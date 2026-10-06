@@ -124,6 +124,19 @@ describe('secondary contacts: an impossible number is never saved or asked', () 
     expect(onSiteOptinAskTrigger({ ...contact, phone: '+19415550123' })).toBe(true);
   });
 
+  test('the contact loop cleans each entry once, before the slot write and every ask/send', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const loop = src.indexOf('for (const resolvedEntry of callSecondaryContacts) {');
+    const clean = src.indexOf('isImpossibleNanpPhone(resolvedEntry.phone)', loop);
+    const persist = src.indexOf('persistCallSecondaryContact(', loop);
+    const claim = src.indexOf('claimRecipientOptins({', loop);
+    expect(loop).toBeGreaterThan(-1);
+    expect(clean).toBeGreaterThan(loop);
+    expect(persist).toBeGreaterThan(clean);
+    expect(claim).toBeGreaterThan(clean);
+    expect(src.indexOf('for (const secondaryEntry of callSecondaryContacts)')).toBe(-1);
+  });
+
   test('the slot writer refuses the impossible number before anything else reads it', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const fn = src.indexOf('async function persistCallSecondaryContact(');

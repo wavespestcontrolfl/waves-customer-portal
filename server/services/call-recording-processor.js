@@ -14010,7 +14010,13 @@ const CallRecordingProcessor = {
       // dedup, cross-customer, empty slot). A full set of slots does not end
       // the scan: a later party already on record still gets its on-site ask.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      for (const secondaryEntry of callSecondaryContacts) {
+      for (const resolvedEntry of callSecondaryContacts) {
+      // One cleaned entry drives the slot write AND every ask/send below: an
+      // impossible number (a misheard +1 173-...) is never saved or texted,
+      // even when the contact is still saved by its email.
+      const secondaryEntry = resolvedEntry && resolvedEntry.phone && isImpossibleNanpPhone(resolvedEntry.phone)
+        ? { ...resolvedEntry, phone: null }
+        : resolvedEntry;
       let onSitePath = false;
       try {
         // Pre-persist: only entries that could be asked need the slot-phone read.
