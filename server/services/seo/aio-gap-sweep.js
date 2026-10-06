@@ -18,6 +18,7 @@ const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const { parseSerp } = require('./aio-pinned-capture');
 const { WAVES_RE } = require('./llm-mention-companies');
+const { normalizeCity } = require('./llm-app-scraper');
 const { isOwnedUrl } = require('./aeo-measurement');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -62,7 +63,8 @@ const json = (v) => (v == null ? null : JSON.stringify(v));
 const normQuery = (q) => String(q || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
 function cityFromLabel(raw) {
-  const key = String(raw || '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // Same folding as the app scrapers ("Bradenton, FL", "LWR"), plus GSC's slugs.
+  const key = normalizeCity(String(raw || '').replace(/[_-]+/g, ' '));
   if (!key) return null;
   return CITY_NAMES.find((c) => c.toLowerCase() === key) || null;
 }
@@ -347,6 +349,21 @@ async function sweepOne(row) {
 
 // Closes the run only while it is still open (an admin cancel wins a race).
 // Returns the number of runs closed.
+/**
+ * Rows left 'running' by a crash or deploy: the call may have been billed, so
+ * each is settled as request_error and books one call's estimated cost.
+ */
+async function recoverInterrupted(runId) {
+  const stale = await db('seo_aio_sweep_results')
+    .where({ run_id: runId, status: 'running' })
+    .where('captured_at', '<', db.raw("now() - interval '30 minutes'"))
+    .select('id');
+  for (const r of stale) {
+    await storeResult(runId, r.id, { status: 'request_error', error: 'interrupted after the paid call started', captured_at: db.fn.now() }, EST_CALL_COST_USD);
+  }
+  return stale.length;
+}
+
 async function runStillOpen(runId) {
   return Boolean(await db('seo_aio_sweep_runs').where({ id: runId, status: 'open' }).first());
 }
@@ -377,7 +394,8 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
   summary.status = 'open';
 
   const maxCost = run.max_cost_usd == null ? Infinity : Number(run.max_cost_usd);
-  let runCost = Number(run.cost_usd) || 0;
+  const recovered = await recoverInterrupted(run.id);
+  let runCost = (Number(run.cost_usd) || 0) + recovered * EST_CALL_COST_USD;
   if (runCost + EST_CALL_COST_USD > maxCost) {
     if (await finishRun(run.id, 'stopped_budget')) {
       logger.warn(`[aio-sweep] run ${run.id} stopped: $${runCost} leaves no room for another call under the $${maxCost} cap`);
@@ -404,6 +422,12 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
       // A cancel (or a budget stop) mid-chunk must stop new paid calls; the
       // row is claimed first so concurrent workers never share an index.
       if (!(await runStillOpen(run.id))) { inFlight -= 1; break; }
+      // Durable claim before the paid call: a crash after DataForSEO accepts
+      // the task leaves the row 'running', never 'pending', so it is not paid
+      // for twice (recoverInterrupted settles it on a later tick).
+      const claimed = await db('seo_aio_sweep_results').where({ id: row.id, status: 'pending' })
+        .update({ status: 'running', captured_at: db.fn.now() });
+      if (!claimed) { inFlight -= 1; continue; }
       let update;
       try {
         update = await sweepOne(row);
@@ -440,7 +464,8 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
   };
   await Promise.all(Array.from({ length: Math.min(CHUNK_CONCURRENCY, rows.length) }, worker));
 
-  const remaining = await db('seo_aio_sweep_results').where({ run_id: run.id, status: 'pending' }).count({ n: '*' }).first();
+  // A 'running' row (a crash mid-call, settled after 30 minutes) keeps the run open.
+  const remaining = await db('seo_aio_sweep_results').where({ run_id: run.id }).whereIn('status', ['pending', 'running']).count({ n: '*' }).first();
   if (!Number(remaining?.n)) {
     if (await finishRun(run.id, 'done')) summary.status = 'done';
   } else if (runCost + EST_CALL_COST_USD > maxCost) {

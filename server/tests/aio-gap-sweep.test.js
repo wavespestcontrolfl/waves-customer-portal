@@ -35,7 +35,7 @@ function mockExec(q) {
   }
   let hit = rows.filter((r) => mockMatches(r, q.wheres) && q.whereIns.every(([c, vals]) => vals.includes(r[c])));
   if (q.update) {
-    if (q.table === 'seo_aio_sweep_results' && mockState.failResultUpdates > 0) {
+    if (q.table === 'seo_aio_sweep_results' && q.update.status !== 'running' && mockState.failResultUpdates > 0) {
       mockState.failResultUpdates -= 1;
       throw new Error('write failed');
     }
@@ -181,6 +181,11 @@ describe('mergeCandidates', () => {
     expect(out.map((c) => c.query)).toEqual(['exampleton termite treatment', 'brown patch lawn fungus']);
   });
 
+  test('managed city values in typed formats map to their city', () => {
+    const out = sweep.mergeCandidates({ managedRows: [{ query: 'who sprays near me', city: 'LWR' }, { query: 'ant help', city: 'Bradenton, FL' }] });
+    expect(Object.fromEntries(out.map((c) => [c.query, c.city]))).toEqual({ 'who sprays near me': 'Lakewood Ranch', 'ant help': 'Bradenton' });
+  });
+
   test('a Search Console Palmetto label is ignored for the palmetto bug', () => {
     const out = sweep.mergeCandidates({ gscRows: [{ query: 'palmetto bugs vs cockroaches', impressions: 90, city_target: 'palmetto' }] });
     expect(out[0].city).toBeNull();
@@ -292,6 +297,16 @@ describe('processSweepChunk', () => {
     const out = await sweep.processSweepChunk();
     expect(out.runId).toBeNull();
     expect(dataforseo.request).not.toHaveBeenCalled();
+  });
+
+  test('a row is claimed as running before its paid call', async () => {
+    openRun();
+    pendingRow('q');
+    let statusDuringCall = null;
+    dataforseo.request.mockImplementation(async () => { statusDuringCall = rowOf('q').status; return serp([]); });
+    await sweep.processSweepChunk();
+    expect(statusDuringCall).toBe('running');
+    expect(rowOf('q').status).toBe('none');
   });
 
   test('each sweep call is a single attempt (a retry can be a second billed task)', async () => {

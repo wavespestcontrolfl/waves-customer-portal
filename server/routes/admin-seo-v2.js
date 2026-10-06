@@ -798,26 +798,24 @@ const AIO_SWEEP_MAX_COST_USD = 25;
 const AIO_SWEEP_MAX_CANDIDATES = 5000;
 
 // POST /api/admin/seo/aio-sweep { maxCostUsd (<=25, default 10), minImpressions (default 20), max (<=5000, default 2500) }
+// Each body field: the text it must match and its range. maxCostUsd is whole
+// cents (max_cost_usd is stored to the cent); minImpressions has a floor of 10
+// because one-off searches are the ones most likely to hold a name.
+const AIO_SWEEP_FIELDS = [
+  { key: 'maxCostUsd', re: /^\d+(\.\d{1,2})?$/, min: 1, max: AIO_SWEEP_MAX_COST_USD, error: `maxCostUsd must be whole cents from 1 to ${AIO_SWEEP_MAX_COST_USD}` },
+  { key: 'minImpressions', re: /^\d+$/, min: 10, max: 1000000, error: 'minImpressions must be a whole number, 10 or more' },
+  { key: 'max', re: /^\d+$/, min: 1, max: AIO_SWEEP_MAX_CANDIDATES, error: `max must be a whole number from 1 to ${AIO_SWEEP_MAX_CANDIDATES}` },
+];
 router.post('/aio-sweep', requireAdmin, async (req, res, next) => {
   try {
     const body = req.body || {};
     const opts = {};
-    if (body.maxCostUsd !== undefined) {
-      const n = Number(body.maxCostUsd);
-      // Whole cents, at least $1: max_cost_usd is stored to the cent.
-      if (typeof body.maxCostUsd === 'boolean' || !Number.isFinite(n) || n < 1 || n > AIO_SWEEP_MAX_COST_USD || !/^\d+(\.\d{1,2})?$/.test(String(body.maxCostUsd).trim())) return res.status(400).json({ error: `maxCostUsd must be whole cents from 1 to ${AIO_SWEEP_MAX_COST_USD}` });
-      opts.maxCostUsd = n;
-    }
-    if (body.minImpressions !== undefined) {
-      const n = Number(body.minImpressions);
-      // Floor of 10: one-off searches are the ones most likely to hold a name.
-      if (typeof body.minImpressions === 'boolean' || !Number.isInteger(n) || n < 10 || n > 1000000) return res.status(400).json({ error: 'minImpressions must be a whole number, 10 or more' });
-      opts.minImpressions = n;
-    }
-    if (body.max !== undefined) {
-      const n = Number(body.max);
-      if (typeof body.max === 'boolean' || !Number.isInteger(n) || n < 1 || n > AIO_SWEEP_MAX_CANDIDATES) return res.status(400).json({ error: `max must be a whole number from 1 to ${AIO_SWEEP_MAX_CANDIDATES}` });
-      opts.max = n;
+    for (const f of AIO_SWEEP_FIELDS) {
+      if (body[f.key] === undefined) continue;
+      const raw = typeof body[f.key] === 'boolean' ? '' : String(body[f.key]).trim();
+      const n = Number(raw);
+      if (!f.re.test(raw) || n < f.min || n > f.max) return res.status(400).json({ error: f.error });
+      opts[f.key] = n;
     }
     const { startSweep } = require('../services/seo/aio-gap-sweep');
     try {

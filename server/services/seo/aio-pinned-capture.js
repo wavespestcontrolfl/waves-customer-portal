@@ -51,13 +51,24 @@ function parseSerp(items) {
 
   if (!aio) return { aio: null, organicTop, paa, localPack };
 
-  const elements = arr(aio.items)
-    .filter((e) => e?.type === 'ai_overview_element' && (e.text || e.markdown))
+  // Every answer part can carry citations: plain, table, video and expanded
+  // elements, and the components nested in an expanded element.
+  const parts = [];
+  const walk = (list) => {
+    for (const e of arr(list)) {
+      if (/^ai_overview_\w*(element|component)$/.test(e?.type || '')) parts.push(e);
+      walk(e?.items);
+      walk(e?.components);
+    }
+  };
+  walk(aio.items);
+  const elements = parts
     .map((e) => ({
       title: e.title || null,
       text: e.text || e.markdown || '',
       urls: [...arr(e.references), ...arr(e.links)].map((r) => r?.url).filter(Boolean),
-    }));
+    }))
+    .filter((e) => e.text || e.urls.length);
   const references = arr(aio.references).map((r) => ({
     url: r?.url || null, title: r?.title || null, domain: r?.domain || null, text: r?.text || r?.snippet || null,
   }));
