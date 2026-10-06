@@ -22,6 +22,7 @@ const commercialMigration = require('../models/migrations/20261007130000_lawn_v1
 const siteOneMigration = require('../models/migrations/20261007133000_lawn_v13_dimension_siteone_row_reconcile');
 const priceMigration = require('../models/migrations/20261007134000_lawn_v13_dimension_price_and_cap_clamp');
 const finalizeMigration = require('../models/migrations/20261007136000_lawn_v13_dimension_price_finalize');
+const repairMigration = require('../models/migrations/20261007137000_lawn_v13_dimension_repair');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { randomUUID } = require('crypto');
@@ -504,7 +505,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         [siteOneVendor] = await knex('vendors').where({ name: 'SiteOne' }).select('id');
       });
       afterEach(async () => {
-        await knex('lawn_protocol_audit_log').whereIn('action', [finalizeMigration.ACTION, priceMigration.ACTION, siteOneMigration.ACTION]).del();
+        await knex('lawn_protocol_audit_log').whereIn('action', [repairMigration.ACTION, finalizeMigration.ACTION, priceMigration.ACTION, siteOneMigration.ACTION]).del();
         await knex('price_snapshots').where({ product_id: productId }).del();
         await knex('price_history').where({ product_id: productId }).del();
         await knex('vendor_pricing').where({ product_id: productId }).del();
@@ -608,6 +609,131 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         expect(await knex('price_snapshots').where({ product_id: productId })).toHaveLength(0);
         const restored = await catalogRow();
         expect({ ...Object.fromEntries(PRICE_COLUMNS.map((column) => [column, restored[column] ?? null])) }).toEqual(savedCatalog);
+      });
+
+      describe('the repair (137000)', () => {
+        const repairUp = async () => { await upChain(); await repairMigration.up(knex); };
+        const repairDown = async () => { await repairMigration.down(knex); await downChain(); };
+        const limitRows = () => knex('product_limits').where({ product_id: productId, match_type: 'product' }).orderBy('limit_type').select('limit_type', 'severity', 'limit_value');
+
+        test('every product-level 3-a-year and 60-day row is a hard block, including a row already at the label values but marked warning; down restores the prior severity', async () => {
+          await knex('product_limits').where({ product_id: productId, match_type: 'product' }).update({ severity: 'warning' });
+          try {
+            await repairMigration.up(knex);
+            expect((await limitRows()).map((r) => [r.limit_type, r.severity])).toEqual([['annual_max_apps', 'hard_block'], ['min_interval_days', 'hard_block']]);
+            await repairMigration.up(knex);
+            expect(await knex('lawn_protocol_audit_log').where({ action: repairMigration.ACTION })).toHaveLength(1);
+          } finally {
+            await repairMigration.down(knex);
+          }
+          expect((await limitRows()).map((r) => [r.limit_type, r.severity])).toEqual([['annual_max_apps', 'warning'], ['min_interval_days', 'warning']]);
+          await knex('product_limits').where({ product_id: productId, match_type: 'product' }).update({ severity: 'hard_block' });
+        });
+
+        test.each([
+          ['a row 134000 inserted', false],
+          ['a SiteOne row 133000 reconciled', true],
+        ])('a catalog bag of 400 oz is not the seeded 800 oz: %s is taken back untouched, needs_pricing is set, costing is cleared; down puts it all back', async (_label, reuse) => {
+          await knex('products_catalog').where({ id: productId }).update({ unit_size_oz: 400 });
+          if (reuse) await knex('vendor_pricing').insert({ ...quote, product_id: productId, vendor_id: siteOneVendor.id, landed_unit_price: null });
+          try {
+            await upChain();
+            const [seeded] = await vendorRows();
+            expect(Number(seeded.price)).toBe(44.23);
+            await repairMigration.up(knex);
+            if (reuse) {
+              const [back] = await vendorRows();
+              expect(back).toMatchObject({ id: seeded.id, approval_status: 'pending', is_active: false });
+              expect(Number(back.price)).toBe(0);
+            } else {
+              expect(await vendorRows()).toHaveLength(0);
+            }
+            expect(await knex('price_snapshots').where({ product_id: productId })).toHaveLength(0);
+            expect(await knex('price_history').where({ product_id: productId })).toHaveLength(0);
+            const priced = await catalogRow();
+            expect(priced).toMatchObject({ best_price: null, best_vendor: null, best_vendor_pricing_id: null, best_price_status: 'no_valid_price', needs_pricing: true, cost_per_unit: null, cost_unit: null });
+            // Down reverses its own writes: the seeded row, its snapshot and history, the catalog fields.
+            await repairMigration.down(knex);
+            const [again] = await vendorRows();
+            expect(again).toMatchObject({ id: seeded.id, approval_status: 'approved', is_active: true, vendor_sku: '702032' });
+            expect(Number(again.price)).toBe(44.23);
+            expect(String(again.latest_snapshot_id)).toBe(String(seeded.latest_snapshot_id));
+            expect(await knex('price_snapshots').where({ id: seeded.latest_snapshot_id })).toHaveLength(1);
+            const restored = await catalogRow();
+            expect([Number(restored.best_price), restored.best_vendor, restored.best_vendor_pricing_id, restored.needs_pricing, Number(restored.cost_per_unit), restored.cost_unit]).toEqual([22.12, 'SiteOne', seeded.id, false, 0.8846, 'lb']); // the 50 lb quote scaled to a 400 oz catalog bag, as the seed left it
+          } finally {
+            await downChain();
+          }
+          expect(await vendorRows()).toHaveLength(reuse ? 1 : 0);
+        });
+
+        test('a row an admin re-quoted since the seed is not taken back, even on a bag that does not match', async () => {
+          await knex('products_catalog').where({ id: productId }).update({ unit_size_oz: 400 });
+          try {
+            await upChain();
+            const [row] = await vendorRows();
+            await adminRequote(row.id, 47.5);
+            await repairMigration.up(knex);
+            const [kept] = await vendorRows();
+            expect(Number(kept.price)).toBe(47.5);
+            expect(kept.approval_status).toBe('approved');
+          } finally {
+            await repairDown();
+          }
+        });
+
+        test('another vendor wins: the seeded cost_per_unit (0.8846 per lb) is cleared so costing reads the winner; a seeded winner keeps it; down restores it', async () => {
+          const [other] = await knex('vendors').insert({ name: 'Other Supply' }).returning('*');
+          await knex('vendor_pricing').insert({
+            product_id: productId, vendor_id: other.id, price: 41, price_amount: 41, quantity: '50 lb', price_type: 'manual', source_type: 'manual',
+            approval_status: 'approved', is_active: true, currency: 'USD', price_per_oz: 41 / 800, normalized_unit_price: 41 / 800, unit_normalized: 'oz',
+          });
+          expect([Number((await catalogRow()).cost_per_unit), (await catalogRow()).cost_unit]).toEqual([0.8846, 'lb']);
+          try {
+            await repairUp();
+            const winner = await catalogRow();
+            expect([Number(winner.best_price), winner.best_vendor]).toEqual([41, 'Other Supply']);
+            expect([winner.cost_per_unit, winner.cost_unit]).toEqual([null, null]);
+            await repairMigration.down(knex);
+            expect([Number((await catalogRow()).cost_per_unit), (await catalogRow()).cost_unit]).toEqual([0.8846, 'lb']);
+          } finally {
+            await downChain();
+          }
+          await knex('vendor_pricing').where({ product_id: productId }).del();
+          // The seeded SiteOne row wins: nothing to clear.
+          try {
+            await repairUp();
+            const seededWins = await catalogRow();
+            expect([seededWins.best_vendor, Number(seededWins.cost_per_unit), seededWins.cost_unit]).toEqual(['SiteOne', 0.8846, 'lb']);
+          } finally {
+            await repairDown();
+          }
+        });
+
+        test('a re-quote after the seed survives the full rollback: the landed fields stay cleared, the catalog keeps its vendor, price and status, and 130000 restores only its limit and rate values', async () => {
+          await knex('vendor_pricing').insert({ ...quote, product_id: productId, vendor_id: siteOneVendor.id, landed_unit_price: 0.95, landed_cost: 52, shipping_cost: 5, tax_rate: 0.07 });
+          try {
+            await upChain();
+            await repairMigration.up(knex);
+            const [row] = await vendorRows();
+            await adminRequote(row.id, 47.5);
+          } finally {
+            await repairMigration.down(knex);
+            await finalizeMigration.down(knex);
+            await priceMigration.down(knex);
+            await siteOneMigration.down(knex);
+            await commercialMigration.down(knex);
+            await commercialMigration.up(knex);
+          }
+          const [kept] = await vendorRows();
+          expect(Number(kept.price)).toBe(47.5);
+          expect(kept).toMatchObject({ approval_status: 'approved', is_active: true });
+          for (const column of finalizeMigration.LANDED_COLUMNS) expect({ column, value: kept[column] }).toEqual({ column, value: null });
+          const catalogAfter = await catalogRow();
+          expect([Number(catalogAfter.best_price), catalogAfter.best_vendor, catalogAfter.best_vendor_pricing_id, catalogAfter.best_price_status, catalogAfter.needs_pricing])
+            .toEqual([47.5, 'SiteOne', kept.id, 'current', false]);
+          expect(Number(catalogAfter.max_label_rate_per_1000)).toBe(5.46);
+        });
       });
     });
 
