@@ -63,6 +63,11 @@ const DEFAULT_SERVICE_MIN = 60;
 // route-optimizer's model, so this module and auto-dispatch score on the
 // same scale (a local copy lived here until the travel-gap lane).
 
+// The pins and times of a gap candidate's two neighbours, for a caller that
+// re-prices the shown legs on real roads (find-time-hints.js). Symbol-keyed
+// so JSON never carries stop coordinates to a client; spreads keep it.
+const GAP_LEGS = Symbol('gapLegs');
+
 function hasCoords(stop) {
   return stop != null && stop.lat != null && stop.lng != null;
 }
@@ -895,6 +900,14 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
         before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,
       },
       stops_that_day: dayStops.length,
+      [GAP_LEGS]: {
+        prev: hasCoords(prev) ? { lat: Number(prev.lat), lng: Number(prev.lng) } : null,
+        next: hasCoords(next) ? { lat: Number(next.lat), lng: Number(next.lng) } : null,
+        prevEndMin: prev.endMin,
+        prevIsHome: !prevIsStop,
+        newStop: { lat: Number(newStop.lat), lng: Number(newStop.lng) },
+        durationMinutes,
+      },
     };
   };
 
@@ -1268,6 +1281,7 @@ async function findAvailableSlots(opts) {
 
 module.exports = {
   findAvailableSlots,
+  GAP_LEGS,
   // Service-day bounds (ET hours) — the one place they are defined; other
   // offer surfaces (rain-out same-day presets) clamp to these.
   DAY_START_HOUR,

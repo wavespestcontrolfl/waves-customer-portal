@@ -127,9 +127,16 @@ it('summary mode: one search around the picked date answers availability and not
     pickedDate: '2035-01-05',
     days: [
       { date: '2035-01-01', status: 'full', hours: [] },
-      { date: '2035-01-02', status: 'open', hours: [{ date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 12, technicianId: 'tech', technicianName: null }] },
+      { date: '2035-01-02', status: 'open', hours: [{
+        date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 12, driveInMinutes: null, fromHomeBase: null, fromName: null,
+        driveSource: null, rainChance: null, stopsThatDay: null, technicianId: 'tech', technicianName: null,
+      }] },
     ],
-    picked: { start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null },
+    best: null,
+    picked: {
+      start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null,
+      driveInMinutes: null, fromHomeBase: null, fromName: null, driveSource: null, rainChance: null,
+    },
   });
   expect(result.current.bestTimes).toEqual([]);
   expect(result.current.bestInRange).toBeNull();

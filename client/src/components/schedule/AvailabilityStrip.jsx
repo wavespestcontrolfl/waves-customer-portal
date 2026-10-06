@@ -10,6 +10,12 @@
 //   3. Every hour chip carries what it adds to the day's driving
 //      ("+11 min drive"); no "on route" / "tight" labels.
 //   4. Day pills run around the PICKED date, not today.
+// Owner 2026-10-06 (replaces rule 3): a chip shows BOTH numbers, the drive
+// here from the stop before ("19 min here") and what the stop adds to the
+// day's driving ("+34 min day"), plus the chance of rain at that hour. With
+// `bestRows` (New Appointment) the box shows two rows of four: the best
+// hours on the picked date and the best date + hours in the 7 days from
+// today, always, in place of the "closest" offers.
 // Warn-only like the hint it replaces: picking a chip only fills fields
 // (onPick), never submits, and no consumer disables a save on this data.
 // Renders nothing without an availability answer (gate off, search failed)
@@ -45,7 +51,35 @@ export function fmtDay(ymd) {
 export function drivePhrase(detourMinutes) {
   if (detourMinutes == null) return null;
   const mins = Math.round(Number(detourMinutes) || 0);
-  return mins > 0 ? `+${mins} min drive` : 'no added drive';
+  return mins > 0 ? `+${mins} min day` : 'no added drive';
+}
+
+// The drive INTO the stop. null with a priced detour = an unpinned
+// neighbour; null with no detour either = no single leg (arrival windows).
+export function driveHerePhrase(hour) {
+  const mins = Math.round(Number(hour.driveInMinutes));
+  if (hour.driveInMinutes == null || !Number.isFinite(mins)) return hour.detourMinutes == null ? 'drive unknown' : null;
+  return `${mins} min here`;
+}
+
+export function rainPhrase(rainChance) {
+  const pct = Math.round(Number(rainChance));
+  return rainChance == null || !Number.isFinite(pct) ? null : `${pct}% rain`;
+}
+
+// The verdict's second line for a fitting hour: where the drive comes from,
+// what it adds to the day, the rain chance.
+function pickedDetail(verdict) {
+  const mins = Math.round(Number(verdict.driveInMinutes));
+  const from = verdict.fromHomeBase ? 'home base' : (verdict.fromName || 'the previous stop');
+  const parts = [];
+  if (verdict.driveInMinutes != null && Number.isFinite(mins)) parts.push(`Drive here: ${mins} min from ${from}`);
+  const added = drivePhrase(verdict.detourMinutes);
+  if (added) parts.push(added === 'no added drive' ? 'No added drive' : `Adds ${added.replace(' day', '')} to the day`);
+  const rain = rainPhrase(verdict.rainChance);
+  if (rain) parts.push(rain);
+  if (parts.length && verdict.driveSource === 'estimate' && verdict.driveInMinutes != null) parts.push('estimated');
+  return parts.length ? `${parts.join(' · ')}.` : null;
 }
 
 const sameStart = (a, b) => !!a && !!b && String(a).slice(0, 5) === String(b).slice(0, 5);
@@ -101,9 +135,8 @@ function verdictFor(availability, { currentDate, currentStart }) {
   const verdict = picked && sameStart(picked.start, currentStart) ? picked : null;
 
   if (verdict?.fits === true) {
-    const drive = drivePhrase(verdict.detourMinutes);
     return {
-      tone: 'ok', text: `${day} · ${time} fits.`, detail: drive ? `${drive.replace(/^no/, 'No')}.` : null,
+      tone: 'ok', text: `${day} · ${time} fits.`, detail: pickedDetail(verdict),
       lead: 'Also open that day:', offers: others.slice(0, OFFER_COUNT), withDay: false,
     };
   }
@@ -185,6 +218,10 @@ const chipStyle = {
   minHeight: 44, padding: '5px 10px', borderRadius: 4, border: '0.5px solid #D4D4D8', background: '#fff', fontFamily: 'inherit',
   color: '#18181B', fontSize: 14, fontWeight: 500, lineHeight: 1.2, fontVariantNumeric: 'tabular-nums', cursor: 'pointer',
 };
+const chipCompact = { minHeight: 0, padding: '6px 4px', gap: 1 };
+const bestRowStyle = {
+  display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(96px, 1fr)', gap: 6, overflowX: 'auto', paddingBottom: 2,
+};
 const chipCurrent = { background: '#18181B', color: '#fff', border: '0.5px solid #18181B', cursor: 'default' };
 const subStyle = { fontSize: 14, fontWeight: 400, color: '#52525B' };
 const pillStyle = {
@@ -207,10 +244,16 @@ function emptyDayLine(day) {
   return 'no hour fits.';
 }
 
-function HourChip({ hour, withDay, current, onPick }) {
-  const drive = drivePhrase(hour.detourMinutes);
-  const sub = [drive, hour.technicianName].filter(Boolean).join(' · ');
-  const label = `${withDay ? `${fmtDay(hour.date)} · ` : ''}${fmtHour(hour.start)}`;
+// One line per fact, so four chips side by side stay readable: the time,
+// the drive here, what it adds to the day, rain, and whose route it is.
+function HourChip({ hour, withDay, current, onPick, compact = false }) {
+  const here = driveHerePhrase(hour);
+  const added = drivePhrase(hour.detourMinutes);
+  const rain = rainPhrase(hour.rainChance);
+  const lines = [here, added, rain, hour.technicianName].filter(Boolean);
+  const label = withDay && compact ? fmtHour(hour.start) : `${withDay ? `${fmtDay(hour.date)} · ` : ''}${fmtHour(hour.start)}`;
+  const muted = current ? { color: '#fff', opacity: 0.8 } : null;
+  const rainInk = !current && Number(hour.rainChance) >= 40 ? { color: '#B45309' } : null;
   return (
     <button
       type="button"
@@ -218,15 +261,38 @@ function HourChip({ hour, withDay, current, onPick }) {
       disabled={current || !onPick}
       aria-pressed={current}
       onClick={() => onPick && onPick(hour)}
-      style={{ ...chipStyle, ...(current ? chipCurrent : null) }}
+      style={{ ...chipStyle, ...(compact ? chipCompact : null), ...(current ? chipCurrent : null) }}
     >
+      {withDay && compact ? <span style={{ ...subStyle, ...muted }}>{fmtDay(hour.date).replace(/ \w+ /, ' ')}</span> : null}
       <span>{label}</span>
-      {sub ? <span style={{ ...subStyle, ...(current ? { color: '#fff', opacity: 0.8 } : null) }}>{sub}</span> : null}
+      {lines.map((line) => (
+        <span key={line} style={{ ...subStyle, ...muted, ...(line === rain ? rainInk : null) }}>{line}</span>
+      ))}
     </button>
   );
 }
 
-export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style }) {
+// A row of best-times chips: four side by side, scrolling sideways on a
+// narrow screen rather than wrapping.
+function BestRow({ title, hours, withDay, empty, isCurrent, onPick }) {
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ marginBottom: 6, color: '#52525B' }}>{title}</div>
+      {!withDay && hours.length > 0 && hours.every((hour) => hour.stopsThatDay === 0) ? (
+        <div style={{ marginBottom: 6, color: '#52525B' }}>No stops that day yet. Any hour works.</div>
+      ) : null}
+      {hours.length ? (
+        <div data-testid="best-row" style={bestRowStyle}>
+          {hours.map((hour) => (
+            <HourChip key={`${hour.date}-${hour.start}-${hour.technicianId || ''}`} hour={hour} withDay={withDay} compact current={isCurrent(hour)} onPick={onPick} />
+          ))}
+        </div>
+      ) : <div style={{ color: '#52525B' }}>{empty}</div>}
+    </div>
+  );
+}
+
+export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style, bestRows = false }) {
   const [viewDate, setViewDate] = useState(currentDate);
   // A new pick (typed, or filled by a chip) brings the browse row back to it.
   useEffect(() => { setViewDate(currentDate); }, [currentDate]);
@@ -243,6 +309,12 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   // duration and pick: show them, but take none until the new answer lands.
   const pick = availability.stale ? undefined : onPick;
   const today = etDateString();
+  // The two best-times rows replace the verdict's own offers when the
+  // consumer asks for them and the server sent them.
+  const showBest = bestRows && !!availability.best;
+  // A picked date more than two weeks out searches only the days around it:
+  // no week row then, rather than a false "nothing fits".
+  const weekCovered = showBest && availability.best.weekCovered !== false;
 
   return (
     <div data-testid="availability-strip" style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 14, ...style }}>
@@ -254,7 +326,29 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
             {verdict.detail ? ` ${verdict.detail}` : null}
           </div>
         </div>
-        {verdict.offers.length > 0 && (
+        {showBest && (
+          <>
+            <BestRow
+              title={`Best on ${fmtDay(currentDate)}`}
+              hours={availability.best.day}
+              withDay={false}
+              empty="No open hours that day. The note above says why."
+              isCurrent={isCurrent}
+              onPick={pick}
+            />
+            {weekCovered && (
+              <BestRow
+                title="Best in the next 7 days"
+                hours={availability.best.week}
+                withDay
+                empty="Nothing fits in the next 7 days."
+                isCurrent={isCurrent}
+                onPick={pick}
+              />
+            )}
+          </>
+        )}
+        {!showBest && verdict.offers.length > 0 && (
           <div style={{ marginTop: 10 }}>
             {verdict.lead ? <div style={{ marginBottom: 6, color: '#52525B' }}>{verdict.lead}</div> : null}
             <div style={chipGridStyle}>

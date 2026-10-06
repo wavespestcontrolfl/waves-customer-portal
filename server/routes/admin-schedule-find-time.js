@@ -424,13 +424,21 @@ router.post('/', async (req, res) => {
     // Calendar labels for the strip's day pills (closed day, technician off).
     const dayFacts = await loadSummaryDayFacts(plan, technicianId || null);
 
+    // A summary also answers the best-times rows (find-time-hints.js
+    // buildBestRows), with the picked verdict's drive numbers priced the
+    // same way as the chips.
+    const built = await buildHintSummary(plan, every, {
+      rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate,
+    });
+    const pickedOut = built.picked;
+
     res.json({
       ...engineResult,
       slots,
-      ...(picked ? { picked } : {}),
+      ...(pickedOut ? { picked: pickedOut } : {}),
       ...(pickedByTech ? { pickedByTech } : {}),
       // undefined (dropped from the JSON) for everything but a summary plan.
-      summary: buildHintSummary(plan, every, { rejectionsByDate, startedAt, ...dayFacts }),
+      summary: built.summary,
       target,
       range: { dateFrom: plan.from, dateTo: plan.to },
     });

@@ -14,7 +14,7 @@
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
-const { DAY_START_HOUR, DAY_END_HOUR } = require('./find-time');
+const { DAY_START_HOUR, DAY_END_HOUR, GAP_LEGS } = require('./find-time');
 const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
 const { etParts } = require('../../utils/datetime-et');
 
@@ -281,6 +281,8 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
     from_home_base: !gap.insertion?.after_stop_id,
     from_name: gap.insertion?.after_name || null,
     technician: gap.technician || null,
+    // Not serialized: lets the route re-price this verdict on real roads.
+    [GAP_LEGS]: gap[GAP_LEGS],
   };
 }
 
@@ -440,9 +442,16 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       start_time: slot.start_time,
       end_time: slot.end_time,
       detour_minutes: slot.detour_minutes ?? null,
+      // The drive INTO this stop and where it comes from, so a chip can show
+      // it beside what the stop adds to the day (owner 2026-10-06). null =
+      // no single insertion leg (arrival-window mode) or an unpinned stop.
+      drive_in_minutes: slot.drive_in_minutes ?? null,
+      from_home_base: slot.insertion ? !slot.insertion.after_stop_id : null,
+      from_name: slot.insertion?.after_name || null,
       estimated_arrival: slot.estimated_arrival || null,
       stops_that_day: slot.stops_that_day ?? null,
       technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,
+      [GAP_LEGS]: slot[GAP_LEGS],
     });
   }
   return [...byDate].map(([date, hours]) => ({
@@ -456,6 +465,118 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
     ...(closedDates?.has(date) ? { closed: true } : {}),
     hours: hours.sort((a, b) => a.start_time.localeCompare(b.start_time)),
   }));
+}
+
+// The best-times rows (owner 2026-10-06): four hours on the picked date and
+// four date + hour pairs in the next 7 days from today, the picked date,
+// closed days and days off left out of the second row. Best = least added
+// to the day's driving, then the shortest drive in, then the sooner day,
+// then the earlier hour. An unpriced hour sorts last.
+const BEST_ROW_SIZE = 4;
+const WEEK_DAYS = 7;
+
+const finiteOr = (v) => (Number.isFinite(v) ? v : Infinity);
+function byBest(a, b) {
+  return finiteOr(a.detour_minutes) - finiteOr(b.detour_minutes)
+    || finiteOr(a.drive_in_minutes) - finiteOr(b.drive_in_minutes)
+    || a.date.localeCompare(b.date)
+    || a.start_time.localeCompare(b.start_time);
+}
+
+function pickBestRows(days, { pickedDate, today }) {
+  let weekEnd = today;
+  for (let i = 1; i < WEEK_DAYS; i++) weekEnd = nextYmd(weekEnd);
+  const withDate = (day) => day.hours.map((h) => ({ ...h, date: day.date }));
+  const dayRow = days.filter((day) => day.date === pickedDate).flatMap(withDate).sort(byBest).slice(0, BEST_ROW_SIZE);
+  const weekRow = days
+    .filter((day) => day.date >= today && day.date <= weekEnd && day.date !== pickedDate
+      && !day.closed && day.status !== 'off')
+    .flatMap(withDate).sort(byBest).slice(0, BEST_ROW_SIZE);
+  // A picked date more than two weeks out searches only the days around it,
+  // so the week row has nothing to say rather than "nothing fits".
+  const weekCovered = days.some((day) => day.date === today);
+  return { day: dayRow, week: weekRow, week_from: today, week_to: weekEnd, week_covered: weekCovered };
+}
+
+// Highest NWS hourly rain chance across a chip's window, or null.
+function rainForWindow(hourly, date, startTime, endTime) {
+  if (!Array.isArray(hourly)) return null;
+  const startH = toMin(startTime);
+  const endMin = toMin(endTime);
+  if (startH == null) return null;
+  let best = null;
+  for (let m = Math.floor(startH / 60) * 60; m < Math.max(startH + 1, endMin ?? startH + 60); m += 60) {
+    const key = `${date}T${String(Math.floor(m / 60)).padStart(2, '0')}`;
+    const hour = hourly.find((h) => String(h.startTime).slice(0, 13) === key);
+    if (hour && Number.isFinite(hour.rainChance)) best = best == null ? hour.rainChance : Math.max(best, hour.rainChance);
+  }
+  return best;
+}
+
+function publicChip(chip) {
+  return {
+    date: chip.date,
+    start_time: chip.start_time,
+    end_time: chip.end_time,
+    detour_minutes: chip.detour_minutes ?? null,
+    drive_in_minutes: chip.drive_in_minutes ?? null,
+    from_home_base: chip.from_home_base ?? null,
+    from_name: chip.from_name || null,
+    drive_source: chip.drive_source || 'estimate',
+    rain_chance: chip.rain_chance ?? null,
+    stops_that_day: chip.stops_that_day ?? null,
+    technician: chip.technician || null,
+  };
+}
+
+/**
+ * The summary's `best` rows: chosen on the model's numbers, then re-priced
+ * on real roads (GATE_BEST_TIMES_ROAD_TIMES) and decorated with the NWS
+ * chance of rain for each chip's hour. Both lookups fail open: a chip keeps
+ * the model's numbers, or shows no rain.
+ */
+async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null, spanMin = 60, deps = {} }) {
+  const rows = pickBestRows(days, { pickedDate, today });
+  // The picked hour's verdict gets the same treatment, so its sentence and
+  // its own chip never disagree.
+  const pickedChip = picked?.fits === true && picked[GAP_LEGS] ? {
+    ...picked, date: pickedDate, start_time: picked.start, end_time: toHHMM(toMin(picked.start) + spanMin),
+  } : null;
+  const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
+  const rainLookup = deps.hourlyRain || (async (la, ln) => {
+    const { getHourlyRainOutlook } = require('../weather-forecast');
+    let timer;
+    return Promise.race([
+      getHourlyRainOutlook(la, ln).catch(() => null),
+      new Promise((resolve) => { timer = setTimeout(resolve, 1500, null); }),
+    ]).finally(() => clearTimeout(timer));
+  });
+  const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
+  const [priced, hourly] = await Promise.all([
+    priceChips(chips),
+    rainLookup(lat, lng).catch(() => null),
+  ]);
+  const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
+  const nDay = rows.day.length;
+  const nWeek = rows.week.length;
+  const pricedPicked = pickedChip ? decorate(priced[nDay + nWeek]) : null;
+  return {
+    rows: {
+      day: priced.slice(0, nDay).sort(byBest).map(decorate),
+      week: priced.slice(nDay, nDay + nWeek).sort(byBest).map(decorate),
+      week_from: rows.week_from,
+      week_to: rows.week_to,
+      week_covered: rows.week_covered,
+    },
+    // Only the drive numbers and rain change; the verdict itself stands.
+    picked: pricedPicked ? {
+      ...picked,
+      drive_in_minutes: pricedPicked.drive_in_minutes,
+      detour_minutes: pricedPicked.detour_minutes,
+      drive_source: pricedPicked.drive_source,
+      rain_chance: pricedPicked.rain_chance,
+    } : picked,
+  };
 }
 
 /**
@@ -497,19 +618,25 @@ async function loadSummaryDayFacts(plan, technicianId) {
 const SUMMARY_SLOW_MS = 1500;
 
 /** The response's `summary` for a summary plan; undefined for any other. */
-function buildHintSummary(plan, everyStart, { rejectionsByDate, startedAt, closedDates, offDates }) {
-  if (!plan.summary) return undefined;
+// Returns { summary, picked }: the summary (undefined for any other plan)
+// and the picked verdict with its drive numbers re-priced like the chips.
+async function buildHintSummary(plan, everyStart, {
+  rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate,
+}) {
+  if (!plan.summary) return { summary: undefined, picked };
+  const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
+  const best = await buildBestRows(days, {
+    pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin,
+  });
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {
     logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
   }
-  return {
-    days: summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates }),
-    elapsed_ms: elapsedMs,
-  };
+  return { summary: { days, best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
 }
 
 module.exports = {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech,
   hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, loadSummaryDayFacts,
+  pickBestRows, buildBestRows, rainForWindow,
 };

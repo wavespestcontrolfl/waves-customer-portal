@@ -6402,6 +6402,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           />
           <AvailabilityStrip
             availability={availability}
+            bestRows
             currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentStart={windowStart}
             currentTechnicianId={techMode === 'choose' ? techId : null}

@@ -3382,6 +3382,17 @@ const gates = {
   // the plain three-line hint, so pickers render exactly as today.
   rescheduleAvailability: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
 
+  // Best-times road times (owner 2026-10-06): the best-times chips in the
+  // availability strip (summary.best) and the picked hour's verdict get
+  // their drive-in and added-drive numbers from Google's traffic-aware route
+  // matrix instead of the straight-line model. Only the shown chips are
+  // priced, on the picker's own allowance (route-optimizer hintTravelBudget,
+  // never customer booking's), with a 6-hour cache per pin pair and hour.
+  // Which hours fit is still decided by the model. OFF in every environment;
+  // scheduling/hint-road-times.js reads it through gateEnvValue() at call
+  // time. Kill switch: unset — chips show the model's numbers.
+  bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a

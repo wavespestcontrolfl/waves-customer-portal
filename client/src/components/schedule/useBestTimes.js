@@ -47,6 +47,9 @@ const RANGE_DAYS = 3;
 // Availability strip window around the picked date (owner default 2026-10-02).
 const SUMMARY_BACK = 3;
 const SUMMARY_FORWARD = 7;
+// Latest picked date a summary still searches from today: the server covers
+// at most 14 days, and the picked date must be inside them.
+const SUMMARY_FROM_TODAY_MAX = 13;
 const SUMMARY_RETRY_MS = 10 * 60 * 1000;
 let summaryUnavailableUntil = 0;
 // The parent kill switch (GATE_BEST_TIME_HINTS off answers `gated: true`):
@@ -95,21 +98,44 @@ export function normalizeAvailability(data, { date, scopedToTech }) {
       date: day.date,
       status: day.status || (day.hours?.length ? 'open' : 'full'),
       ...(day.closed === true ? { closed: true } : {}),
-      hours: (day.hours || []).map((h) => ({
-        date: day.date,
-        start: h.start_time,
-        end: h.end_time,
-        detourMinutes: h.detour_minutes ?? null,
-        technicianId: h.technician?.id || null,
-        technicianName: scopedToTech ? null : (h.technician?.name || null),
-      })),
+      hours: (day.hours || []).map((h) => summaryHour({ ...h, date: day.date }, scopedToTech)),
     })),
+    // The best-times rows (owner 2026-10-06): 4 hours on the picked date, 4
+    // date + hours in the 7 days from today. Absent from an older server.
+    best: data.summary.best ? {
+      day: (data.summary.best.day || []).map((h) => summaryHour(h, scopedToTech)),
+      week: (data.summary.best.week || []).map((h) => summaryHour(h, scopedToTech)),
+      weekCovered: data.summary.best.week_covered !== false,
+    } : null,
     picked: p ? {
       start: p.start,
       fits: p.fits === true ? true : (p.fits === false ? false : null),
       reason: p.reason || null,
       detourMinutes: p.detour_minutes ?? null,
+      driveInMinutes: p.drive_in_minutes ?? null,
+      fromHomeBase: p.from_home_base ?? null,
+      fromName: p.from_name || null,
+      driveSource: p.drive_source || null,
+      rainChance: p.rain_chance ?? null,
     } : null,
+  };
+}
+
+// One summary hour (a day's row or a best-times chip) in the strip's shape.
+function summaryHour(h, scopedToTech) {
+  return {
+    date: h.date,
+    start: h.start_time,
+    end: h.end_time,
+    detourMinutes: h.detour_minutes ?? null,
+    driveInMinutes: h.drive_in_minutes ?? null,
+    fromHomeBase: h.from_home_base ?? null,
+    fromName: h.from_name || null,
+    driveSource: h.drive_source || null,
+    rainChance: h.rain_chance ?? null,
+    stopsThatDay: h.stops_that_day ?? null,
+    technicianId: h.technician?.id || null,
+    technicianName: scopedToTech ? null : (h.technician?.name || null),
   };
 }
 
@@ -280,7 +306,9 @@ export function useBestTimes({
           const back = addDays(date, -SUMMARY_BACK);
           const data = await search({
             summary: true,
-            dateFrom: back < today ? today : back,
+            // From today whenever the picked date is close enough, so the
+            // "best in the next 7 days" row is covered by the same search.
+            dateFrom: back < today || date <= addDays(today, SUMMARY_FROM_TODAY_MAX) ? today : back,
             dateTo: addDays(date, SUMMARY_FORWARD),
             topN: 3,
             pickedDate: date,
