@@ -681,48 +681,83 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
     expect(arg.callbackVisit.customerRequest).toBeUndefined();
   });
   // Owner 2026-10-05: a self-booked re-service rang nobody (the internal
-  // text it sent is silenced by the bell policy). One bell per booking.
-  describe('owner bell on a new booking', () => {
-    const { triggerNotification } = require('../services/notification-triggers');
-    beforeEach(() => triggerNotification.mockClear());
+  // text it sent is silenced by the bell policy). Every path that sees the
+  // booking asks for the bell; the bell itself is built from the saved visit.
+  describe('owner bell on a self-booked re-service', () => {
+    const flush = () => new Promise((r) => setImmediate(r));
+    let ring;
+    beforeEach(() => { ring = jest.spyOn(reservicePublicRouter._internals, 'ringReserviceBooked').mockResolvedValue(); });
+    afterEach(() => ring.mockRestore());
 
-    async function post(body, replayed = false) {
-      const csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking').mockResolvedValue({
-        ok: true, body: { booking: { id: 'booking-1' }, confirmationCode: 'ABC123', ...(replayed ? { replayed: true } : {}) },
-      });
+    async function post(result) {
+      const csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking').mockResolvedValue(result);
       try {
-        await callHandler(postHandler(), { params: { token: 'a'.repeat(64) }, body });
+        await callHandler(postHandler(), { params: { token: 'a'.repeat(64) }, body: { date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' } });
+        await flush();
       } finally {
         csb.mockRestore();
       }
     }
 
-    test('rings once with the name, visit day, picked pests and the typed words', async () => {
-      gateState.reservicePestChips = true;
-      await post({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'roaches in the kitchen', pests: ['roaches'] });
-      expect(triggerNotification).toHaveBeenCalledTimes(1);
-      const [key, payload] = triggerNotification.mock.calls[0];
-      expect(key).toBe('reservice_self_booked');
-      expect(payload).toEqual(expect.objectContaining({
-        customerId: CUST_ID, name: 'Jamie', pests: 'Roaches', request: 'roaches in the kitchen',
-      }));
-      expect(payload.when).toMatch(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}/);
+    test.each([
+      ['a new booking', { ok: true, body: { booking: { id: 'booking-1' } } }],
+      ['an idempotent replay', { ok: true, body: { booking: { id: 'booking-1' }, replayed: true } }],
+      ['a lane-dedupe race lost inside the transaction', { ok: false, status: 409, code: 'ALREADY_BOOKED', error: 'already' }],
+    ])('%s asks for the bell for this customer', async (_label, result) => {
+      await post(result);
+      expect(ring).toHaveBeenCalledTimes(1);
+      expect(ring.mock.calls[0][0].id).toBe(CUST_ID);
     });
+
+    test('a slot race asks for no bell (nothing was booked)', async () => {
+      await post({ ok: false, status: 409, code: 'SLOT_TAKEN', error: 'taken' });
+      expect(ring).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ringReserviceBooked builds from the committed visit', () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    const { ringReserviceBooked } = reservicePublicRouter._internals;
+    beforeEach(() => triggerNotification.mockClear());
+
+    function conn(rows) {
+      const calls = [];
+      const q = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'select']) q[m] = (...a) => { calls.push([m, ...a]); return q; };
+      q.then = (ok, err) => Promise.resolve(rows).then(ok, err);
+      const fn = jest.fn(() => q);
+      fn.raw = (sql) => sql;
+      return { fn, calls };
+    }
+
+    test('rings each open link booking with its STORED words and pests, keyed per visit, linked to the visit', async () => {
+      const { fn, calls } = conn([{
+        id: 'visit-1', service_type: 'Pest Control Re-Service', service_key: 'pest_re_service', window_start: '13:00:00',
+        customer_request: 'roaches in the kitchen', customer_request_pests: ['roaches'], service_date: '2026-10-09',
+      }]);
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie', last_name: 'Doe' }, fn);
+      expect(calls).toEqual(expect.arrayContaining([
+        ['where', 'sba.source', 'reservice_link'],
+        ['whereIn', 's.status', OPEN_CALLBACK_STATUSES],
+        ['where', 's.customer_id', CUST_ID],
+      ]));
+      expect(triggerNotification).toHaveBeenCalledWith('reservice_self_booked', {
+        customerId: CUST_ID, scheduledServiceId: 'visit-1', serviceDate: '2026-10-09', name: 'Jamie Doe',
+        when: 'Fri, Oct 9 at 1:00 PM', pests: 'Roaches', request: 'roaches in the kitchen',
+      }, { dedupeKey: 'reservice-booked:visit-1' });
+    });
+
+    test('no open link booking: no bell', async () => {
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, conn([]).fn);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+  });
 
     test('source pin: createSelfBooking sends no internal text for a re-service (one alert, not two)', () => {
       const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
       expect(src).toMatch(/const reserviceOwnBell = !!callbackVisit && !callbackVisit\.alertLabel;\s*if \(process\.env\.ADAM_PHONE && !reserviceOwnBell\)/);
     });
 
-    test('keyed per booking, so a replay re-dispatches under the same key (a no-op once the first landed)', async () => {
-      await post({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' });
-      await post({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' }, true);
-      expect(triggerNotification).toHaveBeenCalledTimes(2);
-      expect(triggerNotification.mock.calls.map((c) => c[2])).toEqual([
-        { dedupeKey: 'reservice-booked:booking-1' }, { dedupeKey: 'reservice-booked:booking-1' },
-      ]);
-    });
-  });
   // GATE_RESERVICE_DETAILS_REQUIRED (owner 2026-10-02: any text counts; a
   // pest chip alone does not replace the box).
   describe('GATE_RESERVICE_DETAILS_REQUIRED', () => {

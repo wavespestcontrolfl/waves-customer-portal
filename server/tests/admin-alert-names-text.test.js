@@ -190,7 +190,7 @@ describe('reservice_self_booked bell (owner 2026-10-05)', () => {
   const why = (built) => {
     const { composeAdminAlert } = require('../services/admin-alert-compose');
     return composeAdminAlert({ area: 'Schedule', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
-      subject: { type: 'customer', id: 'c1' }, doneWhen: 'request_read', who: 'person' });
+      subject: { type: 'customer', id: 'c1' }, doneWhen: 'visit_closed', who: 'person' });
   };
 
   test('names the customer and the visit, quotes their words, links the customer', () => {
@@ -206,9 +206,14 @@ describe('reservice_self_booked bell (owner 2026-10-05)', () => {
 
   test('the row carries the structured parts: Schedule, needs-you, the visit, a person reads it', () => {
     expect(build({ customerId: 'c1', scheduledServiceId: 'v1', name: 'Albert Clark', request: 'ants' }).alert).toEqual({
-      area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'v1' }, doneWhen: 'request_read', who: 'person',
+      area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'v1' }, doneWhen: 'visit_closed', who: 'person',
     });
     expect(build({ customerId: 'c1', name: 'Albert Clark' }).alert.subject).toEqual({ type: 'customer', id: 'c1' });
+  });
+
+  test('with the visit known, the link opens it on the schedule', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', serviceDate: '2026-10-09', name: 'Albert Clark', request: 'ants' }).link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-09&appointment=v1');
   });
 
   test('a short name keeps the visit day in the headline', () => {

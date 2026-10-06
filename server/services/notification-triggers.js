@@ -321,9 +321,15 @@ const TRIGGER_REGISTRY = {
           ? names.whyWithQuote({ lead: pests, quote: words })
           : (p.pests ? `Picked ${p.pests.toLowerCase()} and typed no description.` : 'They typed no description of the problem.'),
         severity: 'needs-you',
-        link: p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/schedule',
+        // The booked visit on the schedule (its job card shows the request);
+        // the customer only when the visit is not known.
+        link: p.scheduledServiceId && p.serviceDate
+          ? `/admin/dispatch?tab=schedule&date=${encodeURIComponent(p.serviceDate)}&appointment=${encodeURIComponent(p.scheduledServiceId)}`
+          : (p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/schedule'),
         subject: p.scheduledServiceId ? { type: 'visit', id: p.scheduledServiceId } : { type: 'customer', id: p.customerId },
-        doneWhen: 'request_read',
+        // Closed by the relevance sweep (admin-alert-relevance.js
+        // reservice_booked) once the visit is completed, cancelled or gone.
+        doneWhen: 'visit_closed',
         who: 'person',
       };
       const detail = words ? [p.pests ? `Pests: ${p.pests}` : null, p.when ? `Visit: ${p.when}` : null, `Request: ${words}`].filter(Boolean).join('\n') : null;

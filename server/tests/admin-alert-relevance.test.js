@@ -326,6 +326,26 @@ describe('class rules', () => {
     expect((await reasonFor(note({ category: 'alert', metadata: { dedupeKey: 'visit-promise-marks:x' } }))).reason).toBeNull();
   });
 
+  test('self-booked re-service bell: done once its visit is completed, cancelled or gone; open stays (owner 2026-10-05)', async () => {
+    const bell = (over = {}) => note({
+      category: 'schedule',
+      link: `/admin/dispatch?tab=schedule&date=2026-10-09&appointment=${VISIT}`,
+      metadata: { triggerKey: 'reservice_self_booked', dedupeKey: `reservice-booked:${VISIT}`, payload: { customerId: CUST }, ...over },
+    });
+    for (const status of ['pending', 'confirmed', 'en_route', 'on_site']) {
+      mockTables['scheduled_services as ss'] = [visit({ status })];
+      expect(await reasonFor(bell())).toEqual({ cls: 'reservice_booked', reason: null });
+    }
+    for (const status of ['completed', 'cancelled', 'no_show', 'skipped']) {
+      mockTables['scheduled_services as ss'] = [visit({ status })];
+      expect((await reasonFor(bell())).reason).toBe('Visit is closed');
+    }
+    mockTables['scheduled_services as ss'] = [];
+    expect((await reasonFor(bell())).reason).toBe('Visit is gone');
+    // Another schedule bell (a reschedule request) is not this class.
+    expect(classify(note({ category: 'schedule', metadata: { triggerKey: 'appointment_reschedule_intent', dedupeKey: `reservice-booked:${VISIT}` } }))).toBeNull();
+  });
+
   test('promise chaser: settled once the promise it chases is closed; a missing promise or another missed-call bell is never judged (owner 2026-10-03)', async () => {
     const P = uid(520);
     const chaser = (over = {}) => note({
