@@ -362,6 +362,18 @@ test('saved floor notation and a saved directional-plus-unit street stay editabl
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).error).toMatch(/stored as one line/);
 });
 
+test('a ZIP+4 in the stored line matches a five-digit zip column: one line', async () => {
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '21 Oak Ave 34200-1234', city: 'Testville', zip: '34200' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).error).toMatch(/stored as one line/);
+});
+
+test('a state other than FL beside a unit token is a locality, requested or stored', async () => {
+  db.mockImplementation(() => chain({ first: ADDR_LEAD }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Oak Ave, GA Apt 4' })).error).toMatch(/street alone/);
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '12 Oak Ave, GA Apt 4', city: 'Testville', zip: '34200' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).error).toMatch(/stored as one line/);
+});
+
 test('confirmed phone change does not touch the address columns in the guard', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
   const activities = chain({ insert: undefined });

@@ -760,14 +760,17 @@ function cityIsReal(city) {
   return !UNIT_DESIGNATORS.has(rest[0]);
 }
 
-// Does a parse carry a locality? A real city, or a state standing alone as
-// the tail ("12 Oak Ave, FL"). A state beside a unit-like token is floor
-// notation ("123 Main St, Fl 2": state FL, city "2") and reads as street
-// text. One rule for the requested value and for the stored line, so a
+// Does a parse carry a locality? A real city, a state other than FL, or FL
+// standing alone as the tail ("12 Oak Ave, FL"). FL beside a unit-like token
+// is floor notation ("123 Main St, Fl 2": state FL, city "2") and reads as
+// street text. One rule for the requested value and for the stored line, so a
 // value saved as a street stays editable.
 function parsedCarriesLocality(parts) {
   if (cityIsReal(parts.city)) return true;
-  return Boolean(parts.state) && String(parts.city || '').trim() === '';
+  if (!parts.state) return false;
+  // Only "Fl" doubles as a floor designator; any other state is a locality.
+  if (String(parts.state).toUpperCase() !== 'FL') return true;
+  return String(parts.city || '').trim() === '';
 }
 
 // Does the stored line carry more than a street? A locality in the parse
@@ -776,10 +779,11 @@ function parsedCarriesLocality(parts) {
 // five digits as a ZIP, so "21 Oak Ave Apt 34236" with another zip column is
 // a bare street with a unit number). A comma segment equal to the city column
 // counts as well.
-// "34200" in the line matches a zip column of "34200" or "34200-1234".
+// The five digits match in either direction: "34200" in the line and a
+// column of "34200-1234", or the reverse.
 function zipMatchesColumn(parsed, column) {
-  const col = String(column || '').trim();
-  return parsed === col || col.startsWith(`${parsed}-`);
+  const five = (z) => String(z || '').trim().slice(0, 5);
+  return /^\d{5}/.test(five(parsed)) && five(parsed) === five(column);
 }
 function storedIsOneLine(lead) {
   const stored = String(lead.address || '').trim();
