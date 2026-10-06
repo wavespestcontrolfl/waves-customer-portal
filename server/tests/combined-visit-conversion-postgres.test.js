@@ -423,14 +423,10 @@ postgres('combined capacity conversion on the migrated application schema', () =
       const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId })
         .whereNull('recurring_parent_id').orderBy('window_start');
       expect(parents).toHaveLength(count);
-      // Two stop groups (owner 2026-10-05): the first service's group keeps
-      // 09:00; the other group starts after its 60 minutes per service.
-      const PEST_GROUP = ['pest_control', 'mosquito', 'termite_bait', 'rodent_bait'];
-      const groupOf = (line) => (PEST_GROUP.includes(line.service) ? 'pest' : 'lawn');
-      const firstCount = selected.filter((line) => groupOf(line) === groupOf(selected[0])).length;
+      // Two stop groups (owner 2026-10-05), version 1: one hour per service,
+      // back to back (every fixture lists its pest-group services first).
       const hour = (h) => `${String(h).padStart(2, '0')}:00:00`;
-      const startOf = (line) => (groupOf(line) === groupOf(selected[0]) ? 9 : 9 + firstCount);
-      const starts = selected.map(startOf).sort((a, b) => a - b);
+      const starts = selected.map((_, i) => 9 + i);
       expect(parents.map((p) => p.window_start)).toEqual(starts.map(hour));
       expect(parents.map((p) => p.window_end)).toEqual(starts.map((h) => hour(h + 1)));
       expect(parents.map((p) => p.estimated_duration_minutes)).toEqual(selected.map(() => 60));
@@ -459,10 +455,8 @@ postgres('combined capacity conversion on the migrated application schema', () =
       }
       const reminders = await trx('appointment_reminders').where({ customer_id: f.customerId });
       expect(reminders).toHaveLength(count);
-      // One arrival time (and one live reminder) per stop group.
-      const groups = new Set(selected.map(groupOf)).size;
-      expect(new Set(reminders.map((r) => r.appointment_time.toISOString())).size).toBe(groups);
-      expect(reminders.filter((r) => !r.suppressed_by_sibling)).toHaveLength(groups);
+      // Each service has its own hour, so its own arrival time.
+      expect(new Set(reminders.map((r) => r.appointment_time.toISOString())).size).toBe(count);
       for (const line of selected) {
         const catalog = await trx('services').where({ service_key: line.catalog }).first('id');
         const parent = parents.find((p) => p.service_id === catalog.id);
@@ -513,9 +507,8 @@ postgres('combined capacity conversion on the migrated application schema', () =
       const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId })
         .whereNull('recurring_parent_id').orderBy('window_start');
       expect(parents).toHaveLength(2);
-      // Lawn and tree & shrub are one stop group: one shared hour.
       expect(parents.map((row) => [row.window_start, row.window_end]))
-        .toEqual([['09:00:00', '10:00:00'], ['09:00:00', '10:00:00']]);
+        .toEqual([['09:00:00', '10:00:00'], ['10:00:00', '11:00:00']]);
       expect(parents.map((row) => row.recurring_pattern)).toEqual([pattern, 'every_6_weeks']);
       for (const row of parents) {
         expect(row.reservation_service_mix.allocatedServiceIds).toEqual(parents.map((member) => member.id));

@@ -61,9 +61,15 @@ function stopGroupOffsetMinutes(capacity, anchor, allowanceIndex, catalogService
   const memberKey = known(serviceKeyFor({ service_key: catalogServiceKey })) || capacity.services[allowanceIndex];
   const anchorKey = known(serviceKeyFor({ service_key: anchor.service_key_snapshot }));
   const firstGroup = anchorKey ? stopGroupOf(anchorKey) : defaultAnchorGroup(capacity.services);
+  if (capacity.version !== 2) {
+    // Version 1 is one hour per service, back to back: the anchor's group
+    // first, then the other group, so no two members share an hour.
+    const ordered = [...capacity.services.filter((key) => stopGroupOf(key) === firstGroup),
+      ...capacity.services.filter((key) => stopGroupOf(key) !== firstGroup)];
+    return ordered.indexOf(memberKey) * SERVICE_MINUTES;
+  }
   if (stopGroupOf(memberKey) === firstGroup) return 0;
-  const durations = capacity.version === 2 ? capacity.durations : null;
-  return Math.ceil(groupMinutes(capacity.services, durations, firstGroup) / 60) * 60;
+  return Math.ceil(groupMinutes(capacity.services, capacity.durations, firstGroup) / 60) * 60;
 }
 
 function capacityForServices(services, durations) {

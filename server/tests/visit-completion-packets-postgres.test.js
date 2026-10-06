@@ -4664,7 +4664,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(parents.filter((row) => row.estimated_price != null).map((row) => Number(row.estimated_price))).toEqual([240]);
       expect(parents.reduce((sum, row) => sum + Number(row.estimated_duration_minutes), 0)).toBe(120);
       expect(parents.map((row) => [row.window_start, row.window_end]).sort())
-        .toEqual([['09:00:00', '10:00:00'], ['09:00:00', '10:00:00']]);
+        .toEqual([['09:00:00', '10:00:00'], ['10:00:00', '11:00:00']]);
       expect(new Set(parents.map((row) => row.visit_id)).size).toBe(1);
       expect(parents.every((row) => row.property_id === propertyId && row.visit_id)).toBe(true);
       const visitId = parents[0].visit_id;

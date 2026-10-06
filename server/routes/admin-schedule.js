@@ -19949,21 +19949,35 @@ async function joinOwnStopExtension(ctx, candidate, clashRows) {
 async function placeAfterOtherGroupStop(ctx, candidate, clashRows, technicianId) {
   const { conn, parent, parentId, cols, svcLike, opts } = ctx;
   const rows = await conn('scheduled_services').whereIn('id', clashRows.map((r) => r.id))
-    .select('service_id', 'window_start', 'window_end', 'estimated_duration_minutes');
+    .select('service_id', 'property_id', 'window_start', 'window_end', 'estimated_duration_minutes');
   const ids = [parent.service_id, ...rows.map((r) => r.service_id)];
   if (rows.length !== clashRows.length || ids.some((id) => !id)) return null;
+  // The same stop: the series' own property on every clash row (a customer's
+  // other property is another stop with travel between).
+  if (!parent.property_id || rows.some((r) => String(r.property_id || '') !== String(parent.property_id))) return null;
   const families = new Map((await conn('services').whereIn('id', ids).select('id', 'group_family'))
     .map((r) => [String(r.id), r.group_family || null]));
   const own = families.get(String(parent.service_id));
   const stopFamilies = new Set(rows.map((r) => families.get(String(r.service_id))));
   if (!own || stopFamilies.has(own) || stopFamilies.has(null) || stopFamilies.size !== 1) return null;
-  const ends = rows.map((r) => parseHHMM(r.window_end)
-    ?? (parseHHMM(r.window_start) == null ? null : parseHHMM(r.window_start) + (Number(r.estimated_duration_minutes) || 60)));
-  if (ends.some((end) => end == null)) return null;
-  const start = Math.ceil(Math.max(...ends) / 60) * 60;
-  const minutes = Number(parent.estimated_duration_minutes) || 60;
-  if (start + minutes > 24 * 60 - 1) return null;
-  const window = { window_start: minutesToHHMM(start), window_end: minutesToHHMM(start + minutes) };
+  // The stop's members work one after another (a shared arrival hour still
+  // means sequential work), so the stop ends after the summed work from its
+  // first arrival, or its latest window end when that is later.
+  const starts = rows.map((r) => parseHHMM(r.window_start));
+  if (starts.some((v) => v == null)) return null;
+  const work = rows.reduce((sum, r) => sum + (Number(r.estimated_duration_minutes)
+    || ((parseHHMM(r.window_end) ?? 0) - parseHHMM(r.window_start)) || 60), 0);
+  const stopEnd = Math.max(Math.min(...starts) + work, ...rows.map((r) => parseHHMM(r.window_end) ?? 0));
+  let window;
+  try {
+    // The canonical appointment-window rules (shift / admin day end).
+    window = assertAdminAppointmentWindow({
+      windowStart: minutesToHHMM(Math.ceil(stopEnd / 60) * 60),
+      durationMinutes: Number(parent.estimated_duration_minutes) || 60,
+    });
+  } catch {
+    return null;
+  }
   const scope = deferredCommitScope(conn);
   try {
     const placed = await conn.transaction(async (sp) => {
