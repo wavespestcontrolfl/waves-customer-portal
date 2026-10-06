@@ -303,15 +303,18 @@ function productsNamedIn(question, products) {
 // house number past two digits) is masked (Codex P1 r1 #5957). It cannot see a
 // customer's NAME in prose, or a street name without a number and a suffix: no
 // pattern tells those from ordinary words, so those pass through.
-// Full words and the common postal abbreviations.
-const STREET_SUFFIX = `(?:${[
-  'street', 'st', 'avenue', 'ave', 'av', 'road', 'rd', 'drive', 'dr', 'lane', 'ln', 'court', 'ct', 'circle', 'cir',
-  'boulevard', 'blvd', 'way', 'place', 'pl', 'terrace', 'ter', 'trail', 'trl', 'parkway', 'pkwy', 'highway', 'hwy',
-  'loop', 'run', 'cove', 'cv', 'point', 'pointe', 'pt', 'crossing', 'xing', 'square', 'sq', 'row', 'path', 'alley',
-  'bend', 'glen', 'ridge', 'trace', 'plaza', 'plz', 'turnpike', 'tpke', 'pike', 'expressway', 'expy', 'causeway',
-  'cswy', 'creek', 'grove', 'heights', 'hts', 'hollow', 'landing', 'manor', 'mews', 'oaks', 'shores', 'vista', 'villas',
-].join('|')})`;
-const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}?${STREET_SUFFIX}\\b\\.?`, 'gi');
+// Every USPS street suffix and variant (Publication 28 C1, the table the
+// address matcher uses), longest first so "parkway" wins over "park". A
+// hand-picked list kept missing real types ("18 Bay Pass", Codex P1 #5964 r6).
+const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
+
+// Local spellings the USPS table does not list ("Pointe", "Villas") ride along.
+const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'trace', 'mews', 'landing', 'hollow', 'vista'];
+const STREET_SUFFIX = `(?:${[...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
+  .sort((x, y) => y.length - x.length)
+  .join('|')})`;
+// Greedy: "21 Harbor Crossing" takes both words, not the first suffix only.
+const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}${STREET_SUFFIX}\\b\\.?`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -426,6 +429,107 @@ function treeShrubFacts(data = {}, keep = () => true) {
   });
 }
 
+const objectOr = (value) => (value && typeof value === 'object' ? value : {});
+const orNull = (row) => (Object.keys(row).length ? row : null);
+const inchesOf = (value) => {
+  const n = readingOrNull(value);
+  return n === null ? null : Math.round(n * 100) / 100;
+};
+const underscoresToSpaces = (value) => cleanText(value).replace(/_/g, ' ');
+
+// A string the watering keeper allows, clipped; null otherwise.
+function keptText(keep) {
+  return (value, max) => {
+    const out = clip(value, max);
+    return out && keep(out) ? out : null;
+  };
+}
+
+function lawnLeadFacts(v2, text) {
+  const lead = objectOr(v2.lead);
+  const snapshot = objectOr(v2.snapshot);
+  const texts = (values, count, max) => asArray(values).slice(0, count).map((value) => text(value, max)).filter(Boolean);
+  return {
+    headline: text(lead.headline || snapshot.statusHeadline, 200),
+    why: text(lead.why || snapshot.rootCause || snapshot.scoreExplanation, 300),
+    applied_today: text(lead.applied, 300),
+    your_part: texts(lead.yourPart, 2, 240),
+    next: text(lead.next, 240),
+    what_to_expect: text(lead.whatToExpect, 300),
+    watching: texts([lead.watching].flat(), 2, 200),
+    from_your_technician: text(lead.techParagraph, 700),
+    since_last_visit: texts(objectOr(lead.sinceLast).lines, 4, 200),
+  };
+}
+
+function lawnCardFacts(v2, text) {
+  return {
+    insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
+      headline: text(card?.headline, 160),
+      what_we_saw: text(card?.whatWeSaw, 240),
+      customer_action: text(card?.customerAction, 240),
+    })).filter((card) => Object.keys(card).length),
+    diagnosis: asArray(v2.diagnosis).slice(0, 6).map((card) => dropEmpty({
+      area: cleanText(card?.label),
+      status: underscoresToSpaces(card?.status),
+      explanation: text(card?.explanation || card?.customerExplanation, 240),
+    })).filter((card) => card.area),
+  };
+}
+
+function lawnWaterFacts(water, text) {
+  const plan = objectOr(water.weekPlan);
+  return orNull(dropEmpty({
+    rain_last_7_days_inches: inchesOf(water.rainInches),
+    irrigation_inches_per_week: inchesOf(water.irrigationInches),
+    total_inches_7_days: inchesOf(water.totalInches),
+    target_inches_per_week: inchesOf(water.targetInches),
+    status: water.status === 'unknown' ? null : cleanText(water.status),
+    explanation: text(water.explanation, 300),
+    week_plan: text([plan.title, plan.detail].filter(Boolean).join(': '), 300),
+  }));
+}
+
+function lawnRainFacts(v2) {
+  const days = asArray(v2.rain7d)
+    .map((day) => ({ day: cleanText(day?.d), inches: inchesOf(day?.in) }))
+    .filter((day) => day.inches !== null);
+  if (!days.length) return null;
+  return dropEmpty({
+    days,
+    total_inches: inchesOf(days.reduce((sum, day) => sum + day.inches, 0)),
+    limited_data: v2.rain7dConfidence === 'low' || null,
+  });
+}
+
+function lawnMowingFacts(mowing, text) {
+  return orNull(dropEmpty({
+    measured_height_inches: inchesOf(mowing.measuredHeightInches),
+    ideal_min_inches: inchesOf(mowing.idealMinInches),
+    ideal_max_inches: inchesOf(mowing.idealMaxInches),
+    status: underscoresToSpaces(mowing.status),
+    recommendation: text(mowing.recommendation, 240),
+  }));
+}
+
+// First and last point of each series the trend cards draw. The values stay
+// numbers: a string would lose a score of 100 to the 3-digit scrub (Codex P2
+// #5964 r6).
+const LAWN_TRENDS = [
+  ['overall_out_of_100', 'overall'], ['density_out_of_100', 'coverage'], ['weed_cleanliness_out_of_100', 'weed'],
+  ['color_out_of_100', 'color'], ['stress_damage_out_of_100', 'stress'], ['water_gap_inches', 'waterGap'],
+  ['mowing_height_inches', 'mowing'],
+];
+function trendEnds(series) {
+  const points = asArray(series)
+    .map((point) => ({ month: cleanText(point?.label), value: inchesOf(point?.value) }))
+    .filter((point) => point.value !== null);
+  return points.length >= 2 ? { from: points[0], to: points[points.length - 1] } : null;
+}
+function lawnTrendFacts(trends) {
+  return orNull(dropEmpty(Object.fromEntries(LAWN_TRENDS.map(([name, key]) => [name, trendEnds(trends[key])]))));
+}
+
 // Lawn reports keep their customer-visible dashboard in data.reportV2
 // (lawn-report-v2.js, LawnReportV2Section.jsx): the lead, the insight and
 // diagnosis cards, the water intake card, the seven-day rain chart, the
@@ -437,81 +541,14 @@ function treeShrubFacts(data = {}, keep = () => true) {
 function lawnV2Facts(data = {}, keep = () => true) {
   const v2 = data.reportV2;
   if (data.serviceLine !== 'lawn' || !v2 || typeof v2 !== 'object') return null;
-  const text = (value, max) => {
-    const out = clip(value, max);
-    return out && keep(out) ? out : null;
-  };
-  const texts = (values, count, max) => asArray(values).slice(0, count).map((value) => text(value, max)).filter(Boolean);
-  const inches = (value) => {
-    const n = readingOrNull(value);
-    return n === null ? null : Math.round(n * 100) / 100;
-  };
-  const lead = v2.lead && typeof v2.lead === 'object' ? v2.lead : {};
-  const snapshot = v2.snapshot || {};
-  const water = v2.water && typeof v2.water === 'object' ? v2.water : null;
-  const mowing = v2.mowing && typeof v2.mowing === 'object' ? v2.mowing : null;
-  const rainDays = asArray(v2.rain7d)
-    .map((day) => ({ day: cleanText(day?.d), inches: inches(day?.in) }))
-    .filter((day) => day.inches !== null);
-  const trend = (series) => {
-    const points = asArray(series).filter((point) => readingOrNull(point?.value) !== null);
-    if (points.length < 2) return null;
-    const first = points[0];
-    const last = points[points.length - 1];
-    return `${Math.round(readingOrNull(first.value) * 100) / 100} in ${cleanText(first.label)} to ${Math.round(readingOrNull(last.value) * 100) / 100} in ${cleanText(last.label)}`;
-  };
-  const trends = v2.trends && typeof v2.trends === 'object' ? v2.trends : {};
-  const orNull = (row) => (Object.keys(row).length ? row : null);
+  const text = keptText(keep);
   return orNull(dropEmpty({
-    headline: text(lead.headline || snapshot.statusHeadline, 200),
-    why: text(lead.why || snapshot.rootCause || snapshot.scoreExplanation, 300),
-    applied_today: text(lead.applied, 300),
-    your_part: texts(lead.yourPart, 2, 240),
-    next: text(lead.next, 240),
-    what_to_expect: text(lead.whatToExpect, 300),
-    watching: texts(lead.watching ? [lead.watching].flat() : [], 2, 200),
-    from_your_technician: text(lead.techParagraph, 700),
-    since_last_visit: lead.sinceLast ? texts(lead.sinceLast.lines, 4, 200) : [],
-    insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
-      headline: text(card?.headline, 160),
-      what_we_saw: text(card?.whatWeSaw, 240),
-      customer_action: text(card?.customerAction, 240),
-    })).filter((card) => Object.keys(card).length),
-    diagnosis: asArray(v2.diagnosis).slice(0, 6).map((card) => dropEmpty({
-      area: cleanText(card?.label),
-      status: cleanText(card?.status).replace(/_/g, ' '),
-      explanation: text(card?.explanation || card?.customerExplanation, 240),
-    })).filter((card) => card.area),
-    water_this_week: water ? orNull(dropEmpty({
-      rain_last_7_days_inches: inches(water.rainInches),
-      irrigation_inches_per_week: inches(water.irrigationInches),
-      total_inches_7_days: inches(water.totalInches),
-      target_inches_per_week: inches(water.targetInches),
-      status: cleanText(water.status) === 'unknown' ? null : cleanText(water.status),
-      explanation: text(water.explanation, 300),
-      week_plan: water.weekPlan ? text([water.weekPlan.title, water.weekPlan.detail].filter(Boolean).join(': '), 300) : null,
-    })) : null,
-    rain_by_day_last_7_days: rainDays.length ? {
-      days: rainDays,
-      total_inches: Math.round(rainDays.reduce((sum, day) => sum + day.inches, 0) * 100) / 100,
-      limited_data: v2.rain7dConfidence === 'low' || null,
-    } : null,
-    mowing: mowing ? orNull(dropEmpty({
-      measured_height_inches: inches(mowing.measuredHeightInches),
-      ideal_min_inches: inches(mowing.idealMinInches),
-      ideal_max_inches: inches(mowing.idealMaxInches),
-      status: cleanText(mowing.status).replace(/_/g, ' ') || null,
-      recommendation: text(mowing.recommendation, 240),
-    })) : null,
-    trends: orNull(dropEmpty({
-      overall_out_of_100: trend(trends.overall),
-      density_out_of_100: trend(trends.coverage),
-      weed_cleanliness_out_of_100: trend(trends.weed),
-      color_out_of_100: trend(trends.color),
-      stress_damage_out_of_100: trend(trends.stress),
-      water_gap_inches: trend(trends.waterGap),
-      mowing_height_inches: trend(trends.mowing),
-    })),
+    ...lawnLeadFacts(v2, text),
+    ...lawnCardFacts(v2, text),
+    water_this_week: v2.water ? lawnWaterFacts(objectOr(v2.water), text) : null,
+    rain_by_day_last_7_days: lawnRainFacts(v2),
+    mowing: v2.mowing ? lawnMowingFacts(objectOr(v2.mowing), text) : null,
+    trends: lawnTrendFacts(objectOr(v2.trends)),
   }));
 }
 
@@ -765,6 +802,51 @@ const CONTENT_CHECKS = [
   ['target_list', leaksTargetList],
 ];
 
+// ── Dates and times must come from the facts ────────────────────────────
+// The shared screen's date and time rules are skipped for a short answer
+// (SHARED_SCREEN_SKIP), so a made-up visit day or arrival window ("January 8
+// at 2 PM" when the facts say January 5 between 9 and 11 AM) would pass
+// (Codex P1 #5964 r6). Every calendar date, weekday and clock time the answer
+// states must also appear somewhere in the fact sheet (next_visit,
+// service_date, reentry, required_lines and the rest).
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const MONTH_RE = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?';
+const MONTH_DAY = new RegExp(`\\b${MONTH_RE}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'gi');
+const SLASH_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/g;
+const ORDINAL_DAY = /\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b/gi;
+const WEEKDAY_FULL = /\b(mon|tues|wednes|thurs|fri|satur|sun)day\b/gi;
+// Abbreviations only capitalized: a lowercase "sun" is the sun.
+const WEEKDAY_ABBR = /\b(Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/g;
+const MERIDIEM = '([ap])\\.?\\s?m\\b\\.?';
+const CLOCK = new RegExp(`\\b(\\d{1,2})(?::(\\d{2}))?\\s*${MERIDIEM}`, 'gi');
+// "9 to 11 AM", "9-11 AM": the bare start takes the end's meridiem.
+const CLOCK_RANGE = new RegExp(`\\b(\\d{1,2})(?::(\\d{2}))?\\s*(?:-|–|to|and|until)\\s*\\d{1,2}(?::\\d{2})?\\s*${MERIDIEM}`, 'gi');
+const NOON = /\b(noon|midday|midnight)\b/gi;
+
+function dateTimeTokens(text) {
+  const tokens = new Set();
+  const value = String(text || '');
+  const all = (re, add) => { for (const m of value.matchAll(re)) add(m); };
+  all(MONTH_DAY, (m) => tokens.add(`d:${MONTHS.indexOf(m[1].slice(0, 3).toLowerCase()) + 1}/${Number(m[2])}`));
+  all(SLASH_DATE, (m) => { if (Number(m[1]) <= 12) tokens.add(`d:${Number(m[1])}/${Number(m[2])}`); });
+  all(ORDINAL_DAY, (m) => tokens.add(`day:${Number(m[1])}`));
+  all(WEEKDAY_FULL, (m) => tokens.add(`w:${m[1].slice(0, 3).toLowerCase()}`));
+  all(WEEKDAY_ABBR, (m) => tokens.add(`w:${m[1].slice(0, 3).toLowerCase()}`));
+  all(CLOCK, (m) => tokens.add(`t:${Number(m[1])}:${m[2] || '00'}${m[3].toLowerCase()}`));
+  all(CLOCK_RANGE, (m) => tokens.add(`t:${Number(m[1])}:${m[2] || '00'}${m[3].toLowerCase()}`));
+  all(NOON, (m) => tokens.add(m[1].toLowerCase() === 'midnight' ? 't:12:00a' : 't:12:00p'));
+  return tokens;
+}
+
+function statesUnknownDateTime(text, { facts, requiredLines }) {
+  const said = dateTimeTokens(text);
+  if (!said.size) return false;
+  const known = dateTimeTokens(JSON.stringify([facts || {}, requiredLines]));
+  // "the 5th" matches any known date on that day of the month.
+  for (const token of known) if (token.startsWith('d:')) known.add(`day:${token.split('/')[1]}`);
+  return [...said].some((token) => !known.has(token));
+}
+
 // A sentence just before a required line that takes it back. The answer must
 // state the line as itself, not as something the customer is told to ignore.
 const DISMISSAL_CUE = /\b(?:ignore|disregard|not true|no longer|outdated|out of date|you can skip)\b/i;
@@ -796,6 +878,7 @@ const ASK_CHECKS = [
   // A dismissal anywhere in an answer that carries required lines, before or
   // after them ("…until dry. However, ignore that.") (Codex P1 #5964 r4).
   ['dismisses_required_line', (text, { requiredLines }) => requiredLines.length > 0 && DISMISSAL_CUE.test(text)],
+  ['unstated_date_time', statesUnknownDateTime],
 ];
 
 function firstFailure(checks, text, context) {
@@ -870,16 +953,71 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
-  /\bsprayed\s+(?:on\s+)?(?:me|him|her|us|them|my\s+\w+)\b/i,
+  // A pronoun object, "them" included ("my kids ran out and he sprayed them").
+  /\bsprayed\s+(?:on\s+)?(?:me|myself|him|himself|her|herself|us|ourselves|them|themselves)\b/i,
+  // First person, "sprayed" right after the verb: "I got sprayed", never the
+  // causative "I got it sprayed" (Codex P1 #6016 r2).
+  /\b(?:i|we|he|she)\s+(?:just\s+|also\s+|accidentally\s+)?(?:got|get|gets|was|were|have\s+been|had\s+been|been)\s+(?:accidentally\s+|directly\s+|also\s+)?sprayed\b/i,
 ];
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
  * null. Pure and deterministic; the question is never logged.
  */
+// "Sprayed (on) my/the X" and "my/the X was sprayed". Who or what X is cannot
+// be listed in full ("my partner", "my neck", "my hamster"), so X's head noun
+// (its last word, before a place or time word) counts as a person or pet
+// unless it names a place, a plant, a pest or a thing ("my front lawn", "the
+// dog bed", "my dog's bowl"). A missed exposure is worse than an extra Poison
+// Control answer (Codex P1 #5964, #6016 r1-r2).
+const DETERMINER = '(?:my|our|his|her|their|the|your)';
+const SPRAYED_ON = new RegExp(`\\bsprayed\\s+(?:on\\s+|onto\\s+|at\\s+)?${DETERMINER}\\s+([^.?!,;:]+)`, 'gi');
+const SPRAYED_PASSIVE = new RegExp(`\\b${DETERMINER}\\s+((?:[\\w'’-]+\\s+){0,2}[\\w'’-]+)\\s+(?:got|gets|was|were|is|are|has\\s+been|have\\s+been|been)\\s+(?:accidentally\\s+|directly\\s+|also\\s+)?sprayed\\b`, 'gi');
+// Words that end the noun phrase: prepositions, place and time words, links.
+const PHRASE_STOP_WORDS = new Set(('in on at by with near around under over to from for of into onto behind through while when '
+  + 'after before and but or so because then too also again inside outside indoors outdoors upstairs downstairs here there '
+  + 'today yesterday tonight earlier last this that accidentally directly just was were is are got gets has have had '
+  + 'and while who which right now').split(' '));
+const BODY_PART_WORDS = new Set(('eye eyes skin mouth face hand hands arm arms leg legs foot feet nose lip lips head hair body neck '
+  + 'ear ears back chest throat stomach belly paw paws fur tongue finger fingers toe toes knee knees shoulder shoulders wrist ankle').split(' '));
+const NOT_A_PATIENT_WORDS = new Set(('lawn yard yards grass turf fence fences patio deck porch lanai pool garage driveway sidewalk walkway '
+  + 'house home roof wall walls window windows door doors floor floors baseboard baseboards cabinet cabinets kitchen bathroom '
+  + 'attic shed barn screen screens perimeter foundation siding gutters gutter mulch soil dirt beds bed garden gardens '
+  + 'flower flowers plant plants shrub shrubs bush bushes hedge hedges tree trees palm palms weed weeds leaves roses '
+  + 'ant ants roach roaches spider spiders webs nest nests hive mosquito mosquitoes bug bugs insects wasps termites fleas ticks '
+  + 'mound mounds area areas spot spots side corner corners exterior interior property entry entries station stations '
+  + 'cage crate bowl bowls toy toys playset swing swingset trampoline furniture couch chair chairs table car truck boat trash can cans '
+  + 'bin bins grill hose sprinkler sprinklers everything stuff part parts room rooms closet laundry').split(' '));
+
+function headNoun(phrase) {
+  const words = phrase.toLowerCase().split(/\s+/).map((word) => word.replace(/[^a-z'’-]/g, ''));
+  const stop = words.findIndex((word, i) => i > 0 && PHRASE_STOP_WORDS.has(word));
+  const kept = (stop === -1 ? words : words.slice(0, stop)).slice(0, 4).filter(Boolean);
+  return (kept[kept.length - 1] || '').replace(/['’]s?$/, '');
+}
+
+function namesPatient(phrase) {
+  const head = headNoun(phrase);
+  if (!head) return false;
+  return BODY_PART_WORDS.has(head) || !NOT_A_PATIENT_WORDS.has(head);
+}
+
+// A passive subject is the 1 to 3 words right before the verb; a stop word
+// inside them means the words are not one noun phrase ("the ants disappeared
+// after they were sprayed").
+function passiveSubjectIsPatient(phrase) {
+  const words = phrase.toLowerCase().split(/\s+/);
+  return !words.some((word) => PHRASE_STOP_WORDS.has(word)) && namesPatient(phrase);
+}
+
+function sprayedOnSomeone(text) {
+  return [...text.matchAll(SPRAYED_ON)].some((m) => namesPatient(m[1]))
+    || [...text.matchAll(SPRAYED_PASSIVE)].some((m) => passiveSubjectIsPatient(m[1]));
+}
+
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
-  return MEDICAL_CUES.some((cue) => cue.test(text)) ? MEDICAL_EXPOSURE_ANSWER : null;
+  return MEDICAL_CUES.some((cue) => cue.test(text)) || sprayedOnSomeone(text) ? MEDICAL_EXPOSURE_ANSWER : null;
 }
 
 // ── The call ────────────────────────────────────────────────────────────

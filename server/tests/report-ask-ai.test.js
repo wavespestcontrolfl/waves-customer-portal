@@ -431,7 +431,9 @@ describe('screenAskAnswer', () => {
   test('shared screen: a local absence, recorded re-entry words, a timeframe, a date and a product name pass', () => {
     expect(screen('None were seen at the dishwasher today.')).toBeNull();
     expect(screen('Keep pets off the treated areas until they are dry.', 'Can my dog go out?')).toBeNull();
-    expect(screen('Activity can stay up for a few days, and your next visit is Tuesday, January 5, 2027.')).toBeNull();
+    // A date passes when the facts hold it (next_visit here).
+    const withVisit = buildReportAskFacts({ data, nextAppointment: { scheduled_date: '2027-01-05' } });
+    expect(screenAskAnswer('Activity can stay up for a few days, and your next visit is Tuesday, January 5, 2027.', { question: 'What was done?', data, facts: withVisit })).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
 
@@ -584,6 +586,24 @@ describe('symptoms and exposure never reach the model', () => {
     'I am having trouble breathing',
     'I feel lightheaded since this morning',
     'He passed out in the kitchen',
+    'You sprayed my dog by accident',
+    'The tech sprayed me',
+    'It sprayed on my face',
+    'My cat got sprayed',
+    'The tech sprayed my neck',
+    'Some got sprayed on my ear',
+    'You sprayed my back by the door',
+    'The tech sprayed my partner',
+    'You sprayed my roommate',
+    'The tech sprayed my hamster',
+    "You sprayed my dog's face",
+    'My roommate got sprayed',
+    'I got sprayed in the yard',
+    'The tech sprayed my hamster inside',
+    'You sprayed my partner yesterday',
+    'My kids ran outside and the tech sprayed them',
+    'My dogs were in the yard and he sprayed them',
+    'I was accidentally sprayed',
   ])('a fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
   });
@@ -596,6 +616,24 @@ describe('symptoms and exposure never reach the model', () => {
     'When can my dog go back outside?',
     'Are there bee hives near my shed?',
     'How many numbers are on the pressure scale?',
+    'What was sprayed on my lawn?',
+    'What was sprayed on the fence?',
+    'Was anything sprayed on my patio?',
+    'Which product was sprayed on my garage?',
+    'What was sprayed on the dog bed?',
+    'Was the bird cage sprayed?',
+    "What was sprayed on the kids' playset?",
+    'The weeds were brown after they were sprayed. What product did you use?',
+    'The ants disappeared after they were sprayed',
+    'The bushes were sprayed on Monday, right?',
+    "Was my dog's bowl sprayed?",
+    'The dog bed was sprayed',
+    'The bird cage was sprayed',
+    'My front lawn was sprayed',
+    'I got it sprayed last week',
+    'We got outside sprayed',
+    'I got everything sprayed',
+    'You sprayed my front lawn today',
     '',
   ])('no fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();

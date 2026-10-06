@@ -361,7 +361,7 @@ describe('the fact sheet and prompt carry required lines', () => {
       mowing: {
         measuredHeightInches: 3, idealMinInches: 3.5, idealMaxInches: 4, status: 'too_short', recommendation: 'Raise the mower one setting.',
       },
-      trends: { overall: [{ label: 'Aug', value: 70 }, { label: 'Oct', value: 82 }], mowing: [{ label: 'Aug', value: 3.5 }] },
+      trends: { overall: [{ label: 'Aug', value: 70 }, { label: 'Oct', value: 100 }], mowing: [{ label: 'Aug', value: 3.5 }] },
       ...overrides,
     });
 
@@ -379,7 +379,8 @@ describe('the fact sheet and prompt carry required lines', () => {
         mowing: {
           measured_height_inches: 3, ideal_min_inches: 3.5, ideal_max_inches: 4, status: 'too short', recommendation: 'Raise the mower one setting.',
         },
-        trends: { overall_out_of_100: '70 in Aug to 82 in Oct' },
+        // Numbers, not a string: a 100 survives the 3-digit scrub.
+        trends: { overall_out_of_100: { from: { month: 'Aug', value: 70 }, to: { month: 'Oct', value: 100 } } },
       });
       // A one-point series is not a trend.
       expect(facts.lawn_report.trends.mowing_height_inches).toBeUndefined();
@@ -655,5 +656,43 @@ describe('a dismissal after a required line', () => {
   });
   it('passes the same line with plain surrounding text', () => {
     expect(screenAskAnswer(`Here is what your report says. ${line}`, { question: 'q', data: {}, requiredLines: [line] })).toBeNull();
+  });
+});
+
+describe('street addresses with any USPS suffix are masked', () => {
+  test.each(['18 Bay Pass', '4 Ocean View', '7 Palm Walk', '12 Example Lane', '9 Heron Pointe'])('%s', (address) => {
+    const facts = buildReportAskFacts({ question: `Can you come to ${address}?`, data: pestData({ customerConcern: `Ants at ${address}` }) });
+    expect(JSON.stringify(facts)).not.toContain(address);
+    expect(facts.customer_concern).toContain('[address]');
+  });
+
+  test('ordinary numbers stay', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'We got 3 inches of rain and saw 2 ants.' }) });
+    expect(facts.customer_concern).toBe('We got 3 inches of rain and saw 2 ants.');
+  });
+});
+
+describe('dates and times in an answer must come from the facts', () => {
+  const nextAppointment = { scheduled_date: '2027-01-05', window_start: '09:00', service_type: 'Quarterly Pest Control' };
+  const data = pestData();
+  const facts = buildReportAskFacts({ question: 'When is my next visit?', data, nextAppointment });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'When is my next visit?', data, facts });
+
+  test.each([
+    'Your next visit is Tuesday, January 5, 2027, between 9:00 AM and 11:00 AM.',
+    'We come back on Jan 5 between 9 and 11 AM.',
+    'Your next visit is on the 5th.',
+  ])('passes: %s', (answer) => {
+    expect(ask(answer)).toBeNull();
+  });
+
+  test.each([
+    'Your next visit is January 8 at 2 PM.',
+    'Your next visit is January 5 at 2 PM.',
+    'We come back on 1/8.',
+    'Your next visit is Wednesday.',
+    'We will be there at noon.',
+  ])('rejects: %s', (answer) => {
+    expect(ask(answer)).toBe('unstated_date_time');
   });
 });
