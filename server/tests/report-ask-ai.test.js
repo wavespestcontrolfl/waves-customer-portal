@@ -59,6 +59,8 @@ const {
   screenAskAnswer,
   medicalExposureAnswer,
   MEDICAL_EXPOSURE_ANSWER,
+  exposureSafetyLine,
+  EXPOSURE_SAFETY_LINE,
   placeOfApplication,
   answerReportQuestionWithAI,
 } = require('../services/service-report/report-ask-ai');
@@ -338,7 +340,7 @@ describe('buildReportAskPrompt', () => {
 
 describe('screenAskAnswer', () => {
   const data = reportData();
-  const facts = buildReportAskFacts({ data, now: NOW });
+  const facts = buildReportAskFacts({ data, nextAppointment, now: NOW });
   const screen = (answer, question = 'What was done?') => screenAskAnswer(answer, { question, data, facts });
 
   test('passes a plain grounded answer', () => {
@@ -431,9 +433,8 @@ describe('screenAskAnswer', () => {
   test('shared screen: a local absence, recorded re-entry words, a timeframe, a date and a product name pass', () => {
     expect(screen('None were seen at the dishwasher today.')).toBeNull();
     expect(screen('Keep pets off the treated areas until they are dry.', 'Can my dog go out?')).toBeNull();
-    // A date passes when the facts hold it (next_visit here).
-    const withVisit = buildReportAskFacts({ data, nextAppointment: { scheduled_date: '2027-01-05' } });
-    expect(screenAskAnswer('Activity can stay up for a few days, and your next visit is Tuesday, January 5, 2027.', { question: 'What was done?', data, facts: withVisit })).toBeNull();
+    expect(screen('Activity can stay up for a few days, and we check again at your next visit.')).toBeNull();
+    expect(screen('Your next visit is Tuesday, January 5, 2027.')).toBe('states_a_date');
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
 
@@ -586,9 +587,16 @@ describe('symptoms and exposure never reach the model', () => {
     'I am having trouble breathing',
     'I feel lightheaded since this morning',
     'He passed out in the kitchen',
+    'It sprayed on my face',
+  ])('a fixed answer for: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
+  });
+
+  // Spray plus a person, pet or body part: the safety line goes before the
+  // normal answer (owner 2026-10-05, option A); the answer is not replaced.
+  test.each([
     'You sprayed my dog by accident',
     'The tech sprayed me',
-    'It sprayed on my face',
     'My cat got sprayed',
     'The tech sprayed my neck',
     'Some got sprayed on my ear',
@@ -604,8 +612,33 @@ describe('symptoms and exposure never reach the model', () => {
     'My kids ran outside and the tech sprayed them',
     'My dogs were in the yard and he sprayed them',
     'I was accidentally sprayed',
-  ])('a fixed answer for: %s', (question) => {
-    expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
+    'The tech sprayed my neck area',
+    'The tech sprayed my left side',
+    'You sprayed my arm and hand',
+    'What was sprayed on the arm chair?',
+    'Can my dog go out after the spray?',
+  ])('a safety line before the answer for: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+    expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
+  });
+
+  test.each([
+    'What was sprayed on my lawn?',
+    'What was sprayed on the fence?',
+    'Which product was sprayed on my garage?',
+    'What was sprayed on the outside of the house?',
+    'Can you tell me what was sprayed?',
+    'Text us what you sprayed',
+    'When can my dog go back outside?',
+    'Why was Alpine WSG used?',
+    '',
+  ])('no safety line for: %s', (question) => {
+    expect(exposureSafetyLine(question)).toBeNull();
+  });
+
+  test('the safety line: Poison Control and 911, nothing about safety', () => {
+    expect(EXPOSURE_SAFETY_LINE).toBe('If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911.');
+    expect(EXPOSURE_SAFETY_LINE).not.toMatch(/\bsaf/i);
   });
 
   test.each([
@@ -634,6 +667,16 @@ describe('symptoms and exposure never reach the model', () => {
     'We got outside sprayed',
     'I got everything sprayed',
     'You sprayed my front lawn today',
+    'What was sprayed on the outside of the house?',
+    'What was sprayed on the inside?',
+    'The product was sprayed outside; what was it?',
+    'The chemical was sprayed near the door',
+    'Was the treatment sprayed on the front?',
+    'What was sprayed on my back yard?',
+    'You sprayed the back door',
+    'What was sprayed on the side of the house?',
+    'Was the front door sprayed?',
+    'You sprayed my left side of the yard',
     '',
   ])('no fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
@@ -738,6 +781,9 @@ function chain(overrides = {}) {
 
 async function withServer(fn) {
   const app = express();
+  // Each test request comes from its own client address (ask() below), so the
+  // route's 20-a-minute limiter does not count across tests.
+  app.set('trust proxy', 'loopback');
   app.use(express.json());
   app.use('/reports', reportsRouter);
   app.use((err, _req, res, _next) => {
@@ -778,10 +824,12 @@ function mockDb() {
   return { eventInsert };
 }
 
+let askCount = 0;
 async function ask(baseUrl, question) {
+  askCount += 1;
   const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/ask`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `10.0.${Math.floor(askCount / 250)}.${askCount % 250}` },
     body: JSON.stringify({ question }),
   });
   return { status: res.status, body: await res.json() };
@@ -955,6 +1003,18 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'applied' });
   });
 
+  test('a spray question naming a person: the safety line, then the normal answer', async () => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, 'The tech sprayed my arm, what was it?');
+      expect(status).toBe(200);
+      expect(body.answer.startsWith(`${EXPOSURE_SAFETY_LINE} `)).toBe(true);
+      expect(body.answer.length).toBeGreaterThan(EXPOSURE_SAFETY_LINE.length + 1);
+    });
+  });
+
   test('a symptom question on a lawn report gets the fixed answer too', async () => {
     delete process.env.GATE_REPORT_ASK_AI;
     buildReportV1Data.mockResolvedValue({ serviceLine: 'lawn', applications: [] });
@@ -974,4 +1034,33 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
       expect(body).toEqual({ answer: rulesAnswer });
     });
   });
+});
+
+describe('report Ask hotfix (Codex on #5964 against live #5957 code)', () => {
+  const m = require('../services/service-report/report-ask-ai');
+  it('a question about what was sprayed on the lawn is a report question, not an exposure', () => {
+    expect(m.medicalExposureAnswer('What was sprayed on my lawn?')).toBeNull();
+    expect(m.medicalExposureAnswer('What did you spray on my bushes?')).toBeNull();
+    // Option A (owner 2026-10-05): a spray + pet question keeps its answer, with the safety line first.
+    expect(m.exposureSafetyLine('They sprayed my dog')).toBe(m.EXPOSURE_SAFETY_LINE);
+    expect(m.medicalExposureAnswer('It got sprayed in my eyes')).toBeTruthy();
+  });
+  it('masks two-digit addresses on Pass, View and Walk streets', () => {
+    for (const address of ['18 Bay Pass', '7 Harbor View', '22 Palm Walk']) {
+      expect(m.buildReportAskPrompt({ question: `I live at ${address}`, data: { serviceLine: 'pest', applications: [] } }).user).not.toContain(address);
+    }
+  });
+  it('an AI answer states no date, weekday or time of its own', () => {
+    const facts = { service_date: 'Sunday, October 4, 2026', next_visit: { date: 'Monday, January 4, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' } };
+    const screen = (a, requiredLines = []) => m.screenAskAnswer(a, { question: 'q', data: {}, facts, requiredLines });
+    // Even a date the facts hold: a near miss ("January 1" for "January 10",
+    // a wrong year, a weekday from another date) cannot be told apart (#6020).
+    expect(screen('Your next visit is Monday, January 4, 2027, between 9:00 AM and 11:00 AM.')).toBe('states_a_date');
+    expect(screen('Your next visit is January 8 at 2 PM.')).toBe('states_a_date');
+    expect(screen('Your next visit is Friday.')).toBe('states_a_date');
+    expect(screen('It keeps working for weeks.')).toBeNull();
+    // A required line keeps its own date or time.
+    expect(screen('Not yet. Skip your turf watering until Thu 3 PM.', ['Skip your turf watering until Thu 3 PM.'])).toBeNull();
+  });
+
 });

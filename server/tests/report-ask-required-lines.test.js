@@ -300,6 +300,38 @@ describe('the fact sheet and prompt carry required lines', () => {
       expect(text).toContain('[address]');
     });
 
+    test('the five category rows the card draws are carried, a score of 100 and 0 intact', () => {
+      const rows = [
+        { key: 'pest_activity', label: 'Pests', score: 100, status: 'excellent', customerExplanation: 'No pest signals today.' },
+        { key: 'disease', label: 'Disease', score: 0, status: 'needs_attention', explanation: 'Leaf spot on the lower foliage.' },
+        { key: 'canopy', label: 'Canopy', score: 71.6, status: 'good', explanation: 'Call 941-555-0100 about 4421 Elm Street.' },
+        { key: 'unscored', label: 'Moisture' },
+        { key: 'nameless', score: 90 },
+      ];
+      const { diagnosis } = buildReportAskFacts({ data: treeData({ diagnosis: rows }) }).tree_shrub_report;
+      expect(diagnosis.slice(0, 2)).toEqual([
+        { area: 'Pests', score_out_of_100: 100, status: 'excellent', explanation: 'No pest signals today.' },
+        { area: 'Disease', score_out_of_100: 0, status: 'needs attention', explanation: 'Leaf spot on the lower foliage.' },
+      ]);
+      expect(diagnosis[2]).toMatchObject({ area: 'Canopy', score_out_of_100: 72 });
+      expect(JSON.stringify(diagnosis)).not.toMatch(/941-555-0100|4421/);
+      expect(diagnosis[3]).toEqual({ area: 'Moisture' });
+      expect(diagnosis).toHaveLength(4);
+    });
+
+    test('at most six category rows, and a row the watering keeper blocks loses its text', () => {
+      const many = Array.from({ length: 9 }, (_, i) => ({ key: `k${i}`, label: `Row ${i}`, score: 50 }));
+      expect(buildReportAskFacts({ data: treeData({ diagnosis: many }) }).tree_shrub_report.diagnosis).toHaveLength(6);
+      const held = treeData({ aftercare: { ...HOLD_AFTERCARE }, diagnosis: [{ label: 'Water', score: 60, explanation: 'Increase irrigation to twice this week.' }] });
+      expect(buildReportAskFacts({ data: held }).tree_shrub_report.diagnosis).toEqual([{ area: 'Water', score_out_of_100: 60 }]);
+    });
+
+    test('a category answer passes the screen and the row text is not a leaked target list', () => {
+      const data = treeData({ diagnosis: [{ label: 'Disease', score: 100, status: 'excellent', explanation: 'No leaf spot seen.' }] });
+      const facts = buildReportAskFacts({ data });
+      expect(screenAskAnswer('Disease scored 100 out of 100, with no leaf spot seen.', { question: 'How is disease?', data, facts })).toBeNull();
+    });
+
     test('another service line, or a tree & shrub report without a read, carries nothing', () => {
       expect(buildReportAskFacts({ data: treeData() }).tree_shrub_report).toBeDefined();
       expect(buildReportAskFacts({ data: { ...treeData(), serviceLine: 'lawn' } }).tree_shrub_report).toBeUndefined();
@@ -415,6 +447,15 @@ describe('the fact sheet and prompt carry required lines', () => {
       const facts = buildReportAskFacts({ data });
       const answer = 'Your lawn got about 1.23 inches of rain over the past week. The mower is at 3 inches, and the ideal range is 3.5 to 4 inches.';
       expect(screenAskAnswer(answer, { question: 'How much rain did we get?', data, facts })).toBeNull();
+    });
+
+    test('a lawn answer with trend months, a score of 100 and a watering day passes the screen', () => {
+      const data = lawnData({ reportV2: v2({ water: { status: 'balanced', weekPlan: { title: 'Water', detail: 'Not before Tuesday morning.' } } }) });
+      const facts = buildReportAskFacts({ data });
+      const ask = (answer) => screenAskAnswer(answer, { question: 'How is my lawn doing?', data, facts });
+      expect(ask('Your lawn score went from 70 in Aug to 100 in Oct.')).toBeNull();
+      // A weekday is the rule answer's to state (required lines), not the model's.
+      expect(ask('Hold off watering until Tuesday morning.')).toBe('states_a_date');
     });
 
     test('another service line, or a lawn report without reportV2, carries nothing', () => {
@@ -672,27 +713,70 @@ describe('street addresses with any USPS suffix are masked', () => {
   });
 });
 
-describe('dates and times in an answer must come from the facts', () => {
+describe('next-visit questions and dates', () => {
   const nextAppointment = { scheduled_date: '2027-01-05', window_start: '09:00', service_type: 'Quarterly Pest Control' };
-  const data = pestData();
-  const facts = buildReportAskFacts({ question: 'When is my next visit?', data, nextAppointment });
-  const ask = (answer) => screenAskAnswer(answer, { question: 'When is my next visit?', data, facts });
 
-  test.each([
-    'Your next visit is Tuesday, January 5, 2027, between 9:00 AM and 11:00 AM.',
-    'We come back on Jan 5 between 9 and 11 AM.',
-    'Your next visit is on the 5th.',
-  ])('passes: %s', (answer) => {
-    expect(ask(answer)).toBeNull();
+  test('a next-visit question keeps the rule answer, with no model call', async () => {
+    const callModel = jest.fn();
+    const out = await answerReportQuestionWithAI({
+      question: 'When is my next visit?', data: pestData(), nextAppointment, topic: 'next_visit',
+    }, { callModel });
+    expect(out).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
   });
 
   test.each([
-    'Your next visit is January 8 at 2 PM.',
-    'Your next visit is January 5 at 2 PM.',
+    'Your next visit is Tuesday, January 5, 2027, between 9:00 AM and 11:00 AM.',
+    'Your next visit is January 5, 2028.',
     'We come back on 1/8.',
-    'Your next visit is Wednesday.',
+    'The technician arrives Wed at 14:00.',
+    'The technician arrives on 2027-01-05.',
     'We will be there at noon.',
   ])('rejects: %s', (answer) => {
-    expect(ask(answer)).toBe('unstated_date_time');
+    const data = pestData();
+    const facts = buildReportAskFacts({ question: 'What was done?', data, nextAppointment });
+    expect(screenAskAnswer(answer, { question: 'What was done?', data, facts })).toBe('states_a_date');
+  });
+});
+
+describe('answer screen, Codex round 7', () => {
+  test('while watering is held, the model may not tell the customer to water', () => {
+    const data = lawnData();
+    const routed = route('Should I water?', data);
+    const facts = buildReportAskFacts({ question: 'Should I water?', data, requiredLines: texts(routed) });
+    const ask = (answer, lines = []) => screenAskAnswer(answer, { question: 'Should I water?', data, facts, requiredLines: lines });
+    expect(ask('Increase irrigation to twice this week.')).toBe('watering_during_hold');
+    expect(ask('Your lawn is filling in well.')).toBeNull();
+    // The required hold line itself is a watering sentence and stays allowed.
+    expect(ask(`Not yet. ${HOLD_LINE}`, [HOLD_LINE])).toBeNull();
+  });
+
+  test('every number the model writes must be one the facts hold', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, water: { rainInches: 1.23, status: 'balanced' } } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How is my lawn?', data, facts });
+    expect(ask('Your lawn health score is 82 out of 100.')).toBeNull();
+    expect(ask('Your lawn health score is 95 out of 100.')).toBe('unstated_number');
+    expect(ask('The report shows 1.23 inches of rain this week.')).toBeNull();
+    expect(ask('The report shows 4 inches of rain this week.')).toBe('unstated_number');
+  });
+
+  test('a pest the question and the facts never name is outside knowledge', () => {
+    const data = pestData({ applications: [{ product: { name: 'Taurus SC' }, targets: ['ants'] }] });
+    const facts = buildReportAskFacts({ question: 'What is Taurus SC for?', data });
+    const ask = (answer, question = 'What is Taurus SC for?') => screenAskAnswer(answer, { question, data, facts });
+    expect(ask('Taurus SC also treats termites.')).toBe('target_list');
+    expect(ask('We checked for termites around the garage.', 'Did you look for termites?')).toBeNull();
+  });
+
+  test.each(['lockbox 42', 'lock box A2', 'keypad #7', 'Key-box 1234'])('the shorthand %s is masked', (credential) => {
+    const facts = buildReportAskFacts({ question: `The ${credential} is by the side gate`, data: pestData({ customerConcern: `Use ${credential} to get in` }) });
+    expect(JSON.stringify(facts)).not.toMatch(/\b(?:42|A2|#7|1234)\b/);
+    expect(facts.customer_concern).toContain('[redacted]');
+  });
+
+  test('ordinary lockbox words stay', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'The lockbox is on the side gate.' }) });
+    expect(facts.customer_concern).toBe('The lockbox is on the side gate.');
   });
 });

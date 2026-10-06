@@ -304,24 +304,33 @@ function productsNamedIn(question, products) {
 // customer's NAME in prose, or a street name without a number and a suffix: no
 // pattern tells those from ordinary words, so those pass through.
 // Every USPS street suffix and variant (Publication 28 C1, the table the
-// address matcher uses), longest first so "parkway" wins over "park". A
-// hand-picked list kept missing real types ("18 Bay Pass", Codex P1 #5964 r6).
+// address matcher uses) plus local spellings the table lacks, longest first.
+// A hand-picked list missed real types ("18 Bay Pass", Codex P1 #5964 r6).
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 
-// Local spellings the USPS table does not list ("Pointe", "Villas") ride along.
 const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'trace', 'mews', 'landing', 'hollow', 'vista'];
+// "is" (ISLE) is an everyday word, not a street type in prose.
+const NOT_STREET_SUFFIXES = new Set(['is']);
 const STREET_SUFFIX = `(?:${[...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
+  .filter((suffix) => !NOT_STREET_SUFFIXES.has(suffix))
   .sort((x, y) => y.length - x.length)
   .join('|')})`;
-// Greedy: "21 Harbor Crossing" takes both words, not the first suffix only.
-const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}${STREET_SUFFIX}\\b\\.?`, 'gi');
+// At least one street-name word, so a bare "2 is" or "3 way" is prose. Greedy:
+// "21 Harbor Crossing" takes both words, not the first suffix only.
+const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){1,4}${STREET_SUFFIX}\\b\\.?`, 'gi');
+
+// "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
+// directly by a short value with a digit in it is a credential even with no
+// "code" or "pin" noun (Codex P1 #5964 r7). The shared redactor needs the noun.
+const LOCKBOX_SHORTHAND = /\b(lock[\s-]?box|key[\s-]?box|key[\s-]?safe|keypad)(\s*(?:#|no\.?|number|is|=|:|-)?\s*)(?=[a-z*#]*\d)[a-z0-9*#]{1,10}\b/gi;
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(STREET_ADDRESS, '[address]')).replace(/\d{3,}/g, '[number]');
+  const masked = redactAccessCodes(redactContact(text).replace(STREET_ADDRESS, '[address]').replace(LOCKBOX_SHORTHAND, '$1$2[redacted]'))
+    .replace(/\d{3,}/g, '[number]');
   return clip(masked, max);
 }
 
@@ -398,37 +407,6 @@ function lawnAssessmentFacts(data = {}, keep = () => true) {
   return Object.keys(kept).length ? kept : null;
 }
 
-// Tree & shrub reports keep their customer-visible read in data.reportV2
-// (tree-shrub-report-v2.js): the plant-health score out of 100, what we are
-// watching, the homeowner's one task and the insight cards. Not carried: the
-// treatment block (products, narrative), category scores and photo text. Card
-// text can quote the customer's own concern or a technician's edit; scrubFacts
-// covers it like every other string.
-function treeShrubFacts(data = {}, keep = () => true) {
-  const v2 = data.reportV2;
-  if (data.serviceLine !== 'tree_shrub' || !v2 || typeof v2 !== 'object') return null;
-  const snapshot = v2.snapshot || {};
-  const text = (value, max) => {
-    const out = clip(value, max);
-    return out && keep(out) ? out : null;
-  };
-  const score = readingOrNull(snapshot.overallScore);
-  return dropEmpty({
-    plant_health_score_out_of_100: score === null ? null : Math.round(score),
-    status_headline: text(snapshot.statusHeadline, 200),
-    score_explanation: text(snapshot.scoreExplanation, 300),
-    watching: asArray(snapshot.watching).slice(0, 3).map((item) => text(item, 160)).filter(Boolean),
-    main_watch: text(snapshot.mainWatch, 240),
-    customer_action: text(snapshot.customerAction, 240),
-    waves_next: text(snapshot.wavesNext, 240),
-    insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
-      headline: text(card?.headline, 160),
-      what_we_saw: text(card?.whatWeSaw, 240),
-      customer_action: text(card?.customerAction, 240),
-    })).filter((card) => Object.keys(card).length),
-  });
-}
-
 const objectOr = (value) => (value && typeof value === 'object' ? value : {});
 const orNull = (row) => (Object.keys(row).length ? row : null);
 const inchesOf = (value) => {
@@ -443,6 +421,52 @@ function keptText(keep) {
     const out = clip(value, max);
     return out && keep(out) ? out : null;
   };
+}
+
+// The category rows a report card draws (label, status, explanation), from
+// either service line. Only the tree & shrub card shows a score per row, out of
+// 100, kept a number so a 100 survives the 3-digit scrub. Text goes through the
+// watering keeper; a row with no label is dropped.
+function diagnosisFacts(rows, text, { scored = false } = {}) {
+  return asArray(rows).slice(0, 6).map((row) => {
+    const score = scored ? readingOrNull(row?.score) : null;
+    return dropEmpty({
+      area: cleanText(row?.label),
+      score_out_of_100: score === null ? null : Math.round(score),
+      status: underscoresToSpaces(row?.status),
+      explanation: text(row?.explanation || row?.customerExplanation, 240),
+    });
+  }).filter((row) => row.area);
+}
+
+// Tree & shrub reports keep their customer-visible read in data.reportV2
+// (tree-shrub-report-v2.js): the plant-health score out of 100, what we are
+// watching, the homeowner's one task and the insight cards. Not carried: the
+// treatment block (products, narrative) and photo text. The five category rows
+// the plant health card draws are carried (label, score, status, what we saw).
+// Card text can quote the customer's own concern or a technician's edit; scrubFacts
+// covers it like every other string.
+function treeShrubFacts(data = {}, keep = () => true) {
+  const v2 = data.reportV2;
+  if (data.serviceLine !== 'tree_shrub' || !v2 || typeof v2 !== 'object') return null;
+  const snapshot = v2.snapshot || {};
+  const text = keptText(keep);
+  const score = readingOrNull(snapshot.overallScore);
+  return dropEmpty({
+    plant_health_score_out_of_100: score === null ? null : Math.round(score),
+    status_headline: text(snapshot.statusHeadline, 200),
+    score_explanation: text(snapshot.scoreExplanation, 300),
+    watching: asArray(snapshot.watching).slice(0, 3).map((item) => text(item, 160)).filter(Boolean),
+    main_watch: text(snapshot.mainWatch, 240),
+    customer_action: text(snapshot.customerAction, 240),
+    waves_next: text(snapshot.wavesNext, 240),
+    diagnosis: diagnosisFacts(v2.diagnosis, text, { scored: true }),
+    insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
+      headline: text(card?.headline, 160),
+      what_we_saw: text(card?.whatWeSaw, 240),
+      customer_action: text(card?.customerAction, 240),
+    })).filter((card) => Object.keys(card).length),
+  });
 }
 
 function lawnLeadFacts(v2, text) {
@@ -469,11 +493,7 @@ function lawnCardFacts(v2, text) {
       what_we_saw: text(card?.whatWeSaw, 240),
       customer_action: text(card?.customerAction, 240),
     })).filter((card) => Object.keys(card).length),
-    diagnosis: asArray(v2.diagnosis).slice(0, 6).map((card) => dropEmpty({
-      area: cleanText(card?.label),
-      status: underscoresToSpaces(card?.status),
-      explanation: text(card?.explanation || card?.customerExplanation, 240),
-    })).filter((card) => card.area),
+    diagnosis: diagnosisFacts(v2.diagnosis, text),
   };
 }
 
@@ -752,6 +772,16 @@ function targetLabelsOf(data = {}) {
 // the findings, the reviewed sections, the lawn and typed-visit facts, the
 // recorded required lines or the selected products' own approved wording
 // (what_it_does, labeled_for) did not already name is a leaked list.
+// Pests the model may only name when the question or the facts already do:
+// with a product recorded for ants, "it also treats termites" is outside
+// knowledge (Codex P1 #5964 r7). Stems, compared the same way as targets.
+const PEST_TERMS = [
+  'ant', 'fire ant', 'roach', 'cockroach', 'spider', 'termite', 'flea', 'tick', 'mosquito', 'wasp', 'bee', 'hornet',
+  'yellow jacket', 'silverfish', 'earwig', 'centipede', 'millipede', 'cricket', 'beetle', 'scorpion', 'rodent', 'mice',
+  'mouse', 'rat', 'bed bug', 'chinch bug', 'grub', 'armyworm', 'webworm', 'mole cricket', 'whitefly', 'whiteflies', 'aphid',
+  'mealybug', 'mite', 'caterpillar', 'fly', 'flies', 'moth', 'snail', 'slug', 'weevil', 'gnat', 'midge', 'no-see-um',
+].map((term) => stemmedTerms(term));
+
 function leaksTargetList(text, {
   question, data, facts, requiredLines,
 }) {
@@ -764,7 +794,7 @@ function leaksTargetList(text, {
     .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
     .join(' '));
   const said = stemmedTerms(text);
-  return targetLabelsOf(data).some((label) => said.includes(label) && !allowed.includes(label));
+  return [...targetLabelsOf(data), ...PEST_TERMS].some((label) => said.includes(label) && !allowed.includes(label));
 }
 
 const splitSentences = (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -802,49 +832,34 @@ const CONTENT_CHECKS = [
   ['target_list', leaksTargetList],
 ];
 
-// ── Dates and times must come from the facts ────────────────────────────
-// The shared screen's date and time rules are skipped for a short answer
-// (SHARED_SCREEN_SKIP), so a made-up visit day or arrival window ("January 8
-// at 2 PM" when the facts say January 5 between 9 and 11 AM) would pass
-// (Codex P1 #5964 r6). Every calendar date, weekday and clock time the answer
-// states must also appear somewhere in the fact sheet (next_visit,
-// service_date, reentry, required_lines and the rest).
-const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-const MONTH_RE = '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?';
-const MONTH_DAY = new RegExp(`\\b${MONTH_RE}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'gi');
-const SLASH_DATE = /\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/g;
-const ORDINAL_DAY = /\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b/gi;
-const WEEKDAY_FULL = /\b(mon|tues|wednes|thurs|fri|satur|sun)day\b/gi;
-// Abbreviations only capitalized: a lowercase "sun" is the sun.
-const WEEKDAY_ABBR = /\b(Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/g;
-const MERIDIEM = '([ap])\\.?\\s?m\\b\\.?';
-const CLOCK = new RegExp(`\\b(\\d{1,2})(?::(\\d{2}))?\\s*${MERIDIEM}`, 'gi');
-// "9 to 11 AM", "9-11 AM": the bare start takes the end's meridiem.
-const CLOCK_RANGE = new RegExp(`\\b(\\d{1,2})(?::(\\d{2}))?\\s*(?:-|–|to|and|until)\\s*\\d{1,2}(?::\\d{2})?\\s*${MERIDIEM}`, 'gi');
-const NOON = /\b(noon|midday|midnight)\b/gi;
+// The shared screen skips its date and time rules, so an AI answer may not
+// state a calendar date, a weekday or a clock time at all: a recombined or
+// mistyped appointment can never reach the customer (Codex P1s on #6020).
+// Next-visit questions keep the rule answer, which states the schedule. A
+// required line keeps its own date or time ("until Thu 3 PM"): only the
+// model's own words are checked.
+const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
+// Abbreviated weekdays only capitalized: a lowercase "sun" or "sat" is a word.
+const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
-function dateTimeTokens(text) {
-  const tokens = new Set();
-  const value = String(text || '');
-  const all = (re, add) => { for (const m of value.matchAll(re)) add(m); };
-  all(MONTH_DAY, (m) => tokens.add(`d:${MONTHS.indexOf(m[1].slice(0, 3).toLowerCase()) + 1}/${Number(m[2])}`));
-  all(SLASH_DATE, (m) => { if (Number(m[1]) <= 12) tokens.add(`d:${Number(m[1])}/${Number(m[2])}`); });
-  all(ORDINAL_DAY, (m) => tokens.add(`day:${Number(m[1])}`));
-  all(WEEKDAY_FULL, (m) => tokens.add(`w:${m[1].slice(0, 3).toLowerCase()}`));
-  all(WEEKDAY_ABBR, (m) => tokens.add(`w:${m[1].slice(0, 3).toLowerCase()}`));
-  all(CLOCK, (m) => tokens.add(`t:${Number(m[1])}:${m[2] || '00'}${m[3].toLowerCase()}`));
-  all(CLOCK_RANGE, (m) => tokens.add(`t:${Number(m[1])}:${m[2] || '00'}${m[3].toLowerCase()}`));
-  all(NOON, (m) => tokens.add(m[1].toLowerCase() === 'midnight' ? 't:12:00a' : 't:12:00p'));
-  return tokens;
+function statesADate(text, { requiredLines }) {
+  const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
+  return DATE_TOKEN.test(own) || WEEKDAY_ABBR.test(own);
 }
 
-function statesUnknownDateTime(text, { facts, requiredLines }) {
-  const said = dateTimeTokens(text);
-  if (!said.size) return false;
-  const known = dateTimeTokens(JSON.stringify([facts || {}, requiredLines]));
-  // "the 5th" matches any known date on that day of the month.
-  for (const token of known) if (token.startsWith('d:')) known.add(`day:${token.split('/')[1]}`);
-  return [...said].some((token) => !known.has(token));
+// Every number the model writes itself must be a number the fact sheet holds:
+// a score of 95 when the facts say 82, or 4 inches of rain when they say
+// 1.23, is rejected (Codex P1 #5964 r7). Required lines keep their own
+// numbers; "out of 100" is the score scale the prompt asks for.
+const NUMBER_RE = /\d+(?:\.\d+)?/g;
+function statesUnknownNumber(text, { facts, requiredLines }) {
+  const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text))
+    .replace(/\bout of 100\b/gi, ' ');
+  const said = own.match(NUMBER_RE) || [];
+  if (!said.length) return false;
+  const known = new Set((JSON.stringify([facts || {}, requiredLines]).match(NUMBER_RE) || []).map(Number));
+  return said.some((n) => !known.has(Number(n)));
 }
 
 // A sentence just before a required line that takes it back. The answer must
@@ -878,7 +893,14 @@ const ASK_CHECKS = [
   // A dismissal anywhere in an answer that carries required lines, before or
   // after them ("…until dry. However, ignore that.") (Codex P1 #5964 r4).
   ['dismisses_required_line', (text, { requiredLines }) => requiredLines.length > 0 && DISMISSAL_CUE.test(text)],
-  ['unstated_date_time', statesUnknownDateTime],
+  ['states_a_date', statesADate],
+  ['unstated_number', statesUnknownNumber],
+  // While the aftercare holds watering, no sentence of the model's own may
+  // tell the customer to water (Codex P1 #5964 r7): a required line states
+  // the hold itself.
+  ['watering_during_hold', (text, { data, requiredLines }) => wateringRestricted(data)
+    && splitSentences(matchForm(text)).some((sentence) => !requiredLines.some((line) => matchForm(line).includes(sentence.replace(/[.!?]$/, '')))
+      && isWateringRecommendation(sentence))],
 ];
 
 function firstFailure(checks, text, context) {
@@ -953,71 +975,38 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
-  // A pronoun object, "them" included ("my kids ran out and he sprayed them").
-  /\bsprayed\s+(?:on\s+)?(?:me|myself|him|himself|her|herself|us|ourselves|them|themselves)\b/i,
-  // First person, "sprayed" right after the verb: "I got sprayed", never the
-  // causative "I got it sprayed" (Codex P1 #6016 r2).
-  /\b(?:i|we|he|she)\s+(?:just\s+|also\s+|accidentally\s+)?(?:got|get|gets|was|were|have\s+been|had\s+been|been)\s+(?:accidentally\s+|directly\s+|also\s+)?sprayed\b/i,
 ];
+
+// ── A question that sounds like a spray exposure: a safety line first ──
+// "Sprayed" plus a person, a pet or a body part anywhere in the question
+// ("the tech sprayed my side", "can my dog go out after the spray?") puts
+// one fixed Poison Control line before the normal answer (owner 2026-10-05,
+// option A, #6016). A word match cannot tell "the arm chair" from "my arm"
+// (Codex rounds 1-5 on #6016), so the match is broad and a false match costs
+// one sentence. Clear symptoms and ingestion (MEDICAL_CUES) still replace
+// the answer. The model never writes this line.
+const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, call Poison Control at ${POISON_CONTROL_PHONE_DISPLAY} (free, confidential, 24/7). In an emergency, call 911.`;
+const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
+const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
+// "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|animals?|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you)\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
  * null. Pure and deterministic; the question is never logged.
  */
-// "Sprayed (on) my/the X" and "my/the X was sprayed". Who or what X is cannot
-// be listed in full ("my partner", "my neck", "my hamster"), so X's head noun
-// (its last word, before a place or time word) counts as a person or pet
-// unless it names a place, a plant, a pest or a thing ("my front lawn", "the
-// dog bed", "my dog's bowl"). A missed exposure is worse than an extra Poison
-// Control answer (Codex P1 #5964, #6016 r1-r2).
-const DETERMINER = '(?:my|our|his|her|their|the|your)';
-const SPRAYED_ON = new RegExp(`\\bsprayed\\s+(?:on\\s+|onto\\s+|at\\s+)?${DETERMINER}\\s+([^.?!,;:]+)`, 'gi');
-const SPRAYED_PASSIVE = new RegExp(`\\b${DETERMINER}\\s+((?:[\\w'’-]+\\s+){0,2}[\\w'’-]+)\\s+(?:got|gets|was|were|is|are|has\\s+been|have\\s+been|been)\\s+(?:accidentally\\s+|directly\\s+|also\\s+)?sprayed\\b`, 'gi');
-// Words that end the noun phrase: prepositions, place and time words, links.
-const PHRASE_STOP_WORDS = new Set(('in on at by with near around under over to from for of into onto behind through while when '
-  + 'after before and but or so because then too also again inside outside indoors outdoors upstairs downstairs here there '
-  + 'today yesterday tonight earlier last this that accidentally directly just was were is are got gets has have had '
-  + 'and while who which right now').split(' '));
-const BODY_PART_WORDS = new Set(('eye eyes skin mouth face hand hands arm arms leg legs foot feet nose lip lips head hair body neck '
-  + 'ear ears back chest throat stomach belly paw paws fur tongue finger fingers toe toes knee knees shoulder shoulders wrist ankle').split(' '));
-const NOT_A_PATIENT_WORDS = new Set(('lawn yard yards grass turf fence fences patio deck porch lanai pool garage driveway sidewalk walkway '
-  + 'house home roof wall walls window windows door doors floor floors baseboard baseboards cabinet cabinets kitchen bathroom '
-  + 'attic shed barn screen screens perimeter foundation siding gutters gutter mulch soil dirt beds bed garden gardens '
-  + 'flower flowers plant plants shrub shrubs bush bushes hedge hedges tree trees palm palms weed weeds leaves roses '
-  + 'ant ants roach roaches spider spiders webs nest nests hive mosquito mosquitoes bug bugs insects wasps termites fleas ticks '
-  + 'mound mounds area areas spot spots side corner corners exterior interior property entry entries station stations '
-  + 'cage crate bowl bowls toy toys playset swing swingset trampoline furniture couch chair chairs table car truck boat trash can cans '
-  + 'bin bins grill hose sprinkler sprinklers everything stuff part parts room rooms closet laundry').split(' '));
-
-function headNoun(phrase) {
-  const words = phrase.toLowerCase().split(/\s+/).map((word) => word.replace(/[^a-z'’-]/g, ''));
-  const stop = words.findIndex((word, i) => i > 0 && PHRASE_STOP_WORDS.has(word));
-  const kept = (stop === -1 ? words : words.slice(0, stop)).slice(0, 4).filter(Boolean);
-  return (kept[kept.length - 1] || '').replace(/['’]s?$/, '');
-}
-
-function namesPatient(phrase) {
-  const head = headNoun(phrase);
-  if (!head) return false;
-  return BODY_PART_WORDS.has(head) || !NOT_A_PATIENT_WORDS.has(head);
-}
-
-// A passive subject is the 1 to 3 words right before the verb; a stop word
-// inside them means the words are not one noun phrase ("the ants disappeared
-// after they were sprayed").
-function passiveSubjectIsPatient(phrase) {
-  const words = phrase.toLowerCase().split(/\s+/);
-  return !words.some((word) => PHRASE_STOP_WORDS.has(word)) && namesPatient(phrase);
-}
-
-function sprayedOnSomeone(text) {
-  return [...text.matchAll(SPRAYED_ON)].some((m) => namesPatient(m[1]))
-    || [...text.matchAll(SPRAYED_PASSIVE)].some((m) => passiveSubjectIsPatient(m[1]));
-}
-
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
-  return MEDICAL_CUES.some((cue) => cue.test(text)) || sprayedOnSomeone(text) ? MEDICAL_EXPOSURE_ANSWER : null;
+  return MEDICAL_CUES.some((cue) => cue.test(text)) ? MEDICAL_EXPOSURE_ANSWER : null;
+}
+
+/**
+ * The safety line to put before the answer when the question mentions spray
+ * and a person, a pet or a body part, else null.
+ */
+function exposureSafetyLine(question) {
+  const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
+  return SPRAY_WORD.test(text) && EXPOSED_SOMEONE.test(text) ? EXPOSURE_SAFETY_LINE : null;
 }
 
 // ── The call ────────────────────────────────────────────────────────────
@@ -1041,8 +1030,11 @@ const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 // recommendation, the primary move, a finding's recommendation) must be
 // repeated word for word, and a customer's name in prose cannot be detected,
 // so it never reaches the model.
-function ruleAnswerReason(data = {}, requiredLines = []) {
+function ruleAnswerReason(data = {}, requiredLines = [], topic = null) {
   if (!AI_SERVICE_LINES.has(data.serviceLine)) return 'service_line';
+  // The rule answer states the scheduled date and window exactly; an AI
+  // answer states no date (Codex P1s on #6020 and #5964).
+  if (topic === 'next_visit') return 'next_visit';
   if (data.typedReport) return 'typed_report';
   if (asArray(data.companionReports).some((companion) => companion && companion.internalOnly !== true)) return 'companion_reports';
   if (asArray(requiredLines).some((line) => line?.source !== 'system')) return 'technician_line';
@@ -1057,7 +1049,7 @@ function ruleAnswerReason(data = {}, requiredLines = []) {
  * { text, source } entries (report-assistant.js requiredCollector).
  */
 async function answerReportQuestionWithAI({
-  question, data, nextAppointment, requiredLines: rawRequiredLines, now,
+  question, data, nextAppointment, requiredLines: rawRequiredLines, topic = null, now,
 } = {}, deps = {}) {
   const callModel = deps.callModel || defaultCallModel;
   // Before any fact sheet or model call: a symptom or exposure gets the fixed
@@ -1065,7 +1057,7 @@ async function answerReportQuestionWithAI({
   const urgent = medicalExposureAnswer(question);
   if (urgent) return { answer: urgent, provider: null, model: null };
   try {
-    const skipped = ruleAnswerReason(data, rawRequiredLines);
+    const skipped = ruleAnswerReason(data, rawRequiredLines, topic);
     if (skipped) {
       logger.info(`[report-ask] fixed-rule answer (${skipped}); no model call`);
       return null;
@@ -1143,6 +1135,8 @@ module.exports = {
   screenRequiredLines,
   medicalExposureAnswer,
   MEDICAL_EXPOSURE_ANSWER,
+  exposureSafetyLine,
+  EXPOSURE_SAFETY_LINE,
   placeOfApplication,
   ruleAnswerReason,
   answerReportQuestionWithAI,

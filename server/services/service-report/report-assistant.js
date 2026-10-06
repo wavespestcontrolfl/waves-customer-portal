@@ -461,6 +461,14 @@ function targetsFromApplications(applications = []) {
   )));
 }
 
+// The scope sentence the fallback next-steps answer gives, by application scope.
+const NEXT_STEPS_SCOPE_LINES = {
+  'exterior-only': 'No interior prep was called out because this report shows exterior treatment only.',
+  'interior-only': 'Interior areas were documented, so follow the re-entry guidance before using treated spaces normally.',
+};
+const NEXT_STEPS_SCOPE_DEFAULT = 'Follow the re-entry guidance before normal use of treated areas.';
+const listOf = (value) => (Array.isArray(value) ? value : []);
+
 function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
   const need = requiredCollector(required);
   // Scoped to the visit's own plan week — a reopened report's generic
@@ -468,83 +476,68 @@ function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
   // credit as though it were this visit's task (codex P2 #5033 r7).
   const aftercare = normalizeLawnAftercare(data.reportV2?.aftercare);
   const weekPlan = data.reportV2?.water?.weekPlan;
-  const wateringTask = aftercareCustomerTask(aftercare, weekPlan);
+  // The watering task and the next visit lead and close every branch.
+  const wateringLine = need(aftercareCustomerTask(aftercare, weekPlan), 'system');
+  const nextVisitLine = nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '';
+  const lines = (...middle) => [wateringLine, ...middle, nextVisitLine].filter(Boolean).join('\n');
   // While the aftercare restricts watering (review / hold), its task is the
   // only watering instruction: a stored card or recommendation that changes
   // watering ("Increase irrigation to twice this week") would contradict it.
   const restrictsWatering = Boolean(wateringRestrictionAction(aftercare, weekPlan));
   const answerable = (text) => Boolean(text) && !(restrictsWatering && isWateringRecommendation(text));
   const dynamic = data.dynamicContext || {};
-  const lawnAssessment = data.lawnAssessment || null;
-  if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
-    const cards = Array.isArray(lawnAssessment.recommendationCards) ? lawnAssessment.recommendationCards : [];
-    const cardLines = cards
+  const snapshot = data.serviceLine === 'lawn' ? data.lawnAssessment?.snapshot : null;
+  if (snapshot) {
+    const cardLines = listOf(data.lawnAssessment.recommendationCards)
       .map((card) => cleanText(card.customerCopy || card.title))
       .filter(answerable)
       .slice(0, 2);
-    const watchItems = Array.isArray(lawnAssessment.snapshot.nextWatchItems)
-      ? lawnAssessment.snapshot.nextWatchItems.map(cleanText).filter(Boolean)
-      : [];
-    const expected = lawnAssessment.snapshot.expectedWindow || {};
-    const expectedLine = expected.minDays && expected.maxDays
-      ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
-      : '';
-    return [
-      need(wateringTask, 'system'),
+    const watchItems = listOf(snapshot.nextWatchItems).map(cleanText).filter(Boolean);
+    const expected = snapshot.expectedWindow || {};
+    return lines(
       cardLines.length ? `Recommended next step: ${need(cardLines[0])}` : '',
       cardLines.length > 1 ? `Also noted: ${cardLines.slice(1).map((line) => need(line)).join(' ')}` : '',
       watchItems.length ? `What we are watching: ${watchItems.slice(0, 2).join(' ')}` : '',
-      expectedLine,
-      nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '',
-    ].filter(Boolean).join('\n') || lawnAssessment.snapshot.summary;
+      expected.minDays && expected.maxDays
+        ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
+        : '',
+    ) || snapshot.summary;
   }
   const primaryMove = [
     dynamic.premiumExperience?.primaryMove?.title,
     dynamic.aiSummary?.recommendedNextStep?.text,
-    pickRecommendedFinding(Array.isArray(data.findings) ? data.findings : [])?.recommendation,
+    pickRecommendedFinding(listOf(data.findings))?.recommendation,
   ].find(answerable);
   const recommendations = recommendationList(data).filter(answerable);
-  const applications = Array.isArray(data.applications) ? data.applications : [];
-  const scope = applicationScope(data);
-  const targetText = targetsFromApplications(applications).slice(0, 3).join(', ');
   const reentry = dynamic.reentry?.customerSummary;
-  const weather = dynamic.premiumExperience?.weatherCall
-    ? sentenceJoin([dynamic.premiumExperience.weatherCall.headline, dynamic.premiumExperience.weatherCall.body])
-    : '';
+  // Built where it is used, so the required lines keep the answer's order.
+  const reentryLine = () => (reentry ? `Re-entry: ${need(reentry, 'system')}` : '');
 
   if (primaryMove || recommendations.length) {
-    return [
-      need(wateringTask, 'system'),
-      primaryMove ? `Priority next step: ${need(primaryMove)}` : `Recommended next step: ${need(recommendations[0])}`,
-      recommendations.length > 1 ? `Also noted: ${recommendations.slice(1, 3).map((line) => need(line)).join(' ')}` : '',
-      reentry ? `Re-entry: ${need(reentry, 'system')}` : '',
-      nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '',
-    ].filter(Boolean).join('\n');
+    const nextStep = primaryMove ? `Priority next step: ${need(primaryMove)}` : `Recommended next step: ${need(recommendations[0])}`;
+    const alsoNoted = recommendations.length > 1 ? `Also noted: ${recommendations.slice(1, 3).map((line) => need(line)).join(' ')}` : '';
+    return lines(nextStep, alsoNoted, reentryLine());
   }
 
+  const applications = listOf(data.applications);
+  const targetText = targetsFromApplications(applications).slice(0, 3).join(', ');
   const watchArea = targetText
     ? `Watch for ${targetText} around the treated areas.`
     : 'Watch the documented treatment areas.';
-  const scopeLine = scope === 'exterior-only'
-    ? 'No interior prep was called out because this report shows exterior treatment only.'
-    : scope === 'interior-only'
-      ? 'Interior areas were documented, so follow the re-entry guidance before using treated spaces normally.'
-      : 'Follow the re-entry guidance before normal use of treated areas.';
   const rinseLine = applications.some((app) => /spray|broadcast|perimeter|spot/i.test(`${app.method} ${app.methodLabel}`))
     ? 'Avoid rinsing, pressure-washing, or disturbing the treated perimeter today unless Waves gives different instructions.'
     : '';
-
-  return [
-    need(wateringTask, 'system') || 'No special repair or prep was flagged for you on this report.',
-    scopeLine,
-    reentry ? `Re-entry: ${need(reentry, 'system')}` : '',
+  const weatherCall = dynamic.premiumExperience?.weatherCall;
+  return lines(
+    wateringLine ? '' : 'No special repair or prep was flagged for you on this report.',
+    NEXT_STEPS_SCOPE_LINES[applicationScope(data)] || NEXT_STEPS_SCOPE_DEFAULT,
+    reentryLine(),
     need(rinseLine, 'system'),
     // Background, not an instruction: stays in the rule answer, never a
     // required line for the AI answer.
-    weather,
+    weatherCall ? sentenceJoin([weatherCall.headline, weatherCall.body]) : '',
     `${watchArea} Text Waves if activity increases, moves inside, or shows up in a new area before the next visit.`,
-    nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '',
-  ].filter(Boolean).join('\n');
+  );
 }
 
 function answerReentry({ data = {}, required } = {}) {
