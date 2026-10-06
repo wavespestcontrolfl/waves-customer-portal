@@ -160,16 +160,19 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
     });
   });
 
-  test('grass context gives a mixed profile the v13 track only while the gate is on', async () => {
+  // The general loader also feeds historical report context (no planning flag),
+  // where a synthesized track would resolve the old active program for a past
+  // visit. The fallback is planning-only: the loader keeps a mixed lawn untracked.
+  test('grass context keeps a mixed profile untracked even with the gate on', async () => {
     const knex = knexFor({ customer_turf_profiles: { grass_type: 'mixed' }, customers: {} });
     await withGateAsync('true', async () => {
-      expect((await loadCustomerGrassContext('c1', knex)).trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
-    });
-    await withGateAsync(undefined, async () => {
       expect((await loadCustomerGrassContext('c1', knex)).trackKey).toBeNull();
     });
-    await withGateAsync('true', async () => {
-      expect((await loadCustomerGrassContext('c1', knexFor({ customers: {} }))).trackKey).toBeNull();
+  });
+
+  test('gate on: unrecognized legacy lawn_type with no profile plans the v13 visit', () => {
+    withGate('true', () => {
+      expect(engine.selectProtocolVisit(null, date, 'Centipede', { requireKnownGrass: true }).trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
     });
   });
 });

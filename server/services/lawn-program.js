@@ -32,7 +32,8 @@ function lawnProtocols() {
 // A lawn whose recorded grass names none of them (mixed, unknown, free text)
 // plans from this key while GATE_LAWN_V13 is live: the four copies are the same
 // steps and the same safety rules, so the key changes nothing but the lookup.
-// Gate off: null, and such a lawn has no track, as before.
+// Gate off: null, and such a lawn has no track, as before. Planning only (the
+// plan engine): historical readers never synthesize a track for a past visit.
 const LAWN_V13_ANY_GRASS_TRACK = 'st_augustine';
 function lawnV13AnyGrassTrack() {
   return featureGates.lawnV13Live?.() === true ? LAWN_V13_ANY_GRASS_TRACK : null;
