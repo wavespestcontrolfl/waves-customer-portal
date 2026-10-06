@@ -2638,64 +2638,45 @@ selected at render from the frozen memory and the two visits' scores, so a
 permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
 
-`GATE_LAWN_TECH_PARAGRAPH` (dark, owner 2026-10-05; effective only while
+`GATE_LAWN_TECH_PARAGRAPH` (owner 2026-10-05; rebuilt as FIXED SENTENCES 2026-10-06,
+owner "lawn fixed sentences", the tree & shrub design; effective only while
 `GATE_LAWN_REPORT_LEAD` is also live; off leaves the lawn payload, the render, the
-PDF and its cache signature unchanged, key for key, with no model call and no
-read) adds ONE optional string, `reportV2.lead.techParagraph`: the "From your
-technician" paragraph, 2 to 4 sentences and at most 70 words, in the first person
-plural. It is written ONCE, at completion (`finalizeLawnReportSynthesis`,
-`lawn-report-write-gate.js`), by one model call (lane `lawn_tech_paragraph`,
-`TEXT_POLICIES.report`, ONE 15-second deadline across the whole step: record read, input gather, model call, validation and freeze; about 7.5 s for the first provider, the rest for the backup; a stage that would start after expiry does not run, a freeze already issued finishes whole (it is one atomic first-writer-wins statement, issued only after a validated paragraph), and on expiry nothing further is stored and completion goes on) from the technician's
-note (verbatim), the products applied with their stored targets, the confirmed
-scores, the technician-kept photo findings (allowlisted symptom labels with the
-read's confidence), the last visit's products, watched topics and kept findings, the
-fixed density / weed / stress progress sentences, and the report's own headline and
-watering line. It never reads the raw observation text, a price, an address or any
-customer name. The text freezes first-writer-wins under
-`structured_notes.lawnTechParagraph[assessmentId]` (its own top-level key, never
-inside `lawnReportV2`); a render only reads it, from the record the build already
-loaded, so no render calls a model, `/api/reports/:token/ask` gains no read, and
-the in-process hand-off (`reportV2.techParagraph`) is non-enumerable: the only
-payload key is `reportV2.lead.techParagraph`. The key is absent when no paragraph
-was written (no note, no product, a failed or slow call, a degraded build, or any
-rejection below) and when the lead region would run past 250 words: it is the FIRST
-field given up (`techParagraph`, then `why`, `watching`, `applied`, `whatToExpect`,
-`sinceLast`), so gate on never costs a gate-off field its place; the field cap is
-70 words (+3 label words). Code rejects the WHOLE paragraph, and stores nothing, when it names a product that
-was not applied (including last visit's), a name no input carries, or a pest,
-disease, weed or condition no input carries (a product's target list licenses only
-"protects against", never "found"); states a number other than one inside an applied
-product's own name, a date, month, amount, price, timing, promise ("will", "next
-visit", "follow up") or watering/mowing advice; says "no issues" or "all clear";
-compares color between visits or compares anything with the last visit unless a fixed
-progress sentence has the same metric (thickness, weeds or stress) and direction
-(better, same, worse, on track), judged clause by clause so a compound comparison
-needs a line for each clause; says a condition is present when the note says it
-was NOT found or only MIGHT be (negation and uncertainty are read around the term;
-a negated term may appear only as negated, an uncertain one only hedged, and a note mention that only states a treatment purpose is not a sighting); states a
-product's target or role as found, seen or present (they license a purpose claim
-only: "to protect against", "to go after"); says the photos confirmed a cause (the
-technician's note wins over the photo read); states a low-confidence photo finding
-without a hedge; says it found, saw or there is something the condition vocabulary
-does not know (fail closed, `observed_unrecognized`); uses any word that is not
-ordinary English (a fixed list in the module), a known condition, a grass or place
-word, or a word the system-built inputs carry (findings, progress, facts, targets, product names; never the note's free text) (`word_not_in_inputs`: no invented
-diagnosis, product or person can reach the customer; codes never carry the raw
-word); or fails `customerCopyViolations`, the writer-rules timing screen
-or the next-visit claim lint. The model also returns a per-sentence `sources` list
-(note / product / finding / prior / progress / fact) that the code checks
-against what each sentence names. No tip or blog suggestion is produced yet; the
-technician-screen PR that reads them adds those fields under a new prompt version.
-The web report prints it under "What we applied today" as "From your technician",
-and the PDF (`ServiceReportDocument`) prints the same text under the same label
-(`lead.techParagraph`); the SMS and email summaries are unchanged. The text is
-screened again where it is read (a frozen text that no longer passes prints
-nothing). The PDF cache signature gains `:tp=<hash of the text>` only while the
-gate is live AND a whole frozen entry exists (an unreadable record stamps a
-one-off key), so a PDF cached before the paragraph existed is never served after
-it, and a visit with none keeps its key. Known limit: the validator is strict on purpose, so it rejects any watering or
-mowing word, even a harmless one such as "dry patch", and the whole paragraph
-with it (no paragraph is the safe miss).
+PDF and its cache signature unchanged, key for key, with no model call and no read)
+adds ONE optional string, `reportV2.lead.techParagraph`: the "From your technician"
+paragraph. Every word comes from `LAWN_SENTENCES` in
+`server/services/service-report/lawn-tech-paragraph.js` (owner approved
+2026-10-06): "Our technician saw {items}." (up to 3 closed-list conditions, each
+optionally "in the {front lawn | back lawn | side yard}"), "There may be early
+signs of {labels}; we will keep an eye on it." (low-confidence technician-kept photo
+findings the note does not cover, at most 2: weed pressure, thinning turf, nutrient
+stress, lawn stress) and "Today we applied {products}." (applied product display
+names only). There is no all-clear, confirmed, progress, comparison or color line.
+No model text is ever printed. It is written ONCE, at completion
+(`finalizeLawnReportSynthesis`, `lawn-report-write-gate.js`), with at most one model
+call (lane `lawn_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second deadline
+across the whole step) that only EXTRACTS closed-list `{ condition, place }` ids from
+the technician's note, each with `quote` (the technician's exact words) and a
+`seenToday` judgment. The model judges the language and the code only verifies
+(owner ruling, the 2026-10-03 portal chat pattern): an item stays only when
+`seenToday` is true and the quote is word for word part of one note sentence that
+names the condition; the place stays only when the quote names it; generic "weeds"
+whose quote names a specific weed is that weed. There is no sighting, negation,
+purpose or time word list. An answer with an item outside the schema is a miss (the
+backup provider runs). No note = no model call; a failed call = the deterministic
+lines only; nothing to say = a text-less marker (never printed) so a resumed
+completion makes no second call. Inputs: the note, the applied product names and
+the low-confidence kept photo findings; never a score, a prior visit, a price, an
+address or any customer name. The entry `{ text, slots, v: 2 }` freezes
+first-writer-wins under `structured_notes.lawnTechParagraph[assessmentId]` (its own
+top-level key); at read time the text must equal the render of its slots under the
+current templates and pass `customerCopyViolations`, else nothing prints (a v1
+free-text entry never prints; prod stored none). A render only reads it, so no
+render calls a model and `/api/reports/:token/ask` gains no read; the lead keeps its
+250-word budget and gives this field up first. The web report prints it under "What
+we applied today" as "From your technician", and the PDF (`ServiceReportDocument`)
+prints the same text; the SMS and email summaries are unchanged. The PDF cache
+signature gains `:tp=<hash of the text>` only while the gate is live AND a whole
+frozen entry exists.
 
 `GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
 sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
