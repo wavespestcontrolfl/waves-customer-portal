@@ -46,6 +46,7 @@ const DEFINING = { [LOOKUP]: 'routes/property-lookup-v2.js', [TRIO]: 'services/p
 // refused: the id it carries proves nothing.
 const REGISTRY = 'services/property-lookup/lookup-callers.js';
 const REGISTRY_ABS = path.join(SERVER_ROOT, REGISTRY).replace(/\.js$/, '');
+const DEFINING_ABS = new Set(Object.values(DEFINING).map((f) => path.join(SERVER_ROOT, f).replace(/\.js$/, '')));
 const requiredPath = (node, fromFile) => { // the module a require('<literal>') / import '<literal>' names, resolved
   const lit = node && node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'require'
     && node.arguments[0] && node.arguments[0].type === 'Literal' ? node.arguments[0].value
@@ -213,7 +214,7 @@ function analyze(file) {
   const { ast, comments } = parse(src, r);
   currentSrc = src;
   const aliases = { [LOOKUP]: aliasesOf(ast, LOOKUP), [TRIO]: aliasesOf(ast, TRIO) };
-  const out = { file: r, calls: { [LOOKUP]: [], [TRIO]: [] }, valueRefs: [], helperCalls: [], helperRefs: [], badHelper: [], optionVars: new Map(), optionVarMisuse: [], overrides: [], mentions: [], policyWrites: [] };
+  const out = { file: r, calls: { [LOOKUP]: [], [TRIO]: [] }, valueRefs: [], helperCalls: [], helperRefs: [], badHelper: [], optionVars: new Map(), optionVarMisuse: [], overrides: [], mentions: [], policyWrites: [], nameAsString: [], computedCalls: [] };
 
   // Pass 1: identifiers bound to lookupOptionsFor(...), and every binding
   // (declaration, parameter, pattern, import, catch, class, function) each
@@ -327,9 +328,35 @@ function analyze(file) {
     return null;
   }
 
+  // Module objects bound to a defining module (`const pl = require('<route>')`):
+  // a computed call on one whose key is not a static string
+  // (`pl[method](...)`, `pl[name + '']()`) cannot be resolved and is refused.
+  const definingObjects = new Set();
+  walk.simple(ast, {
+    VariableDeclarator(node) {
+      if (node.id.type === 'Identifier' && node.init && DEFINING_ABS.has(requiredPath(node.init, file))) definingObjects.add(node.id.name);
+    },
+  });
+
   // Pass 2: calls, value references, helper uses, overrides.
   walk.ancestor(ast, {
+    Literal(node, _st, ancestors) {
+      // The function's name spelled as a string (`const method = 'performPropertyLookup'`,
+      // `pl['perform' + ...]` cannot be, but a whole-name literal can) is the
+      // start of a computed call this guard cannot follow; outside the
+      // defining module, and outside a destructuring key (`{ 'performPropertyLookup': x }`,
+      // which aliasesOf already follows), it is refused.
+      if (typeof node.value !== 'string' || ![LOOKUP, TRIO].includes(node.value) || r === DEFINING[node.value]) return;
+      const parent = ancestors[ancestors.length - 2];
+      const isPatternKey = parent && parent.type === 'Property' && parent.key === node && ancestors[ancestors.length - 3] && ancestors[ancestors.length - 3].type === 'ObjectPattern';
+      if (!isPatternKey) out.nameAsString.push({ line: node.loc.start.line, text: sourceOf(parent || node).split('\n')[0].trim() });
+    },
     CallExpression(node, _st, ancestors) {
+      const cal = node.callee.type === 'ChainExpression' ? node.callee.expression : node.callee;
+      if (cal.type === 'MemberExpression' && cal.computed && memberName(cal) === null
+        && (definingObjects.has(cal.object.type === 'Identifier' ? cal.object.name : '') || DEFINING_ABS.has(requiredPath(cal.object, file)))) {
+        out.computedCalls.push({ line: node.loc.start.line, text: sourceOf(node).split('\n')[0].trim() });
+      }
       const hit = targetOfCallee(node.callee);
       if (hit) {
         const args = node.arguments;
@@ -469,6 +496,8 @@ describe('property-lookup callers declare their scope decision', () => {
         else if (!optionsDeclared(call)) offenders.push(`${a.file}:${call.line}: options are not the canonical lookupOptionsFor(...) / a const bound to it`);
       }
       for (const m of a.optionVarMisuse) offenders.push(`${a.file}:${m.line}: trusted options variable used outside the lookup call: ${m.text}`);
+      for (const n of a.nameAsString) offenders.push(`${a.file}:${n.line}: the lookup's name as a string: ${n.text}`);
+      for (const c of a.computedCalls) offenders.push(`${a.file}:${c.line}: computed call on the lookup module: ${c.text}`);
       for (const v of a.valueRefs.filter((v) => v.target === LOOKUP)) offenders.push(`${a.file}:${v.line}: performPropertyLookup used as a value: ${v.text}`);
       // A caller never spells the option, anywhere in its file, in any form.
       // Only the modules that define or read it are exempt, named one by one.
