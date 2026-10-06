@@ -1830,17 +1830,16 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // OPERATOR turn on the OPERATOR's OWN server-persisted thread naming the
     // preview's product) — resolveInventoryWriteTarget re-verifies thread
     // ownership and the threads gate itself before reading anything.
-    const Procurement = require('../services/intelligence-bar/procurement-tools');
-    const target = await Procurement.resolveInventoryWriteTarget({
+    const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
       toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
       actorId: getAdminActorId(req), threadId: req.body.thread_id,
       // The requesting tab's OWN observed thread tail (Codex round-2 P2) —
       // same parse as the optimistic-append check below — so a stale tab
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
-      // Products this route's own lookups showed the model alone in earlier
-      // rounds of this request (server-held results, never model input).
-      lookedUpProductIds: Procurement.productsShownAlone(priorToolResults),
+      // This route's own tool results (with the input each ran with) from
+      // earlier rounds of this request: server-held, never client history.
+      priorToolResults,
     });
     // A refused target leaves no card and writes nothing; the model is told so
     // in plain words, so its reply can never read as a recorded change.
@@ -3398,7 +3397,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
-        toolResults.push({ name: toolUse.name, result, round });
+        toolResults.push({ name: toolUse.name, input: executionInput, result, round });
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.

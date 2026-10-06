@@ -1,11 +1,11 @@
 /**
  * adjust_stock target from the bar's own lookup (owner IB history 2026-10-06):
- * the operator used a short product name, query_stock found exactly one
- * product, adjust_stock was proposed with that id, and the proposal was
- * refused, so the stock was never written. The route now hands
- * resolveInventoryWriteTarget the products its OWN lookups showed the model
- * alone, from EARLIER rounds of this request only (a read in the same round
- * had not reached the model yet). A refusal tells the model nothing was
+ * the operator used a short product name, query_stock found the product,
+ * adjust_stock was proposed with that id, and the proposal was refused, so
+ * the stock was never written. The route now hands
+ * resolveInventoryWriteTarget its OWN tool results, with the input each read
+ * ran with, from EARLIER rounds of this request only (a read in the same
+ * round had not reached the model yet). A refusal tells the model nothing was
  * written and leaves no card; an accepted target still shows the card with
  * the product and on hand before and after (owner 2026-10-05).
  *
@@ -47,16 +47,14 @@ jest.mock('../services/intelligence-bar/tools', () => ({
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], executeSeoTool: jest.fn() }));
-// Real tool definitions and the real productsShownAlone; the reads, the
-// preview and the target rule are scripted so the test watches only what the
-// route hands the rule.
+// Real tool definitions; the reads, the preview and the target rule are
+// scripted so the test watches only what the route hands the rule.
 const mockExecuteProcurementTool = jest.fn();
 const mockResolveInventoryWriteTarget = jest.fn();
 jest.mock('../services/intelligence-bar/procurement-tools', () => {
   const actual = jest.requireActual('../services/intelligence-bar/procurement-tools');
   return {
     PROCUREMENT_TOOLS: actual.PROCUREMENT_TOOLS,
-    productsShownAlone: actual.productsShownAlone,
     executeProcurementTool: (...args) => mockExecuteProcurementTool(...args),
     resolveInventoryWriteTarget: (...args) => mockResolveInventoryWriteTarget(...args),
   };
@@ -151,7 +149,10 @@ test('a lookup in an earlier round reaches the target rule, and the card names t
     const { status, body } = await postQuery(baseUrl, { prompt: 'Add 2 gallons of the Guard to inventory', context: 'procurement', pageData: { route: '/admin/inventory' } });
     expect(status).toBe(200);
     const [args] = mockResolveInventoryWriteTarget.mock.calls[0];
-    expect([...args.lookedUpProductIds]).toEqual([PRODUCT_ID]);
+    expect(args.priorToolResults).toHaveLength(1);
+    expect(args.priorToolResults[0]).toMatchObject({ name: 'query_stock', input: { search: 'guard' }, round: 0 });
+    expect(args.priorToolResults[0].result.products[0].id).toBe(PRODUCT_ID);
+    expect(args.threadSeq).toBeNull();
     expect(body.pendingActions).toHaveLength(1);
     const labels = (body.pendingActions[0].contract?.effects || []).map((effect) => effect.label);
     expect(labels).toContain('Synthetic Guard CS: restock 2 gal; on hand 62 → 318 fl_oz');
@@ -166,7 +167,7 @@ test('a lookup in the SAME round as the proposal does not count (the model had n
     const { status } = await postQuery(baseUrl, { prompt: 'Add 2 gallons of the Guard to inventory', context: 'procurement', pageData: { route: '/admin/inventory' } });
     expect(status).toBe(200);
     const [args] = mockResolveInventoryWriteTarget.mock.calls[0];
-    expect([...args.lookedUpProductIds]).toEqual([]);
+    expect(args.priorToolResults).toEqual([]);
   });
 });
 
