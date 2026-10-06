@@ -120,10 +120,12 @@ describe('moveCompletedVisitToWorkDay guards', () => {
 
 describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery)', () => {
   const explode = () => { throw new Error('unexpected query'); };
-  const runnerFor = (visit, partner = null) => (table) => {
+  const cols = { original_scheduled_date: {}, visit_id: {} };
+  const runnerFor = (visit, partner = null, columns = cols) => (table) => {
     const chain = {
       where() { return chain; }, whereNot() { chain._partner = true; return chain; }, whereNotIn() { return chain; },
       first: async () => (chain._partner ? partner : visit),
+      columnInfo: async () => columns,
     };
     return chain;
   };
@@ -134,9 +136,10 @@ describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery
   test('gate off: no query, no date', async () => {
     expect(await earlyCloseoutInvoiceDate(explode, { project, scheduledServiceId: 'v', today })).toBeNull();
   });
-  test('gate on, work day before the booked day: the work day', async () => {
+  test('gate on, work day before the booked day: the booked and work days', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
-    expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: 'v', today })).toBe('2026-10-05');
+    expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: 'v', today }))
+      .toEqual({ from: '2026-10-08', to: '2026-10-05' });
   });
   test('gate on: late, same-day, future, rescheduled and grouped visits keep the default date', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
@@ -148,5 +151,16 @@ describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery
     expect(await run({ ...visit, visit_id: 'stop-1' }, project, { id: 'p' })).toBeNull();
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project: {}, scheduledServiceId: 'v', today })).toBeNull();
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: null, today })).toBeNull();
+  });
+  test('gate on but original_scheduled_date is missing (migration not run): no date, so no invoice is dated for a move that cannot happen', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    expect(await earlyCloseoutInvoiceDate(runnerFor(visit, null, { scheduled_date: {} }), { project, scheduledServiceId: 'v', today })).toBeNull();
+  });
+});
+
+describe('date reading', () => {
+  test('a date that is not on the calendar is no date', () => {
+    expect(planCompletionDateMove({ bookedDate: '2026-02-31', workDate: '2026-02-01', today: '2026-10-06' })).toMatchObject({ move: false, reason: 'no_date' });
+    expect(planCompletionDateMove({ bookedDate: '2026-10-08T00:00:00.000Z', workDate: '2026-10-05', today: '2026-10-06' })).toMatchObject({ move: true, from: '2026-10-08' });
   });
 });

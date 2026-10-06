@@ -249,6 +249,58 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
       } finally { await cleanup(f); }
     });
 
+    // A draft minted earlier (before the gate, or by hand) still on the booked
+    // day, then sent through the real send-route resolver.
+    const reuse = async (f, args = {}) => {
+      const { resolveProjectInvoiceForSend } = require('../routes/admin-projects')._private;
+      const project = await mockPg('projects').where({ id: f.projectId }).first();
+      const customer = await mockPg('customers').where({ id: f.customerId }).first();
+      const out = await resolveProjectInvoiceForSend({ project, customer, ...args });
+      return { out, row: await mockPg('invoices').where({ id: f.invoiceId }).first() };
+    };
+
+    test('gate on, early: a REUSED undelivered draft on the booked day is re-dated before delivery', async () => {
+      process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceStatus: 'draft' });
+      try {
+        await mockPg('invoices').where({ id: f.invoiceId }).update({ line_items: JSON.stringify([{ description: 'Fixture', quantity: 1, unit_price: 350, amount: 350 }]) });
+        const { out, row } = await reuse(f);
+        expect(out.created).toBe(false);
+        expect(out.invoice.id).toBe(f.invoiceId);
+        expect(day(out.invoice.service_date)).toBe(f.work);
+        expect(day(row.service_date)).toBe(f.work);
+      } finally { await cleanup(f); }
+    });
+
+    test('gate on, early: the caller-supplied invoice_id path re-dates the same way', async () => {
+      process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceStatus: 'draft' });
+      try {
+        const { out, row } = await reuse(f, { invoiceId: f.invoiceId });
+        expect(day(out.invoice.service_date)).toBe(f.work);
+        expect(day(row.service_date)).toBe(f.work);
+      } finally { await cleanup(f); }
+    });
+
+    test('gate on: a hand-edited date, a delivered invoice, a preview, a late closeout and the gate off are all left alone', async () => {
+      const cases = [
+        { name: 'hand-edited', gate: true, seedArgs: { invoiceDate: dayOffset(10) }, expectKept: 'edited' },
+        { name: 'delivered', gate: true, seedArgs: { invoiceStatus: 'sent' }, expectKept: 'booked' },
+        { name: 'preview', gate: true, seedArgs: {}, args: { dryRun: true }, expectKept: 'booked' },
+        { name: 'gate off', gate: false, seedArgs: {}, expectKept: 'booked' },
+        { name: 'late', gate: true, seedArgs: { bookedOffset: -3, projectOffset: 0 }, expectKept: 'booked' },
+      ];
+      for (const c of cases) {
+        if (c.gate) process.env.GATE_COMPLETION_MOVES_DATE = 'true'; else delete process.env.GATE_COMPLETION_MOVES_DATE;
+        const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceStatus: 'draft', ...c.seedArgs });
+        try {
+          const { row } = await reuse(f, { invoiceId: f.invoiceId, ...(c.args || {}) });
+          const want = c.expectKept === 'edited' ? c.seedArgs.invoiceDate : f.booked;
+          expect([c.name, day(row.service_date)]).toEqual([c.name, want]);
+        } finally { await cleanup(f); }
+      }
+    });
+
     test('gate OFF: the minted draft keeps the booked day (today\'s behavior)', async () => {
       const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
       try {

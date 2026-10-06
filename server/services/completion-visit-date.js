@@ -37,18 +37,17 @@
  * Gate off = this module writes nothing.
  */
 const logger = require('./logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, validCalendarDate } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { completionMovesDateLive } = require('../config/feature-gates');
 // A grouped partner in a terminal or replaced status no longer shares the stop.
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 
 const MOVE_SOURCE = 'completion_early';
 
-function dayKey(value) {
-  if (value == null || value === '') return null;
-  const text = String(value instanceof Date ? value.toISOString() : value).slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
-}
+// The shared date-only reader, plus a real-calendar check (it accepts any
+// 'YYYY-MM-DD' prefix, so '2026-02-31' needs rejecting here).
+const dayKey = (value) => validCalendarDate(dateOnlyString(value));
 
 /**
  * Pure decision: does a closeout dated `workDate` move a visit booked for
@@ -100,27 +99,68 @@ async function hasLiveGroupPartner(runner, row) {
   return !!partner;
 }
 
+// Only a draft nobody has received, still carrying `day` (a copy of the booked
+// day), may be re-dated: a sent, delivered, viewed or settled invoice keeps the
+// date on the PDF the customer holds, and a hand-edited date is never touched.
+function undeliveredDraftsDatedOn(query, day) {
+  return query
+    .where({ status: 'draft' })
+    .whereNull('sent_at')
+    .whereNull('sms_sent_at')
+    .whereNull('email_sent_at')
+    .whereRaw('service_date = ?::date', [day]);
+}
+
 /**
- * The service date a project's invoice must carry when it is created BEFORE
- * the visit closes out early: the project's work day, only when the closeout
- * will then move the visit to that day (same plan, same exclusions). The
- * invoice is normally delivered before closeout, so it has to be dated right
- * at creation; the closeout never re-dates a delivered invoice.
- * Returns the YYYY-MM-DD work day, or null (gate off, no early move, or no visit).
+ * The ONE eligibility rule, shared by the mover and the invoice dater: does a
+ * closeout dated `workDate` move this visit? Checks, in order: gate, the
+ * `original_scheduled_date` column (the booked day cannot be kept without it),
+ * the visit row, its status (when `requireStatus` is given), the date plan,
+ * and a live grouped partner.
+ * Resolves to { move:false, reason } or { move:true, from, to, visit, cols }.
+ */
+async function planEarlyMove(runner, {
+  scheduledServiceId, workDate, previousStatus, cols = null, today, lock = false, requireStatus = null,
+}) {
+  if (!completionMovesDateLive()) return { move: false, reason: 'gate_off' };
+  const columns = cols || await runner('scheduled_services').columnInfo();
+  if (!columns.original_scheduled_date) return { move: false, reason: 'column_missing' };
+  const query = runner('scheduled_services').where({ id: scheduledServiceId });
+  const visit = await (lock ? query.forUpdate() : query).first();
+  const status = String(visit?.status || '').toLowerCase();
+  const refusal = (!visit && 'visit_missing') || (requireStatus && status !== requireStatus && `not_${requireStatus}`);
+  if (refusal) return { move: false, reason: refusal };
+  const plan = planCompletionDateMove({
+    bookedDate: visit.scheduled_date, workDate, previousStatus: previousStatus ?? visit.status, today,
+  });
+  const grouped = plan.move && columns.visit_id && await hasLiveGroupPartner(runner, visit);
+  return grouped ? { move: false, reason: 'grouped_visit' } : { ...plan, visit, cols: columns };
+}
+
+/**
+ * The booked day -> work day a project's invoice must follow when it is
+ * created or sent BEFORE the visit closes out early ({ from, to }), or null
+ * (gate off, column missing, no early move, no visit). The invoice is normally
+ * delivered before closeout, so it has to be dated before delivery; the
+ * closeout never re-dates a delivered invoice.
  */
 async function earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId, today = etDateString() } = {}) {
-  if (!completionMovesDateLive()) return null;
-  if (!scheduledServiceId) return null;
-  const workDate = dayKey(project?.project_date);
-  if (!workDate) return null;
-  const visit = await runner('scheduled_services').where({ id: scheduledServiceId }).first();
-  if (!visit) return null;
-  const plan = planCompletionDateMove({
-    bookedDate: visit.scheduled_date, workDate, previousStatus: visit.status, today,
-  });
-  if (!plan.move) return null;
-  if (await hasLiveGroupPartner(runner, visit)) return null;
-  return plan.to;
+  if (!completionMovesDateLive() || !scheduledServiceId) return null;
+  const plan = await planEarlyMove(runner, { scheduledServiceId, workDate: project?.project_date, today });
+  return plan.move ? { from: plan.from, to: plan.to } : null;
+}
+
+/**
+ * A REUSED invoice (an existing auto-created draft, or one the caller picked)
+ * about to be delivered: give it the work day under the closeout's copy-only
+ * rule (undelivered draft, service date still the booked day). One guarded
+ * UPDATE, so a concurrent send or hand edit wins. Returns the invoice row.
+ */
+async function redateUndeliveredDraft(runner, invoice, dates) {
+  if (!dates || !invoice?.id) return invoice;
+  const changed = await undeliveredDraftsDatedOn(runner('invoices').where({ id: invoice.id }), dates.from)
+    .update({ service_date: dates.to, updated_at: runner.fn.now() });
+  return changed ? { ...invoice, service_date: dates.to } : invoice;
 }
 
 /**
@@ -146,26 +186,19 @@ async function moveCompletedVisitToWorkDay(trx, {
   scheduledServiceCols = null,
   today = etDateString(),
 } = {}) {
-  if (!completionMovesDateLive()) return { moved: false, reason: 'gate_off' };
   if (!scheduledServiceId || !serviceRecord) return { moved: false, reason: 'no_record' };
 
-  const cols = scheduledServiceCols || await trx('scheduled_services').columnInfo();
-  // Without the column the booked day cannot be kept: move nothing.
-  if (!cols.original_scheduled_date) return { moved: false, reason: 'column_missing' };
-
-  const locked = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first();
-  if (!locked) return { moved: false, reason: 'visit_missing' };
-  if (String(locked.status || '').toLowerCase() !== 'completed') return { moved: false, reason: 'not_completed' };
-
-  const plan = planCompletionDateMove({
-    bookedDate: locked.scheduled_date,
+  const plan = await planEarlyMove(trx, {
+    scheduledServiceId,
     workDate: dayKey(workDate) || serviceRecord.service_date,
     previousStatus,
+    cols: scheduledServiceCols,
     today,
+    lock: true,
+    requireStatus: 'completed',
   });
   if (!plan.move) return { moved: false, reason: plan.reason };
-
-  if (cols.visit_id && await hasLiveGroupPartner(trx, locked)) return { moved: false, reason: 'grouped_visit' };
+  const { visit: locked, cols } = plan;
 
   const update = {
     scheduled_date: plan.to,
@@ -193,22 +226,11 @@ async function moveCompletedVisitToWorkDay(trx, {
       .update({ service_date: plan.to });
   }
 
-  // The visit's own invoices: only a service date that still equals the booked
-  // day is a copy of it, so a deliberately different date is never overwritten,
-  // and only a draft nobody has received: a sent, delivered, viewed or settled
-  // invoice keeps the date on the PDF the customer holds.
-  const invoiceMatch = (builder) => {
+  // The visit's own undelivered drafts that still copy the booked day.
+  const invoicesDated = await undeliveredDraftsDatedOn(trx('invoices').where((builder) => {
     builder.where({ scheduled_service_id: locked.id });
     if (serviceRecord.id) builder.orWhere({ service_record_id: serviceRecord.id });
-  };
-  const invoicesDated = await trx('invoices')
-    .where(invoiceMatch)
-    .where({ status: 'draft' })
-    .whereNull('sent_at')
-    .whereNull('sms_sent_at')
-    .whereNull('email_sent_at')
-    .whereRaw('service_date = ?::date', [plan.from])
-    .update({ service_date: plan.to, updated_at: trx.fn.now() });
+  }), plan.from).update({ service_date: plan.to, updated_at: trx.fn.now() });
 
   logger.info(`[completion-visit-date] visit ${locked.id} completed early: moved ${plan.from} -> ${plan.to}${locked.is_recurring === true ? ' (recurring: series slot kept)' : ''}; ${invoicesDated} invoice(s) re-dated, ${recordDated} record(s) re-dated`);
   return { moved: true, from: plan.from, to: plan.to, invoicesDated, recordDated };
@@ -218,5 +240,6 @@ module.exports = {
   MOVE_SOURCE,
   planCompletionDateMove,
   earlyCloseoutInvoiceDate,
+  redateUndeliveredDraft,
   moveCompletedVisitToWorkDay,
 };
