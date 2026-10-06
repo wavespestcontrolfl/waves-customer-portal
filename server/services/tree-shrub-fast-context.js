@@ -29,6 +29,8 @@ const PhotoService = require('./photos');
 const { normalizeTreeShrubPhotoSlot } = require('../config/tree-shrub-photo-slots');
 const { watchListForMonth } = require('../config/tree-shrub-watch-list');
 const { tsWatchListLive, visitWatchMonth } = require('./tree-shrub-watch-items');
+const { tsPestCheckLive } = require('./tree-shrub-pest-check');
+const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
 const ROTATION_WINDOW_DAYS = 60;
 // Palm spacing = the shared three-calendar-month rule (owner program, #5089).
@@ -476,6 +478,9 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // GATE_TS_WATCH_LIST: this visit's month on the seasonal watch list. Gate
     // off = no key at all.
     ...(tsWatchListLive() && { watchList: watchListForVisit(svc.scheduled_date) }),
+    // GATE_TS_PEST_CHECK: the "Live insects found?" block and its insect types.
+    // Gate off = no key at all.
+    ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
   };
 }
 
