@@ -707,9 +707,6 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       await post(result);
       expect(ring).toHaveBeenCalledTimes(1);
       expect(ring.mock.calls[0][0].id).toBe(CUST_ID);
-      // Only the booking this request committed counts as fresh (its push always goes).
-      const fresh = result.ok && !result.body.replayed ? 'booking-1' : undefined;
-      expect(ring.mock.calls[0][2]?.freshBookingId).toBe(fresh);
     });
 
     test('a slot race asks for no bell (nothing was booked)', async () => {
@@ -721,53 +718,79 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
   describe('ringReserviceBooked builds from the committed visit', () => {
     const { triggerNotification } = require('../services/notification-triggers');
     const { ringReserviceBooked } = reservicePublicRouter._internals;
-    beforeEach(() => triggerNotification.mockClear());
+    beforeEach(() => triggerNotification.mockReset().mockResolvedValue({ bellWritten: true, push: { sent: 1 } }));
 
-    function conn(rows) {
+    const VISIT_ROW = {
+      id: 'visit-1', service_type: 'Pest Control Re-Service', service_key: 'pest_re_service', window_start: '13:00:00',
+      customer_request: 'roaches in the kitchen', customer_request_pests: ['roaches'], service_date: '2026-10-09',
+    };
+    // A fake knex: the visit read resolves `rows`; inside the transaction the
+    // delivery-record read resolves `delivered`, and inserts are captured.
+    function conn(rows, { delivered = null } = {}) {
       const calls = [];
-      const q = {};
-      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'select']) q[m] = (...a) => { calls.push([m, ...a]); return q; };
-      q.then = (ok, err) => Promise.resolve(rows).then(ok, err);
-      const fn = jest.fn(() => q);
+      const inserts = [];
+      const locks = [];
+      const chain = (result) => {
+        const q = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereRaw', 'select']) q[m] = (...a) => { calls.push([m, ...a]); return q; };
+        q.first = async () => result;
+        q.insert = async (row) => { inserts.push(row); };
+        q.then = (ok, err) => Promise.resolve(result).then(ok, err);
+        return q;
+      };
+      const trx = jest.fn(() => chain(delivered));
+      trx.raw = async (sql, args) => { locks.push(args); };
+      const fn = jest.fn(() => chain(rows));
       fn.raw = (sql) => sql;
-      return { fn, calls };
+      fn.transaction = async (work) => work(trx);
+      return { fn, calls, inserts, locks };
     }
+    const optsOf = () => triggerNotification.mock.calls[0][2];
 
-    test('rings each open link booking with its STORED words and pests, keyed per visit, linked to the visit', async () => {
-      const { fn, calls } = conn([{
-        id: 'visit-1', service_type: 'Pest Control Re-Service', service_key: 'pest_re_service', window_start: '13:00:00',
-        customer_request: 'roaches in the kitchen', customer_request_pests: ['roaches'], service_date: '2026-10-09',
-      }]);
+    test('rings each open link booking with its STORED words and pests, keyed and locked per visit', async () => {
+      const { fn, calls, locks } = conn([VISIT_ROW]);
       await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie', last_name: 'Doe' }, fn);
       expect(calls).toEqual(expect.arrayContaining([
         ['where', 'sba.source', 'reservice_link'],
         ['whereIn', 's.status', OPEN_CALLBACK_STATUSES],
         ['where', 's.customer_id', CUST_ID],
       ]));
+      expect(locks).toEqual([['reservice-bell:visit-1']]);
       expect(triggerNotification).toHaveBeenCalledWith('reservice_self_booked', {
         customerId: CUST_ID, scheduledServiceId: 'visit-1', serviceDate: '2026-10-09', name: 'Jamie Doe',
         when: 'Fri, Oct 9 at 1:00 PM', pests: 'Roaches', request: 'roaches in the kitchen',
       }, expect.objectContaining({ dedupeKey: 'reservice-booked:visit-1' }));
     });
 
-    // Codex r3: a push-only admin setup writes no bell row, so a dedupe hit
-    // cannot stop a recovery dispatch from buzzing again.
-    test.each([
-      ['the booking this request committed', { freshBookingId: 'sba-1' }, false, true],
-      ['a recovery that writes the bell now', {}, true, true],
-      ['a recovery whose bell already landed, or with no bell row (push-only)', {}, false, false],
-      ['a fresh booking of another visit does not make this one fresh', { freshBookingId: 'sba-2' }, false, false],
-    ])('push for %s', async (_label, opts, written, pushes) => {
-      const { fn } = conn([{ id: 'visit-1', self_booking_id: 'sba-1', service_type: 'Pest Control Re-Service', service_key: 'pest_re_service', service_date: '2026-10-09' }]);
-      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn, opts);
-      const { onBell, beforePush } = triggerNotification.mock.calls[0][2];
-      onBell(written);
-      expect(beforePush()).toBe(pushes);
-    });
-
     test('no open link booking: no bell', async () => {
       await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, conn([]).fn);
       expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    // Codex r3/r4: a push-only admin setup writes no bell row, so delivery is
+    // recorded on its own and a recovery pushes exactly once.
+    test('first delivery: push allowed, and a bell or a push records the delivery', async () => {
+      for (const stats of [{ bellWritten: true, push: { sent: 0 } }, { bellWritten: false, push: { sent: 2 } }]) {
+        triggerNotification.mockReset().mockResolvedValue(stats);
+        const { fn, inserts } = conn([VISIT_ROW]);
+        await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn);
+        expect(optsOf().beforePush()).toBe(true);
+        expect(inserts).toEqual([expect.objectContaining({ customer_id: CUST_ID, action: 'reservice_bell_delivered', metadata: JSON.stringify({ scheduledServiceId: 'visit-1' }) })]);
+      }
+    });
+
+    test('nothing delivered (no bell, no push): no record, so the next submit tries again', async () => {
+      triggerNotification.mockReset().mockResolvedValue({ bellWritten: false, push: { sent: 0 } });
+      const { fn, inserts } = conn([VISIT_ROW]);
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn);
+      expect(inserts).toEqual([]);
+    });
+
+    test('already delivered: the bell is re-offered to its dedupe but no push, no second record', async () => {
+      const { fn, inserts } = conn([VISIT_ROW], { delivered: { id: 'log-1' } });
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn);
+      expect(optsOf().beforePush()).toBe(false);
+      expect(inserts).toEqual([]);
     });
   });
 
