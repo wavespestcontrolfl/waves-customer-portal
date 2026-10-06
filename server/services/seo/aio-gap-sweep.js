@@ -82,8 +82,6 @@ function locationForCity(city) {
 }
 
 const isWavesQuery = (q) => q.includes('waves');
-// Google search operators are not customer searches, and DataForSEO bills them
-// at 5x, past the per-call budget reservation.
 // A search that looks like it holds a person's contact details is never sent to
 // DataForSEO: an email, a run of 7+ digits (phone), or a house number followed by
 // a street word. Search Console already hides rare queries; the route's
@@ -121,7 +119,11 @@ function namesAPerson(query, nameIndex) {
   }
   return false;
 }
-const OPERATOR_RE = /(^|[^a-z0-9])-?(site|inurl|allinurl|intitle|allintitle|intext|allintext|filetype|ext|related|cache|link|info|define|before|after|source|map):/i;
+// A colon marks a Google search operator (site:, inurl:, inanchor:, id: and
+// the rest). Operators are not customer searches, and DataForSEO bills them at
+// 5x, past the per-call budget reservation. Customers do not type colons, so
+// every colon query is left out rather than keeping a list of operators.
+const OPERATOR_RE = /:/;
 
 // Sums a Search Console row into a candidate; position is impression-weighted.
 function addGscNumbers(c, r, impressions) {

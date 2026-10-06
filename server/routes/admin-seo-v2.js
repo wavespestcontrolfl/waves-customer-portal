@@ -817,6 +817,9 @@ router.post('/aio-sweep', requireAdmin, async (req, res, next) => {
       if (!f.re.test(raw) || n < f.min || n > f.max) return res.status(400).json({ error: f.error });
       opts[f.key] = n;
     }
+    // The 10-minute processor runs only with both gates on; a run started
+    // without it would sit open and block every later start.
+    if (!isEnabled('seoIntelligence') || !isEnabled('cronJobs')) return res.status(409).json({ error: 'The sweep processor is off (seoIntelligence and cronJobs must both be on).' });
     const { startSweep } = require('../services/seo/aio-gap-sweep');
     try {
       res.status(201).json(await startSweep({ ...opts, trigger: 'manual' }));

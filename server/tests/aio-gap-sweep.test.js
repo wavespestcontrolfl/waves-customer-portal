@@ -215,6 +215,8 @@ describe('mergeCandidates', () => {
     const out = sweep.mergeCandidates({ gscRows: [
       { query: 'site:example.test pest control', impressions: 90 },
       { query: 'termite inurl:bait', impressions: 80 },
+      { query: 'inanchor:pest control', impressions: 75 },
+      { query: 'id:12345', impressions: 74 },
       { query: 'termite bait stations', impressions: 70 },
     ] });
     expect(out.map((c) => c.query)).toEqual(['termite bait stations']);

@@ -18,7 +18,8 @@ for (const m of ['search-console-v2', 'seo-advisor', 'rank-tracker', 'serp-analy
   jest.mock(`../services/seo/${m}`, () => ({}));
 }
 jest.mock('../services/csv-generators', () => ({ geoGridToCSV: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
+const mockGates = { on: true };
+jest.mock('../config/feature-gates', () => ({ isEnabled: (name) => mockGates.on && (name === 'seoIntelligence' || name === 'cronJobs') }));
 
 const express = require('express');
 const router = require('../routes/admin-seo-v2');
@@ -58,6 +59,15 @@ describe('POST /aio-sweep', () => {
     const res = await call('POST', '/aio-sweep', { maxCostUsd: 25, minImpressions: 10, max: 5000 });
     expect(res.status).toBe(201);
     expect(mockSweep.startSweep).toHaveBeenCalledWith({ trigger: 'manual', maxCostUsd: 25, minImpressions: 10, max: 5000 });
+  });
+
+  test('a start is refused while the sweep processor is off', async () => {
+    mockGates.on = false;
+    try {
+      const res = await call('POST', '/aio-sweep', {});
+      expect(res.status).toBe(409);
+      expect(mockSweep.startSweep).not.toHaveBeenCalled();
+    } finally { mockGates.on = true; }
   });
 
   test('a two-decimal cap such as 19.99 is accepted', async () => {
