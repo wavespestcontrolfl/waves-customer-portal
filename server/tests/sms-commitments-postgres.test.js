@@ -2943,9 +2943,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(row.sms_context).toMatchObject({ basis: 'promise', due_date: tomorrow });
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     await refreshSmsCommitments({ conn: mockPg, now: new Date(new Date(row.due_at).getTime() + 60000) });
-    // Owner audit 2026-10-01: the bell names the customer and quotes the promise.
+    // Owner audit 2026-10-01: the bell names the customer and quotes the promise —
+    // the slice of the text that matches this promise's description (#6056).
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
-      expect.stringContaining('We said “Gonna knock out your quarterly spray tomorrow”'), expect.objectContaining({ bell: true }));
+      expect.stringContaining('We said “knock out your quarterly spray tomorrow”'), expect.objectContaining({ bell: true }));
   });
 
   test('Codex #5248 r2: the promised item sent by an automated text closes a general staff promise', async () => {
