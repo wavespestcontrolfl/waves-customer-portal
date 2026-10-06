@@ -1,5 +1,6 @@
 import { isTreeShrubFastCompleteEligible } from "./tree-shrub-fast-complete";
 import { isLawnFastCompleteEligible } from "./lawn-fast-complete";
+import { isFastCompleteReportEligible } from "./pest-fast-complete";
 
 export const TERMINAL_VISIT_STATUSES = new Set([
   "completed",
@@ -48,6 +49,26 @@ export function shouldOpenTreeShrubFastComplete(service) {
 // to the full form when the server says it is not eligible.
 export function shouldOpenLawnFastComplete(service) {
   return isLawnFastCompleteEligible(service)
+    && service != null && "propertyId" in service
+    && !service?.completionInvoiceAlreadySent
+    && !service?.checkoutInvoiceId
+    && !service?.checkoutInvoiceToken;
+}
+
+// Admin Dispatch opens the pest Fast Complete sheet, in its report flow, for the
+// regular pest visits and pest re-services the technician home already sends
+// there (owner 2026-10-05: the long form was slow for a regular quarterly
+// visit). It is the shared pest rule, with this page's guards on top: not a
+// typed or combined profile (their forms keep the Dispatch completion panel),
+// not a visit returning from the payment flow, and not a row with no
+// `propertyId` key (the mobile week list), all on the same terms as the lawn
+// sheet above. The sheet's own "Full form" button hands the visit to the full
+// form.
+export function shouldOpenPestFastComplete(service) {
+  const profile = service?.completionProfile;
+  return isFastCompleteReportEligible(service)
+    && !profile?.findingsType
+    && !(profile?.companions || []).length
     && service != null && "propertyId" in service
     && !service?.completionInvoiceAlreadySent
     && !service?.checkoutInvoiceId

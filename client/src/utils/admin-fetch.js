@@ -68,7 +68,8 @@ export async function adminFetch(path, { redirectOn401 = true, ...options } = {}
     const r = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers: {
-        'Content-Type': 'application/json',
+        // A FormData body (a recorded clip) sets its own multipart boundary.
+        ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
         ...authHeader(),
         ...options.headers,
       },

@@ -112,6 +112,7 @@ const {
 } = require('../services/lawn-protocol-completion');
 const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
+const { freezePestCheck } = require('./tree-shrub-pest-check');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -3999,6 +4000,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         month: visitWatchMonth(backfillPlan.active ? backfillPlan.serviceDate : svc.scheduled_date),
       })
       : null;
+    // T&S live-insect check (GATE_TS_PEST_CHECK): the technician's "Live insects
+    // found?" answer and insect types, validated against the enum and frozen
+    // the same way. Tech-facing storage only; gate off or no valid answer =
+    // null = nothing written.
+    const treeShrubPestCheckFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
+      ? freezePestCheck(completionInput.body?.treeShrubReview)
+      : null;
     // A Waves blog post the completion picked (GATE_REPORT_BLOG_POST): the id
     // is checked against the one link rule (report-blog-post.js) and its
     // title and live URL frozen, so the report shows the post the customer
@@ -6487,6 +6495,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             } : {}),
             ...(treeShrubTechFindingsFreeze || {}),
             ...(treeShrubWatchItemsFreeze || {}),
+            ...(treeShrubPestCheckFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
