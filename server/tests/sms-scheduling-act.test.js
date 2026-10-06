@@ -176,3 +176,29 @@ describe('gate on', () => {
     expect(fake.dbh).not.toHaveBeenCalled();
   });
 });
+
+// Codex #6039 r3 P1: the notice rule runs again on the LOCKED row, so an
+// office move approval that a move away and back cleared is not trusted
+// from the unlocked read.
+describe('buildMoveGuard: move notice on the locked row', () => {
+  const lockedRow = (over) => ({
+    scheduled_date: '2026-10-02', window_start: '18:00:00', window_end: '19:00:00', status: 'confirmed',
+    customer_id: 'cust-1', visit_id: null, source_action: null, customer_confirmed: true, ...over,
+  });
+  const fakeTrx = (row) => jest.fn(() => {
+    const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => row) };
+    return q;
+  });
+  const guardFor = (row, noticeApplies) => act.buildMoveGuard({
+    decisionId: 'dec-1', offer: OFFER, visitId: VISIT_ID, customerId: 'cust-1', now: NOW, target: {},
+    expected: { date: '2026-10-02', start: '18:00', end: '19:00', status: 'confirmed' }, noticeApplies,
+  })({ trx: fakeTrx(row) });
+
+  test('a visit inside the window without a current approval is refused', async () => {
+    await expect(guardFor(lockedRow({ office_move_approved_for: null }), true)).rejects.toMatchObject({ refusal: 'self_serve_notice' });
+  });
+
+  test('a missed visit (noticeApplies false) skips the rule', async () => {
+    await expect(guardFor(lockedRow({ office_move_approved_for: null }), false)).rejects.not.toMatchObject({ refusal: 'self_serve_notice' });
+  });
+});
