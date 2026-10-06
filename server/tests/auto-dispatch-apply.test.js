@@ -1,5 +1,11 @@
 // apply.js stale guard: must re-read the row and refuse to move it if it was
 // locked/excluded or its date/window/tech changed since it was scored.
+// The person-placed check reads reschedule_log ⋈ series_moves, which this
+// suite's fake trx does not model; it has its own suite (eligibility test).
+jest.mock('../services/auto-dispatch/eligibility', () => ({
+  ...jest.requireActual('../services/auto-dispatch/eligibility'),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
@@ -387,6 +393,15 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const off = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
     await expect(off({ trx, members })).resolves.toBeUndefined();
     expect(routeTiers.loadReminderFreeze).not.toHaveBeenCalled();
+  });
+
+  test('a sibling a person placed refuses the whole grouped move (Codex #6055 r1 P1)', async () => {
+    const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
+    isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });
+    const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
+    const members = [{ id: SERVICE.id, status: 'confirmed' }, { id: 's2', status: 'confirmed' }];
+    await expect(guard({ trx: fakeTrx({ siblings: [eligible()] }), members }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('placed by a person') });
   });
 
   test('the receiving tech DEACTIVATED for a sibling category refuses; missing/qualified passes; an UNCHANGED tech is re-read too (Off can land mid-run)', async () => {

@@ -21,7 +21,7 @@ const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
-const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
+const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
@@ -320,6 +320,10 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
     if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
     const plan = await isRecurringPlanActive(r, trx);
     if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
+    // A grouped move drags every member, so a member a person placed
+    // protects the whole visit, whichever member the run evaluated.
+    const placed = await isPersonPlacedVisit(r, trx);
+    if (placed.placed) throw refuse(r.id, `was placed by a person (${placed.reason_code}: ${placed.reason_description})`);
   }
 }
 

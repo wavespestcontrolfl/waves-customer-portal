@@ -144,32 +144,48 @@ async function isRecurringPlanActive(service, db) {
 }
 
 /**
- * Did a person put this visit on its current date? A committed, unreverted
- * series move (staff edit modal / quick move / dispatch board, or the
- * customer's own reschedule page) anchored on this visit whose new_date is
- * still the visit's date means a person chose it — and the text that move
- * sends says "visits already on your calendar won't change unless we talk
- * with you first". Auto-dispatch never sends a text (apply.js), so moving
- * such a visit breaks that promise silently (prod 10-06: a customer picked
- * Sun 9 AM at 8:49 PM; the 4:10 AM run moved it to Mon 3 PM; nobody told them).
+ * Did a person put this visit on its current date? The series-move text says
+ * "visits already on your calendar won't change unless we talk with you
+ * first", and auto-dispatch never sends a text (apply.js), so moving such a
+ * visit breaks that promise silently (prod 10-06: a customer picked Sun 9 AM
+ * at 8:49 PM; the 4:10 AM run moved it to Mon 3 PM; nobody told them).
+ *
+ * Evidence is the visit's OWN reschedule_log: every series move writes one
+ * row per visit it moves, the anchor and each carried grouped partner, tagged
+ * with series_move_id (rebooker.js). The visit counts as person-placed when
+ * its newest series-move row belongs to a committed, unreverted move, landed
+ * the visit on the date it holds now, and no later row (any mover, auto-
+ * dispatch included) exists. Every series_moves initiator is a person (staff
+ * surfaces, the customer page, a customer's text reply).
  *
  * Fails CLOSED: a read error skips the visit for this run.
  */
+const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_sms', 'sms_offer_ai']);
+
 async function isPersonPlacedVisit(service, db) {
   const dateStr = toDateStr(service.scheduled_date);
   if (!service.id || !dateStr) return { placed: false };
   try {
-    const move = await db('series_moves')
-      .where({ anchor_service_id: service.id, status: 'committed' })
-      .whereNull('reverted_at')
-      .where('new_date', dateStr)
-      .orderBy('created_at', 'desc')
-      .first('id', 'initiated_by');
-    if (!move) return { placed: false };
-    const who = move.initiated_by === 'customer_self_serve' ? 'the customer' : 'staff';
-    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${who} (series move ${move.id})` };
+    const placement = await db('reschedule_log as r')
+      .join('series_moves as m', 'm.id', 'r.series_move_id')
+      .where('r.scheduled_service_id', service.id)
+      .where('r.new_date', dateStr)
+      .where('m.status', 'committed')
+      .whereNull('m.reverted_at')
+      .orderBy('r.created_at', 'desc')
+      .first('m.id as series_move_id', 'm.initiated_by', 'r.created_at');
+    if (!placement) return { placed: false };
+    // Rows one move writes share its transaction's created_at, so only a
+    // strictly later row is a later placement.
+    const later = await db('reschedule_log')
+      .where('scheduled_service_id', service.id)
+      .where('created_at', '>', placement.created_at)
+      .first('id');
+    if (later) return { placed: false };
+    const who = CUSTOMER_INITIATORS.has(placement.initiated_by) ? 'the customer' : 'staff';
+    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${who} (series move ${placement.series_move_id})` };
   } catch (err) {
-    return { placed: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read series moves: ${err.message}` };
+    return { placed: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
   }
 }
 

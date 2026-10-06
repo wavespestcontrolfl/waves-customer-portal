@@ -198,50 +198,93 @@ describe('GATE_AUTO_DISPATCH_FLEX_TIER ctx', () => {
 });
 
 describe('isPersonPlacedVisit', () => {
-  // Rows are filtered by the same predicates the query sends, so a wrong
-  // column, status or date in the query makes the test miss the row.
-  function fakeDb(rows, { fail = false } = {}) {
+  // A tiny in-memory reschedule_log ⋈ series_moves. Rows are filtered by the
+  // predicates the query sends, so a wrong column or table makes a test miss.
+  function fakeDb({ log = [], moves = [], fail = false } = {}) {
     return (table) => {
-      if (table !== 'series_moves') throw new Error(`unexpected table ${table}`);
       const preds = [];
-      return {
-        where(key, value) {
-          if (typeof key === 'object') Object.entries(key).forEach(([k, v]) => preds.push((r) => r[k] === v));
-          else preds.push((r) => r[key] === value);
-          return this;
+      let order = null;
+      let source;
+      if (table === 'reschedule_log as r') {
+        source = () => log.flatMap((r) => {
+          const m = moves.find((x) => x.id === r.series_move_id);
+          if (!m) return [];
+          const row = {};
+          Object.entries(r).forEach(([k, v]) => { row[`r.${k}`] = v; });
+          Object.entries(m).forEach(([k, v]) => { row[`m.${k}`] = v; });
+          return [row];
+        });
+      } else if (table === 'reschedule_log') {
+        source = () => log;
+      } else throw new Error(`unexpected table ${table}`);
+      const chain = {
+        join() { return chain; },
+        where(key, op, value) {
+          if (value === undefined) preds.push((r) => String(r[key]) === String(op));
+          else preds.push((r) => new Date(r[key]) > new Date(value));
+          return chain;
         },
-        whereNull(key) { preds.push((r) => r[key] == null); return this; },
-        orderBy() { return this; },
+        whereNull(key) { preds.push((r) => r[key] == null); return chain; },
+        orderBy(key) { order = key; return chain; },
         first: async () => {
           if (fail) throw new Error('connection reset');
-          return rows.find((r) => preds.every((p) => p(r))) || null;
+          let rows = source().filter((r) => preds.every((p) => p(r)));
+          if (order) rows = rows.sort((a, b) => new Date(b[order]) - new Date(a[order]));
+          const r = rows[0];
+          if (!r) return null;
+          return table === 'reschedule_log' ? r : { series_move_id: r['m.id'], initiated_by: r['m.initiated_by'], created_at: r['r.created_at'] };
         },
       };
+      return chain;
     };
   }
-  const move = (o = {}) => ({ id: 'm1', anchor_service_id: 's1', status: 'committed', reverted_at: null, new_date: '2026-10-18', initiated_by: 'customer_self_serve', ...o });
+  const T1 = '2026-10-06T00:49:58Z';
+  const move = (o = {}) => ({ id: 'm1', status: 'committed', reverted_at: null, initiated_by: 'customer_self_serve', ...o });
+  const logRow = (o = {}) => ({ id: 'l1', scheduled_service_id: 's1', series_move_id: 'm1', new_date: '2026-10-18', created_at: T1, ...o });
   const visit = { id: 's1', scheduled_date: '2026-10-18' };
 
   test('placed when the customer moved the visit to its current date', async () => {
-    expect(await isPersonPlacedVisit(visit, fakeDb([move()]))).toMatchObject({ placed: true, reason_code: 'PERSON_PLACED', reason_description: expect.stringContaining('the customer') });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [logRow()], moves: [move()] })))
+      .toMatchObject({ placed: true, reason_code: 'PERSON_PLACED', reason_description: expect.stringContaining('the customer') });
   });
 
-  test('placed when staff moved it', async () => {
-    expect(await isPersonPlacedVisit(visit, fakeDb([move({ initiated_by: 'admin' })]))).toMatchObject({ placed: true, reason_description: expect.stringContaining('staff') });
+  test('a customer text reply counts as the customer; staff surfaces as staff', async () => {
+    for (const initiated_by of ['customer_sms', 'sms_offer_ai', 'customer']) {
+      expect((await isPersonPlacedVisit(visit, fakeDb({ log: [logRow()], moves: [move({ initiated_by })] }))).reason_description).toContain('the customer');
+    }
+    expect((await isPersonPlacedVisit(visit, fakeDb({ log: [logRow()], moves: [move({ initiated_by: 'admin' })] }))).reason_description).toContain('staff');
   });
 
-  test('not placed when the visit has since left the chosen date, or the move was reverted or not committed', async () => {
-    expect(await isPersonPlacedVisit({ ...visit, scheduled_date: '2026-10-19' }, fakeDb([move()]))).toEqual({ placed: false });
-    expect(await isPersonPlacedVisit(visit, fakeDb([move({ reverted_at: '2026-10-06T00:00:00Z' })]))).toEqual({ placed: false });
-    expect(await isPersonPlacedVisit(visit, fakeDb([move({ status: 'superseded' })]))).toEqual({ placed: false });
-    expect(await isPersonPlacedVisit(visit, fakeDb([move({ anchor_service_id: 's2' })]))).toEqual({ placed: false });
+  test('a grouped partner the move carried is protected by its own log row', async () => {
+    const partner = { id: 's2', scheduled_date: '2026-10-18' };
+    expect(await isPersonPlacedVisit(partner, fakeDb({ log: [logRow({ id: 'l2', scheduled_service_id: 's2' })], moves: [move()] })))
+      .toMatchObject({ placed: true });
+  });
+
+  test('rows written in the same move transaction do not supersede it', async () => {
+    const sameTx = logRow({ id: 'l9', series_move_id: null });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [logRow(), sameTx], moves: [move()] }))).toMatchObject({ placed: true });
+  });
+
+  test('not placed after a later move, even one that returned the visit to the same date', async () => {
+    const later = logRow({ id: 'l2', series_move_id: null, created_at: '2026-10-06T08:10:19Z', new_date: '2026-10-19' });
+    const back = logRow({ id: 'l3', series_move_id: null, created_at: '2026-10-07T08:10:19Z', new_date: '2026-10-18' });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [logRow(), later, back], moves: [move()] }))).toEqual({ placed: false });
+  });
+
+  test('not placed when the visit left the date, or the move was reverted or not committed', async () => {
+    expect(await isPersonPlacedVisit({ ...visit, scheduled_date: '2026-10-19' }, fakeDb({ log: [logRow()], moves: [move()] }))).toEqual({ placed: false });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [logRow()], moves: [move({ reverted_at: '2026-10-06T01:00:00Z' })] }))).toEqual({ placed: false });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [logRow()], moves: [move({ status: 'superseded' })] }))).toEqual({ placed: false });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [logRow({ scheduled_service_id: 's9' })], moves: [move()] }))).toEqual({ placed: false });
   });
 
   test('a Date scheduled_date compares as its calendar date', async () => {
-    expect(await isPersonPlacedVisit({ id: 's1', scheduled_date: new Date('2026-10-18T04:00:00Z') }, fakeDb([move()]))).toMatchObject({ placed: true });
+    expect(await isPersonPlacedVisit({ id: 's1', scheduled_date: new Date('2026-10-18T04:00:00Z') }, fakeDb({ log: [logRow()], moves: [move()] })))
+      .toMatchObject({ placed: true });
   });
 
   test('fails closed on a read error', async () => {
-    expect(await isPersonPlacedVisit(visit, fakeDb([], { fail: true }))).toMatchObject({ placed: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }))).toMatchObject({ placed: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
   });
 });
