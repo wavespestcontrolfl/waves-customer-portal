@@ -322,7 +322,7 @@ const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suf
 const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:[-/]\\d{1,6}[a-z]?)?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
 // A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 N US 41",
 // "12 State Road 64" (Codex P1 #6016 r15).
-const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:fl|sr|us|cr|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
+const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:fl|s\.?\s?r\.?|u\.?\s?s\.?|c\.?\s?r\.?|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value is a credential even with no "code" or "pin"
@@ -839,6 +839,11 @@ const PEST_TERMS = [
   'katydid', 'grasshopper', 'lubber', 'stink bug', 'palmetto bug', 'billbug', 'ground pearl', 'nematode', 'springtail',
   'booklice', 'termite swarmer', 'carpenter ant', 'carpenter bee', 'mud dauber', 'paper wasp', 'lovebug', 'love bug',
   'brown patch', 'rust', 'mildew', 'mold', 'fungus',
+  // Lawn and shrub conditions: a diagnosis the facts never state is not the
+  // model's to make (Codex P1 #5964 r22).
+  'drought stress', 'heat stress', 'water stress', 'cold damage', 'frost damage', 'nutrient deficiency', 'nitrogen deficiency',
+  'iron deficiency', 'magnesium deficiency', 'potassium deficiency', 'chlorosis', 'compaction', 'thatch', 'overwatering',
+  'underwatering', 'fungal', 'disease', 'blight', 'root rot', 'wilt', 'scorch', 'leaf spot', 'dieback', 'decline',
   // The canonical treatment-target vocabulary (pest, lawn and ornamental
   // target suggestions), each name and its last word ("Large patch", "patch").
   ...canonicalTargetTerms(),
@@ -1095,8 +1100,9 @@ function ownSentences(text, requiredLines) {
   return splitSentences(matchForm(text)).filter((sentence) => !lines.some((line) => line.includes(sentence.replace(/[.!?]$/, ''))));
 }
 
-const SAYS_INSIDE = /\b(?:inside|indoors|interior|in\s+the\s+(?:home|house|kitchen|bathroom|garage))\b/i;
-const SAYS_OUTSIDE = /\b(?:outside|outdoors|exterior|perimeter|around\s+the\s+(?:home|house|outside))\b/i;
+// Rooms are inside; yard features are outside (Codex P1 #5964 r22).
+const SAYS_INSIDE = /\b(?:inside|indoors?|interior|in\s+the\s+(?:home|house)|kitchen|bathrooms?|bedrooms?|living\s+room|dining\s+room|family\s+room|attic|basement|closets?|pantry|laundry|hallways?|cabinets?|baseboards?|under\s+the\s+sink)\b/i;
+const SAYS_OUTSIDE = /\b(?:outside|outdoors?|exterior|perimeter|around\s+the\s+(?:home|house|outside)|yard|lawn|garden|flower\s+beds?|landscape\s+beds?|lanai|patio|pool\s+(?:cage|deck|area)|fence(?:\s+line)?|driveway|eaves|soffits?|mulch|shrubs?|hedges?|trees?|palms?|turf)\b/i;
 const APPLICATION_VERB = /\b(?:applied|applying|used|using|sprayed|spraying|put\s+down|spread|treated|went|placed|baited)\b/i;
 const wrongPlace = (sentence, where) => (SAYS_INSIDE.test(sentence) && !/inside|garage|entry/.test(where))
   || (SAYS_OUTSIDE.test(sentence) && !/outside|entry/.test(where));
@@ -1115,7 +1121,11 @@ function statesWrongScope(text, { facts }) {
   return splitSentences(matchForm(text)).some((sentence) => {
     const named = products.filter((product) => mentions(sentence, product));
     if (named.length) return named.some((product) => wrongPlace(sentence, String(product.applied_where || '')));
-    return APPLICATION_VERB.test(sentence) && products.every((product) => wrongPlace(sentence, String(product.applied_where || '')));
+    if (!APPLICATION_VERB.test(sentence)) return false;
+    // With no name, each place claim must fit some recorded product.
+    const wheres = products.map((product) => String(product.applied_where || ''));
+    return (SAYS_INSIDE.test(sentence) && !wheres.some((where) => /inside|garage|entry/.test(where)))
+      || (SAYS_OUTSIDE.test(sentence) && !wheres.some((where) => /outside|entry/.test(where)));
   });
 }
 
@@ -1124,9 +1134,24 @@ function statesWrongScope(text, { facts }) {
 // (Codex P1 #5964 r21).
 const SENTENCE_WORDS = new Set(('the we it its your our this that these those a an today yes no they he she you i '
   + 'waves pest control lawn care technician tech after before once until when if and but so then also').split(' '));
+// The word right after an application verb, or right before "was/were
+// <verb>", names what was applied; it must be a recorded product or a generic
+// word, in any case ("we applied roundup outside") (Codex P1 #5964 r22).
+const APPLIED_OBJECT_RE = /\b(?:applied|used|sprayed|spread|placed|put\s+down)\s+(?:some\s+|the\s+|a\s+|an\s+|more\s+)?([a-z][\w-]*)/gi;
+const APPLIED_SUBJECT_RE = /\b([a-z][\w-]*)\s+(?:was|were)\s+(?:\w+\s+)?(?:applied|used|sprayed|spread|placed|put\s+down)\b/gi;
+const APPLIED_GENERIC_WORDS = new Set(('it this that these those they them something anything everything product products treatment treatments spray sprays '
+  + 'bait baits granules granular liquid liquids insecticide insecticides herbicide herbicides fungicide fungicides fertilizer pesticide '
+  + 'pesticides material materials barrier gel dust foam mix solution what which nothing none one both all each around inside outside '
+  + 'along in on at to near over under across throughout indoors outdoors here there today only also again before after').split(' '));
+function namesUnrecordedObject(text, known) {
+  const words = [...text.matchAll(APPLIED_OBJECT_RE), ...text.matchAll(APPLIED_SUBJECT_RE)].map((m) => m[1].toLowerCase());
+  return words.some((word) => !APPLIED_GENERIC_WORDS.has(word) && !known.has(word) && !SAYS_INSIDE.test(word) && !SAYS_OUTSIDE.test(word));
+}
+
 function namesUnrecordedProduct(text, { facts }) {
   const known = new Set(asArray(facts?.products).flatMap((product) => normalizeKey(product.name).split(' ')));
   for (const word of normalizeKey(facts?.technician_first_name || '').split(' ')) known.add(word);
+  if (namesUnrecordedObject(matchForm(text), known)) return true;
   return splitSentences(matchForm(text)).some((sentence) => {
     if (!APPLICATION_VERB.test(sentence)) return false;
     // The opening word is a name only as the subject ("Roundup was applied");
@@ -1235,6 +1260,9 @@ const PATIENT_NOUNS = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|birds?|horses
 // a lawn question (Codex P1 #6016 r27).
 const NOT_PATIENT_NOUNS = '(?:lawn|lawns|grass|turf|yard|yards|sod|palms?|trees?|shrubs?|bush(?:es)?|hedges?|plants?|garden|gardens|flowers?|roses?|beds?|mulch|soil|house|home|roof|garage|fence|pool|patio|lanai|deck|porch|driveway|sidewalk|siding|foundation|kitchen|bathroom|attic|ants?|roach(?:es)?|spiders?|termites?|fleas?|ticks?|mosquito(?:e?s)?|weeds?|crabgrass|ficus|hibiscus|ixora|crotons?|oaks?|citrus)';
 const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS}|(?:my|our|his|her|their)\\s+(?!${NOT_PATIENT_NOUNS}\\b)[\\w-]+)`;
+// Feeling unwell takes only a listed person or pet: "my azalea is sick" is a
+// plant question, and no plant list is complete (Codex P1 #6016 r29).
+const LISTED_PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
   /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
@@ -1243,8 +1271,11 @@ const MEDICAL_CUES = [
   /\bburn(?:s|ed|ing)\b[^.?!]{0,30}\b(?:eyes?|skin|throat|lungs?|nose|mouth|hands?|face)\b|\b(?:eyes?|skin|throat|lungs?|nose|mouth|hands?|face)\b[^.?!]{0,30}\b(?:burn(?:s|ed|ing)|sting(?:s|ing)|itch\w*|irritat\w*|red\b)/i,
   // Feeling unwell: only when a person or pet is the one ("my dog is sick"; a
   // "sick lawn" is a lawn question).
-  new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,1}?(?:feel(?:s|ing)?|got|gets|getting|became|is|are|was|were|am|seem(?:s|ed)?)\\s+(?:\\w+\\s+){0,2}?(?:sick|ill|unwell|weak|woozy|dizzy)\\b`, 'i'),
+  new RegExp(`\\b${LISTED_PATIENT}\\s+(?:\\w+\\s+){0,1}?(?:feel(?:s|ing)?|got|gets|getting|became|is|are|was|were|am|seem(?:s|ed)?)\\s+(?:\\w+\\s+){0,2}?(?:sick|ill|unwell|weak|woozy|dizzy)\\b`, 'i'),
   /\b(?:feel|feeling|felt)\s+(?:\w+\s+){0,2}?(?:sick|ill|unwell|weak|woozy|off|strange)\b/i,
+  // Any possessive patient feeling unwell counts when the question ties it to
+  // the treatment ("my partner is sick after the spray").
+  new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,1}?(?:feel(?:s|ing)?|got|gets|getting|became|is|are|was|were|seem(?:s|ed)?)\\s+(?:\\w+\\s+){0,2}?(?:sick|ill|unwell|weak|woozy|dizzy)\\b(?=[^.?!]*\\b(?:spray\\w*|bait\\w*|treat\\w*|pesticide|chemical|product|granules?|insecticide|poison))`, 'i'),
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b)\b/i,
   // Passive: "the bait was eaten by my dog" (Codex P1 #5964 r19).
@@ -1317,7 +1348,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:service|visit|appointment|treatment)\s+date|date\s+of\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|appointment|treatment)|(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?<!\bdid\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back|in|into|inside))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }

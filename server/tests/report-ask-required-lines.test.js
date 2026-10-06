@@ -1191,3 +1191,25 @@ describe('answer screen, Codex round 21', () => {
     expect(ask('It was applied around the outside of the home.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 22', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Exterior perimeter' }] });
+  const facts = buildReportAskFacts({ question: 'What was applied?', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'What was applied?', data, facts });
+
+  test.each(['We applied roundup outside.', 'roundup was applied outside.'])('a lowercase unrecorded product is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('unrecorded_product');
+  });
+
+  test.each(['It was applied in the attic.', 'Alpine WSG was sprayed in the bedroom.', 'It was used throughout the living room.'])(
+    'a room claim against an outside record is rejected: %s',
+    (answer) => {
+      expect(ask(answer)).toBe('scope_claim');
+    },
+  );
+
+  test.each(['We found drought stress across the lawn.', 'We found nutrient deficiency in the turf.'])('an ungrounded diagnosis is rejected: %s', (answer) => {
+    const lawn = lawnData({ reportV2: null, lawnAssessment: null });
+    expect(screenAskAnswer(answer, { question: 'q', data: lawn, facts: buildReportAskFacts({ data: lawn }) })).toBe('target_list');
+  });
+});
