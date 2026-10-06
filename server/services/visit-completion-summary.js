@@ -5,7 +5,7 @@ const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
 const {
-  getPrimaryContact, getServiceContactSlots, getServiceReportEmailRecipients, primaryWithheldFromReports, slotWithheldFromReports, withAccountPrimaryContact,
+  getPrimaryContact, getServiceContactSlots, getServiceReportEmailRecipients, slotWithheldFromReports, withAccountPrimaryContact,
 } = require('./customer-contact');
 // The summary text waits for a contact's own YES (recipient-optin.js).
 const { resolveServiceContactSmsRecipient } = require('./recipient-optin');
@@ -17,12 +17,9 @@ const ContactReportText = require('./contact-report-text');
 // phone, or the gate off: the slot-1 contact rule, except that a slot-1
 // contact the report is withheld from (a tenant, or an occupant on a
 // property-manager account) never gets the summary: the account holder does,
-// or nobody by text when the holder has no phone or is that tenant.
+// or nobody by text when the holder has no phone.
 async function summarySmsRecipient(customer, opts) {
   const primary = getPrimaryContact(customer);
-  // A property profile whose own contact is a tenant on a manager's account:
-  // nobody here may read the summary, so no text (the manager gets the email).
-  if (primaryWithheldFromReports(customer)) return { ...primary, phone: '', role: 'primary' };
   if (ContactReportText.enabled() && primary.phone) return primary;
   const recipient = await resolveServiceContactSmsRecipient(customer, opts);
   const slot1 = getServiceContactSlots(customer)[0];

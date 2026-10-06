@@ -271,7 +271,10 @@ function serviceReportEmailOptedOut(prefs) {
 // (property-manager vendor agreements require it). Slots added by hand carry
 // no role, so on a manager account they count as occupants; a manager-side
 // copy goes through the billing recipient instead. Appointment texts are
-// unchanged: an occupant still needs to know when the tech arrives.
+// unchanged: an occupant still needs to know when the tech arrives. A
+// profile's own account holder always gets their own reports (owner
+// 2026-10-05): to keep a tenant out, list them as an on-site contact under
+// the manager's or owner's profile, never as a profile's holder.
 const REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT = new Set(['property_manager', 'landlord']);
 
 // The account-level role. A primary (or unlinked) profile's own contact_role
@@ -294,13 +297,6 @@ function slotWithheldFromReports(customer, slot) {
   const role = String(slot?.contactRole || '').trim().toLowerCase();
   if (role === 'tenant') return true;
   return managedAccount(customer) && !REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT.has(role);
-}
-
-// The row's own contact is withheld too when it is a property profile whose
-// contact is a tenant (the occupant of someone else's rental), whoever owns
-// the account. A tenant who is the account itself gets their own reports.
-function primaryWithheldFromReports(customer) {
-  return clean(customer?.contact_role).toLowerCase() === 'tenant' && isSecondaryProfile(customer);
 }
 
 function getServiceReportEmailRecipients(customer, prefs = {}) {
@@ -343,7 +339,7 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
   const notifyBilling = prefs.service_report_notify_billing === true && !!clean(prefs.billing_email);
   return uniqueByEmail([
     ...recipients,
-    notifyPrimary && !primaryWithheldFromReports(customer) ? primary : null,
+    notifyPrimary ? primary : null,
     notifyBilling ? getBillingContact(customer, prefs) : null,
   ].filter(Boolean));
 }
@@ -475,7 +471,6 @@ module.exports = {
   getServiceContactSlots,
   isServiceContactRole,
   slotWithheldFromReports,
-  primaryWithheldFromReports,
   withAccountContactRole,
   getBillingContact,
   getAppointmentContacts,
