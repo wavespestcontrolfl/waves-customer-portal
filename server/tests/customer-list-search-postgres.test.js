@@ -209,6 +209,12 @@ postgres('customer list search PostgreSQL behavior', () => {
         '00000000-0000-4000-8000-000000000010',
       ]);
       expect(await matchingIds(trx, '100 Sample Main St, Apt 6, Sarasota')).toEqual([]);
+      // The 5 of a ZIP or of unit 52 is not unit 5.
+      await trx('customer_properties').update({ address_line2: 'Apt 4', zip: '34205' });
+      expect(await matchingIds(trx, '100 Sample Main St Apt 5')).toEqual([]);
+      await trx('customer_properties').update({ address_line2: 'Apt 52' });
+      expect(await matchingIds(trx, '100 Sample Main St Apt 5')).toEqual([]);
+      await trx('customer_properties').update({ address_line2: 'Apt 5', zip: '34202' });
       await trx('customer_properties').update({ active: false });
       expect(await matchingIds(trx, '100 Sample Main St, Apt 5')).toEqual([]);
     });

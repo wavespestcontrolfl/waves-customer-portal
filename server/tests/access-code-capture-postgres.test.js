@@ -2003,6 +2003,7 @@ postgres('access codes section', () => {
     const readVisit = (id) => access.listForVisit(trx, { techRole: 'admin' }, id);
     const addPass = (c, extra = {}) => call('POST', '/', { customerId: c.id, kind: 'pass', life: 'standing', instructions: `View your pass: ${LINK}`, ...extra });
     const directoryRows = () => trx('neighborhood_access');
+    const passLinkOf = (text) => (String(text).match(/https:\/\/\S+/) || [null])[0];
 
     test('a switched-off neighborhood shares no pass, and more than twenty passes all come back', async () => {
       process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
@@ -2033,7 +2034,7 @@ postgres('access codes section', () => {
       const passId = res.body.accessCode.id;
       const atNeighbor = await visitAtHome(neighbor);
       const out = await readVisit(atNeighbor);
-      expect(out.codes).toEqual([{ id: passId, kind: 'pass', code: null, instructions: `View your pass: ${LINK}`, life: 'standing', scheduledServiceId: null, shared: true }]);
+      expect(out.codes).toEqual([{ id: passId, kind: 'pass', code: null, instructions: `Visitor pass: ${LINK}`, life: 'standing', scheduledServiceId: null, shared: true }]);
       // Nothing of the owner leaks into the projection.
       expect(JSON.stringify(out)).not.toContain(owner.id);
       // The owner sees its own pass (not marked shared); nothing is in the directory.
@@ -2083,7 +2084,8 @@ postgres('access codes section', () => {
       // A waiting (found) pass is not shared until the office accepts it.
       await found(owner.id, { kind: 'pass', code: null, instructions: 'Waiting pass text', life: 'standing' });
       await addPass(owner, { instructions: 'Scan the guest QR at the guard house' });
-      expect((await readVisit(atNeighbor)).codes.map((r) => r.instructions)).toEqual(['Scan the guest QR at the guard house']);
+      await addPass(owner);
+      expect((await readVisit(atNeighbor)).codes.map((r) => r.instructions)).toEqual([`Visitor pass: ${LINK}`]);
       await trx('customers').where({ id: owner.id }).update({ deleted_at: new Date() });
       expect((await readVisit(atNeighbor)).codes).toEqual([]);
       await trx('customers').where({ id: owner.id }).update({ deleted_at: null });
@@ -2099,12 +2101,16 @@ postgres('access codes section', () => {
       await addPass(one);
       await addPass(two);
       await addPass(one, { instructions: 'Scan the guest QR at the guard house' });
+      // Only the link crosses customers: the neighbour's words (which can name
+      // them or their street) stay theirs, and a pass with no link is not shared.
+      await addPass(two, { instructions: `Pass for Sample Owner at 4460 Example Lane: ${LINK}/two;` });
       const atMe = await visitAtHome(me);
-      expect((await readVisit(atMe)).codes.map((r) => r.instructions).sort())
-        .toEqual(['Scan the guest QR at the guard house', `View your pass: ${LINK}`]);
+      const shared = (await readVisit(atMe)).codes.map((r) => r.instructions).sort();
+      expect(shared).toEqual([`Visitor pass: ${LINK}`, `Visitor pass: ${LINK}/two`]);
+      expect(JSON.stringify(shared)).not.toMatch(/Sample|4460|guard/);
       await addPass(me);
       const out = (await readVisit(atMe)).codes;
-      expect(out.filter((r) => r.instructions === `View your pass: ${LINK}`).map((r) => r.shared)).toEqual([undefined]);
+      expect(out.filter((r) => passLinkOf(r.instructions) === LINK).map((r) => r.shared)).toEqual([undefined]);
     });
 
     test('a pass in the neighborhood is not shown when the visit moves to another neighborhood while it is read', async () => {
@@ -2168,12 +2174,12 @@ postgres('access codes section', () => {
       const neighbor = await customer({ house: '4460' });
       await inHood(owner, hoodId);
       await inHood(neighbor, hoodId);
-      await addPass(owner, { instructions: 'Scan the guest QR at the guard house' });
+      await addPass(owner);
       const atNeighbor = await visitAtHome(neighbor);
       expect((await readVisit(atNeighbor)).codes).toHaveLength(1);
       await call('POST', `/${(await rows(owner.id))[0].id}/retire`);
-      await addPass(owner, { instructions: 'Scan the new guest QR at the guard house' });
-      expect((await readVisit(atNeighbor)).codes.map((r) => r.instructions)).toEqual(['Scan the new guest QR at the guard house']);
+      await addPass(owner, { instructions: `New pass: ${LINK}/new` });
+      expect((await readVisit(atNeighbor)).codes.map((r) => r.instructions)).toEqual([`Visitor pass: ${LINK}/new`]);
     });
 
     describe('the suggested customer is a full address match', () => {

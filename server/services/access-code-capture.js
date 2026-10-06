@@ -254,13 +254,15 @@ function linksAreWhole(instructions, bodyText, quote = '') {
   return links.every((link) => whole.has(link));
 }
 
+const trimmedOrNull = (v) => (typeof v === 'string' && v.trim()) || null;
+
 // One item against the current message; the kept item or null.
 function verifyItem(item, bodyText, { refuse, phones }) {
   if (!item || !KINDS.includes(item.kind) || !LIVES.includes(item.life)) return null;
   const quote = normalizeText(item.quote);
   if (!quote || quote.length > MAX_QUOTE || !bodyText.includes(quote)) return null;
-  const code = typeof item.code === 'string' && item.code.trim() ? item.code.trim() : null;
-  const instructions = typeof item.instructions === 'string' && item.instructions.trim() ? item.instructions.trim() : null;
+  const code = trimmedOrNull(item.code);
+  const instructions = trimmedOrNull(item.instructions);
   if (instructions && instructions.length > MAX_INSTRUCTIONS) return null;
   // Directions are the customer's own words too: they must stand in the text,
   // so a grounded code never carries invented steps into a one-tap save.
@@ -1085,16 +1087,23 @@ async function listForVisit(conn, req, visitId) {
       id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId,
       ...(profileBacked(r) ? { profileBacked: true } : {}),
     }));
-  // The same pass text the customer already has is not listed twice.
-  const have = new Set(own.filter((r) => r.kind === 'pass').map((r) => normalizeText(r.instructions)));
-  return { ok: true, codes: [...own, ...shared.filter((r) => !have.has(normalizeText(r.instructions)))] };
+  // A pass link the customer already has is not listed twice.
+  const have = new Set(own.filter((r) => r.kind === 'pass').map((r) => passLinkKey(r.instructions)).filter(Boolean));
+  return { ok: true, codes: [...own, ...shared.filter((r) => !have.has(passLinkKey(r.instructions)))] };
 }
 
 // The neighbours' passes at a neighborhood: active, standing, a pass with only
 // directions (a link or how to show it, no keypad code), bound to an active
 // home in the neighborhood, of a live customer other than the visit's, from a
-// text the same customer still owns. Identical directions collapse to one row.
-// The projection carries no id of the other customer, name, quote or address.
+// text the same customer still owns. Only the pass link crosses customers:
+// the neighbour's own words can name them or their street, so the shared row
+// reads "Visitor pass: <link>" and a pass with no link is not shared. The
+// projection carries no id of the other customer, name, quote or address.
+// Identical links collapse to one row.
+// The https links of a pass, in order, as one key; '' when it has none.
+const passLinkKey = (text) => [...new Set((String(text || '').match(URL_RE) || []).map(trimLink)
+  .filter((u) => /^https:\/\//i.test(u)))].join(' ');
+
 async function neighborPasses(conn, customerId, hoodId) {
   const rows = await conn('customer_access_codes as a')
     .join('customer_properties as p', 'p.id', 'a.property_id')
@@ -1109,10 +1118,10 @@ async function neighborPasses(conn, customerId, hoodId) {
   const seen = new Set();
   const out = [];
   for (const r of rows) {
-    const key = normalizeText(r.instructions);
-    if (seen.has(key)) continue;
+    const key = passLinkKey(r.instructions);
+    if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push({ id: r.id, kind: 'pass', code: null, instructions: r.instructions, life: 'standing', scheduledServiceId: null, shared: true });
+    out.push({ id: r.id, kind: 'pass', code: null, instructions: `Visitor pass: ${key}`, life: 'standing', scheduledServiceId: null, shared: true });
   }
   return out;
 }

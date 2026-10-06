@@ -111,13 +111,15 @@ function applyCustomerSearchFilter(query, value) {
 
     // Any active home of the customer, not only the address on the customer
     // row: a second home's street finds its owner too.
-    // Every word of the search must appear in one home's address, so a
-    // pasted "100 Main St, Apt 5, Sarasota, FL 34202" finds it as written.
-    const homeText = "CONCAT_WS(' ', cp.address_line1, cp.address_line2, cp.city, cp.state, cp.zip)";
-    const homeTerms = terms.length ? terms : [search];
-    this.orWhereRaw(`EXISTS (SELECT 1 FROM customer_properties cp WHERE cp.customer_id = customers.id AND cp.active
-      AND ${homeTerms.map(() => `${homeText} ILIKE ? ESCAPE '\\'`).join(' AND ')})`,
-    homeTerms.map((term) => `%${escapeLikePattern(term)}%`));
+    // Every word of the search must be a whole word of one home's address, so
+    // a pasted "100 Main St, Apt 5, Sarasota, FL 34202" finds it as written and
+    // "Apt 5" never matches the 5 in another home's ZIP or unit 52.
+    if (terms.length) {
+      const homeText = "CONCAT_WS(' ', cp.address_line1, cp.address_line2, cp.city, cp.state, cp.zip)";
+      this.orWhereRaw(`EXISTS (SELECT 1 FROM customer_properties cp WHERE cp.customer_id = customers.id AND cp.active
+        AND ${terms.map(() => `${homeText} ~* ?`).join(' AND ')})`,
+      terms.map((term) => `\\m${term}\\M`));
+    }
   });
 }
 
