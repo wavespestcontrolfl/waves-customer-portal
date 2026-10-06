@@ -143,10 +143,11 @@ test('a rescheduled phantom row never publishes as the lawn nextVisit — the re
   const nextVisit = data.reportV2.snapshot?.nextVisit;
   expect(nextVisit).toBeTruthy();
   expect(nextVisit.source).toBe('scheduled');
+  // A date outside this calendar year names its year.
   const expectedLabel = new Date('2999-02-03T12:00:00Z')
-    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   const phantomLabel = new Date('2999-01-02T12:00:00Z')
-    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+    .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   expect(nextVisit.label).toBe(expectedLabel);
   expect(nextVisit.label).not.toBe(phantomLabel);
 });

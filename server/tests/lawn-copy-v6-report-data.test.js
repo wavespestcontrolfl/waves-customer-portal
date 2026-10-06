@@ -414,6 +414,44 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         expect(multi.data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
+      // Prod shape (2026-10-06): the customer's recurring lawn rows (Nov 2 and
+      // on) carry NO property_id and no stamp; the one row with a property_id
+      // is a year out. The report's own visit is linked to the primary property.
+      const PRIMARY = { id: 'prop-primary', customer_id: CUSTOMER, address_line1: '100 Test Palm Way', address_line2: null, city: 'Bradenton', zip: '34201', is_primary: true };
+      const nullPropertyRows = (nextYear = {}) => ({
+        scheduled_services: [
+          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Every 6 Weeks Lawn Care Service', property_id: 'prop-primary' },
+          { id: 'ss-nov', customer_id: CUSTOMER, scheduled_date: '2026-11-02', status: 'pending', service_type: 'Every 6 Weeks Lawn Care Service', property_id: null },
+          { id: 'ss-dec', customer_id: CUSTOMER, scheduled_date: '2026-12-15', status: 'pending', service_type: 'Every 6 Weeks Lawn Care Service', property_id: null },
+          { id: 'ss-next-year', customer_id: CUSTOMER, scheduled_date: '2027-08-29', status: 'pending', service_type: 'Every 6 Weeks Lawn Care Service', property_id: 'prop-primary', ...nextYear },
+        ],
+        customer_properties: [PRIMARY],
+        customers: [{ id: CUSTOMER, has_multi_home: false }],
+      });
+      const svcAtPrimary = () => ({ ...service(records()['svc-cur'].structured_notes), address_line1: '100 Test Palm Way', city: 'Bradenton', zip: '34201' });
+
+      test('rows with no property_id, stamp or estimate link count at the primary property: the earlier one is the next visit, not a year-out linked one', async () => {
+        live();
+        const { data } = await render(records(), nullPropertyRows(), svcAtPrimary());
+        expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' });
+        expect(data.reportV2.snapshot.nextVisit.label).toMatch(/November 2/);
+      });
+
+      test('a far-off date names its year, so it can never read as a past date', async () => {
+        live();
+        const { data } = await render(records(), { scheduled_services: [
+          { id: 'ss-cur', customer_id: CUSTOMER, scheduled_date: '2026-09-30', status: 'completed', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+          { id: 'ss-far', customer_id: CUSTOMER, scheduled_date: '2027-08-29', status: 'pending', service_type: 'Lawn Care Treatment Program', ...HOME_A },
+        ] });
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Sunday, August 29, 2027');
+      });
+
+      test('a date in this calendar year keeps the short label', async () => {
+        live();
+        const { data } = await render(records(), nullPropertyRows(), svcAtPrimary());
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Monday, November 2');
+      });
+
       test('two lawn jobs on one day: the one at this home is shown whichever order they come back in', async () => {
         live();
         const here = { id: 'ss-b', customer_id: CUSTOMER, scheduled_date: '2027-01-15', status: 'confirmed', service_type: 'Lawn Care Treatment Program', ...HOME_A };
