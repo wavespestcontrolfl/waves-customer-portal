@@ -2369,6 +2369,20 @@ headline + what we saw (+ why it matters only for needs_attention) with no
 line; tree & shrub ignores `lead`. The lawn PDF cache signature carries a lead
 stamp while the gate is on, so gate-off PDFs are never served after the flip
 (or the reverse on rollback).
+`GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES` (dark, read at call time; gate off leaves the
+payload, the PDF and every cached PDF key byte-identical) changes the lawn
+`/api/reports/:token/data` payload and the PDF that share `buildReportV1Data`
+(lawn only; no new route, token, privacy or rate-limit surface). When a lawn visit's
+coverage zones are only the schematic defaults, meaning no active `property_zones`
+row keeps a technician satellite mark (a non-empty `geometry_image`) after drift
+resolution (zone rows with no mark, or marks dropped as untrusted, count as
+defaults), the payload carries `serviceCoverage: { enabled: false }` in place of
+the A-D perimeter coverage list, and adds one optional key
+`lawnCoverageHidden: true` (absent otherwise). The PDF reads that key and prints no
+generated "Where we treated" map or A-D legend either; a real technician-traced
+treatment map still prints. While the gate is live the lawn PDF signature
+(`lawnAssessmentPdfSignature`) carries `:covhide=1`, so PDFs cached before a flip
+re-render, and re-render again when the gate is turned off.
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit

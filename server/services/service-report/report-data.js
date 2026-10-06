@@ -2818,6 +2818,12 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES drops the PDF's coverage list, map and
+  // zone legend for a lawn visit with only schematic default zones, so a PDF
+  // cached before a flip is never served after it, and the stamp leaving on
+  // rollback re-keys it back. Rides only while the gate is live (lawn only:
+  // this function returns early for other lines).
+  if (featureGates.lawnCoverageHideDefaultZonesLive()) irrigationStamp += ':covhide=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
@@ -4255,9 +4261,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     height: 340,
   }, { allOrNothing: true });
   const zones = resolvedDbZones.length ? resolvedDbZones : defaultZones(areaLabels, serviceLine);
-  // No technician-marked zone rows: the zones are schematic defaults (stock
-  // rectangles named after the chipped areas), not places anyone marked.
-  const coverageZonesAreDefaults = !resolvedDbZones.length;
+  // "Defaults" = no zone keeps a technician satellite mark AFTER drift
+  // resolution (the same predicate the satellite overlay uses: a non-empty
+  // geometry_image). Zone rows alone prove nothing: property-zones.js creates
+  // rows with only stock schematic geometry and clears geometry_image without
+  // deleting the row, and resolveZoneRowsImageDrift nulls untrusted marks.
+  const coverageZonesAreDefaults = !resolvedDbZones.some((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0);
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
@@ -7250,6 +7259,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     companionReports,
     metrics,
     mapSvg,
+    // Only present while GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES hides a lawn
+    // visit's default-zone coverage: the PDF then prints no schematic map or
+    // A-D legend either (they come from the same default zones). Absent = the
+    // payload is byte-identical to before.
+    ...(hideDefaultLawnCoverage ? { lawnCoverageHidden: true } : {}),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {
