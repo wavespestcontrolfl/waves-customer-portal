@@ -169,9 +169,12 @@ describe('property-lookup callers declare their scope decision', () => {
       }
     }
     expect(nonCanonical).toEqual([]);
-    const expected = Object.fromEntries(Object.entries(CALLERS).map(([id, c]) => [id, [c.file]]));
-    // Each id appears in its own file only (a file may call it more than once).
-    const actual = Object.fromEntries(Object.entries(uses).map(([id, fs_]) => [id, [...new Set(fs_)]]));
+    // Each id appears in its own file only, exactly `calls` times: a second
+    // lookup purpose added to the same file is a new caller that must
+    // declare its own policy (or a reviewed count bump), not a free reuse of
+    // this one's suite-sizing decision.
+    const expected = Object.fromEntries(Object.entries(CALLERS).map(([id, c]) => [id, { files: [c.file], calls: c.calls }]));
+    const actual = Object.fromEntries(Object.entries(uses).map(([id, fs_]) => [id, { files: [...new Set(fs_)], calls: fs_.length }]));
     expect(actual).toEqual(expected);
   });
 
@@ -184,6 +187,7 @@ describe('property-lookup callers declare their scope decision', () => {
     for (const [id, c] of Object.entries(CALLERS)) {
       expect(['staff', 'automation', 'public', 'customer']).toContain(c.surface);
       expect(typeof c.suiteSizing).toBe('boolean');
+      expect(Number.isInteger(c.calls) && c.calls >= 1).toBe(true);
       expect(c.why.length).toBeGreaterThan(8);
       expect(fs.existsSync(path.join(SERVER_ROOT, c.file))).toBe(true);
       if (c.surface === 'public' || c.surface === 'customer') expect(c.suiteSizing).toBe(false);

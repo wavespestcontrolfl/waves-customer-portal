@@ -21,38 +21,40 @@
  *                       or a cache warm whose consumer decides for itself
  */
 
-// `file`: the ONE production file that may use this id (relative to server/).
-// The guard test fails when an id is used anywhere else, so a new surface
-// cannot borrow another caller's decision.
+// `file`: the ONE production file that may use this id (relative to server/),
+// and `calls`: how many times that file uses it. The guard test fails when
+// an id is used anywhere else, or more times than declared, so a new
+// surface, even one added inside the same file, cannot borrow another
+// caller's decision without its own entry (or a reviewed count bump).
 // Each entry is frozen too (`freezeEntries` below): a consumer that loads
 // first cannot flip `CALLERS.public_quote.suiteSizing` and opt a customer
 // surface in for every later caller.
 const CALLERS = freezeEntries({
   // Staff, can answer: the admin estimate tool's own lookup route (occupancy
   // buttons on the panel; wholeProperty for an association job).
-  admin_estimate_tool: { surface: 'staff', suiteSizing: true, file: 'routes/property-lookup-v2.js', why: 'the panel asks and answers the scope question' },
+  admin_estimate_tool: { surface: 'staff', suiteSizing: true, calls: 1, file: 'routes/property-lookup-v2.js', why: 'the panel asks and answers the scope question' },
   // Automation that drafts a priced estimate from a call: the composer's own
   // commercial verdict answers for it, and an unresolved scope goes red.
-  estimator_engine: { surface: 'automation', suiteSizing: true, file: 'services/estimator-engine/index.js', why: 'the engine answers scope from the call and refuses to price an unresolved one' },
+  estimator_engine: { surface: 'automation', suiteSizing: true, calls: 1, file: 'services/estimator-engine/index.js', why: 'the engine answers scope from the call and refuses to price an unresolved one' },
   // Staff, but no answer surface: the legacy GET lookup route (no client
   // reads it today) and the Intelligence Bar's lookup tool. A suite question
   // raised here could not be answered, and its 409 at pricing would block
   // the bar. Suite sizing stays with the admin estimate tool.
-  admin_lookup_get: { surface: 'staff', suiteSizing: false, file: 'routes/admin-property-lookup.js', why: 'no answer surface' },
-  intelligence_bar_lookup: { surface: 'staff', suiteSizing: false, file: 'services/intelligence-bar/estimate-tools.js', why: 'no answer surface; suite sizing is the estimate tool\'s' },
+  admin_lookup_get: { surface: 'staff', suiteSizing: false, calls: 1, file: 'routes/admin-property-lookup.js', why: 'no answer surface' },
+  intelligence_bar_lookup: { surface: 'staff', suiteSizing: false, calls: 1, file: 'services/intelligence-bar/estimate-tools.js', why: 'no answer surface; suite sizing is the estimate tool\'s' },
   // Staff editor for lawn / bed / tree areas: the building is not what it
   // measures.
-  property_service_areas: { surface: 'staff', suiteSizing: false, file: 'services/property-service-areas.js', why: 'area editor; building size is not read' },
+  property_service_areas: { surface: 'staff', suiteSizing: false, calls: 1, file: 'services/property-service-areas.js', why: 'area editor; building size is not read' },
   // Cache warm after a call: the engine opts in itself when it runs.
-  call_cache_warm: { surface: 'automation', suiteSizing: false, file: 'services/call-property-lookup.js', why: 'warms the shared cache; the consumer decides' },
+  call_cache_warm: { surface: 'automation', suiteSizing: false, calls: 1, file: 'services/call-property-lookup.js', why: 'warms the shared cache; the consumer decides' },
   // Customer-facing: the website quote and lookup, the portal / chat pricing,
   // the service report cross-sell and its warm. Never a Places listing, never
   // a suite size (#4840: public surfaces keep the ordinary lookup).
-  public_property_lookup: { surface: 'public', suiteSizing: false, file: 'routes/public-property-lookup.js', why: 'customer surface' },
-  public_quote: { surface: 'public', suiteSizing: false, file: 'routes/public-quote.js', why: 'customer surface, cache-only' },
-  customer_pricing_ai: { surface: 'customer', suiteSizing: false, file: 'services/customer-pricing-ai.js', why: 'customer self-quote' },
-  report_cross_sell: { surface: 'customer', suiteSizing: false, file: 'services/service-report/cross-sell.js', why: 'customer report, cache-only' },
-  report_cross_sell_prewarm: { surface: 'automation', suiteSizing: false, file: 'services/service-report/evidence-prewarm.js', why: 'warms the cross-sell cache for a customer report' },
+  public_property_lookup: { surface: 'public', suiteSizing: false, calls: 1, file: 'routes/public-property-lookup.js', why: 'customer surface' },
+  public_quote: { surface: 'public', suiteSizing: false, calls: 1, file: 'routes/public-quote.js', why: 'customer surface, cache-only' },
+  customer_pricing_ai: { surface: 'customer', suiteSizing: false, calls: 1, file: 'services/customer-pricing-ai.js', why: 'customer self-quote' },
+  report_cross_sell: { surface: 'customer', suiteSizing: false, calls: 1, file: 'services/service-report/cross-sell.js', why: 'customer report, cache-only' },
+  report_cross_sell_prewarm: { surface: 'automation', suiteSizing: false, calls: 1, file: 'services/service-report/evidence-prewarm.js', why: 'warms the cross-sell cache for a customer report' },
 });
 
 function freezeEntries(registry) {
