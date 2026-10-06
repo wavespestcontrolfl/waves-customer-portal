@@ -3,7 +3,7 @@
  *
  *   GET  /api/tech/dictation/availability  -> { available }
  *   POST /api/tech/dictation                -> { text }
- *        multipart: audio (the clip), duration_seconds, customer_id?, service_id?
+ *        multipart: audio (the clip), duration_seconds; query: customer_id?, service_id?
  *
  * Every staff mic (client/src/hooks/useSpeechDictation.js) records a clip and
  * posts it here instead of using the browser's speech recognition, which on an
@@ -14,6 +14,15 @@
  * own records (services/dictation-word-list.js). The client sends ids only,
  * never prompt text. Admin and technician logins both reach it; it answers only
  * with the words the caller spoke, so a context id never returns record data.
+ *
+ * Context ids ride the QUERY STRING (?customer_id=&service_id=), not the body, so
+ * the ownership fence below runs before multer buffers the clip. A technician's
+ * context id must belong to them (their assigned visit, or a customer they have a
+ * current visit for: services/technician-visit-scope.js, the fence tech-track and
+ * the SMS inbox use); a failed fence DROPS the id, the clip still transcribes and
+ * the prompt just carries no customer. Dropping, not a 403: the mic keeps working
+ * for a visit that was just reassigned, and the answer never says whether a
+ * customer or visit exists. Admins are unrestricted.
  *
  * Nothing is stored: no row, no S3 object. The audit line carries sizes and
  * counts only, never the audio or the words (audio has no ledger: lane-policies
@@ -48,6 +57,27 @@ const dictationLimiter = rateLimit({
 const { UUID_RE } = require('../services/dictation-word-list');
 const uuidOrNull = (value) => (UUID_RE.test(String(value || '')) ? String(value) : null);
 
+const db = require('../models/db');
+const { isTechnicianRequest, technicianServicesCustomer, technicianVisitRowInScope } = require('../services/technician-visit-scope');
+
+// The context ids the caller may steer the word list with, as a plain object on
+// req. Runs before the upload is buffered.
+async function fenceContext(req, res, next) {
+  try {
+    let customerId = uuidOrNull(req.query?.customer_id);
+    let serviceId = uuidOrNull(req.query?.service_id);
+    if (isTechnicianRequest(req)) {
+      if (serviceId) {
+        const svc = await db('scheduled_services').where({ id: serviceId }).first('id', 'technician_id', 'status', 'scheduled_date');
+        if (!svc || !technicianVisitRowInScope(req, svc)) serviceId = null;
+      }
+      if (customerId && !(await technicianServicesCustomer(req, customerId))) customerId = null;
+    }
+    req.dictationContext = { customerId, serviceId };
+    return next();
+  } catch (err) { return next(err); }
+}
+
 const gateOn = () => featureGates.serverDictationLive() === true;
 const NOT_AVAILABLE = { error: 'Server dictation is not available' };
 
@@ -57,17 +87,16 @@ router.get('/availability', (req, res) => {
 
 // Gate first, so a gate-off request never costs 15 MB of memory in multer.
 router.post('/', (req, res, next) => (gateOn() ? next() : res.status(404).json(NOT_AVAILABLE)),
-  dictationLimiter, dictationAudioUpload(), async (req, res, next) => {
+  dictationLimiter, fenceContext, dictationAudioUpload(), async (req, res, next) => {
     try {
       if (!req.file || !req.file.buffer?.length) return res.status(400).json({ error: 'No audio provided' });
       const { baseType, filename } = dictationClipType(req.file);
       if (!filename) return res.status(415).json({ error: `Unsupported audio type: ${baseType || 'unknown'}` });
 
-      // Ids only. The prompt is built here from our own records; nothing the
-      // client sends other than an id ever reaches the transcriber.
+      // Ids only, already fenced. The prompt is built here from our own records;
+      // nothing the client sends other than an id ever reaches the transcriber.
       const { buildDictationPrompt } = require('../services/dictation-word-list');
-      const customerId = uuidOrNull(req.body?.customer_id);
-      const serviceId = uuidOrNull(req.body?.service_id);
+      const { customerId, serviceId } = req.dictationContext;
       const prompt = await buildDictationPrompt({ customerId, serviceId });
 
       const { transcribeWithOpenAI, isImplausibleTranscript } = require('../services/call-recording-processor');

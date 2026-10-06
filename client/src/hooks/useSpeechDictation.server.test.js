@@ -40,14 +40,16 @@ const yes = (body) => ({ ok: true, json: async () => body });
 // Routes fetch by URL: availability answers `available`, the clip POST answers `clip`.
 function stubServer({ available = true, clip = yes({ text: "Treated the lanai for roaches." }) } = {}) {
   const fn = vi.fn(async (url, opts) => {
-    if (String(url).endsWith("/tech/dictation/availability")) return typeof available === "function" ? available() : yes({ available });
-    if (String(url).endsWith("/tech/dictation") && opts?.method === "POST") return clip;
+    const path = String(url).split("?")[0];
+    if (path.endsWith("/tech/dictation/availability")) return typeof available === "function" ? available() : yes({ available });
+    if (path.endsWith("/tech/dictation") && opts?.method === "POST") return clip;
     throw new Error(`unexpected fetch ${url}`);
   });
   vi.stubGlobal("fetch", fn);
   return fn;
 }
-const callsTo = (fn, suffix) => fn.mock.calls.filter(([url]) => String(url).endsWith(suffix));
+const postsTo = (fn) => fn.mock.calls.filter(([url, o]) => String(url).split("?")[0].endsWith("/tech/dictation") && o?.method === "POST");
+const callsTo = (fn, suffix) => fn.mock.calls.filter(([url]) => String(url).split("?")[0].endsWith(suffix));
 
 beforeEach(() => {
   forgetServerDictation();
@@ -99,18 +101,20 @@ describe("useSpeechDictation with server dictation on", () => {
     expect(alert).not.toHaveBeenCalled();
   });
 
-  it("sends ids only: the customer and visit the field belongs to, never words", async () => {
+  it("sends ids only, in the query (the server checks them before it reads the clip), never words", async () => {
     const fetchMock = stubServer();
     const { result } = renderHook(() => useSpeechDictation(vi.fn(), { dictationContext: { customerId: CUSTOMER, serviceId: SERVICE } }));
     await waitFor(() => expect(result.current.mode).toBe("upload"));
     await act(async () => { result.current.toggle(); });
     await waitFor(() => expect(result.current.listening).toBe(true));
     await act(async () => { result.current.toggle(); });
-    await waitFor(() => expect(callsTo(fetchMock, "/tech/dictation").some(([, o]) => o?.method === "POST")).toBe(true));
-    const body = callsTo(fetchMock, "/tech/dictation").find(([, o]) => o?.method === "POST")[1].body;
-    expect([...body.keys()].sort()).toEqual(["audio", "customer_id", "duration_seconds", "service_id"]);
-    expect(body.get("customer_id")).toBe(CUSTOMER);
-    expect(body.get("service_id")).toBe(SERVICE);
+    await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+    const [url, opts] = postsTo(fetchMock)[0];
+    const query = new URL(url, "http://x").searchParams;
+    expect([...query.keys()].sort()).toEqual(["customer_id", "service_id"]);
+    expect(query.get("customer_id")).toBe(CUSTOMER);
+    expect(query.get("service_id")).toBe(SERVICE);
+    expect([...opts.body.keys()].sort()).toEqual(["audio", "duration_seconds"]);
   });
 
   it("a visit id given for the older upload path is also the visit context", async () => {
@@ -120,8 +124,8 @@ describe("useSpeechDictation with server dictation on", () => {
     await act(async () => { result.current.toggle(); });
     await waitFor(() => expect(result.current.listening).toBe(true));
     await act(async () => { result.current.toggle(); });
-    await waitFor(() => expect(callsTo(fetchMock, "/tech/dictation").some(([, o]) => o?.method === "POST")).toBe(true));
-    expect(callsTo(fetchMock, "/tech/dictation").find(([, o]) => o?.method === "POST")[1].body.get("service_id")).toBe(SERVICE);
+    await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+    expect(new URL(postsTo(fetchMock)[0][0], "http://x").searchParams.get("service_id")).toBe(SERVICE);
     // the per-visit availability route is not asked when the server transcribes every mic
     expect(fetch.mock.calls.some(([url]) => String(url).includes("/tech/services/"))).toBe(false);
   });
@@ -153,6 +157,66 @@ describe("useSpeechDictation with server dictation on", () => {
     await act(async () => { resolveClip(yes({ text: "Words for the first customer." })); });
     await waitFor(() => expect(result.current.uploading).toBe(false));
     expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("a target change mid-RECORDING: the clip is sent for the customer it was started on and its words are dropped, never put into the new field", async () => {
+    const onTranscript = vi.fn();
+    const fetchMock = stubServer();
+    const B = "33333333-3333-4333-8333-333333333333";
+    const { result, rerender } = renderHook(({ customerId }) => useSpeechDictation(onTranscript, { dictationContext: { customerId } }), { initialProps: { customerId: CUSTOMER } });
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    rerender({ customerId: B });
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(postsTo(fetchMock)).toHaveLength(1));
+    expect(new URL(postsTo(fetchMock)[0][0], "http://x").searchParams.get("customer_id")).toBe(CUSTOMER);
+    await waitFor(() => expect(result.current.uploading).toBe(false));
+    expect(onTranscript).not.toHaveBeenCalled();
+    // and a recording started on B afterwards lands on B
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.listening).toBe(true));
+    await act(async () => { result.current.toggle(); });
+    await waitFor(() => expect(onTranscript).toHaveBeenCalledWith("Treated the lanai for roaches."));
+    expect(new URL(postsTo(fetchMock)[1][0], "http://x").searchParams.get("customer_id")).toBe(B);
+  });
+
+  it("one microphone at a time: starting a second mic stops the first and hands over its clip", async () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const fetchMock = stubServer();
+    const a = renderHook(() => useSpeechDictation(first));
+    const b = renderHook(() => useSpeechDictation(second));
+    await waitFor(() => expect(a.result.current.mode).toBe("upload"));
+    await waitFor(() => expect(b.result.current.mode).toBe("upload"));
+    await act(async () => { a.result.current.toggle(); });
+    await waitFor(() => expect(a.result.current.listening).toBe(true));
+    await act(async () => { b.result.current.toggle(); });
+    await waitFor(() => expect(b.result.current.listening).toBe(true));
+    // the first mic's recording ended and was sent; only the second still records
+    expect(a.result.current.listening).toBe(false);
+    await waitFor(() => expect(first).toHaveBeenCalledWith("Treated the lanai for roaches."));
+    expect(postsTo(fetchMock)).toHaveLength(1);
+    expect(FakeRecorder.instances.filter((r) => r.state === "recording")).toHaveLength(1);
+    await act(async () => { b.result.current.toggle(); });
+    await waitFor(() => expect(second).toHaveBeenCalled());
+  });
+
+  it("a mic still waiting for the permission prompt when another mic takes over never starts recording", async () => {
+    stubServer();
+    let resolveStream;
+    navigator.mediaDevices.getUserMedia.mockImplementationOnce(() => new Promise((r) => { resolveStream = r; }));
+    const a = renderHook(() => useSpeechDictation(vi.fn()));
+    const b = renderHook(() => useSpeechDictation(vi.fn()));
+    await waitFor(() => expect(a.result.current.mode).toBe("upload"));
+    await waitFor(() => expect(b.result.current.mode).toBe("upload"));
+    act(() => { a.result.current.toggle(); });
+    await act(async () => { b.result.current.toggle(); });
+    await waitFor(() => expect(b.result.current.listening).toBe(true));
+    await act(async () => { resolveStream({ getTracks: () => [track] }); });
+    await waitFor(() => expect(a.result.current.starting).toBe(false));
+    expect(a.result.current.listening).toBe(false);
+    expect(FakeRecorder.instances).toHaveLength(1);
   });
 
   it("a recording ends when the page is hidden and the clip is still transcribed", async () => {
@@ -208,7 +272,7 @@ describe("useSpeechDictation with server dictation off", () => {
     act(() => { result.current.toggle(); });
     expect(FakeSpeechRecognition.instances).toHaveLength(1);
     expect(FakeRecorder.instances).toHaveLength(0);
-    expect(callsTo(fetchMock, "/tech/dictation").some(([, o]) => o?.method === "POST")).toBe(false);
+    expect(postsTo(fetchMock)).toHaveLength(0);
   });
 
   it("an availability request that fails (offline, 500, 401) leaves the browser mic and is asked again next time", async () => {

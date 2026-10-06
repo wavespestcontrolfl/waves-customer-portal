@@ -11,6 +11,7 @@ import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from '../../lib/
 import { computePretreatChemistry } from '../../lib/termitePretreatRates';
 import ProjectFindingFieldInput, { hasCatalogBackedProjectFields } from './ProjectFindingFieldInput';
 import DictationButton from './DictationButton';
+import useDictationPending from '../../hooks/dictationPending';
 import useModalFocus from '../../hooks/useModalFocus';
 import {
   useCustomerCards,
@@ -443,6 +444,9 @@ export default function CreateProjectModal({
   const [recommendations, setRecommendations] = useState('');
   const [saving, setSaving] = useState(false);
   const [aiWriting, setAiWriting] = useState(false);
+  // A mic (the recommendations box or a finding field) is recording or transcribing: its words
+  // are still on the way, so Save and AI draft wait instead of reading the fields without them.
+  const dictationPending = useDictationPending();
   const [aiUseComms, setAiUseComms] = useState(true);
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
@@ -1233,6 +1237,7 @@ export default function CreateProjectModal({
   }
 
   async function handleAiDraft() {
+    if (dictationPending) return setError('Finish dictating first. The words are still being typed in.');
     if (!projectType) return setError('Pick a project type first');
     const hasFindings = Object.values(findings).some(v => String(v || '').trim());
     if (!hasFindings && !recommendations.trim()) return setError('Add at least one finding or quick note before drafting');
@@ -1441,6 +1446,7 @@ export default function CreateProjectModal({
   }
 
   async function handleSave() {
+    if (dictationPending) return setError('Finish dictating first. The words are still being typed in.');
     if (!projectType) return setError('Pick a project type');
     if (!customerId) return setError('Pick a customer');
     // Saving mid-extraction would persist the pre-extraction findings and
@@ -2661,13 +2667,13 @@ export default function CreateProjectModal({
                     <button
                       type="button"
                       onClick={handleAiDraft}
-                      disabled={aiWriting || saving || !projectType}
+                      disabled={aiWriting || saving || !projectType || dictationPending}
                       style={{
                         padding: '6px 10px', borderRadius: 8, fontSize: 11, fontWeight: wStrong,
                         background: theme === 'light' ? P.card : P.bg,
                         color: P.text, border: `1px solid ${P.border}`,
-                        cursor: (aiWriting || saving || !projectType) ? 'default' : 'pointer',
-                        opacity: (aiWriting || saving || !projectType) ? 0.55 : 1,
+                        cursor: (aiWriting || saving || !projectType || dictationPending) ? 'default' : 'pointer',
+                        opacity: (aiWriting || saving || !projectType || dictationPending) ? 0.55 : 1,
                         whiteSpace: 'nowrap',
                       }}
                     >
@@ -2777,7 +2783,7 @@ export default function CreateProjectModal({
           <button
             type="button"
             onClick={handleSave}
-            disabled={saving || !projectType || !customerId || treatmentExtract.status === 'working'}
+            disabled={saving || dictationPending || !projectType || !customerId || treatmentExtract.status === 'working'}
             style={{
               minHeight: isEstimateStyle || isSheet ? 48 : undefined,
               padding: isEstimateStyle ? '0 18px' : '10px 18px',
@@ -2786,7 +2792,7 @@ export default function CreateProjectModal({
               fontWeight: wStrong,
               background: (!projectType || !customerId || treatmentExtract.status === 'working') ? P.muted : P.accent,
               color: P.accentText, border: 'none',
-              cursor: (saving || !projectType || !customerId || treatmentExtract.status === 'working') ? 'default' : 'pointer',
+              cursor: (saving || dictationPending || !projectType || !customerId || treatmentExtract.status === 'working') ? 'default' : 'pointer',
               ...(isSheet ? { flex: 1 } : {}),
             }}
           >{saving

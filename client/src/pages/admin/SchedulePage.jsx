@@ -129,6 +129,7 @@ import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.js
 import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import useDictationPending from "../../hooks/dictationPending";
 import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
@@ -12176,6 +12177,9 @@ export function CompletionPanel({
     // spells this customer's name right (ids only).
     { uploadServiceId: service?.id, dictationContext: { customerId: service?.customerId || service?.customer_id, serviceId: service?.id } },
   );
+  // A finding-field mic (DictationButton) recording or transcribing: its words are still on the
+  // way, so Generate and Complete wait for them like they do for the notes mic above.
+  const anyDictationPending = useDictationPending();
   // Customer email isn't on the schedule payload (only name/phone are), so fetch
   // it for the header contact card's tap-to-email link. The same fetch surfaces
   // the account's default payer for the third-party-billing banner below.
@@ -16674,7 +16678,7 @@ export function CompletionPanel({
     // chunk (and the mic is disabled). Upload-mode dictation transcribes
     // AFTER the mic stops (an async server round-trip), so a snapshot taken
     // now would miss it. Hold the action until the transcript has landed.
-    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+    if (anyDictationPending || (dictation.mode === "upload" && (dictation.starting || dictation.listening || dictation.uploading))) {
       alert("Stop dictation and wait for the transcript to appear in your notes first.");
       return;
     }
@@ -17848,7 +17852,7 @@ export function CompletionPanel({
     if (completionPricingPending) return;
     // Upload-mode dictation lands asynchronously after the mic stops; a
     // completion posted now would ship notes without it (pre-push P1).
-    if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
+    if (anyDictationPending || (dictation.mode === "upload" && (dictation.starting || dictation.listening || dictation.uploading))) {
       alert("Stop dictation and wait for the transcript to appear in your notes before completing.");
       return;
     }

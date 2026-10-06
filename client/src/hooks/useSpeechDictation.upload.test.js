@@ -5,11 +5,10 @@ import useSpeechDictation from "./useSpeechDictation";
 
 // These tests cover the per-visit upload fallback with GATE_SERVER_DICTATION off;
 // the server-dictation path has its own file (useSpeechDictation.server.test.js).
-vi.mock("./serverDictation", () => ({
+vi.mock("./serverDictation", async (importOriginal) => ({
+  ...(await importOriginal()),
   checkServerDictation: vi.fn(async () => false),
   knownServerDictation: vi.fn(() => false),
-  forgetServerDictation: vi.fn(),
-  transcribeOnServer: vi.fn(),
 }));
 
 class FakeRecorder {
