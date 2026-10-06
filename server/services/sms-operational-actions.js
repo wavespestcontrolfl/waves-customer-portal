@@ -997,9 +997,12 @@ function headlineWords(quote, description, redact) {
     const lead = needsEdge(chars) ? '(?<![\\p{L}\\p{N}\\p{M}_])' : '';
     const tail = needsEdge([...chars].reverse()) ? '(?![\\p{L}\\p{N}\\p{M}_])' : '';
     const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(quote);
-    // The headline is one sentence (admin-alert-compose), so a description
-    // that runs across a sentence break keeps only its first sentence.
-    if (found) return compose.firstSentence(found[0]).replace(/[.!?]+$/, '');
+    // The headline is one plain sentence (admin-alert-compose rejects
+    // exclamations and multi-sentence text). A slice with any sentence
+    // punctuation inside keeps today's headline instead, so this branch can
+    // only ever narrow plain words.
+    const slice = found && found[0].replace(/[.!?。！？]+$/u, '');
+    if (slice && !/[.!?。！？]/u.test(slice)) return slice;
   }
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }

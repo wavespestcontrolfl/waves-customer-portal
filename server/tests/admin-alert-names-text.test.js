@@ -158,10 +158,11 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(lastCall()[2]).toBe('We said “وسأرسلها غدا” (Sep 29) — nothing on record shows it done.');
   });
 
-  test('a description that runs across a sentence break keeps only its first sentence', async () => {
-    const quote = 'Thanks! I will mail the receipt. Then I will call you Friday';
-    await ring({ row: { kind: 'other', description: 'mail the receipt. Then I will call you', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
-    expect(lastCall()[2]).toBe('We said “mail the receipt” (Sep 29) — nothing on record shows it done.');
+  test('a matched slice with sentence punctuation inside keeps the first-sentence headline', async () => {
+    await ring({ row: { kind: 'other', description: 'mail the receipt. Then I will call you', evidence: [{ quote: 'I will mail the receipt. Then I will call you Friday' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “I will mail the receipt” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'call! then issue the refund', evidence: [{ quote: 'Okay. I will call! then issue the refund' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
   });
 
   test('a description that is not in the quote keeps the first sentence', async () => {
