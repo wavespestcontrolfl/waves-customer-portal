@@ -8,33 +8,37 @@
       "No N or P from June 1 through September 30 (North Port: April 1). Reclaimed-water lawns (purple pipes or caps): the tech logs half the N at every N visit; the app does not adjust it yet.",
       "No pre-emergent on sod in its first growing season or on thin or recovering turf. Customer waters in 0.5 in within 24 hours after a pre-emergent.",
       "Fungicide, insecticide and post-emergent products are spot work only. The one exception is May Tetrino on sunny turf.",
-      "Never use the same chemical group twice in a row on one lawn.",
+      "Never use the same chemical group twice in a row on the same target. This applies to curative fungicide, insecticide and post-emergent sequences, not to pre-emergents: all of them are Group 3 this season (owner accepted 2026-10-06). The take-all Artavia pair (two applications 28 days apart) is the labeled exception.",
       "Large patch: Artavia, then Velista. Prevent on mapped areas in October and November when the soil falls through 80 F, at 2 gal per 1,000 sq ft.",
       "Gray leaf spot: Artavia, then Gravex.",
       "Take-all: Artavia on mapped areas, two applications 28 days apart in spring and again in fall. No curative once the roots are black.",
       "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G.",
-      "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck.",
+      "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
-      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Repeat sedge: Dismiss, November to March only.",
+      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Dry spots: Dispatch Sprayable.",
-      "No soil tests."
+      "No soil tests.",
+      "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
+      "North Port: no Nutra-TECH on the June, August and September visits (the city fact sheet bans all turf fertilizing from April 1 to September 30; the city has not confirmed yet). The plan holds the product back and a completion that records it is flagged."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap; use Blindside after the cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.",
       "Dylox 6.2 G: spreader visits only, water in.",
-      "Dismiss: November to March only.",
+      "Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Pre-emergent: no pre-emergent on first-year sod or thin or recovering turf; customer waters in 0.5 in within 24 hours.",
       "N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).",
-      "Never repeat a chemical group on the next application."
+      "Do not repeat a chemical group on the next curative fungicide, insecticide or post-emergent application on the same target. Pre-emergents are all Group 3 this season (owner accepted 2026-10-06); the take-all Artavia pair is the labeled exception.",
+      "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
+      "North Port: no Nutra-TECH June through September until the city confirms (city fact sheet bans all turf fertilizing April 1 to September 30)."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Jan",
         "primary": "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -47,20 +51,20 @@
         "visit": 2,
         "month": "Feb",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Celsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, light weed spots only during green-up\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Celsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, light weed spots only during green-up\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       },
       {
         "visit": 3,
         "month": "Mar",
         "primary": "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -80,7 +84,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
@@ -111,13 +115,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf."
+        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 7,
         "month": "Jul",
         "primary": "Scout visit: inspect the whole lawn and treat spots only, no whole-lawn tool",
-        "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours",
+        "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -130,27 +134,27 @@
         "visit": 8,
         "month": "Aug",
         "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days",
+        "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30."
+        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 9,
         "month": "Sep",
         "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30."
+        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 10,
@@ -169,27 +173,27 @@
         "visit": 11,
         "month": "Nov",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       },
       {
         "visit": 12,
         "month": "Dec",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 2.1 lb per 1,000 sq ft (0.5 lb N), spreader",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit."
+        "notes": "N rate: 0.5 lb N. Spreader visit. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       }
     ]
   },
@@ -202,33 +206,37 @@
       "No N or P from June 1 through September 30 (North Port: April 1). Reclaimed-water lawns (purple pipes or caps): the tech logs half the N at every N visit; the app does not adjust it yet.",
       "No pre-emergent on sod in its first growing season or on thin or recovering turf. Customer waters in 0.5 in within 24 hours after a pre-emergent.",
       "Fungicide, insecticide and post-emergent products are spot work only. The one exception is May Tetrino on sunny turf.",
-      "Never use the same chemical group twice in a row on one lawn.",
+      "Never use the same chemical group twice in a row on the same target. This applies to curative fungicide, insecticide and post-emergent sequences, not to pre-emergents: all of them are Group 3 this season (owner accepted 2026-10-06). The take-all Artavia pair (two applications 28 days apart) is the labeled exception.",
       "Large patch: Artavia, then Velista. Prevent on mapped areas in October and November when the soil falls through 80 F, at 2 gal per 1,000 sq ft.",
       "Gray leaf spot: Artavia, then Gravex.",
       "Take-all: Artavia on mapped areas, two applications 28 days apart in spring and again in fall. No curative once the roots are black.",
       "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G.",
-      "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck.",
+      "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
-      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Repeat sedge: Dismiss, November to March only.",
+      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Dry spots: Dispatch Sprayable.",
-      "No soil tests."
+      "No soil tests.",
+      "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
+      "North Port: no Nutra-TECH on the June, August and September visits (the city fact sheet bans all turf fertilizing from April 1 to September 30; the city has not confirmed yet). The plan holds the product back and a completion that records it is flagged."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap; use Blindside after the cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.",
       "Dylox 6.2 G: spreader visits only, water in.",
-      "Dismiss: November to March only.",
+      "Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Pre-emergent: no pre-emergent on first-year sod or thin or recovering turf; customer waters in 0.5 in within 24 hours.",
       "N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).",
-      "Never repeat a chemical group on the next application."
+      "Do not repeat a chemical group on the next curative fungicide, insecticide or post-emergent application on the same target. Pre-emergents are all Group 3 this season (owner accepted 2026-10-06); the take-all Artavia pair is the labeled exception.",
+      "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
+      "North Port: no Nutra-TECH June through September until the city confirms (city fact sheet bans all turf fertilizing April 1 to September 30)."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Jan",
         "primary": "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -241,20 +249,20 @@
         "visit": 2,
         "month": "Feb",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Celsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, light weed spots only during green-up\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Celsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, light weed spots only during green-up\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       },
       {
         "visit": 3,
         "month": "Mar",
         "primary": "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -274,7 +282,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
@@ -305,13 +313,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf."
+        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 7,
         "month": "Jul",
         "primary": "Scout visit: inspect the whole lawn and treat spots only, no whole-lawn tool",
-        "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours",
+        "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -324,27 +332,27 @@
         "visit": 8,
         "month": "Aug",
         "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days",
+        "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30."
+        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 9,
         "month": "Sep",
         "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30."
+        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 10,
@@ -363,27 +371,27 @@
         "visit": 11,
         "month": "Nov",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       },
       {
         "visit": 12,
         "month": "Dec",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 2.1 lb per 1,000 sq ft (0.5 lb N), spreader",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit."
+        "notes": "N rate: 0.5 lb N. Spreader visit. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       }
     ]
   },
@@ -396,33 +404,37 @@
       "No N or P from June 1 through September 30 (North Port: April 1). Reclaimed-water lawns (purple pipes or caps): the tech logs half the N at every N visit; the app does not adjust it yet.",
       "No pre-emergent on sod in its first growing season or on thin or recovering turf. Customer waters in 0.5 in within 24 hours after a pre-emergent.",
       "Fungicide, insecticide and post-emergent products are spot work only. The one exception is May Tetrino on sunny turf.",
-      "Never use the same chemical group twice in a row on one lawn.",
+      "Never use the same chemical group twice in a row on the same target. This applies to curative fungicide, insecticide and post-emergent sequences, not to pre-emergents: all of them are Group 3 this season (owner accepted 2026-10-06). The take-all Artavia pair (two applications 28 days apart) is the labeled exception.",
       "Large patch: Artavia, then Velista. Prevent on mapped areas in October and November when the soil falls through 80 F, at 2 gal per 1,000 sq ft.",
       "Gray leaf spot: Artavia, then Gravex.",
       "Take-all: Artavia on mapped areas, two applications 28 days apart in spring and again in fall. No curative once the roots are black.",
       "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G.",
-      "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck.",
+      "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
-      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Repeat sedge: Dismiss, November to March only.",
+      "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Dry spots: Dispatch Sprayable.",
-      "No soil tests."
+      "No soil tests.",
+      "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
+      "North Port: no Nutra-TECH on the June, August and September visits (the city fact sheet bans all turf fertilizing from April 1 to September 30; the city has not confirmed yet). The plan holds the product back and a completion that records it is flagged."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap; use Blindside after the cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.",
       "Dylox 6.2 G: spreader visits only, water in.",
-      "Dismiss: November to March only.",
+      "Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
       "Pre-emergent: no pre-emergent on first-year sod or thin or recovering turf; customer waters in 0.5 in within 24 hours.",
       "N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).",
-      "Never repeat a chemical group on the next application."
+      "Do not repeat a chemical group on the next curative fungicide, insecticide or post-emergent application on the same target. Pre-emergents are all Group 3 this season (owner accepted 2026-10-06); the take-all Artavia pair is the labeled exception.",
+      "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
+      "North Port: no Nutra-TECH June through September until the city confirms (city fact sheet bans all turf fertilizing April 1 to September 30)."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Jan",
         "primary": "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nVelista — large patch, the next application after Artavia\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -435,20 +447,20 @@
         "visit": 2,
         "month": "Feb",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Celsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, light weed spots only during green-up\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Celsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, light weed spots only during green-up\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Weed spots stay light while the lawn greens up. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       },
       {
         "visit": 3,
         "month": "Mar",
         "primary": "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide — 0.5 fl oz per 1,000 sq ft, hose\nLESCO Nutra-TECH T&O Micronutrient Package — 6 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first spring application\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -468,7 +480,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
@@ -499,13 +511,13 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf."
+        "notes": "N rate: 0 lb N. Hose visit. No N or P from June 1 through September 30. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 7,
         "month": "Jul",
         "primary": "Scout visit: inspect the whole lawn and treat spots only, no whole-lawn tool",
-        "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours",
+        "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours",
         "tiers": {
           "bronze": true,
           "silver": true,
@@ -518,27 +530,27 @@
         "visit": 8,
         "month": "Aug",
         "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days",
+        "secondary": "Artavia 2 SC (Azoxy) — gray leaf spot, hose spot treatment\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30."
+        "notes": "N rate: 0 lb N. Hose visit. Mole crickets seen: note them for Dylox 6.2 G on the next spreader visit. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 9,
         "month": "Sep",
         "primary": "LESCO Nutra-TECH T&O Micronutrient Package — 12 fl oz per 1,000 sq ft, hose",
-        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days",
+        "secondary": "Artavia 2 SC (Azoxy) — mapped take-all areas, first fall application\nAcelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30."
+        "notes": "N rate: 0 lb N. Hose visit. Hold the application when a tropical watch is posted. Sweep the lawn after any storm. No N or P from June 1 through September 30. North Port: skip Nutra-TECH on this visit until the city confirms."
       },
       {
         "visit": 10,
@@ -557,27 +569,27 @@
         "visit": 11,
         "month": "Nov",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader",
-        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Velista — mapped large patch at 2 gal per 1,000 sq ft",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.75 lb N. Spreader visit."
+        "notes": "N rate: 0.75 lb N. Spreader visit. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       },
       {
         "visit": 12,
         "month": "Dec",
         "primary": "LESCO 24-0-11 with PolyPlus OPTI — 2.1 lb per 1,000 sq ft (0.5 lb N), spreader",
-        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix\nDismiss 64 oz — repeat sedge spots only, November to March",
+        "secondary": "Artavia 2 SC (Azoxy) — active large patch, mapped areas\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
           "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit."
+        "notes": "N rate: 0.5 lb N. Spreader visit. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn."
       }
     ]
   }

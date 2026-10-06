@@ -631,6 +631,22 @@ function blackoutLockoutBlocks(plan) {
     .filter((block) => lockoutCodes.has(block.code));
 }
 
+// A product the plan held back for the city's window (North Port Nutra-TECH, June to September: it
+// has no N or P analysis, so the ordinance check cannot see it) that the closeout records as applied.
+// Flagged like the nitrogen ban: same record, same advisory line in the closeout.
+function heldProductBlocks(plan, submittedProducts = []) {
+  // Held items are not selected, so they sit in the protocol lists, not in the mix items.
+  const held = new Map([...(plan?.protocol?.base || []), ...(plan?.protocol?.conditional || [])]
+    .filter((item) => item.selectionReason === 'north_port_product_window' && item.product?.id)
+    .map((item) => [String(item.product.id), item.product.name]));
+  const applied = new Set((submittedProducts || []).map((p) => String(p.productId)).filter((id) => held.has(id)));
+  return [...applied].map((id) => ({
+    code: 'actual_north_port_product_window',
+    severity: 'block',
+    message: `${held.get(id)} is recorded as applied, but North Port bans all turf fertilizing from April 1 to September 30; the plan held it back.`,
+  }));
+}
+
 function annualNLockoutBlocks(plan) {
   return (plan?.propertyGate?.blocks || [])
     .filter((block) => block.code === 'annual_n_budget_exceeded');
@@ -5135,6 +5151,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       const blackoutBlocks = [
         ...blackoutLockoutBlocks(plan),
+        ...heldProductBlocks(plan, products),
         ...await actualProductBlackoutBlocks(svc, products, db),
       ];
       // Advisory, not a lockout (owner directive 2026-07-29: approval
@@ -15240,6 +15257,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 module.exports = {
   completeScheduledService,
   actualProductBlackoutBlocks,
+  heldProductBlocks,
   deliveryUnverifiedProviderOutcome,
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,
