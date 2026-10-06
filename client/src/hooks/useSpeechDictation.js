@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  dictationTarget, guardRecording, openRecorderSlot, pickMode, pickRecorderMime, stopQuietly, transcribeClip,
+} from "./serverDictation";
+import useServerDictationMode, { readToken } from "./useServerDictationMode";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -52,6 +56,20 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  * can hold it open); `uploading` is true while a clip is in flight. Browsers
  * with SpeechRecognition never change behavior.
  *
+ * Server dictation (GATE_SERVER_DICTATION, every mic): on a browser that can
+ * record, the hook asks `/tech/dictation/availability` once per session; when
+ * the server says yes, the mic records a clip on EVERY such browser (the
+ * browser's speech recognition is never used) and the clip is POSTed to
+ * `/tech/dictation`, where our transcriber hears it with a word list the server
+ * builds itself. Words arrive after the mic stops, not live: `mode` is "upload"
+ * and the same `starting` / `listening` / `uploading` states apply. Pass
+ * `{ dictationContext: { customerId, serviceId } }` where the field belongs to a
+ * customer or visit: the ids steer the word list (the customer's name is
+ * spelled right) and nothing else; the client never sends words for it. A
+ * recording stops on its own when the page is hidden or after CLIP_MAX_MS, as
+ * clip mode does. Gate off, key missing, or a browser that cannot record: the
+ * paths above run exactly as before.
+ *
  * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
  * the mic ALWAYS records, on every browser that can record, and hands the
  * finished clip to the handler instead of transcribing it here: no speech
@@ -70,17 +88,34 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const [uploadAvailable, setUploadAvailable] = useState(false);
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
-  // Removes the clip's hidden-page guard (set while a clip records).
+  // Ends the live recording's own bookkeeping (hidden-page guard, the app-wide
+  // one-recorder slot); set while a clip records.
   const unguardRef = useRef(null);
   // True from the first tap until getUserMedia settles: a second tap in that
   // window must not open a second stream nobody can stop. The ref answers
   // that tap synchronously; `starting` shows the same window to the caller.
   const startingRef = useRef(false);
   const [starting, setStarting] = useState(false);
-  // Current dictation target; a transcript that arrives for a previous
-  // target is dropped (the panel can move to another visit mid-upload).
-  const serviceIdRef = useRef(uploadServiceId);
-  serviceIdRef.current = uploadServiceId;
+  // The recorder slot of the latest tap; `cancel()` cancels it while the mic is
+  // still opening, so the recording never starts.
+  const openingSlotRef = useRef(null);
+
+  const speechSupported =
+    typeof window !== "undefined" &&
+    !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  const recorderSupported =
+    typeof window !== "undefined" &&
+    typeof window.MediaRecorder === "function" &&
+    !!navigator.mediaDevices?.getUserMedia;
+  const { serverMode, dropServerMode } = useServerDictationMode({ clipMode, recorderSupported });
+
+  // What this mic's words are for: the customer and visit ids of its field. A
+  // recording snapshots it at the tap (`toggleUpload`), and a transcript that
+  // comes back for a target the field has since left is dropped (the panel can
+  // move to another customer or visit mid-recording or mid-upload).
+  const target = dictationTarget(options, serverMode);
+  const targetRef = useRef(target);
+  targetRef.current = target;
   // Keep the latest callback without re-creating `toggle` each render.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
@@ -105,23 +140,16 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // result still in flight is dropped instead of landing after it.
   const discardResultsRef = useRef(false);
 
-  const speechSupported =
-    typeof window !== "undefined" &&
-    !!(window.SpeechRecognition || window.webkitSpeechRecognition);
-  const recorderSupported =
-    typeof window !== "undefined" &&
-    typeof window.MediaRecorder === "function" &&
-    !!navigator.mediaDevices?.getUserMedia;
-
   // Upload availability is only worth asking about where speech recognition
-  // is missing — the gate never changes a SpeechRecognition browser.
+  // is missing and server dictation is not on: the gate never changes a
+  // SpeechRecognition browser.
   useEffect(() => {
-    if (clipMode || speechSupported || !recorderSupported || !uploadServiceId) {
+    if (clipMode || serverMode || speechSupported || !recorderSupported || !uploadServiceId) {
       setUploadAvailable(false);
       return undefined;
     }
     let disposed = false;
-    const token = localStorage.getItem("waves_admin_token");
+    const token = readToken();
     if (!token) return undefined;
     fetch(
       `${API_BASE}/tech/services/${encodeURIComponent(uploadServiceId)}/dictation/availability`,
@@ -137,69 +165,78 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     return () => {
       disposed = true;
     };
-  }, [clipMode, speechSupported, recorderSupported, uploadServiceId]);
+  }, [clipMode, serverMode, speechSupported, recorderSupported, uploadServiceId]);
 
-  const clipOrSpeech = clipMode ? (recorderSupported ? "upload" : null) : "speech";
-  const mode = clipMode || speechSupported ? clipOrSpeech : uploadAvailable ? "upload" : null;
+  const mode = pickMode({ clipMode, recorderSupported, serverMode, speechSupported, uploadAvailable });
   const supported = mode !== null;
 
-  const uploadClip = useCallback(
+  const settleUpload = useCallback(() => {
+    if (mountedRef.current) setUploading(false);
+  }, []);
+
+  // Clip mode: the caller transcribes (Fast Complete voice fill).
+  const runClipHandler = useCallback(
     async (blob, durationSeconds) => {
-      if (clipHandlerRef.current) {
-        if (!blob || !blob.size) return;
-        setUploading(true);
-        try {
-          await clipHandlerRef.current(blob, durationSeconds);
-        } finally {
-          if (mountedRef.current) setUploading(false);
-        }
-        return;
-      }
-      const token = localStorage.getItem("waves_admin_token");
-      if (!token || !blob || !blob.size) return;
       setUploading(true);
       try {
-        const form = new FormData();
-        const type = (blob.type || "audio/webm").split(";")[0];
-        const ext = type.includes("mp4") ? "mp4" : type.includes("ogg") ? "ogg" : type.includes("wav") ? "wav" : type.includes("mpeg") ? "mp3" : "webm";
-        form.append("audio", blob, `dictation.${ext}`);
-        // Recorded seconds feed the server's transcript plausibility guard.
-        if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
-          form.append("duration_seconds", String(Math.round(durationSeconds)));
-        }
-        const r = await fetch(
-          `${API_BASE}/tech/services/${encodeURIComponent(uploadServiceId)}/dictation`,
-          { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form },
-        );
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(data?.error || `Transcription failed (HTTP ${r.status})`);
-        const text = String(data?.text || "").trim();
-        // The round trip can outlive the field: unmounted, or the panel now
-        // dictates for a different visit. Never append into the wrong notes.
-        if (!mountedRef.current || serviceIdRef.current !== uploadServiceId) return;
-        if (text && onTranscriptRef.current) onTranscriptRef.current(text);
-      } catch (e) {
-        if (mountedRef.current) alert(`Dictation error: ${e.message}`);
+        await clipHandlerRef.current(blob, durationSeconds);
       } finally {
-        if (mountedRef.current) setUploading(false);
+        settleUpload();
       }
     },
-    [uploadServiceId],
+    [settleUpload],
+  );
+
+  // `clip` is the recording's own snapshot (target at the tap), never today's props.
+  const runTranscription = useCallback(
+    async (blob, durationSeconds, clip) => {
+      const token = readToken();
+      if (!token) return;
+      setUploading(true);
+      try {
+        const text = await transcribeClip(blob, durationSeconds, clip, token);
+        // The round trip can outlive the field: unmounted, or the mic now
+        // belongs to another customer or visit. Never append into the wrong field.
+        if (!mountedRef.current || targetRef.current.key !== clip.key) return;
+        if (text && onTranscriptRef.current) onTranscriptRef.current(text);
+      } catch (e) {
+        // 404 = the gate went off mid-session: the next tap uses the browser's mic again.
+        if (clip.server && e?.status === 404 && mountedRef.current) dropServerMode();
+        if (mountedRef.current) alert(`Dictation error: ${e.message}`);
+      } finally {
+        settleUpload();
+      }
+    },
+    [dropServerMode, settleUpload],
+  );
+
+  const uploadClip = useCallback(
+    (blob, durationSeconds, clip) => {
+      if (!blob || !blob.size) return undefined;
+      return clipHandlerRef.current
+        ? runClipHandler(blob, durationSeconds)
+        : runTranscription(blob, durationSeconds, clip);
+    },
+    [runClipHandler, runTranscription],
   );
 
   const toggleUpload = useCallback(async () => {
     // Second tap stops the recording; the clip uploads on stop.
     if (recorderRef.current) {
-      try {
-        recorderRef.current.stop();
-      } catch {
-        /* already stopped */
-      }
+      stopQuietly(recorderRef.current);
       return;
     }
     if (uploading || startingRef.current) return;
     startingRef.current = true;
     setStarting(true);
+    // The words are for the field this tap was made on, even if the panel moves on.
+    const clip = targetRef.current;
+    // One microphone records at a time: claiming the slot stops the mic that
+    // holds it (and hands over its clip). A mic still opening when it loses the
+    // slot never starts.
+    const slot = openRecorderSlot(() => stopQuietly(recorderRef.current));
+    openingSlotRef.current = slot;
+    const { release } = slot;
     const doneStarting = () => {
       startingRef.current = false;
       if (mountedRef.current) setStarting(false);
@@ -208,20 +245,20 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
+      release();
       doneStarting();
       alert(`Microphone unavailable: ${e?.message || e}`);
       return;
     }
-    if (!mountedRef.current) {
-      // Unmounted while the permission prompt was open — release the mic.
+    if (!mountedRef.current || slot.cancelled()) {
+      // Unmounted, cancelled (`cancel()`), or another mic took the microphone
+      // while the permission prompt was open — release the mic.
       stream.getTracks().forEach((t) => t.stop());
+      release();
       doneStarting();
       return;
     }
-    const preferred = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-    const mimeType = preferred.find(
-      (t) => typeof window.MediaRecorder.isTypeSupported === "function" && window.MediaRecorder.isTypeSupported(t),
-    );
+    const mimeType = pickRecorderMime();
     let rec;
     try {
       rec = new window.MediaRecorder(stream, mimeType ? { mimeType } : undefined);
@@ -229,6 +266,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       // Recorder construction can throw (unsupported options, device gone):
       // release the live mic and let the tech type.
       stream.getTracks().forEach((t) => t.stop());
+      release();
       doneStarting();
       alert(`Dictation error: ${e?.message || "recorder unavailable"}`);
       return;
@@ -245,32 +283,25 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         /* already stopped */
       }
     };
-    const onHidden = () => {
-      if (document.visibilityState === "hidden") stopRecording();
-    };
-    const guarded = clipMode && typeof document !== "undefined";
-    let cutoffTimer = null;
-    const unguard = () => {
-      if (!guarded) return;
-      clearTimeout(cutoffTimer);
-      document.removeEventListener("visibilitychange", onHidden);
-      window.removeEventListener("pagehide", stopRecording);
+    // A recording never runs behind a hidden or closing page, and a forgotten
+    // mic on a visible page (a phone on a mount) ends by itself at the cutoff:
+    // the clip stops and what was recorded is handed over.
+    const guarded = (clipMode || serverMode) && typeof document !== "undefined";
+    const unguard = guarded ? guardRecording(stopRecording, clipMaxMs) : () => {};
+    if (!unguard) {
+      // Hidden while the permission prompt was open: the clip never starts.
+      stream.getTracks().forEach((t) => t.stop());
+      release();
+      doneStarting();
+      return;
+    }
+    // Everything a finished recording lets go of: the page guard and the slot.
+    const finish = () => {
+      unguard();
+      release();
       unguardRef.current = null;
     };
-    if (guarded) {
-      if (document.visibilityState === "hidden") {
-        // Hidden while the permission prompt was open: the clip never starts.
-        stream.getTracks().forEach((t) => t.stop());
-        doneStarting();
-        return;
-      }
-      document.addEventListener("visibilitychange", onHidden);
-      window.addEventListener("pagehide", stopRecording);
-      // A forgotten mic on a visible page (a phone on a mount) ends by itself:
-      // the clip stops at the cutoff and what was recorded is handed over.
-      cutoffTimer = setTimeout(stopRecording, clipMaxMs);
-      unguardRef.current = unguard;
-    }
+    unguardRef.current = finish;
     const chunks = [];
     const startedAt = Date.now();
     // onerror is followed by onstop in the MediaRecorder state machine — a
@@ -280,17 +311,17 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       if (ev.data && ev.data.size) chunks.push(ev.data);
     };
     rec.onstop = () => {
-      unguard();
+      finish();
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);
       if (recordingFailed) return;
       const blob = new Blob(chunks, { type: rec.mimeType || mimeType || "audio/webm" });
-      uploadClip(blob, (Date.now() - startedAt) / 1000);
+      uploadClip(blob, (Date.now() - startedAt) / 1000, clip);
     };
     rec.onerror = () => {
       recordingFailed = true;
-      unguard();
+      finish();
       stream.getTracks().forEach((t) => t.stop());
       recorderRef.current = null;
       setListening(false);
@@ -301,7 +332,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     } catch (e) {
       // start() can throw synchronously (state / device errors): release the
       // mic and reset so the next tap starts clean.
-      unguard();
+      finish();
       stream.getTracks().forEach((t) => t.stop());
       doneStarting();
       alert(`Dictation error: ${e?.message || "could not start recording"}`);
@@ -312,13 +343,22 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // `starting || listening` never sees a gap between them.
     doneStarting();
     setListening(true);
-  }, [uploadClip, uploading, clipMode, clipMaxMs]);
+  }, [uploadClip, uploading, clipMode, serverMode, clipMaxMs]);
 
   const toggle = useCallback((event) => {
     const SR =
       typeof window !== "undefined"
         ? window.SpeechRecognition || window.webkitSpeechRecognition
         : null;
+    // Second tap stops an in-progress session; onend sees stopRequestedRef
+    // and finishes instead of restarting. First, so a session that started
+    // before the server's answer arrived (mode flipped to upload under it) is
+    // still stopped by its own tap.
+    if (recognitionRef.current) {
+      stopRequestedRef.current = true;
+      recognitionRef.current.stop();
+      return;
+    }
     if (mode === "upload") {
       toggleUpload();
       return;
@@ -327,13 +367,6 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       alert(
         "Voice dictation isn't supported in this browser. Use the keyboard mic on your phone, or try Chrome/Safari.",
       );
-      return;
-    }
-    // Second tap stops an in-progress session; onend sees stopRequestedRef
-    // and finishes instead of restarting.
-    if (recognitionRef.current) {
-      stopRequestedRef.current = true;
-      recognitionRef.current.stop();
       return;
     }
     const rec = new SR();
@@ -539,9 +572,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
 
   // Ends a live SPEECH session for a consumer that has gone busy (e.g. a
   // disabled mic while its field is being rewritten) and drops any result
-  // still in flight. The MediaRecorder upload path records until
-  // tap-to-stop and has no in-flight speech results to drop.
+  // still in flight. On the recording path it stops a mic still waiting for
+  // the permission prompt from ever starting (a hidden tab must not record);
+  // a recording already running stops on its own tap as before.
   const cancel = useCallback(() => {
+    if (startingRef.current) openingSlotRef.current?.cancel();
     const rec = recognitionRef.current;
     if (!rec) return;
     stopRequestedRef.current = true;
