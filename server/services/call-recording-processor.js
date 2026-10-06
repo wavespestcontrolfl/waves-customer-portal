@@ -115,7 +115,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1247,6 +1247,23 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
   // is "00:00" for the elapsed comparison (codex #4890 r8 P2).
   const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
   return sameDayWindowElapsed(scheduledDate, start);
+}
+
+// Spelled-email trust (owner ruling 2026-10-05) applies only to an address no
+// customer record already holds — the ownership gate the decoder adopt and
+// the domain-typo adopt use, with no customer exempted. An address the primary extractor captured
+// itself never went through those adopt paths, so it is checked here before
+// the read-back card (and with it the first-touch hold) is dropped. Fails
+// closed: a failed lookup keeps the card.
+async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail }) {
+  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
+  // No customer is exempt: the canonical customer is not known yet (Step 3
+  // can still reassign a shared-phone call), so ANY record already holding
+  // the address keeps the read-back card.
+  const ownedByAnyone = await require('./email-bounce-recovery')
+    .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
+    .catch(() => true);
+  return !ownedByAnyone;
 }
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
@@ -6766,6 +6783,27 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   return out;
 }
 
+// Business whole-building unit waiver for one call
+// (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT; caller checks the gate). No
+// service allowlist: the owner's ruling (2026-10-06) is about the ADDRESS, a
+// business building the caller owns or occupies whole. The V2 extraction judges
+// the language (property.whole_building_occupancy plus a pinned caller quote);
+// the pure rule in call-triage-flags.js verifies it against the labeled
+// transcript and Google's business verdict. Returns the SAME verdict object
+// unless the waiver applies.
+function businessWholeBuildingUnitWaiverForCall({ addressValidation, v2Extraction = null, transcription = '', outbound = false } = {}) {
+  const property = v2Extraction?.property || {};
+  return applyBusinessWholeBuildingUnitWaiver(addressValidation, {
+    enabled: true,
+    propertyType: property.property_type,
+    wholeBuildingOccupancy: property.whole_building_occupancy,
+    wholeBuildingFinal: property.whole_building_occupancy_final,
+    evidence: v2Extraction?.evidence,
+    transcript: transcription,
+    outbound,
+  });
+}
+
 async function resolveDefaultCallBookingTechnician(conn = db) {
   const configuredId = String(process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID || '').trim();
   if (configuredId) {
@@ -8328,6 +8366,15 @@ Return ONLY valid JSON.`;
 // response_schema ("too many states for serving"), so we use plain JSON mode and
 // embed the schema as prompt guidance. Correctness is guaranteed by the two-pass
 // ajv validation in finalizeV2Extraction — the model output is never trusted directly.
+// ET wall-clock time of the call's start ("1:12 PM"), or null when the start is
+// unknown or unparseable. No fallback to now: a reprocess must not tell the
+// model the call was made at the time of the reprocess.
+function callTimeETString(callStartedAt) {
+  if (!callStartedAt) return null;
+  const at = new Date(callStartedAt);
+  return Number.isNaN(at.getTime()) ? null : formatETTime(at);
+}
+
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
 function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
   return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
@@ -8403,6 +8450,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   const callDateET = etDateString(opts.callStartedAt || new Date());
   const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
     bookableServiceNames: opts.bookableServiceNames,
+    // The call's own ET clock time, so a time agreed with no day ("I'll be
+    // there at three") can be judged against it: today when still ahead.
+    // Only from a real call start; never guessed from "now" on a reprocess.
+    callTimeET: callTimeETString(opts.callStartedAt),
     // Existing-customer hint — V1 has had this since the non-lead veto work;
     // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
     // booking (the duplicate-appointment path).
@@ -10971,7 +11022,12 @@ const CallRecordingProcessor = {
     // service is resolved the way the booking below resolves it (catalog row
     // first, coarse label only when no catalog row matched). Gate off, or any
     // non-qualifying call, returns the verdict object untouched.
-    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+    // Business whole building (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT, owner
+    // ruling 2026-10-06): the same rewrite for a business address when the
+    // caller says they own or occupy the WHOLE building. It rides the same
+    // open-card guard and persisted marker (reason 'business_whole_building'),
+    // and runs only when the whole-structure rule did not already waive the call.
+    if (v2AddressValidation && (isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)) {
       try {
         // A reprocess of a call an earlier pass parked on the unit ask: the
         // open missing_unit_number card (and its clarify draft and merged
@@ -10986,16 +11042,26 @@ const CallRecordingProcessor = {
         if (openUnitCard) {
           logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
         } else {
-          const wsAv = wholeStructureUnitWaiverForCall({
-            addressValidation: v2AddressValidation,
-            extracted,
-            preAdoptionExtracted,
-            transcription,
-            services: bookableCallServices,
-            property: v2Result?.extraction?.property,
-            v2Extraction: v2Result?.extraction,
-            unclearServiceAssessment: unclearServiceAssessmentActive(),
-          });
+          let wsAv = isEnabled('callWholeStructureNoUnit')
+            ? wholeStructureUnitWaiverForCall({
+              addressValidation: v2AddressValidation,
+              extracted,
+              preAdoptionExtracted,
+              transcription,
+              services: bookableCallServices,
+              property: v2Result?.extraction?.property,
+              v2Extraction: v2Result?.extraction,
+              unclearServiceAssessment: unclearServiceAssessmentActive(),
+            })
+            : v2AddressValidation;
+          if (wsAv === v2AddressValidation && isEnabled('callBusinessWholeBuildingNoUnit')) {
+            wsAv = businessWholeBuildingUnitWaiverForCall({
+              addressValidation: v2AddressValidation,
+              v2Extraction: v2Result?.extraction,
+              transcription,
+              outbound: isOutboundCall(call),
+            });
+          }
           if (wsAv !== v2AddressValidation) {
             // Stamp the pass's waiver on the PERSISTED verdict (status stays
             // the original) so the offline audits can rebuild the verdict the
@@ -11005,7 +11071,7 @@ const CallRecordingProcessor = {
               ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived }),
               updated_at: new Date(),
             });
-            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (${wsAv.wholeStructureUnitWaived.reason || `service ${wsAv.wholeStructureUnitWaived.service}`})`);
             v2AddressValidation = wsAv;
           }
         }
@@ -11304,6 +11370,17 @@ const CallRecordingProcessor = {
           if (onFileSatisfied.length) {
             logger.info(`[call-proc] Address flags satisfied by the on-file address for ${maskSid(callSid)}: ${onFileSatisfied.join(', ')} (no card)`);
           }
+          // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
+          // cards only; finalFlags, the route decision and the routing
+          // verdict keep every flag.
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          if (unneededCards.size) {
+            logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
+            // Only cards this pass would file are skipped. Cards an earlier
+            // pass filed keep their filing-time snapshot of the ask and are
+            // left to the evidence sweep — the rolling extraction can change
+            // under them.
+          }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -11379,7 +11456,7 @@ const CallRecordingProcessor = {
           // don't block. Without this, promoting DRIVES_ROUTING would silence the
           // identity signals the shadow bridge used to surface. onConflict dedups
           // against the blocked-branch inserts below.
-          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f) && !unneededCards.has(f)).slice(0, 10)) {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({
@@ -11490,13 +11567,13 @@ const CallRecordingProcessor = {
             const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
               ? routingResult.appointmentBlockingFlags
               : (noSchedulingAsk ? [] : [routingResult.reason || 'routing_rejected']);
-            const triageReasons = blockingReasons;
+            const triageReasons = blockingReasons.filter((f) => !unneededCards.has(f));
             // A held scheduling CHANGE (cancel / reschedule / coordination on
             // an existing visit) is owed work. The card files below, but
             // review_status is driven by bridgeNeedsConfirmation alone, so the
             // call itself looked fully processed (2026-09-02..08 audit: a
             // cancellation, two reschedules and a re-treat with no owner).
-            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
+            if (triageReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({
                 callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
@@ -11511,7 +11588,7 @@ const CallRecordingProcessor = {
             // set, so without this loop it would appear on no card at all.
             // Mirrors the allowed branch's fail-open advisory loop; onConflict
             // dedups against any same-reason row.
-            for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
+            for (const f of (routingResult.failedOpenFlags || []).filter((x) => !unneededCards.has(x)).slice(0, 10)) {
               try {
                 await db('triage_items')
                   .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11539,7 +11616,7 @@ const CallRecordingProcessor = {
             // (phone via ANI, garbled email, on-file address, low confidence) —
             // book-and-flag, never book-and-hide (owner directive).
             if (routingResult.failedOpenFlags?.length) {
-              for (const f of routingResult.failedOpenFlags) {
+              for (const f of routingResult.failedOpenFlags.filter((x) => !unneededCards.has(x))) {
                 try {
                   await db('triage_items')
                     .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11733,6 +11810,12 @@ const CallRecordingProcessor = {
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
+        // and it is the address being saved — no read-back card, no hold.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
+          const at = needsConfirmation.indexOf('email_unverified');
+          if (at !== -1) needsConfirmation.splice(at, 1);
         }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
@@ -11942,6 +12025,12 @@ const CallRecordingProcessor = {
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
+        // shadow branch.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
+          const at = emailReasons.indexOf('email_unverified');
+          if (at !== -1) emailReasons.splice(at, 1);
         }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
@@ -23119,6 +23208,7 @@ CallRecordingProcessor._test = {
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
+  businessWholeBuildingUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,
   applyUnclearServiceTranscriptVeto,
@@ -23174,6 +23264,7 @@ CallRecordingProcessor._test = {
   emailPassEvidence,
   transcribeRecording,
   extractCallDataV2,
+  callTimeETString,
   CALL_EXTRACTION_ROUTE,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,

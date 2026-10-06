@@ -34,6 +34,7 @@ const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require(
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactStreet,
   normalizeContactCity,
@@ -318,6 +319,7 @@ price: the visit price in dollars when the user states one. A stated price needs
         notes: { type: 'string' },
         customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
+        price_confirmed: { type: 'boolean', description: 'Set true ONLY after the user explicitly confirmed the stated price in reply to a price_read_back question (the stated price differed from the catalog price). Never set it on the first proposal.' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
@@ -1193,6 +1195,8 @@ async function createCustomer(input) {
   const lastName = normalizeContactName(String(input.last_name || '').trim()) || null;
   const phone = normalizeContactPhone(String(input.phone || '').trim());
   if (!firstName || !phone) return { error: 'first_name and phone are required' };
+  const phoneProblem = contactPhoneProblem(input.phone);
+  if (phoneProblem) return { error: phoneProblem };
 
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (phoneDigits.length < 10) return { error: 'phone must include at least 10 digits' };
@@ -1314,6 +1318,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // live check before this (GH r9 P1).
   if (before.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+  }
+
+  // A phone being entered now must be a number that can exist; an unchanged
+  // stored number echoed back is not a new write.
+  if (clean.phone && clean.phone !== before.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
   }
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
@@ -1647,6 +1658,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+  // A bulk write stamps one number onto every selected row, so an impossible
+  // US phone is refused here, before either execution path (codex #6028 P2).
+  if (clean.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
 
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
@@ -2362,7 +2379,41 @@ const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
 // window start. Returns { start } (null start when no time was given) or
 // { error } for garbage input, so callers return a clear tool error instead
 // of a Postgres time-cast error.
-function parseTimeWindowStart(timeWindow) {
+// The refusal for a start that is not on the hour (owner rule — every creator
+// enforces it; Codex #3109 r33 flagged this tool as the bypass). Rejects
+// rather than rounding, and names the nearest valid starts ("Visits start on
+// the hour. Use 2:00 PM or 3:00 PM.") so the model can re-ask. Each candidate
+// (the hour before and the hour after) is checked against the shared admin
+// window rule with the flat-60 duration, so a 7:30 PM request names only
+// 7:00 PM (8:00 PM would end past the day end) and an 8:30 PM request, with
+// no valid neighbor, gets the rule's own refusal as invalid_appointment_window
+// (Codex r1 on #6023, P2). A reschedule passes the visit's preserved
+// duration, so a 90-minute visit asked for 6:30 PM is offered 6:00 PM only
+// (7:00–8:30 ends past the day end; Codex r2 on #6023, P2). The codes are stable: the proposal returns them
+// with no card (W5-dev-03), and the executor refuses the same start the same
+// way if no card was ever made.
+function offHourRefusal(hour, durationMinutes = 60) {
+  const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
+  const candidates = hour + 1 > 23 ? [hour] : [hour, hour + 1];
+  const valid = [];
+  let firstRefusal = null;
+  for (const h of candidates) {
+    const start = `${String(h).padStart(2, '0')}:00`;
+    const windowEnd = deriveWindowEnd(start, durationMinutes);
+    try {
+      if (!windowEnd) throw Object.assign(new Error('That window would cross midnight — pick an earlier start.'), { status: 422 });
+      assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes });
+      valid.push(hour12(h));
+    } catch (err) {
+      if (err?.status !== 422) throw err;
+      if (!firstRefusal) firstRefusal = err.message;
+    }
+  }
+  if (!valid.length) return { error: firstRefusal, code: 'invalid_appointment_window' };
+  return { error: `Visits start on the hour. Use ${valid.join(' or ')}.`, code: 'window_not_on_the_hour' };
+}
+
+function parseTimeWindowStart(timeWindow, durationMinutes = 60) {
   if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
   const raw = String(timeWindow).trim().toLowerCase();
   if (raw === 'morning') return { start: '08:00' };
@@ -2378,13 +2429,8 @@ function parseTimeWindowStart(timeWindow) {
   if (hour > 23 || minute > 59) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
   }
-  // Appointment windows start ON THE HOUR (owner rule — every creator
-  // enforces it; Codex #3109 r33 flagged this tool as the bypass). Reject
-  // rather than silently rounding: the operator asked for a specific time
-  // and the model can re-ask with the corrected value.
-  if (minute !== 0) {
-    return { error: `Appointment windows start on the hour — got "${timeWindow}"; use e.g. "${hour > 12 ? hour - 12 : hour || 12}:00 ${hour >= 12 ? 'PM' : 'AM'}"` };
-  }
+  // Appointment windows start ON THE HOUR; see offHourRefusal.
+  if (minute !== 0) return offHourRefusal(hour, durationMinutes);
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 
@@ -2869,7 +2915,11 @@ function ibBookingCustomerRequest(rawRequest, catalogRow) {
 // booking will carry and a booking that would be refused never reaches a
 // card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest) {
+async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest, timeWindow) {
+  // The window verdict comes first and reads nothing (W5-dev-03): a start the
+  // executor would refuse gets a coded refusal here, never a card.
+  const windowRefusal = ibBookingWindowRefusal(timeWindow);
+  if (windowRefusal) return windowRefusal;
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
@@ -2879,9 +2929,22 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
   if (request?.error) return { error: request.error };
   const discount = booking.pricing?.primaryDiscount || null;
+  // A STATED price shows the catalog price for this customer beside it when
+  // the two differ (display only). Same helper, same inputs, no stated price;
+  // best effort: any failure just leaves the card without the comparison.
+  let catalogPrice = null;
+  if (booking.source === 'stated') {
+    try {
+      const catalog = await ibBookingPricing({ customer, serviceType });
+      if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
+    } catch (err) {
+      logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
+    }
+  }
   return {
     price: booking.price,
     source: booking.source,
+    catalogPrice,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
     // The reason exactly as the insert will save it (trimmed, capped), so
@@ -2917,7 +2980,7 @@ const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing
 // true/false, or null when there is no timed window to probe (the executor
 // probes nothing then either). A read error THROWS so the proposal fails
 // closed; an invalid date or window returns null (the executor refuses it).
-async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+async function ibBookingOverlapRows(scheduledDate, timeWindow) {
   const dateStr = validScheduleDate(scheduledDate);
   if (!dateStr) return null;
   const win = parseTimeWindowStart(timeWindow);
@@ -2930,8 +2993,76 @@ async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
     if (err?.status === 422) return null;
     throw err;
   }
-  const overlap = await db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
-  return overlap.length > 0;
+  return db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+}
+
+async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  return overlap == null ? null : overlap.length > 0;
+}
+
+// "9:00 AM" from a stored "09:00:00" (card text only).
+function clockLabel(hhmmss) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmmss || ''));
+  if (!m) return null;
+  const h = Number(m[1]);
+  return `${h % 12 || 12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// The facts the booking card shows about each overlapping visit: customer
+// name, service, date and window, with the visit id. ONE function builds them
+// for both the proposal (the card line and the pin) and the executor (the
+// commit-time comparison), so the pin and the check can never drift apart.
+// `fact` is the single string that is pinned and compared.
+async function bookingOverlapFacts(conn, rows, dateStr) {
+  const ids = (rows || []).map((r) => r.id).filter(Boolean);
+  const names = ids.length
+    ? await conn('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereIn('scheduled_services.id', ids)
+      .select('scheduled_services.id', 'customers.first_name', 'customers.last_name')
+    : [];
+  const nameById = new Map((Array.isArray(names) ? names : []).map((n) => [String(n.id), `${n.first_name || ''} ${n.last_name || ''}`.trim()]));
+  return (rows || []).map((r) => {
+    const start = clockLabel(r.window_start);
+    const end = clockLabel(r.window_end);
+    const id = r.id ? String(r.id) : null;
+    const customer = nameById.get(String(r.id)) || null;
+    const service = r.service_type || null;
+    const window = start && end ? `${start}-${end}` : (start || null);
+    return { id, customer, service, window, fact: [id, customer, service, dateStr, window].map((v) => v ?? '').join('|') };
+  });
+}
+
+// Who the overlapping visit(s) are, for the booking card's line, plus the
+// pinned `fact` of each (the executor refuses an overlapping visit whose fact
+// is not in the pinned set). Every overlapping visit is returned; [] when
+// there is no overlap or no timed window.
+async function ibBookingOverlapWho(scheduledDate, timeWindow) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  if (!rows || !rows.length) return [];
+  return bookingOverlapFacts(db, rows, validScheduleDate(scheduledDate));
+}
+
+// Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
+// parse (parseTimeWindowStart) and the SAME shared admin window rule
+// (assertAdminAppointmentWindow) the executor runs, asked before a card
+// exists so a start the executor would refuse (a :30 start) is a refusal
+// with a code, not a card whose Confirm saves nothing. Returns null when the
+// window is acceptable or absent, else { error, code }.
+function ibBookingWindowRefusal(timeWindow) {
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error) return { error: win.error, code: win.code || 'invalid_appointment_window' };
+  if (!win.start) return null;
+  const windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return { error: 'That window would cross midnight — pick an earlier start.', code: 'invalid_appointment_window' };
+  try {
+    assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 });
+  } catch (err) {
+    if (err?.status === 422) return { error: err.message, code: 'invalid_appointment_window' };
+    throw err;
+  }
+  return null;
 }
 
 async function createAppointment(input, actionContext = {}) {
@@ -2942,7 +3073,7 @@ async function createAppointment(input, actionContext = {}) {
     return { error: `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${scheduled_date}")` };
   }
   const win = parseTimeWindowStart(time_window);
-  if (win.error) return { error: win.error };
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   // Flat-60 convention (admin-schedule: every service call defaults to 60
   // minutes) so overlap checks see a real block, not an open-ended start.
@@ -3080,7 +3211,19 @@ async function createAppointment(input, actionContext = {}) {
       // rolls the transaction back before the insert, so nothing is booked
       // and the post-commit confirmation text below never runs. A pinned
       // "overlap existed", or no pin at all, keeps the advisory warning.
-      if (overlap.length && input._booking_overlap === false) {
+      // A card that named the overlapping visits pinned what it showed about
+      // each (id, customer, service, date, window): a visit not in that set,
+      // or one whose shown facts changed, is NEW too. An overlap that
+      // disappeared is fine; a card with nothing pinned (older cards, or a
+      // name lookup that failed) keeps the boolean rule only.
+      const pinnedFacts = Array.isArray(input._booking_overlap_facts) && input._booking_overlap_facts.length
+        ? new Set(input._booking_overlap_facts.map(String)) : null;
+      let unseenOverlap = false;
+      if (overlap.length && input._booking_overlap === true && pinnedFacts) {
+        const liveFacts = await bookingOverlapFacts(trx, overlap, dateStr);
+        unseenOverlap = liveFacts.some((f) => !pinnedFacts.has(f.fact));
+      }
+      if (overlap.length && (input._booking_overlap === false || unseenOverlap)) {
         const err = new Error('booking_overlap_new');
         err.bookingOverlapNew = true;
         throw err;
@@ -3445,8 +3588,11 @@ async function rescheduleAppointment(input, actionContext = {}) {
   if (!dateStr) {
     return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${new_date}")` };
   }
-  const win = parseTimeWindowStart(new_time_window);
-  if (win.error) return { error: win.error };
+  // The visit's own window length, judged before the new start is parsed so
+  // an off-hour refusal names only starts this visit can actually take.
+  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
+  const win = parseTimeWindowStart(new_time_window, apptDuration);
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   const oldDate = appt.scheduled_date;
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this tool moves ONE
@@ -3472,7 +3618,6 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // and the audit log both read window_end, so both would break. The shared
   // deriveWindowEnd returns null when the preserved duration would carry the
   // end past midnight — reject rather than persist a wrapped, inverted block.
-  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
   const newStart = win.start || appt.window_start;
   let newWindowEnd = win.start
     ? deriveWindowEnd(win.start, apptDuration)
@@ -4355,7 +4500,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.

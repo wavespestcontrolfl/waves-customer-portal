@@ -154,6 +154,13 @@ describe('buildRescheduleLink dead-link guard (C3/C6)', () => {
     expect(url).toMatch(/\/l\/x{10}$/);
   });
 
+  test('officeApproving skips only the move-window check: the composer stamps the approval after a usable link (owner 2026-10-06)', async () => {
+    mockSvc(svcRow({ scheduled_date: '2026-05-06', window_start: '10:00:00' }));
+    const result = await buildRescheduleLink('svc-1', { officeApproving: true });
+    expect(result.url).toBeTruthy();
+    expect(result.tooSoonToMove).toBeUndefined();
+  });
+
   test("assumeConfirmed skips the guard entirely (round-2 P1, claude fallback): rain-out's pre-move measurement reads the OLD, about-to-be-superseded slot, so checking it against the move window would refuse a link the customer's NEW slot may not deserve", async () => {
     // The row's CURRENT scheduled_date/window_start is deep inside the
     // move-notice window — exactly what a visit being rain-out-moved off a

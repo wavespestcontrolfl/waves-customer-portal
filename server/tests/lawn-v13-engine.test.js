@@ -126,6 +126,57 @@ describe('gate off is byte-identical for the readers', () => {
   });
 });
 
+// ── A grass with no track of its own runs the one program ──────────────────
+describe('mixed or unknown grass under GATE_LAWN_V13', () => {
+  const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
+  const { LAWN_V13_ANY_GRASS_TRACK } = require('../services/lawn-program');
+  const date = new Date(Date.UTC(2026, 9, 6, 16));
+  const knexFor = (rows) => (table) => ({ where() { return this; }, first: async () => rows[table] ?? null });
+
+  test('the four v13 copies are one program, so any key serves any grass', () => {
+    const body = ({ name, ...rest }) => JSON.stringify(rest);
+    for (const grass of GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
+  });
+
+  test.each(['mixed', 'unknown', 'centipede'])('gate on: recorded %s plans the October v13 visit', (grass) => {
+    withGate('true', () => {
+      for (const requireKnownGrass of [false, true]) {
+        const got = engine.selectProtocolVisit({ grass_type: grass }, date, null, { requireKnownGrass });
+        expect(got.trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
+        expect(got.visit).toBe(v13[LAWN_V13_ANY_GRASS_TRACK].visits.find((v) => v.month === 'Oct'));
+      }
+    });
+  });
+
+  test.each(['mixed', 'unknown', 'centipede'])('gate off: recorded %s still has no track', (grass) => {
+    withGate(undefined, () => {
+      expect(engine.selectProtocolVisit({ grass_type: grass }, date).trackKey).toBeNull();
+    });
+  });
+
+  test('gate on: blank grass under completion defaults stays unresolved', () => {
+    withGate('true', () => {
+      expect(engine.selectProtocolVisit({ grass_type: '', track_key: null }, date, null, { requireKnownGrass: true }).trackKey).toBeNull();
+    });
+  });
+
+  // The general loader also feeds historical report context (no planning flag),
+  // where a synthesized track would resolve the old active program for a past
+  // visit. The fallback is planning-only: the loader keeps a mixed lawn untracked.
+  test('grass context keeps a mixed profile untracked even with the gate on', async () => {
+    const knex = knexFor({ customer_turf_profiles: { grass_type: 'mixed' }, customers: {} });
+    await withGateAsync('true', async () => {
+      expect((await loadCustomerGrassContext('c1', knex)).trackKey).toBeNull();
+    });
+  });
+
+  test('gate on: unrecognized legacy lawn_type with no profile plans the v13 visit', () => {
+    withGate('true', () => {
+      expect(engine.selectProtocolVisit(null, date, 'Centipede', { requireKnownGrass: true }).trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
+    });
+  });
+});
+
 // ── Every line resolves to the intended catalog row ──────────────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
@@ -546,6 +597,23 @@ describe('the material-cost audit reads the gate-aware program', () => {
     expect(trackNames(off)).toEqual(expect.arrayContaining(['bahia', 'bermuda', 'st_augustine', 'zoysia']));
     // The v13 visits carry no cost fields, which the old ones do: the two reports differ.
     expect(JSON.stringify(on)).not.toBe(JSON.stringify(off));
+  });
+
+  test('the cadence report prices April by the plan: Dimension 18-0-10 at the 9x row, the 24-0-11 at 12x and 6x', () => {
+    const DIM = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
+    const catalog = [
+      { id: 'f24', name: migration.NAMES.F24, aliases: [], default_rate_per_1000: 4.2, rate_unit: 'lb', analysis_n: 24, analysis_k: 11, cost_per_unit: 1, cost_unit: 'lb', needs_pricing: false },
+      { id: 'dim', name: DIM, aliases: [], default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_k: 10, cost_per_unit: 2, cost_unit: 'lb', needs_pricing: false },
+    ];
+    const aprilRows = new Map([['f24', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }], ['dim', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }]]);
+    const v13Rows = new Map([['st_augustine|Apr', aprilRows]]);
+    const report = withGate('true', () => auditScript.buildCadenceReport(catalog, lawnProtocols(), v13Rows));
+    const april = (tier) => report.rows.find((r) => r.track === 'st_augustine' && r.tier === tier).visits.find((v) => v.month === 'Apr');
+    const selected = (result) => result.items.filter((i) => i.selected && i.product).map((i) => i.product.name);
+    expect(selected(april('enhanced'))).toEqual([DIM]);
+    expect(april('enhanced').items.find((i) => i.product?.name === DIM).mix.ratePer1000).toBeCloseTo(2.7778, 3);
+    expect(selected(april('premium'))).toEqual([migration.NAMES.F24]);
+    expect(selected(april('standard'))).toEqual([migration.NAMES.F24]);
   });
 
   test('analyzeVisit resolves a v13 line by its exact catalog name', () => {

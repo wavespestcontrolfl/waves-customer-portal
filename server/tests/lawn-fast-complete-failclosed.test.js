@@ -175,7 +175,7 @@ describe('buildLawnFastContext: every read, made to throw', () => {
     const result = await buildLawnFastContext(VISIT, { knex: fakeKnex(baseTables({ customers: readError() }), { calls }) });
     expect(result).toMatchObject({
       eligible: true, reason: null, visitType: 'unknown',
-      plannedProducts: { source: null, items: [] }, plannedProductsUnavailable: 'billing_mode_lookup_failed',
+      plannedProducts: { source: null, items: [], addOns: [] }, plannedProductsUnavailable: 'billing_mode_lookup_failed',
     });
     expect(result.readFailures).toContain('billing_mode');
     expect(buildPlanForService).not.toHaveBeenCalled();
@@ -210,14 +210,14 @@ describe('buildLawnFastContext: every read, made to throw', () => {
   test('plan read fails: empty planned products with a reason', async () => {
     buildPlanForService.mockRejectedValue(readError());
     const result = await ctx({});
-    expect(result.plannedProducts).toEqual({ source: null, items: [] });
+    expect(result.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
     expect(result.plannedProductsUnavailable).toBe('planned_products_lookup_failed');
     expect(result.readFailures).toContain('planned_products');
   });
 
   test('catalog read for the planned rules fails: empty planned products, never rule-less items', async () => {
     const result = await ctx({ products_catalog: readError() });
-    expect(result.plannedProducts).toEqual({ source: null, items: [] });
+    expect(result.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
     expect(result.plannedProductsUnavailable).toBe('planned_products_lookup_failed');
   });
 

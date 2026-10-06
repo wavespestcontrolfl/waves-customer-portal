@@ -106,7 +106,31 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // ONE thing: deciding whether to send that person the recipient opt-in ask.
 // Consent is the recipient's own YES to that text, never these flags. New
 // fields and instructions: a new cohort.
-const PROMPT_VERSION = 'v21';
+// v22: three audited bookings that never booked although a time was agreed
+// (owner direction 2026-10-06; prompt wording only, no schema shape change).
+// (1) A bare time with no day on a call made before that hour means TODAY, and
+// a known customer's call is coordination only when it refers to an
+// appointment that already exists (a technician said "I'll be there at
+// three", the caller said "Yeah, it's fine", status came back none). The
+// prompt now carries the call's own ET clock time for that judgement.
+// (2) A missing AM/PM is never a reason to hold a settled hour, and the
+// caller's own window supplies the period (the call-4de755e1 shape, again).
+// (3) Staff hedges ("I'm thinking", "probably", "around four") do not unconfirm
+// a NEW booking the caller accepted; a hedge by the CALLER or an open condition
+// still does. A new cohort.
+// v23: property.whole_building_occupancy (schema 1.23.0; owner ruling
+// 2026-10-06, a commercial caller who bought a whole building and gave no unit
+// was held for a unit ask). The model, not code, judges whether the caller
+// states they own, bought, lease or occupy the ENTIRE building at the service
+// address (not a suite, unit, bay or space inside it) and pins the caller's
+// sentence; the pipeline verifies the quote and Google's business verdict
+// before it skips the unit ask (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT).
+// property.whole_building_occupancy_final is the model's judgement that the
+// claim stood unhedged, uncorrected, unshared and not a question or condition
+// for the WHOLE call (the price_is_final precedent: the model judges the
+// language, the code verifies the pinned quote). New fields and instructions:
+// a new cohort.
+const PROMPT_VERSION = 'v23';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -157,6 +181,11 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
       : `\nKNOWN CALLER: this number matches ${opts.knownCaller.name || 'a contact'} already in our pipeline as a PROSPECT (not yet a customer). A booking on this call is likely their FIRST visit — treat an agreed date+time as a real "confirmed" booking, NOT existing-appointment coordination.\n`)
     : '';
   const priorCallBlock = buildPriorCallBlock(opts.priorCall);
+  // The call's own start as an Eastern wall-clock time, so a time said with no
+  // day can be judged against it (BARE TIME WITH NO DAY rule). Per-call
+  // variable, deliberately outside the version hash like the blocks above;
+  // omitted when the call's start is unknown rather than guessed.
+  const callTimeBlock = opts.callTimeET ? `\nCall time in Eastern Time (when the call started): ${opts.callTimeET}` : '';
   // Carrier caller-ID name (Twilio CNAM). A candidate, never a fact: it is
   // often the account holder or a household member rather than the speaker.
   const callerIdBlock = opts.callerIdName
@@ -175,7 +204,7 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
 Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
 Caller phone (from Twilio ANI): ${callerPhone || 'unknown'}
-Call date in Eastern Time: ${callDateET}
+Call date in Eastern Time: ${callDateET}${callTimeBlock}
 ${knownCallerBlock}${callerIdBlock}${callDirectionBlock}${priorCallBlock}
 
 Transcript:
@@ -189,6 +218,9 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - "confirmed": ONLY when BOTH a specific DATE and a specific TIME are explicitly agreed to by the caller. Vague references ("tomorrow", "next week", "noonish", "sometime Tuesday") do NOT qualify — the caller must confirm an actual time slot (e.g. "10 AM", "2:30 PM", "noon"). If the agent says "I'll text you" or "let me check" without the caller confirming, status is NOT confirmed.
   - ARRIVAL WINDOW: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — STATED as an explicit AM/PM on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon"), or, when none was said, READ from business hours by the BUSINESS-HOURS READING rule below — DOES qualify as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set confirmed_start_at to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") IS a specific day here; the vague examples in the rule above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range or hour with an explicit AM/PM, "noon"/"midnight" or a day-part word keeps that period. BUSINESS-HOURS READING (owner decision 2026-09-29, the same rule the owner approved for reschedules on 2026-09-28): when the agreed START hour — one time, or a range's start — was said with NO AM/PM, no day-part word and no "noon"/"midnight" ("can we plan on 2 o'clock?" answered "Sure."; "Tuesday, 2 to 4"; "between 2 and 4"; "we'll see you at 10"), read it as business hours: 7 to 11 is the morning, 12 and 1 to 6 the afternoon. When staff COMMITTED to that hour and the caller ACCEPTED it (a plain "Sure."/"Yes."/"That works." to the offered hour counts), on a specific day, it qualifies as confirmed from that reading: set confirmed_start_at from that reading and agreed_slot_words.period to null. Only ONE exact on-the-hour start that BOTH sides settled qualifies: an approximation ("around two", "two-ish"), a bound ("by two", "before two"), alternatives ("two or three", "two or four"), minutes ("two thirty"), a correction still open, or an hour that is not one of 1 to 12 does NOT. If anyone on the call states an AM/PM or a part of the day for that time that conflicts with the business-hours reading ("two in the morning", or a caller who said they can only do mornings while the hour reads as 2 PM), do not confirm: the stated period governs and the time is contested, so status stays "requested"/"offered" as appropriate, confirmed_start_at null. The same applies to an offer staff did not commit to — "we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time" — which stays NOT confirmed.
   - When confirmed, set confirmed_start_at to ISO 8601 with the Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). NEVER emit a UTC "Z" timestamp. Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date.
+  - BARE TIME WITH NO DAY (prompt v22, owner direction 2026-10-06; audited call: a technician said "I'll be there at three", the caller said "Yeah, it's fine", and nothing was booked): when staff COMMITTED to ONE exact on-the-hour time and the caller ACCEPTED it ("okay", "yeah, it's fine", "sure"), and NO day was named anywhere on the call, the day is TODAY (${callDateET}) provided the hour, read by the BUSINESS-HOURS READING rule above, is still ahead of the call time given at the top. Set status "confirmed", confirmed_start_at to today at that hour, agreed_slot_words.day null and selected_day_words null. When the hour has already passed on the call date, or a different day was named, do not guess a day: the normal day rules apply. Being an existing customer does NOT turn a call into coordination: the EXISTING APPOINTMENT rule applies only when the call itself refers to a visit that already exists ("are we still on for Tuesday", "my appointment", "can we move it"). Staff saying when they will arrive, with nothing on the call pointing to an earlier booking, is a NEW visit.
+  - A MISSING AM/PM IS NEVER A REASON TO HOLD A SETTLED HOUR (prompt v22; audited call: the caller asked for "today between 1:30 and 3:30", staff asked "can we plan on 2 o'clock?", the caller said "Sure.", staff said "we'll see you then", and the extraction answered "no AM/PM was stated"): read the period from the caller's OWN window or day-part when they gave one ("between 1:30 and 3:30" is the afternoon), otherwise from the BUSINESS-HOURS READING rule, and confirm. A day said in an earlier turn ("today") is the day. Staff's "we'll see you then" after the caller's "Sure." is the staff commitment. Never write "no AM/PM was stated" as the reason a status is not confirmed.
+  - STAFF HEDGES DO NOT UNCONFIRM A NEW BOOKING (prompt v22, owner ruling 2026-10-06; audited call: a relative arranging service for her mother heard staff say "I'm thinking tomorrow afternoon, like around four, I could probably make it out there" and answered "Okay, great. Thank you very much."): for a NEW booking, when STAFF named one specific day (a relative day counts) and one on-the-hour time (its period from a day-part word, an explicit AM/PM or the BUSINESS-HOURS READING rule) and the CALLER ACCEPTED it, the status is "confirmed" even though staff phrased it softly: "I'm thinking", "I think", "probably", "I could probably make it", "should work", "around four", "like around four". Those words soften how staff talk; they do not leave the slot open. This paragraph overrides the approximation exclusion above for a hedge in STAFF's words only: "around four" next to a named day is hour four (record agreed_slot_words.hour "four"); a bare "around two" with no day, or one the CALLER hedged, stays not confirmed. Keep the status NOT confirmed when: the CALLER hedges, declines or defers ("maybe", "let me ask my husband", "I'll call you back"); a condition is left open on either side ("I'll check the schedule and call you back", "if I can get a tech out", "pending approval"); staff offered alternatives and none was chosen; the caller never answered; or the time is not on the hour. definite_commitment may stay false here: it only gates a RESCHEDULE, which keeps its own rule above.
 ${EXISTING_APPOINTMENT_RULE}
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.
@@ -265,6 +297,8 @@ ADDRESS:
 PROPERTY:
 - hoa_community_flag: true if property is IN an HOA community (e.g. Lakewood Ranch, Heritage Harbor).
 - hoa_common_area_service: true ONLY if service is FOR HOA-owned common areas (clubhouse, retention ponds, entry beds). A single-family home inside an HOA is hoa_community_flag=true but hoa_common_area_service=false.
+- whole_building_occupancy: true ONLY when the CALLER states they own, bought, lease, rent or occupy the ENTIRE building at the service address ("we just bought this building", "we own the whole building", "the building is ours and we're making it a flower shop"). false when the caller says the address is only part of a building (a suite, unit, bay, space, a storefront in a plaza or strip center). null when unstated. A business name or property_type=commercial alone is NOT enough, and neither is "my business" or "our shop" (a tenant of one suite says that too). When true, pin the caller's statement to /property/whole_building_occupancy with speaker "caller": copy ONLY the shortest plain clause that states it ("We just bought this building"), word for word, with no hedge, question or condition inside it.
+- whole_building_occupancy_final (judge it over the WHOLE call): true ONLY when whole_building_occupancy is true AND the caller never hedged about occupying the entire building, never corrected it to a part (a floor, suite, space, storefront, side, wing, unit or bay), never said they share the building with another tenant, and the claim was a plain statement, not a question or a condition. false when ANY of that happened. null when whole_building_occupancy is not true. A hedge about a SIDE detail (when the sale closed, who signed, "I think the owner bought it a couple weeks ago, but we're just moving in") does not make it false; a hedge about WHETHER they occupy the whole building does. Examples that are false: "we only lease the second floor"; "I think we own the whole building"; "we probably have the whole building"; "do we own the whole building?" (a question); "if closing happens we'll own the whole building" (a condition); "actually we share it with a dentist"; "we have the storefront on the left". Examples that are true: "We just bought this building, and we're making it a flower shop"; "we own the whole building".
 
 MULTIPLE PROPERTIES (service_address vs additional_properties):
 - When the caller wants service at MORE THAN ONE property (a second home, a rental, another unit, "we bought a condo AND a house"), service_address holds the PRIMARY property and EVERY other property goes into property.additional_properties — never drop one, never merge two addresses into one.
@@ -370,6 +404,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - service_request.urgency
 - caller.on_site_authorization (when caller != owner)
 - property.hoa_common_area_service (when true)
+- property.whole_building_occupancy (when true — the CALLER's sentence stating they own/bought/lease/occupy the entire building; speaker must be "caller")
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
 - scheduling.confirmed_start_at (the quote must contain the agreed date AND time — except for a NEW booking whose day was already set earlier in the call, e.g. the caller's "today between 1:30 and 3:30" and then the agent's "can we plan on 2 o'clock?": then quote the one turn that states the agreed time, verbatim, and resolve the day from that earlier turn; never stitch two turns into one quote)

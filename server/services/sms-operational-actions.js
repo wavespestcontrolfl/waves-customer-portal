@@ -44,10 +44,12 @@ const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(
   JSON.stringify([item.quote, item.property_id, item.description]),
 ).slice(0, 20)}`;
 
-function eligibleMessage(message = {}, { captured = false } = {}) {
+// `unlinked`: an inbound text from a number with no customer record (the
+// access codes net files it for the office to link); every other rule holds.
+function eligibleMessage(message = {}, { captured = false, unlinked = false } = {}) {
   const statuses = captured ? ['sent', 'delivered', 'failed', 'undelivered'] : ['sent', 'delivered'];
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
-  return !!message.customer_id && !!message.message_body
+  return (!!message.customer_id || (unlinked && message.direction === 'inbound')) && !!message.message_body
     && !isInternalTestCustomerId(message.customer_id)
     && tail(ourNumber) !== tail(numbers.tollFree.number)
     && !!numbers.findByNumber(ourNumber)
@@ -1032,6 +1034,21 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  // The 24h window rolls from created_at, so a promise still overdue after a
+  // day gets a NEW row and the old one stayed open: one promise piled up four
+  // to six unread rows (prod 2026-10-05). The daily re-ring stays; only the
+  // newest row for this key may stay open. Runs for a deduped result too, so
+  // rows an older build left behind close on the next ring. openToCloser: a
+  // row a person marked done is taken over too (their Reopen would bring an
+  // obsolete duplicate back); a row a system component closed is left alone.
+  if (notification.id) {
+    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    await openToCloser(trx('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .whereNot({ id: notification.id }), 'supersede')
+      .update(doneColumns({ by: 'supersede', resolution: 'Replaced by a newer reminder for the same promise', keepExisting: true, conn: trx }));
+  }
   return notification;
 }
 

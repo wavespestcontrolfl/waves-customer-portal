@@ -695,6 +695,82 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
   'do_not_contact_requested',
 ]);
 
+// Cards nobody needs (2026-10-05 call-agent audit: 136 cards on 49 calls in a
+// week, 4 worked by a person). The routing verdict is NOT changed — a call
+// these rules quiet is still held from auto-booking exactly as before; only
+// the Needs Review cards it would file are trimmed. Each rule is a shape the
+// audit found filed with nothing for the office to do:
+//   1. One scheduling change, one card. A cancellation files
+//      cancellation_request; a reschedule files reschedule_or_cancel. The
+//      catch-all existing_appointment_coordination (and, on a cancel, the
+//      generic reschedule_or_cancel) said the same thing a second and third
+//      time.
+//   2. existing_appointment_coordination on a call that asked for no change
+//      (scheduling.status none): "I'm out front", "running ten minutes
+//      late", "what should I move before the treatment". The tech settled it
+//      live. Promises made on such a call ("Adam will let you know when")
+//      are tracked by call_commitments, which owns that follow-through.
+//   3. Address cards on a call that asks for no visit and no quote (a
+//      status check, a cancellation, a support question) AND states no
+//      street: missing_service_address, and the model's address_unverifiable
+//      when the call named no street. With no stated street nothing can be
+//      backfilled onto the record, so the card is nobody's work. A stated
+//      street keeps every address card (Step 3's backfill can copy it onto
+//      an empty record, and only the card gets it reviewed). A new service
+//      ask, a quote, or any time asked, offered or confirmed keeps them all.
+//      out_of_service_area is never touched.
+//   4. caller_not_authorized on a call that asked for no visit time (status
+//      none / canceled) from a caller the owner treats as authorized: a
+//      family member (owner ruling 2026-09-28), a client's own employee, or a
+//      realtor / lender / buyer arranging a WDO inspection (owner ruling
+//      2026-09-26). With no time asked there is nothing to authorize. Any
+//      time requested, offered or confirmed keeps the card: there the flag
+//      may still be the routing veto, and the card is the only trace of the
+//      unbooked visit (confirmed family / WDO-arranger bookings are already
+//      cleared upstream by isAuthorizedFamilyMemberBooking /
+//      isAuthorizedWdoArrangerBooking). Tenants, property managers, HOA
+//      members and "other" keep the card.
+const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
+const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
+const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address']);
+const AUTHORIZED_THIRD_PARTY_RELATIONSHIPS = new Set(['family_member', 'employee']);
+
+function callMakesNoServiceAsk(extraction) {
+  const status = String(extraction?.scheduling?.status || 'none');
+  if (!SCHEDULING_NO_ASK_STATUSES.has(status)) return false;
+  const sr = extraction?.service_request || {};
+  if (sr.quote_requested === true || sr.quote_promised === true) return false;
+  return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
+}
+
+function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
+  const list = Array.isArray(flags) ? flags : [];
+  const dropped = new Set();
+  const has = (f) => list.includes(f);
+  if (has('cancellation_request')) {
+    dropped.add('reschedule_or_cancel');
+    dropped.add('existing_appointment_coordination');
+  } else if (has('reschedule_or_cancel')) {
+    dropped.add('existing_appointment_coordination');
+  }
+  const status = String(extraction?.scheduling?.status || 'none');
+  if (status === 'none') dropped.add('existing_appointment_coordination');
+  // The merged canonical record counts too: adoptV2PrimaryFields keeps a
+  // V1-only street V2 dropped, and Step 3's backfill can copy it.
+  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
+  if (callMakesNoServiceAsk(extraction) && !statedStreet) {
+    for (const f of NO_ASK_ADDRESS_CARDS) dropped.add(f);
+  }
+  const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
+  if (SCHEDULING_NO_ASK_STATUSES.has(status)
+      && (AUTHORIZED_THIRD_PARTY_RELATIONSHIPS.has(relationship)
+        || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {})))) {
+    dropped.add('caller_not_authorized');
+  }
+  const kept = list.filter((f) => !dropped.has(f));
+  return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
+}
+
 function hasCanonicalWriteBlock(flags) {
   return (flags || []).some((f) => CANONICAL_WRITE_BLOCKING_FLAGS.has(f));
 }
@@ -860,6 +936,153 @@ function applyWholeStructureUnitWaiver(av, opts = {}) {
     missingComponents: [],
     wholeStructureUnitWaived: { missingComponents: [...av.missingComponents], originalStatus: av.status },
   };
+}
+
+// The extraction JUDGES the language (owner ruling 2026-10-01; the
+// service_request.price_is_final precedent in call-commercial-dictated-booking.js):
+// property.whole_building_occupancy_final says the claim stood unhedged,
+// uncorrected, unshared and neither a question nor a condition for the WHOLE
+// call. The code only VERIFIES. It screens the pinned QUOTE TEXT itself (a
+// fragment that carries its own hedge, negation, question or condition is not a
+// plain statement) and keeps two hard vetoes for EXPLICIT signals across the
+// call: a unit designator with a number or letter in a caller turn, and
+// multi-tenant center wording in any turn. Chatty asides never decide it.
+// Uncertainty IN the pinned quote itself: the caller is guessing, not stating. A LOCAL superset on purpose: the shared hedge screen
+// (turnHasNegationOrHedge) is calibrated for agent commitments and other
+// callers depend on it as it is. Tested on the normalized turn ("I'm" reads
+// "i m", "I'd" reads "i d").
+const UNCERTAINTY_RE = new RegExp('(?:^| )(?:'
+  + 'i (?:think|thought|believe|guess|suppose|assume|reckon|hope|figure|d (?:assume|guess|say|think)|'
+  + '(?:m|am) (?:pretty|fairly|almost|not|kinda|kind of) (?:sure|certain|positive))'
+  + '|pretty sure|fairly sure|probably|prob|maybe|might|may|perhaps|possibly|supposedly|presumably|allegedly|apparently'
+  + '|as far as i know|to my knowledge|should be|kind of|kinda|sort of|sorta|not sure|unsure|not certain|not positive'
+  + '|no idea|think so|believe so|hopefully|more or less'
+  + ')(?: |$)');
+// A designator followed by a number or a single letter ("suite 4", "unit B",
+// "bay 3", "apt 2B", "# 12"): the caller named a specific unit. "unit" alone, or
+// "suite of services", is not a designator.
+const UNIT_DESIGNATOR_RE = /\b(?:suite|ste|unit|apt|apartment|bay|condo(?:minium)?|room)\.?\s*#?\s*(?:\d+[a-z]?|[a-z])\b|#\s*\d/i;
+// An interrogative quote is not an assertion. Punctuation is only a hint in a
+// transcript, so a question opener ("do we", "is it", "are we") counts too,
+// after any leading filler word.
+const QUESTION_FILLER_RE = /^(?:(?:well|so|and|but|okay|ok|um|uh|yeah|yes|no|hmm|like|then) )+/;
+const QUESTION_OPENER_RE = /^(?:do|does|did|is|are|was|were|am|will|would|can|could|should|shall|have|has|what|how|why|who|which|where|when)\b/;
+// The quote is a plain statement: no negation, hedge, open condition,
+// uncertainty or question inside the quote text itself.
+function quoteIsPlainStatement(quote) {
+  const nq = normalizeForGrounding(quote);
+  return !turnHasNegationOrHedge(nq)
+    && !turnHasUnresolvedConditional(nq)
+    && !UNCERTAINTY_RE.test(nq)
+    && !/\?/.test(quote)
+    && !QUESTION_OPENER_RE.test(nq.replace(QUESTION_FILLER_RE, ''));
+}
+
+// Outbound speaker labels have been swapped before (diarization): the lead is
+// labeled Agent and Waves staff Caller. A plain staff self-introduction at the
+// start of a turn ("Hi, this is Sam with Waves ...") is a deterministic tell.
+// On an OUTBOUND call, when a Caller-labeled turn introduces itself that way
+// and no Agent-labeled turn does, swap the roles. Both or neither introducing
+// is ambiguous and keeps the raw labels (fail closed). Inbound never swaps.
+const STAFF_INTRO_RE = /^\s*(?:(?:hi|hello|hey|good (?:morning|afternoon|evening|day)|thanks? for (?:calling|taking))\b[\s,.!:-]*)*this is [a-z'.-]+(?: [a-z'.-]+){0,3}? (?:calling )?(?:with|from|at) waves\b/i;
+function orientTranscriptForOutbound(transcript, outbound) {
+  if (outbound !== true) return transcript;
+  const { parseTurns } = require('./call-reschedule-agreement').groundingTools;
+  const turns = parseTurns(transcript);
+  if (!turns) return transcript;
+  const callerIntro = turns.some((t) => !t.agent && STAFF_INTRO_RE.test(t.raw));
+  const agentIntro = turns.some((t) => t.agent && STAFF_INTRO_RE.test(t.raw));
+  if (!callerIntro || agentIntro) return transcript;
+  return String(transcript).replace(/^(\s*)(agent|caller)(\s*:)/gim,
+    (_m, lead, who, colon) => `${lead}${who.toLowerCase() === 'agent' ? 'Caller' : 'Agent'}${colon}`);
+}
+
+// Wording that says the building sits in a multi-tenant center.
+const MULTI_TENANT_WORDING_RE = /\b(?:strip\s+(?:mall|center|centre|plaza)|plaza|shopping\s+(?:center|centre|mall|plaza)|mall|(?:office|business|industrial)\s+park|(?:office|apartment|business)\s+complex)\b/i;
+const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
+
+/**
+ * GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT (owner ruling 2026-10-06): skip the
+ * "which unit?" hold when Google says the address is a BUSINESS address AND the
+ * caller says they own, bought, lease or occupy the WHOLE building. The owner
+ * accepted the risk of a strip-mall caller who has a suite.
+ *
+ * Sibling of applyWholeStructureUnitWaiver with the same return contract: the
+ * SAME object untouched unless every condition holds, so gate-off (and every
+ * non-qualifying call) is byte-identical. Conditions:
+ *   - the gate is on and the verdict is exactly "PREMISE resolved, only
+ *     subpremise missing", in service area, nothing unconfirmed or replaced;
+ *   - Google's addressUse says business AND residential === false (unknown
+ *     residential keeps the hold);
+ *   - V2 property_type is commercial;
+ *   - V2 property.whole_building_occupancy AND whole_building_occupancy_final
+ *     are both true. The extraction judges the language (owner ruling
+ *     2026-10-01; the price_is_final precedent); this code only verifies that
+ *     its pinned quote (field_path /property/whole_building_occupancy, speaker
+ *     caller) is word for word inside a CALLER turn of a fully labeled
+ *     two-speaker transcript (roles swapped first on an outbound call whose
+ *     labels look swapped) and that the QUOTE TEXT itself carries no negation,
+ *     hedge, uncertainty, open condition or question;
+ *   - no caller turn names a unit designator with a number or letter (suite 4,
+ *     unit B, bay 3, apt 2B), and no turn at all names a strip mall, plaza,
+ *     shopping center, mall, office/business/industrial park or office/
+ *     apartment/business complex. A chatty aside never decides the call.
+ * The waived copy carries the same wholeStructureUnitWaived marker as the
+ * whole-structure waiver plus reason 'business_whole_building', so
+ * reconstructWaivedAddressValidation and the offline audits rebuild it.
+ */
+function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
+  if (!opts.enabled) return av;
+  if (!isMissingUnitNumber(av)) return av;
+  if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
+  // Both halves must be AFFIRMATIVE: unknown (null/absent) residential keeps the hold.
+  if (av.addressUse?.business !== true || av.addressUse?.residential !== false) return av;
+  if (opts.propertyType !== 'commercial') return av;
+  if (opts.wholeBuildingOccupancy !== true || opts.wholeBuildingFinal !== true) return av;
+  // Lazy: call-reschedule-agreement requires this module at load time.
+  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
+  const turns = parseTurns(orientTranscriptForOutbound(opts.transcript, opts.outbound));
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return av;
+  const quotes = (Array.isArray(opts.evidence) ? opts.evidence : [])
+    .filter((e) => e?.field_path === '/property/whole_building_occupancy' && e.speaker === 'caller' && typeof e.quote === 'string');
+  const grounded = quotes.some((e) => turnsHolding(turns, e.quote, 'caller').length > 0
+    && quoteIsPlainStatement(e.quote));
+  if (!grounded) return av;
+  if (turns.some((t) => !t.agent && UNIT_DESIGNATOR_RE.test(t.raw))) return av;
+  if (turns.some((t) => MULTI_TENANT_WORDING_RE.test(t.raw))) return av;
+  return {
+    ...av,
+    status: 'validated_accept',
+    missingComponents: [],
+    wholeStructureUnitWaived: {
+      missingComponents: [...av.missingComponents],
+      originalStatus: av.status,
+      reason: BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
+    },
+  };
+}
+
+// Offline audits judge a FRESH extraction against the persisted verdict of the
+// PRIOR one. Whether the waiver stamped on that row carries to the candidate:
+//   - a business whole-building waiver is recomputed against the candidate's own
+//     property fields, pinned evidence and the transcript, so a candidate that
+//     drops or misgrounds the /property/whole_building_occupancy pin keeps the
+//     hold even when the scalar inputs happen to match;
+//   - any other waiver (whole-structure) carries when the caller-supplied
+//     scalar inputs (service and property type) match: `scalarInputsMatch`.
+// `stored` is the persisted (unwaived, marker-stamped) verdict.
+function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true, outbound = false } = {}) {
+  if (stored?.wholeStructureUnitWaived?.reason !== BUSINESS_WHOLE_BUILDING_WAIVER_REASON) return scalarInputsMatch;
+  const property = candidate?.property || {};
+  return applyBusinessWholeBuildingUnitWaiver(stored, {
+    enabled: true,
+    propertyType: property.property_type,
+    wholeBuildingOccupancy: property.whole_building_occupancy,
+    wholeBuildingFinal: property.whole_building_occupancy_final,
+    evidence: candidate?.evidence,
+    transcript,
+    outbound,
+  }) !== stored;
 }
 
 // Offline audits (v2-promotion-readiness, verify-v2-shadow-path, replay
@@ -2522,6 +2745,39 @@ const BASIC_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
  * normalizer nulls non-regex emails before this runs) so invalid captures
  * still get their reason — and a missing-dot typo its fix.
  */
+/**
+ * Spelled-email trust (owner ruling 2026-10-05). An email the caller spelled
+ * out letter by letter is trusted when the transcript decoder heard exactly
+ * ONE spelling and that spelling is the address being saved: no read-back
+ * card, so no first-touch hold either. The card stays when there is any
+ * doubt the letters themselves carry — two spellings heard (decoder
+ * candidates, or the V1/V2 disagreement payload), an arbiter verdict short of
+ * a decisive adopt (adopt_with_confirmation, review, reject), a domain-typo correction that would
+ * change the saved value, or a value that is not email-shaped. A bounce
+ * later still files its own card through the bounce-recovery lane.
+ *
+ * Pure. `dictationEmailPayload` is the processor's decoder/arbiter payload;
+ * `savedEmail` is extracted.email at card-decision time; `correctedEmail` is
+ * deriveEmailReview's normalizedEmail (null when no correction is proposed).
+ */
+function spelledEmailSettled(dictationEmailPayload, savedEmail, correctedEmail = null) {
+  const p = dictationEmailPayload;
+  if (!p || p.email_disagreement) return false;
+  const candidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
+  if (candidates.length !== 1) return false;
+  // Only a decisive arbiter adopt (or no arbiter at all — the decoders
+  // agreed) settles it. adopt_with_confirmation is the arbiter saying the
+  // evidence is circumstantial and the read-back must stay open
+  // (contact-quarantine-arbiter.js).
+  const verdict = p.arbiter?.verdict;
+  if (verdict && verdict !== 'adopt') return false;
+  const saved = String(savedEmail || '').trim().toLowerCase();
+  if (!saved || !BASIC_EMAIL_SHAPE.test(saved)) return false;
+  if (String(candidates[0]?.value || '').trim().toLowerCase() !== saved) return false;
+  if (correctedEmail && String(correctedEmail).trim().toLowerCase() !== saved) return false;
+  return true;
+}
+
 function deriveEmailReview(extracted = {}) {
   const needsConfirmation = [];
   let normalizedEmail = null;
@@ -2970,6 +3226,10 @@ module.exports = {
   suppressAddressFlagsForAV,
   isMissingUnitNumber,
   applyWholeStructureUnitWaiver,
+  applyBusinessWholeBuildingUnitWaiver,
+  orientTranscriptForOutbound,
+  BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
+  waiverCarriesToCandidate,
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,
@@ -2978,6 +3238,9 @@ module.exports = {
   recordCarriesUnit,
   deriveCallReviewBridge,
   deriveEmailReview,
+  spelledEmailSettled,
+  dropUnneededCallCards,
+  callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,
   detectRentalSignal,

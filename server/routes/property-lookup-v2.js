@@ -3325,7 +3325,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // legacy-preservation the client contract promises (`!== false`). A
   // legacy payload simply carries NO verdict; fresh merges always stamp a
   // positive count, so every new lookup gets one.
-  if (Number.isFinite(Number(profile.palmCountConfidence))) {
+  // A positive count only: palmCountTrusted is the PREFILL verdict, and a
+  // stamped zero (a real "no palms" read) has no count to prefill, so it keeps
+  // carrying no verdict, exactly as before the zero was stamped.
+  if (Number.isFinite(Number(profile.palmCountConfidence)) && Number(profile.estimatedPalmCount) > 0) {
     profile.palmCountTrusted = lookupPalmCountIsTrustworthy(profile);
   }
 
@@ -6344,8 +6347,13 @@ function mergeAiAnalyses(providerResults) {
   // And the palm count — it prefills the estimator's palm field (owner
   // ruling 2026-08-10) and, submitted, prices per-palm injection. Same
   // gap-fill/divergence exposure, same stamp.
-  const mergedPalmCount = Number(merged.estimatedPalmCount);
-  if (Number.isFinite(mergedPalmCount) && mergedPalmCount > 0) {
+  // An observed ZERO is stamped too (a provider really returned "no palms"):
+  // the T&S draft path needs that confidence to tell a trusted zero from an
+  // unknown one (draft-builder servicesWithTreeShrubPalms). Only an ABSENT
+  // read goes unstamped; buildEnrichedProfile's synthetic no-AI zero never
+  // passes through here, so it stays unstamped.
+  const mergedPalmCount = numericRead(merged.estimatedPalmCount);
+  if (mergedPalmCount !== null) {
     // Explicit zero counts join divergence detection (a confident "no
     // palms" read contradicts a confident 7); only absent reads are
     // excluded.

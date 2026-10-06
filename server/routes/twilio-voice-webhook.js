@@ -56,7 +56,7 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
-      // An UNKNOWN caller (no customer on file) who waited 25s+ and left no
+      // An UNKNOWN caller (no customer on file) who waited 15s+ and left no
       // voicemail gets a text-back from the line they called — same grace,
       // own try/catch so a failure here never blocks the bells above.
       try {

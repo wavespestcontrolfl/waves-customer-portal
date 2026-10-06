@@ -87,11 +87,12 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
 
   test('a combined hold preserves each resolved allowance when the release gate is disabled', async () => {
     await f.db('estimates').where({ id: f.ids.estimates[0] }).update({ estimate_data: f.estimateData(['pest_control', 'lawn_care']) });
-    const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0], 70) });
+    // Two stop groups: 30 pest minutes, then lawn on the next whole hour for 40.
+    const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0], 100) });
     delete process.env.GATE_SCHEDULING_CAPACITY;
     const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.ids.customer });
-    expect(booked.estimated_duration_minutes).toBe(70);
-    expect(booked.reservation_service_mix).toMatchObject({ version: 2, durations: [30, 40], durationMinutes: 70 });
+    expect(booked.estimated_duration_minutes).toBe(100);
+    expect(booked.reservation_service_mix).toMatchObject({ version: 2, durations: [30, 40], durationMinutes: 100 });
   });
 
   test('legacy combined holds retain hourly members beside a new catalog-sized hold', async () => {
@@ -128,15 +129,13 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
   test('equal-total allocation changes require a fresh combined hold', async () => {
     await f.db('estimates').where({ id: f.ids.estimates[0] })
       .update({ estimate_data: f.estimateData(['pest_control', 'lawn_care']) });
-    const slotId = f.signedSlot(f.ids.estimates[0], 70);
+    // Equal held span (100: pest rounds up to the hour, then lawn's 40)
+    // with a different allocation, [30, 40] -> [50, 40].
+    const slotId = f.signedSlot(f.ids.estimates[0], 100);
     const oldHold = await reserveSlot({ estimateId: f.ids.estimates[0], slotId });
     await f.db('services').where({ service_key: 'pest_general_quarterly' }).update({
-      scheduling_duration_policy: { version: 1, default_duration_minutes: 40,
-        min_duration_minutes: 30, max_duration_minutes: 40 },
-    });
-    await f.db('services').where({ service_key: 'lawn_care_recurring' }).update({
-      scheduling_duration_policy: { version: 1, default_duration_minutes: 30,
-        min_duration_minutes: 30, max_duration_minutes: 40 },
+      scheduling_duration_policy: { version: 1, default_duration_minutes: 50,
+        min_duration_minutes: 30, max_duration_minutes: 50 },
     });
     try {
       await expect(commitReservation({ scheduledServiceId: oldHold.scheduledServiceId, customerId: f.ids.customer }))
@@ -147,7 +146,7 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
       expect(freshHold.scheduledServiceId).not.toBe(oldHold.scheduledServiceId);
       expect(await f.db('scheduled_services').where({ id: oldHold.scheduledServiceId }).first()).toBeUndefined();
       const booked = await commitReservation({ scheduledServiceId: freshHold.scheduledServiceId, customerId: f.ids.customer });
-      expect(booked.reservation_service_mix).toMatchObject({ version: 2, durations: [40, 30], durationMinutes: 70 });
+      expect(booked.reservation_service_mix).toMatchObject({ version: 2, durations: [50, 40], durationMinutes: 100 });
     } finally {
       await f.db('services').where({ service_key: 'pest_general_quarterly' }).update({
         scheduling_duration_policy: { version: 1, default_duration_minutes: 30,
@@ -255,7 +254,7 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
     if (combined) await f.db('estimates').where({ id: f.ids.estimates[0] })
       .update({ estimate_data: f.estimateData(['pest_control', 'lawn_care']) });
     const held = await reserveSlot({ estimateId: f.ids.estimates[0],
-      slotId: f.signedSlot(f.ids.estimates[0], combined ? 70 : 30) });
+      slotId: f.signedSlot(f.ids.estimates[0], combined ? 100 : 30) });
     const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
     delete process.env.GATE_SCHEDULING_CAPACITY;
     const changed = f.estimateData(combined ? ['pest_control', 'lawn_care'] : ['lawn_care']);

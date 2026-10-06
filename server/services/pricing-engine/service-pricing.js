@@ -7,7 +7,7 @@ const {
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
-  BED_DENSITY, BED_AREA_REVIEW_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const {
@@ -2538,12 +2538,33 @@ function estimateTreeShrubBedAreaFromLot(property = {}) {
   return { bedArea: rawBedArea, rawBedArea };
 }
 
-function resolveTreeShrubBedArea(property = {}, warnings = []) {
+// Quote-time T&S knob reader: a finite number inside [min, max], else null.
+function treeShrubKnobNumber(value, min, max) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= min && n <= max ? n : null;
+}
+
+// The fallback bed size a quote with no bed signal prices. A replayed quote
+// carries its own stamped size (options.knobs.fallbackBedSqFt); fresh quotes
+// use the live pricing_config value (TREE_SHRUB.fallbackBedSqFt, default 1200).
+function treeShrubFallbackBedSqFt(knobs) {
+  const stamped = treeShrubKnobNumber(knobs && knobs.fallbackBedSqFt, 100, 20000);
+  if (stamped !== null) return stamped;
+  const live = treeShrubKnobNumber(TREE_SHRUB.fallbackBedSqFt, 100, 20000);
+  return live !== null ? live : TREE_SHRUB_FALLBACK_BED_SQFT;
+}
+
+function treeShrubFallbackWarning(sqft) {
+  return `Tree & Shrub bed area was not provided; fallback ${Math.round(sqft).toLocaleString('en-US')} sqft was used.`;
+}
+
+function resolveTreeShrubBedArea(property = {}, warnings = [], knobs = null) {
   const sourceHint = normalizeTreeShrubEnum(property.bedAreaSource);
+  const fallbackSqFt = treeShrubFallbackBedSqFt(knobs);
   if (sourceHint === 'fallback') {
-    warnings.push('Tree & Shrub bed area was not provided; fallback 2,000 sqft was used.');
+    warnings.push(treeShrubFallbackWarning(fallbackSqFt));
     return {
-      bedArea: 2000,
+      bedArea: fallbackSqFt,
       bedAreaSource: 'fallback',
       pricingConfidence: 'low',
       requiresManualReview: true,
@@ -2592,9 +2613,9 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
     };
   }
 
-  warnings.push('Tree & Shrub bed area was not provided; fallback 2,000 sqft was used.');
+  warnings.push(treeShrubFallbackWarning(fallbackSqFt));
   return {
-    bedArea: 2000,
+    bedArea: fallbackSqFt,
     bedAreaSource: 'fallback',
     pricingConfidence: 'low',
     requiresManualReview: true,
@@ -2606,7 +2627,7 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
 // signals (admin UI, customer proposal) that the property warrants the full
 // program (Light 4x is retired for new sales — grandfathered replay only). `recommendTreeShrubTier` is the
 // back-compat string-returning wrapper used by older callers and tests.
-function evaluateTreeShrubTierRecommendation(property = {}) {
+function evaluateTreeShrubTierRecommendation(property = {}, knobs = null) {
   // 6-visit Standard is the MANDATED default program (protocol six_x). We
   // always recommend it. The 4-visit Light tier (protocol four_x) was retired
   // for new sales 2026-09-24 and is priced only to replay the grandfathered
@@ -2626,7 +2647,7 @@ function evaluateTreeShrubTierRecommendation(property = {}) {
     if (lotEstimate && lotEstimate.bedArea > 0) {
       bedArea = lotEstimate.bedArea;
     } else {
-      bedArea = 2000;
+      bedArea = treeShrubFallbackBedSqFt(knobs);
       bedAreaFromFallback = true;
     }
   }
@@ -2643,7 +2664,7 @@ function evaluateTreeShrubTierRecommendation(property = {}) {
   if (highTreeCount) reasons.push('tree_count_at_or_above_8');
   if (difficultAccess) reasons.push('difficult_access');
   if (knownPressure) reasons.push('high_pest_pressure');
-  if (bedAreaFromFallback && bedArea >= 2000) reasons.push('fallback_bed_area_used');
+  if (bedAreaFromFallback) reasons.push('fallback_bed_area_used');
 
   // Standard (6x) is the mandate — never auto-escalate or auto-downsell.
   const recommendedTier = TREE_SHRUB.recommendedTier || TREE_SHRUB.defaultTier || 'standard';
@@ -2714,12 +2735,20 @@ function priceTreeShrub(property, options = {}) {
       treeCount,
     },
   };
-  const { recommendedTier, recommendationReasons } = evaluateTreeShrubTierRecommendation(recommendationInput);
+  // Quote-time knob snapshot (options.knobs) beats the live config. These
+  // knobs mutate global constants, and estimate-public replays stored engine
+  // inputs through generateEstimate on every view/accept — without an
+  // input-level override an admin flip would re-price an ALREADY-SENT quote
+  // and then lock/bill the new amount. Same input-first replay mechanism the
+  // lawn/pest floor state uses (estimate-public#savedFloorReplayOverrides).
+  const knobs = (options.knobs && typeof options.knobs === 'object') ? options.knobs : {};
+  const knobNumber = treeShrubKnobNumber;
+  const { recommendedTier, recommendationReasons } = evaluateTreeShrubTierRecommendation(recommendationInput, knobs);
   const requestedTier = options.tier || recommendedTier;
   const { tier, legacyTierRequested } = normalizeTreeShrubTier(requestedTier, warnings, warningCodes);
   const tierConfig = TREE_SHRUB.tiers[tier];
 
-  const bedAreaInfo = resolveTreeShrubBedArea(property, warnings);
+  const bedAreaInfo = resolveTreeShrubBedArea(property, warnings, knobs);
   const bedArea = bedAreaInfo.bedArea;
 
   // v4.7: shrub density now multiplies the MEASURED-bed terms (per-sqft
@@ -2728,19 +2757,8 @@ function priceTreeShrub(property, options = {}) {
   // between sparse and packed plantings. Ships neutral (all factors 1).
   // MEASURED sources only: lot_based bed area is ALREADY density-scaled by
   // estimateTreeShrubBedAreaFromLot (10/18/25% of lot), so a factor there
-  // would apply density twice; the 2,000 fallback is a guess, not a
+  // would apply density twice; the fallback bed size is a guess, not a
   // measurement, and gets no adjustment either.
-  // Quote-time knob snapshot (options.knobs) beats the live config. These
-  // knobs mutate global constants, and estimate-public replays stored engine
-  // inputs through generateEstimate on every view/accept — without an
-  // input-level override an admin flip would re-price an ALREADY-SENT quote
-  // and then lock/bill the new amount. Same input-first replay mechanism the
-  // lawn/pest floor state uses (estimate-public#savedFloorReplayOverrides).
-  const knobs = (options.knobs && typeof options.knobs === 'object') ? options.knobs : {};
-  const knobNumber = (value, min, max) => {
-    const n = Number(value);
-    return Number.isFinite(n) && n >= min && n <= max ? n : null;
-  };
 
   const shrubDensity = getTreeShrubShrubDensity(property);
   const densityEligibleSource = bedAreaInfo.bedAreaSource === 'explicit'
@@ -2828,8 +2846,17 @@ function priceTreeShrub(property, options = {}) {
   const inferredTrees = treeCountSource === 'density_estimate';
   const suppressFor = (legArmed) => inferredTrees
     && (foldablePalmCount > 0 || (legArmed && palmCount > 0));
-  const materialBaseTreeCount = suppressFor(palmMaterialArmed) ? 0 : treeCount;
-  const laborBaseTreeCount = suppressFor(palmLaborArmed) ? 0 : treeCount;
+  // A LOOKUP-sourced palm count (draft-builder, owner ruling 2026-10-05) must
+  // never lower the plant total below the density estimate: one trusted palm
+  // on a property whose density says ~10 trees would otherwise suppress all
+  // 10 and price a single plant. The palms price as palms, so only the
+  // palms' share comes off the inferred tree count, on both legs and
+  // whether or not the reserve is armed. A caller-stated count keeps the
+  // suppression above (replayed sent quotes depend on it).
+  const palmsFromLookup = options.palmCountFromLookup === true && palmCountSource === 'service_line';
+  const lookupNetTrees = inferredTrees && palmsFromLookup ? Math.max(treeCount - palmCount, 0) : null;
+  const materialBaseTreeCount = lookupNetTrees ?? (suppressFor(palmMaterialArmed) ? 0 : treeCount);
+  const laborBaseTreeCount = lookupNetTrees ?? (suppressFor(palmLaborArmed) ? 0 : treeCount);
   // Per-leg counts: palms ride the legacy per-tree term only where their
   // replacement is still unarmed.
   const materialTreeCount = materialBaseTreeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
@@ -2926,6 +2953,13 @@ function priceTreeShrub(property, options = {}) {
     manualReviewReasonsSet.add('difficult_access_large_bed_area');
     warnings.push('Difficult access with large bed area; manual review recommended.');
   }
+  // Call pipeline: the caller named no palm count and no trusted lookup count
+  // exists, so a zero here means "unknown", not "no palms". The reserve
+  // priced nothing; a human counts palms on the aerial photo before sending.
+  if (options.palmCountUnverified === true && palmCount === 0) {
+    manualReviewReasonsSet.add('palm_count_unverified');
+    warnings.push('Palm count not verified; count palms on the aerial photo before sending.');
+  }
   const manualReviewReasons = [...manualReviewReasonsSet];
   const manualReview = manualReviewReasons.length > 0;
 
@@ -2965,6 +2999,7 @@ function priceTreeShrub(property, options = {}) {
     palmCount,
     largePalmCount,
     palmCountSource,
+    ...(palmsFromLookup ? { palmCountFromLookup: true } : {}),
     palmReserveActive,
     palmMaterialArmed,
     palmLaborArmed,
@@ -2977,6 +3012,10 @@ function priceTreeShrub(property, options = {}) {
       minutesPerPalmVisit: palmReserve.minutesPerPalmVisit ?? 0,
       largePalmFactor: palmReserve.largePalmFactor,
       callbackReservePerVisit,
+      // The bed size a no-bed-signal quote prices (1,200 since 2026-10-05,
+      // 2,000 before). Stamped so a replay of a sent fallback quote keeps
+      // its original size.
+      fallbackBedSqFt: treeShrubFallbackBedSqFt(knobs),
     },
     access,
     onSiteMin,

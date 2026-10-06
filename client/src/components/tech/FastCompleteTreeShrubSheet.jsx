@@ -9,10 +9,17 @@
 // Nothing is assumed applied. This month's protocol products are SUGGESTION
 // tiles, off until tapped; an amount fills only from what the server says was
 // recorded last time (labeled "last time"), else it is blank and required.
-// AI never guesses an amount. "+ Other product" adds any other catalog
-// product except an injection (the server hard-blocks injections on a T&S
+// AI never guesses an amount. The "Search products" box in the Products
+// section (one tap adds the row; "+ Other product" hands off to the full form
+// when the catalog did not load) adds any other catalog product except an injection (the server hard-blocks injections on a T&S
 // visit: they belong to the palm injection flow). A product the server flags
 // as an N/P fertilizer in the summer blackout cannot be turned on.
+//
+// Since 2026-10-05 the screen follows the lawn sheet's rulings (#5951): the
+// mic sits inside the note box, a Customer row (who was home, the shared
+// preset) is sent as customerInteraction, and no hint text ("Optional",
+// "Tap what you applied", the tip search label). Each photo slot keeps one
+// short line.
 //
 // The photos are five slots (the approved shot guide), sent as the body's
 // completionPhotos, never through the staged photo manager: staged photos
@@ -57,6 +64,9 @@ import {
   SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
+import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
+import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
+import { withPestCheck } from '../../lib/tree-shrub-pest-check';
 import { Button, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -128,13 +138,12 @@ const DEFAULT_METHOD = 'foliar_spray';
 // The approved shot guide: standing on the ground, about a minute for all of
 // them. The first two are the floor.
 const PHOTO_SLOTS = [
-  { key: 'front_beds', label: 'Front beds', when: 'Required', required: true, caption: 'The whole front bed line from the driveway apron or walk, chest height, same spot as last time.' },
-  { key: 'back_landscape', label: 'Back or side landscape', when: 'Required', required: true, caption: 'The back beds from the lanai or back door edge, or a side bed if the back is locked, fenced or has a dog.' },
-  { key: 'whole_palm', label: 'Whole palm', when: 'If palms', caption: 'Step back until the worst-looking palm fits top to bottom, shot from the ground.' },
-  { key: 'oldest_fronds', label: 'Oldest fronds', when: 'If palms', caption: 'The lowest fronds you can reach standing, at arm’s length.' },
-  { key: 'leaf_close_up', label: 'Leaf close-up', when: 'If something’s wrong', caption: 'One leaf or stem with the problem, 6 to 12 inches away; top and underside if there are insects or sooty mold.' },
+  { key: 'front_beds', label: 'Front beds', when: 'Required', required: true, caption: 'Whole front bed line, same spot as last time.' },
+  { key: 'back_landscape', label: 'Back or side landscape', when: 'Required', required: true, caption: 'Back beds, or a side bed if the back is gated.' },
+  { key: 'whole_palm', label: 'Whole palm', when: 'If palms', caption: 'The worst palm, top to bottom, from the ground.' },
+  { key: 'oldest_fronds', label: 'Oldest fronds', when: 'If palms', caption: 'Lowest fronds you can reach, at arm’s length.' },
+  { key: 'leaf_close_up', label: 'Leaf close-up', when: 'If something’s wrong', caption: 'One leaf or stem with the problem, close up.' },
 ];
-const MAX_PHOTOS = PHOTO_SLOTS.length;
 const SLOT_KEYS = new Set(PHOTO_SLOTS.map((slot) => slot.key));
 
 // Last visit's photo per slot, as the server signed it: only a known slot with
@@ -299,11 +308,12 @@ function contextFrom(data, service) {
     warningsUnavailable: data?.warningsUnavailable === true,
     visitIdentity: recapVisitIdentity(data?.service),
     watchList: watchListFrom(data),
+    pestCheck: data?.pestCheck && typeof data.pestCheck === 'object' ? data.pestCheck : null,
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -440,6 +450,8 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
       },
     } : watchItems.length ? { treeShrubReview: { watchItems } } : {}),
     technicianNotes: form.note.trim(),
+    // Who was home, as the pest and lawn sheets send it (the same field, the same values).
+    customerInteraction: form.customerHome,
     techTips: techTipsOf(form, tipsAvailable),
     // Same as the full form (owner ruling): the completion text, the review
     // ask and the pay link go out the way they do from there.
@@ -532,6 +544,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     plantGroups: new Set(PLANT_GROUP_OPTIONS.filter((option) => (ctx.lastVisit?.plantGroups || []).includes(option))),
     areas: new Set(AREA_OPTIONS.filter((option) => (ctx.lastVisit?.areasTreated || []).includes(option))),
     condition: '', pollinator: '', irac: '', tipId: '', customTip: '',
+    customerHome: DEFAULT_CUSTOMER_HOME,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -552,11 +565,16 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     isMobile,
     onFullForm,
     onPick: products.addProduct,
+    // With a catalog the search sits in the Products section: no sheet to open.
+    inline: true,
   });
 
   const photoList = photos.list;
   const previewCurrent = !!photos.preview && sameSet(photos.preview.photos, photoList);
-  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending });
+  // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
+  const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
+  const removeMerit = (meritRows) => meritRows.forEach((row) => products.updateRow(row.productId, { active: false }));
+  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || pestCheck.evaluation.blockMessage;
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
   const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -574,7 +592,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }),
+      () => withPestCheck(completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }), pestCheck.payload),
       `${names || 'Inspection'} · ${inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups)}`,
     );
   };
@@ -589,7 +607,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
           <PhotosSection photos={photos} lastPhotos={ctx.lastVisitPhotos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
           {ctx.watchList && ctx.watchList.length > 0 && (
             <WatchListSection
@@ -602,7 +620,8 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               locked={locked || dictationPending}
             />
           )}
-          <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} />
+          <PestCheckSection state={pestCheck} locked={locked} onRemoveMerit={removeMerit} />
+          <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
@@ -611,7 +630,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               <Chip disabled={locked} key={label} label={label} pressed={form.plantGroups.has(label)} onClick={() => setField('plantGroups', toggleInSet(form.plantGroups, label))} />
             ))}
           </ChoiceSection>
-          <ChoiceSection title="Areas treated (optional)" columns={2}>
+          <ChoiceSection title="Areas treated" columns={2}>
             {AREA_OPTIONS.map((label) => (
               <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
             ))}
@@ -621,8 +640,10 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               <Chip disabled={locked} key={label} label={label === suggested ? `${label} (photo read)` : label} pressed={form.condition === label} onClick={() => setField('condition', label)} />
             ))}
           </ChoiceSection>
+          <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
           {tipsAvailable && (
             <TipSection
+              quiet
               library={tips}
               priorityTipIds={priorityTipIds}
               tipId={form.tipId}
@@ -638,7 +659,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
-        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow}
+        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!pestCheck.evaluation.blockMessage}
         label="Complete tree & shrub"
         onSubmit={submit}
         coverProps={picker.coverProps}
@@ -739,7 +760,7 @@ function PhotosSection({ photos, lastPhotos, previewCurrent, locked }) {
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Photos</h3>
-        <span className="tech-visit-muted">{`${count} of ${MAX_PHOTOS} · first two required`}</span>
+        <span className="tech-visit-muted">{`${count} added`}</span>
       </div>
       <div className="tech-ts-slots">
         {PHOTO_SLOTS.map((slot) => (
@@ -882,7 +903,6 @@ function WatchListSection({ list, flagged, analyzed, readComplete, choices, onCh
     <section className="tech-visit-choice-section" aria-label={WATCH_TITLE}>
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">{WATCH_TITLE}</h3>
-        <span className="tech-visit-muted">Optional</span>
       </div>
       {analyzed && readComplete && flaggedItems.length === 0 && (
         <p className="tech-visit-muted" role="status">The photo read flagged nothing on this list.</p>
@@ -999,19 +1019,17 @@ function FindingTile({ finding, rejected, locked, onToggle }) {
 }
 
 // This month's protocol products as suggestions, then anything the tech adds.
-function ProductsSection({ ctx, products, locked, other, popover }) {
+function ProductsSection({ ctx, products, locked, other, popover, inlineSearch }) {
   const { rows, updateRow, removeRow } = products;
   const sectionWarnings = ctx.warnings.filter((warning) => warning.productId == null);
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Products used</h3>
-        <span className="tech-visit-muted">Tap what you applied</span>
       </div>
       {sectionWarnings.map((warning) => (
         <p key={`${warning.type}-${warning.productId}-${warning.message}`} className="tech-visit-warning" role="status"><WarningIcon /> {warning.message}</p>
       ))}
-      {!rows.length && <p className="tech-visit-muted">No suggested products this month. Add what you applied.</p>}
       <div className="tech-visit-tile-grid">
         {rows.map((row) => (
           <ProductTile key={row.productId} row={row} locked={locked} onClick={() => updateRow(row.productId, { active: !row.active })} />
@@ -1027,7 +1045,7 @@ function ProductsSection({ ctx, products, locked, other, popover }) {
           onRemove={() => removeRow(row.productId)}
         />
       ))}
-      <OtherProductButton {...other} popover={popover} />
+      {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
 }

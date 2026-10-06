@@ -19,6 +19,9 @@ const {
   planLineFields,
   v13SelectedGateWarnings,
   v13SelectionBlocks,
+  visitForPlan,
+  loadVisitForPlan,
+  v13VisitLimits,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -961,8 +964,14 @@ router.get('/lawn-mix', async (req, res, next) => {
     if (!track) return res.status(404).json({ error: 'Lawn protocol track not found' });
 
     const month = monthAbbr(req.query.month);
-    const visit = track.visits?.find((v) => v.month === month);
-    if (!visit) return res.status(404).json({ error: 'Protocol visit not found for month' });
+    const recipeVisit = track.visits?.find((v) => v.month === month);
+    if (!recipeVisit) return res.status(404).json({ error: 'Protocol visit not found for month' });
+    // The visit the sheet is opened from (?scheduledServiceId=): its plan picks a cadence-
+    // dependent step (v13 April, 9x; ?visitsPerYear= overrides it) and its customer,
+    // property and date decide the application limits. With no visit (the reference tab)
+    // the sheet keeps the 12x step, warns, and checks no limits.
+    const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q));
+    const { visit, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
@@ -1010,11 +1019,15 @@ router.get('/lawn-mix', async (req, res, next) => {
     // offers no combined mixing order (the plan does the same).
     const v13Active = lawnV13On();
     const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
+    // The plan's own application-limit decision for a sheet opened from a visit: a capped
+    // product gets no amount and its limit message (a block beside the apply-alone ones, not
+    // holding the rest of the mix), a warning-level limit a sheet warning.
+    const limitCheck = await v13VisitLimits(db, scheduled, resolvedLines, v13Rows);
     const items = resolvedLines.map((line) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
-      // no quantity at all); the sheet has no visit, so no application limits.
-      const v13Line = v13Active && product ? v13LineState(product, v13Rows) : null;
+      // no quantity at all; a capped line none either).
+      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped) : null;
       const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
@@ -1077,6 +1090,7 @@ router.get('/lawn-mix', async (req, res, next) => {
 
     // Required v13 gate notes on the selected items are warnings, as in the plan.
     warnings.push(...v13SelectedGateWarnings(selectedItems));
+    warnings.push(...cadenceWarnings, ...limitCheck.warnings);
 
     const seesPricing = viewerSeesPricing(req);
     const payload = {
@@ -1112,9 +1126,9 @@ router.get('/lawn-mix', async (req, res, next) => {
       mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.map((item) => ({
         raw: item.raw,
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
-      }))),
+      })), limitCheck.capped),
       warnings,
-      blocks,
+      blocks: [...blocks, ...limitCheck.blocks],
     };
     res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }

@@ -38,6 +38,7 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'customer_missed_call',           // a customer called, nobody answered, no voicemail
   'relay_unbooked_call',            // a caller spoke with Sandy and the call ended with nothing booked or captured
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
+  'reservice_self_booked',          // a customer booked a free re-service and described the problem (owner 2026-10-05)
   // Owner ruling 2026-09-11: a declined card / returned ACH is the one money
   // failure that must ring regardless of the payment category override —
   // before this it reached the owner only via the billing follow-up

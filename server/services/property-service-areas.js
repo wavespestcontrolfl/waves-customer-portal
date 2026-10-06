@@ -3,6 +3,7 @@
 const { createHash } = require('crypto');
 const db = require('../models/db');
 const { addressKey } = require('./customer-properties');
+const { normalizeZip, normStreet } = require('./customer-property-address-keys');
 const { gateEnvValue } = require('../config/feature-gates');
 const { technicianCurrentVisitFilter, lockOwnedLiveVisit } = require('./technician-visit-scope');
 const logger = require('./logger');
@@ -44,10 +45,23 @@ function areaVersion(property, primaryLawnSqft = null) {
   ])).digest('hex');
 }
 
+// The customer row and its primary property name the same address. addressKey
+// keys locality on the ZIP when there is one, else the city, so a ZIP on only
+// one side never matches (prod 10-06: a property saved without its ZIP hid the
+// customer's lawn size and the lawn sheet asked the tech). With a ZIP on one
+// side only, street + unit + city decide; two different ZIPs still differ.
+function sameCustomerAddress(customer, property) {
+  if (!customer || !property) return false;
+  if (addressKey(customer) === addressKey(property)) return true;
+  if (!normalizeZip(customer.zip) === !normalizeZip(property.zip)) return false;
+  if (!normStreet(customer.city) || !normStreet(property.city)) return false;
+  return addressKey({ ...customer, zip: null }) === addressKey({ ...property, zip: null });
+}
+
 async function primaryLawnArea(property, knex) {
   if (!property.is_primary) return null;
   const customer = await knex('customers').where({ id: property.customer_id }).first();
-  if (addressKey(customer) !== addressKey(property)) return null;
+  if (!sameCustomerAddress(customer, property)) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: property.customer_id }).first();
   return areaNumber(profile?.lawn_sqft);
 }
@@ -185,7 +199,7 @@ async function saveAreaMeasurements(scope, req, input, { knex = db } = {}) {
     const customer = await trx('customers').where({ id: property.customer_id }).first();
     // Existing primary-property readers keep using their existing columns.
     // A secondary property's measurement can never overwrite those mirrors.
-    if (property.is_primary && addressKey(customer) === addressKey(property)) {
+    if (property.is_primary && sameCustomerAddress(customer, property)) {
       if (changes.beds) await trx('customers').where({ id: property.customer_id }).update({ bed_sqft: changes.beds.sqft, updated_at: trx.fn.now() });
       if (changes.lawn) {
         await trx('customers').where({ id: property.customer_id }).update({ property_sqft: changes.lawn.sqft, updated_at: trx.fn.now() });
@@ -233,5 +247,5 @@ async function snapshotVisitArea(input, service, req, knex = db, { treatmentEvid
 
 module.exports = { AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
   validateAreaChanges, lookupSuggestions, loadAreaProperty, readAreaMeasurements, saveAreaMeasurements, snapshotVisitArea,
-  hasAreaMeasurementsColumn,
+  hasAreaMeasurementsColumn, sameCustomerAddress,
   _resetAreaColumnCache: () => { areaColumnKnown = false; } };

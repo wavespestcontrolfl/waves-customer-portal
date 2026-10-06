@@ -143,8 +143,12 @@ async function linkSuppressedByVisitGroup(svc, scheduledServiceId) {
 // baseline (AGENTS.md: extract new decision paths into small named
 // helpers rather than grow an already-flagged function) — no behavior
 // change.
-function deadLinkGuardVerdict(svc, { previewOnly, assumeConfirmed }) {
-  if (previewOnly || assumeConfirmed) return null;
+// officeApproving: the admin composer building the link it is about to
+// approve (owner 2026-10-06). It stamps office_move_approved_for only
+// after this returns a usable url, so the guard would refuse a move the
+// office is approving.
+function deadLinkGuardVerdict(svc, { previewOnly, assumeConfirmed, officeApproving }) {
+  if (previewOnly || assumeConfirmed || officeApproving) return null;
   const now = new Date();
   const verdict = eligibility(svc, now);
   if (require('./reschedule-link-promises').tooSoonToSelfServeMove(svc, verdict, now)) {
@@ -159,13 +163,13 @@ function deadLinkGuardVerdict(svc, { previewOnly, assumeConfirmed }) {
   return null;
 }
 
-async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false, assumeConfirmed = false, pinnedUrl = undefined } = {}) {
+async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false, assumeConfirmed = false, pinnedUrl = undefined, officeApproving } = {}) {
   try {
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('id', 'customer_id', 'reschedule_token', 'source_action', 'status', 'customer_confirmed',
-        'visit_id', 'scheduled_date', 'window_start', 'window_end');
+        'visit_id', 'scheduled_date', 'window_start', 'window_end', 'office_move_approved_for');
     if (!svc?.reschedule_token) return { url: null, line: '' };
     if (await linkSuppressedByVisitGroup(svc, scheduledServiceId)) return { url: null, line: '' };
     // Never mint a self-serve link for a dispatch-owned booking the office
@@ -184,7 +188,7 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
     // through, so a plain (non-preview, non-assumeConfirmed) caller —
     // reminders, admin quick-send, the legacy Twilio reminder — inherits it
     // automatically.
-    const guardVerdict = deadLinkGuardVerdict(svc, { previewOnly, assumeConfirmed });
+    const guardVerdict = deadLinkGuardVerdict(svc, { previewOnly, assumeConfirmed, officeApproving });
     if (guardVerdict) return guardVerdict;
 
     if (pinnedUrl !== undefined) return { url: pinnedUrl, line: smsLineFor(pinnedUrl) };

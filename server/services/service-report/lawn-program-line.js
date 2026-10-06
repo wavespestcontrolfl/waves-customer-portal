@@ -1,22 +1,27 @@
 /**
  * Lawn monthly program line (lawn report rebuild P9, GATE_LAWN_EXPECTATIONS).
  *
- * One calendar-based, tier-neutral sentence about what the program focuses on in
- * this month, written from what server/config/protocols.json says for that grass
- * and month. It describes the program, not what one visit applied: a step the
- * protocol makes conditional (skip / only-if / soil-test / weather-gated /
- * optional / on request) is only ever stated with a qualifier. It replaces
- * the generic peak/shoulder/dormant season note in snapshot.seasonalNote while
- * the gate is live.
+ * One calendar-based, tier-neutral sentence about what the lawn program v13
+ * focuses on in this month (one universal program for every grass, owner
+ * 2026-09-30 / 2026-10-05). It describes the program, not what one visit
+ * applied: a step the v13 recipe makes conditional is only ever stated with a
+ * qualifier. It replaces the generic peak/shoulder/dormant season note in
+ * snapshot.seasonalNote while the gate is live, and ONLY for a visit whose plan
+ * resolved the staged v13 version with GATE_LAWN_V13 on. Every other visit
+ * (completed before v13, pinned to an older version, or with no recorded
+ * version) gets no line and keeps the season note: the old per-grass sentences
+ * described the retired grass-track programs (and steps such as soil tests that
+ * Waves does not run), so they are gone, and a past report is never rewritten
+ * with a program the visit did not run.
  *
- * Rules the copy keeps (pinned by server/tests/lawn-program-line.test.js):
+ * Rules the copy keeps (pinned by server/tests/lawn-v13-copy.test.js):
  *   - program-level: "in <month> the program focuses on ...", never a promise
  *     about one product, a tier, a visit count, a rate, a date or a clock time;
  *   - no product or brand name, no ordinance / county / blackout / law wording;
  *   - no watering, rain, irrigation or mowing instruction (the banner and the
  *     water card own those);
  *   - every claim has a `claims` entry whose phrase the test proves against the
- *     protocols.json visit for that grass and month, including its conditions,
+ *     lawn-protocol-v13.json visit for that month, including its conditions,
  *     so no treatment is invented and no skipped step is stated plainly.
  *
  * Jun-Sep: the program carries no nitrogen in those months, so a line that
@@ -25,129 +30,58 @@
  * keeps the old season note.
  */
 
-const protocols = require('../../config/protocols.json');
-
-const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const featureGates = require('../../config/feature-gates');
+const { LAWN_V13_VERSION } = require('../lawn-program');
 
 // Months in which the program applies no nitrogen. A visit that did apply some
 // does not match the line, so the line steps aside.
 const NO_NITROGEN_MONTHS = new Set([6, 7, 8, 9]);
 
-// Wording that marks a step as conditional. A claim whose protocols.json step
-// is conditional (skip / only-if / soil-test / weather-gated / tier-specific /
-// optional) must carry one of these inside its own phrase; the test derives
-// which claims are conditional from protocols.json itself. None of them names
-// irrigation, watering, a tier, a visit count or a product.
+// Wording that marks a step as conditional. A claim whose v13 recipe step is
+// conditional (not a plain primary line, or worded if / only / hold / skip / no)
+// must carry one of these inside its own phrase; the test derives which claims
+// are conditional from the recipe itself. None of them names irrigation,
+// watering, a tier, a visit count, a product or a soil test (owner 2026-10-05:
+// Waves runs no soil tests).
 const QUALIFIERS = [
   'where the lawn needs it',
   'where needed',
   'when conditions allow',
   'where it fits the property',
-  'where a soil test calls for it',
-  'matched to soil test results',
   'as needed',
   'on request',
   'where helpful',
 ];
 
-// month number (1-12) -> { line, claims } per grass. `line` describes what the
-// program focuses on this time of year (never what one visit applied);
-// `claims` maps each protocol fact the sentence relies on to the exact phrase
-// that states it, so the test can prove the phrase against protocols.json.
+// month number (1-12) -> { line, claims }. `line` describes what the program
+// focuses on this time of year (never what one visit applied); `claims` maps
+// each recipe fact the sentence relies on to the exact phrase that states it,
+// so the test can prove the phrase against lawn-protocol-v13.json.
 // L(line, { tag: phrase }): every tag's phrase appears verbatim in the line.
 const L = (line, claims) => ({ line, claims });
 
-const BARRIER = 'a pre-emergent weed-barrier application';
-const SOIL_FEED = 'a spring feeding matched to soil test results';
 const FALL_FEED = 'the fall feeding';
-const WINTER = 'offers a winter check-in on request, including what dormant, brown turf means';
 
-const PROGRAM_LINES = {
-  st_augustine: {
-    1: L(`In January the program focuses on ${BARRIER}, with broadleaf weed control when conditions allow.`, { pre_emergent: BARRIER, broadleaf: 'broadleaf weed control when conditions allow' }),
-    2: L('In February the program focuses on a light feeding with iron and micronutrients.', { feed: 'a light feeding with iron and micronutrients', micros: 'a light feeding with iron and micronutrients' }),
-    3: L(`In March the program focuses on ${BARRIER} and a spring feeding, with scouting for chinch bugs and thatch.`, { pre_emergent: BARRIER, feed: 'a spring feeding', chinch_check: 'scouting for chinch bugs and thatch', thatch_check: 'scouting for chinch bugs and thatch' }),
-    4: L('In April the program focuses on a preventive insect treatment ahead of chinch bug season, plus potassium where a soil test calls for it and weed control when conditions allow.', { insect_prevention: 'a preventive insect treatment ahead of chinch bug season', potassium: 'potassium where a soil test calls for it', broadleaf: 'weed control when conditions allow' }),
-    5: L(`In May the program focuses on ${SOIL_FEED}, plus iron and a biostimulant.`, { feed: SOIL_FEED, micros: 'iron and a biostimulant', biostimulant: 'iron and a biostimulant' }),
-    6: L('In June the program focuses on checking for chinch bugs and on micronutrients and potassium where a soil test calls for it.', { chinch_check: 'checking for chinch bugs', micros: 'micronutrients and potassium where a soil test calls for it', potassium: 'micronutrients and potassium where a soil test calls for it' }),
-    7: L('In July the program focuses on checking for chinch bugs, with summer broadleaf weed control when conditions allow and potassium where the lawn needs it.', { chinch_check: 'checking for chinch bugs', broadleaf: 'summer broadleaf weed control when conditions allow', potassium: 'potassium where the lawn needs it' }),
-    8: L('August is a scouting month: the program checks the lawn for chinch bugs and disease, and photographs anything that needs attention.', { scouting_visit: 'checks the lawn for chinch bugs and disease, and photographs anything that needs attention' }),
-    9: L('In September the program focuses on potassium where a soil test calls for it and weed control when conditions allow.', { potassium: 'potassium where a soil test calls for it', broadleaf: 'weed control when conditions allow' }),
-    10: L(`In October the program focuses on ${FALL_FEED} with iron, plus fall disease control where the lawn needs it and a thatch check.`, { feed: FALL_FEED, micros: 'with iron', fungicide: 'fall disease control where the lawn needs it', thatch_check: 'a thatch check' }),
-    11: L('In November the program focuses on micronutrients and potassium where the lawn needs it, plus broadleaf weed control when conditions allow.', { micros: 'micronutrients and potassium where the lawn needs it', potassium: 'micronutrients and potassium where the lawn needs it', broadleaf: 'broadleaf weed control when conditions allow' }),
-    12: L('In December the program offers a winter wellness check-in on request.', { winter_touchpoint: 'offers a winter wellness check-in on request' }),
-  },
-  bermuda: {
-    1: L(`In January the program focuses on ${BARRIER}, with broadleaf weed control when conditions allow and a review of any fall disease damage.`, { pre_emergent: BARRIER, broadleaf: 'broadleaf weed control when conditions allow', sds_review: 'a review of any fall disease damage' }),
-    2: L('In February the program focuses on a light feeding with iron and micronutrients, plus monitoring for early green-up as Bermuda wakes up late.', { feed: 'a light feeding with iron and micronutrients', micros: 'a light feeding with iron and micronutrients', green_up_watch: 'monitoring for early green-up', late_green_up: 'as Bermuda wakes up late' }),
-    3: L(`In March the program focuses on ${BARRIER}, a spring feeding and growth regulation.`, { pre_emergent: BARRIER, feed: 'a spring feeding', growth_regulator: 'growth regulation' }),
-    4: L('In April the program focuses on a preventive treatment against armyworms and mole crickets, scouting for both, and growth regulation, with potassium where a soil test calls for it.', { insect_prevention: 'a preventive treatment against armyworms and mole crickets', armyworm_check: 'scouting for both', mole_cricket_check: 'scouting for both', growth_regulator: 'growth regulation', potassium: 'potassium where a soil test calls for it' }),
-    5: L(`In May the program focuses on ${SOIL_FEED}, a biostimulant, and growth regulation as needed.`, { feed: SOIL_FEED, biostimulant: 'a biostimulant', growth_regulator: 'growth regulation as needed' }),
-    6: L('In June the program focuses on growth regulation, armyworm checks, and micronutrients and potassium where a soil test calls for it.', { growth_regulator: 'growth regulation', armyworm_check: 'armyworm checks', micros: 'micronutrients and potassium where a soil test calls for it', potassium: 'micronutrients and potassium where a soil test calls for it' }),
-    7: L('In July the program focuses on growth regulation and summer broadleaf weed control when conditions allow, with armyworm checks as needed.', { growth_regulator: 'growth regulation', broadleaf: 'summer broadleaf weed control when conditions allow', armyworm_check: 'armyworm checks as needed' }),
-    8: L('August is a scouting month: the program checks the lawn for armyworms and general condition.', { scouting_visit: 'checks the lawn for armyworms and general condition', armyworm_check: 'checks the lawn for armyworms and general condition' }),
-    9: L('In September the program focuses on an armyworm check, growth regulation, potassium where the lawn needs it and broadleaf weed control when conditions allow.', { armyworm_check: 'an armyworm check', growth_regulator: 'growth regulation', potassium: 'potassium where the lawn needs it', broadleaf: 'broadleaf weed control when conditions allow' }),
-    10: L(`In October the program focuses on ${FALL_FEED}, a preventive fungicide before soil cools and growth regulation.`, { feed: FALL_FEED, fungicide: 'a preventive fungicide before soil cools', growth_regulator: 'growth regulation' }),
-    11: L('In November the program focuses on fall disease prevention and potassium where the lawn needs it.', { fungicide: 'fall disease prevention', potassium: 'potassium where the lawn needs it' }),
-    12: L(`In December the program ${WINTER}.`, { winter_touchpoint: WINTER, dormancy_talk: WINTER }),
-  },
-  zoysia: {
-    1: L(`In January the program focuses on ${BARRIER}, with broadleaf weed control when conditions allow and scouting for large patch.`, { pre_emergent: BARRIER, broadleaf: 'broadleaf weed control when conditions allow', large_patch_watch: 'scouting for large patch' }),
-    2: L('In February the program focuses on iron and micronutrients as zoysia wakes up late, with large patch disease prevention where needed.', { micros: 'iron and micronutrients', late_green_up: 'as zoysia wakes up late', fungicide: 'large patch disease prevention where needed' }),
-    3: L(`In March the program focuses on ${BARRIER} and a spring feeding, with conservative growth regulation as needed and a thatch check.`, { pre_emergent: BARRIER, feed: 'a spring feeding', growth_regulator: 'conservative growth regulation as needed', thatch_check: 'a thatch check' }),
-    4: L('In April the program focuses on a preventive treatment and scouting for webworms, the main insect on zoysia, with potassium where the lawn needs it.', { insect_prevention: 'a preventive treatment', webworm_check: 'scouting for webworms', webworm_primary: 'the main insect on zoysia', potassium: 'potassium where the lawn needs it' }),
-    5: L(`In May the program focuses on ${SOIL_FEED}, iron and a biostimulant, and light growth regulation as needed.`, { feed: SOIL_FEED, micros: 'iron and a biostimulant', biostimulant: 'iron and a biostimulant', growth_regulator: 'light growth regulation as needed' }),
-    6: L('In June the program focuses on webworm checks, light growth regulation as needed, and micronutrients and potassium where a soil test calls for it.', { webworm_check: 'webworm checks', growth_regulator: 'light growth regulation as needed', micros: 'micronutrients and potassium where a soil test calls for it', potassium: 'micronutrients and potassium where a soil test calls for it' }),
-    7: L('In July the program focuses on summer broadleaf weed control when conditions allow and light growth regulation as needed.', { broadleaf: 'summer broadleaf weed control when conditions allow', growth_regulator: 'light growth regulation as needed' }),
-    8: L('August is a scouting month: the program checks zoysia for disease and webworms.', { scouting_visit: 'checks zoysia for disease and webworms', webworm_check: 'checks zoysia for disease and webworms' }),
-    9: L('In September the program focuses on potassium where the lawn needs it and weed control when conditions allow, ahead of October’s large patch treatment.', { potassium: 'potassium where the lawn needs it', broadleaf: 'weed control when conditions allow', large_patch_prep: 'ahead of October’s large patch treatment' }),
-    10: L(`In October the program focuses on ${FALL_FEED} and large patch prevention, the most important disease step on zoysia, plus a thatch check.`, { feed: FALL_FEED, fungicide: 'large patch prevention, the most important disease step on zoysia', thatch_check: 'a thatch check' }),
-    11: L('In November the program focuses on large patch prevention and potassium where the lawn needs it.', { fungicide: 'large patch prevention', potassium: 'potassium where the lawn needs it' }),
-    12: L('In December the program offers a winter check-in on request and a large patch rescue treatment where needed.', { winter_touchpoint: 'offers a winter check-in on request', fungicide: 'a large patch rescue treatment where needed' }),
-  },
-  bahia: {
-    1: L(`In January the program focuses on ${BARRIER}, which matters most on thin bahia, with broadleaf weed control when conditions allow.`, { pre_emergent: BARRIER, thin_turf: 'which matters most on thin bahia', broadleaf: 'broadleaf weed control when conditions allow' }),
-    2: L('In February the program focuses on iron and micronutrients where the lawn needs it and a mole cricket check, since mole crickets are the main insect threat to bahia.', { micros: 'iron and micronutrients where the lawn needs it', mole_cricket_check: 'a mole cricket check', mole_cricket_primary: 'since mole crickets are the main insect threat to bahia' }),
-    3: L(`In March the program focuses on ${BARRIER} and a spring feeding, with mole cricket checks as needed during their spring flight.`, { pre_emergent: BARRIER, feed: 'a spring feeding', mole_cricket_check: 'mole cricket checks as needed', mole_flight: 'during their spring flight' }),
-    4: L('In April the program focuses on a preventive treatment against mole cricket nymphs, plus potassium where it fits the property and weed control when conditions allow.', { insect_prevention: 'a preventive treatment against mole cricket nymphs', potassium: 'potassium where it fits the property', broadleaf: 'weed control when conditions allow' }),
-    5: L('In May the program focuses on iron, micronutrients and potassium where it fits the property, plus crabgrass checks as needed.', { micros: 'iron, micronutrients and potassium where it fits the property', potassium: 'iron, micronutrients and potassium where it fits the property', crabgrass_watch: 'crabgrass checks as needed' }),
-    6: L('In June the program focuses on a mole cricket check, since damage shows as spongy, lifted turf, plus micronutrients and potassium where it fits the property.', { mole_cricket_check: 'a mole cricket check', mole_damage_signs: 'since damage shows as spongy, lifted turf', micros: 'micronutrients and potassium where it fits the property', potassium: 'micronutrients and potassium where it fits the property' }),
-    7: L('In July the program focuses on broadleaf weed control when conditions allow, with an explanation of normal summer seed heads where helpful.', { broadleaf: 'broadleaf weed control when conditions allow', seed_heads: 'an explanation of normal summer seed heads where helpful' }),
-    8: L('August is a scouting month: the program checks bahia for mole cricket damage, which peaks now, and for general condition.', { scouting_visit: 'checks bahia for mole cricket damage, which peaks now, and for general condition', mole_cricket_check: 'checks bahia for mole cricket damage, which peaks now, and for general condition' }),
-    9: L('In September the program focuses on potassium where it fits the property, broadleaf weed control when conditions allow, and watching for crabgrass breakthrough.', { potassium: 'potassium where it fits the property', broadleaf: 'broadleaf weed control when conditions allow', crabgrass_watch: 'watching for crabgrass breakthrough' }),
-    10: L(`In October the program focuses on ${FALL_FEED} with iron, plus treatment for mole crickets or disease where needed.`, { feed: FALL_FEED, micros: 'with iron', fungicide: 'treatment for mole crickets or disease where needed', mole_cricket_treat: 'treatment for mole crickets or disease where needed' }),
-    11: L('In November the program focuses on potassium where it fits the property and broadleaf weed control when conditions allow.', { potassium: 'potassium where it fits the property', broadleaf: 'broadleaf weed control when conditions allow' }),
-    12: L(`In December the program ${WINTER}.`, { winter_touchpoint: WINTER, dormancy_talk: WINTER }),
-  },
+// GATE_LAWN_V13: one universal program for every grass, so one table for all
+// of them. The claims are proven against server/config/lawn-protocol-v13.json
+// by server/tests/lawn-v13-copy.test.js.
+const SPOT_DISEASE = 'spot treatment for disease and weeds where needed';
+const V13_BARRIER = 'a pre-emergent weed-barrier application where it fits the property';
+const V13_FALL_BARRIER = 'a pre-emergent weed barrier where it fits the property';
+const PROGRAM_LINES_V13 = {
+  1: L(`In January the program focuses on ${V13_BARRIER} and a micronutrient feeding, plus ${SPOT_DISEASE}.`, { pre_emergent: V13_BARRIER, micros: 'a micronutrient feeding', fungicide: SPOT_DISEASE, broadleaf: SPOT_DISEASE }),
+  2: L('In February the program focuses on a feeding as the lawn greens up, plus spot weed control where needed.', { feed: 'a feeding as the lawn greens up', broadleaf: 'spot weed control where needed' }),
+  3: L(`In March the program focuses on ${V13_BARRIER} and a micronutrient feeding, plus spot treatment for root disease and weeds where needed.`, { pre_emergent: V13_BARRIER, micros: 'a micronutrient feeding', fungicide: 'spot treatment for root disease and weeds where needed', broadleaf: 'spot treatment for root disease and weeds where needed' }),
+  4: L('In April the program focuses on a light feeding, plus spot treatment for root disease and chinch bugs where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for root disease and chinch bugs where needed', insect_spot: 'spot treatment for root disease and chinch bugs where needed' }),
+  5: L('In May the program focuses on an insect treatment where it fits the property, plus spot treatment for chinch bugs, weeds and dry spots where needed.', { insect_treatment: 'an insect treatment where it fits the property', insect_spot: 'spot treatment for chinch bugs, weeds and dry spots where needed', broadleaf: 'spot treatment for chinch bugs, weeds and dry spots where needed', dry_spots: 'spot treatment for chinch bugs, weeds and dry spots where needed' }),
+  6: L(`In June the program focuses on a micronutrient feeding and ${V13_BARRIER}, plus spot treatment for disease and chinch bugs where needed.`, { micros: 'a micronutrient feeding', pre_emergent: V13_BARRIER, fungicide: 'spot treatment for disease and chinch bugs where needed', insect_spot: 'spot treatment for disease and chinch bugs where needed' }),
+  7: L('In July the program focuses on an inspection of the whole lawn, plus spot treatment for caterpillars, leaf spot disease and chinch bugs where needed.', { scouting_visit: 'an inspection of the whole lawn', insect_spot: 'spot treatment for caterpillars, leaf spot disease and chinch bugs where needed', fungicide: 'spot treatment for caterpillars, leaf spot disease and chinch bugs where needed' }),
+  8: L('In August the program focuses on a micronutrient feeding, plus spot treatment for leaf spot disease and caterpillars where needed.', { micros: 'a micronutrient feeding', fungicide: 'spot treatment for leaf spot disease and caterpillars where needed', insect_spot: 'spot treatment for leaf spot disease and caterpillars where needed' }),
+  9: L('In September the program focuses on a micronutrient feeding, plus spot treatment for root disease and caterpillars where needed.', { micros: 'a micronutrient feeding', fungicide: 'spot treatment for root disease and caterpillars where needed', insect_spot: 'spot treatment for root disease and caterpillars where needed' }),
+  10: L(`In October the program focuses on ${FALL_FEED} with ${V13_FALL_BARRIER}, plus spot treatment for large patch, grubs and weeds where needed.`, { feed: FALL_FEED, pre_emergent: V13_FALL_BARRIER, fungicide: 'spot treatment for large patch, grubs and weeds where needed', insect_spot: 'spot treatment for large patch, grubs and weeds where needed', broadleaf: 'spot treatment for large patch, grubs and weeds where needed' }),
+  11: L('In November the program focuses on a feeding, plus spot treatment for large patch and sedge where needed.', { feed: 'a feeding', fungicide: 'spot treatment for large patch and sedge where needed', broadleaf: 'spot treatment for large patch and sedge where needed' }),
+  12: L('In December the program focuses on a light feeding, plus spot treatment for large patch and weeds where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for large patch and weeds where needed', broadleaf: 'spot treatment for large patch and weeds where needed' }),
 };
-
-// Unknown, mixed or missing grass: only what holds in all four programs that month.
-const DEFAULT_LINES = {
-  1: L(`In January the program focuses on ${BARRIER}, with broadleaf weed control when conditions allow.`, { pre_emergent: BARRIER, broadleaf: 'broadleaf weed control when conditions allow' }),
-  2: L('In February the program focuses on iron and micronutrients where the lawn needs it.', { micros: 'iron and micronutrients where the lawn needs it' }),
-  3: L(`In March the program focuses on ${BARRIER} and a spring feeding.`, { pre_emergent: BARRIER, feed: 'a spring feeding' }),
-  4: L('In April the program focuses on a preventive insect treatment, plus potassium where the lawn needs it and weed control when conditions allow.', { insect_prevention: 'a preventive insect treatment', potassium: 'potassium where the lawn needs it', broadleaf: 'weed control when conditions allow' }),
-  5: L('In May the program focuses on iron and micronutrients where the lawn needs it.', { micros: 'iron and micronutrients where the lawn needs it' }),
-  6: L('In June the program focuses on insect checks and on micronutrients and potassium where the lawn needs it.', { insect_check: 'insect checks', micros: 'micronutrients and potassium where the lawn needs it', potassium: 'micronutrients and potassium where the lawn needs it' }),
-  7: L('In July the program focuses on summer broadleaf weed control when conditions allow.', { broadleaf: 'summer broadleaf weed control when conditions allow' }),
-  8: L('August is a scouting month: the program checks the lawn for insect activity and general condition.', { scouting_visit: 'checks the lawn for insect activity and general condition' }),
-  9: L('In September the program focuses on potassium where the lawn needs it and weed control when conditions allow.', { potassium: 'potassium where the lawn needs it', broadleaf: 'weed control when conditions allow' }),
-  10: L(`In October the program focuses on ${FALL_FEED} and disease control where needed.`, { feed: FALL_FEED, fungicide: 'disease control where needed' }),
-  11: L('In November the program focuses on potassium where the lawn needs it and broadleaf weed control when conditions allow.', { potassium: 'potassium where the lawn needs it', broadleaf: 'broadleaf weed control when conditions allow' }),
-  12: L('In December the program offers a winter check-in on request.', { winter_touchpoint: 'offers a winter check-in on request' }),
-};
-
-function grassKeyFor(grassType) {
-  const key = String(grassType || '').toLowerCase().trim().replace(/[\s-]+/g, '_').replace(/[^a-z_]/g, '');
-  return Object.prototype.hasOwnProperty.call(PROGRAM_LINES, key) ? key : null;
-}
-
-// Month numbers (1-12) the protocol carries a visit for, for one grass key.
-function protocolMonths(grassKey) {
-  const visits = protocols && protocols.lawn && protocols.lawn[grassKey] && protocols.lawn[grassKey].visits;
-  if (!Array.isArray(visits)) return new Set();
-  return new Set(visits.map((v) => MONTH_ABBR.indexOf(String(v && v.month).slice(0, 3)) + 1).filter((m) => m >= 1));
-}
 
 // Any applied product with nitrogen (analysis_n > 0). Reads the catalog value on
 // either report shape; when the catalog value is absent, a fertilizer-analysis
@@ -254,37 +188,37 @@ async function resolveProgramVisit({ serviceData = null, scheduledService = null
 }
 
 /**
- * @param {{ grassType?: string|null, month?: number|null, applications?: object[], nitrogenApplied?: boolean|null, programVisit?: boolean }} input
+ * @param {{ month?: number|null, applications?: object[], nitrogenApplied?: boolean|null, programVisit?: boolean, protocolVersion?: string|null }} input
  *   programVisit must be true (a recurring lawn plan visit, see resolveProgramVisit);
  *   anything else, including omitted, returns null.
+ *   protocolVersion is the lawn protocol version the visit's plan resolved
+ *   (completion ledger row, else the scheduled visit's pin), null when none is
+ *   recorded. Only 2026.10-v13 with GATE_LAWN_V13 on gets a line.
  *   nitrogenApplied is the caller's catalog-backed answer (report-data reads
  *   analysis_n); null means derive it from `applications`. month is the visit's
  *   calendar month (1-12), already computed at a noon-UTC anchor by the report builder.
  * @returns {string|null} the program line, or null when there is no honest line
- *   (not a plan visit, no valid month, a month the grass's protocol has no visit
- *   for, or a Jun-Sep visit that applied nitrogen).
+ *   (not a plan visit, not a v13 visit, no valid month, or a Jun-Sep visit that
+ *   applied nitrogen); the caller then keeps the season note.
  */
-function buildProgramLine({ grassType = null, month = null, applications = [], nitrogenApplied = null, programVisit = false } = {}) {
+function buildProgramLine({ month = null, applications = [], nitrogenApplied = null, programVisit = false, protocolVersion = null } = {}) {
   if (programVisit !== true) return null;
+  // v13 copy only for a visit whose plan resolved the staged v13 version (the
+  // closeout's ledger row, or the scheduled visit's pin, carries it). A visit with
+  // no recorded version is historical or unattributed, and one pinned to an older
+  // version ran a retired grass-track program: neither gets a line.
+  if (!featureGates.lawnV13Live?.() || protocolVersion !== LAWN_V13_VERSION) return null;
   const m = Number(month);
   if (!Number.isInteger(m) || m < 1 || m > 12) return null;
   if (NO_NITROGEN_MONTHS.has(m) && (nitrogenApplied === null ? appliedNitrogen(applications) : nitrogenApplied === true)) return null;
-  const grassKey = grassKeyFor(grassType);
-  if (grassKey) {
-    if (!protocolMonths(grassKey).has(m)) return null;
-    return PROGRAM_LINES[grassKey][m].line;
-  }
-  return DEFAULT_LINES[m].line;
+  return PROGRAM_LINES_V13[m].line;
 }
 
 module.exports = {
   buildProgramLine,
-  PROGRAM_LINES,
-  DEFAULT_LINES,
+  PROGRAM_LINES_V13,
   QUALIFIERS,
   NO_NITROGEN_MONTHS,
-  grassKeyFor,
-  protocolMonths,
   appliedNitrogen,
   resolveNitrogenApplied,
   resolveProgramVisit,

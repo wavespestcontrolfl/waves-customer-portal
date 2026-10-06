@@ -264,6 +264,41 @@ function serviceReportEmailOptedOut(prefs) {
   return prefs?.email_enabled === false || prefs?.service_completed === false;
 }
 
+// Service contacts who never get the visit's findings (reports, report
+// links): a contact recorded as a tenant, and every on-site contact on a
+// property-manager account unless that contact is recorded as a manager or
+// landlord. A manager reports findings to the owner, not the occupant
+// (property-manager vendor agreements require it). Slots added by hand carry
+// no role, so on a manager account they count as occupants; a manager-side
+// copy goes through the billing recipient instead. Appointment texts are
+// unchanged: an occupant still needs to know when the tech arrives. A
+// profile's own account holder always gets their own reports (owner
+// 2026-10-05): to keep a tenant out, list them as an on-site contact under
+// the manager's or owner's profile, never as a profile's holder.
+const REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT = new Set(['property_manager', 'landlord']);
+
+// The account-level role. A primary (or unlinked) profile's own contact_role
+// is the account's. A property profile's contact_role describes that
+// property's contact (a tenant on a rental, say), so its account role is
+// account_contact_role, which withAccountPrimaryFallback /
+// withAccountPrimaryContactStrict copy from the account primary ('' when the primary
+// has none). A property profile without that field has an unknown account
+// role (its primary is missing or unread) and counts as managed: withhold
+// rather than guess.
+function managedAccount(customer) {
+  if (isSecondaryProfile(customer)) {
+    if (!Object.prototype.hasOwnProperty.call(customer, 'account_contact_role')) return true;
+    return clean(customer.account_contact_role).toLowerCase() === 'property_manager';
+  }
+  return clean(customer?.contact_role).toLowerCase() === 'property_manager';
+}
+
+function slotWithheldFromReports(customer, slot) {
+  const role = String(slot?.contactRole || '').trim().toLowerCase();
+  if (role === 'tenant') return true;
+  return managedAccount(customer) && !REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT.has(role);
+}
+
 function getServiceReportEmailRecipients(customer, prefs = {}) {
   if (!customer) return [];
   // This resolver previously only consulted
@@ -279,9 +314,14 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
   const primary = getPrimaryContact(customer);
   const recipients = [];
 
-  for (const slot of getServiceContactSlots(customer)) {
+  // Deny wins: an address recorded on any withheld slot is withheld, even when
+  // another slot carries it too.
+  const slots = getServiceContactSlots(customer);
+  const withheldEmails = new Set(slots.filter((slot) => slot.email && slotWithheldFromReports(customer, slot))
+    .map((slot) => cleanEmail(slot.email)));
+  for (const slot of slots) {
     const distinct = !!slot.email && !sameEmail(slot.email, primary.email);
-    if (!distinct) continue;
+    if (!distinct || withheldEmails.has(cleanEmail(slot.email))) continue;
     recipients.push({
       phone: slot.phone || primary.phone,
       email: slot.email,
@@ -359,6 +399,11 @@ function withAccountPrimaryFallback(row, primaryRow) {
   if (filled.length) {
     out.account_primary_fallback = { customer_id: primaryRow.id, fields: filled };
   }
+  // The account's role (property manager, ...) is an account fact, kept apart
+  // from the property row's own contact_role: the report rule
+  // (slotWithheldFromReports) sees a manager account on every property.
+  // Always set ('' = no role): an absent field means the role is unknown.
+  out.account_contact_role = clean(primaryRow.contact_role);
   return out;
 }
 
@@ -375,12 +420,25 @@ async function loadAccountPrimaryRow(row, { db = null, forShare = false, rethrow
     if (forShare) query = query.forShare();
     const primary = await query
       .whereNull('deleted_at')
-      .first('id', 'first_name', 'phone', 'email');
+      .first('id', 'first_name', 'phone', 'email', 'contact_role');
     return primary && String(primary.id) !== String(row.id) ? primary : null;
   } catch (err) {
     if (rethrow) throw err;
     return null;
   }
+}
+
+// The strict form of withAccountPrimaryContact, for senders that apply the
+// report rule: the row with the primary's blank contact fields filled in and
+// account_contact_role set. Requires account_id and is_primary_profile on the
+// row. A failed read throws, and so does a linked property whose primary is
+// gone (archived): the caller retries rather than send findings to an
+// occupant of a managed rental.
+async function withAccountPrimaryContactStrict(row, { db = null, forShare = false } = {}) {
+  if (!isSecondaryProfile(row)) return row;
+  const primary = await loadAccountPrimaryRow(row, { db, rethrow: true, forShare });
+  if (!primary) throw new Error('account primary profile not found');
+  return withAccountPrimaryFallback(row, primary);
 }
 
 // One-call form: the row with the primary's contact fields filled in where
@@ -417,6 +475,8 @@ module.exports = {
   getServiceContactSmsRecipient,
   getServiceContactSlots,
   isServiceContactRole,
+  slotWithheldFromReports,
+  withAccountPrimaryContactStrict,
   getBillingContact,
   getAppointmentContacts,
   getInvoiceEmailRecipients,

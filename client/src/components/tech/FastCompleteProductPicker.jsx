@@ -46,6 +46,8 @@ function pickerLists(products, commonProducts, groupOf) {
   const rest = listed.filter((product) => !commonById.has(String(product.id))).sort(byName);
   return {
     listed,
+    // Every listed product of the primary group, "Used most" ones included.
+    primary: listed.filter((product) => groupOf(product) === 'pest'),
     commonById,
     mostUsed: [...commonById.keys()].map((id) => byId.get(id)),
     pest: rest.filter((product) => groupOf(product) === 'pest'),
@@ -122,6 +124,8 @@ function BrowseLists({ lists, showOther, groupProps, titles }) {
 // The lawn sheet's own search (variant "inline"): a box in the Products section.
 // Typing lists the matching catalog products right under it; one tap adds the
 // product and clears the box. No dialog, so nothing to open and nothing to close.
+// On the lawn line it searches the lawn products only (lawnProductGroup): a
+// lawn visit never lists a termiticide or a roach bait (owner 2026-10-05).
 // When matches first show for a typed query the list is scrolled into view
 // (nearest edge), so it is not left under the sheet's bottom bar.
 function InlineProductSearch({ line, products, commonProducts, onSheetIds, locked, onPick }) {
@@ -130,7 +134,7 @@ function InlineProductSearch({ line, products, commonProducts, onSheetIds, locke
   const lawn = line === 'lawn';
   const lists = useMemo(() => pickerLists(products, commonProducts, lawn ? lawnProductGroup : productGroup), [products, commonProducts, lawn]);
   const q = query.trim().toLowerCase();
-  const results = q ? rankProducts(lists.listed, q) : null;
+  const results = q ? rankProducts(lawn ? lists.primary : lists.listed, q) : null;
   const resultsRef = useRef(null);
   const hasResults = !!results && results.length > 0;
   useEffect(() => {

@@ -74,6 +74,22 @@ describe('readAreaMeasurements without a database', () => {
     expect(read.areas.lawn.sqft).toBe(2800);
   });
 
+  test('a primary property saved without its ZIP still reads the customer turf profile lawn size', async () => {
+    const property = fixtureProperty({ is_primary: true, zip: null });
+    const customer = { id: 'cust-1', address_line1: property.address_line1, address_line2: null, city: property.city, state: 'FL', zip: '34201' };
+    const knex = makeKnex({ customer_properties: [property], customers: [customer], customer_turf_profiles: [{ customer_id: 'cust-1', lawn_sqft: 4000 }] });
+    const read = await areas.readAreaMeasurements(scope, admin, { knex, lookup: jest.fn().mockResolvedValue(null) });
+    expect(read.areas.lawn).toEqual({ sqft: 4000, source: 'recorded', reviewedAt: null });
+  });
+
+  test('a primary property at another address keeps ignoring the customer turf profile', async () => {
+    const property = fixtureProperty({ is_primary: true, zip: null, address_line1: '200 Other Rd' });
+    const customer = { id: 'cust-1', address_line1: '100 Fixture St', address_line2: null, city: 'Fixture', state: 'FL', zip: '34201' };
+    const knex = makeKnex({ customer_properties: [property], customers: [customer], customer_turf_profiles: [{ customer_id: 'cust-1', lawn_sqft: 4000 }] });
+    const read = await areas.readAreaMeasurements(scope, admin, { knex, lookup: jest.fn().mockResolvedValue(null) });
+    expect(read.areas.lawn).toBeNull();
+  });
+
   test('a repeat refresh inside the cooldown reuses the cache instead of going upstream', async () => {
     const knex = makeKnex({ customer_properties: [fixtureProperty()] });
     const lookup = jest.fn().mockResolvedValue({ enriched: { estimatedBedAreaSf: 800.5 } });
@@ -179,4 +195,22 @@ test('the area-column probe caches only a positive answer', async () => {
   knex.schema.hasColumn.mockResolvedValue(false);
   expect(await fresh.hasAreaMeasurementsColumn(knex)).toBe(true);
   expect(knex.schema.hasColumn).toHaveBeenCalledTimes(2);
+});
+
+describe('sameCustomerAddress', () => {
+  const row = (extra = {}) => ({ address_line1: '100 Fixture St', address_line2: null, city: 'Fixture', zip: '34201', ...extra });
+  test('a ZIP on one side only falls back to street, unit and city', () => {
+    expect(areas.sameCustomerAddress(row(), row({ zip: null }))).toBe(true);
+    expect(areas.sameCustomerAddress(row({ zip: '' }), row())).toBe(true);
+  });
+  test('two different ZIPs, another city, another unit or another street never match', () => {
+    expect(areas.sameCustomerAddress(row(), row({ zip: '34299' }))).toBe(false);
+    expect(areas.sameCustomerAddress(row(), row({ zip: null, city: 'Othertown' }))).toBe(false);
+    expect(areas.sameCustomerAddress(row(), row({ zip: null, address_line2: 'Unit 4' }))).toBe(false);
+    expect(areas.sameCustomerAddress(row(), row({ zip: null, address_line1: '102 Fixture St' }))).toBe(false);
+  });
+  test('no city on the ZIP-less side is not enough to match', () => {
+    expect(areas.sameCustomerAddress(row(), row({ zip: null, city: null }))).toBe(false);
+    expect(areas.sameCustomerAddress(null, row())).toBe(false);
+  });
 });
