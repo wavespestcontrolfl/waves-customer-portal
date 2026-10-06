@@ -119,20 +119,23 @@ describe('property-lookup callers declare their scope decision', () => {
   });
 
   test('every direct lookupPropertyFromAITrio caller (by any alias) is a declared bypass', () => {
-    const offenders = [];
     // Only the defining module and the lookup that composes the trio into a
     // profile are exempt; a helper anywhere else, the lookup directory
     // included, must declare itself.
     const EXEMPT = new Set(['routes/property-lookup-v2.js', 'services/property-lookup/ai-property-lookup.js']);
+    const found = [];
     for (const file of files) {
       const r = rel(file);
       if (EXEMPT.has(r)) continue;
       const src = fs.readFileSync(file, 'utf8');
       const calls = aliasesOf(src, 'lookupPropertyFromAITrio').flatMap((name) => callLines(src, name)
-        .filter(({ line }) => !new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line) && !/module\.exports/.test(line)));
-      if (calls.length && !TRIO_CALLERS[r]) offenders.push(r);
+        .filter(({ line }) => !new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)));
+      if (calls.length) found.push(r);
     }
-    expect(offenders).toEqual([]);
+    // Both directions: a direct caller the registry does not name is a new,
+    // unreviewed bypass; a registry entry with no direct call left is stale
+    // and would pre-approve whatever lands in that file next.
+    expect(found.sort()).toEqual(Object.keys(TRIO_CALLERS).sort());
   });
 
   test('every caller id is used in exactly the one file the registry binds it to, always as a single-quoted literal', () => {
