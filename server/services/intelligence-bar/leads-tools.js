@@ -872,6 +872,35 @@ async function updateLeadContact(input) {
 const leadDisplayName = (row) => `${row.first_name || ''} ${row.last_name || ''}`.trim() || '(no name)';
 const addressLine = (parts) => parts.map(p => (p === null || p === undefined ? '' : String(p).trim())).filter(Boolean).join(', ') || null;
 
+function convertPreview(lead, customer) {
+  return {
+    lead_id: lead.id,
+    lead_name: leadDisplayName(lead),
+    lead_status: lead.status,
+    lead_contact: {
+      phone: lead.phone || null,
+      email: lead.email || null,
+      address: addressLine([lead.address, lead.city, lead.zip]),
+    },
+    customer_id: customer.id,
+    customer_name: leadDisplayName(customer),
+    customer_record: {
+      phone: customer.phone || null,
+      email: customer.email || null,
+      // Unit/suite included: two units at one street address are different customers.
+      // (Leads have no unit column; their address is a single line.)
+      address: addressLine([customer.address_line1, customer.address_line2, customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')]),
+    },
+    // Lead and customer versions bind the card (the two-step fingerprint
+    // hashes `_version`): an edit to either after the card was shown refuses.
+    _version: [lead.updated_at, customer.updated_at].map(v => (v ? new Date(v).toISOString() : '')).join('|'),
+    // The route pins this as the "seen" lead version (see the handled rule).
+    _lead_updated_at: lead.updated_at ? new Date(lead.updated_at).toISOString() : null,
+    // ...and this as the customer version the conversion UPDATE re-asserts.
+    _customer_updated_at: customer.updated_at ? new Date(customer.updated_at).toISOString() : null,
+  };
+}
+
 async function convertLead(input) {
   const lead = await resolveLeadForUpdate(input);
   if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
@@ -884,38 +913,19 @@ async function convertLead(input) {
   const customer = await db('customers').where('id', customerId).whereNull('deleted_at').first();
   if (!customer) return { error: 'Customer not found', code: 'target_not_found' };
   const customerName = leadDisplayName(customer);
-  if (lead.status === 'won') {
-    return { error: `Lead ${leadName} is already converted (won). Nothing to do.`, code: 'already_converted' };
-  }
   if (lead.customer_id && String(lead.customer_id).toLowerCase() !== String(customer.id).toLowerCase()) {
     return {
       error: `Lead ${leadName} is already linked to a different customer. Change that link on the Leads page first.`,
       code: 'target_relationship_mismatch',
     };
   }
+  // Already converted = the relationship is complete (linked and stamped). A
+  // lead marked won by hand with no customer link still gets its card.
+  if (lead.customer_id && lead.converted_at) {
+    return { error: `Lead ${leadName} is already converted to this customer. Nothing to do.`, code: 'already_converted' };
+  }
 
-  const preview = {
-    lead_id: lead.id,
-    lead_name: leadName,
-    lead_status: lead.status,
-    lead_contact: {
-      phone: lead.phone || null,
-      email: lead.email || null,
-      address: addressLine([lead.address, lead.city, lead.zip]),
-    },
-    customer_id: customer.id,
-    customer_name: customerName,
-    customer_record: {
-      phone: customer.phone || null,
-      email: customer.email || null,
-      address: addressLine([customer.address_line1, customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')]),
-    },
-    // Lead and customer versions bind the card (the two-step fingerprint
-    // hashes `_version`): an edit to either after the card was shown refuses.
-    _version: [lead.updated_at, customer.updated_at].map(v => (v ? new Date(v).toISOString() : '')).join('|'),
-    // The route pins this as the "seen" lead version (see the handled rule).
-    _lead_updated_at: lead.updated_at ? new Date(lead.updated_at).toISOString() : null,
-  };
+  const preview = convertPreview(lead, customer);
 
   if (input.confirmed !== true) {
     return {
@@ -927,7 +937,7 @@ async function convertLead(input) {
 
   // The route pins the status and version the card showed; without them this
   // is not an approved card.
-  if (!input._expected_status) {
+  if (!input._expected_status || !input._expected_customer_updated_at) {
     return { error: 'This conversion has no approved card. Rebuild the confirmation card.', preview_changed: true };
   }
   const result = await leadAttribution.convertLeadToCustomer(lead.id, {
@@ -935,11 +945,14 @@ async function convertLead(input) {
     seenStatus: input._expected_status,
     seenUpdatedAt: input._expected_updated_at || null,
     expectedStatus: input._expected_status,
+    expectedCustomerUpdatedAt: input._expected_customer_updated_at,
+    // The lead's own stored amounts ride through (an empty one stays empty),
+    // so the history entry matches the row instead of logging $0.
+    monthlyValue: lead.monthly_value,
+    initialServiceValue: lead.initial_service_value,
   });
   if (result.error) {
-    return result.status === 409
-      ? { error: 'The lead changed since the card was shown — nothing was converted.', preview_changed: true }
-      : { error: result.error };
+    return result.status === 409 ? { error: result.error, preview_changed: true } : { error: result.error };
   }
 
   logger.info(`[intelligence-bar:leads] Converted lead ${lead.id} to customer ${customer.id}`);
@@ -951,7 +964,15 @@ async function convertLead(input) {
     new_status: 'won',
     customer_id: customer.id,
     customer_name: customerName,
+    ...estimateOutcome(result.estimates),
   };
+}
+
+// The best-effort estimate attach, reported: a failure is a warning (a
+// partial outcome), never a clean Done.
+function estimateOutcome(estimates) {
+  if (estimates?.failed) return { warning: "Converted, but the lead's estimates were not attached — attach them from the estimate page." };
+  return estimates?.linked ? { estimates_attached: estimates.linked } : {};
 }
 
 async function previewBulkLeadUpdate(input) {

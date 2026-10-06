@@ -177,7 +177,17 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // write must lose rather than overwrite its customer, codex #3834 r18 P1):
 // 0 rows ⇒ a concurrent transition wins and nothing below runs.
 // Returns whether the lead converted.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId } = {}) {
+// The amounts part of the converted history line. An explicit null for both
+// (the bar's card passes the lead's own stored values, which may be empty)
+// omits them rather than logging $0; every other caller reads as before.
+function conversionAmountsText(monthlyValue, initialServiceValue) {
+  if (monthlyValue === null && initialServiceValue === null) return '';
+  return ` Monthly: $${monthlyValue || 0}, Initial: $${initialServiceValue || 0}`;
+}
+
+// `onEstimateLink` (optional): called with { linked: n } or { failed: true }
+// for the best-effort estimate attach below, for a caller that reports it.
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId, onEstimateLink } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -234,20 +244,22 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // a lead estimate kept customer_id = NULL and was invisible/unbookable). Lazy
   // require breaks the lead-estimate-link ⇄ lead-attribution cycle. Best-effort:
   // a backfill miss must never break the conversion.
+  const reportEstimateLink = onEstimateLink || (() => {});
   if (linkedCustomer) {
     try {
       const lead = await db('leads').where('id', leadId).first('id', 'estimate_id', 'phone', 'email');
       const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
-      await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer });
+      reportEstimateLink({ linked: await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer, throwOnError: Boolean(onEstimateLink) }) });
     } catch (err) {
       logger.warn(`[LeadAttribution] estimate→customer backfill failed for lead ${leadId}: ${err.message}`);
+      reportEstimateLink({ failed: true });
     }
   }
 
   await db('lead_activities').insert({
     lead_id: leadId,
     activity_type: 'converted',
-    description: `Converted to customer${customerId ? ` (${customerId})` : ''}. Monthly: $${monthlyValue || 0}, Initial: $${initialServiceValue || 0}${triggerSource ? ` [via ${triggerSource}]` : ''}`,
+    description: `Converted to customer${customerId ? ` (${customerId})` : ''}.${conversionAmountsText(monthlyValue, initialServiceValue)}${triggerSource ? ` [via ${triggerSource}]` : ''}`,
     performed_by: 'system',
     metadata: JSON.stringify({ customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource }),
   });
@@ -271,7 +283,11 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 // millisecond) and the customer link (none, or this customer) the card showed,
 // so another admin's edit or a re-link after the card matches no row (codex
 // #6099 r1). The route passes none and keeps its handled-only rule.
-async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthlyValue, initialServiceValue, waveguardTier, seenStatus, seenUpdatedAt, expectedStatus } = {}) {
+// `expectedCustomerUpdatedAt` (card path, required with expectedStatus): the
+// same UPDATE also requires the target customer to be live at the version the
+// card showed (codex #6099 r2).
+// Returns { lead, estimates: { linked } | { failed: true } }.
+async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthlyValue, initialServiceValue, waveguardTier, seenStatus, seenUpdatedAt, expectedStatus, expectedCustomerUpdatedAt } = {}) {
   const customerId = typeof rawCustomerId === 'string' ? rawCustomerId.trim() : rawCustomerId;
   if (!customerId) return { status: 400, error: 'customer_id is required to convert a lead' };
 
@@ -284,13 +300,11 @@ async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthl
   const refusal = handledStatusRefusal('won', seenStatus, lead.status, seenUpdatedAt, lead.updated_at);
   if (refusal) return { status: refusal.code, error: refusal.error };
   // The card path fails closed without the version it showed.
-  if (expectedStatus && !seenUpdatedAt) return { status: 409, error: 'The lead changed since the card was shown — nothing was converted.' };
+  const missingPin = expectedStatus && (!seenUpdatedAt ? LEAD_CHANGED : !expectedCustomerUpdatedAt && CUSTOMER_CHANGED);
+  if (missingPin) return { status: 409, error: missingPin };
   const handledGuard = unlessHandledSince(seenStatus, seenUpdatedAt);
-  const cardGuard = expectedStatus ? (q) => {
-    handledGuard(q);
-    q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(seenUpdatedAt).toISOString()]);
-    q.where((w) => w.whereNull('customer_id').orWhere('customer_id', customerId));
-  } : null;
+  const cardGuard = expectedStatus ? cardClaimGuard(handledGuard, { seenUpdatedAt, customerId, expectedCustomerUpdatedAt }) : null;
+  let estimates = null;
   const won = await markConverted(leadId, {
     customerId,
     monthlyValue,
@@ -301,12 +315,37 @@ async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthl
     // re-asserting it in the win's own UPDATE.
     onlyIfIdentity: cardGuard || handledGuard,
     ...(expectedStatus ? { onlyIfStatusIn: [expectedStatus] } : {}),
+    onEstimateLink: (outcome) => { estimates = outcome; },
   });
-  if (won === false && expectedStatus) return { status: 409, error: 'The lead changed since the card was shown — nothing was converted.' };
+  if (won === false && expectedStatus) {
+    return { status: 409, error: (await customerMovedSince(customerId, expectedCustomerUpdatedAt)) ? CUSTOMER_CHANGED : LEAD_CHANGED };
+  }
   if (won === false) return { status: 409, error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' };
   const updatedLead = await db('leads').where('id', leadId).first();
-  return { lead: updatedLead };
+  return { lead: updatedLead, estimates };
 }
+const LEAD_CHANGED = 'The lead changed since the card was shown — nothing was converted.';
+const msIso = (v) => new Date(v).toISOString();
+
+// The card path's extra claim conditions, in the win's own UPDATE: the lead
+// at the version the card showed, linked to no customer or this one, and the
+// target customer live at the version the card showed.
+function cardClaimGuard(handledGuard, { seenUpdatedAt, customerId, expectedCustomerUpdatedAt }) {
+  return (q) => {
+    handledGuard(q);
+    q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [msIso(seenUpdatedAt)]);
+    q.where((w) => w.whereNull('customer_id').orWhere('customer_id', customerId));
+    q.whereExists(db('customers').select(db.raw('1')).where('customers.id', customerId).whereNull('customers.deleted_at')
+      .whereRaw("date_trunc('milliseconds', customers.updated_at) = ?::timestamptz", [msIso(expectedCustomerUpdatedAt)]));
+  };
+}
+
+// After a refused card claim: name the customer when it is gone or moved.
+async function customerMovedSince(customerId, expectedCustomerUpdatedAt) {
+  const now = await db('customers').where('id', customerId).first('updated_at', 'deleted_at');
+  return !now || Boolean(now.deleted_at) || !now.updated_at || msIso(now.updated_at) !== msIso(expectedCustomerUpdatedAt);
+}
+const CUSTOMER_CHANGED = 'The customer changed since the card was shown — nothing was converted.';
 
 // Where a won lead's win lands in the ad funnel — the ONE mechanism for every
 // writer of status='won' (markConverted; the admin book route, which converts

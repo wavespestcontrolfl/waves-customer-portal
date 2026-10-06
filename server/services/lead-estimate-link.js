@@ -1266,8 +1266,10 @@ async function findCustomerLinkedLeadsByContact(database, phone, email) {
 // with this lead's id in `estimate_data.lead_id` (the public-quote mirror).
 // Always guarded to `customer_id IS NULL` so an estimate tied to another
 // customer is never re-homed. Best-effort: a failure here never breaks the
-// conversion. Returns the number of estimates attached.
-async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } = {}) {
+// conversion. Returns the number of estimates attached. `throwOnError`: a
+// caller that reports the outcome (the bar's convert_lead card) gets the
+// error instead of a 0 that reads like "nothing to attach".
+async function linkLeadEstimatesToCustomer({ database = db, lead, customerId, throwOnError = false } = {}) {
   if (!customerId || !lead) return 0;
   try {
     // Primary: the lead's FK-linked estimate — deterministic, zero ambiguity.
@@ -1296,6 +1298,7 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } =
       .update({ customer_id: customerId, updated_at: new Date() });
   } catch (err) {
     logger.warn(`[lead-estimate-link] backfill estimate.customer_id failed for lead ${lead?.id} → customer ${customerId}: ${err.message}`);
+    if (throwOnError) throw err;
     return 0;
   }
 }

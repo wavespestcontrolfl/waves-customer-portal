@@ -410,7 +410,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     push('customer', `The customer record for ${preview.customer_name} is not changed`);
     push('operational', 'The lead is stamped converted now and marked qualified');
     push('operational', "If the lead has a linked ad-attribution row, its funnel stage advances toward 'booked' (never downgraded; best-effort)");
-    push('operational', "Estimates made for this lead that have no customer yet are attached to this customer (they then show as the customer's estimates)");
+    push('operational', "Tries to attach this lead's estimates that have no customer yet to this customer; if that step fails, the result says so and the estimates stay on the lead");
     push('operational', "A converted entry is appended to the lead's activity history");
     push('operational', 'The next daily ad upload may send this lead to Google Ads and Meta as a qualified-lead conversion (when an ad click or matching email or phone is on file); a sent conversion is not recalled');
     push('operational', 'No message is sent to the customer');

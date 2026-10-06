@@ -1427,7 +1427,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       lead_contact: { phone: '+19415550101', email: null, address: '1 Example St' },
       customer_id: 'cust-9', customer_name: 'Testc Beta',
       customer_record: { phone: '+19415550101', email: null, address: null },
-      _version: 'v1', _lead_updated_at: '2026-10-06T14:00:00.123Z',
+      _version: 'v1', _lead_updated_at: '2026-10-06T14:00:00.123Z', _customer_updated_at: '2026-10-06T15:00:00.456Z',
     });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'convert_lead', input: { lead_name: 'Beta', customer_id: 'cust-9' } }],
@@ -1441,6 +1441,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(stored.params).toMatchObject({
         lead_id: 'lead-3', customer_id: 'cust-9',
         _expected_status: 'estimate_sent', _expected_updated_at: '2026-10-06T14:00:00.123Z',
+        _expected_customer_updated_at: '2026-10-06T15:00:00.456Z',
       });
       expect(stored.params.lead_name).toBeUndefined();
       expect(body.pendingActions[0].params).toEqual({
