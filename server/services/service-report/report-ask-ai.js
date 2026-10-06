@@ -311,13 +311,16 @@ const SPELLED_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s
 // A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 N US 41",
 // "12 State Road 64" (Codex P1 #6016 r15).
 const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:fl|s\.?\s?r\.?|u\.?\s?s\.?|c\.?\s?r\.?|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
+// A spelled house number on a numbered route: "Twelve U S 41", "One Hundred SR 70"
+// (Codex P1 #6016 r36).
+const SPELLED_ROUTE_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s+)?${SPELLED_NUMBER})*(?=\\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\\.?\\s+)?(?:fl|s\\.?\\s?r\\.?|u\\.?\\s?s\\.?|c\\.?\\s?r\\.?|i|state\\s+(?:road|route|rd)|county\\s+(?:road|rd)|highway|hwy|route|rte)[\\s-]*\\d{1,4}\\b)`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]')).replace(/\d{3,}/g, '[number]');
+  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]')).replace(/\d{3,}/g, '[number]');
   return clip(masked, max);
 }
 
