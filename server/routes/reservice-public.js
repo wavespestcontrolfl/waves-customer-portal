@@ -690,8 +690,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // card offers "need to move it?" without waiting for the SMS.
     let rescheduleUrl = null;
     let prepPhotos = null;
+    let serviceRow = null;
     try {
-      const serviceRow = await db('scheduled_services')
+      serviceRow = await db('scheduled_services')
         .where({ self_booking_id: result.body?.booking?.id })
         .first('id', 'reschedule_token');
       if (serviceRow?.reschedule_token) rescheduleUrl = `/reschedule/${serviceRow.reschedule_token}`;
@@ -700,6 +701,24 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       if (serviceRow?.id && photosEnabled()) prepPhotos = await reservicePhotoOffer(serviceRow.id, customer);
     } catch (err) {
       logger.warn(`[reservice-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
+    }
+
+    // Owner bell + push (owner 2026-10-05): the booking alert createSelfBooking
+    // sends is an internal text the bell policy silences, so a customer's
+    // re-service request reached nobody. Once per booking — never on a replay.
+    if (!result.body?.replayed) {
+      const { triggerNotification } = require('../services/notification-triggers');
+      const dayLabel = new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', {
+        weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York',
+      });
+      triggerNotification('reservice_self_booked', {
+        customerId: customer.id,
+        scheduledServiceId: serviceRow?.id || null,
+        name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null,
+        when: slot.start_label ? `${dayLabel} at ${slot.start_label}` : dayLabel,
+        pests: requestedPestLabels.length ? requestedPestLabels.join(', ') : null,
+        request: details || null,
+      }).catch((err) => logger.warn(`[reservice-public] re-service bell failed for customer ${customer.id}: ${err.message}`));
     }
 
     return res.json({

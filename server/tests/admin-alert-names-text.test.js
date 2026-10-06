@@ -185,6 +185,46 @@ describe('payment_failed bell', () => {
   });
 });
 
+describe('reservice_self_booked bell (owner 2026-10-05)', () => {
+  const { build } = TRIGGER_REGISTRY.reservice_self_booked;
+  const why = (built) => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    return composeAdminAlert({ area: 'Schedule', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
+      subject: { type: 'customer', id: 'c1' }, doneWhen: 'request_read', who: 'person' });
+  };
+
+  test('names the customer and the visit, quotes their words, links the customer', () => {
+    const request = 'German roaches got into the house a few weeks ago, I treated with a gel bait over a couple of weeks and they seem to have resolved.';
+    const built = build({ customerId: 'c1', name: 'Albert Clark', when: 'Thu, Oct 9 at 1:00 PM', pests: 'Roaches', request });
+    expect(built.title).toBe("Schedule — read Albert Clark's re-service request");
+    expect(built.body.startsWith('Roaches: “German roaches got into the house')).toBe(true);
+    expect(built.body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+    expect(built.detail).toBe(`Pests: Roaches\nVisit: Thu, Oct 9 at 1:00 PM\nRequest: ${request}`);
+    expect(built.link).toBe('/admin/customers?customerId=c1');
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('a short name keeps the visit day in the headline', () => {
+    const built = build({ customerId: 'c1', name: 'Al Day', when: 'Thu, Oct 9', request: 'ants' });
+    expect(built.title).toBe("Schedule — read Al Day's re-service request for Thu, Oct 9");
+    expect(built.title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+  });
+
+  test('no typed words says so, with the picked pests, and passes the rule', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', pests: 'Ants' });
+    expect(built.body).toBe('Picked ants and typed no description.');
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).body).toBe('They typed no description of the problem.');
+    expect(built.detail).toBeUndefined();
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('a phone number or street address in the words is masked', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', request: 'Call 941-555-0123, ants at 123 Palm Avenue' });
+    expect(built.detail).not.toMatch(/555-0123|123 Palm Avenue/);
+    expect(built.body).not.toMatch(/555-0123|123 Palm Avenue/);
+  });
+});
+
 describe('prepaid coverage bell', () => {
   const visit = { id: 'visit-1', customer_id: 'c1', service_date: '2026-10-06', service_type: 'Lawn Care' };
 

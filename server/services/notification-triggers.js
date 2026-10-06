@@ -290,6 +290,35 @@ const TRIGGER_REGISTRY = {
       link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
     }),
   },
+  // A customer booked their own free re-service from the self-serve link
+  // (owner 2026-10-05): the request is a customer telling us about a
+  // problem, so it rings and pushes like a text. The headline names who and
+  // when, the why quotes their words (or the pests they picked), and the
+  // whole request rides in the detail. Fired by reservice-public.js.
+  reservice_self_booked: {
+    label: 'Customer booked a re-service',
+    category: 'schedule',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => {
+      const names = require('./admin-alert-names');
+      const named = p.name || 'a customer';
+      const when = p.when ? ` for ${p.when}` : '';
+      const pests = p.pests ? `${p.pests}: ` : '';
+      const words = p.request ? names.redactedWords(p.request) : '';
+      return {
+        title: `Schedule — ${names.fitAction('Schedule', named, [
+          (n) => `read ${n}'s re-service request${when}`,
+          (n) => `read ${n}'s re-service request`,
+        ])}`,
+        body: words
+          ? names.whyWithQuote({ lead: pests, quote: words })
+          : (p.pests ? `Picked ${p.pests.toLowerCase()} and typed no description.` : 'They typed no description of the problem.'),
+        ...(words ? { detail: [p.pests ? `Pests: ${p.pests}` : null, p.when ? `Visit: ${p.when}` : null, `Request: ${words}`].filter(Boolean).join('\n') } : {}),
+        link: p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/schedule',
+      };
+    },
+  },
   sms_reply: {
     label: 'SMS reply received',
     category: 'inbound_sms',
@@ -998,6 +1027,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // renotify:false, so two customers' failures before the first is
     // dismissed must not collapse into one banner (codex P2 on #4392).
     return `waves-payment_failed-${payload.attemptId || payload.paymentIntentId}`;
+  }
+  if (triggerKey === 'reservice_self_booked') {
+    // Per-visit tag: two customers booking before the first banner is
+    // dismissed must not collapse into one (renotify:false in the worker).
+    return `waves-reservice_self_booked-${payload.scheduledServiceId || crypto.randomUUID()}`;
   }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,

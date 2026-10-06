@@ -54,6 +54,12 @@ jest.mock('../services/visit-prep', () => ({
   })),
 }));
 
+// The owner's re-service bell (registry trigger); its copy and bell policy
+// have their own suites — this file pins when the route fires it.
+jest.mock('../services/notification-triggers', () => ({
+  triggerNotification: jest.fn(async () => ({ bellWritten: true })),
+}));
+
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js
 // uses): chain methods return the chain, .first() resolves firstResults,
 // list terminals resolve listResults.
@@ -673,6 +679,40 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
     const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest' });
     expect(arg.customer_notes).toBe('Re-service requested via self-serve link');
     expect(arg.callbackVisit.customerRequest).toBeUndefined();
+  });
+  // Owner 2026-10-05: a self-booked re-service rang nobody (the internal
+  // text it sent is silenced by the bell policy). One bell per booking.
+  describe('owner bell on a new booking', () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    beforeEach(() => triggerNotification.mockClear());
+
+    async function post(body, replayed = false) {
+      const csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking').mockResolvedValue({
+        ok: true, body: { booking: { id: 'booking-1' }, confirmationCode: 'ABC123', ...(replayed ? { replayed: true } : {}) },
+      });
+      try {
+        await callHandler(postHandler(), { params: { token: 'a'.repeat(64) }, body });
+      } finally {
+        csb.mockRestore();
+      }
+    }
+
+    test('rings once with the name, visit day, picked pests and the typed words', async () => {
+      gateState.reservicePestChips = true;
+      await post({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'roaches in the kitchen', pests: ['roaches'] });
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      const [key, payload] = triggerNotification.mock.calls[0];
+      expect(key).toBe('reservice_self_booked');
+      expect(payload).toEqual(expect.objectContaining({
+        customerId: CUST_ID, name: 'Jamie', pests: 'Roaches', request: 'roaches in the kitchen',
+      }));
+      expect(payload.when).toMatch(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}/);
+    });
+
+    test('an idempotent replay of the same booking does not ring again', async () => {
+      await post({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' }, true);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
   });
   // GATE_RESERVICE_DETAILS_REQUIRED (owner 2026-10-02: any text counts; a
   // pest chip alone does not replace the box).
