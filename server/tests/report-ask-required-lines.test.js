@@ -1475,3 +1475,17 @@ describe('answer screen, Codex round 33 (+ #6038 round 9)', () => {
     expect(medicalExposureAnswer(question)).toBeTruthy();
   });
 });
+
+describe('answer screen, Codex round 34', () => {
+  const data = lawnData({ reportV2: { aftercare: {} } });
+  const facts = buildReportAskFacts({ data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'How can I help my lawn?', data, facts });
+
+  test.each(['You should water every day.', 'It would help to apply fertilizer this week.', 'The best step is to stop mowing.'])('modal care advice is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('own_instruction');
+  });
+
+  test('a plain observation passes', () => {
+    expect(ask('You can see the new growth near the fence.')).toBeNull();
+  });
+});

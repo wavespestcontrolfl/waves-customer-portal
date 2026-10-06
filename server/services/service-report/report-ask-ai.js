@@ -1182,6 +1182,11 @@ function statesLineAlone(sentences, line) {
 const WATERING_DIRECTIVE = /\b(?:keep\s+(?:the\s+|your\s+)?(?:soil|lawn|turf|grass|yard|beds?|plants?|roots?)\s+(?:\w+\s+)?(?:moist|wet|damp|watered|hydrated)|run\s+(?:the\s+|your\s+)?(?:hose|sprinklers?|irrigation|sprinkler\s+system|system)|(?:add|give)\s+(?:\w+\s+){0,2}(?:moisture|water|a\s+drink)|soak(?:s|ing)?\b|hose\s+(?:it\s+|them\s+)?(?:down|off|over)|hand[\s-]?water|sprinkle\s+(?:it|the|some)|moisten\w*|mist(?:s|ing)?\b|hydrat\w*|drench\w*|dampen\w*|wet\s+(?:the|your|it|them))/i;
 
 const CARE_INSTRUCTION_RE = /^(?:please\s+)?(?:mow|water|irrigate|apply|spread|fertiliz\w*|spray|stop|start|avoid|keep|cut|trim|prune|remove|rake|aerate|seed|sod|dethatch|treat|use|add|run|turn|set|skip|wait|don['’]?t|do\s+not|never|make\s+sure|be\s+sure|try)\b/i;
+// Care advice in modal or framed form: "You should water every day", "It
+// would help to apply fertilizer", "The best step is to stop mowing" (Codex
+// P1 #5964 r34).
+const CARE_VERBS = '(?:mow\\w*|water\\w*|irrigat\\w*|appl(?:y|ies|ying)|spread\\w*|fertiliz\\w*|spray\\w*|stop\\w*|start\\w*|avoid\\w*|keep\\w*|cut\\w*|trim\\w*|prun\\w*|remov\\w*|rak\\w*|aerat\\w*|seed\\w*|sod|dethatch\\w*|treat\\w*|use|using|add\\w*|run\\w*|skip\\w*|reduc\\w*|increas\\w*|rais\\w*|lower\\w*)';
+const CARE_ADVICE_RE = new RegExp(`\\b(?:you|we)\\s+(?:should|must|need\\s+to|have\\s+to|ought\\s+to|(?:might|may)\\s+want\\s+to|will\\s+want\\s+to|can|could)\\s+(?:\\w+\\s+)?${CARE_VERBS}\\b|\\b(?:it\\s+(?:would|will|may|might|could|can)\\s+help\\s+to|it\\s+(?:is|['’]s)\\s+(?:best|important|wise|a\\s+good\\s+idea|helpful|recommended)\\s+to|the\\s+best\\s+(?:step|thing|move|option|plan)\\s+(?:is|would\\s+be)\\s+to|(?:try|consider|we\\s+recommend|i\\s+recommend|we\\s+suggest|i\\s+suggest)\\s+(?:to\\s+)?)\\s*(?:\\w+\\s+)?${CARE_VERBS}\\b`, 'i');
 const DRY_TIME_GUIDANCE = /\b(?:pets?|kids?|children|family|treated\s+(?:areas?|zones?))\b[^.?!]*\b(?:until|once|after)\b[^.?!]*\bdr(?:y|ied|ies)\b/i;
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
 // A grant of permission with no condition: "can go out", "right away", "no
@@ -1387,7 +1392,7 @@ const ASK_CHECKS = [
   // A care instruction the model writes itself ("Water every day", "Mow the
   // lawn shorter") is not on the report; only required lines instruct
   // (Codex P1 #5964 r31). The prompt's own dry-time guidance (rule 6) stays.
-  ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => CARE_INSTRUCTION_RE.test(sentence) && !DRY_TIME_GUIDANCE.test(sentence))],
+  ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => (CARE_INSTRUCTION_RE.test(sentence) || CARE_ADVICE_RE.test(sentence)) && !DRY_TIME_GUIDANCE.test(sentence))],
 ];
 
 function firstFailure(checks, text, context) {
