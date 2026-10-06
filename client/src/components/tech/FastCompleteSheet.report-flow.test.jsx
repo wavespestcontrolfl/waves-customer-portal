@@ -595,7 +595,8 @@ describe('the swept eaves and webs box', () => {
     const request = makeRequest();
     await openSheet(request);
     await generate();
-    expect(request.bodies('/generate-report')[0]).not.toHaveProperty('actionsCompleted');
+    // The full form's shape: an empty list, which the writer reads as none.
+    expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');

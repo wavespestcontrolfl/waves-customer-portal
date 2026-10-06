@@ -13,13 +13,19 @@ export const PEST_SWEEP_ACTION = {
   treatmentApplied: false,
 };
 
+// The labels a checked box records: the full form's actionsCompleted shape
+// for the AI report writer, and the /complete body's protocol actions.
+export function pestSweepActions(checked) {
+  return checked ? [PEST_SWEEP_ACTION.label] : [];
+}
+
 // What a checked box adds to the /complete body: the action label and its
 // structured scope entry (the server keeps a scope only for a label it was
 // also sent). Unchecked adds nothing, so an unticked sheet's body is as it was.
 export function pestSweepCompletionFields(checked) {
   return checked
     ? {
-      protocolActionsCompleted: [PEST_SWEEP_ACTION.label],
+      protocolActionsCompleted: pestSweepActions(true),
       protocolActionScopesCompleted: [{
         label: PEST_SWEEP_ACTION.label,
         scope: PEST_SWEEP_ACTION.scope,

@@ -73,7 +73,7 @@ import {
   amountText, categoryLabel, hasAmount, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
-import { PEST_SWEEP_ACTION, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
+import { pestSweepActions, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -384,13 +384,6 @@ function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
   return !reportFlow || isPestDefaultMixVisit({ ...visit, serviceType: visit.serviceType || serviceType });
 }
 
-// The sweep box shows where the full form shows it (isRegularPestVisit in
-// SchedulePage.jsx): a regular pest visit or a pest re-service. An initial
-// cleanout or a specialty visit records no general-pest protocol action.
-function offersSweep(service, visit) {
-  return isPestDefaultMixVisit({ ...service, ...visit, serviceType: visit?.serviceType || service?.serviceType });
-}
-
 // The identity the server re-checks under its lock. The report flow's pay
 // link and review ask follow whether the visit is a free callback, so that
 // flow echoes it too.
@@ -435,6 +428,7 @@ function useFastCompleteContext({
         // A typed visit keeps its own activity (the completion ignores the
         // 1 to 5 rating on a typed form), so it asks for none.
         const rates = ratingContract?.allowed === true && !typedType;
+        const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType });
         setCtx({
           loading: false,
           loadError: '',
@@ -448,9 +442,13 @@ function useFastCompleteContext({
           // The house totals are in the unit the resolver gives (4 fl oz), so
           // a house row never takes a usual unit: that is for picked products
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
-          rows: seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType })
+          rows: houseMix
             ? pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
             : [],
+          // A visit on the house mix is a regular pest visit or a pest
+          // re-service, never a lane or typed one: the visits the full form
+          // shows the sweep box on (isRegularPestVisit in SchedulePage.jsx).
+          houseMix,
           visitIdentity: sheetVisitIdentity(visit, reportFlow),
           // A lane visit: whether its saved trace would show on the report
           // (an older server says nothing, so the trace holds stand).
@@ -787,7 +785,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             ))}
           </ChoiceSection>
           <MethodSection form={form} rows={rows} setField={setField} chooseMethod={pickMethod} locked={formLocked} />
-          {offersSweep(service, ctx.visit) && <SweptEavesSection checked={form.sweptEaves} locked={formLocked} onChange={(checked) => setField('sweptEaves', checked)} />}
+          {/* This form only opens for a pest re-service, always a house-mix visit. */}
+          <SweptEavesSection checked={form.sweptEaves} locked={formLocked} onChange={(checked) => setField('sweptEaves', checked)} />
           {ctx.rating.allowed && (
             <ChoiceSection title="Activity seen" columns={4}>
               {ACTIVITY_LEVELS.map((level) => (
@@ -932,8 +931,9 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
     products: active.map((row) => ({ productId: row.productId || null, name: row.name, ...recordedApplication(row, facts) })),
     areasServiced: facts?.areas || [],
     customerInteraction: customerHomeWriterLabel(form.customerHome),
-    // The full form's own writer field (owner 2026-10-05): the sweep the tech ticked.
-    ...(form.sweptEaves ? { actionsCompleted: [PEST_SWEEP_ACTION.label] } : {}),
+    // The full form's own writer field (owner 2026-10-05), sent as it sends it:
+    // the sweep the tech ticked, or an empty list.
+    actionsCompleted: pestSweepActions(form.sweptEaves),
     // The first-visit 5 is a scoring default, not something the technician
     // saw: the writer gets a rating only once they choose one (codex local
     // r28 on #5538), as the completion recap leaves the default out.
@@ -1797,8 +1797,9 @@ function ReportFlowForm({
       onAddProduct={addProduct}
       productVoice={productVoice}
       noteClipEnabled={voiceFill}
-      // A lane or typed visit has its own record; only a regular pest visit sweeps.
-      showSweep={!mode && offersSweep(service, ctx.visit)}
+      // Only a regular pest visit sweeps: an initial cleanout, a lane or a
+      // typed visit records no general-pest protocol action.
+      showSweep={ctx.houseMix}
       footer={action
         ? { reason: generateMissing.reason, label: action.label, onAction: () => write(action.fresh) }
         // A photo change in hand (a description open, a change saving, a
