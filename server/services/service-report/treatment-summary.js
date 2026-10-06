@@ -50,9 +50,21 @@ function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
   const smartLower = (s) => String(s).split(/\s+/).map((w) => (
     /\d/.test(w) || (w.length <= 3 && /^[A-Z]+$/.test(w)) || isSymbolToken(w) ? w : w.toLowerCase()
   )).join(' ');
+  // A combination pre-emergent + fertilizer carries its analysis after the
+  // active ("prodiamine 0.43% + 15-0-15"): the percentage strip below would
+  // drop it and the report would name only the herbicide. Pull a bare N-P-K
+  // segment out first and name it as a fertilizer. A string with no
+  // percentage active ("24-0-11", "Nitrogen 20-0-0 + micros") is untouched.
+  const NPK_SEGMENT = /^\d{1,2}-\d{1,2}-\d{1,2}$/;
   const activeName = (p) => {
-    const active = String(p.activeIngredient || '').replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
-    return active ? smartLower(active) : p.name;
+    const raw = String(p.activeIngredient || '').trim();
+    const segments = raw.split(/\s*\+\s*/);
+    const fertilizer = segments.find((s) => NPK_SEGMENT.test(s));
+    const others = segments.filter((s) => !NPK_SEGMENT.test(s)).join(' + ');
+    const combined = fertilizer && /\d\s*%/.test(others);
+    const active = (combined ? others : raw).replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
+    if (!active) return p.name;
+    return combined ? `${smartLower(active)} with ${fertilizer} fertilizer` : smartLower(active);
   };
   // Every product applied the same way → say the method ONCE after the list.
   // Four "(broadcast application)" parentheticals in one sentence read as
