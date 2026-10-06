@@ -145,6 +145,11 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     const chinese = '好的，我们明天改喷洒时间。我也会寄发票给您';
     await ring({ row: { kind: 'other', description: '寄发票', evidence: [{ quote: chinese }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “寄发票” (Sep 29) — nothing on record shows it done.');
+    // a description ending in a combining vowel mark still needs a whole word
+    await ring({ row: { kind: 'other', description: 'سأرسلُ', evidence: [{ quote: 'سأرسلُها غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسلُها غدا” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'سأرسلُ', evidence: [{ quote: 'نعم. سأرسلُ غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسلُ” (Sep 29) — nothing on record shows it done.');
     // an Arabic description found only inside a longer word keeps the first sentence
     await ring({ row: { kind: 'other', description: 'سأرسل', evidence: [{ quote: 'وسأرسلها غدا' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “وسأرسلها غدا” (Sep 29) — nothing on record shows it done.');
