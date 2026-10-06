@@ -129,7 +129,7 @@ describe('notices stay until seen', () => {
     expect(posts(calls, '/read')).toHaveLength(0);
     // Scrolled so 400 px (half the screen) of it shows: counts at the next check.
     place(text, { top: VIEWPORT.h - 400, height: 3000 });
-    await advance(1500);
+    await advance(2000); // 1.5 s dwell, sampled every 250 ms
     await advance(5 * MIN + 1000);
     expect(screen.queryByText(/Timer auto-started/)).not.toBeInTheDocument();
     expect(posts(calls, '/read')).toHaveLength(1);
@@ -143,7 +143,7 @@ describe('notices stay until seen', () => {
     await advance(10 * MIN);
     expect(posts(calls, '/read')).toHaveLength(0);
     place(text, { top: VIEWPORT.h - 50, height: 100 }); // 50% shows
-    await advance(1500);
+    await advance(2000); // 1.5 s dwell, sampled every 250 ms
     await advance(5 * MIN + 1000);
     expect(posts(calls, '/n-started/read')).toHaveLength(1);
   });
@@ -158,7 +158,7 @@ describe('notices stay until seen', () => {
     expect(screen.getByText(/Timer auto-started/)).toBeInTheDocument();
     expect(posts(calls, '/read')).toHaveLength(0);
     covered = false; // modal closed: no observer event, the recheck finds the card
-    await advance(1500);
+    await advance(2000); // 1.5 s dwell, sampled every 250 ms
     await advance(5 * MIN + 1000);
     expect(screen.queryByText(/Timer auto-started/)).not.toBeInTheDocument();
     expect(posts(calls, '/n-started/read')).toHaveLength(1);
@@ -264,7 +264,7 @@ describe('notices stay until seen', () => {
     mount();
     const text = await screen.findByText(/Timer auto-started/);
     text.closest('[data-testid="notice-stack"] > div').getBoundingClientRect = () => ({ top: 100, bottom: 200, left: 0, right: VIEWPORT.w, width: VIEWPORT.w, height: 100 });
-    await advance(1500);
+    await advance(2000); // 1.5 s dwell, sampled every 250 ms
     await advance(5 * MIN + 1000);
     expect(screen.queryByText(/Timer auto-started/)).not.toBeInTheDocument();
     expect(posts(calls, '/n-started/read')).toHaveLength(1);
@@ -301,5 +301,74 @@ describe('notices stay until seen', () => {
     mount();
     await screen.findByText(/Timer stopped/);
     expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument();
+  });
+  it('the dwell is continuous: a card covered for most of 1.5 s and uncovered just before the end does not count', async () => {
+    const calls = stubFeed([STARTED]);
+    mount();
+    const text = await screen.findByText(/Timer auto-started/);
+    covered = true;
+    place(text, { top: 100, height: 100 });
+    await advance(1400);
+    covered = false;
+    // The old end-of-dwell check would count it at 1.5 s and clear it at 301.5 s.
+    await advance(1400);
+    await advance(5 * MIN - 500);
+    expect(screen.getByText(/Timer auto-started/)).toBeInTheDocument();
+    expect(posts(calls, '/read')).toHaveLength(0);
+    // Uncovered for a full 1.5 s by now: seen, and its 5-minute clock runs out.
+    await advance(2000);
+    expect(screen.queryByText(/Timer auto-started/)).not.toBeInTheDocument();
+    expect(posts(calls, '/n-started/read')).toHaveLength(1);
+  });
+
+  it('a modal that flickers over the card keeps resetting the dwell', async () => {
+    stubFeed([STARTED]);
+    mount();
+    const text = await screen.findByText(/Timer auto-started/);
+    place(text, { top: 100, height: 100 });
+    for (let i = 0; i < 8; i += 1) {
+      await advance(1000);
+      covered = true;
+      await advance(300);
+      covered = false;
+    }
+    await advance(6 * MIN);
+    expect(screen.getByText(/Timer auto-started/)).toBeInTheDocument();
+  });
+
+  it('sampling stops when the card is not near the viewport', async () => {
+    stubFeed([STARTED]);
+    const spy = vi.spyOn(document, 'elementFromPoint');
+    mount();
+    const text = await screen.findByText(/Timer auto-started/);
+    place(text, { top: -500, height: 100 });
+    spy.mockClear();
+    await advance(10_000);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  // The legacy `new_appointment` row (admin-schedule "Notify technician") has no
+  // card here: it must not wait to be seen, or it sits unread and eats the feed.
+  it('a type with no card is not rendered and is marked read on the 5-minute clock; rendered cards still wait to be seen', async () => {
+    const legacy = n('n-legacy', 'new_appointment', { customer_name: 'Okafor' }, 'New appointment');
+    const calls = stubFeed([legacy, STARTED]);
+    mount();
+    await screen.findByText(/Timer auto-started/);
+    const stack = screen.getByTestId('notice-stack');
+    expect(stack.children).toHaveLength(1); // the started card only: no empty wrapper for the legacy row
+    await advance(5 * MIN - 1000);
+    expect(posts(calls, '/n-legacy/read')).toHaveLength(0);
+    await advance(2000);
+    expect(posts(calls, '/n-legacy/read')).toHaveLength(1);
+    expect(screen.getByText(/Timer auto-started/)).toBeInTheDocument(); // unseen: kept
+    expect(posts(calls, '/n-started/read')).toHaveLength(0);
+  });
+
+  it('a feed with only a type that has no card renders no empty stack', async () => {
+    const legacy = n('n-legacy', 'new_appointment', {}, 'New appointment');
+    stubFeed([legacy]);
+    mount();
+    await advance(100);
+    expect(screen.queryByTestId('notice-stack')).not.toBeInTheDocument();
   });
 });

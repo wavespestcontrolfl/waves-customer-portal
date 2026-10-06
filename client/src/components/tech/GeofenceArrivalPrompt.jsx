@@ -69,9 +69,10 @@ const STOP_TOAST_MS = 15_000;
 // serving the notice then, so the toast offers no Undo past it either.
 const UNDO_WINDOW_MS = 30 * 60 * 1000;
 // Seen = at least half the card (or half the screen, for a tall card) in view
-// and not covered, still true after this long on a visible page, or a tap.
+// and not covered, continuously for this long on a visible page, or a tap.
 const SEEN_VISIBLE_RATIO = 0.5;
 const SEEN_DWELL_MS = 1500;
+const SEEN_SAMPLE_MS = 250;
 const MAX_STORM_CARDS = 2;
 // Visit cards never auto-dismiss, so a bulk assign or day swap could stack
 // dozens over the actionable geofence prompts: same cap + summary line as
@@ -97,6 +98,12 @@ const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
 const PHOTO_TYPES = new Set(['customer_visit_photos']);
 // Time-critical: these still float over Tools, More and an open visit.
 const FLOATING_TYPES = new Set(['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped']);
+// Types this component has a card for. Anything else in the feed (e.g. the
+// legacy `new_appointment` from admin-schedule "Notify technician") has no
+// card: it is never shown, so it can never be seen. It keeps the pre-seen
+// behaviour (marked read on the 5-minute clock) so it cannot sit unread
+// and eat the 20-row feed. Only rendered cards wait to be seen.
+const TIMED_RENDERED_TYPES = new Set([...FLOATING_TYPES, 'storm_watch_alert']);
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
 // Waves Admin look: ink and stone, amber for a warning, red only where the
 // notice is a genuine alert (a cancelled visit, a late arrival check).
@@ -300,7 +307,12 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
   // a re-run of this effect (a new card arriving) never restarts it.
   useEffect(() => {
     const timers = cards
-      .filter((n) => !KEPT_TYPES.has(n.type) && seenAt.current.has(n.id))
+      .filter((n) => !KEPT_TYPES.has(n.type))
+      .filter((n) => {
+        // No card to see: its clock starts now (the pre-seen behaviour).
+        if (!TIMED_RENDERED_TYPES.has(n.type) && !seenAt.current.has(n.id)) seenAt.current.set(n.id, Date.now());
+        return seenAt.current.has(n.id);
+      })
       .map((n) => {
         const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
         const left = Math.max(0, ms - (Date.now() - seenAt.current.get(n.id)));
@@ -352,7 +364,9 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     }
   }
 
-  const showStack = cards.length > 0 || hiddenVisitCount > 0 || hiddenStormCount > 0;
+  // Only types with a card render (and wait to be seen); the rest ride the timer above.
+  const shownCards = cards.filter((n) => TIMED_RENDERED_TYPES.has(n.type) || KEPT_TYPES.has(n.type));
+  const showStack = shownCards.length > 0 || hiddenVisitCount > 0 || hiddenStormCount > 0;
   if (!showStack && waitingCount === 0) return null;
 
   return (
@@ -365,7 +379,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       // Arrival cards are few; a cap keeps even a burst from covering the page.
       maxHeight: '50dvh', overflowY: 'auto',
     } : { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
-      {cards.map((n) => (
+      {shownCards.map((n) => (
         <SeenOnScreen key={n.id} id={n.id} onSeen={markSeen} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
           {n.type === 'geofence_arrival_reminder' && (
             <ReminderCard n={n} onStart={() => handleStart(n)} onDismiss={() => removeCard(n.id)} />
@@ -425,37 +439,45 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
   );
 }
 
-// Wraps one card and reports it SEEN once the tech has really had it on screen:
-// at least SEEN_VISIBLE_RATIO of the card (or of the viewport, for a card taller
-// than the screen) shows, and nothing sits on top of it. IntersectionObserver
-// only decides when to look: it ignores a modal or sheet drawn over the card
-// and cannot express "half the viewport" for a tall card, so the check runs at
-// the END of a SEEN_DWELL_MS dwell with a fresh measurement (cardReallyInView).
-// While the card is in the viewport and the page is visible the check repeats
-// every dwell, so a modal that closes later lets the card count then. A tap on
-// the card counts too. A browser without IntersectionObserver checks on the
-// same schedule.
+// Wraps one card and reports it SEEN once the tech has really had it on screen
+// for a continuous SEEN_DWELL_MS: at least SEEN_VISIBLE_RATIO of the card (or
+// of the viewport, for a card taller than the screen) shows and nothing sits on
+// top of it. IntersectionObserver only says when the card is near the viewport:
+// it ignores a modal or sheet drawn over the card and cannot express "half the
+// viewport" for a tall card. So while the card is near the viewport and the page
+// is visible, it is measured afresh (cardReallyInView) every SEEN_SAMPLE_MS, and
+// the dwell clock starts over whenever a sample fails: a card covered for most
+// of the dwell and uncovered just before the end does not count. Sampling stops
+// when the card leaves the viewport or the page is hidden. A tap on the card
+// counts too. A browser without IntersectionObserver samples on the same
+// schedule.
 function SeenOnScreen({ id, onSeen, style, children }) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
     let nearViewport = typeof IntersectionObserver === 'undefined';
-    let timer = null;
+    let sampler = null;
+    let okSince = null;
     let done = false;
     const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
-    const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
-    const schedule = () => {
-      if (done || timer || !nearViewport || !pageVisible()) return;
-      timer = setTimeout(() => {
-        timer = null;
-        if (!nearViewport || !pageVisible()) return;
-        if (cardReallyInView(el)) { done = true; onSeen(id); return; }
-        schedule();
-      }, SEEN_DWELL_MS);
+    const sample = () => {
+      if (done) return;
+      if (!cardReallyInView(el)) { okSince = null; return; }
+      if (okSince === null) okSince = Date.now();
+      if (Date.now() - okSince >= SEEN_DWELL_MS) { done = true; stop(); onSeen(id); }
+    };
+    const stop = () => {
+      if (sampler) { clearInterval(sampler); sampler = null; }
+      okSince = null;
     };
     const evaluate = () => {
-      if (nearViewport && pageVisible()) schedule(); else stop();
+      if (done) return;
+      if (nearViewport && pageVisible()) {
+        if (!sampler) { sampler = setInterval(sample, SEEN_SAMPLE_MS); sample(); }
+      } else {
+        stop();
+      }
     };
     let observer = null;
     if (!nearViewport) {

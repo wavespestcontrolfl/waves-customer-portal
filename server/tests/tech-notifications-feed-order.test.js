@@ -50,6 +50,9 @@ test('buckets: tracking (0) → arrival prompts (1) → fresh others (2) → fre
   // cards (two per automatic stop) cannot push an unseen prompt out of the
   // window; fresh others → 2; storms → 3; visit rows, texts and stale → 4.
   expect(sql).toMatch(/WHEN type = 'follow_through_tracking' THEN 0 WHEN type IN \('geofence_arrival_reminder', 'geofence_arrival_select'\) THEN 1 /);
+  // The started card is day-capped in the filter but keeps its old sort
+  // position (fresh others, bucket 2): it must not crowd out an unseen prompt.
+  expect(sql).not.toMatch(/geofence_timer_started/);
   expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type IN \('tech_line_sms', 'customer_visit_photos'\) THEN 4/);
   expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 3/);
   expect(sql).toMatch(/interval '6 hours' THEN 2 ELSE 4 END/);
@@ -163,11 +166,11 @@ describe('arrival prompts stay until the end of their ET day', () => {
 
   afterEach(() => { jest.useRealTimers(); });
 
-  test('the day cap covers the two actionable arrival types and nothing else', async () => {
+  test('the day cap covers the arrival prompts and the auto-start card, and nothing else', async () => {
     const { whereNotIn } = await run();
     expect(whereNotIn).toHaveLength(1);
     expect(whereNotIn[0][0]).toBe('type');
-    expect(whereNotIn[0][1].slice().sort()).toEqual(['geofence_arrival_reminder', 'geofence_arrival_select']);
+    expect(whereNotIn[0][1].slice().sort()).toEqual(['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started']);
   });
 
   test('a stop notice is served only inside its 30-minute Undo window (undo-stop answers 410 after it)', async () => {

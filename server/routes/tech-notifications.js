@@ -12,13 +12,15 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Actionable arrival prompts wait for the tech to see them, but not past the
-// end of the ET day they were raised: Start timer on yesterday's visit is
-// wrong. The informational timer cards (started, stopped) are not held: they
-// keep the age rules they had before (a stop notice is served only inside
-// its 30-minute Undo window), and the client starts their dismiss clock when
-// the tech has seen them.
-const DAY_CAPPED_TYPES = ['geofence_arrival_reminder', 'geofence_arrival_select'];
+// Arrival prompts and the auto-start card wait for the tech to see them, but
+// not past the end of the ET day they were raised: Start timer on yesterday's
+// visit is wrong, and "Timer auto-started" days later is noise. A stop notice
+// is not held: it is served only inside its 30-minute Undo window. Only the
+// two ACTIONABLE types (reminder, select) get the high sort bucket in the
+// order below;
+// the started card keeps its old sort position so a burst of them (two rows
+// per automatic stop) cannot crowd out an unseen prompt.
+const DAY_CAPPED_TYPES = ['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started'];
 const UNDO_WINDOW_MINUTES = 30;
 
 // 00:00 ET of today as an instant (the server runs UTC).
@@ -48,7 +50,7 @@ router.get('/', async (req, res, next) => {
         this.whereNot({ type: 'geofence_timer_stopped' })
           .orWhereRaw(`created_at >= now() - interval '${UNDO_WINDOW_MINUTES} minutes'`);
       })
-      // Arrival prompts stay until the tech has SEEN them (owner 2026-10-06,
+      // Arrival prompts and the started card stay until the tech has SEEN them (owner 2026-10-06,
       // "keep notices"): the client starts its 5-minute clock only after the
       // card has been on screen, and marks it read then. Until that, the row
       // stays unread and this feed keeps serving it. The hard cap is the end
