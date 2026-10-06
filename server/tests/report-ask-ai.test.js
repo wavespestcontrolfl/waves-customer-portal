@@ -463,6 +463,8 @@ describe('screenAskAnswer', () => {
     expect(screen('We will return later this month.')).toBe('states_a_date');
     expect(screen('We will return in Sept.')).toBe('states_a_date');
     expect(screen('We will return in 2027.')).toBe('states_a_date');
+    expect(screen('We will return two days from now.')).toBe('states_a_date');
+    expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
     expect(screen('Your window is 2-4.')).toBe('states_a_date');
     expect(screen('We will arrive at 1400.')).toBe('states_a_date');
     expect(screen('We treated the window frames and door sweeps.')).toBeNull();
@@ -620,7 +622,7 @@ describe('schedule questions keep the rule answer', () => {
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
     'What time will you be here?', 'What day are you coming?',
-    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Are we booked for tomorrow?', 'Are we confirmed for tomorrow?', 'Are we set for tomorrow?', 'Am I booked tomorrow?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Can you make it tomorrow?', 'Will you make it tomorrow?', 'When is the follow-up?', 'Are we booked for tomorrow?', 'Are we confirmed for tomorrow?', 'Are we set for tomorrow?', 'Am I booked tomorrow?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
@@ -658,6 +660,8 @@ describe('symptoms and exposure never reach the model', () => {
     'The chemical got into my left eye',
     'It splashed into her right eye',
     'My dog consumed the bait',
+    'The baby sucked on the bait',
+    'My dog lapped up the pesticide',
     'Accidentally swallowed some bait',
     'Ingested some spray',
     'The product touched my skin',
