@@ -2334,7 +2334,9 @@ async function createOrReuseAdminEstimate({
 
       if (lead.estimate_id) {
         const existingEstimate = await firstForUpdate(trx('estimates').where({ id: lead.estimate_id }));
-        if (existingEstimate?.status === 'draft') {
+        // An ARCHIVED draft is never reused: overwriting it would leave the
+        // save hidden and unsendable. It takes the non-draft path instead.
+        if (existingEstimate?.status === 'draft' && !existingEstimate.archived_at) {
           // A linked COMMERCIAL PROPOSAL draft is never reused by the generic
           // save (GH codex P2 r6 on #3750): its proposal is server-owned and
           // its totals come from the authored line items — the generic
