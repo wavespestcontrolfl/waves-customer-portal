@@ -837,10 +837,10 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   // Paid key, a week past Open-Meteo's reach and no MRMS rain: no source
   // can ever answer it, so the caller may settle it instead of retrying
   // (Codex #6052 r2).
-  // Settled only on an authoritative absence: MRMS is off, or it answered
-  // and had nothing. An MRMS outage (null) keeps the retry path (r5).
-  const mrmsAnswered = mode === 'off' || mrms != null;
-  if (!omCovers && mrmsAnswered && value.rainInches == null && value.et0Inches == null) value = { ...value, noSource: true };
+  // Settled only when no source exists at all: MRMS is off. With MRMS on, an
+  // outage or a partial answer (gaps are unknowns, not zeros) keeps the
+  // retry path so a later backfill still fills the week (r5, r6).
+  if (!omCovers && mode === 'off' && value.rainInches == null && value.et0Inches == null) value = { ...value, noSource: true };
   return { ...value, windowClosed };
 }
 

@@ -85,23 +85,30 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
     process.env.GATE_RAIN_MRMS = 'true';
     try {
       const urls = [];
-      // MRMS answers for every day and has no rain value: settled.
       const oldMs = Date.now() - 200 * 86400000;
       const old = new Date(oldMs).toISOString().slice(0, 10);
-      const data = [];
-      for (let i = -12; i <= 2; i += 1) data.push({ date: new Date(oldMs + i * 86400000).toISOString().slice(0, 10), mrms_precip_in: null });
-      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return { ok: true, json: async () => ({ data }) }; });
-      const out = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: old });
-      expect(urls.some((u) => u.includes('open-meteo.com'))).toBe(false);
-      expect(out).toMatchObject({ rainInches: null, et0Inches: null, noSource: true });
 
-      // An MRMS outage is not an answer: not settled, so a later view retries (r5).
+      // MRMS on: a partial answer (gaps are unknowns) is not settled (r6).
+      const partial = [{ date: new Date(oldMs - 3 * 86400000).toISOString().slice(0, 10), mrms_precip_in: 0.2 }];
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return { ok: true, json: async () => ({ data: partial }) }; });
+      const gappy = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: old });
+      expect(urls.some((u) => u.includes('open-meteo.com'))).toBe(false);
+      expect(gappy.noSource).toBeUndefined();
+
+      // MRMS on: an outage is not settled either, so a later view retries (r5).
       jest.resetModules();
-      const fresh = require('../services/service-report/application-conditions');
+      let fresh = require('../services/service-report/application-conditions');
       global.fetch = jest.fn(async () => ({ ok: false, status: 503, json: async () => ({}) }));
       const outage = await fresh.fetchServiceWeekWeather({ latitude: 27.6, longitude: -82.6, serviceDate: old });
       expect(outage.rainInches).toBeNull();
       expect(outage.noSource).toBeUndefined();
+
+      // MRMS off: no source exists for the week at all, so it is settled.
+      process.env.GATE_RAIN_MRMS = 'false';
+      jest.resetModules();
+      fresh = require('../services/service-report/application-conditions');
+      const none = await fresh.fetchServiceWeekWeather({ latitude: 27.7, longitude: -82.7, serviceDate: old });
+      expect(none).toMatchObject({ rainInches: null, et0Inches: null, noSource: true });
     } finally {
       delete process.env.OPEN_METEO_API_KEY;
       if (OLD_MRMS === undefined) delete process.env.GATE_RAIN_MRMS; else process.env.GATE_RAIN_MRMS = OLD_MRMS;
