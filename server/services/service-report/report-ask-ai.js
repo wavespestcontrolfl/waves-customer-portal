@@ -1221,7 +1221,8 @@ const CARE_RECOMMENDATION_RE = /\b(?:is|are)\s+(?:highly\s+|strongly\s+)?(?:reco
 // "Keeping the lawn shorter is beneficial" (Codex P1 #5964 r39).
 const CARE_BENEFIT_RE = new RegExp(`\\b${CARE_VERBS}\\b[^.?!]*\\b(?:beneficial|benefit\\w*|helpful|advisable|worthwhile|worth\\s+(?:it|doing|trying)|good\\s+for|best\\s+for|the\\s+way\\s+to\\s+go)\\b|\\b(?:beneficial|helpful|advisable|ideal|best)\\s+(?:to|for\\s+(?:you|the\\s+lawn|your\\s+lawn)\\s+to)\\s+(?:\\w+\\s+)?${CARE_VERBS}\\b`, 'i');
 const DRY_TIME_GUIDANCE = /\b(?:pets?|kids?|children|family|treated\s+(?:areas?|zones?))\b[^.?!]*\b(?:until|once|after)\b[^.?!]*\bdr(?:y|ied|ies)\b/i;
-const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
+// The treated place itself counts: "The yard is ready right now" (Codex P1 #5964 r40).
+const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|yards?|lawns?|grass|turf|patios?|lanais?|decks?|porch(?:es)?|pool\s+(?:area|deck)|play\s*(?:area|set|ground)|treated\s+(?:areas?|zones?|spots?)|(?:the\s+)?areas?|rooms?|home|house|inside|indoors|outside|outdoors|enter\w*|use\s+(?:it|the)|ready|safe\s+to|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
 // A grant of permission with no condition: "can go out", "right away", "no
 // need to wait". "Once it is dry" and "until" keep the instruction's terms.
 const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:can|may|could)\s+(?:be|stay|get|remain)\s+(?:out|outside|in|inside|back|on|there)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead|(?:let|allow)\s+(?:your\s+|the\s+)?(?:pets?|dogs?|cats?|kids?|children|family|them|everyone)\s+(?:back|out|in|go|play|return|onto)|(?:allowed|permitted|cleared)\s+(?:back|out|to\s+(?:go|return|play|use))|(?:is|are)\s+(?:allowed|permitted|cleared|fine|okay|ok)\b)\b/i;
@@ -1417,9 +1418,52 @@ function contradictsWeather(text, facts) {
   });
 }
 
+// A pressure level or direction must fit pest_pressure: "Yes, pest pressure
+// was high" on a Low report (Codex P1 #5964 r40).
+const PRESSURE_LEVELS = [['none', /\bno\s+(?:pest\s+)?(?:pressure|activity)\b|\bnone\b/], ['very low', /\bvery\s+low\b/], ['low', /\b(?<!very\s)low\b|\blight\b|\bminimal\b|\bminor\b/], ['moderate', /\bmoderate\b|\bmedium\b/], ['elevated', /\belevated\b/], ['high', /\bhigh\b|\bheavy\b|\bsevere\b/]];
+const PRESSURE_UP = /\b(?:worsen\w*|increas\w*|ris(?:e|es|ing|en)|rose|climb\w*|grow\w*|spik\w*|up\b|higher|getting\s+worse|worse)\b/;
+const PRESSURE_DOWN = /\b(?:improv\w*|decreas\w*|fall\w*|fell|declin\w*|drop\w*|down\b|lower|better|eas(?:ed|ing))\b/;
+const PRESSURE_FLAT = /\b(?:stable|steady|flat|unchanged|same|holding)\b/;
+function contradictsPressure(text, facts) {
+  const fact = facts?.pest_pressure;
+  const label = String(fact?.label || '').toLowerCase();
+  const trendText = `${fact?.trend || ''} ${fact?.trend_summary || ''}`.toLowerCase();
+  return splitSentences(matchForm(text)).some((sentence) => {
+    const lower = sentence.toLowerCase();
+    // "Activity may stay up for a few days" is the normal flush, not the gauge.
+    if (!/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/.test(lower) || NOT_CONFIRMED_RE.test(lower)) return false;
+    if (!fact) return PRESSURE_LEVELS.some(([, re]) => re.test(lower)) || PRESSURE_UP.test(lower) || PRESSURE_DOWN.test(lower);
+    const levels = PRESSURE_LEVELS.filter(([, re]) => re.test(lower)).map(([name]) => name);
+    if (levels.length && !levels.includes(label)) return true;
+    const ways = [[PRESSURE_UP, /increas|worse|rising|significant_increase/], [PRESSURE_DOWN, /improv|decreas|lower|better|down/], [PRESSURE_FLAT, /stable|steady|flat|unchanged|same/]];
+    return ways.some(([said, recorded]) => said.test(lower) && !recorded.test(trendText));
+  });
+}
+
+// Who did the visit: a person named as the technician must be the recorded
+// first name (Codex P2 #5964 r40).
+const TECH_NAME_CLAIMS = [
+  /\b(?:technician|tech)\s+(?:was|is|today\s+was|named)\s+([A-Z][a-z]+)\b/g,
+  /\b([A-Z][a-z]+)\s+(?:was|is)\s+(?:your|the)\s+(?:\w+\s+)?(?:technician|tech)\b/g,
+  /\b([A-Z][a-z]+)\s+(?:completed|performed|did|handled|serviced|treated|visited|came\s+(?:out|by)|ran|carried\s+out|took\s+care\s+of)\b/g,
+  /\b(?:by|with|from)\s+(?:technician\s+|tech\s+)?([A-Z][a-z]+)\b(?=[^.?!]*\b(?:visit|service|technician|tech|treatment)\b)|\b(?:visit|service|treatment)\b[^.?!]*\bby\s+([A-Z][a-z]+)\b/g,
+];
+function namesWrongTechnician(text, facts) {
+  const known = new Set(normalizeKey(facts?.technician_first_name || '').split(' ').filter(Boolean));
+  for (const product of asArray(facts?.products)) for (const word of normalizeKey(product.name).split(' ')) known.add(word);
+  known.add('waves');
+  return TECH_NAME_CLAIMS.some((re) => [...matchForm(text).matchAll(re)].some((m) => {
+    const name = String(m[1] || m[2] || '').toLowerCase();
+    return name && !known.has(name) && !SENTENCE_WORDS.has(name) && !TECH_NAME_STOP.has(name) && !MONTH_OR_DAY_WORD.test(name);
+  }));
+}
+const TECH_NAME_STOP = new Set('we it they he she you i your our the this that our a an yes no our team office staff someone nobody'.split(' '));
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['pressure_claim', (text, { facts }) => contradictsPressure(text, facts)],
+  ['technician_name', (text, { facts }) => namesWrongTechnician(text, facts)],
   ['weather_claim', (text, { facts }) => contradictsWeather(text, facts)],
   ['missing_required_line', (text, { requiredLines }) => {
     const sentences = splitSentences(matchForm(text));

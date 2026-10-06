@@ -1615,3 +1615,34 @@ describe('answer screen, Codex round 39', () => {
     expect(ask('It was cloudy with no rain during the visit.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 40', () => {
+  const data = pestData({ applications: [], pestPressure: { label: 'Low', trend: 'improving' }, technicianName: 'Jordan Smith' });
+  const facts = buildReportAskFacts({ data });
+  const ask = (answer, question = 'q') => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['The yard is ready right now.', 'Your yard is fine to enter immediately.'])('the treated place gets no unconditional clearance: %s', (answer) => {
+    expect(ask(answer, 'Is the yard ready to use?')).toBe('second_instruction');
+  });
+
+  test('a conditional yard answer passes', () => {
+    expect(ask('The yard is ready once the treated areas are dry.', 'Is the yard ready to use?')).toBeNull();
+  });
+
+  test.each(['Yes, pest pressure was high.', 'Pest pressure was worsening.'])('a pressure claim must fit the gauge: %s', (answer) => {
+    expect(ask(answer, 'Was pest pressure high?')).toBe('pressure_claim');
+  });
+
+  test('the recorded pressure passes', () => {
+    expect(ask('Pest pressure was low and improving.', 'Was pest pressure high?')).toBeNull();
+    expect(ask('Pest pressure was not high.', 'Was pest pressure high?')).toBeNull();
+  });
+
+  test.each(['Yes, Alex was your technician.', 'Alex completed your service.', 'Your technician was Alex.'])('a technician the report does not name is rejected: %s', (answer) => {
+    expect(ask(answer, 'Was Alex my technician?')).toBe('technician_name');
+  });
+
+  test('the recorded technician passes', () => {
+    expect(ask('Jordan completed your service.', 'Who was my technician?')).toBeNull();
+  });
+});
