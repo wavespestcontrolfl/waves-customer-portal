@@ -12,12 +12,16 @@
  * the forecast grid URL, then the grid forecast returns 12-hour
  * periods with probabilityOfPrecipitation.
  *
- * Everything here is fail-open: any timeout / non-200 / parse problem
- * returns null and the caller renders options without rain badges.
+ * Backup (owner 2026-10-06): when NWS fails, the same readers answer from
+ * Open-Meteo (paid key via open-meteo-endpoint.js) in the same shape.
+ *
+ * Everything here is fail-open: when both sources fail, any timeout / non-200
+ * / parse problem returns null and the caller renders options without rain badges.
  * Weather decoration must never block a reschedule.
  */
 
 const logger = require('./logger');
+const { openMeteoForecastUrl } = require('./open-meteo-endpoint');
 
 const NWS_BASE = 'https://api.weather.gov';
 const USER_AGENT = '(wavespestcontrol.com, contact@wavespestcontrol.com)';
@@ -54,6 +58,86 @@ async function fetchJson(url, label) {
   }
 }
 
+// ── Open-Meteo backup (owner 2026-10-06) ─────────────────────────────────
+// NWS stays the primary source: its hourly chance of rain is forecaster-
+// checked on a 2.5 km grid, and on 2026-10-06 it read 78-85% through an
+// afternoon storm at HQ that Open-Meteo's coarse ensemble chance put at
+// 36-49%. Open-Meteo answers only when NWS fails, so a surface that shows
+// rain keeps a number through an NWS outage. Same output shapes as the NWS
+// readers; every entry carries source: 'open-meteo'.
+const ET_ZONE = 'America/New_York';
+const _etParts = new Intl.DateTimeFormat('en-US', {
+  timeZone: ET_ZONE, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
+
+// ISO with the Eastern offset of that instant ("2026-10-06T16:00:00-04:00"),
+// the NWS startTime format: callers slice the local date and hour off it.
+function etIso(ms) {
+  const parts = Object.fromEntries(_etParts.formatToParts(new Date(ms)).map((p) => [p.type, p.value]));
+  const local = `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+  const offsetMin = Math.round((Date.parse(`${local}Z`) - ms) / 60000);
+  const sign = offsetMin < 0 ? '-' : '+';
+  const abs = Math.abs(offsetMin);
+  return `${local}${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+}
+
+// One Open-Meteo hourly read → NWS-shaped hours. Never logs the URL: with
+// the paid key set, the key rides in it.
+async function fetchOpenMeteoHours(latNum, lngNum) {
+  const url = openMeteoForecastUrl();
+  url.searchParams.set('latitude', latNum.toFixed(4));
+  url.searchParams.set('longitude', lngNum.toFixed(4));
+  url.searchParams.set('hourly', 'precipitation_probability,temperature_2m,wind_speed_10m');
+  url.searchParams.set('temperature_unit', 'fahrenheit');
+  url.searchParams.set('wind_speed_unit', 'mph');
+  url.searchParams.set('timeformat', 'unixtime');
+  url.searchParams.set('forecast_days', '7');
+  const body = await fetchJson(url.toString(), 'open-meteo backup');
+  const h = body?.hourly;
+  if (!h || !Array.isArray(h.time)) return null;
+  const num = (arr, i) => (Array.isArray(arr) && Number.isFinite(arr[i]) ? arr[i] : null);
+  const nowHour = Math.floor(Date.now() / 3600000) * 3600000;
+  const hours = [];
+  for (let i = 0; i < h.time.length; i += 1) {
+    const ms = Number(h.time[i]) * 1000;
+    // NWS hourly starts at the current hour; match it.
+    if (!Number.isFinite(ms) || ms < nowHour) continue;
+    const temp = num(h.temperature_2m, i);
+    const wind = num(h.wind_speed_10m, i);
+    hours.push({
+      startTime: etIso(ms),
+      rainChance: num(h.precipitation_probability, i),
+      shortForecast: null,
+      temperatureF: temp == null ? null : Math.round(temp),
+      windMph: wind == null ? null : Math.round(wind),
+      source: 'open-meteo',
+    });
+  }
+  return hours.length ? hours : null;
+}
+
+// Daily backup = the max hourly chance over the NWS daytime period
+// (6 AM-6 PM ET), the window the NWS daily reader prefers.
+function dailyFromHours(hours) {
+  const byDate = {};
+  for (const hour of hours) {
+    const date = hour.startTime.slice(0, 10);
+    const hh = Number(hour.startTime.slice(11, 13));
+    if (hh < 6 || hh >= 18) continue;
+    const prev = byDate[date];
+    const chance = hour.rainChance;
+    if (!prev) byDate[date] = { rainChance: chance, shortForecast: null, source: 'open-meteo' };
+    else if (chance != null && (prev.rainChance == null || chance > prev.rainChance)) prev.rainChance = chance;
+  }
+  return Object.keys(byDate).length ? byDate : null;
+}
+
+async function openMeteoDailyBackup(latNum, lngNum) {
+  const hours = await fetchOpenMeteoHours(latNum, lngNum);
+  return hours ? dailyFromHours(hours) : null;
+}
+
 /**
  * Daily rain outlook for a coordinate.
  *
@@ -73,6 +157,13 @@ async function getDailyRainOutlook(lat, lng) {
   const cached = _cache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
 
+  const byDate = (await nwsDaily(latNum, lngNum)) || (await openMeteoDailyBackup(latNum, lngNum));
+  if (!byDate) return null;
+  _cache.set(key, { at: Date.now(), value: byDate });
+  return byDate;
+}
+
+async function nwsDaily(latNum, lngNum) {
   const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
   const forecastUrl = points?.properties?.forecast;
   if (!forecastUrl) return null;
@@ -97,9 +188,7 @@ async function getDailyRainOutlook(lat, lng) {
     if (period.isDaytime || !byDate[date]) byDate[date] = entry;
   }
 
-  if (Object.keys(byDate).length === 0) return null;
-  _cache.set(key, { at: Date.now(), value: byDate });
-  return byDate;
+  return Object.keys(byDate).length === 0 ? null : byDate;
 }
 
 // Bounded daily lookup for decorative consumers (rain chips): the raw
@@ -181,6 +270,13 @@ async function getHourlyRainOutlook(lat, lng) {
   const cached = _hourlyCache.get(key);
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS) return cached.value;
 
+  const hours = (await nwsHourly(latNum, lngNum)) || (await fetchOpenMeteoHours(latNum, lngNum));
+  if (!hours) return null;
+  _hourlyCache.set(key, { at: Date.now(), value: hours });
+  return hours;
+}
+
+async function nwsHourly(latNum, lngNum) {
   const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
   const hourlyUrl = points?.properties?.forecastHourly;
   if (!hourlyUrl) return null;
@@ -205,9 +301,7 @@ async function getHourlyRainOutlook(lat, lng) {
       windMph: parseWindMph(p?.windSpeed),
     }));
 
-  if (hours.length === 0) return null;
-  _hourlyCache.set(key, { at: Date.now(), value: hours });
-  return hours;
+  return hours.length === 0 ? null : hours;
 }
 
 /**
@@ -224,5 +318,5 @@ module.exports = {
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
   forecastLinkForZip,
-  _test: { cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { etIso, dailyFromHours, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };
