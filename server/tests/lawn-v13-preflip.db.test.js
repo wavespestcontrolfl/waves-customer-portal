@@ -18,6 +18,7 @@ const reconcileMigration = require('../models/migrations/20261006160000_lawn_v13
 const labelMaxMigration = require('../models/migrations/20261006170000_lawn_v13_prodiamine_cap_label_max');
 const ownershipMigration = require('../models/migrations/20261006180000_lawn_v13_april_9x_ownership');
 const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_october_dimension');
+const commercialMigration = require('../models/migrations/20261007130000_lawn_v13_october_dimension_commercial_rate');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { randomUUID } = require('crypto');
@@ -94,16 +95,19 @@ describe('dithiopyr cap derivation and the v13 season against it (no database)',
     return totals;
   };
 
-  test('12x and 9x v13 seasons: dithiopyr stays under its cap (62.0% and 78.7%); prodiamine is January alone', () => {
+  test('12x and 9x v13 seasons: dithiopyr stays under its cap (70.0% and 87.0%); prodiamine is January alone', () => {
     const twelve = season(12);
     const nine = season(9);
-    expect(Math.round(twelve.dithiopyr * 1000) / 10).toBe(62);
-    expect(Math.round(nine.dithiopyr * 1000) / 10).toBe(78.7);
+    expect(Math.round(twelve.dithiopyr * 1000) / 10).toBe(70);
+    expect(Math.round(nine.dithiopyr * 1000) / 10).toBe(87);
     expect(twelve.dithiopyr).toBeLessThan(1);
     expect(nine.dithiopyr).toBeLessThan(1);
     for (const totals of [twelve, nine]) expect(Math.round(totals.prodiamine * 1000) / 10).toBe(45.4);
-    // The October line adds only the 2.73 lb granular share (16.6%) to the March and June 2EW passes (45.4%).
-    expect(octoberMigration.NEW_RATE / CAP_GRANULAR).toBeCloseTo(0.1665, 4);
+    // The October line adds only the 4.04 lb granular share (24.6%) to the March and June 2EW passes (45.4%); April 9x adds 2.78 lb (17.0%).
+    expect(commercialMigration.OCT_RATE / CAP_GRANULAR).toBeCloseTo(0.2464, 4);
+    expect(2.78 / CAP_GRANULAR).toBeCloseTo(0.1695, 4);
+    // The label's own yearly maximum for the granular is 16.38 lb; the cap row sits within 0.02 lb of it.
+    expect(Math.abs(CAP_GRANULAR - 16.38)).toBeLessThan(0.02);
   });
 });
 
@@ -201,6 +205,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     await ownershipMigration.up(knex);
     // The staged October row above is the pushed Stonewall 15-0-15 one; this swaps it for Dimension 18-0-10 and writes the dithiopyr caps.
     await octoberMigration.up(knex);
+    await commercialMigration.up(knex);
 
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
@@ -269,41 +274,62 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(uncapped).toEqual([]);
     });
 
-    test('the staged October row is Dimension 18-0-10 at 2.73 lb (0.49 lb N, 0.27 lb K2O) linked to its catalog row, the April 9x row states 2.73 lb, and the catalog max is 2.73; down restores all of it and up swaps it again', async () => {
+    test('the staged rows, catalog and limits carry the commercial label values (October 4.04 lb, April 9x 2.78 lb derived, max 5.46, price, hard limits); the two Dimension migrations roll back in order and swap again', async () => {
       const feeding = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
         .where({ 'w.window_key': 'oct_v13_spreader_fall' }).select('p.product_name', 'p.product_id', 'p.rate_per_1000', 'p.gates', 'p.annual_counter', 'w.goal');
-      const [swapped] = await feeding();
-      expect(swapped).toMatchObject({ product_name: DIMENSION, product_id: catalog[DIMENSION].id, gates: { targetN: '0.49 lb N/1000', targetK2O: '0.27 lb K2O/1000', annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' }, goal: octoberMigration.NEW_GOAL });
-      expect(Number(swapped.rate_per_1000)).toBe(2.73);
       const aprilDimension = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
         .where({ 'w.window_key': aprilMigration.APRIL_WINDOW, 'p.product_name': DIMENSION }).select('p.rate_per_1000', 'p.rate_unit', 'p.gates').first();
-      const dimensionCatalog = () => knex('products_catalog').where({ name: DIMENSION }).first('max_label_rate_per_1000', 'default_rate_per_1000');
+      const dimensionCatalog = () => knex('products_catalog').where({ name: DIMENSION }).first('max_label_rate_per_1000', 'default_rate_per_1000', 'best_price', 'best_vendor', 'cost_per_unit', 'cost_unit', 'needs_pricing');
+      const productLimits = () => knex('product_limits').where({ product_id: catalog[DIMENSION].id, match_type: 'product' }).select('limit_type', 'limit_value', 'severity');
+      const state = async () => ({ oct: await feeding(), april: await aprilDimension(), catalog: await dimensionCatalog(), limits: (await productLimits()).sort((a, b) => a.limit_type.localeCompare(b.limit_type)) });
+
+      const [swapped] = await feeding();
+      expect(swapped).toMatchObject({ product_name: DIMENSION, product_id: catalog[DIMENSION].id, gates: { targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' }, goal: octoberMigration.NEW_GOAL });
+      expect(Number(swapped.rate_per_1000)).toBe(4.04);
       const april9x = await aprilDimension();
-      expect([Number(april9x.rate_per_1000), april9x.rate_unit, april9x.gates.targetN, april9x.gates.planVisitsPerYear]).toEqual([2.73, 'lb', '0.49 lb N/1000', 9]);
-      expect([Number((await dimensionCatalog()).max_label_rate_per_1000), Number((await dimensionCatalog()).default_rate_per_1000)]).toEqual([2.73, 2.73]);
-      expect((await knex('product_limits').where({ product_id: catalog[DIMENSION].id, match_type: 'product' })).map((r) => [r.limit_type, Number(r.limit_value)]).sort())
-        .toEqual([['annual_max_apps', 3], ['min_interval_days', 60]]);
-      await octoberMigration.down(knex);
+      expect([april9x.rate_per_1000, april9x.rate_unit, april9x.gates.targetN, april9x.gates.planVisitsPerYear]).toEqual([null, 'lb_n', '0.5 lb N/1000', 9]);
+      const priced = await dimensionCatalog();
+      expect([Number(priced.max_label_rate_per_1000), Number(priced.default_rate_per_1000), Number(priced.best_price), priced.best_vendor, Number(priced.cost_per_unit), priced.cost_unit, priced.needs_pricing])
+        .toEqual([5.46, 2.78, 44.23, 'SiteOne', 0.8846, 'lb', false]);
+      expect((await productLimits()).map((r) => [r.limit_type, Number(r.limit_value), r.severity]).sort())
+        .toEqual([['annual_max_apps', 3, 'hard_block'], ['min_interval_days', 60, 'hard_block']]);
+
+      const final = JSON.stringify(await state());
+      await commercialMigration.down(knex);
       try {
-        const [restored] = await feeding();
-        expect(restored).toMatchObject({ product_name: STW_15, product_id: catalog[STW_15].id, gates: { targetN: '0.6 lb N/1000', annualCounter: 'prodiamine_oz_per_1000' }, annual_counter: { counter: 'prodiamine_oz_per_1000' }, goal: octoberMigration.OLD_GOAL });
-        expect(restored.gates.targetK2O).toBeUndefined();
-        expect(Number(restored.rate_per_1000)).toBe(4.02);
-        const restoredApril = await aprilDimension();
-        expect([restoredApril.rate_per_1000, restoredApril.rate_unit, restoredApril.gates.targetN]).toEqual([null, 'lb_n', '0.5 lb N/1000']);
-        expect([Number((await dimensionCatalog()).max_label_rate_per_1000), Number((await dimensionCatalog()).default_rate_per_1000)]).toEqual([5.48, 2.78]);
-        expect(await knex('product_limits').where({ product_id: catalog[DIMENSION].id, match_type: 'product' })).toHaveLength(0);
-        expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(0);
-        expect(await knex('lawn_protocol_audit_log').where({ action: octoberMigration.ACTION })).toHaveLength(0);
+        // 20261007120000's values.
+        const [first] = await feeding();
+        expect(Number(first.rate_per_1000)).toBe(2.73);
+        expect(first.gates).toMatchObject({ targetN: '0.49 lb N/1000', targetK2O: '0.27 lb K2O/1000' });
+        const aprilFirst = await aprilDimension();
+        expect([Number(aprilFirst.rate_per_1000), aprilFirst.rate_unit, aprilFirst.gates.targetN]).toEqual([2.73, 'lb', '0.49 lb N/1000']);
+        const catalogFirst = await dimensionCatalog();
+        expect([Number(catalogFirst.max_label_rate_per_1000), Number(catalogFirst.default_rate_per_1000), catalogFirst.best_price]).toEqual([2.73, 2.73, null]);
+        expect((await productLimits()).map((r) => [r.limit_type, r.severity]).sort()).toEqual([['annual_max_apps', 'hard_block'], ['min_interval_days', 'warning']]);
+        await octoberMigration.down(knex);
+        try {
+          const [restored] = await feeding();
+          expect(restored).toMatchObject({ product_name: STW_15, product_id: catalog[STW_15].id, gates: { targetN: '0.6 lb N/1000', annualCounter: 'prodiamine_oz_per_1000' }, annual_counter: { counter: 'prodiamine_oz_per_1000' }, goal: octoberMigration.OLD_GOAL });
+          expect(restored.gates.targetK2O).toBeUndefined();
+          expect(Number(restored.rate_per_1000)).toBe(4.02);
+          const restoredApril = await aprilDimension();
+          expect([restoredApril.rate_per_1000, restoredApril.rate_unit, restoredApril.gates.targetN]).toEqual([null, 'lb_n', '0.5 lb N/1000']);
+          expect([Number((await dimensionCatalog()).max_label_rate_per_1000), Number((await dimensionCatalog()).default_rate_per_1000)]).toEqual([5.48, 2.78]);
+          expect(await productLimits()).toHaveLength(0);
+          expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(0);
+          expect(await knex('lawn_protocol_audit_log').whereIn('action', [octoberMigration.ACTION, commercialMigration.ACTION])).toHaveLength(0);
+        } finally {
+          await octoberMigration.up(knex);
+        }
       } finally {
-        await octoberMigration.up(knex);
+        await commercialMigration.up(knex);
       }
-      const [again] = await feeding();
-      expect(again.product_name).toBe(DIMENSION);
-      expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(2);
+      expect(JSON.stringify(await state())).toBe(final);
+      // A second run of each changes nothing.
       await octoberMigration.up(knex);
+      await commercialMigration.up(knex);
+      expect(JSON.stringify(await state())).toBe(final);
       expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(2);
-      expect(await knex('lawn_protocol_audit_log').where({ action: octoberMigration.ACTION })).toHaveLength(1);
     });
 
     // The whole stack, in deployment order and in rollback order.
@@ -438,7 +464,9 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     });
 
     test('April rows: the 9x row mirrors the 24-0-11 row and carries its plan; the 24-0-11 row is marked 12x', async () => {
-      const rows = await knex('lawn_protocol_products').whereIn('product_name', [F24, DIMENSION]).orderBy('product_name');
+      // The April window's rows (the October window names the Dimension bag too).
+      const rows = await knex('lawn_protocol_products').whereIn('product_name', [F24, DIMENSION]).orderBy('product_name')
+        .whereIn('lawn_protocol_window_id', knex('lawn_protocol_windows').where({ window_key: aprilMigration.APRIL_WINDOW }).select('id'));
       const dimension = rows.find((r) => r.product_name === DIMENSION);
       const f24 = rows.find((r) => r.product_name === F24);
       expect(dimension).toMatchObject({ product_id: catalog[DIMENSION].id, role: 'nutrition', rate_unit: 'lb_n', default_in_plan: true });
@@ -470,7 +498,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(result.mixingOrder.map((step) => step.productName)).not.toContain(STW_4FL);
     });
 
-    test('the October plan is Dimension 18-0-10: 27.3 lb on 10,000 sq ft; a 12x dithiopyr season (March and June 2EW) is 62.0% with it, no warning and no block, and January prodiamine does not count', async () => {
+    test('the October plan is Dimension 18-0-10: 40.4 lb on 10,000 sq ft; a 12x dithiopyr season (March and June 2EW) is 70.0% with it, no warning and no block, and January prodiamine does not count', async () => {
       setGates();
       const { scheduled, customerId } = await visit('2026-10-12');
       await applied(customerId, STW_4FL, '2026-01-12', 0.5, 'fl oz');
@@ -479,31 +507,31 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       const result = await plan(scheduled);
       expect(codes(result)).not.toContain('lawn_v13_annual_limit');
       expect(result.propertyGate.warnings.filter((w) => w.code === 'lawn_v13_limit_warning' && /yearly label cap/.test(w.message))).toEqual([]);
-      expect(item(result, DIMENSION).mix).toMatchObject({ amount: 27.3 });
+      expect(item(result, DIMENSION).mix).toMatchObject({ amount: 40.4 });
       expect(item(result, STW_15)).toBeUndefined();
     });
 
-    test('a 9x season (2EW in March and June, the 2.73 lb April granular) brings the October application to 78.7% of the dithiopyr cap: a warning, no block', async () => {
+    test('a 9x season (2EW in March and June, the 2.78 lb April granular) brings the October application to 87.0% of the dithiopyr cap: a warning, no block', async () => {
       setGates();
       const { scheduled, customerId } = await visit('2026-10-12');
       await applied(customerId, DIM_2EW, '2026-03-10', 0.5, 'fl oz');
       await applied(customerId, DIM_2EW, '2026-06-09', 0.5, 'fl oz');
-      await applied(customerId, DIMENSION, '2026-04-14', 2.73, 'lb');
+      await applied(customerId, DIMENSION, '2026-04-14', 2.78, 'lb');
       const result = await plan(scheduled);
       expect(codes(result)).not.toContain('lawn_v13_annual_limit');
       const warning = result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning' && /yearly label cap/.test(w.message));
-      expect(warning.message).toMatch(/dithiopyr across all products this year is 62% of the yearly label cap; this application brings it to 78\.7%/);
-      expect(item(result, DIMENSION).mix).toMatchObject({ amount: 27.3 });
+      expect(warning.message).toMatch(/dithiopyr across all products this year is 62\.3% of the yearly label cap; this application brings it to 87%/);
+      expect(item(result, DIMENSION).mix).toMatchObject({ amount: 40.4 });
     });
 
-    test('two formulations add up: 84.7% of the dithiopyr cap already used (2EW and the April granular) plus the October granular is 101.4%, a block', async () => {
+    test('two formulations add up: 85% of the dithiopyr cap already used (2EW and the April granular) plus the October granular is 109.7%, a block', async () => {
       setGates();
       const { scheduled, customerId } = await visit('2026-10-12');
       await applied(customerId, DIM_2EW, '2026-03-10', 1.5, 'fl oz'); // 68.1%
-      await applied(customerId, DIMENSION, '2026-04-14', 2.73, 'lb'); // 16.6%
+      await applied(customerId, DIMENSION, '2026-04-14', 2.78, 'lb'); // 17.0%
       const result = await plan(scheduled);
       expect(codes(result)).toContain('lawn_v13_annual_limit');
-      expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/is 84\.7% of the yearly label cap; this application brings it to 101\.4%/);
+      expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/is 85% of the yearly label cap; this application brings it to 109\.7%/);
       expect(item(result, DIMENSION).mix).toBeNull();
     });
 
@@ -559,6 +587,22 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         await applied(customerId, WDG, '2026-01-06', 0.84, 'oz');
         expect((await check(propertyB)).blocks).toHaveLength(1);
       });
+    });
+
+    test('the product\'s own limits (the 60-day interval) follow the treated property and the planned visit; a row with no known property counts anywhere', async () => {
+      const { scheduled, customerId } = await visit('2026-10-12');
+      const [propertyB] = await knex('customer_properties').insert({ customer_id: customerId, address_line1: '300 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const [past] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: scheduled.property_id, scheduled_date: '2026-09-01', service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: past.id, service_date: '2026-09-01', service_type: 'Lawn fixture' }).returning('*');
+      await applied(customerId, DIMENSION, '2026-09-01', 2.78, 'lb', { service_record_id: record.id });
+      const date = new Date('2026-10-12T16:00:00Z');
+      const intervalBlocks = async (opts) => (await applicationLimits.checkLimits(customerId, catalog[DIMENSION].id, date, knex, opts)).blocks.filter((b) => b.type === 'min_interval_days');
+      expect(await intervalBlocks({})).toHaveLength(1); // legacy callers: the customer's whole year
+      expect(await intervalBlocks({ propertyId: scheduled.property_id })).toHaveLength(1);
+      expect(await intervalBlocks({ propertyId: propertyB.id })).toHaveLength(0);
+      expect(await intervalBlocks({ excludeScheduledServiceId: past.id })).toHaveLength(0);
+      await applied(customerId, DIMENSION, '2026-09-05', 2.78, 'lb');
+      expect(await intervalBlocks({ propertyId: propertyB.id })).toHaveLength(1);
     });
 
     test('the season is judged on its own date: a January completion entered after an October application does not count it', async () => {
@@ -624,9 +668,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
   });
 
   describe('the April step by the visit\'s plan', () => {
-    // The rollback tests above leave the 150000-shaped April row (derived 2.778 lb); the October migration restates it at the label's 2.73 lb. Idempotent.
-    beforeAll(async () => { await octoberMigration.up(knex); });
-    test.each([['Every 6 Weeks Lawn Care Service', DIMENSION, 27.3, F24], ['Monthly Lawn Care Service', F24, 20.833, DIMENSION]])(
+    test.each([['Every 6 Weeks Lawn Care Service', DIMENSION, 27.778, F24], ['Monthly Lawn Care Service', F24, 20.833, DIMENSION]])(
       '%s: plans %s (%s lb on 10,000 sq ft) and not %s',
       async (serviceType, expected, amount, other) => {
         setGates();

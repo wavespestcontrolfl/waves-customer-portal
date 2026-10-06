@@ -36,7 +36,7 @@ const CATALOG = [
   { id: 'cel', name: 'Celsius WG', aliases: [], default_rate_per_1000: 0.085, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
-  { id: 'dim', name: DIMENSION, aliases: [], analysis_n: 18, analysis_k: 10, default_rate_per_1000: 2.73, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
+  { id: 'dim', name: DIMENSION, aliases: [], analysis_n: 18, analysis_k: 10, default_rate_per_1000: 2.78, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
 ];
 const V13_SUMMARY = {
   version: LAWN_V13_VERSION,
@@ -44,8 +44,7 @@ const V13_SUMMARY = {
     { productId: 'nt', ratePer1000: 6, rateUnit: 'fl oz', gates: {} },
     { productId: 'stw', ratePer1000: 0.5, rateUnit: 'fl oz', gates: {} },
     { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
-    // The 9x April row states the label's per-application maximum (20261007120000).
-    { productId: 'dim', ratePer1000: 2.73, rateUnit: 'lb', gates: {} },
+    { productId: 'dim', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
     { productId: 'are', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
     { productId: 'cel', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', gates: { annualCounter: 'celsius_oz_per_1000' } },
     { productId: 'nis', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { concentration: '0.25% v/v', tankMixWith: 'Celsius WG' } },
@@ -111,11 +110,11 @@ test('a lb_n month derives from the N target: April 24-0-11 is 2.083 lb per 1,00
   expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
 });
 
-test('April on a 9x plan (?visitsPerYear=9): Dimension 18-0-10 at the stated 2.73 lb per 1,000 (0.49 lb N), no 24-0-11, no cadence warning', async () => {
+test('April on a 9x plan (?visitsPerYear=9): Dimension 18-0-10 at 2.778 lb per 1,000 (0.5 lb N), no 24-0-11, no cadence warning', async () => {
   const body = await lawnMix({ month: '4', visitsPerYear: '9' });
   expect(body.selectedItems.map((item) => item.product.name)).toEqual([DIMENSION]);
-  expect(itemFor(body, DIMENSION).jobMix).toMatchObject({ rateSource: 'protocol_rate', amountUnit: 'lb' });
-  expect(itemFor(body, DIMENSION).jobMix.ratePer1000).toBeCloseTo(2.73, 3);
+  expect(itemFor(body, DIMENSION).jobMix).toMatchObject({ rateSource: 'target_n_analysis', amountUnit: 'lb' });
+  expect(itemFor(body, DIMENSION).jobMix.ratePer1000).toBeCloseTo(2.7778, 3);
   expect(itemFor(body, F24)).toBeUndefined();
   expect(body.warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
 });

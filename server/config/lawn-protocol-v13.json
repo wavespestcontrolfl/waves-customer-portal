@@ -80,10 +80,10 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.73 lb per 1,000 sq ft (0.49 lb N), in place of the 24-0-11.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
         "cadenceVariants": {
           "9": {
-            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N), spreader"
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
           }
         }
       },
@@ -155,7 +155,7 @@
       {
         "visit": 10,
         "month": "Oct",
-        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N, 0.27 lb K2O), spreader",
+        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader",
         "secondary": "Artavia 2 SC (Azoxy) — mapped large patch with Velista at 2 gal per 1,000 sq ft, and mapped take-all areas, second fall application\nVelista — mapped large patch with Artavia at 2 gal per 1,000 sq ft\nDylox 6.2 G Granular Insecticide — grubs or mole crickets, spreader visit only, water in\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
@@ -163,7 +163,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.49 lb N. K rate: 0.27 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.25 lb ai per acre, at the label's per-application maximum of 2.73 lb of product per 1,000 sq ft for the 0.21% granular."
+        "notes": "N rate: 0.73 lb N. K rate: 0.4 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.37 lb ai per acre: 4.04 lb of product per 1,000 sq ft, the commercial label's Coastal South rate for pre-emergence on high-cut turf, under its per-application maximum of 5.46 lb."
       },
       {
         "visit": 11,
@@ -274,10 +274,10 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.73 lb per 1,000 sq ft (0.49 lb N), in place of the 24-0-11.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
         "cadenceVariants": {
           "9": {
-            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N), spreader"
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
           }
         }
       },
@@ -349,7 +349,7 @@
       {
         "visit": 10,
         "month": "Oct",
-        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N, 0.27 lb K2O), spreader",
+        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader",
         "secondary": "Artavia 2 SC (Azoxy) — mapped large patch with Velista at 2 gal per 1,000 sq ft, and mapped take-all areas, second fall application\nVelista — mapped large patch with Artavia at 2 gal per 1,000 sq ft\nDylox 6.2 G Granular Insecticide — grubs or mole crickets, spreader visit only, water in\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
@@ -357,7 +357,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.49 lb N. K rate: 0.27 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.25 lb ai per acre, at the label's per-application maximum of 2.73 lb of product per 1,000 sq ft for the 0.21% granular."
+        "notes": "N rate: 0.73 lb N. K rate: 0.4 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.37 lb ai per acre: 4.04 lb of product per 1,000 sq ft, the commercial label's Coastal South rate for pre-emergence on high-cut turf, under its per-application maximum of 5.46 lb."
       },
       {
         "visit": 11,
@@ -468,10 +468,10 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.73 lb per 1,000 sq ft (0.49 lb N), in place of the 24-0-11.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
         "cadenceVariants": {
           "9": {
-            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N), spreader"
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
           }
         }
       },
@@ -543,7 +543,7 @@
       {
         "visit": 10,
         "month": "Oct",
-        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N, 0.27 lb K2O), spreader",
+        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader",
         "secondary": "Artavia 2 SC (Azoxy) — mapped large patch with Velista at 2 gal per 1,000 sq ft, and mapped take-all areas, second fall application\nVelista — mapped large patch with Artavia at 2 gal per 1,000 sq ft\nDylox 6.2 G Granular Insecticide — grubs or mole crickets, spreader visit only, water in\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
@@ -551,7 +551,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.49 lb N. K rate: 0.27 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.25 lb ai per acre, at the label's per-application maximum of 2.73 lb of product per 1,000 sq ft for the 0.21% granular."
+        "notes": "N rate: 0.73 lb N. K rate: 0.4 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.37 lb ai per acre: 4.04 lb of product per 1,000 sq ft, the commercial label's Coastal South rate for pre-emergence on high-cut turf, under its per-application maximum of 5.46 lb."
       },
       {
         "visit": 11,
@@ -662,10 +662,10 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.73 lb per 1,000 sq ft (0.49 lb N), in place of the 24-0-11.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
         "cadenceVariants": {
           "9": {
-            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N), spreader"
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
           }
         }
       },
@@ -737,7 +737,7 @@
       {
         "visit": 10,
         "month": "Oct",
-        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.73 lb per 1,000 sq ft (0.49 lb N, 0.27 lb K2O), spreader",
+        "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O), spreader",
         "secondary": "Artavia 2 SC (Azoxy) — mapped large patch with Velista at 2 gal per 1,000 sq ft, and mapped take-all areas, second fall application\nVelista — mapped large patch with Artavia at 2 gal per 1,000 sq ft\nDylox 6.2 G Granular Insecticide — grubs or mole crickets, spreader visit only, water in\nCelsius WG — weed spots, 0.085 oz per 1,000 sq ft in the weed mix, mornings\nCertainty Turf Herbicide — weed spots, 0.028 oz per 1,000 sq ft in the Celsius weed mix\nLESCO 90/10 Nonionic Surfactant — 0.25% of the spray volume in the Celsius weed mix\nBlindside Herbicide — weed spots once the annual Celsius cap is reached, used in place of the Celsius weed mix",
         "tiers": {
           "bronze": true,
@@ -745,7 +745,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.49 lb N. K rate: 0.27 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.25 lb ai per acre, at the label's per-application maximum of 2.73 lb of product per 1,000 sq ft for the 0.21% granular."
+        "notes": "N rate: 0.73 lb N. K rate: 0.4 lb K. Spreader visit. Large patch is prevented on mapped areas when the soil falls through 80 F. Dithiopyr this year stays under the label yearly cap. This application is 0.37 lb ai per acre: 4.04 lb of product per 1,000 sq ft, the commercial label's Coastal South rate for pre-emergence on high-cut turf, under its per-application maximum of 5.46 lb."
       },
       {
         "visit": 11,

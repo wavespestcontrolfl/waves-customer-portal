@@ -18,6 +18,7 @@ const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixe
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_october_dimension');
+const commercialMigration = require('../models/migrations/20261007130000_lawn_v13_october_dimension_commercial_rate');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
@@ -73,10 +74,10 @@ describe('the v13 recipe', () => {
 
   test('N targets parse from the visit notes and total the program', () => {
     const n = MONTHS.map((m) => engine.parseVisitNutrientTargets(visitFor(m).notes).targetNPer1000);
-    // October is Dimension 18-0-10 at 2.73 lb per 1,000 sq ft (the label's per-application maximum): 0.49 lb N, 0.27 lb K2O.
-    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.49, 0.75, 0.5]);
-    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(2.99);
-    expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.27);
+    // October is Dimension 18-0-10 at 4.04 lb per 1,000 sq ft (commercial label, Coastal South): 0.73 lb N, 0.40 lb K2O.
+    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.73, 0.75, 0.5]);
+    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.23);
+    expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.4);
     // No N or P in Jun-Sep.
     for (const m of [6, 7, 8, 9]) expect(n[m - 1]).toBe(0);
   });
@@ -103,7 +104,7 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
       const [line, ...rest] = lines(variants[0].cadenceVariants['9'].primary);
       expect(rest).toEqual([]);
       expect(nameOfLine(line)).toBe(april.DIMENSION);
-      expect(line).toMatch(/2\.73 lb per 1,000 sq ft \(0\.49 lb N\), spreader$/);
+      expect(line).toMatch(/2\.78 lb per 1,000 sq ft \(0\.5 lb N\), spreader$/);
     }
     expect(fixMigration.PRODUCTS.map((p) => p.name)).toContain(april.DIMENSION);
   });
@@ -699,10 +700,11 @@ describe('migration 20261007120000: October Dimension 18-0-10 and the dithiopyr 
   test('the staged row agrees with the recipe file: same name, same rate, same N and K targets', async () => {
     const { db, knex } = await build();
     await octoberMigration.up(knex);
+    await commercialMigration.up(knex);
     const [line] = lines(visitFor(10).primary);
     expect(nameOfLine(line)).toBe(NEW);
     const row = octoberRows(db)[0];
-    expect(line).toContain(`${Number(row.rate_per_1000).toFixed(2)} lb per 1,000 sq ft`);
+    expect(line).toContain(`${Number(row.rate_per_1000)} lb per 1,000 sq ft`);
     const targets = engine.parseVisitNutrientTargets(visitFor(10).notes);
     expect(`${targets.targetNPer1000} lb N/1000`).toBe(gatesOf(row).targetN);
     expect(`${targets.targetKPer1000} lb K2O/1000`).toBe(gatesOf(row).targetK2O);
@@ -710,7 +712,7 @@ describe('migration 20261007120000: October Dimension 18-0-10 and the dithiopyr 
     for (const grass of GRASSES) {
       const notes = v13[grass].visits.find((v) => v.month === 'Oct').notes;
       expect(notes).toMatch(/Dithiopyr this year stays under the label yearly cap/);
-      expect(notes).toMatch(/0\.25 lb ai per acre, at the label's per-application maximum of 2\.73 lb of product per 1,000 sq ft/);
+      expect(notes).toMatch(/0\.37 lb ai per acre: 4\.04 lb of product per 1,000 sq ft, the commercial label's Coastal South rate .* under its per-application maximum of 5\.46 lb/);
       expect(notes).not.toMatch(/prodiamine|1\.5 lb ai per acre cap/i);
     }
   });
@@ -769,8 +771,6 @@ describe('migration 20261007120000: October Dimension 18-0-10 and the dithiopyr 
       expect(row).toMatchObject({ rate_per_1000: 2.73, rate_unit: 'lb' });
       expect(gatesOf(row)).toEqual({ targetN: '0.49 lb N/1000', blackoutSensitive: true, northPortBlocked: true, planVisitsPerYear: 9 });
     }
-    // The recipe's 9x line states the same rate.
-    expect(lines(visitFor(4).cadenceVariants['9'].primary)[0]).toContain('2.73 lb per 1,000 sq ft (0.49 lb N)');
     // An April row whose rate someone already set is not touched.
     const { db: db2, knex: knex2 } = await build();
     const edited = db2.lawn_protocol_products.find((r) => r.product_name === NEW && r.role === 'nutrition');
@@ -833,5 +833,156 @@ describe('migration 20261007120000: October Dimension 18-0-10 and the dithiopyr 
     db.product_limits.push({ id: 'old', product_id: 'cat-dim18', match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', description: 'Earlier row' });
     await octoberMigration.up(knex);
     expect(db.product_limits.filter((r) => r.product_id === 'cat-dim18' && r.match_value === 'dithiopyr')).toHaveLength(1);
+  });
+});
+
+// ── Commercial label rates (Codex round 1 on #6084) ──────────────────────────
+describe('migration 20261007130000: Dimension 0.21% at the commercial label rates', () => {
+  const OLD = octoberMigration.OLD_NAME;
+  const NEW = octoberMigration.NEW_NAME;
+  const gatesOf = (row) => (typeof row.gates === 'string' ? JSON.parse(row.gates) : row.gates);
+  const windowIds = (db, key) => new Set(db.lawn_protocol_windows.filter((w) => w.window_key === key).map((w) => w.id));
+  const rowsIn = (db, key, role) => db.lawn_protocol_products.filter((r) => windowIds(db, key).has(r.lawn_protocol_window_id) && r.role === role);
+  const octoberRows = (db) => rowsIn(db, 'oct_v13_spreader_fall', 'fall_pre_emergent_nutrition');
+  const aprilRows = (db) => rowsIn(db, 'apr_v13_spreader_feeding', 'nutrition').filter((r) => r.product_name === NEW);
+  const snapshot = (db) => JSON.stringify({
+    products: db.lawn_protocol_products, windows: db.lawn_protocol_windows, audit: db.lawn_protocol_audit_log, limits: db.product_limits, catalog: db.products_catalog,
+  }, (key, value) => (key === 'updated_at' || value === null ? undefined : value)); // a column put back to NULL reads as absent in the fake
+  let warn;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => warn.mockRestore());
+
+  // The database as 20261007120000 leaves it. `alias` puts the Dimension bag behind an alias row only.
+  async function build({ alias = false } = {}) {
+    const db = seedDb();
+    db.products_catalog.push({ id: 'cat-dim', name: alias ? 'Dimension 0.21% Bag (SiteOne 702032)' : NEW, active: true, active_ingredient: 'Dithiopyr', rate_unit: 'lb', default_rate_per_1000: 2.78, max_label_rate_per_1000: 5.48 });
+    if (alias) db.product_aliases.push({ product_id: 'cat-dim', alias_name: NEW });
+    Object.assign(db.products_catalog.find((c) => c.name === migration.NAMES.DIM), { active_ingredient: 'Dithiopyr', rate_unit: 'fl oz' });
+    db.product_limits = [];
+    const knex = makeKnex(db);
+    await migration.up(knex);
+    for (const window of db.lawn_protocol_windows.filter((w) => w.window_key === 'apr_v13_spreader_feeding')) {
+      await knex('lawn_protocol_products').insert({
+        lawn_protocol_window_id: window.id, product_id: 'cat-dim', product_name: NEW, role: 'nutrition', application_mode: 'broadcast',
+        rate_per_1000: null, rate_unit: 'lb_n', default_in_plan: true, sort_order: 99,
+        gates: JSON.stringify({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true, planVisitsPerYear: 9 }), annual_counter: '{}',
+      });
+    }
+    await octoberMigration.up(knex);
+    return { db, knex };
+  }
+
+  test('October is 4.04 lb (0.73 lb N, 0.40 lb K2O) on every staged protocol, matching the recipe line and notes', async () => {
+    const { db, knex } = await build();
+    await commercialMigration.up(knex);
+    const rows = octoberRows(db);
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row).toMatchObject({ product_name: NEW, product_id: 'cat-dim', rate_per_1000: 4.04, rate_unit: 'lb' });
+      expect(gatesOf(row)).toEqual({ targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000', blackoutSensitive: true, annualCounter: 'dithiopyr_lb_per_1000' });
+    }
+    const targets = engine.parseVisitNutrientTargets(visitFor(10).notes);
+    expect([`${targets.targetNPer1000} lb N/1000`, `${targets.targetKPer1000} lb K2O/1000`]).toEqual([gatesOf(rows[0]).targetN, gatesOf(rows[0]).targetK2O]);
+    expect(lines(visitFor(10).primary)[0]).toContain('4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O)');
+    // 4.04 lb x 0.21% x 43.56 = 0.37 lb ai/acre, under the 5.46 lb commercial per-application maximum.
+    expect(4.04 * 0.0021 * 43.56).toBeCloseTo(0.37, 2);
+    expect(4.04).toBeLessThan(5.46);
+  });
+
+  test('the 9x April row goes back to the derived 2.78 lb (lb_n, 0.5 lb N) and matches the recipe line; its 9x condition stays', async () => {
+    const { db, knex } = await build();
+    expect(aprilRows(db).every((r) => r.rate_per_1000 === 2.73 && r.rate_unit === 'lb')).toBe(true);
+    await commercialMigration.up(knex);
+    expect(aprilRows(db)).toHaveLength(4);
+    for (const row of aprilRows(db)) {
+      expect(row).toMatchObject({ rate_per_1000: null, rate_unit: 'lb_n' });
+      expect(gatesOf(row)).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true, planVisitsPerYear: 9 });
+    }
+    expect(lines(visitFor(4).cadenceVariants['9'].primary)[0]).toContain('2.78 lb per 1,000 sq ft (0.5 lb N)');
+    expect(engine.parseVisitNutrientTargets(visitFor(4).notes).targetNPer1000).toBe(0.5);
+    expect(0.5 / 0.18).toBeCloseTo(2.78, 2);
+  });
+
+  test('catalog: label max 5.46, default back to 2.78, SiteOne price seeded only where there is none', async () => {
+    const { db, knex } = await build();
+    const row = () => db.products_catalog.find((c) => c.id === 'cat-dim');
+    await commercialMigration.up(knex);
+    expect(row()).toMatchObject({ max_label_rate_per_1000: 5.46, default_rate_per_1000: 2.78, best_price: 44.23, best_vendor: 'SiteOne', cost_per_unit: 0.8846, cost_unit: 'lb', needs_pricing: false });
+    expect(44.23 / 50).toBeCloseTo(0.8846, 4);
+    // A price someone already set is kept.
+    const { db: priced, knex: knex2 } = await build();
+    Object.assign(priced.products_catalog.find((c) => c.id === 'cat-dim'), { best_price: 51, best_vendor: 'Other', needs_pricing: false });
+    await commercialMigration.up(knex2);
+    expect(priced.products_catalog.find((c) => c.id === 'cat-dim')).toMatchObject({ best_price: 51, best_vendor: 'Other', max_label_rate_per_1000: 5.46 });
+  });
+
+  test('limits: the 60-day interval is a hard block next to the 3-a-year row; the yearly dithiopyr cap text is label-verified', async () => {
+    const { db, knex } = await build();
+    expect(db.product_limits.find((r) => r.limit_type === 'min_interval_days').severity).toBe('warning');
+    await commercialMigration.up(knex);
+    const limits = db.product_limits.filter((r) => r.match_type === 'product');
+    expect(limits.map((r) => [r.limit_type, Number(r.limit_value), r.severity]).sort()).toEqual([['annual_max_apps', 3, 'hard_block'], ['min_interval_days', 60, 'hard_block']]);
+    const caps = db.product_limits.filter((r) => r.match_value === 'dithiopyr');
+    expect(caps).toHaveLength(2);
+    for (const cap of caps) {
+      expect(cap.description).toContain('EPA 10404-87 commercial label');
+      expect(cap.description).not.toContain('confirm on the label');
+    }
+    expect(Number(caps.find((r) => r.limit_unit.startsWith('lb')).limit_value)).toBeCloseTo(16.38, 1);
+  });
+
+  test('a product that resolves only through an alias gets the catalog, price and limit updates too', async () => {
+    const { db, knex } = await build({ alias: true });
+    expect(db.products_catalog.some((c) => c.name === NEW)).toBe(false);
+    await commercialMigration.up(knex);
+    expect(db.products_catalog.find((c) => c.id === 'cat-dim')).toMatchObject({ max_label_rate_per_1000: 5.46, best_price: 44.23 });
+    const limits = db.product_limits.filter((r) => r.product_id === 'cat-dim' && r.match_type === 'product');
+    expect(limits.map((r) => [r.limit_type, r.severity]).sort()).toEqual([['annual_max_apps', 'hard_block'], ['min_interval_days', 'hard_block']]);
+  });
+
+  test('a missing limit row is written; one that is not the migration\'s own is left alone', async () => {
+    const { db, knex } = await build();
+    db.product_limits = db.product_limits.filter((r) => r.limit_type !== 'annual_max_apps');
+    db.product_limits.find((r) => r.limit_type === 'min_interval_days').description = 'Office rule: 45 days';
+    db.product_limits.find((r) => r.limit_type === 'min_interval_days').severity = 'warning';
+    await commercialMigration.up(knex);
+    expect(db.product_limits.filter((r) => r.limit_type === 'annual_max_apps' && r.severity === 'hard_block')).toHaveLength(1);
+    expect(db.product_limits.find((r) => r.limit_type === 'min_interval_days')).toMatchObject({ severity: 'warning', description: 'Office rule: 45 days' });
+  });
+
+  test('idempotent: a second run changes nothing', async () => {
+    const { db, knex } = await build();
+    await commercialMigration.up(knex);
+    const once = snapshot(db);
+    await commercialMigration.up(knex);
+    expect(snapshot(db)).toBe(once);
+  });
+
+  test('down restores exactly what 20261007120000 left; both downs restore what was there before either', async () => {
+    const { db, knex } = await build();
+    const afterFirst = snapshot(db);
+    await commercialMigration.up(knex);
+    expect(snapshot(db)).not.toBe(afterFirst);
+    await commercialMigration.down(knex);
+    expect(snapshot(db)).toBe(afterFirst);
+    await commercialMigration.up(knex);
+    await commercialMigration.down(knex);
+    await octoberMigration.down(knex);
+    const staged = octoberRows(db);
+    expect(staged.every((r) => r.product_name === OLD && Number(r.rate_per_1000) === 4.02)).toBe(true);
+    expect(db.product_limits).toEqual([]);
+    expect(db.products_catalog.find((c) => c.id === 'cat-dim')).toMatchObject({ max_label_rate_per_1000: 5.48, default_rate_per_1000: 2.78 });
+  });
+
+  test('down leaves a field someone changed since, and still reverts the rest', async () => {
+    const { db, knex } = await build();
+    await commercialMigration.up(knex);
+    const [row] = octoberRows(db);
+    row.rate_per_1000 = 3.9;
+    db.products_catalog.find((c) => c.id === 'cat-dim').best_price = 47;
+    await commercialMigration.down(knex);
+    expect(row.rate_per_1000).toBe(3.9);
+    expect(gatesOf(row).targetN).toBe('0.49 lb N/1000');
+    expect(db.products_catalog.find((c) => c.id === 'cat-dim')).toMatchObject({ best_price: 47, max_label_rate_per_1000: 2.73 });
   });
 });
