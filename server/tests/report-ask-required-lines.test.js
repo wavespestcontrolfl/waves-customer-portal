@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const {
+  ruleAnswerReason,
   medicalExposureAnswer,
   SYSTEM_PROMPT,
   buildReportAskFacts,
@@ -948,7 +949,7 @@ describe('answer screen, Codex round 11', () => {
     const facts = buildReportAskFacts({ data });
     const ask = (answer) => screenAskAnswer(answer, { question: 'How long?', data, facts });
     expect(ask('It may take 941 days to improve.')).toBe('unstated_number');
-    expect(ask('It may take 2026 days to improve.')).toBe('unstated_number');
+    expect(ask('It may take 2026 days to improve.')).not.toBeNull();
   });
 });
 
@@ -1059,5 +1060,37 @@ describe('answer screen, Codex round 16', () => {
   test('"one" as prose still passes', () => {
     const data = pestData();
     expect(screenAskAnswer('No one needs to stay home for this.', { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBeNull();
+  });
+});
+
+describe('answer screen, Codex round 17', () => {
+  test('a direct "will" result promise is rejected', () => {
+    const data = lawnData({ reportV2: null });
+    expect(screenAskAnswer('The crabgrass will disappear soon.', { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('result promise');
+  });
+
+  test('"out of 5" is the pressure gauge only when the clause names it', () => {
+    const data = pestData({ pressureIndex: 4 });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'q', data, facts });
+    expect(ask('We found activity on 4 out of 5 plants.')).toBe('unstated_number');
+    expect(ask('The pressure score is 4 out of 5.')).toBeNull();
+  });
+
+  test('the water facts carry the plan the card shows after a credited water-in', () => {
+    const afterTreatment = { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' };
+    const data = lawnData({
+      reportV2: {
+        aftercare: { ...WATER_IN_AFTERCARE },
+        water: { status: 'balanced', weekPlan: { ...RAW_PLAN, afterTreatment } },
+      },
+    });
+    const plan = buildReportAskFacts({ data }).lawn_report.water_this_week.week_plan;
+    expect(plan).toContain('No further turf runs this week');
+    expect(plan).not.toContain('one full cycle');
+  });
+
+  test.each(['Fire Ant Treatment', 'Bee/Wasp Removal', 'Dethatching'])('a specialty service keeps the rule answer: %s', (serviceType) => {
+    expect(ruleAnswerReason({ serviceLine: serviceType === 'Dethatching' ? 'lawn' : 'pest', serviceType })).toBe('specialty_service');
   });
 });

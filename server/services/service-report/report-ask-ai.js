@@ -535,8 +535,11 @@ function lawnCardFacts(v2, text) {
   };
 }
 
-function lawnWaterFacts(water, text) {
-  const plan = objectOr(water.weekPlan);
+function lawnWaterFacts(water, text, aftercare) {
+  // The plan the water card shows: reduced by a credited water-in, or the
+  // hold version (lawn-aftercare.js renderedWeekPlan) (Codex P1 #5964 r17).
+  const { renderedWeekPlan } = require('./lawn-aftercare');
+  const plan = objectOr(renderedWeekPlan(aftercare, water.weekPlan));
   // The water card shows irrigation and the weekly total only with a usable
   // schedule on file (WaterIntakeBar: "Irrigation: Not on file"); the model
   // gets the same (Codex P1 #5964 r8).
@@ -607,7 +610,7 @@ function lawnV2Facts(data = {}, keep = () => true) {
   return orNull(dropEmpty({
     ...lawnLeadFacts(v2, text),
     ...lawnCardFacts(v2, text),
-    water_this_week: v2.water ? lawnWaterFacts(objectOr(v2.water), text) : null,
+    water_this_week: v2.water ? lawnWaterFacts(objectOr(v2.water), text, v2.aftercare) : null,
     rain_by_day_last_7_days: lawnRainFacts(v2),
     mowing: v2.mowing ? lawnMowingFacts(objectOr(v2.mowing), text) : null,
     trends: lawnTrendFacts(objectOr(v2.trends)),
@@ -769,9 +772,10 @@ const INLINE_LIST_RE = /(?:^|[:.;]\s)1[.)]\s+\S.*\s2[.)]\s/;
 // that neither covers. Promises of a result are the owner's rule 1 of 2026-09-30
 // in a form the writer's own word list does not match.
 const ASK_EXTRA_BANNED = [
-  // Modal and expected results (Codex P1 #5964 r13): "should disappear",
+  // Modal, future and expected results (Codex P1 #5964 r13, r17): "should
+  // disappear", "will disappear soon",
   // "this should get rid of the crabgrass", "is expected to clear up".
-  [/\b(?:should|ought\s+to|(?:is|are)\s+going\s+to|(?:is|are)\s+expected\s+to|expect\s+(?:it|them|the\s+\w+)\s+to|(?:is|are)\s+(?:likely|bound|sure)\s+to)\s+(?:\w+\s+)?(?:disappear|vanish|go\s+away|be\s+gone|get\s+rid\s+of|eliminate|kill\s+(?:all|every|the)|wipe\s+out|clear\s+(?:up|out)|stop|end|fix|solve|take\s+care\s+of)\b/i, 'result promise'],
+  [/\b(?:will|(?:is|are)\s+gonna|should|ought\s+to|(?:is|are)\s+going\s+to|(?:is|are)\s+expected\s+to|expect\s+(?:it|them|the\s+\w+)\s+to|(?:is|are)\s+(?:likely|bound|sure)\s+to)\s+(?:\w+\s+)?(?:disappear|vanish|go\s+away|be\s+gone|get\s+rid\s+of|eliminate|kill\s+(?:all|every|the)|wipe\s+out|clear\s+(?:up|out)|stop|end|fix|solve|take\s+care\s+of)\b/i, 'result promise'],
   [/\bwill\s+(?:definitely\s+|certainly\s+|surely\s+|absolutely\s+)?(?:stop|get\s+rid\s+of|kill\s+(?:all|every)|eliminate)\b/i, 'result promise'],
   [/\b(?:you\s+will\s+not|you\s+won['’]?t|you\s+will\s+never|won['’]?t)\s+(?:\w+\s+)?see\s+(?:any|an?)\s+(?:more|further)\b/i, 'result promise'],
   [/\bno\s+more\s+(?:\w+\s+)?(?:pests?|bugs?|insects?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|mosquito(?:e?s)?|termites?|rodents?|mice|mouse|rats?|fleas?|ticks?|wasps?|flies|fly|beetles?)\b/i, 'result promise'],
@@ -926,12 +930,15 @@ const HOUR_RANGE = new RegExp(`\\b(?:between|from)\\s+${HOUR_WORDS}\\s+(?:and|to
 // A relative offset: "in two days", "in a few weeks", "later this month",
 // "end of the week" (Codex P1 #6016 r19). "This week" alone stays.
 const RELATIVE_OFFSET = /\b(?:in\s+(?:a\s+(?:few|couple(?:\s+of)?)\s+|\d+\s+|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+|a\s+)(?:days?|weeks?|months?)|later\s+(?:this|next)\s+(?:week|month)|this\s+month|(?:end|beginning|start|middle)\s+of\s+(?:the|this|next)\s+(?:week|month))\b/i;
+// A year on its own: "in 2027" (Codex P1 #6016 r22). An answer has no use
+// for a four-digit year.
+const YEAR = /\b(?:19|20)\d{2}\b/;
 const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
   const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
-  return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY].some((re) => re.test(own));
+  return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY, YEAR].some((re) => re.test(own));
 }
 
 // Every number the model writes itself must be a number the fact sheet holds,
@@ -997,9 +1004,14 @@ function factNumbers(value, key = '', out = []) {
 // "3.5 to 4 inches": the first number of a range takes the second's unit.
 const RANGE_TAIL_RE = /^\s*(?:to|-|–|and)\s*\d+(?:\.\d+)?/i;
 
+const PRESSURE_WORDS = /\b(?:pressure|gauge|score|rating|level|index)\b/i;
+
 function numberIsKnown(value, after, sentence, known) {
   const unitText = after.replace(RANGE_TAIL_RE, '');
-  const kind = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(unitText));
+  const found = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(unitText));
+  // "out of 5" is the pressure gauge only when the clause names it; "4 out of
+  // 5 plants" is a count (Codex P1 #5964 r17).
+  const kind = found && found[0] === 'pressure' && !PRESSURE_WORDS.test(sentence) ? null : found;
   const matched = MEASUREMENTS.filter(([wordRe]) => wordRe.test(sentence));
   // "density score" names density: the generic score words apply only when
   // no category is named (Codex P1 #5964 r14).
@@ -1035,7 +1047,7 @@ function statesUnknownNumber(text, { facts, requiredLines }) {
   return clauses.some((sentence) => [...sentence.matchAll(NUMBER_RE)].some((m) => {
     const value = numberValue(m[0]);
     // "out of 100" names the scale, not a value.
-    if ((value === 100 || value === 5) && /out\s+of\s*$/i.test(sentence.slice(0, m.index))) return false;
+    if ((value === 100 || (value === 5 && PRESSURE_WORDS.test(sentence))) && /out\s+of\s*$/i.test(sentence.slice(0, m.index))) return false;
     return !numberIsKnown(value, sentence.slice(m.index + m[0].length), sentence, known);
   }));
 }
@@ -1244,7 +1256,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
@@ -1258,6 +1270,12 @@ const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 // so it never reaches the model.
 function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question = '') {
   if (!AI_SERVICE_LINES.has(data.serviceLine)) return 'service_line';
+  // Specialty services run under the pest or lawn line ("Fire Ant
+  // Treatment", "Dethatching"); the canonical classifier names them (Codex P1
+  // #5964 r17).
+  if (require('../../../shared/specialty-service-closeouts').specialtyServiceKey({
+    serviceKey: data.serviceKey, serviceType: data.serviceType || data.serviceDisplayName,
+  })) return 'specialty_service';
   // The rule answer states the scheduled date and window exactly; an AI
   // answer states no date and the fact sheet carries no appointment (Codex
   // P1s on #6020, #5964 and #6016).
