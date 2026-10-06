@@ -338,3 +338,114 @@ test('authorization contract: the card shows the old and new address and says no
   ]));
   expect(c.effects.map(e => e.label)).not.toEqual(expect.arrayContaining([expect.stringMatching(/email-confirmed/)]));
 });
+
+// ─── a composed one-line address ("street, City, FL zip") ───────
+
+const COMPOSED = '21 Synthetic Oak Ave, Testville, FL 34200';
+const COMPOSED_LEAD = { ...LEAD, address: COMPOSED, city: 'Testville', zip: '34200' };
+const ONE_LINE_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
+
+test('composed row + street-only edit keeps the embedded city and zip; the columns stay out of the diff', async () => {
+  db.mockReturnValue(chain({ first: COMPOSED_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Synthetic Oak Ave' });
+  expect(res.changes).toEqual({ address: { from: COMPOSED, to: '12 Synthetic Oak Ave, Testville, FL 34200' } });
+});
+
+test('composed row + zip-only edit rewrites the embedded zip and the zip column together', async () => {
+  db.mockReturnValue(chain({ first: COMPOSED_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' });
+  expect(res.changes).toEqual({
+    address: { from: COMPOSED, to: '21 Synthetic Oak Ave, Testville, FL 34201' },
+    zip: { from: '34200', to: '34201' },
+  });
+});
+
+test('composed row + city-only edit rewrites the embedded city and the city column together', async () => {
+  db.mockReturnValue(chain({ first: COMPOSED_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Newtown' });
+  expect(res.changes).toEqual({
+    address: { from: COMPOSED, to: '21 Synthetic Oak Ave, Newtown, FL 34200' },
+    city: { from: 'Testville', to: 'Newtown' },
+  });
+});
+
+test('composed row + a requested value equal to what it embeds is nothing to change', async () => {
+  db.mockReturnValue(chain({ first: COMPOSED_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '21 Synthetic Oak Ave', zip: '34200' });
+  expect(res.error).toMatch(/already has those contact details/);
+});
+
+test('a whole composed address given by the operator replaces the row and syncs city and zip', async () => {
+  db.mockReturnValue(chain({ first: COMPOSED_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '5 Test Pine Rd, Newtown, FL 34999' });
+  expect(res.changes).toEqual({
+    address: { from: COMPOSED, to: '5 Test Pine Rd, Newtown, FL 34999' },
+    city: { from: 'Testville', to: 'Newtown' },
+    zip: { from: '34200', to: '34999' },
+  });
+});
+
+test('bare row keeps the plain behavior: a city or zip edit leaves the street alone', async () => {
+  db.mockReturnValue(chain({ first: ADDR_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Newtown', zip: '34999' });
+  expect(res.changes).toEqual({ city: { from: 'Testville', to: 'Newtown' }, zip: { from: '34200', to: '34999' } });
+  // A street with a comma that embeds no city or zip is still bare.
+  db.mockReturnValue(chain({ first: { ...ADDR_LEAD, address: '21 Synthetic Oak Ave, Unit 4' } }));
+  const unit = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Newtown' });
+  expect(unit.changes).toEqual({ city: { from: 'Testville', to: 'Newtown' } });
+});
+
+test('an unparseable one-line address refuses a partial edit and writes nothing; all three fields replace it', async () => {
+  const odd = { ...ADDR_LEAD, address: '21 Synthetic Oak Ave, Testville' };
+  const leads = chain({ first: odd });
+  db.mockReturnValue(leads);
+  for (const input of [{ zip: '34201' }, { address: '12 Synthetic Oak Ave' }, { city: 'Newtown' }]) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...input });
+    expect(res.error).toBe(ONE_LINE_REFUSAL);
+    expect(res.preview).toBeUndefined();
+  }
+  const confirmed = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201', confirmed: true });
+  expect(confirmed.error).toBe(ONE_LINE_REFUSAL);
+  expect(leads.update).not.toHaveBeenCalled();
+  const whole = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Synthetic Oak Ave', city: 'Newtown', zip: '34201' });
+  expect(whole.changes).toEqual({
+    address: { from: '21 Synthetic Oak Ave, Testville', to: '12 Synthetic Oak Ave' },
+    city: { from: 'Testville', to: 'Newtown' },
+    zip: { from: '34200', to: '34201' },
+  });
+});
+
+test('confirmed composed zip edit: one guarded UPDATE writes the rebuilt address and the zip, re-asserting both old values', async () => {
+  const leads = chain({ first: COMPOSED_LEAD, update: [{ id: 'lead-1' }] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', zip: '34201', confirmed: true,
+    _approved_changes: {
+      address: { from: COMPOSED, to: '21 Synthetic Oak Ave, Testville, FL 34201' },
+      zip: { from: '34200', to: '34201' },
+    },
+  });
+  expect(res.success).toBe(true);
+  expect(res.updated_fields).toEqual(['address', 'zip']);
+  expect(leads.where).toHaveBeenCalledWith('address', COMPOSED);
+  expect(leads.where).toHaveBeenCalledWith('zip', '34200');
+  expect(leads.update).toHaveBeenCalledWith(
+    expect.objectContaining({ address: '21 Synthetic Oak Ave, Testville, FL 34201', zip: '34201' }), ['id'],
+  );
+});
+
+test('confirmed: a composed row that changed after the card refuses with preview_changed', async () => {
+  const moved = { ...COMPOSED_LEAD, address: '99 Other St, Elsewhere, FL 34111', city: 'Elsewhere', zip: '34111' };
+  const leads = chain({ first: moved, update: [{ id: 'lead-1' }] });
+  db.mockReturnValue(leads);
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', zip: '34201', confirmed: true,
+    _approved_changes: {
+      address: { from: COMPOSED, to: '21 Synthetic Oak Ave, Testville, FL 34201' },
+      zip: { from: '34200', to: '34201' },
+    },
+  });
+  expect(res.preview_changed).toBe(true);
+  expect(leads.update).not.toHaveBeenCalled();
+});

@@ -164,7 +164,7 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
-        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field." },
+        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field. When the lead's address is stored as one line (street, City, FL zip), an address, city or zip edit rewrites that line so it never disagrees with the city and zip columns." },
         city: { type: 'string', description: "The lead's city (120 characters max); a blank clears it" },
         zip: { type: 'string', description: "The lead's zip code (20 characters max); a blank clears it" },
       },
@@ -663,6 +663,13 @@ const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email', 'addre
 // refuses an over-long value rather than silently cutting a street address.
 const LEAD_ADDRESS_MAX = { address: 255, city: 120, zip: 20 };
 
+// Blank clears; over the admin form's cap is refused, never cut.
+function normalizeLeadAddressField(field, text) {
+  if (!text) return { value: null };
+  if (text.length > LEAD_ADDRESS_MAX[field]) return { error: `${field} is too long (${LEAD_ADDRESS_MAX[field]} characters max).` };
+  return { value: text };
+}
+
 // Normalize one requested contact field. Returns { value } (null = clear)
 // or { error }.
 function normalizeLeadContactField(field, raw) {
@@ -694,11 +701,7 @@ function normalizeLeadContactField(field, raw) {
     if (!canonical) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
     return { value: e164 };
   }
-  if (LEAD_ADDRESS_MAX[field]) {
-    if (!text) return { value: null };
-    if (text.length > LEAD_ADDRESS_MAX[field]) return { error: `${field} is too long (${LEAD_ADDRESS_MAX[field]} characters max).` };
-    return { value: text };
-  }
+  if (LEAD_ADDRESS_MAX[field]) return normalizeLeadAddressField(field, text);
   if (field === 'email') {
     if (!text) return { value: null };
     const email = cleanValidEmailOrNull(text);
@@ -708,6 +711,101 @@ function normalizeLeadContactField(field, raw) {
     return { value: email };
   }
   return { error: `Unknown contact field: ${field}` };
+}
+
+// ─── COMPOSED ADDRESSES ─────────────────────────────────────────
+//
+// leads.address holds either a street-only line or a fully composed
+// "street, City, FL 34221" string, depending on which intake path wrote the row
+// (client LeadsTabs.jsx formatLeadAddress documents both shapes, and lead →
+// customer conversion copies leads.address into customers.address_line1
+// verbatim). No server helper splits it, so this is the small local rule.
+// A stored value is COMPOSED when its last comma segment is a two-letter state
+// optionally followed by a zip ("FL" or "FL 34221"); the segment before it is the
+// city (when there are three or more segments) and everything before that is the
+// street. Editing city or zip, or only the street, on a composed row rebuilds the
+// whole string so the lead never holds two places.
+const COMPOSED_TAIL = /^([A-Za-z]{2})(?:\s+(\d{5}(?:-\d{4})?))?$/;
+const COMPOSED_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
+
+function parseComposedAddress(text) {
+  const segments = String(text || '').split(',').map(x => x.trim());
+  if (segments.length < 2 || segments.some(x => !x)) return null;
+  const tail = COMPOSED_TAIL.exec(segments[segments.length - 1]);
+  if (!tail) return null;
+  const hasCity = segments.length >= 3;
+  return {
+    street: segments.slice(0, hasCity ? -2 : -1).join(', '),
+    city: hasCity ? segments[segments.length - 2] : null,
+    state: tail[1],
+    zip: tail[2] || null,
+  };
+}
+
+// Same segment-wise containment test the lead screen uses: the city column or
+// the zip column already appears inside the stored address line.
+function addressEmbedsLocation(lead, stored) {
+  const segments = stored.split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+  if (segments.length < 2) return false;
+  const city = String(lead.city || '').trim().toLowerCase();
+  const zip = String(lead.zip || '').trim();
+  if (city && segments.slice(1).includes(city)) return true;
+  if (zip && segments.some(seg => seg.split(/\s+/).includes(zip))) return true;
+  return segments.slice(1).some(seg => /\b\d{5}\b/.test(seg));
+}
+
+function composeAddress({ street, city, state, zip }) {
+  if (!street) return null;
+  return [street, city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+}
+
+const ADDRESS_FIELDS = ['address', 'city', 'zip'];
+
+// The parts the rebuilt line is made of: the operator's whole composed address,
+// else the stored parts with the requested street laid over them.
+function addressTargetParts(requested, base, given) {
+  let parts;
+  if (given) parts = { ...given };
+  else if ('address' in requested) parts = { ...(base || {}), street: requested.address };
+  else parts = { ...base };
+  if ('city' in requested) parts.city = requested.city;
+  if ('zip' in requested) parts.zip = requested.zip;
+  return parts;
+}
+
+// Turns the operator's address / city / zip request into what must be written.
+// Bare rows keep the plain behavior; a composed row (or a composed request) is
+// rebuilt so address, city and zip never disagree. Returns { requested } or
+// { error }. A stored one-line address this rule cannot split with confidence
+// refuses a partial edit; a request naming all three fields replaces it whole.
+function rebuildLeadAddress(lead, requested) {
+  if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested };
+  const stored = String(lead.address || '').trim();
+  const base = stored ? parseComposedAddress(stored) : null;
+  const partial = !ADDRESS_FIELDS.every(f => f in requested);
+  if (partial && stored && !base && addressEmbedsLocation(lead, stored)) return { error: COMPOSED_REFUSAL };
+  const given = typeof requested.address === 'string' ? parseComposedAddress(requested.address) : null;
+  if (!base && !given) return { requested };
+
+  const out = { ...requested };
+  // A composed whole address given by the operator also fixes the columns.
+  if (given) Object.assign(out, syncedColumns(given, requested));
+  const parts = addressTargetParts(requested, base, given);
+  if (sameAddressParts(parts, base)) delete out.address;
+  else out.address = composeAddress({ ...parts, state: parts.state || (base && base.state) || 'FL' });
+  return { requested: out };
+}
+
+function syncedColumns(given, requested) {
+  const cols = {};
+  if (!('city' in requested)) cols.city = given.city;
+  if (!('zip' in requested)) cols.zip = given.zip;
+  return cols;
+}
+
+function sameAddressParts(parts, base) {
+  return Boolean(base) && parts.street === base.street && (parts.city || null) === base.city
+    && (parts.zip || null) === base.zip;
 }
 
 // { field: { from, to } } for every requested field whose stored value
@@ -744,7 +842,7 @@ function approvedLeadContactChanges(pinned, requested) {
 }
 
 async function updateLeadContact(input) {
-  const requested = {};
+  let requested = {};
   for (const field of LEAD_CONTACT_FIELDS) {
     if (input[field] === undefined) continue;
     const norm = normalizeLeadContactField(field, input[field]);
@@ -758,6 +856,11 @@ async function updateLeadContact(input) {
   const lead = await resolveLeadForUpdate(input);
   if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
   if (lead.error) return lead;
+
+  // A one-line "street, City, FL zip" address is rebuilt, never half-edited.
+  const rebuilt = rebuildLeadAddress(lead, requested);
+  if (rebuilt.error) return { error: rebuilt.error };
+  requested = rebuilt.requested;
 
   // Only fields whose stored value actually differs are written (and shown).
   // A confirmed run uses the APPROVED diff the route pinned at proposal
