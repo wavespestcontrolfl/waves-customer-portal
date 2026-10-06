@@ -129,7 +129,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.14.0 additive. true ONLY when the caller explicitly states the number reaching us is NOT their own — a shared/office line, a receptionist's desk phone, someone else's cell they borrowed — or the number CANNOT TAKE TEXTS (a video-relay service number, a landline, \"you can't text this one\"), because a text to it never reaches the caller. null when the call gives no signal either way; false is never set (the model omits the field or returns null instead — an unstated caller ID is not evidence it IS theirs). The Twilio ANI must not be trusted as a personal callback number when true and no spoken number backs it up; see phone_source and phone_note."
+          "description": "1.14.0 additive. true ONLY when the caller explicitly states the number reaching us is NOT their own — a shared/office line, a receptionist's desk phone, someone else's cell they borrowed. null when the call gives no signal either way; false is never set (the model omits the field or returns null instead — an unstated caller ID is not evidence it IS theirs). The Twilio ANI must not be trusted as a personal callback number when true and no spoken number backs it up; see phone_source and phone_note."
         },
         "phone_note": {
           "type": [

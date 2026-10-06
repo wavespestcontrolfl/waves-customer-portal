@@ -106,18 +106,7 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // ONE thing: deciding whether to send that person the recipient opt-in ask.
 // Consent is the recipient's own YES to that text, never these flags. New
 // fields and instructions: a new cohort.
-// v22: wording only, no schema shape change (audit 2026-10-05 of 7 days of
-// production calls). (1) SPELLED letters also beat the KNOWN CALLER name on
-// file and the CALLER ID NAME, and a surname the transcriber glued to the next
-// words ("Hartwellover at ..." for "Hartwell over at ...") is split. (2) A
-// spoken phone no NANP line can have (area or exchange code starting 0 or 1)
-// is emitted as null, never as phone_e164. (3) caller.caller_id_disclaimed also
-// covers a number that cannot take texts (video-relay service, landline, "you
-// can't text this one"), and a separate number the caller gives for texts is
-// phone_e164. The server backs all three with deterministic checks
-// (call-spoken-data-guard.js). New instructions the model must follow, so this
-// is a new cohort.
-const PROMPT_VERSION = 'v22';
+const PROMPT_VERSION = 'v21';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -239,8 +228,6 @@ SPELLED-OUT INPUT IS AUTHORITATIVE (names + emails):
 - When an email is described relative to the name ("first name dot last name"), build it from the SPELLED name parts, not the misheard spoken form.
 - Transcription often CONCATENATES a phonetic spelling into nonsense tokens: "blikenboy, vlikenvictor" is "B like in boy, V like in Victor" — decode each such token to its letter (B, V). A run of these tokens ending in digits is a spelled email local part ("blikenboy vlikenvictor 42 at gmail.com" -> bv42@gmail.com). Decode the letters even when the words are jammed together.
 - The decoded spelled letters ALSO beat the caller's own read-back of the finished email as transcribed — the read-back is one more chance for the transcriber to mishear. When you had to decode garbled tokens, lower caller_identity confidence to 0.6 or below.
-- Spelled letters ALSO beat the KNOWN CALLER name on file and the CALLER ID NAME: when the caller spells a surname that differs from the name on file, emit the SPELLED form — the office corrects the record. Never keep the on-file spelling over letters the caller just spelled.
-- Transcription also glues a name to the words after it: "this is Sally Hartwellover at 12 Palm Court" is the name Hartwell followed by "over at". When a surname ends in "over" right before at/in/on/with and the stem is a plausible name, drop the "over" (real surnames such as Hanover or Glover stay).
 
 PHONE:
 - phone_e164: Set to the callback number the caller states, in E.164 format (+1XXXXXXXXXX).
@@ -248,9 +235,7 @@ PHONE:
 - phone_source: "spoken" if caller stated a number, "caller_id" if using Twilio ANI only, "both" if spoken matches ANI, "unknown" if neither available.
 - If no number is spoken, set phone_e164 to null (server will fall back to ANI).
 - ALWAYS prefer a spoken callback number over the incoming Twilio ANI: when the caller states ANY number to be reached at — their cell, a direct line, "call me at..." — that is phone_e164/phone_raw_spoken, even if it never gets compared to the ANI out loud.
-- caller_id_disclaimed: set true, with an evidence quote, ONLY when the caller explicitly says the number reaching us is NOT their own — a shared office line, a front-desk phone, a coworker's or spouse's phone they're borrowing ("this is our office line, they route it to me", "I'm calling from the shop phone", "this is my husband's cell") — OR explicitly says we CANNOT TEXT this number: a video relay service or interpreter placing the call, a landline, "you can't text this one", "I have a different number for texts". Do not infer it from silence or from a business name alone — it takes an explicit statement that THIS number isn't theirs or can't take texts. Leave null when nothing was said about whose number it is or whether it takes texts.
-- When the caller gives a SEPARATE number for texts, that number is phone_e164 (phone_source "spoken"), never the incoming number.
-- A spoken number that cannot be a US phone number — an area code or exchange (the first three digits after the area code) starting with 0 or 1, such as 173-303-xxxx — is a mishearing: set that number's phone_e164 to null and keep phone_raw_spoken as heard; never guess the missing digit.
+- caller_id_disclaimed: set true, with an evidence quote, ONLY when the caller explicitly says the number reaching us is NOT their own — a shared office line, a front-desk phone, a coworker's or spouse's phone they're borrowing ("this is our office line, they route it to me", "I'm calling from the shop phone", "this is my husband's cell"). Do not infer it from silence or from a business name alone — it takes an explicit statement that THIS number isn't theirs. Leave null when nothing was said about whose number it is.
 - phone_note: when caller_id_disclaimed is true, capture the caller's own explanation in their words (trimmed, <=160 chars) — e.g. "office line, routes to me, I text back from my cell". null otherwise.
 - A disclaimed caller ID with no spoken callback number (phone_source stays "caller_id"/"unknown") means we have NO verified way to text this caller back — that is exactly the case phone_note and caller_id_disclaimed exist to flag; do not silently fall back to treating the ANI as good enough once you've heard the caller say otherwise.
 
