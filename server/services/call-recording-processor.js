@@ -198,9 +198,14 @@ function isLeadCallbackBridge(call = {}) {
 // The canAutoRoute options of that lane: {} when it is off (so the options shape every
 // lane and audit compares is unchanged gate-off), else the switch, the call direction
 // (outbound adds the staff-identity proof) and the catalog check, built only when on.
-function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}) {
+// `v1Views` are the V1 records the no-price decision also reads for any price signal (the
+// merged record and the one before V2 adoption): the same views commercialAssessmentBookableFor gets.
+function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}, v1Views = []) {
   if (!commercialAssessmentBookingActive(call, gates)) return {};
-  return { commercialAssessmentBooking: true, commercialOutbound: isOutboundCall(call), commercialAssessmentBookable: makeBookable() };
+  return {
+    commercialAssessmentBooking: true, commercialOutbound: isOutboundCall(call), commercialAssessmentBookable: makeBookable(),
+    commercialAssessmentV1Views: v1Views.filter(Boolean),
+  };
 }
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
@@ -2219,13 +2224,20 @@ function auditCommercialAssessmentOptions({ call, gates, transcript, extracted, 
   // routed transcript and the call start); the priced switch and quote check are dropped.
   const { commercialDictatedBooking: _priced, commercialQuoteBookable: _quote, ...shared } = auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices });
   const routedTranscript = shared.transcript;
+  const persisted = extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction);
+  // The persisted record is the merged V1 view; the pre-adoption view is rebuilt from the
+  // recorded V1 fields the same way auditCommercialAssessmentBookableFor does (the record keeps
+  // the V1 SERVICE fields only, so a price V2 adoption replaced is visible through the merged
+  // view and the V2 extraction, never from the pre-adoption record).
+  const recorded = persisted?.pre_adoption_service_fields;
+  const hasRecord = !!recorded && typeof recorded === 'object' && !Array.isArray(recorded) && Object.keys(recorded).length > 0;
   return {
     ...shared,
     ...commercialAssessmentRoutingOptions(call, () => auditCommercialAssessmentBookableFor({
-      extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
+      extracted: persisted,
       transcription: routedTranscript,
       services: bookableServices,
-    }), gates),
+    }), gates, [persisted, hasRecord ? { ...persisted, ...recorded } : null]),
   };
 }
 
@@ -11405,7 +11417,7 @@ const CallRecordingProcessor = {
             // Assessment staff booked with no price discussed, outbound included. {} when off.
             ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
               extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
-            }), { captured: assessmentLaneActive }),
+            }), { captured: assessmentLaneActive }, [extracted, preAdoptionExtracted]),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: callStartedAt(call) || call.created_at,
@@ -21835,7 +21847,7 @@ const CallRecordingProcessor = {
           // Mirrors the enforce lane (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING).
           ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
             extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
-          }), { captured: assessmentLaneActive }),
+          }), { captured: assessmentLaneActive }, [extracted, preAdoptionExtracted]),
           callStartedAt: callStartedAt(call) || call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),

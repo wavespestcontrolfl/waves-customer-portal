@@ -2280,7 +2280,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
         quoteBookable: opts.commercialQuoteBookable,
         ...(opts.commercialAssessmentBooking === true ? {
           pricedPath: opts.commercialDictatedBooking === true,
-          assessmentBooking: { bookable: opts.commercialAssessmentBookable, outbound: opts.commercialOutbound === true },
+          assessmentBooking: { bookable: opts.commercialAssessmentBookable, outbound: opts.commercialOutbound === true, v1Views: opts.commercialAssessmentV1Views },
         } : {}),
       }).ok) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {

@@ -43,10 +43,9 @@ const {
   buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, applyUnclearServiceTranscriptVeto, resolveCallContactPhone,
   resolveKnownCallerCustomer,
 } = require('../services/call-recording-processor');
-const { commercialAssessmentBookingActive } = require('../services/call-recording-processor')._test;
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
-const { PROMPT_HASH, extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
+const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -105,20 +104,6 @@ function contactPhoneForCall(row) {
   return resolveCallContactPhone(row);
 }
 
-// The prompt versions that count as CURRENT: the bare hash and the live catalog's. While
-// GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING is live the processor ALSO stamps '-aps' on the
-// calls whose prompt carries the agent-proposed-slot block (see extractionPromptVersion),
-// and those rows are current-extractor rows too: without their versions here they would be
-// dropped as "older extractor". Gate off: the same two versions as before.
-function currentPromptVersions(liveCatalogNames, { assessmentLane = false } = {}) {
-  const versions = [CURRENT_PROMPT_VERSION, extractionPromptVersion(liveCatalogNames)];
-  if (assessmentLane === true) {
-    versions.push(extractionPromptVersion([], { agentProposedSlotCommitment: true }));
-    versions.push(extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true }));
-  }
-  return [...new Set(versions)];
-}
-
 async function main() {
   const db = dbConn();
 
@@ -146,10 +131,11 @@ async function main() {
   const { loadBookableCallServices } = require('../services/call-booking-catalog');
   const bookableCallServices = await loadBookableCallServices(db);
   const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
-  const currentVersions = currentPromptVersions(liveCatalogNames, { assessmentLane: commercialAssessmentBookingActive({ direction: 'inbound' }) });
+  const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
+  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
-    .whereIn('ai_extraction_prompt_version', currentVersions)
+    .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
     // metadata + source: resolveCallContactPhone needs both to resolve a
@@ -537,8 +523,38 @@ async function main() {
   console.log(`\n${allPass ? '✅ ALL CRITERIA PASS — safe to flip CALL_EXTRACTION_V2_DRIVES_ROUTING=true (after reviewing disagreements).' : '⛔ NOT READY — criteria above still failing.'}\n`);
 }
 
-if (require.main === module) {
-  main().catch((e) => { console.error(e); process.exit(1); });
+// The "-aps" cohort (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, codex #6046 r4): calls whose
+// extraction prompt carried the agent-proposed-slot block are stamped with an '-aps' version
+// suffix (extractionPromptVersion). They are a DIFFERENT prompt, so they are never merged into
+// main()'s readiness cohort above (which stays on the unsuffixed versions exactly as before)
+// and are scored here on their own counts with the same MIN_CALLS and SCHEMA_PASS_THRESHOLD.
+// Routing agreement and the consent / phantom checks are main()'s and are not rescored here.
+function evaluateApsCohort(rows) {
+  const attempts = rows.length;
+  const valid = rows.filter((r) => r.v2_extraction_status === 'valid').length;
+  const schemaPassRate = attempts ? valid / attempts : 0;
+  return { attempts, valid, schemaPassRate, enough: attempts >= MIN_CALLS, schemaOk: attempts > 0 && schemaPassRate >= SCHEMA_PASS_THRESHOLD };
 }
 
-module.exports = { contactPhoneForCall, currentPromptVersions };
+async function apsCohortReport(env = process.env) {
+  if (env.GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING !== 'true') return null;
+  const db = dbConn();
+  try {
+    const rows = await db('call_log')
+      .whereNotNull('v2_extraction_status').whereNot('v2_extraction_status', 'not_run')
+      .whereIn('ai_extraction_model', [CURRENT_PRIMARY])
+      .where('ai_extraction_prompt_version', 'like', `${CURRENT_PROMPT_VERSION}%-aps`)
+      .select('v2_extraction_status');
+    const r = evaluateApsCohort(rows);
+    console.log(`\n-aps cohort (agent-proposed-slot prompt; scored separately, never merged above): ${r.attempts} attempt(s), schema pass ${(r.schemaPassRate * 100).toFixed(1)}% (${r.valid}/${r.attempts}) — ≥ ${MIN_CALLS} attempts: ${r.enough ? 'yes' : 'no'}, ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid: ${r.schemaOk ? 'yes' : 'no'}.`);
+    return r;
+  } finally {
+    await db.destroy();
+  }
+}
+
+if (require.main === module) {
+  main().then(() => apsCohortReport()).catch((e) => { console.error(e); process.exit(1); });
+}
+
+module.exports = { contactPhoneForCall, evaluateApsCohort, apsCohortReport };

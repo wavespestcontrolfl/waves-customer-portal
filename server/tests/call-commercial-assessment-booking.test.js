@@ -468,7 +468,7 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
     expect(commercialAssessmentRoutingOptions(outbound, never, gatesOf({ assessment: false }))).toEqual({});
     expect(commercialAssessmentRoutingOptions(outbound, never, gatesOf({ agentCommit: false }))).toEqual({});
     const check = () => true;
-    expect(commercialAssessmentRoutingOptions(outbound, () => check, gatesOf())).toEqual({ commercialAssessmentBooking: true, commercialOutbound: true, commercialAssessmentBookable: check });
+    expect(commercialAssessmentRoutingOptions(outbound, () => check, gatesOf())).toEqual({ commercialAssessmentBooking: true, commercialOutbound: true, commercialAssessmentBookable: check, commercialAssessmentV1Views: [] });
     expect(commercialAssessmentRoutingOptions(inbound, () => check, gatesOf())).toMatchObject({ commercialOutbound: false });
     expect(commercialAssessmentRoutingOptions({ direction: 'Outbound-API', metadata: { type: 'lead_auto_bridge' } }, () => check, gatesOf())).toMatchObject({ commercialOutbound: true });
   });
@@ -490,7 +490,7 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
 
   test('both live lanes and the audit builder derive it through that ONE predicate', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    expect(src.match(/\.\.\.commercialAssessmentRoutingOptions\(call, \(\) => commercialAssessmentBookableFor\(\{\s*extracted, preAdoptionExtracted, transcription, services: bookableCallServices,\s*\}\), \{ captured: assessmentLaneActive \}\),/g)).toHaveLength(2);
+    expect(src.match(/\.\.\.commercialAssessmentRoutingOptions\(call, \(\) => commercialAssessmentBookableFor\(\{\s*extracted, preAdoptionExtracted, transcription, services: bookableCallServices,\s*\}\), \{ captured: assessmentLaneActive \}, \[extracted, preAdoptionExtracted\]\),/g)).toHaveLength(2);
     expect(src).toMatch(/\.\.\.\(commercialAssessmentBookingActive\(call, gates\) \? auditCommercialAssessmentOptions\(/);
     const at = src.indexOf('function commercialAssessmentBookingActive');
     const body = src.slice(at, src.indexOf('\n}\n', at));
@@ -602,24 +602,29 @@ describe('codex #6046 round 2', () => {
   const Processor = require('../services/call-recording-processor');
   const { commercialAssessmentBookingActive } = Processor._test;
 
-  test('promotion readiness counts the -aps cohort as current while the lane is live, and only then', () => {
-    const { currentPromptVersions } = require('../scripts/v2-promotion-readiness');
-    const { extractionPromptVersion, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
-    const names = ['Waves Assessment', 'Cockroach Control Service'];
-    const off = currentPromptVersions(names);
-    expect(off).toEqual([PROMPT_HASH, extractionPromptVersion(names)]);
-    expect(off.some((v) => v.endsWith('-aps'))).toBe(false);
-    expect(currentPromptVersions(names, { assessmentLane: false })).toEqual(off);
-    const on = currentPromptVersions(names, { assessmentLane: true });
-    expect(on).toEqual(expect.arrayContaining([...off, `${PROMPT_HASH}-aps`, extractionPromptVersion(names, { agentProposedSlotCommitment: true })]));
-    expect(on).toContain(`${extractionPromptVersion(names)}-aps`);
-    // the exact versions the processor stamps for an eligible call are all counted
-    expect(on).toContain(extractionPromptVersion(names, { agentProposedSlotCommitment: true }));
-    expect(on).toContain(extractionPromptVersion([], { agentProposedSlotCommitment: true }));
-    // the script selects rows with that list, not a hand-built pair
+  test('promotion readiness: the main cohort stays on the unsuffixed versions; -aps rows are scored in their own section', async () => {
+    const mod = require('../scripts/v2-promotion-readiness');
+    expect(mod.currentPromptVersions).toBeUndefined();
     const src = fs.readFileSync(path.join(__dirname, '../scripts/v2-promotion-readiness.js'), 'utf8');
-    expect(src).toContain(".whereIn('ai_extraction_prompt_version', currentVersions)");
-    expect(src).toContain("commercialAssessmentBookingActive({ direction: 'inbound' })");
+    // main()'s computation is origin/main's: the bare hash and the live catalog's version only
+    expect(src).toContain(".whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])");
+    expect(src).not.toContain('currentVersions');
+    expect(src).not.toMatch(/main\(\)[\s\S]{0,40}commercialAssessmentBookingActive/);
+    // the separate section: only -aps rows, same thresholds, its own counts
+    const { evaluateApsCohort, apsCohortReport } = mod;
+    const rows = (valid, bad) => [...Array(valid).fill({ v2_extraction_status: 'valid' }), ...Array(bad).fill({ v2_extraction_status: 'schema_failed' })];
+    expect(evaluateApsCohort([])).toMatchObject({ attempts: 0, enough: false, schemaOk: false });
+    expect(evaluateApsCohort(rows(95, 5))).toMatchObject({ attempts: 100, valid: 95, enough: true, schemaOk: true });
+    expect(evaluateApsCohort(rows(94, 6))).toMatchObject({ enough: true, schemaOk: false });
+    expect(evaluateApsCohort(rows(10, 0))).toMatchObject({ enough: false, schemaOk: true });
+    expect(src).toContain('${CURRENT_PROMPT_VERSION}%-aps');
+    expect(src).toContain('.then(() => apsCohortReport())');
+    // gate off: no section, no database read, no output (output identical to main)
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await apsCohortReport({})).toBeNull();
+    expect(await apsCohortReport({ GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: 'TRUE' })).toBeNull();
+    expect(log).not.toHaveBeenCalled();
+    log.mockRestore();
   });
 
   test('ONE read of the lane per processing pass: the prompt, the stamps and both routing lanes share it', () => {
@@ -630,7 +635,7 @@ describe('codex #6046 round 2', () => {
     expect(src).not.toMatch(/\.\.\.\(commercialAssessmentBookingActive\(call\) \? \{ agentProposedSlotCommitment/);
     expect(src).toContain('extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive })');
     expect(src).toContain('...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),');
-    expect(src.match(/\}\), \{ captured: assessmentLaneActive \}\),/g)).toHaveLength(2);
+    expect(src.match(/\}\), \{ captured: assessmentLaneActive \}, \[extracted, preAdoptionExtracted\]\),/g)).toHaveLength(2);
     // every ai_extraction_prompt_version stamp in the pass uses the const's version
     expect(src.match(/ai_extraction_prompt_version: v2PromptVersion,/g).length).toBeGreaterThanOrEqual(2);
   });
@@ -764,5 +769,90 @@ describe('codex #6046 round 3', () => {
       expect(extractionPromptVersion([], { agentProposedSlotCommitment: true })).toMatch(/-aps$/);
       expect(on).not.toBe(off);
     });
+  });
+});
+
+describe('codex #6046 round 4: the no-price decision fails closed on every view', () => {
+  const v1Price = (over) => [{ requested_service: 'Waves Assessment', ...over }];
+  const groundedWith = (ex, transcript, v1Views) => grounded(ex, transcript, { assessmentBooking: assess({ v1Views }) });
+
+  test('control: no price anywhere books', () => {
+    expect(groundedWith(extraction(), OUTBOUND, [{ requested_service: 'Waves Assessment', quoted_price: null, quote_requested: false, quote_promised: false }]).ok).toBe(true);
+  });
+
+  test('a V1-only price signal (merged or pre-adoption view) goes to the priced path', () => {
+    for (const over of [
+      { quoted_price: 149 }, { quoted_price_usd: 149 }, { price_amount_usd: 99 }, { price_amount_max_usd: 120 },
+      { price: { amount_usd: 75 } }, { prices: [{ amount_max_usd: 120 }] }, { quote_requested: true }, { quote_promised: true },
+    ]) {
+      for (const views of [v1Price(over), [{}, v1Price(over)[0]], [v1Price(over)[0], null]]) {
+        expect([over, groundedWith(extraction(), OUTBOUND, views)]).toEqual([over, { ok: false, reason: 'price_discussed' }]);
+      }
+    }
+    expect(priceDiscussed({}, OUTBOUND, v1Price({ quoted_price: 149 }))).toBe(true);
+    expect(priceDiscussed({}, OUTBOUND, undefined)).toBe(false);
+    expect(priceDiscussed({}, OUTBOUND, 'nope')).toBe(false);
+    // through canAutoRoute, with the views the processor threads in
+    expect(route(extraction(), { commercialAssessmentV1Views: v1Price({ quoted_price: 149 }) }).allowed).toBe(false);
+    expect(route(extraction(), { commercialAssessmentV1Views: v1Price({ quote_promised: true }) }).allowed).toBe(false);
+    expect(route(extraction(), { commercialAssessmentV1Views: [{ quoted_price: null }] }).allowed).toBe(true);
+  });
+
+  test('price nouns in ANY turn count, not just currency words', () => {
+    const withLine = (line) => OUTBOUND.replace('Caller: Great, thank you.', `Caller: Great, thank you.\n${line}`);
+    for (const line of [
+      "Agent: It'll be one forty-nine total.", 'Caller: What does it cost?', 'Agent: There is a fee for that.', 'Caller: How much is the rate?',
+      'Agent: I can send you a quote.', 'Caller: Do I pay you today?', 'Agent: We will invoice you.', 'Caller: Is there a deposit?',
+      'Agent: What is your bill like?', 'Caller: What is the price?', 'Agent: Payment is after the visit.', 'Agent: It is about forty bucks.', 'Agent: Eighty dollars.', 'Agent: That is $90.',
+    ]) {
+      expect([line, grounded(extraction(), withLine(line))]).toEqual([line, { ok: false, reason: 'price_discussed' }]);
+    }
+  });
+
+  test('"free" and "no charge" are not price talk (and near-miss words do not trip it)', () => {
+    const withLine = (line) => OUTBOUND.replace('Caller: Great, thank you.', `Caller: Great, thank you.\n${line}`);
+    for (const line of ['Agent: The assessment is free.', 'Agent: There is no charge for the visit.', 'Agent: At no cost to you.', 'Agent: There is no extra fee.', 'Agent: We are accurate and separate about it, and Prater Street is fine.']) {
+      expect([line, grounded(extraction(), withLine(line)).ok]).toEqual([line, true]);
+    }
+    // a charge that is NOT waived still counts
+    expect(grounded(extraction(), withLine('Agent: There is no charge today, but a charge later.'))).toEqual({ ok: false, reason: 'price_discussed' });
+  });
+
+  test('the processor threads the V1 views into both live lanes and the audit builder', () => {
+    const Processor = require('../services/call-recording-processor');
+    const { buildFailOpenRoutingContext } = Processor;
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src.match(/\[extracted, preAdoptionExtracted\]\),/g)).toHaveLength(2);
+    expect(src).toContain('commercialAssessmentV1Views: v1Views.filter(Boolean)');
+    const call = { direction: 'inbound', transcription: OUTBOUND, created_at: CALL_STARTED_AT };
+    const gates = { isEnabled: (g) => ({ callAgentCommitBooking: true, callAgentCommitTrustedLabels: true }[g] === true), assessmentLive: () => true };
+    const build = (extracted) => buildFailOpenRoutingContext({ call, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates, bookableServices: [ASSESSMENT_ROW], extracted }).options;
+    const ASSESS = { requested_service: 'Waves Assessment', matched_service: 'Waves Assessment', specific_service_name: 'Waves Assessment', pre_adoption_service_fields: {} };
+    const priced = { ...ASSESS, quoted_price: 149 };
+    expect(build(ASSESS).commercialAssessmentV1Views).toEqual([ASSESS]);
+    const opts2 = (ex) => ({ addressValidation: AV_CLEAN, contactPhone: '+19415550100', ...build(ex) });
+    expect(canAutoRoute(extraction(), { ...opts2(ASSESS), commercialOutbound: false }).allowed).toBe(true);
+    expect(canAutoRoute(extraction(), { ...opts2(priced), commercialOutbound: false }).allowed).toBe(false);
+    expect(canAutoRoute(extraction(), { ...opts2({ ...ASSESS, quote_promised: true }), commercialOutbound: false }).allowed).toBe(false);
+  });
+});
+
+describe('the real shape still grounds after round 4 (outbound lead_auto_bridge)', () => {
+  test('real transcript shape, no price signal on any view', () => {
+    const real = [
+      'Agent: Hey Jennifer, this is Adam with Waves. How are you?',
+      'Caller: Good, thanks.',
+      'Agent: How does noon on Thursday sound?',
+      'Caller: Perfect.',
+      "Agent: Awesome. I'll book you for that, and we'll see you then.",
+    ].join('\n');
+    const ex = extraction({ evidence: [
+      quote('/scheduling/confirmed_start_at', 'agent', 'How does noon on Thursday sound?'),
+      quote('/scheduling/caller_accepted_slot', 'caller', 'Perfect.'),
+      quote('/scheduling/agent_committed_booking', 'agent', "I'll book you for that, and we'll see you then"),
+    ] });
+    const views = [{ requested_service: 'Waves Assessment', quoted_price: null, quote_requested: false, quote_promised: false }];
+    expect(grounded(ex, real, { assessmentBooking: assess({ outbound: true, v1Views: views }) })).toEqual({ ok: true, reason: 'assessment_booking_grounded', mode: 'agent_proposed', assessment: true });
+    expect(route(ex, { transcript: real, commercialAssessmentV1Views: views }).allowed).toBe(true);
   });
 });

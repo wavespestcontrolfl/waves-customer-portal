@@ -206,18 +206,32 @@ function acceptedEntryFor(svc, quoted) {
   return entries.find((e) => e && e.accepted === true && e.amount_usd === quoted && !(e.amount_max_usd > e.amount_usd));
 }
 
-// Did a price come up on the call at all? Any amount in the extraction (the quoted
-// total, a price entry with an amount or a range end), ANY price judgement (a false
-// one means price talk happened too: only null means none), or a dollar figure /
-// "dollars" / "bucks" in the transcript. The no-price assessment mode needs ALL of
-// these quiet; one of them sends the call to the priced path.
-const DOLLAR_TALK = /\$\s*\d|\bdollars?\b|\bbucks?\b/i;
-function priceDiscussed(svc = {}, transcript = '') {
+// Did a price come up on the call at all? Fail closed on EVERY view of the call:
+//  - the V2 service_request: the quoted total, a price entry with an amount or a range end,
+//    and ANY price judgement (a false one means price talk happened too: only null means none);
+//  - every V1 view the processor hands in (the merged record AND the one before V2 adoption):
+//    a quoted price, a price amount, a price entry, quote_requested or quote_promised;
+//  - the transcript, in ANY turn: a price noun (price, cost, charge, fee, total, quote, rate,
+//    pay, payment, invoice, bill, deposit) or a currency word / figure ($, dollars, bucks).
+//    "free" and "no charge" / "no cost" / "no fee" are not price talk.
+// The no-price assessment mode needs ALL of these quiet; one of them sends the call to the
+// priced path.
+const PRICE_TALK = /\$\s*\d|\b(?:dollars?|bucks?|price[sd]?|pricing|costs?|charg(?:e|es|ed|ing)|fees?|totals?|quot(?:e|es|ed|ing)|rates?|pay|pays|paying|paid|payments?|invoic(?:e|es|ed|ing)|bill|bills|billed|billing|deposits?)\b/i;
+const NO_CHARGE = /\b(?:no|without|free of)\s+(?:extra\s+|additional\s+|any\s+)?(?:charge|charges|cost|costs|fee|fees)\b/gi;
+const hasAmount = (e) => !!e && typeof e === 'object' && (e.amount_usd != null || e.amount_max_usd != null);
+function v1ViewPriced(view) {
+  if (!view || typeof view !== 'object') return false;
+  const entries = [view.price, ...(Array.isArray(view.prices) ? view.prices : [])];
+  return [view.quoted_price, view.quoted_price_usd, view.price_amount_usd, view.price_amount_max_usd].some((v) => v != null)
+    || view.quote_requested === true || view.quote_promised === true || entries.some(hasAmount);
+}
+function priceDiscussed(svc = {}, transcript = '', v1Views = []) {
   const entries = [svc.price, ...(Array.isArray(svc.prices) ? svc.prices : [])];
   return svc.quoted_price_usd != null
     || [svc.price_offered_by_staff, svc.price_accepted_by_caller, svc.price_is_final].some((j) => j != null)
-    || entries.some((e) => e && typeof e === 'object' && (e.amount_usd != null || e.amount_max_usd != null))
-    || DOLLAR_TALK.test(String(transcript || ''));
+    || entries.some(hasAmount)
+    || (Array.isArray(v1Views) ? v1Views : []).some(v1ViewPriced)
+    || PRICE_TALK.test(String(transcript || '').replace(NO_CHARGE, ' '));
 }
 
 // Staff identity on an OUTBOUND recording, independent of who the labels say is who:
@@ -271,7 +285,7 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quot
   const early = SCHEDULE_CHECKS.find(([, fails]) => fails(v2?.scheduling));
   if (early) return { ok: false, reason: early[0] };
   const svc = v2.service_request || {};
-  const noPriceMode = !!assessmentBooking && !priceDiscussed(svc, transcript);
+  const noPriceMode = !!assessmentBooking && !priceDiscussed(svc, transcript, assessmentBooking.v1Views);
   const terms = { v2, transcript, assessmentBooking, pricedPath, agreed: resolveCallAgreedPrice(v2), quoted: svc.quoted_price_usd, entry: acceptedEntryFor(svc, svc.quoted_price_usd), quoteBookable };
   const failedTerm = (noPriceMode ? ASSESSMENT_CHECKS : PRICED_PATH_CHECKS).find(([, fails]) => fails(terms));
   if (failedTerm) return { ok: false, reason: failedTerm[0] };
