@@ -14,6 +14,8 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
   const recognitionIngredient = require('../models/migrations/20261006220400_bermuda_recognition_active_ingredient');
   const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
   const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const aliasBackfill = require('../models/migrations/20261006220500_watering_rule_bermuda_removal_alias_backfill');
+  const zoysiaNote = require('../models/migrations/20261006220600_bermuda_zoysia_2ee_note');
   const surfactantToken = require('../models/migrations/20261006220300_bermuda_surfactant_unit_token');
   const unitToken = require('../models/migrations/20261006220200_bermuda_fusilade_unit_token');
   const RATE_UNITS = require('../../shared/rate-units.json');
@@ -219,6 +221,88 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
       expect(instruction.state).toBe('hold');
       expect(new Date(instruction.holdUntil).getTime() - new Date(completedAt).getTime()).toBe(3 * 3600 * 1000);
       expect(instruction.lines[0]).toMatch(/^Skip your turf watering until/);
+    });
+  });
+
+  describe('20261006220500 watering alias backfill', () => {
+    test('fills the empty rule of an alias-linked product the staged bermuda rows point at; never a filled one, never the surfactant; audited; idempotent; down is a no-op', async () => {
+      await rolledBack(async (trx) => {
+        const ruleOf = async (id) => { const r = await trx('products_catalog').where({ id }).first('post_application_watering'); return typeof r.post_application_watering === 'string' ? JSON.parse(r.post_application_watering) : r.post_application_watering; };
+        // An alias-spelled catalog product, linked from the staged Recognition rows (not the exact catalog name).
+        const [aliased] = await trx('products_catalog').insert({ name: 'Recognition 20.4 WG (office spelling)', category: 'herbicide', active: true, rate_unit: 'oz' }).returning('*');
+        await trx('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: 'Recognition Post Emergent Herbicide' }).update({ product_id: aliased.id });
+        const exact = await trx('products_catalog').where({ name: 'Fusilade II Post Emergent Liquid Herbicide' }).first('id');
+        const surfactant = await trx('products_catalog').where({ name: 'LESCO 90/10 Nonionic Surfactant' }).first('id');
+        await trx('products_catalog').where({ id: exact.id }).update({ post_application_watering: JSON.stringify({ mode: 'water_in', source: 'admin' }) });
+        await trx('products_catalog').where({ id: surfactant.id }).update({ post_application_watering: null });
+        const audits = async () => (await trx('audit_log').where({ action: 'migration:20261006220500_watering_rule_bermuda_removal_alias_backfill:seeded' })).length;
+        const before = await audits();
+        await aliasBackfill.up(trx);
+        expect(await ruleOf(aliased.id)).toMatchObject({ mode: 'hold', hold_hours: 3, source: 'owner' });
+        expect(await ruleOf(exact.id)).toEqual({ mode: 'water_in', source: 'admin' });
+        expect(await ruleOf(surfactant.id)).toBeNull();
+        expect(await audits()).toBe(before + 1);
+        await aliasBackfill.up(trx);
+        expect(await audits()).toBe(before + 1);
+        await aliasBackfill.down(trx);
+        expect(await ruleOf(aliased.id)).toMatchObject({ mode: 'hold', hold_hours: 3 });
+      });
+    });
+  });
+
+  describe('20261006220600 Zoysia 2(ee) note', () => {
+    const SEEDED = 'migration:20261006220600_bermuda_zoysia_2ee_note:seeded';
+    const REVERTED = 'migration:20261006220600_bermuda_zoysia_2ee_note:reverted';
+    const noted = (trx) => trx('lawn_protocol_products as p')
+      .join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+      .join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+      .whereRaw("p.gates->>'bermudaRemoval' = 'true'")
+      .select('l.protocol_key', 'w.window_key', knex2(trx));
+    const knex2 = (trx) => trx.raw("jsonb_exists(p.gates, 'zoysia2eeOnHand') as noted");
+
+    test('on a migrations-only database the Zoysia April and June rows (all three lines) carry the key and no St. Augustine row does', async () => {
+      const rows = await noted(db);
+      const zoysia = rows.filter((r) => r.protocol_key === 'swfl_zoysia_10_10');
+      const staug = rows.filter((r) => r.protocol_key === 'swfl_st_augustine_10_10');
+      expect(zoysia).toHaveLength(6);
+      expect(zoysia.every((r) => r.noted)).toBe(true);
+      expect(new Set(zoysia.map((r) => r.window_key))).toEqual(new Set(['apr_v13_spreader_feeding', 'jun_v13_hose_blackout']));
+      expect(staug).toHaveLength(6);
+      expect(staug.some((r) => r.noted)).toBe(false);
+    });
+
+    test('appends only where absent, other gate keys kept; append-only audit; down removes only what it added', async () => {
+      await rolledBack(async (trx) => {
+        const events = (action) => trx('audit_log').where({ action });
+        const zoysiaRows = () => trx('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+          .where('l.protocol_key', 'swfl_zoysia_10_10').whereRaw("p.gates->>'bermudaRemoval' = 'true'").select('p.id', 'p.gates');
+        const original = (await events(SEEDED)).map((e) => e.id);
+        // Strip the key from one row and an admin-set value onto another (kept as it is).
+        const [first, second] = await zoysiaRows();
+        await trx('lawn_protocol_products').where({ id: first.id }).update({ gates: trx.raw("gates - 'zoysia2eeOnHand'") });
+        const keptBefore = (await zoysiaRows()).find((r) => r.id === second.id).gates;
+        await zoysiaNote.up(trx);
+        const after = await zoysiaRows();
+        expect(after.every((r) => r.gates.zoysia2eeOnHand === true)).toBe(true);
+        expect(after.find((r) => r.id === first.id).gates).toMatchObject({ bermudaRemoval: true, activelyGrowingOnly: true });
+        expect(after.find((r) => r.id === second.id).gates).toEqual(keptBefore);
+        const seeded = await events(SEEDED);
+        expect(seeded).toHaveLength(original.length + 1);
+        await zoysiaNote.up(trx);
+        expect(await events(SEEDED)).toHaveLength(original.length + 1);
+        // Down appends a rollback event per original and leaves the originals as written.
+        await zoysiaNote.down(trx);
+        expect((await zoysiaRows()).some((r) => r.gates.zoysia2eeOnHand)).toBe(false);
+        expect((await events(REVERTED)).length).toBeGreaterThanOrEqual(original.length + 1);
+        expect((await trx('audit_log').whereIn('id', seeded.map((e) => e.id)).select('action')).every((r) => r.action === SEEDED)).toBe(true);
+        // A second down adds nothing; St. Augustine rows are untouched throughout.
+        const reverted = (await events(REVERTED)).length;
+        await zoysiaNote.down(trx);
+        expect((await events(REVERTED)).length).toBe(reverted);
+        const staug = await trx('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id').join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id')
+          .where('l.protocol_key', 'swfl_st_augustine_10_10').whereRaw("p.gates->>'bermudaRemoval' = 'true'").select('p.gates');
+        expect(staug.some((r) => 'zoysia2eeOnHand' in r.gates)).toBe(false);
+      });
     });
   });
 

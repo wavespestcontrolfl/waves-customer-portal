@@ -13,6 +13,7 @@ const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const rowsMigration = require('../models/migrations/20261006190100_lawn_bermuda_removal_rows');
 const programMigration = require('../models/migrations/20261006190300_lawn_bermuda_removal_limit_program');
 const catalogMigration = require('../models/migrations/20261006190400_lawn_bermuda_removal_catalog');
+const zoysiaNoteMigration = require('../models/migrations/20261006220600_bermuda_zoysia_2ee_note');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
 const { rateAdvisories, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 
@@ -84,6 +85,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
     // The real migration writes the rows and the limits into the fixture protocols.
     await rowsMigration.up(knex);
     await programMigration.up(knex);
+    await zoysiaNoteMigration.up(knex);
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   });
@@ -326,6 +328,24 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const selected = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
       expect(selected.propertyGate.warnings.filter((w) => w.code === 'lawn_bermuda_limit_warning')).toEqual([]);
       expect(selected.propertyGate.warnings.filter((w) => w.code === 'lawn_v13_limit_warning' && /cumulative 0\.150/.test(w.message)).length).toBeGreaterThan(0);
+    });
+
+    test('the Zoysia 2(ee) note: a required note on every Zoysia step line, the plan\'s selected-line warnings and the completion options; St. Augustine lines carry none', async () => {
+      setGates();
+      const NOTE = /Syngenta FIFRA 2\(ee\) recommendation \(2023-03-28\), not the printed label/;
+      const zoysia = await lawn({ grass: 'zoysia', date: '2026-06-16', bermuda: true });
+      const result = await plan(zoysia.visit, { selectedConditionalProductIds: [rec.id], completionDefaultsEnabled: true, includeCompletionDefaults: true });
+      const lines = result.mixCalculator.items.filter((item) => item.bermudaStep);
+      expect(lines).toHaveLength(3);
+      for (const line of lines) expect(line.gateNotes.find((n) => n.key === 'zoysia2eeOnHand')).toMatchObject({ severity: 'required', text: expect.stringMatching(NOTE) });
+      expect(result.propertyGate.warnings.filter((w) => w.gate === 'zoysia2eeOnHand')).toHaveLength(3);
+      const grouped = result.completionDefaults?.options?.filter((o) => o.group === 'bermuda_removal') || [];
+      expect(grouped).toHaveLength(3);
+      for (const option of grouped) expect(option.gateNotes.find((n) => n.key === 'zoysia2eeOnHand')).toMatchObject({ severity: 'required' });
+      const staug = await lawn({ date: '2026-06-16', bermuda: true });
+      const plain = await plan(staug.visit, { selectedConditionalProductIds: [rec.id] });
+      expect(JSON.stringify(plain.mixCalculator.items.filter((item) => item.bermudaStep))).not.toMatch(/2\(ee\)/);
+      expect(plain.propertyGate.warnings.some((w) => w.gate === 'zoysia2eeOnHand')).toBe(false);
     });
 
     test('the plan uses the appointment\'s own ET month: an April-window visit rescheduled into May has no step', async () => {

@@ -534,6 +534,8 @@ const V13_GATE_NOTES = [
   { key: 'noRainOrIrrigationHours', text: (hours) => `No rain or irrigation for ${hours} hours after the spray.` },
   { key: 'noMowDaysBeforeAfter', text: (days) => `Do not mow for ${days} days before or after the spray.` },
   { key: 'skipCelsiusInBermudaArea', text: () => 'Skip the Celsius weed spot in the bermuda area today.' },
+  // Zoysia only (migration 20261006220600): the mix is the manufacturer's 2(ee) recommendation, not the printed label.
+  { key: 'zoysia2eeOnHand', required: true, text: () => 'Zoysia: this mix is a Syngenta FIFRA 2(ee) recommendation (2023-03-28), not the printed label — keep the 2(ee) on hand when applying.' },
 ];
 
 function v13GateNotes(gates, context = {}) {

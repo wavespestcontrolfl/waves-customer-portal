@@ -522,7 +522,7 @@ function withRowGateNotes(items, rows) {
 
 // The spray conditions the tech must see before choosing the step, in the order they are
 // read out. Every projection that offers the step carries these from the staged rows.
-const OPTION_NOTE_KEYS = ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea', 'testPatchFirst'];
+const OPTION_NOTE_KEYS = ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea', 'zoysia2eeOnHand', 'testPatchFirst'];
 
 // The spray conditions an option or action carries through a completion projection (the
 // plan's completion options, /completion-actions): the step line's own gate notes for
@@ -539,6 +539,24 @@ const optionNotes = (item) => {
 // amount; the tech enters the area and the amount). Options add the spray conditions.
 const STEP_FIELDS = { group: BERMUDA_GROUP, applicationMode: 'spot', prefillAmount: false };
 const stepOptionFields = (item) => ({ ...STEP_FIELDS, ...optionNotes(item) });
+
+// The track a visit-scoped reader (the completion actions) uses: the ACTIVE turf profile's own
+// grass (St. Augustine or Zoysia) when the visit is known, the request's track otherwise (a client
+// that sends a blank or stale lawn type still gets the step for a Zoysia profile). Only while the
+// removal gate and v13 are live; gate off, the request's track is the answer, as before.
+async function trackForVisit(knex, loadVisit, requestedTrack) {
+  if (!bermudaRemovalLive() || featureGates.lawnV13Live?.() !== true) return requestedTrack;
+  const visit = await loadVisit();
+  if (!visit?.customer_id) return requestedTrack;
+  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
+  return profileTrack(profile) || requestedTrack;
+}
+
+// A loader that runs once and hands every later caller its answer.
+const once = (load) => {
+  let pending = null;
+  return () => { pending = pending || load(); return pending; };
+};
 
 // The step as the visit PLAN sees it, in the order the planner needs it, so the planner holds no
 // bermuda decision of its own: every eligibility, cultivar, month, projection and output-shaping
@@ -643,6 +661,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
 }
 
 module.exports = {
+  trackForVisit, once,
   openPlanStep,
   visitMonthOf,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,

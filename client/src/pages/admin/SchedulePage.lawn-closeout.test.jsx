@@ -1500,6 +1500,7 @@ it('the spray conditions of the bermuda removal mix show once each beside the se
     { key: 'noRainOrIrrigationHours', severity: 'note', text: 'No rain or irrigation for 3 hours after the spray.' },
     { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow for 2 days before or after the spray.' },
     { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip the Celsius weed spot in the bermuda area today.' },
+    { key: 'zoysia2eeOnHand', severity: 'required', text: 'Zoysia: this mix is a Syngenta FIFRA 2(ee) recommendation (2023-03-28), not the printed label — keep the 2(ee) on hand when applying.' },
   ];
   const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', gateNotes: notes }));
   optionalOptions = mix;
@@ -1586,6 +1587,16 @@ it('no warnings, no warning lines beside the Additional work selector', async ()
   render(<CompletionPanel service={service} products={[...catalog, { id: 'quiet-product', name: 'Quiet product', category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1 }]} onClose={() => {}} onSubmit={submit} />);
   await screen.findByRole('option', { name: 'Quiet product' });
   expect(screen.queryByText(/Bermuda removal is/)).toBeNull();
+});
+
+it('a St. Augustine mix (no 2(ee) note on its lines) shows no 2(ee) line', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', gateNotes: [{ key: 'activelyGrowingOnly', severity: 'required', text: 'Spray only when the bermuda is actively growing.' }] }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, gateNotes, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  await screen.findByText('Spray only when the bermuda is actively growing.');
+  expect(screen.queryByText(/2\(ee\)/)).toBeNull();
 });
 
 it('the bermuda removal mix options go on together and come off together', async () => {

@@ -1194,6 +1194,7 @@ router.get('/lawn/window', async (req, res, next) => {
 router.get('/completion-actions', async (req, res, next) => {
   try {
     const protocols = require('../config/protocols.json');
+    const visitOnce = bermudaRemoval.once(() => loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q)));
     const serviceType = req.query.serviceType || req.query.service_type || '';
     const products = await getProtocolProducts();
     let programKey;
@@ -1204,7 +1205,8 @@ router.get('/completion-actions', async (req, res, next) => {
 
     if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
-      track = lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track);
+      // With a booked visit the active turf profile's grass sets the track, not the request's.
+      track = await bermudaRemoval.trackForVisit(db, visitOnce, lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track));
       program = lawnProtocols()?.[track] || lawnProtocols()?.st_augustine;
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
@@ -1225,13 +1227,12 @@ router.get('/completion-actions', async (req, res, next) => {
     // and the tank sheet: the serving v13 window's staged rows must link all three, and
     // neither limited product may be capped or too soon, or none of the three is offered
     // (with a warning). Off, every part of it is a no-op.
-    let bermudaVisit = null;
     const bermuda = await bermudaRemoval.openStep(db, {
-      loadVisit: async () => { bermudaVisit = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q)); return bermudaVisit; },
+      loadVisit: visitOnce,
       trackKey: track, month,
       parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
       loadRows: (options) => loadV13RowsForMonth(db, track, month, options),
-      probeLimits: (probe, rows) => v13VisitLimits(db, bermudaVisit, probe, rows || new Map()),
+      probeLimits: async (probe, rows) => v13VisitLimits(db, await visitOnce(), probe, rows || new Map()),
       reportLimitWarnings: true,
     });
     const actionLines = [...baseLines, ...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];

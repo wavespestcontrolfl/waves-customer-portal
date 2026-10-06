@@ -123,6 +123,42 @@ test.each([['st_augustine', '4'], ['zoysia', '6']])('%s month %s: the three spot
   expect(blockCodes(body)).toEqual([]);
 });
 
+describe('the Zoysia 2(ee) note: a required gate note on the Zoysia lines only', () => {
+  const NOTE = 'Zoysia: this mix is a Syngenta FIFRA 2(ee) recommendation (2023-03-28), not the printed label — keep the 2(ee) on hand when applying.';
+  const stageWithNote = () => stage(Object.values(ROWS).map((row) => (row.gates.bermudaRemoval ? { ...row, gates: { ...row.gates, zoysia2eeOnHand: true } } : row)));
+  const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+  const actionsFor = async (query) => {
+    const res = { json: jest.fn(), status: jest.fn() };
+    res.status.mockReturnValue(res);
+    await completionActions({ query: { serviceType: 'Lawn Care', month: '4', scheduledServiceId: SERVICE_ID, ...query } }, res, jest.fn());
+    return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+  };
+  const noteOf = (item) => (item.gateNotes || []).find((n) => n.key === 'zoysia2eeOnHand');
+
+  test('Zoysia: the sheet lines, the selected-line warnings and the completion actions carry it, required', async () => {
+    account.profile.grass_type = 'zoysia';
+    stageWithNote();
+    const body = await lawnMix({ track: 'zoysia', scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec' });
+    const lines = body.items.filter((item) => item.bermudaStep);
+    expect(lines).toHaveLength(3);
+    for (const line of lines) expect(noteOf(line)).toEqual({ key: 'zoysia2eeOnHand', severity: 'required', text: NOTE });
+    expect(body.warnings.filter((w) => w.gate === 'zoysia2eeOnHand')).toHaveLength(3);
+    const actions = (await actionsFor({ track: 'zoysia' })).actions.filter((a) => a.group);
+    expect(actions).toHaveLength(3);
+    for (const action of actions) expect(noteOf(action)).toMatchObject({ severity: 'required', text: NOTE });
+  });
+
+  test('St. Augustine lines (rows without the key) never carry it', async () => {
+    stageWithNote();
+    // The St. Augustine staged rows are the ones without the key: stage them as the migration leaves them.
+    stage(Object.values(ROWS));
+    const body = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec' });
+    for (const line of body.items.filter((item) => item.bermudaStep)) expect(noteOf(line)).toBeUndefined();
+    expect(JSON.stringify(body)).not.toMatch(/2\(ee\)/);
+    for (const action of (await actionsFor({})).actions.filter((a) => a.group)) expect(noteOf(action)).toBeUndefined();
+  });
+});
+
 test.each([['fus'], ['rec'], ['nis']])('selecting only %s selects all three lines together', async (id) => {
   const body = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: id });
   expect(body.selectedItems.filter((item) => item.bermudaStep).map((item) => item.product?.name).sort()).toEqual([FUS, NIS, REC].sort());
@@ -175,7 +211,7 @@ describe('/completion-actions', () => {
   test.each([
     ['no visit named', { scheduledServiceId: undefined }, {}],
     ['the old bermudaRemoval=true parameter does nothing without a visit', { scheduledServiceId: undefined, bermudaRemoval: 'true' }, {}],
-    ['Bermuda track', { track: 'bermuda', scheduledServiceId: SERVICE_ID }, {}],
+    // (A Bermuda REQUEST track no longer matters with a visit named: the profile's grass decides; see the Zoysia test below.)
     ['other month', { month: '5', scheduledServiceId: SERVICE_ID }, {}],
     ['gate off', { scheduledServiceId: SERVICE_ID }, { GATE_LAWN_BERMUDA_REMOVAL: undefined }],
   ])('%s: none of the three', async (_label, query, env) => {
@@ -455,6 +491,31 @@ describe('the account decides, on the server', () => {
       // Without a planned rate counted there is nothing to warn about: the proposal is what makes the warning.
       applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
       expect((await actionsFor()).warnings).toBeUndefined();
+    });
+
+    test('a Zoysia profile with a blank or stale request track still gets the April mix: the track comes from the visit\'s active profile, and never from the request when the visit is known', async () => {
+      account.profile.grass_type = 'zoysia';
+      const ask = async (query) => {
+        const res = { json: jest.fn(), status: jest.fn() };
+        res.status.mockReturnValue(res);
+        await completionActions({ query: { serviceType: 'Lawn Care', month: '4', scheduledServiceId: SERVICE_ID, ...query } }, res, jest.fn());
+        return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+      };
+      // No track, a blank lawn type, and a stale track from the customer's lawn_type all get the mix.
+      for (const query of [{}, { lawnType: '' }, { track: 'st_augustine' }, { lawnType: 'Bermuda' }, { track: 'bahia' }]) {
+        expect((await ask(query)).actions.filter((a) => a.group)).toHaveLength(3);
+      }
+      // Without a booked visit the request's track is all there is: no step, as before.
+      expect((await ask({ scheduledServiceId: undefined, track: 'zoysia' })).actions.filter((a) => a.group)).toEqual([]);
+      // A profile of another grass opens nothing, whatever the request says.
+      for (const grass of ['bahia', 'bermuda']) {
+        account.profile.grass_type = grass;
+        expect((await ask({ track: 'zoysia' })).actions.filter((a) => a.group)).toEqual([]);
+      }
+      // Gate off: the request's track is the answer and there is no step.
+      account.profile.grass_type = 'zoysia';
+      delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
+      expect((await ask({ track: 'zoysia' })).actions.filter((a) => a.group)).toEqual([]);
     });
 
     test('nothing limited: the three actions are offered and there is no warning; the program is passed to the limit check', async () => {

@@ -287,13 +287,13 @@ test('the spray conditions and the test-patch note ride each bermuda option; oth
   const note = { key: 'testPatchFirst', severity: 'required', text: 'Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot.' };
   const step = (id) => ({
     selected: false, role: 'conditional', bermudaStep: true,
-    gateNotes: [note, { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow.' }, { key: 'bermudaRemoval', severity: 'note', text: 'Recipe.' }, { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip the Celsius weed spot in the bermuda area today.' }, { key: 'morningUnderF', severity: 'required', text: 'Morning.' }],
+    gateNotes: [note, { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow.' }, { key: 'bermudaRemoval', severity: 'note', text: 'Recipe.' }, { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip the Celsius weed spot in the bermuda area today.' }, { key: 'morningUnderF', severity: 'required', text: 'Morning.' }, { key: 'zoysia2eeOnHand', severity: 'required', text: 'Zoysia: 2(ee) on hand.' }],
     product: { id, name: id, active: true, labelVerifiedAt: '2026-01-01' }, mix: null,
   });
   plan.protocol.structured.products.push(...['rec', 'fus', 'nis'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: {} })));
   plan.mixCalculator.conditionalOptions = [step('rec'), step('fus'), step('nis')];
   const { options } = buildLawnCompletionDefaults(plan, context);
-  for (const option of options.filter((o) => o.group === 'bermuda_removal')) expect(option.gateNotes.map((n) => n.key)).toEqual(['morningUnderF', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea', 'testPatchFirst']);
+  for (const option of options.filter((o) => o.group === 'bermuda_removal')) expect(option.gateNotes.map((n) => n.key)).toEqual(['morningUnderF', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea', 'zoysia2eeOnHand', 'testPatchFirst']);
   expect(options.find((o) => o.product.id === 'product')).not.toHaveProperty('gateNotes');
 });
 

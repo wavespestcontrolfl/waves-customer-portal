@@ -12262,7 +12262,7 @@ function PestRecapCard({ serviceId }) {
 // Shown beside the Additional work selector while the bermuda removal mix carries the
 // server's spray conditions; the test-patch line is the short wording for a CitraBlue or
 // unconfirmed St. Augustine cultivar.
-const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "testPatchFirst"];
+const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "zoysia2eeOnHand", "testPatchFirst"];
 const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
 
 export function CompletionPanel({
