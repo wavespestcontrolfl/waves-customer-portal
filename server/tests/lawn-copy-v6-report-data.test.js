@@ -437,6 +437,31 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         expect(data.reportV2.snapshot.nextVisit.label).toMatch(/November 2/);
       });
 
+      // Prod shape (2026-10-06): the recurring rows carry no property_id and no
+      // stamp, only the creating estimate's one-line Google address; the primary
+      // property spells the same house out.
+      const ESTIMATE_ID = 'est-recurring';
+      const estimateLinked = (estimateAddress) => {
+        const base = nullPropertyRows();
+        base.customer_properties = [{ ...PRIMARY, address_line1: '4610 61st Drive East', zip: '34203' }];
+        base.scheduled_services = base.scheduled_services.map((r) => (r.property_id === null ? { ...r, source_estimate_id: ESTIMATE_ID } : r));
+        base.estimates = [{ id: ESTIMATE_ID, status: 'accepted', property_id: null, address: estimateAddress }];
+        return base;
+      };
+      const svcAtDrive = () => ({ ...service(records()['svc-cur'].structured_notes), address_line1: '4610 61st Drive East', city: 'Bradenton', zip: '34203' });
+
+      test('estimate-linked rows (one-line "Dr E, ... USA" address) are this property: the next visit is the earlier one', async () => {
+        live();
+        const { data } = await render(records(), estimateLinked('4610 61st Dr E, Bradenton, FL 34203, USA'), svcAtDrive());
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Monday, November 2');
+      });
+
+      test('estimate-linked rows for a different house in the same zip stay excluded', async () => {
+        live();
+        const { data } = await render(records(), estimateLinked('4612 61st Dr E, Bradenton, FL 34203, USA'), svcAtDrive());
+        expect(data.reportV2.snapshot.nextVisit.label).toBe('Sunday, August 29, 2027');
+      });
+
       test('a far-off date names its year, so it can never read as a past date', async () => {
         live();
         const { data } = await render(records(), { scheduled_services: [
