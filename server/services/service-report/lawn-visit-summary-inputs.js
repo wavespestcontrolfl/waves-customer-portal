@@ -99,8 +99,8 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, knex 
   const methodOf = new Map(treatmentProducts.map((p) => [p && p.name, p && p.method]));
   const applied = appliedFromProducts(treatmentProducts).map((a) => ({ ...a, method: methodOf.get(a.name) || null }));
 
-  // Catalog: every name (validator defense) and the applied products' full rows (watering rules).
-  const catalog = await knex('products_catalog').select('name');
+  // Catalog: every name and active ingredient (validator defense) and the applied products' full rows (watering rules).
+  const catalog = await knex('products_catalog').select('name', 'active_ingredient');
   const appliedNames = applied.map((a) => a.name);
   const ruleRows = appliedNames.length ? await knex('products_catalog').whereIn('name', appliedNames).select('*') : [];
 
@@ -138,6 +138,8 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, knex 
     watchNext: watch.length ? watch : ['how the lawn responds to today’s treatment'],
     technicianNote: record.technician_notes,
     knownProductNames: (catalog || []).map((row) => row && row.name),
+    // Validator only, like the names: every catalog active (a note may repeat one).
+    knownActiveIngredients: (catalog || []).map((row) => row && row.active_ingredient),
   });
 }
 

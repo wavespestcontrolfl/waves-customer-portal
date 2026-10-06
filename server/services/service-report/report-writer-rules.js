@@ -686,6 +686,8 @@ module.exports = {
   withheldProductsLine,
   bookedReasonBlock,
   COMMON_ACTIVE_INGREDIENTS,
+  activeIngredientNames,
+  activeIngredientPattern,
   activeIngredientsMentioned,
   groundedTimeframePhrases,
   lawnResultTimingViolation,

@@ -2697,6 +2697,41 @@ it, and a visit with none keeps its key. Known limit: the validator is strict on
 mowing word, even a harmless one such as "dry patch", and the whole paragraph
 with it (no paragraph is the safe miss).
 
+`GATE_LAWN_VISIT_SUMMARY_V2` (dark, strict opt-in, exactly `'true'`, read at call
+time; off leaves the `/api/reports/:token/data` payload, the render, the PDF and its
+cache signature unchanged, key for key, with no model call and no read) changes ONE
+existing lawn field, not the shape: `summary` carries the frozen lawn Visit Summary
+(4 to 6 sentences, at most 150 words) in place of the generic completion recap
+(`structured_notes.customerRecap`), and `summarySource` is `'lawn_visit_summary'`
+instead of `'recap'`. No key is added. It applies only to a lawn report with a
+confirmed assessment, and the tech-reviewed AI report, which still wins, is
+unchanged. The text is written ONCE, at completion (`finalizeLawnReportSynthesis`,
+`lawn-report-write-gate.js`), by one model call (lane `lawn_visit_summary`, report text
+policy, one 15-second deadline) from the report's own facts: product CATEGORIES (never
+names, rates or actives), the technician-kept photo findings, the area reads, the v13
+program line, the visit's frozen watering step with its exact inches and hours, recent
+rain, and the technician note. It freezes first-writer-wins under
+`structured_notes.lawnVisitSummary[assessmentId]` (its own top-level key); a render
+only reads it, from the record the build already loaded, so no render calls a model
+and `/api/reports/:token/ask` gains no read. Code rejects the WHOLE text, and stores
+nothing, when it names a product, brand or active ingredient (including every catalog
+active, applied or not), names a pest, disease or weed no finding or technician note
+carries (a product's category licenses its purpose word only in the sentence that
+says what we applied), states a low-confidence finding or a hedged technician note
+without a hedge, states any number or spelled-out quantity other than the exact
+watering inches and hours, gives watering advice the frozen state does not carry (a
+hold never says to water, a water-in never says hold, hold-then-water-in says both in
+that order) or omits the required one, states a result timeframe, date, guarantee
+or "all clear", fails the shared customer-copy screens, or carries a per-sentence
+`sources` list whose sentences are not its own sentences in order. Any miss, an
+unreadable record or a slow call leaves the generic recap exactly as it was. The
+text is screened again where it is read (a frozen text that no longer passes prints
+the recap). The SMS and email keep the short `customerRecap`. The PDF cache
+signature gains `:vs=<hash of the text>` only while the gate is live AND a frozen
+entry exists, so a PDF cached before the summary existed is never served after it,
+and a visit with none keeps its key. No token, eligibility, privacy, rate-limit or
+header change; no new route.
+
 `GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
 sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
 claim between visits shot in different or unknown light", with six independent

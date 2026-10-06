@@ -22,10 +22,15 @@
  * stores nothing (so the report keeps the generic recap), when it
  *   - names a product, brand or active ingredient (applied or not),
  *   - names a pest, disease or weed that no photo finding or technician note
- *     carries (a program line or a product's target list is never a sighting),
- *   - states a low-confidence photo finding as fact (no hedge),
- *   - states a number other than the exact watering inches and hours,
- *   - gives a watering step the facts do not carry, or leaves the required one out,
+ *     carries (a program line or a product's target list is never a sighting; a
+ *     product's category licenses its purpose word only in the sentence that says
+ *     what we applied),
+ *   - states a low-confidence photo finding or a hedged technician note as fact,
+ *   - states a number, or a spelled-out quantity, other than the exact watering
+ *     inches and hours,
+ *   - gives a watering step the facts do not carry, leaves the required one out, or
+ *     gives the wrong action for the frozen state (hold / water in / both),
+ *   - carries source sentences that are not its own sentences, in order,
  *   - states a result timeframe, date, price, guarantee or "all clear",
  *   - fails the shared customer-copy screens, or has the wrong shape.
  *
@@ -36,7 +41,9 @@
 const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const { customerCopyViolations } = require('./technician-report-copy');
-const { lawnResultTimingViolation, activeIngredientsMentioned, COMMON_ACTIVE_INGREDIENTS } = require('./report-writer-rules');
+const {
+  lawnResultTimingViolation, activeIngredientsMentioned, activeIngredientNames, activeIngredientPattern, COMMON_ACTIVE_INGREDIENTS,
+} = require('./report-writer-rules');
 const { containsProductName } = require('../completion-recap');
 const { splitSentences } = require('./next-visit-claims');
 const { _test: { TERMS } } = require('./lawn-tech-paragraph');
@@ -151,6 +158,8 @@ function normalizeFacts(raw = {}) {
     technicianNote: String(raw.technicianNote == null ? '' : raw.technicianNote).replace(/\r/g, '').trim().slice(0, MAX_NOTE_CHARS),
     // Defense list for the validator only (never shown to the model).
     knownProductNames: (Array.isArray(raw.knownProductNames) ? raw.knownProductNames : []).map((n) => clean(n).slice(0, 80)).filter(Boolean).slice(0, 2000),
+    // Every catalog active_ingredient value ("prodiamine 0.43% + 15-0-15"); split into names by the validator.
+    knownActiveIngredients: [...new Set((Array.isArray(raw.knownActiveIngredients) ? raw.knownActiveIngredients : []).map((n) => clean(n).slice(0, 160)).filter(Boolean))].slice(0, 2000),
   };
 }
 
@@ -263,9 +272,12 @@ const CONFIRM_VERB_RE = /\b(?:confirm(?:s|ed|ing)?|prov(?:e|es|ed|ing|en)|verif(
 const HEDGE_RE = /\b(?:possible|possibly|may|might|could|appears?|seems?|looks?\s+like|signs?\s+of|suggest\w*|watching|keep(?:ing)?\s+an\s+eye|monitor\w*|(?:will|to)\s+(?:look|check)(?:\s+again)?\s+at|look\s+again|take\s+another\s+look)\b/i;
 const WATERING_RE = /\b(?:water(?:ed|ing|s)?|irrigat\w*|sprinkl\w*|mow(?:ing|ed|s)?)\b/i;
 const NEGATION_BEFORE_RE = /\b(?:no|not|none|without|never|n['’]t)\b[^.!?]{0,30}$/i;
-// A spelled number is only a number claim next to a unit.
-const NUMBER_WORD = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|half|quarter|a\\s+couple\\s+of)';
-const SPELLED_UNIT_RE = new RegExp(`\\b(${NUMBER_WORD})(?:[\\s-]+(?:and\\s+)?(?:a\\s+)?${NUMBER_WORD})*\\s+(?:inch(?:es)?|hours?|days?|weeks?|months?|minutes?|percent|ounces?|pounds?|gallons?|acres?|feet|visits?)\\b`, 'i');
+// Every spelled-out quantity is a number claim (owner rule: no numbers except the
+// exact watering amounts), wherever it sits. "one" is also an ordinary pronoun
+// ("each visit builds on the last one"), so only that use is let through.
+const NUMBER_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|dozen|half|quarter|couple|twice)';
+const SPELLED_NUMBER_RE = new RegExp(`\\b${NUMBER_WORD}s?\\b`, 'i');
+const PRONOUN_ONE_RE = /\b(?:last|next|this|that|each|every|no|any|the|which|another|previous|prior|same|other|new|old|first)\s+one\b|\bone(?=\s*(?:[.,;:!?]|$))/gi;
 const SPELLED_INCH_FORMS = Object.freeze({ 0.25: ['quarter', 'a quarter', 'one quarter', '1/4'], 0.5: ['half', 'a half', 'one half', '1/2'], 0.75: ['three quarters', 'three-quarters', '3/4'], 1: ['one', 'an', 'a', '1'], 2: ['two', '2'] });
 
 const fmt = (n) => String(Number(n));
@@ -281,6 +293,29 @@ function allowedNumberTokens(facts) {
   return out;
 }
 
+// The exact amounts the watering step asks for, as patterns (null when the
+// step carries none).
+function wateringAmountRes(w) {
+  if (!w || w.inches == null) return null;
+  const inchForms = [fmt(w.inches), ...(SPELLED_INCH_FORMS[w.inches] || [])].map(escapeRe);
+  const hourForms = [fmt(w.hours), SPELLED_HOURS[w.hours]].filter(Boolean).map(escapeRe);
+  return {
+    inchOk: new RegExp(`(?:^|[^\\d.])(?:${inchForms.join('|')})[\\s-]*(?:(?:of\\s+)?an?\\s+)?inch`, 'i'),
+    hoursOk: new RegExp(`(?:^|[^\\d.])(?:${hourForms.join('|')})[\\s-]*(?:hours?|hrs?)\\b`, 'i'),
+  };
+}
+
+// The spelled forms of exactly the approved amounts ("half an inch", "twenty-four
+// hours"); nothing else is exempt from the spelled-number scan.
+function approvedSpelledAmountRe(w) {
+  if (!w) return null;
+  const parts = [];
+  const inchWords = (w.inches != null ? (SPELLED_INCH_FORMS[w.inches] || []) : []).filter((f) => !/\d/.test(f));
+  if (inchWords.length) parts.push(`(?:${inchWords.sort((x, y) => y.length - x.length).map(escapeRe).join('|')})(?:\\s+of)?(?:\\s+an?)?[\\s-]+inch(?:es)?\\b`);
+  if (w.hours != null && SPELLED_HOURS[w.hours]) parts.push(`${escapeRe(SPELLED_HOURS[w.hours])}[\\s-]+(?:hours?|hrs?)\\b`);
+  return parts.length ? new RegExp(parts.join('|'), 'gi') : null;
+}
+
 function numberProblems(text, facts) {
   const problems = [];
   const allowed = allowedNumberTokens(facts);
@@ -293,26 +328,17 @@ function numberProblems(text, facts) {
     problems.push('number');
     break;
   }
-  // Spelled numbers next to a unit: only the exact inches/hours amounts.
-  for (const m of String(text).matchAll(new RegExp(SPELLED_UNIT_RE.source, 'gi'))) {
-    const phrase = clean(m[0]).toLowerCase();
-    const unit = phrase.match(/(inch(?:es)?|hours?)$/);
-    if (unit && w) {
-      const lead = phrase.slice(0, phrase.length - unit[1].length).trim();
-      if (/^inch/.test(unit[1]) && w.inches != null && (SPELLED_INCH_FORMS[w.inches] || []).includes(lead)) continue;
-      if (/^hour/.test(unit[1]) && w.hours != null && lead === (SPELLED_HOURS[w.hours] || '__none__')) continue;
-    }
-    problems.push('spelled_number');
-    break;
-  }
-  if (w && w.inches != null) {
+  // Spelled numbers, anywhere: only the exact approved watering phrases are let through.
+  let scrubbed = String(text);
+  const approved = approvedSpelledAmountRe(w);
+  if (approved) scrubbed = scrubbed.replace(approved, ' ');
+  scrubbed = scrubbed.replace(PRONOUN_ONE_RE, ' ');
+  if (SPELLED_NUMBER_RE.test(scrubbed)) problems.push('spelled_number');
+  const res = wateringAmountRes(w);
+  if (res) {
     // The required amounts must be stated, exactly.
-    const inchForms = [fmt(w.inches), ...(SPELLED_INCH_FORMS[w.inches] || [])].map(escapeRe);
-    const inchOk = new RegExp(`(?:^|[^\\d.])(?:${inchForms.join('|')})[\\s-]*(?:(?:of\\s+)?an?\\s+)?inch`, 'i');
-    const hourForms = [fmt(w.hours), SPELLED_HOURS[w.hours]].filter(Boolean).map(escapeRe);
-    const hoursOk = new RegExp(`(?:^|[^\\d.])(?:${hourForms.join('|')})[\\s-]*(?:hours?|hrs?)\\b`, 'i');
-    if (!inchOk.test(text)) problems.push('watering_inches_missing');
-    if (!hoursOk.test(text)) problems.push('watering_hours_missing');
+    if (!res.inchOk.test(text)) problems.push('watering_inches_missing');
+    if (!res.hoursOk.test(text)) problems.push('watering_hours_missing');
   }
   return problems;
 }
@@ -339,14 +365,39 @@ function allowedTerms(facts) {
   // symptom terms, never a cause.
   const areaText = facts.areas.map((a) => a.label).join(' \n ');
   for (const term of TERMS) if (!term.cause && term.re.test(areaText)) allowed.add(term.key);
-  // The category of what we applied licenses the generic purpose words only.
-  for (const p of facts.applied) {
-    if (p.kind === 'pre_emergent' || p.kind === 'herbicide') allowed.add('weed');
-    if (p.kind === 'insecticide') allowed.add('insect');
-    if (p.kind === 'fungicide') allowed.add('fungus');
-    if (p.kind === 'fertilizer' || p.kind === 'supplement' || p.alsoFeeds) allowed.add('yellow');
-  }
   return allowed;
+}
+
+// The category of what we applied licenses the generic purpose words ("weed",
+// "insect", "disease", "nutrient") in the sentence that says what we applied, and
+// nowhere else: a fungicide on the visit is never evidence the lawn has fungus.
+function purposeTerms(facts) {
+  const out = new Set();
+  for (const p of facts.applied) {
+    if (p.kind === 'pre_emergent' || p.kind === 'herbicide') out.add('weed');
+    if (p.kind === 'insecticide') out.add('insect');
+    if (p.kind === 'fungicide') out.add('fungus');
+    if (p.kind === 'fertilizer' || p.kind === 'supplement' || p.alsoFeeds) out.add('yellow');
+  }
+  return out;
+}
+
+// Wording that says what we did, and wording that says what we saw.
+const APPLICATION_RE = /\b(?:appl(?:ied|ies|y|ying)|put\s+down|laid\s+down|laying\s+down|lay\s+down|treat\w*|barrier|feeding|fed|spray(?:ed|ing)?|prevent\w*|boost\w*)\b/i;
+const OBSERVATION_RE = /\b(?:saw|seen|see|showed|shows?|showing|noticed?|found|spotted|observed|detected|photos?|pictures?|read)\b|\b(?:lawn|turf|yard|grass|areas?|spots?|patch(?:es)?)\b[^.]{0,20}?\b(?:has|have|had|is|are|was|were)\b|\bthere\s+(?:is|are|was|were)\b|\b(?:because|since|which|that)\s+(?:\w+\s+){0,3}?(?:has|have|had)\b/i;
+
+// A hedge in the technician's own sentence ("Possible chinch bugs", "looks like
+// grubs") makes that term tentative: the summary must hedge it too.
+const TENTATIVE_NOTE_RE = /\b(?:possible|possibly|probably|maybe|perhaps|might|may|could|appears?|seems?|looks?\s+like|suspect\w*|likely|unsure|not\s+(?:sure|certain)|think|thinks)\b/i;
+function tentativeNoteTerms(facts) {
+  const out = new Set();
+  const note = facts.technicianNote;
+  if (!note) return out;
+  for (const part of note.split(/[.!?;\n]+/)) {
+    if (!TENTATIVE_NOTE_RE.test(part)) continue;
+    for (const key of termsIn(part)) out.add(key);
+  }
+  return out;
 }
 
 // Words the prompt itself uses to describe what was applied by category
@@ -364,9 +415,62 @@ function productProblem(text, facts) {
   }
   const actives = facts.applied.map((p) => p.activeIngredient).filter(Boolean);
   if (actives.some((a) => activeIngredientsMentioned(text, a))) return 'active_ingredient';
+  // Every catalog active (a note can repeat one the fixed list does not carry).
+  const catalogNames = activeIngredientNames(facts.knownActiveIngredients || []);
+  for (let i = 0; i < catalogNames.length; i += 200) {
+    const patterns = catalogNames.slice(i, i + 200).map(activeIngredientPattern).filter(Boolean);
+    if (patterns.length && new RegExp(`\\b(?:${patterns.join('|')})\\b`, 'i').test(text)) return 'active_ingredient';
+  }
   const common = new RegExp(`\\b(?:${COMMON_ACTIVE_INGREDIENTS.map((a) => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i');
   if (common.test(text)) return 'active_ingredient';
   return null;
+}
+
+// Watering action by state. The frozen instruction is the authority: a hold
+// never says "we watered" or "water it in"; a water-in never says hold or skip;
+// hold-then-water-in says both, the hold first.
+const WATER_WORD_RE = /\b(?:water(?:ed|ing|s)?|irrigat\w*|sprinkl\w*)\b/i;
+const HOLD_RE = /\b(?:hold(?:ing)?\s+(?:off|back|on|the\s+water|water|irrigation)|skip(?:ping)?|wait(?:ing)?\s+(?:to|before|until|for)|paus\w+|avoid\w*|refrain\w*|(?:do|does|please\s+do)\s+not\s+water|don['’]t\s+water|not\s+to\s+water|no\s+watering)\b/ig;
+const WATERED_RE = /\bwatered\b/i;
+const WATER_IN_ACTION_RE = /\bwater(?:ing)?[\s-]+in\b|\bwater\s+(?:the|your|it|them|this|that)\b|\birrigate\b|\b(?:run|turn\s+on|start|use)\s+(?:the\s+|your\s+)?(?:sprinklers?|irrigation)\b/i;
+
+const normalizeForCompare = (text) => clean(String(text == null ? '' : text).replace(/[‘’‚`´]/g, "'").replace(/[“”„]/g, '"'));
+
+function wateringActionProblems(paragraph, sentences, w) {
+  const out = [];
+  const holdRe = new RegExp(HOLD_RE.source, 'i');
+  const waterSentences = sentences.filter((s) => WATER_WORD_RE.test(s));
+  const holdSentences = waterSentences.filter((s) => holdRe.test(s));
+  const res = wateringAmountRes(w);
+  const amountSentence = res ? waterSentences.find((s) => res.inchOk.test(s)) : null;
+  if (w.state === 'hold') {
+    for (const s of waterSentences) {
+      const rest = s.replace(HOLD_RE, ' ');
+      if (WATERED_RE.test(rest) || WATER_IN_ACTION_RE.test(rest)) { out.push('hold_state_waters'); break; }
+    }
+    if (!holdSentences.length) out.push('watering_hold_missing');
+    return out;
+  }
+  if (w.state === 'water_in') {
+    if (holdSentences.length) out.push('watering_hold_in_water_state');
+    if (res && !amountSentence) out.push('watering_action_missing');
+    return out;
+  }
+  // hold_then_water_in
+  if (!holdSentences.length) out.push('watering_hold_missing');
+  if (res && !amountSentence) out.push('watering_action_missing');
+  if (holdSentences.length && amountSentence) {
+    // The hold comes first: in an earlier sentence, or earlier in the same one.
+    const at = (sentence, re) => {
+      const start = paragraph.indexOf(sentence);
+      const hit = re.exec(sentence);
+      return start >= 0 && hit ? start + hit.index : -1;
+    };
+    const holdPos = at(holdSentences[0], holdRe);
+    const amountPos = at(amountSentence, res.inchOk);
+    if (holdPos >= 0 && amountPos >= 0 && holdPos > amountPos) out.push('watering_order');
+  }
+  return out;
 }
 
 /**
@@ -403,13 +507,22 @@ function validateSummary(answer, facts) {
 
   // Conditions: a pest, disease or weed no finding or note carries.
   const allowed = allowedTerms(facts);
+  const purpose = purposeTerms(facts);
   const lowTerms = new Set();
   for (const f of facts.findings.filter((x) => x.confidence === 'low' || x.confidence === 'unknown')) {
     for (const k of termsIn(f.label)) lowTerms.add(k);
   }
+  // A tentative technician note ("possible chinch bugs") is as unsure as a low-confidence read.
+  for (const k of tentativeNoteTerms(facts)) if (allowed.has(k)) lowTerms.add(k);
   for (const sentence of sentences) {
     for (const key of termsIn(sentence)) {
-      if (!allowed.has(key)) { fail(`invented_condition:${key}`); continue; }
+      if (!allowed.has(key)) {
+        // What we applied licenses its purpose word only in a sentence that says what
+        // we applied, never in one that reports what we saw.
+        if (purpose.has(key) && APPLICATION_RE.test(sentence) && !OBSERVATION_RE.test(sentence)) continue;
+        fail(purpose.has(key) ? `purpose_term_outside_treatment:${key}` : `invented_condition:${key}`);
+        continue;
+      }
       // A low-confidence finding is stated as fact only with a hedge.
       if (lowTerms.has(key) && !HEDGE_RE.test(sentence)) fail(`unhedged_low_confidence:${key}`);
     }
@@ -417,7 +530,8 @@ function validateSummary(answer, facts) {
     if (PHOTO_REF_RE.test(sentence) && CONFIRM_VERB_RE.test(sentence)) fail('photo_confirms');
   }
 
-  // Watering: the step is given, or there is no watering advice at all.
+  // Watering: the step is given, or there is no watering advice at all, and the
+  // action matches the frozen state.
   const w = facts.watering;
   const advising = sentences.filter((s) => WATERING_RE.test(s));
   if (!w && advising.length) {
@@ -425,6 +539,7 @@ function validateSummary(answer, facts) {
     fail('watering_not_in_facts');
   }
   if (w && !advising.length) fail('watering_step_missing');
+  if (w) for (const code of wateringActionProblems(paragraph, sentences, w)) fail(code);
   if (w && w.state === 'hold') {
     // A hold step never carries amounts or hours.
     if (/\d/.test(paragraph)) fail('hold_with_numbers');
@@ -439,6 +554,8 @@ function validateSummary(answer, facts) {
     const from = Array.isArray(s && s.from) ? s.from : [];
     if (!from.length || from.some((k) => !SOURCE_KEYS.includes(k))) { fail('sources_invalid'); break; }
   }
+  // Each entry names ITS sentence, in order: the stored audit must be the paragraph.
+  if (sources.length === sentences.length && sources.some((s, i) => normalizeForCompare(s && s.sentence) !== normalizeForCompare(sentences[i]))) fail('sources_sentence_mismatch');
 
   return problems.length
     ? { ok: false, problems }

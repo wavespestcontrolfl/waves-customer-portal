@@ -432,3 +432,151 @@ describe('owner 2026-10-06 local-test fixes', () => {
     expect(msg).not.toContain('Weed Pressure:');
   });
 });
+
+describe('Codex round 1 on #6087', () => {
+  const sourcesOf = (text) => splitSentences(text).map((sentence) => ({ sentence, from: ['applied'] }));
+
+  describe('1. a category word licenses wording only in the sentence that says what we applied', () => {
+    const FUNGUS_FACTS = summary.normalizeFacts({
+      season: 'fall', applied: [{ name: 'Headway G', kind: 'fungicide', method: 'granular' }], findings: [], areas: [], watering: null, recentRain: null, watchNext: ['how the lawn responds'], technicianNote: '', knownProductNames: [],
+    });
+    const base = (second) => `Today we applied disease protection across the lawn, which fits the season. ${second} Protection like this builds gradually, a little at a time. At the next visit we will look again at how the lawn responds.`;
+
+    test('a fungicide-only visit may say what it applied, never that the lawn has the disease', () => {
+      expect(problems(base('The turf coverage holds steady in the areas we checked.'), FUNGUS_FACTS)).toEqual([]);
+      expect(problems(base('The lawn has fungus in the front yard.'), FUNGUS_FACTS).some((p) => p.includes('fungus'))).toBe(true);
+      expect(problems(base('The photo read showed some disease on the lawn.'), FUNGUS_FACTS).some((p) => p.includes('fungus'))).toBe(true);
+      expect(problems(base('We treated the front yard, which has fungus.'), FUNGUS_FACTS).some((p) => p.includes('fungus'))).toBe(true);
+    });
+
+    test('an insecticide visit does not turn "insect control" into a sighting', () => {
+      const facts = summary.normalizeFacts({ ...RAW, applied: [{ name: 'Arena 50 WDG', kind: 'insecticide', method: 'spray' }], findings: [], technicianNote: '', watering: null, recentRain: null, knownProductNames: [] });
+      expect(problems(GOOD.replace('Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots. ', '').replace('some weed pressure', 'a lot of insects'), facts).some((p) => p.includes('insect'))).toBe(true);
+    });
+  });
+
+  describe('2. the watering action must match the frozen state', () => {
+    const HOLD = summary.normalizeFacts({ ...RAW, watering: { state: 'hold' } });
+    const HOLD_SENTENCE = 'Please hold off watering and follow the watering note in this report.';
+    const WATER_SENTENCE = 'Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots.';
+    const holdText = (s) => GOOD.replace(WATER_SENTENCE, s);
+
+    test('hold: must tell the customer to hold off, never that we watered or to water in', () => {
+      expect(problems(holdText(HOLD_SENTENCE), HOLD)).toEqual([]);
+      expect(problems(holdText('We watered the treatment today.'), HOLD)).toContain('hold_state_waters');
+      expect(problems(holdText('Please water the treated lawn in as soon as you can.'), HOLD)).toContain('hold_state_waters');
+      expect(problems(holdText('Please run the sprinklers now.'), HOLD)).toContain('hold_state_waters');
+      expect(problems(holdText('Please keep the lawn well supplied with water.'), HOLD)).toContain('watering_hold_missing');
+    });
+
+    test('water_in: must not say hold or skip', () => {
+      expect(problems(GOOD)).toEqual([]);
+      expect(problems(GOOD.replace(WATER_SENTENCE, 'Please hold off watering, then water with 0.5 inches within 24 hours.'))).toContain('watering_hold_in_water_state');
+      expect(problems(GOOD.replace(WATER_SENTENCE, 'Please skip watering; 0.5 inches within 24 hours is noted.'))).toContain('watering_hold_in_water_state');
+      expect(problems(GOOD.replace(WATER_SENTENCE, 'The feeding settles in with 0.5 inches within 24 hours.'))).toContain('watering_action_missing');
+    });
+
+    test('hold_then_water_in: both the hold and the later water-in', () => {
+      const both = summary.normalizeFacts({ ...RAW, watering: { state: 'hold_then_water_in', inches: 0.5, hours: 24 } });
+      const ok = 'Please hold off watering until the report says it is time, then water the lawn in with 0.5 inches within 24 hours.';
+      expect(problems(holdText(ok), both)).toEqual([]);
+      expect(problems(holdText(WATER_SENTENCE), both)).toContain('watering_hold_missing');
+      expect(problems(holdText('Please hold off watering and follow the watering note in this report.'), both)).toEqual(expect.arrayContaining(['watering_inches_missing']));
+      expect(problems(holdText('Please water the lawn in with 0.5 inches within 24 hours, after you hold off watering.'), both)).toContain('watering_order');
+    });
+  });
+
+  describe('3. a tentative technician-note term keeps its hedge', () => {
+    const tentative = summary.normalizeFacts({ ...RAW, technicianNote: 'Possible chinch bugs by the driveway.' });
+    test('stated as fact it fails; hedged it passes', () => {
+      const asFact = GOOD.replace('The photo read showed some weed pressure in the lawn, and we are keeping an eye on a few thin spots near the driveway.', 'The photo read showed chinch bugs damaging the lawn near the driveway.');
+      expect(problems(asFact, tentative)).toContain('unhedged_low_confidence:chinch');
+      expect(problems(GOOD.replace('some weed pressure', 'possible chinch bugs'), tentative)).toEqual([]);
+    });
+    test('a definite note term needs no hedge', () => {
+      const definite = summary.normalizeFacts({ ...RAW, technicianNote: 'Chinch bugs by the driveway.' });
+      expect(problems(GOOD.replace('some weed pressure', 'chinch bugs'), definite)).toEqual([]);
+    });
+  });
+
+  describe('4. every spelled-out quantity is rejected, except the exact watering amounts', () => {
+    test.each([
+      ['two thin spots', 'a few thin spots', 'two thin spots'],
+      ['thirteen affected areas', 'a few thin spots', 'thirteen affected areas'],
+      ['a dozen spots', 'a few thin spots', 'a dozen thin spots'],
+      ['one thin spot', 'a few thin spots', 'one thin spot'],
+      ['hundreds', 'color and thickness', 'hundred percent color and thickness'],
+    ])('%s', (_name, from, to) => {
+      expect(problems(GOOD.replace(from, to))).toContain('spelled_number');
+    });
+    test('the exact watering amounts and plain "the last one" pass', () => {
+      expect(problems(GOOD.replace('0.5 inches within 24 hours', 'half an inch within twenty-four hours'))).toEqual([]);
+      expect(problems(GOOD.replace('0.5 inches within 24 hours', 'a half inch within 24 hours'))).toEqual([]);
+      expect(problems(GOOD.replace('rather than all at once', 'and each visit builds on the last one'))).toEqual([]);
+      // Not the exact amount: a spelled number of inches that the facts do not carry.
+      expect(problems(GOOD.replace('0.5 inches within 24 hours', 'two inches within twelve hours'))).toContain('spelled_number');
+    });
+  });
+
+  describe('5. catalog active ingredients are screened (validator only)', () => {
+    const withActives = summary.normalizeFacts({ ...RAW, knownActiveIngredients: ['Penthiopyrad 20%', 'prodiamine 0.43% + 15-0-15', 'Nitrogen, Iron'] });
+    test('a catalog active outside the fixed list is rejected; generic nutrient words are not', () => {
+      expect(problems(GOOD.replace('a fall feeding', 'a fall feeding with penthiopyrad'), withActives)).toContain('active_ingredient');
+      expect(problems(GOOD, withActives)).toEqual([]);
+    });
+    test('the facts builder reads every catalog active_ingredient, and the model never sees one', async () => {
+      const catalog = [{ name: 'Velista', active_ingredient: 'Penthiopyrad 20%' }, { name: 'Wetting Agent', active_ingredient: null }];
+      const knex = (table) => {
+        const q = {};
+        q.where = () => q;
+        q.whereIn = () => q;
+        q.first = async () => (table === 'lawn_assessments' ? { id: 77, customer_id: 9 } : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: [{ label: 'thinning turf', confidence: 'low', keep: true }], added_details: [] });
+        q.select = async (...cols) => { q.cols = cols; return cols[0] === 'name' ? catalog : []; };
+        return q;
+      };
+      const facts = await gatherVisitSummaryFacts({
+        record: { id: 's1', technician_notes: 'x', service_date: '2026-10-06' },
+        data: { lawnAssessment: { assessmentId: 77 }, reportV2: { snapshot: {}, diagnosis: [], insights: [], treatment: { products: [{ name: 'LESCO 24-0-11', kind: 'fertilizer', method: 'granular' }] } } },
+        knex,
+      });
+      expect(facts.knownActiveIngredients).toEqual(['Penthiopyrad 20%']);
+      expect(summary.buildUserMessage(facts)).not.toMatch(/penthiopyrad/i);
+    });
+  });
+
+  describe('6. each source sentence must be its paragraph sentence, in order', () => {
+    const goodSources = () => sourcesOf(GOOD);
+    test('"unrelated" sentences or a reordered list are rejected; spacing and quote style are normalized', () => {
+      expect(summary.validateSummary({ summary: GOOD, sources: goodSources() }, FACTS).problems).toEqual([]);
+      expect(summary.validateSummary({ summary: GOOD, sources: goodSources().map((s) => ({ ...s, sentence: 'unrelated' })) }, FACTS).problems).toContain('sources_sentence_mismatch');
+      expect(summary.validateSummary({ summary: GOOD, sources: goodSources().reverse() }, FACTS).problems).toContain('sources_sentence_mismatch');
+      const spaced = goodSources().map((s) => ({ ...s, sentence: `  ${s.sentence.replace(/ /g, '  ')} ` }));
+      expect(summary.validateSummary({ summary: GOOD, sources: spaced }, FACTS).problems).toEqual([]);
+      const curly = 'Today we put down a fall feeding that fits the season. The photo read showed some weed pressure, and we are keeping an eye on a few thin spots. Feedings like this build gradually, so the lawn’s color improves a little at a time. At the next visit we will look at the weeds again.';
+      const straightSources = splitSentences(curly).map((sentence) => ({ sentence: sentence.replace(/’/g, "'"), from: ['applied'] }));
+      expect(summary.validateSummary({ summary: curly, sources: straightSources }, summary.normalizeFacts({ ...RAW, watering: null })).problems).toEqual([]);
+    });
+  });
+
+  describe('real good outputs still pass', () => {
+    const REAL = summary.normalizeFacts({
+      season: 'fall',
+      programLine: RAW.programLine,
+      applied: [{ name: 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent', method: 'granular' }],
+      findings: [{ label: 'thinning turf', confidence: 'low' }],
+      areas: [{ label: 'Turf Density', status: 'healthy' }, { label: 'Weed Pressure', status: 'strong' }, { label: 'Stress or Damage', status: 'watch' }, { label: 'Color & Vigor', status: 'healthy' }],
+      headline: 'Your lawn is in good shape',
+      watering: null,
+      recentRain: true,
+      watchNext: ['stressed areas', 'thinning turf'],
+      technicianNote: '',
+      knownProductNames: ['LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', 'LESCO Moisture Manager'],
+      knownActiveIngredients: ['prodiamine 0.43% + 15-0-15', 'Penthiopyrad 20%'],
+    });
+    const A = 'Today we laid down a pre-emergent weed barrier across the parts of your lawn where it fits, which suits the fall and sets up the season ahead. The photo read showed turf coverage coming in thick with healthy color, and weed control holding strong with no stress signs in the areas we checked. We did note what may be a little thinning in the turf, and we are keeping an eye on that. A barrier like this works quietly in the soil, building a little at a time so weeds have a harder time taking hold with each visit. At the next visit we will take another look at that thinning turf.';
+    const B = 'Today we laid down a pre-emergent weed barrier across the property, a step that fits the fall feeding window and holds back weeds before they take hold. Reading the photos, the turf shows thick coverage with good color, and weeds are staying well in check, though we are keeping an eye on a few spots that look thin and on some areas showing stress. A barrier like this builds a little at a time, with each visit adding to the last. The rain that fell before our visit helps the treatment settle into the soil. At the next visit we will look again at the stressed areas and those thinning spots.';
+    test.each([['a', A], ['b', B]])('output %s', (_n, text) => {
+      expect(summary.validateSummary({ summary: text, sources: sourcesOf(text) }, REAL).problems).toEqual([]);
+    });
+  });
+});
