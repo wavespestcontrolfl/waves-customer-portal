@@ -41,12 +41,28 @@ jest.mock('../services/messaging/send-manual-customer-sms', () => ({
 }));
 
 // The send reservation is Postgres-backed (a transaction and a thread lock); its own suites cover it.
-jest.mock('../services/intelligence-bar/sms-outcome-guard', () => ({
-  findUnreconciledSend: jest.fn(async () => null),
-  acquireSendReservation: jest.fn(async () => ({ id: 'reservation-1' })),
-  settleSendReservation: jest.fn(async () => undefined),
-  unreconciledRefusal: jest.requireActual('../services/intelligence-bar/sms-outcome-guard').unreconciledRefusal,
-}));
+jest.mock('../services/intelligence-bar/sms-outcome-guard', () => {
+  const actual = jest.requireActual('../services/intelligence-bar/sms-outcome-guard');
+  const mocked = {
+    findUnreconciledSend: jest.fn(async () => null),
+    acquireSendReservation: jest.fn(async () => ({ id: 'reservation-1' })),
+    settleSendReservation: jest.fn(async () => undefined),
+    unreconciledRefusal: actual.unreconciledRefusal,
+    reservationState: actual.reservationState,
+    INTERLOCK_REFUSAL_CODE: actual.INTERLOCK_REFUSAL_CODE,
+  };
+  // The real lifecycle over the mocked acquire and settle, so the tests observe both.
+  mocked.withSendReservation = async ({ phone, customerId = null, body }, send) => {
+    const reservation = await mocked.acquireSendReservation({ phone, customerId, body });
+    if (reservation.refused) return { refused: true };
+    const settle = (state) => mocked.settleSendReservation(reservation.id, state, { phone, body });
+    let result;
+    try { result = await send(); } catch (err) { await settle(actual.reservationState(err, { thrown: true })); throw err; }
+    await settle(actual.reservationState(result));
+    return { result };
+  };
+  return mocked;
+});
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');

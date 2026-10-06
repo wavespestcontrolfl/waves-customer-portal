@@ -24,12 +24,28 @@ jest.mock('../services/messaging/send-manual-customer-sms', () => ({
   sendManualCustomerSms: jest.fn(),
   manualSmsDeliveryState: (value) => value?.manualSmsInterlock?.deliveryState || null,
 }));
-jest.mock('../services/intelligence-bar/sms-outcome-guard', () => ({
-  findUnreconciledSend: jest.fn(async () => null),
-  acquireSendReservation: jest.fn(async () => ({ id: 'reservation-1' })),
-  settleSendReservation: jest.fn(async () => undefined),
-  unreconciledRefusal: jest.requireActual('../services/intelligence-bar/sms-outcome-guard').unreconciledRefusal,
-}));
+jest.mock('../services/intelligence-bar/sms-outcome-guard', () => {
+  const actual = jest.requireActual('../services/intelligence-bar/sms-outcome-guard');
+  const mocked = {
+    findUnreconciledSend: jest.fn(async () => null),
+    acquireSendReservation: jest.fn(async () => ({ id: 'reservation-1' })),
+    settleSendReservation: jest.fn(async () => undefined),
+    unreconciledRefusal: actual.unreconciledRefusal,
+    reservationState: actual.reservationState,
+    INTERLOCK_REFUSAL_CODE: actual.INTERLOCK_REFUSAL_CODE,
+  };
+  // The real lifecycle over the mocked acquire and settle, so the tests observe both.
+  mocked.withSendReservation = async ({ phone, customerId = null, body }, send) => {
+    const reservation = await mocked.acquireSendReservation({ phone, customerId, body });
+    if (reservation.refused) return { refused: true };
+    const settle = (state) => mocked.settleSendReservation(reservation.id, state, { phone, body });
+    let result;
+    try { result = await send(); } catch (err) { await settle(actual.reservationState(err, { thrown: true })); throw err; }
+    await settle(actual.reservationState(result));
+    return { result };
+  };
+  return mocked;
+});
 jest.mock('../services/messaging/validators/consent', () => ({
   loadContactState: jest.fn(async () => ({ prefs: null, customer: null })),
   checkConsentForPurpose: jest.fn(async () => ({ ok: true })),
@@ -238,23 +254,52 @@ describe('the reservation row for an unknown outcome', () => {
     expect(real.carriesUnknownOutcome({ provider_outcome: 'accepted' })).toBe(false);
   });
 
-  test('findUnreconciledSend matches on number and exact body, and only rows still holding an unknown outcome', async () => {
+  test('findUnreconciledSend matches on number and the provider-bound body, and only rows still holding an unknown outcome inside their horizon', async () => {
+    const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
     const rows = [
-      { id: 'settled', metadata: { provider_outcome: 'accepted' } },
-      { id: 'held', metadata: { manual_send_reservation: true, provider_outcome_uncertain: true } },
+      { id: 'settled', metadata: { provider_outcome: 'accepted' }, updated_at: hoursAgo(1) },
+      { id: 'held', metadata: { manual_send_reservation: true, provider_outcome_uncertain: true }, updated_at: hoursAgo(1) },
     ];
     const q = {};
     for (const m of ['where', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
     q.select = jest.fn(async () => rows);
     db.mockImplementation(() => q);
 
-    const found = await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message });
+    // A curly apostrophe, an em dash and an https:// prefix are typed differences only: the
+    // same text reaches the provider, so the lookup compares the canonical body.
+    const typed = 'We’ll be there Tuesday — see waves.example/portal';
+    const found = await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: typed });
 
     expect(found).toEqual(rows[1]);
     expect(db).toHaveBeenCalledWith('sms_log');
-    expect(q.where).toHaveBeenCalledWith({ direction: 'outbound', message_body: SEND.message });
+    expect(q.where).toHaveBeenCalledWith({ direction: 'outbound', message_body: "We'll be there Tuesday - see waves.example/portal" });
     expect(q.whereIn).toHaveBeenCalledWith('status', ['sending', 'scheduled']);
     expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: '' })).toBeNull();
     expect(await real.findUnreconciledSend({ phone: '', body: SEND.message })).toBeNull();
+  });
+
+  test('the hold horizon: a manual row 25 hours old no longer blocks; a review-ask reservation 48 hours old still does', async () => {
+    const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
+    const q = {};
+    for (const m of ['where', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
+    db.mockImplementation(() => q);
+
+    q.select = jest.fn(async () => [{ id: 'manual-old', metadata: { manual_send_reservation: true, provider_outcome_uncertain: true }, updated_at: hoursAgo(25) }]);
+    expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).toBeNull();
+
+    q.select = jest.fn(async () => [{ id: 'manual-fresh', metadata: { manual_send_reservation: true, provider_outcome_uncertain: true }, updated_at: hoursAgo(23) }]);
+    expect((await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).id).toBe('manual-fresh');
+
+    q.select = jest.fn(async () => [{ id: 'ask-48h', metadata: { review_ask_reservation: true }, updated_at: hoursAgo(48) }]);
+    expect((await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).id).toBe('ask-48h');
+
+    q.select = jest.fn(async () => [{ id: 'ask-exhausted-71h', metadata: { review_ask_reservation: true, review_delivery_uncertain_exhausted: true }, updated_at: hoursAgo(71) }]);
+    expect((await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).id).toBe('ask-exhausted-71h');
+
+    q.select = jest.fn(async () => [{ id: 'ask-73h', metadata: { review_ask_reservation: true }, updated_at: hoursAgo(73) }]);
+    expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).toBeNull();
+    // The SQL window is the widest horizon (72 h); the per-row horizon is applied on the rows.
+    const sqlCutoff = q.where.mock.calls.find((c) => c[0] === 'updated_at')[2];
+    expect(Math.abs(sqlCutoff.getTime() - hoursAgo(72).getTime())).toBeLessThan(5000);
   });
 });

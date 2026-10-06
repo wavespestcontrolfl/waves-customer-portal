@@ -192,6 +192,57 @@ suite('send_sms reservation on isolated Postgres', () => {
     expect(await heldRows(message)).toHaveLength(0);
   });
 
+  test.each([
+    ['curly vs straight apostrophe', 'We’ll be there Tuesday at 9.', "We'll be there Tuesday at 9."],
+    ['em dash vs hyphen', 'Visit moved — Friday at 11.', 'Visit moved - Friday at 11.'],
+    ['with vs without https://', 'Pay here: https://waves.example/pay/abc', 'Pay here: waves.example/pay/abc'],
+  ])('a second send that differs only by %s is the same text to the provider: refused', async (_label, first, second) => {
+    const phone = newPhone();
+    bodies.push(first, second, require('../services/messaging/send-customer-message').canonicalSmsBody(first));
+    sendManualCustomerSms.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', reason: 'timeout', manualSmsInterlock: { deliveryState: 'uncertain' } });
+    const unknown = await executeCommsTool('send_sms', { phone, message: first, message_type: 'manual' });
+    expect(unknown).toMatchObject({ outcome_unknown: true });
+
+    const again = await executeCommsTool('send_sms', { phone, message: second, message_type: 'manual' });
+    expect(again).toMatchObject({ success: false, blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
+  });
+
+  test('a genuinely different text to the same number is still allowed while another is held', async () => {
+    const phone = newPhone();
+    const held = newBody('held');
+    const other = newBody('other');
+    sendManualCustomerSms.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', manualSmsInterlock: { deliveryState: 'uncertain' } });
+    await executeCommsTool('send_sms', { phone, message: held, message_type: 'manual' });
+    sendManualCustomerSms.mockResolvedValueOnce(accepted());
+    const result = await executeCommsTool('send_sms', { phone, message: other, message_type: 'manual' });
+    expect(result).toMatchObject({ success: true });
+  });
+
+  test('horizon: a manual held row 25 hours old no longer blocks; a review-ask reservation 48 hours old still does', async () => {
+    const phone = newPhone();
+    const message = newBody('horizon');
+    const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
+    // A scheduled review ask held after an ambiguous attempt (scheduled-sms-delivery.js), 48 hours old.
+    const [ask] = await db('sms_log').insert({
+      direction: 'outbound', from_phone: '+19413529161', to_phone: phone, message_body: message, status: 'scheduled', message_type: 'review_request',
+      scheduled_for: new Date(Date.now() + 3600000), metadata: JSON.stringify({ review_ask_reservation: true }), created_at: hoursAgo(48), updated_at: hoursAgo(48),
+    }).returning('id');
+    const refused = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(refused).toMatchObject({ success: false, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
+    expect(sendManualCustomerSms).not.toHaveBeenCalled();
+    await db('sms_log').where({ id: ask.id }).del();
+
+    // A manual held row 25 hours old is past the wrapper window.
+    await db('sms_log').insert({
+      direction: 'outbound', from_phone: '+19413529161', to_phone: phone, message_body: message, status: 'sending', message_type: 'manual',
+      metadata: JSON.stringify({ manual_send_reservation: true, manual_wrapper_reservation: true, provider_outcome_uncertain: true }), created_at: hoursAgo(25), updated_at: hoursAgo(25),
+    });
+    sendManualCustomerSms.mockResolvedValueOnce(accepted());
+    const allowed = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(allowed).toMatchObject({ success: true });
+  });
+
   test('a wrapper-held row for the same text (its own reservation) makes ours redundant, not doubled', async () => {
     const phone = newPhone();
     const message = newBody('wrapper');

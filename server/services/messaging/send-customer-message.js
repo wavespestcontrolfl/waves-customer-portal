@@ -343,6 +343,15 @@ function nextProviderRetryAt(providerOutcome, now = new Date()) {
  *   default when the throw happened before dispatch ever ran).
  * @returns {'sent' | 'not_sent' | 'unknown'}
  */
+// The body as it goes to the SMS provider: the url-scheme strip and the GSM
+// punctuation normalization applied above for customer, lead and applicant
+// texts. Anything that must match a sent text by body (the Intelligence Bar's
+// send reservation) compares THIS form, never the typed one, so two drafts that
+// differ only by a curly apostrophe or an https:// prefix are the same text.
+function canonicalSmsBody(body) {
+  return normalizeGsmPunctuation(stripSmsUrlScheme(body));
+}
+
 function classifyDeliveryCertainty(outcome) {
   if (!outcome) return 'unknown';
   if (outcome.deliveryOutcome === 'accepted') return 'sent';
@@ -736,7 +745,7 @@ async function sendCustomerMessageCore(input) {
     && mediaUrlsAllowed(sendInput);
   if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
     && ['customer', 'lead', 'applicant'].includes(sendInput.audience) && !sendHasMedia) {
-    sendInput.body = normalizeGsmPunctuation(stripSmsUrlScheme(sendInput.body));
+    sendInput.body = canonicalSmsBody(sendInput.body);
   }
 
   // Round 8 P1: mirrors email's withheldLinkPolicy 'rewrite' (estimate-
@@ -1795,6 +1804,7 @@ module.exports = {
   // must route through this instead of reading `blocked`/`deliveryOutcome`
   // itself, so a future outcome shape only needs updating here.
   classifyDeliveryCertainty,
+  canonicalSmsBody,
   // Exposed for tests
   _internals: {
     validateContract,

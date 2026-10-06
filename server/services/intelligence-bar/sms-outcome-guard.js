@@ -35,12 +35,28 @@ const db = require('../../models/db');
 const logger = require('../logger');
 // The wrapper's reservation module loads on first use, as the wrapper itself does.
 const suggestMode = () => require('../sms-suggest-mode');
+// The body as the provider receives it (send-customer-message.js applies the same
+// function before Twilio): reservations are written and matched on this form.
+const { canonicalSmsBody } = require('../messaging/send-customer-message');
+// A scheduled review ask held after an ambiguous attempt (scheduled-sms-delivery.js)
+// stays unresolved for the ask-spacing window, longer than the wrapper's 24-hour hold.
+const { ASK_SPACING_MS } = require('../review-ask-history');
 const { phoneIdentityKey } = require('../../utils/phone');
 const { phoneIdentitySql } = require('../sms-response-policy');
 const { PRIOR_ATTEMPT_KEY_RE } = require('../scheduled-sms-cancel');
+const { manualSmsDeliveryState } = require('../messaging/send-manual-customer-sms');
 
 // The same bound the wrapper's reservation reader and the recovery sweep use.
 const UNRECONCILED_HOLD_HOURS = 24;
+const UNRECONCILED_HOLD_MS = UNRECONCILED_HOLD_HOURS * 60 * 60 * 1000;
+
+// How long a row's unknown outcome keeps blocking a same-text send: a review-ask
+// reservation for the ask-spacing window (72 h), every other row for the 24-hour
+// wrapper window.
+function holdHorizonMs(metadata) {
+  const meta = parseMeta(metadata);
+  return flag(meta.review_ask_reservation) || flag(meta.review_delivery_uncertain_exhausted) ? ASK_SPACING_MS : UNRECONCILED_HOLD_MS;
+}
 
 const flag = (v) => v === true || v === 'true';
 
@@ -74,22 +90,25 @@ function unreconciledRefusal(extra = {}) {
 }
 
 /**
- * An outbound row to this number with this exact body whose provider outcome
- * is still unknown, inside the hold window. Null when there is none.
- * `excludeId` skips the caller's own reservation.
+ * An outbound row to this number with this text (the provider-bound form) whose
+ * provider outcome is still unknown, inside its hold horizon. Null when there is
+ * none. `excludeId` skips the caller's own reservation.
  */
 async function findUnreconciledSend({ phone, body }, dbh = db, { excludeId = null } = {}) {
   const identity = phoneIdentityKey(phone);
-  if (!identity || !body) return null;
-  const cutoff = new Date(Date.now() - UNRECONCILED_HOLD_HOURS * 60 * 60 * 1000);
+  const canonical = body ? canonicalSmsBody(body) : '';
+  if (!identity || !canonical) return null;
+  const now = Date.now();
+  const widest = new Date(now - Math.max(ASK_SPACING_MS, UNRECONCILED_HOLD_MS));
   const query = dbh('sms_log')
-    .where({ direction: 'outbound', message_body: body })
+    .where({ direction: 'outbound', message_body: canonical })
     .whereIn('status', ['sending', 'scheduled'])
-    .where('updated_at', '>=', cutoff)
+    .where('updated_at', '>=', widest)
     .whereRaw(`${phoneIdentitySql("BTRIM(COALESCE(to_phone, ''))")} = ?`, [identity]);
   if (excludeId) query.whereNot('id', excludeId);
-  const rows = await query.select('id', 'metadata');
-  return (rows || []).find((row) => carriesUnknownOutcome(row.metadata)) || null;
+  const rows = await query.select('id', 'metadata', 'updated_at');
+  return (rows || []).find((row) => carriesUnknownOutcome(row.metadata)
+    && new Date(row.updated_at).getTime() >= now - holdHorizonMs(row.metadata)) || null;
 }
 
 /**
@@ -109,7 +128,7 @@ async function acquireSendReservation({ phone, customerId = null, body }) {
     if (await findUnreconciledSend({ phone, body }, trx)) return { refused: true };
     const fromNumber = await require('../twilio').deriveOutboundNumber({ customerId: customerId || undefined });
     const id = await suggestMode().createReplyHoldingReservation(trx, {
-      to: phone, customerId, fromNumber, body, reservationKind: 'manual', uncertain: true,
+      to: phone, customerId, fromNumber, body: canonicalSmsBody(body), reservationKind: 'manual', uncertain: true,
       // Not the wrapper's own interlock flag while in flight: with a manual-reply
       // lifecycle active the wrapper takes its own reservation next and must not
       // find this one. It is flagged only if the outcome stays unknown (settle).
@@ -152,6 +171,46 @@ async function settleSendReservation(id, state, { phone, body } = {}) {
   }
 }
 
+// What the send's reservation becomes from the provider result or the thrown
+// error: 'accepted' and 'not_sent' release it, 'uncertain' leaves it as the held
+// row. The wrapper's own interlock refusing THIS attempt sent nothing. A thrown
+// error that names no provider outcome could have crossed the handoff: held.
+const INTERLOCK_REFUSAL_CODE = 'MANUAL_REPLY_OUTCOME_UNRESOLVED';
+function isUncertainOutcome(outcome) {
+  return manualSmsDeliveryState(outcome) === 'uncertain'
+    || outcome?.deliveryOutcome === 'uncertain'
+    || outcome?.providerOutcome?.deliveryOutcome === 'uncertain';
+}
+function reservationState(outcome, { thrown = false } = {}) {
+  if (outcome?.sent === true || outcome?.providerOutcome?.sent === true) return 'accepted';
+  if (outcome?.code === INTERLOCK_REFUSAL_CODE) return 'not_sent';
+  if (isUncertainOutcome(outcome)) return 'uncertain';
+  const certainty = outcome?.deliveryOutcome || outcome?.providerOutcome?.deliveryOutcome;
+  if (certainty === 'not_sent' || outcome?.blocked === true) return 'not_sent';
+  return thrown ? 'uncertain' : 'not_sent';
+}
+
+/**
+ * The send lifecycle in one place: acquire the reservation, run the provider
+ * handoff `send()`, settle the reservation from its result or its thrown error,
+ * and return the result (or rethrow). Returns { refused: true } without calling
+ * `send` when a live same-text reservation exists.
+ */
+async function withSendReservation({ phone, customerId = null, body }, send) {
+  const reservation = await acquireSendReservation({ phone, customerId, body });
+  if (reservation.refused) return { refused: true };
+  const settle = (state) => settleSendReservation(reservation.id, state, { phone, body });
+  let result;
+  try {
+    result = await send();
+  } catch (err) {
+    await settle(reservationState(err, { thrown: true }));
+    throw err;
+  }
+  await settle(reservationState(result));
+  return { result };
+}
+
 module.exports = {
   UNRECONCILED_HOLD_HOURS,
   carriesUnknownOutcome,
@@ -159,4 +218,7 @@ module.exports = {
   findUnreconciledSend,
   acquireSendReservation,
   settleSendReservation,
+  withSendReservation,
+  reservationState,
+  INTERLOCK_REFUSAL_CODE,
 };

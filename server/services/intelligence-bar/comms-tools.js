@@ -36,7 +36,7 @@ const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-reg
 // The send takes a durable reservation before the provider handoff, so a repeat
 // of the same text is refused while the first is in flight or unreconciled
 // (sms-outcome-guard.js).
-const { findUnreconciledSend, acquireSendReservation, settleSendReservation, unreconciledRefusal } = require('./sms-outcome-guard');
+const { findUnreconciledSend, withSendReservation, unreconciledRefusal, INTERLOCK_REFUSAL_CODE } = require('./sms-outcome-guard');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -322,8 +322,6 @@ async function executeCommsTool(toolName, input, actionContext = {}) {
 // The one exception is the wrapper's own interlock refusing THIS attempt because
 // an earlier text on the thread is unresolved: that is a refusal (blocked), the
 // unknown outcome belongs to the earlier text.
-const INTERLOCK_REFUSAL_CODE = 'MANUAL_REPLY_OUTCOME_UNRESOLVED';
-
 function uncertainManualSmsResponse(outcome) {
   const code = outcome?.code || 'SMS_DELIVERY_UNCERTAIN';
   return {
@@ -335,18 +333,6 @@ function uncertainManualSmsResponse(outcome) {
     retry: false,
     retryable: false,
   };
-}
-
-// What the send's reservation becomes: 'accepted' and 'not_sent' release it, 'uncertain'
-// leaves it as the held row. The wrapper's own interlock refusing THIS attempt sent nothing.
-// A thrown error that names no provider outcome could have crossed the handoff: held.
-function reservationState(outcome, { thrown = false } = {}) {
-  if (outcome?.sent === true || outcome?.providerOutcome?.sent === true) return 'accepted';
-  if (outcome?.code === INTERLOCK_REFUSAL_CODE) return 'not_sent';
-  if (isUncertainManualSmsOutcome(outcome)) return 'uncertain';
-  const certainty = outcome?.deliveryOutcome || outcome?.providerOutcome?.deliveryOutcome;
-  if (certainty === 'not_sent' || outcome?.blocked === true) return 'not_sent';
-  return thrown ? 'uncertain' : 'not_sent';
 }
 
 function isUncertainManualSmsOutcome(outcome) {
@@ -1254,104 +1240,96 @@ function mapCommsMessageTypeToPurpose(messageType) {
   }
 }
 
-async function sendSms(input) {
-  const { customer_name, customer_id, phone: directPhone, message, message_type = 'manual' } = input;
-
-  let phone = directPhone;
-  let customerName = null;
-  let custId = customer_id;
-
-  // Resolve identity carefully — never cross-wire a customerId to a different
-  // recipient phone. The wrapper's consent + identity validators trust
-  // customerId, so attaching a customerId that belongs to a different person
-  // than the destination phone bypasses that customer's opt-out.
-  //
-  //   1. Only customer_id given: look up by id, use that record's phone.
-  //   2. Only phone given: look up by phone (last-10 digits) — only attach
-  //      the customerId if the phones genuinely match. Phone-format
-  //      mismatches skip the indexed lookup; wrapper falls back to phone-
-  //      match consent, which is the safe degraded mode.
-  //   3. Only customer_name given: resolve by name, use that record's phone.
-  //   4. BOTH phone AND id (or phone AND name): trust the phone as
-  //      destination AND only keep the customerId when its record's phone
-  //      matches the typed phone. A name-or-id-attached record with a
-  //      DIFFERENT phone gets dropped — wrapper does phone-only consent
-  //      lookup. This is the codex P1 fix.
-  if (!custId && !phone) {
+// The recipient of a send, resolved carefully — never cross-wire a customerId
+// to a different recipient phone. The wrapper's consent + identity validators
+// trust customerId, so attaching a customerId that belongs to a different
+// person than the destination phone bypasses that customer's opt-out.
+//
+//   1. Only customer_id given: look up by id, use that record's phone.
+//   2. Only phone given: look up by phone (last-10 digits) — only attach
+//      the customerId if the phones genuinely match. Phone-format
+//      mismatches skip the indexed lookup; wrapper falls back to phone-
+//      match consent, which is the safe degraded mode.
+//   3. Only customer_name given: resolve by name, use that record's phone.
+//   4. BOTH phone AND id (or phone AND name): trust the phone as
+//      destination AND only keep the customerId when its record's phone
+//      matches the typed phone. A name-or-id-attached record with a
+//      DIFFERENT phone gets dropped — wrapper does phone-only consent
+//      lookup. This is the codex P1 fix.
+// Returns { phone, custId, customerName } or a tool { error } result.
+async function resolveSmsRecipient(input) {
+  const { customer_id, phone: directPhone } = input;
+  const fullName = (customer) => `${customer.first_name} ${customer.last_name}`;
+  if (!customer_id && !directPhone) {
     const customer = await resolveCustomer(input);
     if (!customer) return { error: 'Customer not found' };
     if (customer.error) return customer;
-    customerName = `${customer.first_name} ${customer.last_name}`;
-    custId = customer.id;
-    phone = customer.phone;
-  } else if (custId && !phone) {
-    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
+    return { phone: customer.phone, custId: customer.id, customerName: fullName(customer) };
+  }
+  if (customer_id && !directPhone) {
+    const customer = await db('customers').where('id', customer_id).whereNull('deleted_at').first();
     if (!customer) return { error: 'Customer not found' };
     if (!customer.phone) return { error: 'Customer has no phone number' };
-    customerName = `${customer.first_name} ${customer.last_name}`;
-    phone = customer.phone;
-  } else if (!custId && phone) {
+    return { phone: customer.phone, custId: customer_id, customerName: fullName(customer) };
+  }
+  if (!customer_id) {
     // Phone given but no customer_id. Try to find a customer record whose
     // phone matches the typed phone (last 10 digits, format-agnostic).
-    const inputDigits = phone.replace(/\D/g, '').slice(-10);
-    if (inputDigits.length === 10) {
-      const customer = await db('customers')
+    const inputDigits = directPhone.replace(/\D/g, '').slice(-10);
+    const customer = inputDigits.length === 10
+      ? await db('customers')
         .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [inputDigits])
         .whereNull('deleted_at')
-        .first();
-      if (customer) {
-        customerName = `${customer.first_name} ${customer.last_name}`;
-        custId = customer.id;
-      }
-    }
-  } else {
-    // BOTH custId and phone given. Verify they belong to the same record;
-    // if not, trust the typed phone and drop the id. Prevents cross-wired
-    // consent (codex P1).
-    // deleted_at filter: a customer archived/merged-away after the card was
-    // proposed must NOT pass the pin check just because the phone is
-    // unchanged — the lookup misses, phonesMatch is false, and a pinned
-    // confirmation refuses (codex P1 on the drift-guard round). Un-pinned
-    // sends degrade to phone-only consent, never an archived identity.
-    const customer = await db('customers').where('id', custId).whereNull('deleted_at').first();
-    const inputDigits = phone.replace(/\D/g, '').slice(-10);
-    const customerDigits = customer ? (customer.phone || '').replace(/\D/g, '').slice(-10) : null;
-    const phonesMatch = !!customer && inputDigits === customerDigits && inputDigits.length === 10;
-    // _require_phone_match rides on a proposal-pinned confirmation: the card
-    // showed a specific person + phone last4, so if the record's phone
-    // changed (or the record vanished) inside the pending window, REFUSE and
-    // make the operator rebuild the card — never silently send to a number
-    // nobody approved (codex P1 on the pinning round).
-    if (input._require_phone_match && !phonesMatch) {
-      return {
-        error: 'Customer phone changed after the card was approved. Rebuild the confirmation card.',
-        preview_changed: true,
-      };
-    }
-    if (phonesMatch) {
-      customerName = `${customer.first_name} ${customer.last_name}`;
-    } else {
-      custId = null;
-    }
+        .first()
+      : null;
+    return { phone: directPhone, custId: customer ? customer.id : customer_id, customerName: customer ? fullName(customer) : null };
   }
+  // BOTH custId and phone given. Verify they belong to the same record;
+  // if not, trust the typed phone and drop the id. Prevents cross-wired
+  // consent (codex P1).
+  // deleted_at filter: a customer archived/merged-away after the card was
+  // proposed must NOT pass the pin check just because the phone is
+  // unchanged — the lookup misses, phonesMatch is false, and a pinned
+  // confirmation refuses (codex P1 on the drift-guard round). Un-pinned
+  // sends degrade to phone-only consent, never an archived identity.
+  const customer = await db('customers').where('id', customer_id).whereNull('deleted_at').first();
+  const inputDigits = directPhone.replace(/\D/g, '').slice(-10);
+  const customerDigits = customer ? (customer.phone || '').replace(/\D/g, '').slice(-10) : null;
+  const phonesMatch = !!customer && inputDigits === customerDigits && inputDigits.length === 10;
+  // _require_phone_match rides on a proposal-pinned confirmation: the card
+  // showed a specific person + phone last4, so if the record's phone
+  // changed (or the record vanished) inside the pending window, REFUSE and
+  // make the operator rebuild the card — never silently send to a number
+  // nobody approved (codex P1 on the pinning round).
+  if (input._require_phone_match && !phonesMatch) {
+    return {
+      error: 'Customer phone changed after the card was approved. Rebuild the confirmation card.',
+      preview_changed: true,
+    };
+  }
+  return phonesMatch
+    ? { phone: directPhone, custId: customer_id, customerName: fullName(customer) }
+    : { phone: directPhone, custId: null, customerName: null };
+}
+
+async function sendSms(input) {
+  const { message, message_type = 'manual' } = input;
+  const recipient = await resolveSmsRecipient(input);
+  if (recipient.error) return recipient;
+  const { phone, custId, customerName } = recipient;
 
   if (!phone) return { error: 'No phone number' };
-
-  // Reserve the send BEFORE the provider handoff, atomically (the wrapper's own
-  // thread lock and row writer). A text with these exact words to this number that
-  // is in flight or whose provider outcome was never confirmed may already be on
-  // the customer's phone: refuse, with no provider call. Two cards confirmed at
-  // the same moment serialize on this reservation; the proposal-time check alone
-  // could not stop them.
-  const reservation = await acquireSendReservation({ phone, customerId: custId || null, body: message });
-  if (reservation.refused) return unreconciledRefusal({ sent_to: phone, customer: customerName });
 
   // Routed through the customer-message middleware. This is Virginia's
   // daily-driver send path, so the validators apply consistently:
   // suppression list, sms_enabled, no customer-emoji, segment metadata.
   // Operator messages still need to follow the customer voice rules.
-  const settleReservation = (state) => settleSendReservation(reservation.id, state, { phone, body: message });
-  const result = await sendManualCustomerSms({
+  // The send runs inside its reservation (sms-outcome-guard.js): taken atomically
+  // before the provider handoff with the wrapper's own thread lock, settled from
+  // the result. A text with these words to this number that is in flight or whose
+  // outcome was never confirmed may already be on the customer's phone: refused,
+  // with no provider call. Two cards confirmed at the same moment serialize here.
+  const reserved = await withSendReservation({ phone, customerId: custId || null, body: message }, () => sendManualCustomerSms({
     to: phone,
     body: message,
     channel: 'sms',
@@ -1376,13 +1354,9 @@ async function sendSms(input) {
       original_message_type: message_type,
       adminUserId: 'intelligence_bar',
     },
-  }).catch(async (err) => {
-    // A thrown outcome settles the reservation like a returned one;
-    // executeCommsTool turns the throw into the same response.
-    await settleReservation(reservationState(err, { thrown: true }));
-    throw err;
-  });
-  await settleReservation(reservationState(result));
+  }));
+  if (reserved.refused) return unreconciledRefusal({ sent_to: phone, customer: customerName });
+  const { result } = reserved;
 
   if (isUncertainManualSmsOutcome(result)) {
     return uncertainManualSmsResponse(result);

@@ -19,6 +19,8 @@ jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null,
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
+  // The send reservation writes and matches the provider-bound body with the real normalizer.
+  canonicalSmsBody: jest.requireActual('../services/messaging/send-customer-message').canonicalSmsBody,
   classifyDeliveryCertainty: (outcome) => outcome?.deliveryOutcome === 'accepted' ? 'sent'
     : outcome?.deliveryOutcome === 'not_sent' ? 'not_sent' : 'unknown',
 }));
