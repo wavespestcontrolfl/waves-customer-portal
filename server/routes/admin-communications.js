@@ -2839,23 +2839,33 @@ async function firstNameForPhone(last10, customerIds) {
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 // Stamp the office's approval to move a visit online inside the self-serve
-// move notice window: the visit's current start instant, written only while
-// the row still has that start (a concurrent move wins and gets no
-// approval). Only this column changes, so no reminder or confirmation
-// re-arms. True when the row now carries the approval.
-async function approveOfficeMove(scheduledServiceId) {
+// move notice window: the start instant of the snapshot the link lookup
+// refused, written only while the row still has that date and start (a
+// concurrent move wins and gets no approval — codex P1 #6039 r1). Only
+// this column changes, so no reminder or confirmation re-arms; a later
+// move clears it (trigger in 20261006230100). Returns the approved
+// instant, or null when nothing was stamped.
+async function approveOfficeMove(svc) {
   const { visitStartInstant } = require('../services/scheduling/self-serve-notice');
   const { etCalendarDayOf } = require('../utils/datetime-et');
-  const row = await db('scheduled_services').where({ id: scheduledServiceId })
-    .first('id', 'scheduled_date', 'window_start');
-  const startsAt = visitStartInstant(row);
-  if (!startsAt) return false;
+  const startsAt = visitStartInstant(svc);
+  if (!startsAt) return null;
   const updated = await db('scheduled_services')
-    .where({ id: row.id, window_start: row.window_start })
-    .whereRaw('scheduled_date = ?::date', [etCalendarDayOf(row.scheduled_date)])
+    .where({ id: svc.id, window_start: svc.window_start })
+    .whereRaw('scheduled_date = ?::date', [etCalendarDayOf(svc.scheduled_date)])
     .update({ office_move_approved_for: startsAt });
-  if (updated) logger.info(`[reschedule-link] office approved online move inside notice window for ${row.id}`);
-  return updated > 0;
+  if (!updated) return null;
+  logger.info(`[reschedule-link] office approved online move inside notice window for ${svc.id}`);
+  return startsAt;
+}
+
+// Undo an approval whose link never reached the composer: older links for
+// the same token must not inherit it (codex P1 #6039 r1). Clears only the
+// exact approval this request stamped.
+async function revokeOfficeMove(scheduledServiceId, approvedFor) {
+  await db('scheduled_services')
+    .where({ id: scheduledServiceId, office_move_approved_for: approvedFor })
+    .update({ office_move_approved_for: null });
 }
 
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
@@ -2940,8 +2950,10 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     // the composer approves the move for the visit's CURRENT start and
     // rebuilds the link. The page and its commit honor the approval until
     // the visit's start changes (self-serve-notice.js officeApprovedMove).
-    if (tooSoonToMove && await approveOfficeMove(svc.id)) {
+    const approvedFor = tooSoonToMove ? await approveOfficeMove(svc) : null;
+    if (approvedFor) {
       ({ url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id }));
+      if (!url || tooSoonToMove) await revokeOfficeMove(svc.id, approvedFor);
     }
     // Still refused: the row moved between the read and the approval.
     // Distinct 409 so the composer doesn't say the visit has no reschedule

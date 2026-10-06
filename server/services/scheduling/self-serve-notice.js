@@ -124,7 +124,8 @@ function earliestSelfServeMoveStart(now = new Date()) {
 // admin composer stamps office_move_approved_for with the visit's current
 // start. While the row still starts at that instant the visit is NOT
 // treated as inside the window, so the link, the page and its commit all
-// allow the move. Any move changes the start and ends the approval. A
+// allow the move. Any move clears the column (trigger in migration
+// 20261006230100); the start match is a second guard. A
 // caller whose row select lacks the column keeps the plain notice rule.
 function visitInsideMoveNoticeWindow(row, now = new Date()) {
   const startsAt = visitStartInstant(row);
