@@ -19,6 +19,7 @@ const {
   loadV13RowsForMonth,
   v13RateOptions,
   v13RowCalculates,
+  v13AreaLine,
 } = require('../services/waveguard-plan-engine');
 
 const DEFAULT_LAWN_SQFT = Number(process.env.AUDIT_LAWN_SQFT || 10000);
@@ -110,7 +111,7 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
     service: { waveguard_tier: options.plan || 'Platinum' },
   }).map((item) => {
     const row = item.product ? protocolRows?.get(String(item.product.id)) : null;
-    const areaFactor = effectiveAreaFactor(row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, {
+    const areaFactor = effectiveAreaFactor(v13AreaLine(item, row), {
       plan: options.plan || 'Platinum',
       weedPressure: options.weedPressure,
       conditionFlags: options.conditionFlags,

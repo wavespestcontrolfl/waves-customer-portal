@@ -22,6 +22,7 @@ const {
   visitForPlan,
   loadVisitForPlan,
   v13VisitLimits,
+  v13AreaLine,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -1034,7 +1035,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       });
       // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
       // no turf profile, so it takes the half the plan's own default assumes.
-      const sizedLine = v13Line?.row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
+      const sizedLine = v13AreaLine(line, v13Line?.row);
       const areaFactor = effectiveAreaFactor(sizedLine, areaContext);
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,

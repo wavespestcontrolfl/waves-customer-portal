@@ -47,7 +47,9 @@ describe('the v13 watering rules', () => {
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
     const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
     const bermuda = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
-    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name)]);
+    // The February atrazine option's rule is written with its catalog row (20261007140000).
+    const atrazine = require('../models/migrations/20261007140000_lawn_v13_audit_fixes');
+    const covered = new Set([atrazine.NAMES.ATRAZINE, ...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name)]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 

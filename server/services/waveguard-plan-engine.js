@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -517,8 +517,15 @@ const V13_GATE_NOTES = [
   { key: 'novToMarOnly', required: true, when: (ctx) => ctx.monthNumber != null && NOV_TO_MAR(ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
   { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
   { key: 'northPortBlocked', required: true, when: (ctx) => /north\s*port/i.test(String(ctx.municipality || '')), text: () => 'Not allowed in North Port this month; skip this product.' },
+  { key: 'stAugustineOnly', required: true, when: (ctx) => ctx.grassType !== 'st_augustine', text: () => 'St. Augustine (or centipede) lawns only. Not on bermuda, zoysia, bahia or mixed lawns.' },
+  { key: 'avoidHighWaterTable', required: true, text: () => 'Not on wet or sandy lots with a high water table.' },
+  { key: 'fertilizerSafety', required: true, text: () => 'Fertilizer safety: deflector shield on the spreader; 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank; no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast; sweep fertilizer off driveways, sidewalks and streets back onto the lawn; Manatee BMP decal on the vehicle.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
+  { key: 'replacesDefaultBag', text: () => 'Instead of the 24-0-11 on this visit: spread one bag only and record the bag you used.' },
+  { key: 'waterInNow', text: () => 'Water in right after application (label: must be watered in immediately). Keep people and pets off until it is watered in and dry.' },
+  { key: 'oncePerAreaPerYear', text: () => 'Up to 2 applications per lawn per year; never the same area twice in a year.' },
   { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
+  { key: 'delayMowingHours', text: (hours) => `Delay mowing for ${hours} hours.` },
   { key: 'noWaterIn', text: () => 'Do not water this in.' },
   { key: 'tankMixWith', text: (product) => `Tank mix with ${product}.` },
   { key: 'concentration', text: (value) => `Concentration ${value}.` },
@@ -526,6 +533,14 @@ const V13_GATE_NOTES = [
   { key: 'rateRange', text: (range) => `Label rate range ${range}.` },
   { key: 'sunnyTurfOnly', text: () => 'Sunny turf only; the amount covers the sunny share of the lawn.' },
 ];
+
+// The line effectiveAreaFactor reads for a v13 row. A row marked wholeLawn is a spreader bag that covers the
+// lawn even when its recipe line reads as a weed-spot product (the February atrazine bag, whose name makes the
+// line a SPOT_ALLOWANCE): the whole area, never the spot share. sunnyTurfOnly narrows a whole-lawn line.
+function v13AreaLine(item, row) {
+  if (row?.gates?.wholeLawn) return { ...item, scope: 'BROADCAST_FULL' };
+  return row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item;
+}
 
 function v13GateNotes(gates, context = {}) {
   const g = gates && typeof gates === 'object' ? gates : {};
@@ -1163,16 +1178,22 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   const profileRecorded = [profile?.track_key, profile?.grass_type]
     .some((value) => String(value || '').trim());
   const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const grass = normalizeGrassType(profile?.grass_type)
+    || (!profileRecorded ? normalizeGrassType(legacyGrass) : null)
+    || String(profile?.track_key || '').trim().toLowerCase()
+    || null;
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
-    // free text) runs the one v13 program instead of blocking the visit.
-    || (recorded ? lawnV13AnyGrassTrack() : null)
+    // free text) runs the one v13 program instead of blocking the visit. Bahiagrass
+    // is the exception: it has no v13 program and never borrows another grass's.
+    || (recorded ? lawnV13AnyGrassTrack(grass) : null)
     || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? lawnProtocols()?.[trackKey] : null;
   const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
-  return { trackKey, track, month, visit };
+  // Only a v13 plan of a bahia lawn carries the flag; every other result keeps its old shape.
+  return { trackKey, track, month, visit, ...(!track && lawnV13NoProgramGrass(grass) ? { v13NoProgram: true } : {}) };
 }
 
 // The ordinance jurisdictions (county + city) one visit is judged under —
@@ -1856,6 +1877,7 @@ async function buildPlanForService(serviceId, options = {}) {
     monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
     municipality: resolvedOrdinanceCity,
     productionMode: structuredProtocol?.window?.productionMode,
+    grassType: normalizeGrassType(profile?.grass_type) || normalizeGrassType(service.lawn_type) || null,
   };
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
@@ -1877,7 +1899,7 @@ async function buildPlanForService(serviceId, options = {}) {
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
-      areaFactor: effectiveAreaFactor(line?.row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, areaContext),
+      areaFactor: effectiveAreaFactor(v13AreaLine(item, line?.row), areaContext),
       ...nutrientTargets,
       ...v13RateOptions(line?.row),
     }) : null;
@@ -1958,6 +1980,13 @@ async function buildPlanForService(serviceId, options = {}) {
       code: 'missing_lawn_area',
       severity: 'block',
       message: 'Turf profile is missing lawn square footage, so mix amounts cannot be calculated.',
+    });
+  }
+  if (selection.v13NoProgram) {
+    blocks.push({
+      code: 'lawn_v13_bahia_no_program',
+      severity: 'block',
+      message: 'Bahiagrass has no v13 lawn program: Celsius and Blindside are not labeled for bahiagrass, so no suggested amounts are planned. Enter the actual work.',
     });
   }
   if (!track || !visit) {
@@ -2185,6 +2214,7 @@ module.exports = {
   loadV13RowsForMonth,
   lawnV13PlanBlock,
   v13GateNotes,
+  v13AreaLine,
   v13ItemFields,
   v13RowCalculates,
   planLineFields,

@@ -19,7 +19,12 @@ const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gate
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
-const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
+const GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
+const audit = require('../models/migrations/20261007140000_lawn_v13_audit_fixes');
+// The February atrazine option is the one line the St. Augustine track alone carries.
+const ATRAZINE_LINE = /^LESCO Atrazine /;
+const withoutAtrazine = (text) => lines(text).filter((line) => !ATRAZINE_LINE.test(line)).join('\n');
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
@@ -28,10 +33,11 @@ const visitFor = (month) => v13.st_augustine.visits.find((v) => v.month === MONT
 const lines = (text) => String(text || '').split('\n').filter(Boolean);
 
 describe('the v13 recipe', () => {
-  test('four tracks, one universal program, 12 months in the existing visit shape', () => {
+  test('three tracks (no bahia), one universal program, 12 months in the existing visit shape', () => {
     expect(Object.keys(v13)).toEqual(GRASSES);
     for (const grass of GRASSES) {
-      expect(v13[grass].visits).toEqual(v13.st_augustine.visits);
+      expect(v13[grass].visits.map((v) => ({ ...v, secondary: withoutAtrazine(v.secondary) })))
+        .toEqual(v13.st_augustine.visits.map((v) => ({ ...v, secondary: withoutAtrazine(v.secondary) })));
       expect(v13[grass].visits.map((v) => v.month)).toEqual(MONTH_ABBR);
       expect(v13[grass].visits.map((v) => v.visit)).toEqual(MONTHS);
       expect(v13[grass].exact_catalog_names).toBe(true);
@@ -46,8 +52,12 @@ describe('the v13 recipe', () => {
   });
 
   test('what the program drops stays out (no Pennant, no July potash, no March large patch spray, no SpeedZone)', () => {
-    const text = JSON.stringify(v13);
+    // The one atrazine line is the owner-approved February option on the St. Augustine track (2026-10-06).
+    const text = JSON.stringify(v13).replace(JSON.stringify(visitFor(2).secondary.split('\n').find((l) => ATRAZINE_LINE.test(l))).slice(1, -1), '');
     expect(text).not.toMatch(/pennant|k-?flow|potash|speedzone|medallion|t-storm|eagle|sedgehammer|cleary|harrell|atrazine|headway|image for southern/i);
+    expect(JSON.stringify(v13.bermuda) + JSON.stringify(v13.zoysia)).not.toMatch(/atrazine/i);
+    // Dismiss left the recipe lines (use up the jug, do not reorder); Certainty carries sedges.
+    expect(JSON.stringify(v13.st_augustine.visits)).not.toMatch(/dismiss/i);
     const jul = visitFor(7);
     expect(jul.primary).toMatch(/scout visit/i);
     expect(jul.primary).not.toMatch(/\bLESCO|Dimension|Stonewall/);
@@ -127,7 +137,7 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, audit.NAMES.ATRAZINE];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -262,7 +272,9 @@ describe('staged migration 20261005120000', () => {
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
-      expect(spots.sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
+      // Later migrations: 140000 adds Blindside, 20261007140000 adds the St. Augustine atrazine option and removes Dismiss.
+      expect(spots.filter((n) => n !== migration.NAMES.DIS).sort())
+        .toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE && n !== audit.NAMES.ATRAZINE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');
@@ -305,7 +317,8 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
     const specNames = fixMigration.PRODUCTS.map((p) => p.name);
-    for (const name of named) expect(specNames).toContain(name);
+    // The atrazine row is inserted by migration 20261007140000, which has its own spec (tested below).
+    for (const name of named) expect([...specNames, audit.NAMES.ATRAZINE]).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));
     expect(withEpa).toEqual({

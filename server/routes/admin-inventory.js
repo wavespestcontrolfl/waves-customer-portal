@@ -801,6 +801,7 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_certainty', 'Certainty Turf Herbicide', 'pesticide', 'post-emergent herbicide'],
   ['v13_blindside', 'Blindside Herbicide', 'pesticide', 'post-emergent herbicide'],
   ['v13_dismiss', 'Dismiss 64 oz', 'pesticide', 'sedge herbicide'],
+  ['v13_atrazine_bag', 'LESCO Atrazine 1.05% 18-0-10 56% PolyPlus OPTI45 2%Fe 0.5%Mn 0.5%Mg AS MOP', 'pesticide', 'weed-control herbicide with fertilizer'],
   ['v13_nis', 'LESCO 90/10 Nonionic Surfactant', 'adjuvant', 'surfactant'],
   ['v13_dispatch', 'Dispatch Sprayable Wetting Agent', 'wetting_agent', 'wetting agent'],
 ].map(([key, label, type, category]) => ({ key, label, aliases: [label], type, category }));
