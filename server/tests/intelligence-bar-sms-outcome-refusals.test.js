@@ -218,9 +218,20 @@ describe('send_sms at the proposal', () => {
     expect(await sendSmsProposalRefusal(SEND)).toBeNull();
   });
 
-  test('a phone-only send (no customer) is left to the execution-time block', async () => {
+  test('a direct number with no customer gets the same refusal: consent and suppression by phone, and the unreconciled lookup', async () => {
+    checkConsentForPurpose.mockResolvedValue(OPTED_OUT);
+    const optedOut = await sendSmsProposalRefusal({ phone: CUSTOMER.phone, message: SEND.message });
+    expect(optedOut).toMatchObject({ blocked: true, code: 'SMS_OPTED_OUT' });
+    expect(checkSuppression).toHaveBeenCalledWith(expect.objectContaining({ customerId: null, to: CUSTOMER.phone }), expect.anything(), expect.anything());
+
+    checkConsentForPurpose.mockResolvedValue({ ok: true });
+    guard.findUnreconciledSend.mockResolvedValueOnce({ id: 'held-row' });
+    const unreconciled = await sendSmsProposalRefusal({ phone: CUSTOMER.phone, message: SEND.message });
+    expect(unreconciled).toMatchObject({ blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
+    expect(guard.findUnreconciledSend).toHaveBeenCalledWith({ phone: CUSTOMER.phone, body: SEND.message });
+
     expect(await sendSmsProposalRefusal({ phone: CUSTOMER.phone, message: SEND.message })).toBeNull();
-    expect(checkSuppression).not.toHaveBeenCalled();
+    expect(await sendSmsProposalRefusal({ message: SEND.message })).toBeNull();
   });
 });
 
@@ -244,7 +255,7 @@ describe('the reservation row for an unknown outcome', () => {
   const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
   const row = (status, metadata, ageHours = 1, body = SEND.message) => ({ id: `${status}-${ageHours}`, status, metadata, message_body: body, created_at: hoursAgo(ageHours), updated_at: hoursAgo(ageHours) });
 
-  test('carriesUnknownOutcome is the repo\'s unresolved-reservation predicate plus the prior-attempt marker family', () => {
+  test('carriesUnknownOutcome is the repo\'s unresolved-reservation predicate plus the explicit provider_outcome_uncertain marker, in any status', () => {
     // isUnresolvedSendReservation: a reply reservation still sending inside its 24-hour hold.
     expect(real.carriesUnknownOutcome(row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }))).toBe(true);
     expect(real.carriesUnknownOutcome(row('sending', '{"manual_send_reservation":true,"provider_outcome_uncertain":true}'))).toBe(true);
@@ -257,15 +268,19 @@ describe('the reservation row for an unknown outcome', () => {
     expect(real.carriesUnknownOutcome(row('scheduled', { review_ask_reservation: true }, 73))).toBe(false);
     expect(real.carriesUnknownOutcome(row('sent', { review_ask_reservation: true }, 1))).toBe(false);
     expect(real.carriesUnknownOutcome(row('failed', { review_ask_reservation: true, finalize_only: true }, 1))).toBe(false);
-    // A queued row a worker picked up or requeued after an attempt (PRIOR_ATTEMPT_KEY_RE), while still queued,
-    // aged from the ATTEMPT (the marker time), not from the queue row's creation.
-    expect(real.carriesUnknownOutcome(row('scheduled', { scheduled_sms_claimed_at: hoursAgo(10).toISOString() }, 5 * 24))).toBe(true);
-    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry_at: hoursAgo(1).toISOString(), provider_retry_code: 'PROVIDER_FAILURE' }, 5 * 24))).toBe(true);
-    expect(real.carriesUnknownOutcome(row('scheduled', { scheduled_sms_claimed_at: hoursAgo(30).toISOString() }, 5 * 24))).toBe(false);
-    // A boolean marker (twilio-webhook's provider_retry: true) carries no time: the row's own timestamps age it.
-    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry: true }, 2))).toBe(true);
-    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry: true }, 30))).toBe(false);
-    expect(real.carriesUnknownOutcome(row('failed', { provider_retry_at: hoursAgo(1).toISOString() }))).toBe(false);
+    // The explicit marker, in any status, aged from its own timestamp (scheduler.js stamps both) within 24 hours.
+    expect(real.carriesUnknownOutcome(row('blocked', { provider_outcome_uncertain: true, provider_outcome_uncertain_at: hoursAgo(1).toISOString() }, 5 * 24))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('failed', { provider_outcome_uncertain: true, provider_outcome_uncertain_at: hoursAgo(10).toISOString() }, 5 * 24))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_outcome_uncertain: true, provider_outcome_uncertain_at: hoursAgo(10).toISOString(), provider_retry_at: hoursAgo(10).toISOString() }, 5 * 24))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_outcome_uncertain: true, provider_outcome_uncertain_at: hoursAgo(30).toISOString() }, 5 * 24))).toBe(false);
+    // Without the marker's own timestamp the row's updated_at ages it (the wrapper's settlement shape).
+    expect(real.carriesUnknownOutcome(row('sending', { provider_outcome_uncertain: 'true' }, 2))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('blocked', { provider_outcome_uncertain: true }, 30))).toBe(false);
+    // Claim and retry markers alone are NOT evidence of a handoff: a requeue after a pre-provider hold
+    // (QUIET_HOURS_HOLD, STREET_LEVEL_HOLD, BILLING_TEXT_LEG_IN_FLIGHT) carries them with no carrier contact.
+    expect(real.carriesUnknownOutcome(row('scheduled', { scheduled_sms_claimed_at: hoursAgo(1).toISOString(), original_block_code: 'QUIET_HOURS_HOLD' }))).toBe(false);
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry_at: hoursAgo(1).toISOString(), provider_retry_code: 'STREET_LEVEL_HOLD' }))).toBe(false);
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry: true }, 2))).toBe(false);
     // A queued text no worker has picked up, and a plain sent text, are not unknown.
     expect(real.carriesUnknownOutcome(row('scheduled', {}))).toBe(false);
     expect(real.carriesUnknownOutcome(row('sent', null))).toBe(false);
@@ -275,7 +290,7 @@ describe('the reservation row for an unknown outcome', () => {
     const rows = [
       row('sent', { manual_send_reservation: true, provider_outcome: 'accepted' }),
       // A queued row stores the TYPED body (curly apostrophe); the retry is typed straight. Same text to the provider.
-      row('scheduled', { provider_retry_at: hoursAgo(1).toISOString() }, 1, 'We’ll be there Tuesday — see https://waves.example/portal'),
+      row('scheduled', { provider_retry_at: hoursAgo(1).toISOString(), provider_outcome_uncertain: true, provider_outcome_uncertain_at: hoursAgo(1).toISOString() }, 1, 'We’ll be there Tuesday — see https://waves.example/portal'),
       row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }, 1, 'A different text entirely.'),
     ];
     const q = {};
@@ -312,6 +327,10 @@ describe('the reservation row for an unknown outcome', () => {
 
   test('reservationState reads classifyDeliveryCertainty: the explicit deliveryOutcome wins over sent/blocked flags', () => {
     expect(real.reservationState({ sent: true, deliveryOutcome: 'accepted' })).toBe('accepted');
+    // The legacy provider receipt with no deliveryOutcome is accepted (isRealProviderSend), as the surrounding comms code treats it.
+    expect(real.reservationState({ sent: true, providerMessageId: 'SM-legacy' })).toBe('accepted');
+    expect(real.reservationState({ providerOutcome: { sent: true, providerMessageId: 'SM-legacy' } }, { thrown: true })).toBe('accepted');
+    expect(real.reservationState({ sent: true })).toBe('uncertain');
     // Ambiguous even though sent is true: held.
     expect(real.reservationState({ sent: true, deliveryOutcome: 'uncertain' })).toBe('uncertain');
     expect(real.reservationState({ sent: false, deliveryOutcome: 'not_sent', blocked: true })).toBe('not_sent');

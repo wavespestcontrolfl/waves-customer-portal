@@ -279,7 +279,7 @@ suite('send_sms reservation on isolated Postgres', () => {
     const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
     await db('sms_log').insert({
       direction: 'outbound', from_phone: '+19413529161', to_phone: phone, message_body: stored, status: 'scheduled', message_type: 'manual',
-      scheduled_for: new Date(Date.now() + 5 * 60 * 1000), metadata: JSON.stringify({ provider_retry_at: hourAgo.toISOString(), provider_retry_code: 'PROVIDER_FAILURE' }),
+      scheduled_for: new Date(Date.now() + 5 * 60 * 1000), metadata: JSON.stringify({ provider_retry_at: hourAgo.toISOString(), provider_retry_code: 'PROVIDER_FAILURE', provider_outcome_uncertain: true, provider_outcome_uncertain_at: hourAgo.toISOString() }),
       created_at: hourAgo, updated_at: hourAgo,
     });
     const refused = await executeCommsTool('send_sms', { phone, message: typed, message_type: 'manual' });
@@ -287,13 +287,13 @@ suite('send_sms reservation on isolated Postgres', () => {
     expect(sendManualCustomerSms).not.toHaveBeenCalled();
   });
 
-  test('a text queued 5 days ago ages from its attempt: requeued 10 hours ago blocks the retry, 30 hours ago does not', async () => {
+  test('a text queued 5 days ago ages from its uncertain attempt: requeued uncertain 10 hours ago blocks the retry, 30 hours ago does not', async () => {
     const phone = newPhone();
     const message = newBody('aged');
     const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
     const [queued] = await db('sms_log').insert({
       direction: 'outbound', from_phone: '+19413529161', to_phone: phone, message_body: message, status: 'scheduled', message_type: 'manual',
-      scheduled_for: hoursAgo(10), metadata: JSON.stringify({ scheduled_sms_claimed_at: hoursAgo(10).toISOString(), scheduled_sms_recovered_at: hoursAgo(10).toISOString() }),
+      scheduled_for: hoursAgo(10), metadata: JSON.stringify({ scheduled_sms_claimed_at: hoursAgo(10).toISOString(), provider_outcome_uncertain: true, provider_outcome_uncertain_at: hoursAgo(10).toISOString() }),
       created_at: hoursAgo(5 * 24), updated_at: hoursAgo(10),
     }).returning('id');
     const refused = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
@@ -301,7 +301,38 @@ suite('send_sms reservation on isolated Postgres', () => {
     expect(sendManualCustomerSms).not.toHaveBeenCalled();
 
     await db('sms_log').where({ id: queued.id }).update({
-      metadata: JSON.stringify({ scheduled_sms_claimed_at: hoursAgo(30).toISOString(), scheduled_sms_recovered_at: hoursAgo(30).toISOString() }), updated_at: hoursAgo(30),
+      metadata: JSON.stringify({ scheduled_sms_claimed_at: hoursAgo(30).toISOString(), provider_outcome_uncertain: true, provider_outcome_uncertain_at: hoursAgo(30).toISOString() }), updated_at: hoursAgo(30),
+    });
+    sendManualCustomerSms.mockResolvedValueOnce(accepted());
+    const allowed = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(allowed).toMatchObject({ success: true });
+  });
+
+  test.each([
+    ['blocked', 'the final retry ended with an unknown outcome'],
+    ['failed', 'an exception after a possible handoff'],
+  ])('a %s row carrying provider_outcome_uncertain 1 hour old blocks the retry (%s)', async (status) => {
+    const phone = newPhone();
+    const message = newBody(`marker-${status}`);
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    await db('sms_log').insert({
+      direction: 'outbound', from_phone: '+19413529161', to_phone: phone, message_body: message, status, message_type: 'manual',
+      scheduled_for: hourAgo, metadata: JSON.stringify({ terminal_pending: false, provider_outcome_uncertain: true, provider_outcome_uncertain_at: hourAgo.toISOString() }),
+      created_at: new Date(Date.now() - 3 * 60 * 60 * 1000), updated_at: hourAgo,
+    });
+    const refused = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(refused).toMatchObject({ success: false, blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
+    expect(sendManualCustomerSms).not.toHaveBeenCalled();
+  });
+
+  test('a scheduled row requeued after QUIET_HOURS_HOLD, with only a claim marker, does NOT block: the carrier was never contacted', async () => {
+    const phone = newPhone();
+    const message = newBody('quiet-hours');
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    await db('sms_log').insert({
+      direction: 'outbound', from_phone: '+19413529161', to_phone: phone, message_body: message, status: 'scheduled', message_type: 'manual',
+      scheduled_for: new Date(Date.now() + 8 * 60 * 60 * 1000), metadata: JSON.stringify({ scheduled_sms_claimed_at: hourAgo.toISOString(), original_block_code: 'QUIET_HOURS_HOLD', scheduled_sms_attempts: 0 }),
+      created_at: hourAgo, updated_at: hourAgo,
     });
     sendManualCustomerSms.mockResolvedValueOnce(accepted());
     const allowed = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });

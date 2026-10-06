@@ -1455,15 +1455,16 @@ async function smsConsentVerdict({ customerId, phone, message, messageType }) {
  * cannot go out: an opted-out or suppressed number (the same wording the
  * execution-time block uses) or a repeat of a text whose outcome is still
  * unknown. Takes the pinned proposal params (customer_id and phone set by the
- * route). Null = the card may be offered. A phone-only send has no customer to
- * read consent for here and is left to the execution-time block.
+ * route), or a direct phone with no customer. Null = the card may be offered.
  */
 async function sendSmsProposalRefusal(params = {}) {
   const customerId = params.customer_id;
   const phone = params.phone;
   const messageType = params.message_type || 'manual';
-  if (!customerId || !phone || !params.message) return null;
-  const verdict = await smsConsentVerdict({ customerId, phone, message: params.message, messageType });
+  if (!phone || !params.message) return null;
+  // A direct number with no customer still gets the consent and suppression read
+  // (loadContactState falls back to the phone) and the unreconciled lookup (keyed on the number).
+  const verdict = await smsConsentVerdict({ customerId: customerId || null, phone, message: params.message, messageType });
   const customerName = params.customer_name || null;
   if (verdict) return blockedSmsResponse(verdict, { messageType, phone, customerName });
   if (await findUnreconciledSend({ phone, body: params.message })) {

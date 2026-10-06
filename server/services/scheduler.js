@@ -289,6 +289,21 @@ function scheduledSmsAttemptSql() {
   `;
 }
 
+// The one durable sign that a scheduled text's provider handoff may have
+// happened with no confirmed outcome (classifyDeliveryCertainty 'unknown' on the
+// send result, or on the outcome a thrown error carries). Stamped on every
+// transition out of 'sending' that keeps or ends the row without proof either
+// way, so a same-text send elsewhere (the Intelligence Bar's reservation,
+// sms-outcome-guard.js) can refuse until it is reconciled. A result with no
+// provider outcome at all (a throw before the provider was contacted) stamps
+// nothing. The marker is the one sms-suggest-mode.js reservations already carry;
+// the timestamp is this transition's own time.
+function uncertainOutcomeStamp(outcome, at) {
+  const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
+  if (!outcome || !outcome.deliveryOutcome || classifyDeliveryCertainty(outcome) !== 'unknown') return '{}';
+  return JSON.stringify({ provider_outcome_uncertain: true, provider_outcome_uncertain_at: at.toISOString() });
+}
+
 async function holdFinalReviewUncertainty(msgId, meta, failedAt) {
   const safetyUntil = meta.review_delivery_safety_until
     ? new Date(meta.review_delivery_safety_until)
@@ -5715,7 +5730,7 @@ function initScheduledJobs() {
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text) || ?::jsonb", [completedAt, smsResult.code || null, uncertainOutcomeStamp(smsResult, completedAt)]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
@@ -5755,7 +5770,7 @@ function initScheduledJobs() {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: completedAt,
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean) || ?::jsonb", [requiresTerminalHook(claimMeta.entry_point), uncertainOutcomeStamp(smsResult, completedAt)]),
                 });
                 // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
                 if (smsResult.code === 'LINKED_VISIT_ENDED') {
@@ -5831,6 +5846,7 @@ function initScheduledJobs() {
                   status: 'scheduled',
                   scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
                   updated_at: failedAt,
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [uncertainOutcomeStamp(err.providerOutcome, failedAt)]),
                 });
                 logger.warn(`[scheduled-sms] Pre-accept exception on ${msg.id} — rescheduled for retry`);
               } else {
@@ -5840,7 +5856,7 @@ function initScheduledJobs() {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'failed',
                   updated_at: failedAt,
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(failedMeta.entry_point)]),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean) || ?::jsonb", [requiresTerminalHook(failedMeta.entry_point), uncertainOutcomeStamp(err.providerOutcome, failedAt)]),
                 });
                 if (failedMeta.entry_point) {
                   await runTerminalHookDurably(msg.id, failedMeta.entry_point, failedMeta);

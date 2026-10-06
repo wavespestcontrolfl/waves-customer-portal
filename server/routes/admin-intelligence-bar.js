@@ -1171,10 +1171,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           phone_last4: (customer.phone || '').replace(/\D/g, '').slice(-4) || null,
         },
       };
+    }
+    if (toolUse.name === 'send_sms') {
       // No card for a text that cannot go out: an opted-out or suppressed number,
-      // or a repeat of a text whose provider outcome is still unknown. The
-      // refusal carries the send tool's own wording; the execution-time check
-      // stays (a customer can opt out between the card and the confirm).
+      // or a repeat of a text whose provider outcome is still unknown. Runs for a
+      // pinned customer AND for a direct phone with no customer. The refusal
+      // carries the send tool's own wording; the execution-time check stays (a
+      // customer can opt out between the card and the confirm).
       const sendRefusal = await sendSmsProposalRefusal(params);
       if (sendRefusal) return { failed: true, modelResult: sendRefusal };
     }

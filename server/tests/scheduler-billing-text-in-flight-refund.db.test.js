@@ -41,6 +41,8 @@ jest.mock('../utils/cron-lock', () => ({
 }));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550199') }));
 jest.mock('../services/messaging/send-customer-message', () => ({
+  // The scheduler reads the real classifyDeliveryCertainty when it stamps an unknown outcome.
+  ...jest.requireActual('../services/messaging/send-customer-message'),
   sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
 }));
 

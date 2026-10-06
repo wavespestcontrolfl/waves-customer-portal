@@ -900,6 +900,29 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test.each([
+    ['opted-out', { success: false, error: 'Recipient has opted out of SMS (sms_enabled=false on notification_prefs)', blocked: true, code: 'SMS_OPTED_OUT' }],
+    ['unreconciled', { success: false, error: 'An earlier text to this customer with the same message may already have gone out: its delivery was never confirmed and is still being reconciled. Nothing was sent. Check the conversation thread before sending anything similar.', blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' }],
+  ])('send_sms to a direct %s number with no customer: the proposal refusal still runs, no card', async (_label, refusal) => {
+    mockSendSmsProposalRefusal.mockResolvedValueOnce(refusal);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { phone: '+19415550123', message: 'hi', message_type: 'manual' } }],
+      [{ type: 'text', text: 'That number cannot be texted right now.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text 941-555-0123', context: 'comms' });
+      expect(mockResolveCommsCustomer).not.toHaveBeenCalled();
+      expect(mockSendSmsProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415550123', message: 'hi' }));
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ blocked: true, code: refusal.code });
+    });
+  });
+
   test('create_appointment by tech name: pinned technician_id in stored params, tech NAME on the card', async () => {
     mockResolveTechnician.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
     scriptModelTurns([

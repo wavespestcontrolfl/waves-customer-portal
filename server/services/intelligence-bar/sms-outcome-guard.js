@@ -11,8 +11,9 @@
  *   metadata.provider_outcome_uncertain      sms-suggest-mode.js reservation
  *   metadata.manual_send_reservation +       the manual-send wrapper's
  *     manual_wrapper_reservation               reservation (24 h hold)
- *   scheduled_sms_claimed_at, provider_retry*  a queued row a worker has
- *     (PRIOR_ATTEMPT_KEY_RE)                   already picked up
+ *   provider_outcome_uncertain_at            scheduler.js, with the marker, on a
+ *                                              requeue, block or failure whose
+ *                                              outcome was unknown
  *
  * The reservation is taken BEFORE the provider handoff, atomically, with the
  * mechanism the manual-send wrapper (reserveHumanReply) uses: the shared
@@ -49,7 +50,6 @@ const {
 } = require('../messaging/review-ask-reservation');
 const { phoneIdentityKey } = require('../../utils/phone');
 const { phoneIdentitySql } = require('../sms-response-policy');
-const { PRIOR_ATTEMPT_KEY_RE } = require('../scheduled-sms-cancel');
 
 // The same bound the wrapper's reservation reader and the recovery sweep use.
 const UNRECONCILED_HOLD_HOURS = REPLY_RESERVATION_HOLD_HOURS;
@@ -62,47 +62,39 @@ function parseMeta(value) {
   try { return JSON.parse(value); } catch { return {}; }
 }
 
-// When the row's send was last attempted. A queued text can be created days
-// before the scheduler tries it, so its hold ages from the attempt: the latest
-// time-valued prior-attempt marker (scheduled_sms_claimed_at,
-// scheduled_sms_recovered_at, provider_retry_at; a code or a boolean under the
-// same key family is skipped), else updated_at, else created_at.
-function attemptAt(row, meta) {
-  const times = Object.keys(meta)
-    .filter((k) => PRIOR_ATTEMPT_KEY_RE.test(k))
-    .map((k) => meta[k])
-    .filter((v) => typeof v === 'string' || v instanceof Date)
-    .map((v) => new Date(v).getTime())
-    .filter(Number.isFinite);
-  if (times.length) return Math.max(...times);
-  const fallback = new Date(row.updated_at || row.created_at || NaN).getTime();
-  return Number.isFinite(fallback) ? fallback : NaN;
+const flag = (v) => v === true || v === 'true';
+
+// When the row's outcome became unknown: the marker's own timestamp
+// (provider_outcome_uncertain_at, which scheduler.js stamps with the marker),
+// else updated_at (the wrapper's settlement touches it with the marker), else
+// created_at.
+function uncertainSince(row, meta) {
+  const stamped = new Date(meta.provider_outcome_uncertain_at || row.updated_at || row.created_at || NaN).getTime();
+  return Number.isFinite(stamped) ? stamped : NaN;
 }
 
 /**
  * Is this row a text that may already have reached the customer, with no
- * confirmed outcome, inside its hold? Two existing notions, not a third:
+ * confirmed outcome, inside its hold? Two existing signs, no inference from
+ * claim or retry markers (a requeue after a pre-provider hold carries those
+ * though the carrier was never contacted):
  *  - isUnresolvedSendReservation (review-ask-reservation.js): a review-ask
- *    reservation in any non-delivered status (here bounded to the ask-spacing
- *    window), a reply reservation still 'sending' inside its 24-hour hold, a
- *    billing text-leg claim. It is handed the attempt time as created_at so
- *    its own hold ages from the attempt.
- *  - a queued row a worker already picked up or requeued after a provider
- *    attempt: any PRIOR_ATTEMPT_KEY_RE marker (the key family the cancel
- *    writer's CAS and smsIneligibilityReason refuse on), while the row is still
- *    'scheduled' or 'sending' (the deliveryLabel reading in comms-tools),
- *    inside the 24-hour hold from the attempt.
+ *    reservation in any non-delivered status, here bounded to the ask-spacing
+ *    window; a reply reservation still 'sending' inside its 24-hour hold; a
+ *    billing text-leg claim. It is handed the uncertain-since time as created_at
+ *    so its own hold ages from there.
+ *  - the explicit metadata.provider_outcome_uncertain marker, in ANY status
+ *    (scheduler.js stamps it on a requeue, a terminal block and a failure whose
+ *    outcome was unknown), inside the 24-hour hold from its timestamp.
  */
 function carriesUnknownOutcome(row, now = Date.now()) {
   const meta = parseMeta(row.metadata);
-  const attempted = attemptAt(row, meta);
-  const within = (ms) => !Number.isFinite(attempted) || attempted >= now - ms;
-  if (isUnresolvedSendReservation({ ...row, metadata: meta, created_at: Number.isFinite(attempted) ? new Date(attempted) : row.created_at }, now)) {
+  const since = uncertainSince(row, meta);
+  const within = (ms) => !Number.isFinite(since) || since >= now - ms;
+  if (isUnresolvedSendReservation({ ...row, metadata: meta, created_at: Number.isFinite(since) ? new Date(since) : row.created_at }, now)) {
     return meta[REVIEW_ASK_MARKER] === true ? within(REVIEW_ASK_HOLD_MS) : true;
   }
-  return ['scheduled', 'sending'].includes(String(row.status || ''))
-    && Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k))
-    && within(UNRECONCILED_HOLD_HOURS * 60 * 60 * 1000);
+  return flag(meta.provider_outcome_uncertain) && within(UNRECONCILED_HOLD_HOURS * 60 * 60 * 1000);
 }
 
 const REFUSAL = {
@@ -210,11 +202,16 @@ async function settleSendReservation(id, state, { phone, body } = {}) {
 // observed on err.providerOutcome; none means the handoff may have been crossed.
 // The wrapper's own interlock refusing THIS attempt (its code, the only hint it
 // gives) sent nothing even though it marks the thread's outcome uncertain.
+// A legacy provider receipt ({ sent: true, providerMessageId }, no deliveryOutcome)
+// is accepted evidence: the same isRealProviderSend fallback the manual-send
+// wrapper applies to such a receipt.
 const INTERLOCK_REFUSAL_CODE = 'MANUAL_REPLY_OUTCOME_UNRESOLVED';
 const STATE_BY_CERTAINTY = { sent: 'accepted', not_sent: 'not_sent', unknown: 'uncertain' };
 function reservationState(outcome, { thrown = false } = {}) {
   if (outcome?.code === INTERLOCK_REFUSAL_CODE) return 'not_sent';
-  return STATE_BY_CERTAINTY[classifyDeliveryCertainty(thrown ? outcome?.providerOutcome : outcome)];
+  const provider = thrown ? outcome?.providerOutcome : outcome;
+  if (!provider?.deliveryOutcome && require('../sms-auto-send').isRealProviderSend(provider)) return 'accepted';
+  return STATE_BY_CERTAINTY[classifyDeliveryCertainty(provider)];
 }
 
 /**
