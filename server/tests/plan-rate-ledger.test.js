@@ -1065,3 +1065,91 @@ describe('classifyAddOnAcceptContext', () => {
     })).resolves.toEqual({ addOnBase: 0, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: null });
   });
 });
+
+// Owner 2026-10-06: the Intelligence Bar would have set a pest customer's whole
+// bill to a lawn price. A rate edit now names the one line that changes.
+describe('planRateChange / setLineForScalarWrite (one-line rate edits)', () => {
+  const { WHOLE_BILL, billLines, planRateChange, setLineForScalarWrite } = require('../services/plan-rate-ledger');
+  const pest = [{ family_key: 'pest_control', monthly_rate: '41.33' }];
+
+  test('adding lawn to a pest plan keeps pest and adds the lawn line', () => {
+    const change = planRateChange({ components: pest, previousScalar: 41.33, newScalar: 102.66, familyKey: 'lawn_care' });
+    expect(change.lines).toEqual([
+      { family: 'pest_control', before: 41.33, after: 41.33 },
+      { family: 'lawn_care', before: 0, after: 61.33 },
+    ]);
+    expect(change.totalBefore).toBe(41.33);
+    expect(change.totalAfter).toBe(102.66);
+  });
+
+  test('a total below the other lines is refused, not split', () => {
+    const change = planRateChange({ components: pest, previousScalar: 41.33, newScalar: 30, familyKey: 'lawn_care' });
+    expect(change.code).toBe('rate_below_other_lines');
+    expect(change.lines).toBeUndefined();
+  });
+
+  test('a legacy rate with no ledger rows is one unattributed line that stays', () => {
+    expect([...billLines([], 41.33)]).toEqual([[UNATTRIBUTED, 41.33]]);
+    const change = planRateChange({ components: [], previousScalar: 41.33, newScalar: 102.66, familyKey: 'lawn_care' });
+    expect(change.lines).toEqual([
+      { family: UNATTRIBUTED, before: 41.33, after: 41.33 },
+      { family: 'lawn_care', before: 0, after: 61.33 },
+    ]);
+  });
+
+  test('whole_bill replaces every line with one, and the card can show what drops off', () => {
+    const change = planRateChange({ components: pest, previousScalar: 41.33, newScalar: 60.33, familyKey: WHOLE_BILL });
+    expect(change.lines).toEqual([
+      { family: 'pest_control', before: 41.33, after: 0 },
+      { family: UNATTRIBUTED, before: 0, after: 60.33 },
+    ]);
+  });
+
+  test('changing the named line itself moves only that line', () => {
+    const both = [...pest, { family_key: 'lawn_care', monthly_rate: '61.33' }];
+    const change = planRateChange({ components: both, previousScalar: 102.66, newScalar: 100, familyKey: 'lawn_care' });
+    expect(change.lines).toEqual([
+      { family: 'pest_control', before: 41.33, after: 41.33 },
+      { family: 'lawn_care', before: 61.33, after: 58.67 },
+    ]);
+  });
+
+  test('setLineForScalarWrite writes the split lines and keeps the other services', async () => {
+    const db = makeLedgerDb([{ customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 41.33 }]);
+    db.transaction = async (fn) => fn(db);
+    await setLineForScalarWrite(db, 'cust-1', { familyKey: 'lawn_care', previousScalar: 41.33, newScalar: 102.66 }, { source: 'ib_update' });
+    expect(db.store.map((r) => [r.family_key, Number(r.monthly_rate)]).sort()).toEqual([['lawn_care', 61.33], ['pest_control', 41.33]]);
+  });
+
+  test('setLineForScalarWrite refuses (and throws) when the edit no longer splits, even with the gate off', async () => {
+    const db = makeLedgerDb([{ customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 41.33 }]);
+    db.transaction = async (fn) => fn(db);
+    await expect(setLineForScalarWrite(db, 'cust-1', { familyKey: 'lawn_care', previousScalar: 41.33, newScalar: 20 }, { source: 'ib_update' }))
+      .rejects.toMatchObject({ code: 'rate_below_other_lines' });
+    expect(db.store).toHaveLength(1);
+  });
+});
+
+describe('setLineForScalarWrite keeps every other row (Codex #6085 r1)', () => {
+  const { setLineForScalarWrite } = require('../services/plan-rate-ledger');
+
+  test('a paused service\'s zero plan_hold row survives an edit to another line', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 41.33, source: 'estimate_accept' },
+      { customer_id: 'cust-1', family_key: 'mosquito', monthly_rate: 0, source: 'plan_hold' },
+    ]);
+    db.transaction = async (fn) => fn(db);
+    await setLineForScalarWrite(db, 'cust-1', { familyKey: 'lawn_care', previousScalar: 41.33, newScalar: 102.66 }, { source: 'ib_update' });
+    const byFamily = Object.fromEntries(db.store.map((r) => [r.family_key, r]));
+    expect(byFamily.mosquito).toMatchObject({ monthly_rate: 0, source: 'plan_hold' });
+    expect(byFamily.pest_control).toMatchObject({ monthly_rate: 41.33, source: 'estimate_accept' });
+    expect(Number(byFamily.lawn_care.monthly_rate)).toBe(61.33);
+  });
+
+  test('the held service itself cannot be edited', async () => {
+    const db = makeLedgerDb([{ customer_id: 'cust-1', family_key: 'mosquito', monthly_rate: 0, source: 'plan_hold' }]);
+    db.transaction = async (fn) => fn(db);
+    await expect(setLineForScalarWrite(db, 'cust-1', { familyKey: 'mosquito', previousScalar: 0, newScalar: 30 }, { source: 'ib_update' }))
+      .rejects.toMatchObject({ code: 'rate_family_on_hold' });
+  });
+});

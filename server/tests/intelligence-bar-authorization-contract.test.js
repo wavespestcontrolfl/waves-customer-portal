@@ -1008,3 +1008,21 @@ test('cancel_appointment always discloses that it closes any open overdue dispat
   const contract = buildContract({ toolName: 'cancel_appointment', params: { appointment_id: 'svc-1' }, preview });
   expect(contract.effects.some((e) => e.kind === 'operational' && /running-late \/ unassigned-overdue dispatch alert/.test(e.label))).toBe(true);
 });
+
+// Owner 2026-10-06: a rate edit's card shows the whole monthly bill by service,
+// so replacing a pest plan with a lawn price can never hide behind one number.
+test('update_customer monthly-rate edit lists every bill line, the total and the no-notice line', () => {
+  const params = { customer_id: 'c1', updates: { monthly_rate: 60.33 }, _rate_family: 'whole_bill' };
+  const contract = buildContract({
+    toolName: 'update_customer', params, displayParams: { updates: { monthly_rate: 60.33 } },
+    preview: { rate_change: {
+      billing_mode: 'monthly_membership', replaces_whole_bill: true,
+      lines: [{ label: 'Pest control', before: 41.33, after: 0 }, { label: 'Earlier rate (not split by service)', before: 0, after: 60.33 }],
+      total_before: 41.33, total_after: 60.33,
+    } },
+  });
+  const labels = contract.effects.map((e) => e.label);
+  expect(labels).toContain('Pest control: $41.33 → $0.00 a month (drops off the bill)');
+  expect(labels).toContain('Monthly bill total: $41.33 → $60.33 (replaces the whole bill)');
+  expect(labels).toContain('No price-change notice is sent to the customer');
+});
