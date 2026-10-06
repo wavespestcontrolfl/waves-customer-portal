@@ -33,13 +33,21 @@ function walkDir(dir, out = []) {
   }
   return out;
 }
-const files = walkDir(SERVER_ROOT);
 const rel = (f) => path.relative(SERVER_ROOT, f).split(path.sep).join('/');
 
 const LOOKUP = 'performPropertyLookup';
 const TRIO = 'lookupPropertyFromAITrio';
 const HELPER = 'lookupOptionsFor';
 const OPTION = 'commercialSuiteSizing';
+// Where each function is defined — the only module allowed to export it.
+const DEFINING = { [LOOKUP]: 'routes/property-lookup-v2.js', [TRIO]: 'services/property-lookup/ai-property-lookup.js' };
+
+// Only a file that spells one of the names can call, alias, import,
+// re-export or override anything this guard tracks (a computed member built
+// from string pieces is not resolvable by any static scan). So the parse
+// is limited to those files: the whole tree is read, ~1% of it is parsed.
+const NAMES = new RegExp([LOOKUP, TRIO, HELPER, OPTION, 'CALLERS'].join('|'));
+const files = walkDir(SERVER_ROOT).filter((f) => NAMES.test(fs.readFileSync(f, 'utf8')));
 
 // The one sanctioned place the scope decision is changed after the registry
 // answered: the admin route turning the leg OFF for a whole-property job.
@@ -69,11 +77,17 @@ function parse(src, file) {
   throw lastErr;
 }
 
-// Source text with every comment blanked (same length, so line numbers hold).
+// Source text with every comment blanked (same length, so line numbers
+// hold), built in one pass over the comment ranges.
 function withoutComments(src, comments) {
-  let out = src;
-  for (const c of comments) out = out.slice(0, c.start) + out.slice(c.start, c.end).replace(/[^\n]/g, ' ') + out.slice(c.end);
-  return out;
+  const parts = [];
+  let at = 0;
+  for (const c of [...comments].sort((a, b) => a.start - b.start)) {
+    parts.push(src.slice(at, c.start), src.slice(c.start, c.end).replace(/[^\n]/g, ' '));
+    at = c.end;
+  }
+  parts.push(src.slice(at));
+  return parts.join('');
 }
 
 // The static name a member access reads: `.name`, `['name']`, `[`name`]`.
@@ -162,10 +176,57 @@ function analyze(file) {
   const aliases = { [LOOKUP]: aliasesOf(ast, LOOKUP), [TRIO]: aliasesOf(ast, TRIO) };
   const out = { file: r, calls: { [LOOKUP]: [], [TRIO]: [] }, valueRefs: [], helperCalls: [], helperRefs: [], optionVars: new Set(), overrides: [], mentions: [], policyWrites: [] };
 
-  // Pass 1: identifiers bound to lookupOptionsFor(...).
+  // Pass 1: identifiers bound to lookupOptionsFor(...), and every binding
+  // (declaration, parameter, pattern, import, catch, class, function) each
+  // name has in the file, so a trusted options variable can be required to
+  // be a `const` declared exactly once and never assigned: then the one
+  // lexical binding that can reach any call is the helper's result.
+  const bindings = {};
+  const assigned = new Set();
+  const bind = (name) => { bindings[name] = (bindings[name] || 0) + 1; };
+  const bindPattern = (pat) => {
+    if (!pat) return;
+    switch (pat.type) {
+      case 'Identifier': bind(pat.name); break;
+      case 'AssignmentPattern': bindPattern(pat.left); break;
+      case 'RestElement': bindPattern(pat.argument); break;
+      case 'ArrayPattern': pat.elements.forEach(bindPattern); break;
+      case 'ObjectPattern': pat.properties.forEach((pr) => bindPattern(pr.type === 'Property' ? pr.value : pr.argument)); break;
+      default: break;
+    }
+  };
+  walk.full(ast, (node) => {
+    switch (node.type) {
+      case 'VariableDeclaration': node.declarations.forEach((d) => bindPattern(d.id)); break;
+      case 'FunctionDeclaration': case 'FunctionExpression': case 'ArrowFunctionExpression':
+        if (node.id) bind(node.id.name); node.params.forEach(bindPattern); break;
+      case 'ClassDeclaration': case 'ClassExpression': if (node.id) bind(node.id.name); break;
+      case 'CatchClause': bindPattern(node.param); break;
+      case 'ImportDeclaration': node.specifiers.forEach((sp) => bind(sp.local.name)); break;
+      case 'AssignmentExpression': if (node.left.type === 'Identifier') assigned.add(node.left.name); else bindPatternAssigned(node.left); break;
+      case 'UpdateExpression': if (node.argument.type === 'Identifier') assigned.add(node.argument.name); break;
+      default: break;
+    }
+  });
+  function bindPatternAssigned(pat) { // `[opts] = ...`, `({ opts } = ...)`
+    const names = [];
+    const collect = (q) => {
+      if (!q) return;
+      if (q.type === 'Identifier') names.push(q.name);
+      else if (q.type === 'AssignmentPattern') collect(q.left);
+      else if (q.type === 'RestElement') collect(q.argument);
+      else if (q.type === 'ArrayPattern') q.elements.forEach(collect);
+      else if (q.type === 'ObjectPattern') q.properties.forEach((pr) => collect(pr.type === 'Property' ? pr.value : pr.argument));
+    };
+    collect(pat);
+    names.forEach((n) => assigned.add(n));
+  }
   walk.simple(ast, {
-    VariableDeclarator(node) {
-      if (node.id.type === 'Identifier' && node.init && node.init.type === 'CallExpression' && isHelperCallee(node.init.callee)) out.optionVars.add(node.id.name);
+    VariableDeclaration(node) {
+      for (const d of node.declarations) {
+        if (d.id.type === 'Identifier' && d.init && d.init.type === 'CallExpression' && isHelperCallee(d.init.callee)
+          && node.kind === 'const' && bindings[d.id.name] === 1 && !assigned.has(d.id.name)) out.optionVars.add(d.id.name);
+      }
     },
   });
 
@@ -205,7 +266,10 @@ function analyze(file) {
         if (!aliases[t].has(node.name)) continue;
         if (inCalleePosition || memberCallee) continue; // the call itself (counted above)
         if (aliasBinding && refersTo(parent.init || parent.right, t, aliases[t])) continue; // an alias binding
-        if (isExportContext(ancestors)) continue; // module.exports = { performPropertyLookup } / exports.x = ...
+        // Only the defining module may export it. A re-export anywhere else
+        // (`module.exports = performPropertyLookup`, `exports.lookup = renamed`)
+        // is a one-line wrapper another file could call under any name.
+        if (isExportContext(ancestors) && r === DEFINING[t]) continue;
         out.valueRefs.push({ target: t, line: node.loc.start.line, text: sourceOf(parent).split('\n')[0].trim() });
       }
       if (node.name === HELPER && !inCalleePosition && !isExportContext(ancestors) && !(parent.type === 'Property' && parent.key === node && !parent.computed)) {
@@ -249,9 +313,12 @@ for (const file of files) {
 }
 const all = [...analyses.values()];
 
-// The options argument of a lookup call: lookupOptionsFor(...) inline, or an
-// identifier bound to lookupOptionsFor(...) somewhere in the same file.
-// Nothing else — no spread, no object literal around it, no missing argument.
+// The options argument of a lookup call: lookupOptionsFor(...) inline, or a
+// `const` identifier bound to lookupOptionsFor(...) in the same file that is
+// declared exactly once (no shadowing parameter, pattern or redeclaration)
+// and never assigned or updated afterwards, so the binding that reaches the
+// call is the helper's result. Nothing else — no `let`, no spread, no object
+// literal around it, no missing argument.
 function optionsDeclared(call, a) {
   const arg = call.optionsArg;
   if (!arg || call.spreadBeforeOptions || call.via !== 'direct') return false;
@@ -265,7 +332,10 @@ function optionsDeclared(call, a) {
 describe('property-lookup callers declare their scope decision', () => {
   test('every production file parses (a file the guard cannot read cannot hide a caller)', () => {
     expect(parseErrors).toEqual([]);
-    expect(all.length).toBeGreaterThan(100);
+    // The prefilter keeps every file that spells a tracked name; the real
+    // callers are among them, so the set is never trivially empty.
+    expect(all.length).toBeGreaterThan(10);
+    for (const c of Object.values(CALLERS)) expect(all.some((a) => a.file === c.file)).toBe(true);
   });
 
   test('the registry and every entry are frozen; no file reassigns a policy field', () => {
