@@ -434,9 +434,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('comms', 'Sends to an EXTERNAL (non-customer) recipient — this inbox row is not attributed to a customer');
     }
   }
-  if (toolName === 'create_appointment' && preview?.pinned_technician) {
-    push('operational', `Assigned to ${preview.pinned_technician.name}`);
-  }
+  // The technician shows once, as the card's "Technician" line (built from
+  // the display params), not again as a separate "Assigned to" effect.
   // Single-target mutations name the resolved human (GH r8 P1) — the card
   // hides raw params, so the uuid alone would leave the operator unable to
   // detect a wrong-customer selection before confirming.
@@ -519,18 +518,27 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // claimed post-commit and by the hourly sweep — not pinnable), so a card
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
-    if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
+    // The card says nothing about credit when none applies: the executor
+    // still re-verifies it under the credit lock at commit.
     // Another visit already overlaps this time (pinned at proposal, owner
     // 2026-10-05): the booking still goes through, as a warning. An overlap
     // that appears AFTER this card refuses the confirm and shows a new card.
-    if (preview?.slot_overlap?.already_overlaps) push('operational', 'Another visit already overlaps this time. Both stay on the calendar and Confirm warns, as on the Schedule screen');
+    if (preview?.slot_overlap?.already_overlaps) {
+      const withVisits = Array.isArray(preview.slot_overlap.with) ? preview.slot_overlap.with : [];
+      const first = withVisits[0];
+      const who = first ? [first.customer, first.service, first.window].filter(Boolean).join(', ') : '';
+      const more = withVisits.length > 1 ? ` (and ${withVisits.length - 1} more)` : '';
+      push('operational', who
+        ? `Another visit is at this time: ${who}${more}. Both stay on the calendar.`
+        : 'Another visit is at this time. Both stay on the calendar.');
+    }
     // A booking with a time texts the booking confirmation exactly as a
     // Schedule-screen booking does (owner 2026-09-27); a windowless one
     // registers a non-delivering placeholder: its confirmation is marked
     // handled, so setting a time later re-arms only the 72h/24h reminders.
     push('operational', params?.time_window
-      ? 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card)'
-      : 'Registers placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h/24h reminders');
+      ? 'Reminders go out 3 days and 1 day before.'
+      : 'No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) start once a time is set.');
   }
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
@@ -787,6 +795,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // one level of plain-object params flattens to its own lines (so an
   // update_customer card says WHAT changes), deeper structure is described
   // in full rather than dropped.
+  // The booking card's field names read as words with a capital ("When",
+  // "Service", "Price"); other tools keep their existing lowercase labels.
+  const keyLabel = (k) => {
+    const words = humanKey(k);
+    return toolName === 'create_appointment' ? words.charAt(0).toUpperCase() + words.slice(1) : words;
+  };
   for (const [k, v] of Object.entries(propertyAction || customerEstimateAction ? {} : (displayParams || {}))) {
     if (k.startsWith('_')) continue;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
@@ -798,7 +812,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       continue;
     }
     const s = describe(v, 1);
-    if (s !== null) push(kindFor(toolName, k), `${humanKey(k)}: ${s}`);
+    if (s !== null) push(kindFor(toolName, k), `${keyLabel(k)}: ${s}`);
   }
 
   // Deterministic ripples the Confirm also covers (customer-email-fanout /
@@ -957,14 +971,22 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // knows.
       contactLabel = 'The customer MAY be texted a cancellation notice by the existing notice system, depending on conditions at the moment it processes the cancellation';
     }
+    // A timed booking's confirmation is shown as short lines (owner
+    // 2026-10-06); the three below carry the same conditions as the old
+    // one-sentence text.
+    let bookingConfirmationLines = null;
     if (bookingConfirmationText) {
+      bookingConfirmationLines = [
+        'Booking confirmation goes out by text or email, per their settings.',
+        'No confirmation if they turned it off or were already confirmed for another visit at this time.',
+        'Texts after 8 PM wait until 8 AM; an email goes right away.',
+      ];
       // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
       // send window (appointment-reminders.js reminderSendWindowHold — 'email'
       // is never held, and the 'both' channel sends its email leg right away
       // and defers only the text). The old wording said the WHOLE
       // confirmation waited until 8 AM, which is false for an email-only or
       // email+text customer.
-      contactLabel = 'Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
     }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card
@@ -977,7 +999,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
         contactLabel = `Customers with a pinned SMS recipient will be texted; ${missing} stop(s) have no SMS recipient and will NOT be texted`;
       }
     }
-    push('comms', contactLabel);
+    if (bookingConfirmationLines) bookingConfirmationLines.forEach((line) => push('comms', line));
+    else push('comms', contactLabel);
   }
 
   // cancel_appointment's assigned-technician cancel notice

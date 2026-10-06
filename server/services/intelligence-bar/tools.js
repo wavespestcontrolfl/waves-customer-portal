@@ -2928,9 +2928,22 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
   if (request?.error) return { error: request.error };
   const discount = booking.pricing?.primaryDiscount || null;
+  // A STATED price shows the catalog price for this customer beside it when
+  // the two differ (display only). Same helper, same inputs, no stated price;
+  // best effort: any failure just leaves the card without the comparison.
+  let catalogPrice = null;
+  if (booking.source === 'stated') {
+    try {
+      const catalog = await ibBookingPricing({ customer, serviceType });
+      if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
+    } catch (err) {
+      logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
+    }
+  }
   return {
     price: booking.price,
     source: booking.source,
+    catalogPrice,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
     // The reason exactly as the insert will save it (trimmed, capped), so
@@ -2966,7 +2979,7 @@ const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing
 // true/false, or null when there is no timed window to probe (the executor
 // probes nothing then either). A read error THROWS so the proposal fails
 // closed; an invalid date or window returns null (the executor refuses it).
-async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+async function ibBookingOverlapRows(scheduledDate, timeWindow) {
   const dateStr = validScheduleDate(scheduledDate);
   if (!dateStr) return null;
   const win = parseTimeWindowStart(timeWindow);
@@ -2979,8 +2992,46 @@ async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
     if (err?.status === 422) return null;
     throw err;
   }
-  const overlap = await db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
-  return overlap.length > 0;
+  return db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+}
+
+async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  return overlap == null ? null : overlap.length > 0;
+}
+
+// "9:00 AM" from a stored "09:00:00" (card text only).
+function clockLabel(hhmmss) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmmss || ''));
+  if (!m) return null;
+  const h = Number(m[1]);
+  return `${h % 12 || 12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// Who the overlapping visit(s) are, for the booking card's one line: customer
+// name, service and window. Card text only — the boolean pin above is what the
+// executor compares. Up to three visits; [] when there is no overlap or no
+// timed window.
+async function ibBookingOverlapWho(scheduledDate, timeWindow) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  if (!rows || !rows.length) return [];
+  const ids = rows.map((r) => r.id).filter(Boolean);
+  const names = ids.length
+    ? await db('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereIn('scheduled_services.id', ids)
+      .select('scheduled_services.id', 'customers.first_name', 'customers.last_name')
+    : [];
+  const nameById = new Map((Array.isArray(names) ? names : []).map((n) => [String(n.id), `${n.first_name || ''} ${n.last_name || ''}`.trim()]));
+  return rows.slice(0, 3).map((r) => {
+    const start = clockLabel(r.window_start);
+    const end = clockLabel(r.window_end);
+    return {
+      customer: nameById.get(String(r.id)) || null,
+      service: r.service_type || null,
+      window: start && end ? `${start}-${end}` : (start || null),
+    };
+  });
 }
 
 // Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
@@ -4427,7 +4478,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.

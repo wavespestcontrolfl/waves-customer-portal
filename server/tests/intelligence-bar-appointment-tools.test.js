@@ -700,6 +700,24 @@ describe('create_appointment — an overlap that is NEW since the card gets a fr
     await expect(ibBookingOverlapProposal('2099-01-15', undefined)).resolves.toBeNull();
     await expect(ibBookingOverlapProposal('not a date', '10:00 AM')).resolves.toBeNull();
   });
+
+  test('ibBookingOverlapWho names the overlapping visit for the card line: customer, service and window (owner 2026-10-06)', async () => {
+    const { ibBookingOverlapWho } = require('../services/intelligence-bar/tools');
+    const probeWith = (rows) => chain({ whereNotIn: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue(rows) });
+    const namesWith = (rows) => chain({ select: jest.fn().mockResolvedValue(rows) });
+    wireDb({
+      scheduled_services: [
+        probeWith([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Lawn Care' }]),
+        namesWith([{ id: 'other', first_name: 'Testa', last_name: 'Beta' }]),
+        probeWith([]),
+      ],
+    });
+    await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([
+      { customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' },
+    ]);
+    await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([]);
+    await expect(ibBookingOverlapWho('2099-01-15', undefined)).resolves.toEqual([]);
+  });
 });
 
 describe('create_appointment — billing gate (ADMIN-BUG-R12)', () => {
@@ -1005,6 +1023,23 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     const result = await book({ price: 180, _booking_price: 180, _booking_service_id: 'svc-otp' });
     expect(result.success).toBe(true);
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 180, primary_line_price: 180, service_id: 'svc-otp' });
+  });
+
+  test('the proposal of a STATED price carries the catalog price beside it only when the two differ (card text; owner 2026-10-06)', async () => {
+    const wireProposal = () => wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
+      services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
+      scheduled_services: [chain()],
+    });
+    wireProposal();
+    let result = await ibBookingProposal('cust-1', 'One-Time Pest Control Service', 180);
+    expect(result).toMatchObject({ price: 180, source: 'stated', catalogPrice: 250 });
+    wireProposal();
+    result = await ibBookingProposal('cust-1', 'One-Time Pest Control Service', 250);
+    expect(result).toMatchObject({ price: 250, source: 'stated', catalogPrice: null });
+    wireProposal();
+    result = await ibBookingProposal('cust-1', 'One-Time Pest Control Service', undefined);
+    expect(result).toMatchObject({ price: 250, source: 'catalog', catalogPrice: null });
   });
 
   test('a stated price books a service the catalog has no price for — the case that used to be refused', async () => {

@@ -32,6 +32,8 @@ const mockResolveTechnicianById = jest.fn();
 const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, serviceId: null, serviceName: null }));
 // Whether another visit already overlaps the time (owner 2026-10-05): no timed window = no pin by default.
 const mockIbBookingOverlapProposal = jest.fn(async () => null);
+// Who the overlapping visit is (card text only): nobody named by default.
+const mockIbBookingOverlapWho = jest.fn(async () => []);
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -68,6 +70,7 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
   ibBookingProposal: (...args) => mockIbBookingProposal(...args),
   ibBookingOverlapProposal: (...args) => mockIbBookingOverlapProposal(...args),
+  ibBookingOverlapWho: (...args) => mockIbBookingOverlapWho(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -303,6 +306,21 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     const offPrompt = mockMessagesCreate.mock.calls[0][0].system.map((b) => b.text).join('\n');
     expect(offPrompt).toContain('WRITE CONFIRMATION (UI mode)');
     expect(offPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
+  });
+
+  test('system prompt carries the number read-back rule: a changed amount, date, time, quantity or rate gets one question naming both, and no card', async () => {
+    mockExecuteTool.mockResolvedValue({ customers: [] });
+    scriptModelTurns([[{ type: 'text', text: 'hi' }]]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'hello', context: 'schedule' });
+    });
+    const prompt = mockMessagesCreate.mock.calls[0][0].system.map((b) => b.text).join('\n');
+    expect(prompt).toContain('Number read-back:');
+    expect(prompt).toMatch(/money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm/);
+    expect(prompt).toMatch(/act on neither/);
+    expect(prompt).toMatch(/You said \$60\.33, but earlier it was \$61\.33\. Which one\?/);
+    expect(prompt).toMatch(/prepare no card until they answer/);
+    expect(prompt).toMatch(/Voice dictation often mishears digits/);
   });
 
   test.each(['get_customer_detail', 'query_customers', 'get_schedule_view'])('%s redacts query telemetry', async name => {
@@ -1092,7 +1110,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(stored.params._booking_service_id).toBeNull();
 
       expect(body.pendingActions).toHaveLength(1);
-      expect(body.pendingActions[0].params.price).toBe('$180.00 (as stated) — invoiced when the visit is completed');
+      expect(body.pendingActions[0].params.price).toBe('$180.00 (price you gave) — invoiced when the visit is completed');
     });
   });
 
@@ -1128,7 +1146,13 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
       // A timed booking texts its confirmation — the contract says so.
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
-      expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both/));
+      expect(labels).toContain('Booking confirmation goes out by text or email, per their settings.');
+      expect(labels).toContain('Texts after 8 PM wait until 8 AM; an email goes right away.');
+      // Plain field names with a capital, the customer by name (no raw id).
+      expect(labels).toContain('Service: One-Time Pest Control Service');
+      expect(labels).toContain('When: Monday, Jan 5, 9:00 AM');
+      expect(labels).toContain('Booked for: Testa Alpha');
+      expect(labels.some((l) => /customer id|scheduled date|service type|time window/i.test(l))).toBe(false);
     });
   });
 
@@ -1164,7 +1188,42 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_overlap).toBe(true);
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
-      expect(labels).toContainEqual(expect.stringMatching(/^Another visit already overlaps this time\./));
+      expect(labels).toContain('Another visit is at this time. Both stay on the calendar.');
+    });
+  });
+
+  test('create_appointment on a taken time names the visit that holds it; the _booking_overlap pin stays a plain boolean', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingOverlapProposal.mockResolvedValueOnce(true);
+    mockIbBookingOverlapWho.mockResolvedValueOnce([{ customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' }]);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_overlap).toBe(true);
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels).toContain('Another visit is at this time: Testa Beta, Lawn Care, 10:00 AM-11:00 AM. Both stay on the calendar.');
+    });
+  });
+
+  test('create_appointment with a stated price that differs from the catalog shows both (owner 2026-10-06)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service', catalogPrice: 61.33 });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', price: 60.33 } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' });
+      expect(body.pendingActions[0].params.price).toBe('$60.33 (price you gave) — catalog price is $61.33. Invoiced when the visit is completed');
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      // Display only: the pinned price is still the stated one.
+      expect(stored.params._booking_price).toBe(60.33);
     });
   });
 
