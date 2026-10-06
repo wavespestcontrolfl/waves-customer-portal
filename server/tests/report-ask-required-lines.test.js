@@ -330,6 +330,99 @@ describe('the fact sheet and prompt carry required lines', () => {
     expect(buildReportAskFacts({ data: free }).report_sections).toHaveLength(2);
   });
 
+  test('while the aftercare holds watering, the saved Waves summary that changes watering is not carried', () => {
+    const aiSummary = { headline: 'Increase irrigation to twice this week', body: 'The lawn is filling in.' };
+    const facts = buildReportAskFacts({ data: lawnData({ dynamicContext: { aiSummary } }) });
+    expect(JSON.stringify(facts)).not.toMatch(/irrigation/);
+    expect(facts.waves_summary).toEqual({ body: 'The lawn is filling in.' });
+    const bodyOnly = { headline: 'Good visit', body: 'Increase irrigation to twice this week.' };
+    expect(buildReportAskFacts({ data: lawnData({ dynamicContext: { aiSummary: bodyOnly } }) }).waves_summary)
+      .toEqual({ headline: 'Good visit' });
+    const free = lawnData({ reportV2: { water: { weekPlan: null }, aftercare: {} }, dynamicContext: { aiSummary } });
+    expect(buildReportAskFacts({ data: free }).waves_summary).toEqual(aiSummary);
+  });
+
+  describe('lawn report facts (reportV2)', () => {
+    const v2 = (overrides = {}) => ({
+      aftercare: {},
+      lead: {
+        headline: 'Your lawn is filling in',
+        why: 'Density is up since the last visit.',
+        yourPart: ['Mow at the high setting this week.'],
+        next: 'We recheck the thin spots next visit.',
+        techParagraph: 'The fence line is the slowest area to fill in.',
+      },
+      insights: [{ headline: 'Thin spots by the fence', whatWeSaw: 'Some thin turf.', customerAction: 'Keep traffic off it.' }],
+      diagnosis: [{ key: 'turf_density', label: 'Turf density', status: 'needs_attention', explanation: 'A few thin areas.' }],
+      water: {
+        rainInches: 1.234, irrigationInches: 0.5, totalInches: 1.73, targetInches: 1.25, status: 'balanced', explanation: 'Water is on target.', weekPlan: null,
+      },
+      rain7d: [{ d: 'Mon', in: 0.5 }, { d: 'Tue', in: 0 }, { d: 'Wed', in: 0.73 }],
+      mowing: {
+        measuredHeightInches: 3, idealMinInches: 3.5, idealMaxInches: 4, status: 'too_short', recommendation: 'Raise the mower one setting.',
+      },
+      trends: { overall: [{ label: 'Aug', value: 70 }, { label: 'Oct', value: 82 }], mowing: [{ label: 'Aug', value: 3.5 }] },
+      ...overrides,
+    });
+
+    test('the lead, cards, water, seven-day rain, mowing and trends the page shows are carried', () => {
+      const facts = buildReportAskFacts({ data: lawnData({ reportV2: v2() }) });
+      expect(facts.lawn_report).toMatchObject({
+        headline: 'Your lawn is filling in',
+        your_part: ['Mow at the high setting this week.'],
+        from_your_technician: 'The fence line is the slowest area to fill in.',
+        diagnosis: [{ area: 'Turf density', status: 'needs attention', explanation: 'A few thin areas.' }],
+        water_this_week: {
+          rain_last_7_days_inches: 1.23, irrigation_inches_per_week: 0.5, total_inches_7_days: 1.73, target_inches_per_week: 1.25, status: 'balanced',
+        },
+        rain_by_day_last_7_days: { total_inches: 1.23, days: [{ day: 'Mon', inches: 0.5 }, { day: 'Tue', inches: 0 }, { day: 'Wed', inches: 0.73 }] },
+        mowing: {
+          measured_height_inches: 3, ideal_min_inches: 3.5, ideal_max_inches: 4, status: 'too short', recommendation: 'Raise the mower one setting.',
+        },
+        trends: { overall_out_of_100: '70 in Aug to 82 in Oct' },
+      });
+      // A one-point series is not a trend.
+      expect(facts.lawn_report.trends.mowing_height_inches).toBeUndefined();
+      expect(buildReportAskPrompt({ data: lawnData({ reportV2: v2() }) }).user).toContain('rain_by_day_last_7_days');
+    });
+
+    test('the prompt tells the visit weather apart from the week of rain', () => {
+      expect(SYSTEM_PROMPT).toMatch(/weather_during_visit is the weather at the visit only/);
+      expect(SYSTEM_PROMPT).toMatch(/rain_by_day_last_7_days/);
+    });
+
+    test('while the aftercare holds watering, lawn report text that changes watering is not carried', () => {
+      const data = lawnData({
+        reportV2: v2({
+          aftercare: { ...HOLD_AFTERCARE },
+          insights: [{ headline: 'Running dry', customerAction: 'Increase irrigation to twice this week.' }, { headline: 'Thin spots' }],
+        }),
+      });
+      const facts = buildReportAskFacts({ data });
+      expect(JSON.stringify(facts.lawn_report.insights)).not.toMatch(/Increase irrigation/);
+      expect(facts.lawn_report.insights).toEqual([{ headline: 'Running dry' }, { headline: 'Thin spots' }]);
+    });
+
+    test('lawn report text is scrubbed like the concern', () => {
+      const data = lawnData({ reportV2: v2({ lead: { techParagraph: 'Call 941-555-0100 about the gate at 4421 Elm Street.' } }) });
+      const text = JSON.stringify(buildReportAskFacts({ data }).lawn_report);
+      expect(text).not.toMatch(/941-555-0100|4421/);
+    });
+
+    test('a lawn numbers answer passes the screen', () => {
+      const data = lawnData({ reportV2: v2() });
+      const facts = buildReportAskFacts({ data });
+      const answer = 'Your lawn got about 1.23 inches of rain over the past week. The mower is at 3 inches, and the ideal range is 3.5 to 4 inches.';
+      expect(screenAskAnswer(answer, { question: 'How much rain did we get?', data, facts })).toBeNull();
+    });
+
+    test('another service line, or a lawn report without reportV2, carries nothing', () => {
+      expect(buildReportAskFacts({ data: pestData({ reportV2: v2() }) }).lawn_report).toBeUndefined();
+      expect(buildReportAskFacts({ data: lawnData({ reportV2: null }) }).lawn_report).toBeUndefined();
+      expect(buildReportAskFacts({ data: lawnData({ reportV2: { aftercare: {} } }) }).lawn_report).toBeUndefined();
+    });
+  });
+
   test('while the aftercare holds watering, a recommendation that changes watering is not carried', () => {
     const recommendations = ['Increase irrigation to twice this week.', { text: 'Mow at 3.5 inches.' }];
     const facts = buildReportAskFacts({ data: lawnData({ recommendations }) });

@@ -426,6 +426,95 @@ function treeShrubFacts(data = {}, keep = () => true) {
   });
 }
 
+// Lawn reports keep their customer-visible dashboard in data.reportV2
+// (lawn-report-v2.js, LawnReportV2Section.jsx): the lead, the insight and
+// diagnosis cards, the water intake card, the seven-day rain chart, the
+// mowing gauge and the score trends. Without these the model would answer a
+// question about this week's rain or the mowing height from nothing, or from
+// the visit's own 24-hour weather (Codex P2 #5964 r5). Photos, the treatment
+// block and the PDF-only fields are not carried. Every string goes through the
+// watering keeper and scrubFacts like the rest of the sheet.
+function lawnV2Facts(data = {}, keep = () => true) {
+  const v2 = data.reportV2;
+  if (data.serviceLine !== 'lawn' || !v2 || typeof v2 !== 'object') return null;
+  const text = (value, max) => {
+    const out = clip(value, max);
+    return out && keep(out) ? out : null;
+  };
+  const texts = (values, count, max) => asArray(values).slice(0, count).map((value) => text(value, max)).filter(Boolean);
+  const inches = (value) => {
+    const n = readingOrNull(value);
+    return n === null ? null : Math.round(n * 100) / 100;
+  };
+  const lead = v2.lead && typeof v2.lead === 'object' ? v2.lead : {};
+  const snapshot = v2.snapshot || {};
+  const water = v2.water && typeof v2.water === 'object' ? v2.water : null;
+  const mowing = v2.mowing && typeof v2.mowing === 'object' ? v2.mowing : null;
+  const rainDays = asArray(v2.rain7d)
+    .map((day) => ({ day: cleanText(day?.d), inches: inches(day?.in) }))
+    .filter((day) => day.inches !== null);
+  const trend = (series) => {
+    const points = asArray(series).filter((point) => readingOrNull(point?.value) !== null);
+    if (points.length < 2) return null;
+    const first = points[0];
+    const last = points[points.length - 1];
+    return `${Math.round(readingOrNull(first.value) * 100) / 100} in ${cleanText(first.label)} to ${Math.round(readingOrNull(last.value) * 100) / 100} in ${cleanText(last.label)}`;
+  };
+  const trends = v2.trends && typeof v2.trends === 'object' ? v2.trends : {};
+  const orNull = (row) => (Object.keys(row).length ? row : null);
+  return orNull(dropEmpty({
+    headline: text(lead.headline || snapshot.statusHeadline, 200),
+    why: text(lead.why || snapshot.rootCause || snapshot.scoreExplanation, 300),
+    applied_today: text(lead.applied, 300),
+    your_part: texts(lead.yourPart, 2, 240),
+    next: text(lead.next, 240),
+    what_to_expect: text(lead.whatToExpect, 300),
+    watching: texts(lead.watching ? [lead.watching].flat() : [], 2, 200),
+    from_your_technician: text(lead.techParagraph, 700),
+    since_last_visit: lead.sinceLast ? texts(lead.sinceLast.lines, 4, 200) : [],
+    insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
+      headline: text(card?.headline, 160),
+      what_we_saw: text(card?.whatWeSaw, 240),
+      customer_action: text(card?.customerAction, 240),
+    })).filter((card) => Object.keys(card).length),
+    diagnosis: asArray(v2.diagnosis).slice(0, 6).map((card) => dropEmpty({
+      area: cleanText(card?.label),
+      status: cleanText(card?.status).replace(/_/g, ' '),
+      explanation: text(card?.explanation || card?.customerExplanation, 240),
+    })).filter((card) => card.area),
+    water_this_week: water ? orNull(dropEmpty({
+      rain_last_7_days_inches: inches(water.rainInches),
+      irrigation_inches_per_week: inches(water.irrigationInches),
+      total_inches_7_days: inches(water.totalInches),
+      target_inches_per_week: inches(water.targetInches),
+      status: cleanText(water.status) === 'unknown' ? null : cleanText(water.status),
+      explanation: text(water.explanation, 300),
+      week_plan: water.weekPlan ? text([water.weekPlan.title, water.weekPlan.detail].filter(Boolean).join(': '), 300) : null,
+    })) : null,
+    rain_by_day_last_7_days: rainDays.length ? {
+      days: rainDays,
+      total_inches: Math.round(rainDays.reduce((sum, day) => sum + day.inches, 0) * 100) / 100,
+      limited_data: v2.rain7dConfidence === 'low' || null,
+    } : null,
+    mowing: mowing ? orNull(dropEmpty({
+      measured_height_inches: inches(mowing.measuredHeightInches),
+      ideal_min_inches: inches(mowing.idealMinInches),
+      ideal_max_inches: inches(mowing.idealMaxInches),
+      status: cleanText(mowing.status).replace(/_/g, ' ') || null,
+      recommendation: text(mowing.recommendation, 240),
+    })) : null,
+    trends: orNull(dropEmpty({
+      overall_out_of_100: trend(trends.overall),
+      density_out_of_100: trend(trends.coverage),
+      weed_cleanliness_out_of_100: trend(trends.weed),
+      color_out_of_100: trend(trends.color),
+      stress_damage_out_of_100: trend(trends.stress),
+      water_gap_inches: trend(trends.waterGap),
+      mowing_height_inches: trend(trends.mowing),
+    })),
+  }));
+}
+
 function buildReportAskFacts({
   question = '', data = {}, nextAppointment = null, requiredLines = [], now = new Date(),
 } = {}) {
@@ -462,9 +551,16 @@ function buildReportAskFacts({
     .map((rec) => clip(typeof rec === 'string' ? rec : rec?.text || rec?.title, 240))
     .filter((rec) => rec && keep(rec))
     .slice(0, 3);
+  // The saved Waves summary takes the same watering screen (Codex P1 #5964 r5):
+  // a stored "increase irrigation" headline or body must not reach the model
+  // while the aftercare holds watering.
+  const keptSummaryPart = (value, max) => {
+    const out = clip(value, max);
+    return out && keep(out) ? out : null;
+  };
   const aiSummary = data.summary ? {} : dropEmpty({
-    headline: clip(data.dynamicContext?.aiSummary?.headline, 200),
-    body: clip(data.dynamicContext?.aiSummary?.body, 700),
+    headline: keptSummaryPart(data.dynamicContext?.aiSummary?.headline, 200),
+    body: keptSummaryPart(data.dynamicContext?.aiSummary?.body, 700),
   });
 
   return scrubFacts(dropEmpty({
@@ -478,10 +574,13 @@ function buildReportAskFacts({
     findings,
     lawn_assessment: lawnAssessmentFacts(data, keep),
     tree_shrub_report: treeShrubFacts(data, keep),
+    lawn_report: lawnV2Facts(data, keep),
     // A report with no findings rows can still carry its recommendations.
     recommendations,
     // The Waves summary the rule router answers a no-rule question with.
     waves_summary: Object.keys(aiSummary).length ? aiSummary : null,
+    // The visit's own conditions only. Rain over the past week is in
+    // lawn_report (water_this_week, rain_by_day_last_7_days).
     weather_during_visit: weatherFact(data.conditions || {}),
     pest_pressure: pressureFact(data),
     products,
@@ -506,7 +605,8 @@ RULES
 2a. REQUIRED LINES. When the facts hold required_lines, those are the office's recorded instructions for this customer. Put every one of them into your answer exactly as written, word for word, with the same punctuation, as its own sentence. You may put your own sentence before or after a required line. Never reword, shorten, merge, split, skip or contradict one, and never add a different instruction on the same subject. If a required line has no end punctuation, you may end it with a period. Required lines do not count toward the 4 sentences. If a required line already answers the question, add at most one short sentence of your own.
 3. Answer the question that was asked, about the thing that was asked. A question about one product talks about that product only: what it does and where it went. Do not bring in the other products or the rest of the visit.
 4. If the customer's own concern (customer_concern) bears on the question, lead with it and tie the answer to it.
-5. Never give amounts, rates, totals, mix strengths, percentages, counts of product used, or EPA numbers. Lawn scores in lawn_assessment and plant_health_score_out_of_100 are out of 100: say "82 out of 100", never with a percent sign.
+5. Never give amounts, rates, totals, mix strengths, percentages, counts of product used, or EPA numbers. Lawn scores in lawn_assessment, lawn_report and plant_health_score_out_of_100 are out of 100: say "82 out of 100", never with a percent sign. The inches of rain, irrigation and water and the mowing heights in lawn_report are not product amounts and may be stated as written.
+5a. weather_during_visit is the weather at the visit only, with rain in the 24 hours before it. For rain over the past week, use lawn_report water_this_week and rain_by_day_last_7_days. If the facts do not hold the period asked about, say the report does not show it.
 6. Never use the word "safe" in any form (safe, safely, safety). Never say "non-toxic", "harmless", "chemical-free", or that anything is pet-, kid-, child-, family- or people-friendly. For a question about pets, kids, or when anyone can go back out, give the dry or re-entry instruction from the facts (pet_precaution_today first when present, then pets_and_kids_wording, label_reentry, label_precaution, reentry) in plain words, and always include pet_precaution_today when it is present. If the facts hold none, say treated areas should dry completely before pets and kids go back, and offer to confirm by text or call.
 7. Never list which pests a product targets. If asked what a product is for, use only its what_it_does and labeled_for lines (for example "labeled for 25+ pests").
 8. applied_where says where a product went: outside, inside, inside and outside, the garage, the entry points, the garage and the entry points, or not recorded. Say the garage and entry point values as written. For "not recorded", say the report does not say where.
@@ -621,7 +721,7 @@ function leaksTargetList(text, {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for]);
   const allowed = stemmedTerms([
     question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.recommendations,
-    facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.tree_shrub_report,
+    facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report,
     approvedWording, requiredLines,
   ]
     .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
