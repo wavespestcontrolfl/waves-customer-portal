@@ -1840,6 +1840,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // This route's own tool results (with the input each ran with) from
       // earlier rounds of this request: server-held, never client history.
       priorToolResults,
+      // The proposal's own stock change: the same-card-again source compares
+      // it with an earlier card's stored params.
+      proposedParams: params,
     });
     // A refused target leaves no card and writes nothing; the model is told so
     // in plain words, so its reply can never read as a recorded change.

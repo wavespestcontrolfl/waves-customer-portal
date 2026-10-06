@@ -153,6 +153,7 @@ test('a lookup in an earlier round reaches the target rule, and the card names t
     expect(args.priorToolResults[0]).toMatchObject({ name: 'query_stock', input: { search: 'guard' }, round: 0 });
     expect(args.priorToolResults[0].result.products[0].id).toBe(PRODUCT_ID);
     expect(args.threadSeq).toBeNull();
+    expect(args.proposedParams).toMatchObject({ product_id: PRODUCT_ID, movement_type: 'restock', quantity: 2, unit: 'gal' });
     expect(body.pendingActions).toHaveLength(1);
     const labels = (body.pendingActions[0].contract?.effects || []).map((effect) => effect.label);
     expect(labels).toContain('Synthetic Guard CS: restock 2 gal; on hand 62 → 318 fl_oz');

@@ -1387,8 +1387,7 @@ async function productsNamedIn(rawText) {
 // adjust_stock needs a receipt and grounds only a restock preview (never a
 // count or a write-off); create_restock_request needs an order.
 const ARRIVAL_WORDS = new Set(['bought', 'purchased', 'picked', 'received', 'restocked', 'delivered', 'arrived', 'came', 'got']);
-// "request" asks for a restock request (an order), never a stock count.
-const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock', 'buy', 'request', 'requested']);
+const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock', 'buy']);
 const RECORDING_WORDS = new Set(['receive', 'add', 'added', 'adding', 'put', 'log', 'logged', 'record', 'recorded']);
 // The verb "purchase" asks for an order ("please purchase two bottles"); the
 // noun after a determiner ("we added your purchase") names nothing.
@@ -1545,55 +1544,54 @@ async function lookupEstablishes(productId, prompt, results = []) {
   return false;
 }
 
-// Did the server build an adjust_stock card for `productId` on this thread,
-// for this actor, in the last 24 hours, at or before the requesting tab's
-// observed turn? With no observed sequence there is no prior-card grounding
-// (a stale tab never borrows a card it never saw). An unreadable card
-// history grounds nothing (fail closed).
-async function priorCardTargeted(productId, actorId, threadId, observedSeq) {
+// Does the current message state an amount of its own? A digit, a spoken
+// number, or "a/an <unit>" ("a jug") all do, read with the same number words
+// and units the noun-position reader uses. Such a message is a new
+// instruction, never "show me that card again".
+const STATED_NUMBER_RE = new RegExp(`\\d|\\b(?:${PERCENT_NUMBER_WORD_ALT}|hundred|dozen|half)\\b|\\b(?:a|an)\\s+(?:${NOUN_POSITION_UNITS})\\b`, 'i');
+const statesAmount = text => STATED_NUMBER_RE.test(String(text || ''));
+
+// The fields that make two adjust_stock proposals the same stock change.
+const SAME_CARD_FIELDS = ['movement_type', 'quantity', 'set_total', 'unit'];
+const cardField = value => (value == null || value === '' ? null : String(value).trim().toLowerCase());
+const sameStockChange = (stored, proposed) => SAME_CARD_FIELDS.every(key => cardField(stored?.[key]) === cardField(proposed?.[key]));
+
+// "Re-propose the same card": the server built an adjust_stock card for this
+// product on this thread, for this actor, in the last 24 hours, at or before
+// the requesting tab's observed turn, and the new proposal is exactly that
+// stock change (movement type, amount, unit). With no observed sequence
+// there is no prior-card grounding (a stale tab never borrows a card it never
+// saw). An unreadable card history grounds nothing (fail closed).
+async function sameCardAgain(productId, proposedParams, actorId, threadId, observedSeq) {
   if (!Number.isInteger(observedSeq)) return false;
   try {
-    return await require('./pending-actions').threadCardTargetedProduct({
+    const cards = await require('./pending-actions').threadCardParamsForProduct({
       threadId, requestedBy: actorId, toolName: 'adjust_stock', productId, maxTurnSeq: observedSeq,
     });
+    return cards.some(stored => sameStockChange(stored, proposedParams));
   } catch (err) {
     logger.warn(`[intelligence-bar:procurement] prior card read failed: ${err.message}`);
     return false;
   }
 }
 
-// The operator's words that carry the operation for a prior-card target: this
-// prompt, then their own recent turns on the thread (newest first, up to the
-// observed turn). A question or modal turn stops the scan. "Yes" / "I didn't
-// see the confirm button" carry no operation, so the turn that asked for the
-// write ("We got 2 gallons of the Guard") decides. A turn that names any
-// other product (or a conflict) also stops it: its operation is not this
-// card's.
-async function operatorTextsForCard(prompt, productId, actorId, threadId, observedSeq) {
-  const turns = await require('./threads').recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 24 * 60, maxSeq: observedSeq });
-  const texts = [prompt];
-  for (const turn of turns) {
-    if (isNotAnInstruction(turn)) break;
-    const named = await productsNamedIn(turn);
-    if (named.conflict || [...named.named].some(id => String(id) !== productId)) break;
-    texts.push(turn);
-  }
-  return texts;
-}
-
 // One narrow exception, for adjust_stock only (always carded, owner
 // 2026-10-05): may the preview's product stand in where the operator's words
-// name no product the catalog can read? Only when the server itself already
-// established that product (a qualifying lookup in this request, or an
-// earlier card on this thread), the prompt is an instruction, and the
-// operator's words ask for this operation (operationMatches), so order or
-// request language never grounds a stock write.
-async function serverEstablishedTarget({ toolName, prompt, preview, actorId, threadId, threadSeq, priorToolResults }) {
+// name no product the catalog can read? Only when the prompt is an
+// instruction and the server itself already established that product:
+//   - a qualifying lookup in this request (lookupEstablishes), when the
+//     operator's words ask for this operation (operationMatches), so order or
+//     request language never grounds a stock write; or
+//   - the same card again (owner IB history 09-25: "Yes" / "OK I didn't see
+//     the confirm button" after a card expired unseen): the message states no
+//     amount of its own and the proposal equals an earlier card's stored
+//     stock change exactly. The earlier card already fixed the operation.
+async function serverEstablishedTarget({ toolName, prompt, preview, actorId, threadId, threadSeq, priorToolResults, proposedParams }) {
   if (toolName !== 'adjust_stock' || !preview?.product?.id || isNotAnInstruction(prompt)) return false;
   const productId = String(preview.product.id);
   if (operationMatches(toolName, [prompt], preview) && await lookupEstablishes(productId, prompt, priorToolResults)) return true;
-  if (!await priorCardTargeted(productId, actorId, threadId, threadSeq)) return false;
-  return operationMatches(toolName, await operatorTextsForCard(prompt, productId, actorId, threadId, threadSeq), preview);
+  if (statesAmount(prompt)) return false;
+  return sameCardAgain(productId, proposedParams, actorId, threadId, threadSeq);
 }
 
 async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
@@ -1660,15 +1658,15 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
 // read (a short name the grammar's lookup misses, or free phrasing naming
 // nothing), the preview's product stands when serverEstablishedTarget says
 // the server already established it: a lookup in this request whose search
-// term the operator said and which matched that one product, or an earlier
-// adjust_stock card on this thread (owner IB history 09-25: the card expired
-// unseen and "Yes" / "I didn't see the confirm button" was refused). Both are
+// term the operator said and which matched that one product, or the same
+// card again (an earlier adjust_stock card on this thread with exactly this
+// stock change, for a message that states no amount of its own). Both are
 // server records, so a model-invented id is still refused. Neither overrides
 // a name that matched several products, a different product, a page
-// reference, a question, or order/request language.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, priorToolResults = [] }) {
+// reference, or a question.
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, priorToolResults = [], proposedParams = {} }) {
   const { targetClause, UUID_RE } = require('./task-context');
-  const established = () => serverEstablishedTarget({ toolName, prompt, preview, actorId, threadId, threadSeq, priorToolResults });
+  const established = () => serverEstablishedTarget({ toolName, prompt, preview, actorId, threadId, threadSeq, priorToolResults, proposedParams });
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
   // The anchored inventory grammar below excludes communication/note intents.

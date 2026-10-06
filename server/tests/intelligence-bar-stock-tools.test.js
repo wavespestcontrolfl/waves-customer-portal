@@ -561,7 +561,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
   // fallback under test rather than an artifact of a dumb pass-through mock.
   // `cards` are stored ib_pending_actions rows: { thread_id, requested_by,
   // tool_name, created_at, params: { product_id } }. The builder applies the
-  // same filters threadCardTargetedProduct issues.
+  // same filters threadCardParamsForProduct issues.
   function cardsBuilder(cards) {
     let rows = [...cards];
     const api = {
@@ -575,7 +575,9 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         if (/params->>'product_id' = \?/.test(sql)) rows = rows.filter((r) => r.params?.product_id === params[0]);
         return api;
       },
-      first: async () => (rows[0] ? { id: rows[0].id || 'card-1' } : undefined),
+      orderBy() { return api; },
+      limit(n) { rows = rows.slice(0, n); return api; },
+      select: async () => rows.map((r) => ({ params: r.params })),
     };
     return api;
   }
@@ -1908,87 +1910,78 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
 
   // Owner IB history 09-25: the bar built an adjust_stock card for one
   // product, the card expired unseen, and the owner's "Yes" / "OK I didn't
-  // see the confirm button" in a LATER request was refused. A card the server
-  // built for that product on the same thread, for the same actor, in the
-  // last 24 hours, at or before the requesting tab's observed turn, now
-  // establishes the target, when the operator's turns ask for a receipt.
-  describe('an earlier adjust_stock card on the same thread grounds a re-proposal', () => {
+  // see the confirm button" in a LATER request was refused. The prior-card
+  // source is "re-propose the same card" only: the message states no amount
+  // of its own, and the proposal equals the stored stock change of a card the
+  // server built for that product on the same thread, for the same actor, in
+  // the last 24 hours, at or before the requesting tab's observed turn.
+  describe('the same adjust_stock card again, after it expired unseen', () => {
     const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
     const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
     const OTHER_THREAD = '22222222-2222-2222-2222-222222222222';
-    const ASKED = 'We got 2 gallons of Synthetic Guard CS in, add it to stock';
-    const card = (over = {}) => ({ thread_id: THREAD_ID, thread_turn_seq: 4, requested_by: 'actor-1', tool_name: 'adjust_stock',
-      status: 'expired', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000), params: { product_id: GUARD.id }, ...over });
-    // The turn that asked for the write is older than the 30-minute grounding
-    // look-back but inside the card's 24 hours.
-    const turnsOlderThanLookBack = (turns) => IbThreadsMock.recentOperatorTurns.mockImplementation(async (_a, _t, { maxAgeMinutes }) => (maxAgeMinutes > 30 ? turns : []));
-    const repropose = (prompt, extra = {}) => resolveInventoryWriteTarget({
-      toolName: 'adjust_stock', prompt, preview: { product: { id: GUARD.id, name: GUARD.name }, movement_type: 'restock' },
+    const CHANGE = { movement_type: 'restock', quantity: 2, unit: 'gal' };
+    const card = (over = {}, params = {}) => ({ thread_id: THREAD_ID, thread_turn_seq: 4, requested_by: 'actor-1', tool_name: 'adjust_stock',
+      status: 'expired', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000), params: { product_id: GUARD.id, ...CHANGE, ...params }, ...over });
+    const repropose = (prompt, { proposed = {}, product = GUARD, ...extra } = {}) => resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt, preview: { product: { id: product.id, name: product.name }, movement_type: proposed.movement_type || 'restock' },
+      proposedParams: { product_id: product.id, ...CHANGE, ...proposed },
       actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 6, ...extra,
     });
 
-    test.each(['OK I didn\'t see the confirm button', 'Yes'])('the real 09-25 reply after an expired card in an earlier request gets a card: "%s"', async (prompt) => {
+    test.each(['OK I didn\'t see the confirm button', 'Yes'])('the real 09-25 reply gets the same card again: "%s"', async (prompt) => {
       setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
-      turnsOlderThanLookBack([ASKED]);
       expect(await repropose(prompt)).toEqual({ productId: GUARD.id });
     });
 
     test('without that card the same reply is refused (the 09-25 failure)', async () => {
       setGroundingDb({ products: [GUARD, OTHER], cards: [] });
-      turnsOlderThanLookBack([ASKED]);
       expect(await repropose('OK I didn\'t see the confirm button')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('Codex r2: "Add 2 gallons of Unlisted Chemical to inventory" after a card for another product is refused', async () => {
+      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
+      expect(await repropose('Add 2 gallons of Unlisted Chemical to inventory')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a message with its own amount ("yes but make it 3 gallons") never uses the prior card', async () => {
+      setGroundingDb({ products: [GUARD, OTHER], cards: [card({}, { quantity: 3 })] });
+      expect(await repropose('yes but make it 3 gallons', { proposed: { quantity: 3 } })).toMatchObject({ code: 'target_clarification_required' });
+      expect(await repropose('yes, add a jug', { proposed: { quantity: 1, unit: 'jug' } })).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a different movement type, amount, or unit than the stored card is refused', async () => {
+      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
+      expect(await repropose('Yes', { proposed: { movement_type: 'correction' } })).toMatchObject({ code: 'target_clarification_required' });
+      expect(await repropose('Yes', { proposed: { quantity: 3 } })).toMatchObject({ code: 'target_clarification_required' });
+      expect(await repropose('Yes', { proposed: { unit: 'qt' } })).toMatchObject({ code: 'target_clarification_required' });
+      expect(await repropose('Yes', { proposed: { quantity: undefined, set_total: 2 } })).toMatchObject({ code: 'target_clarification_required' });
     });
 
     test('a card after the observed turn is refused; at or before it stands; no observed turn grounds nothing', async () => {
-      turnsOlderThanLookBack([ASKED]);
       setGroundingDb({ products: [GUARD, OTHER], cards: [card({ thread_turn_seq: 7 })] });
-      expect(await repropose('OK I didn\'t see the confirm button')).toMatchObject({ code: 'target_clarification_required' });
+      expect(await repropose('Yes')).toMatchObject({ code: 'target_clarification_required' });
       setGroundingDb({ products: [GUARD, OTHER], cards: [card({ thread_turn_seq: 6 })] });
-      expect(await repropose('OK I didn\'t see the confirm button')).toEqual({ productId: GUARD.id });
-      expect(await repropose('OK I didn\'t see the confirm button', { threadSeq: null })).toMatchObject({ code: 'target_clarification_required' });
+      expect(await repropose('Yes')).toEqual({ productId: GUARD.id });
+      expect(await repropose('Yes', { threadSeq: null })).toMatchObject({ code: 'target_clarification_required' });
     });
 
     test('a card on another thread, for another actor, older than 24 hours, for another product, or another tool is refused', async () => {
-      turnsOlderThanLookBack([ASKED]);
       for (const other of [
         card({ thread_id: OTHER_THREAD }),
         card({ requested_by: 'actor-2' }),
         card({ created_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }),
-        card({ params: { product_id: OTHER.id } }),
+        card({}, { product_id: OTHER.id }),
         card({ tool_name: 'create_restock_request' }),
       ]) {
         setGroundingDb({ products: [GUARD, OTHER], cards: [other] });
-        expect(await repropose('OK I didn\'t see the confirm button')).toMatchObject({ code: 'target_clarification_required' });
+        expect(await repropose('Yes')).toMatchObject({ code: 'target_clarification_required' });
       }
     });
 
-    test('order or request language never grounds a stock write from a prior card', async () => {
+    test('the prior card never overrides a different named product or a question', async () => {
       setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
-      turnsOlderThanLookBack(['Order 2 gallons of Synthetic Guard CS']);
-      expect(await repropose('OK I didn\'t see the confirm button')).toMatchObject({ code: 'target_clarification_required' });
-      turnsOlderThanLookBack([ASKED]);
-      expect(await repropose('request 2 gallons of the Guard')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a receipt turn about a different product never lends its operation to the card', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
-      turnsOlderThanLookBack(['We got 2 gallons of Synthetic Other WSG in, add it to stock']);
-      expect(await repropose('OK I didn\'t see the confirm button')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a model-claimed id with no matching card is refused', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card({ params: { product_id: OTHER.id } })] });
-      turnsOlderThanLookBack([ASKED]);
-      expect(await repropose('Add 2 gallons of the Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('the prior card never overrides a different named product, a question, or a name matching several products', async () => {
-      const GUARD_TWO = { id: 'p-guard-2', name: 'Synthetic Guard CS 2', active: true };
-      setGroundingDb({ products: [GUARD, GUARD_TWO, OTHER], cards: [card()] });
-      turnsOlderThanLookBack([ASKED]);
       expect(await repropose('We got the Synthetic Other WSG in today')).toMatchObject({ code: 'target_relationship_mismatch' });
       expect(await repropose('Did you add it?')).toMatchObject({ code: 'target_clarification_required' });
-      expect(await repropose('Add 2 gallons of Synthetic Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
     });
   });
 });
