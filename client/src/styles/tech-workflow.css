@@ -390,6 +390,7 @@
 /* The mic inside the note's box (VisitNote micInside): bottom-right corner, with room so words never run under it. */
 .tech-visit-note-row--inside { position: relative; display: block; }
 .tech-visit-note-row--inside .tech-visit-note-mic { position: absolute; right: 8px; bottom: 8px; display: flex; }
+.tech-visit-note-row--inside textarea.ui-control.tech-visit-control { padding-right: 60px; }
 .tech-lawn-sheet .tech-visit-note-row--inside textarea.ui-control.tech-visit-control { padding: 14px 60px 14px 14px; }
 .tech-lawn-sheet .ui-control.tech-visit-control:focus { border-color: #111111; --tw-ring-color: #111111; }
 .tech-lawn-sheet .ui-control.tech-visit-control.tech-product-amount-input { width: 120px; min-height: 48px; font-size: 16px; text-align: right; }
