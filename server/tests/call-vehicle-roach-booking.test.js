@@ -1,0 +1,187 @@
+/**
+ * GATE_CALL_VEHICLE_ROACH_BOOKING (owner ruling 2026-10-06): a call about
+ * German roaches inside a car books the vehicle_german_roach catalog row ($199,
+ * two visits), and a unit-less apartment address does not hold it. The first
+ * real case was held on address_unverified (apartment building, no unit) and
+ * would have booked the home roach package. Synthetic data only.
+ */
+process.env.GATE_CALL_VEHICLE_ROACH_BOOKING = 'true';
+
+const {
+  resolveCallBookingCatalogService,
+  resolveCallBookingPrice,
+  hasVehicleRoachRequest,
+} = require('../services/call-booking-catalog');
+const {
+  applyVehicleServiceUnitWaiver,
+  reconstructWaivedAddressValidation,
+  VEHICLE_SERVICE_KEYS,
+  VEHICLE_SERVICE_UNIT_WAIVER_REASON,
+} = require('../services/call-triage-flags');
+const { vehicleServiceUnitWaiverForCall } = require('../services/call-recording-processor')._test;
+const { TWO_TREATMENT_PACKAGE_KEYS } = require('../services/typed-followup-obligation');
+
+// Google's verdict for an apartment building given without a unit.
+const AV_UNIT_MISSING = {
+  status: 'ambiguous',
+  granularity: 'PREMISE',
+  inServiceArea: true,
+  county: 'Manatee County',
+  hasInferred: true,
+  hasReplaced: false,
+  hasUnconfirmed: false,
+  addressUse: { poBox: false, business: false, residential: true },
+  normalized: { street_line_1: '100 Example Ave W', city: 'Bradenton', state: 'FL', postal_code: '34205' },
+  missingComponents: ['subpremise'],
+};
+
+const VEHICLE_ROW = {
+  service_key: 'vehicle_german_roach', name: 'Vehicle German Roach Treatment (2 Visits)', short_name: 'Vehicle Roach',
+  category: 'pest_control', billing_type: 'one_time', pricing_type: 'fixed', base_price: '199.00',
+  requires_follow_up: true, follow_up_interval_days: 14,
+};
+const CATALOG = [
+  { service_key: 'cockroach_control', name: 'Cockroach Treatment Service', short_name: 'Roach', category: 'pest_control', billing_type: 'one_time', pricing_type: 'fixed', base_price: '350.00' },
+  { service_key: 'one_time_pest_control', name: 'General Pest Control', short_name: 'Pest One-Time', category: 'pest_control', billing_type: 'one_time', pricing_type: 'variable', base_price: '150.00' },
+  { service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service', short_name: 'Quarterly Pest', category: 'pest_control', billing_type: 'recurring', pricing_type: 'variable', base_price: '79.00' },
+  VEHICLE_ROW,
+];
+
+// The first real call's extraction shape (names and address synthetic).
+const CAR_CALL = {
+  requested_service: 'Pest control for German cockroaches in a car',
+  pain_points: 'Severe German cockroach infestation inside her 2024 Jeep Grand Cherokee, making it unsafe to drive.',
+  call_summary: 'Jane Example called about German cockroaches in her 2024 Jeep Grand Cherokee. She accepted the $199 treatment for Thursday at 1 PM at her home address.',
+  matched_service: 'Cockroach Treatment Service',
+  specific_service_name: 'Cockroach Treatment Service',
+  quoted_price: 199,
+};
+
+describe('hasVehicleRoachRequest', () => {
+  test.each([
+    [{ requested_service: 'Pest control for German cockroaches in a car' }, true],
+    [{ pain_points: 'German cockroach infestation inside her 2024 Jeep Grand Cherokee' }, true],
+    [{ requested_service: 'roaches in my truck' }, true],
+    [{ call_summary: 'She found roaches inside her minivan after a road trip.' }, true],
+    [{ pain_points: 'German roaches in the kitchen, not in the car' }, false],
+    [{ pain_points: 'roaches in the garage by the car' }, false],
+    [{ requested_service: 'roaches in the house and in my car' }, false],
+    [{ requested_service: 'ants in my car' }, false],
+    [{ call_summary: 'Caller has no roaches in her car anymore' }, false],
+    [{ requested_service: 'roach treatment', call_summary: 'Caller will be in her car until noon.' }, false],
+  ])('%j -> %s', (extracted, expected) => {
+    expect(hasVehicleRoachRequest(extracted)).toBe(expected);
+  });
+});
+
+describe('resolveCallBookingCatalogService with the gate on', () => {
+  test('a car roach call replaces the home roach pick with the vehicle row', () => {
+    expect(resolveCallBookingCatalogService({ extracted: CAR_CALL, services: CATALOG })).toBe(VEHICLE_ROW);
+  });
+
+  test('the quoted $199 books as the price', () => {
+    const row = resolveCallBookingCatalogService({ extracted: CAR_CALL, services: CATALOG });
+    expect(resolveCallBookingPrice({ quotedPrice: 199, catalogRow: row })).toEqual({ price: 199, source: 'transcript' });
+    expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: row })).toEqual({ price: 199, source: 'catalog' });
+  });
+
+  test('a recurring plan pick is never replaced', () => {
+    const extracted = { ...CAR_CALL, matched_service: 'Quarterly Pest Control Service', specific_service_name: 'Quarterly Pest Control Service' };
+    expect(resolveCallBookingCatalogService({ extracted, services: CATALOG }).service_key).toBe('pest_general_quarterly');
+  });
+
+  test('a home roach call keeps the home roach row', () => {
+    const extracted = { requested_service: 'German roaches in the kitchen', matched_service: 'Cockroach Treatment Service' };
+    expect(resolveCallBookingCatalogService({ extracted, services: CATALOG }).service_key).toBe('cockroach_control');
+  });
+
+  test('no vehicle row in the catalog keeps the old resolution', () => {
+    const services = CATALOG.filter((s) => s !== VEHICLE_ROW);
+    expect(resolveCallBookingCatalogService({ extracted: CAR_CALL, services }).service_key).toBe('cockroach_control');
+  });
+});
+
+describe('gate off', () => {
+  test('the resolver keeps the model pick', () => {
+    jest.isolateModules(() => {
+      const saved = process.env.GATE_CALL_VEHICLE_ROACH_BOOKING;
+      delete process.env.GATE_CALL_VEHICLE_ROACH_BOOKING;
+      try {
+        const { resolveCallBookingCatalogService: resolveOff } = require('../services/call-booking-catalog');
+        expect(resolveOff({ extracted: CAR_CALL, services: CATALOG }).service_key).toBe('cockroach_control');
+      } finally {
+        process.env.GATE_CALL_VEHICLE_ROACH_BOOKING = saved;
+      }
+    });
+  });
+});
+
+describe('applyVehicleServiceUnitWaiver (pure)', () => {
+  const ok = { enabled: true, serviceKey: 'vehicle_german_roach' };
+
+  test('disabled or another service returns the very same verdict object', () => {
+    expect(applyVehicleServiceUnitWaiver(AV_UNIT_MISSING, { ...ok, enabled: false })).toBe(AV_UNIT_MISSING);
+    expect(applyVehicleServiceUnitWaiver(AV_UNIT_MISSING, { enabled: true, serviceKey: 'cockroach_control' })).toBe(AV_UNIT_MISSING);
+    expect(applyVehicleServiceUnitWaiver(AV_UNIT_MISSING, { enabled: true, serviceKey: null })).toBe(AV_UNIT_MISSING);
+  });
+
+  test('only the unit missing -> accepted verdict with the audit marker, input untouched', () => {
+    const out = applyVehicleServiceUnitWaiver(AV_UNIT_MISSING, ok);
+    expect(out.status).toBe('validated_accept');
+    expect(out.missingComponents).toEqual([]);
+    expect(out.wholeStructureUnitWaived).toEqual({
+      missingComponents: ['subpremise'], originalStatus: 'ambiguous', reason: VEHICLE_SERVICE_UNIT_WAIVER_REASON,
+    });
+    expect(AV_UNIT_MISSING.status).toBe('ambiguous');
+    // The offline audits rebuild the same verdict from the persisted marker.
+    expect(reconstructWaivedAddressValidation({ ...AV_UNIT_MISSING, wholeStructureUnitWaived: out.wholeStructureUnitWaived }).status)
+      .toBe('validated_accept');
+  });
+
+  test.each([
+    ['out of area', { inServiceArea: false }],
+    ['unknown area', { inServiceArea: undefined }],
+    ['unconfirmed component', { hasUnconfirmed: true }],
+    ['replaced component', { hasReplaced: true }],
+    ['street missing too', { missingComponents: ['subpremise', 'route'] }],
+    ['route-level match', { granularity: 'ROUTE' }],
+  ])('%s keeps the hold', (_label, patch) => {
+    const av = { ...AV_UNIT_MISSING, ...patch };
+    expect(applyVehicleServiceUnitWaiver(av, ok)).toBe(av);
+  });
+
+  test('the allowlist is only the vehicle job', () => {
+    expect([...VEHICLE_SERVICE_KEYS]).toEqual(['vehicle_german_roach']);
+  });
+});
+
+describe('vehicleServiceUnitWaiverForCall', () => {
+  test('the first real call shape is waived', () => {
+    const out = vehicleServiceUnitWaiverForCall({ addressValidation: AV_UNIT_MISSING, extracted: CAR_CALL, services: CATALOG });
+    expect(out.status).toBe('validated_accept');
+    expect(out.wholeStructureUnitWaived.service).toBe('vehicle_german_roach');
+  });
+
+  test('a home roach call at the same address keeps the hold', () => {
+    const extracted = { requested_service: 'German roaches in the kitchen', matched_service: 'Cockroach Treatment Service' };
+    expect(vehicleServiceUnitWaiverForCall({ addressValidation: AV_UNIT_MISSING, extracted, services: CATALOG })).toBe(AV_UNIT_MISSING);
+  });
+
+  test('a pre-adoption view that resolves a home service keeps the hold', () => {
+    const preAdoptionExtracted = { requested_service: 'German roaches in the kitchen', matched_service: 'Cockroach Treatment Service' };
+    expect(vehicleServiceUnitWaiverForCall({
+      addressValidation: AV_UNIT_MISSING, extracted: CAR_CALL, preAdoptionExtracted, services: CATALOG,
+    })).toBe(AV_UNIT_MISSING);
+  });
+});
+
+test('the vehicle job is a two-treatment package (one included follow-up, never a chain)', () => {
+  expect(TWO_TREATMENT_PACKAGE_KEYS.has('vehicle_german_roach')).toBe(true);
+});
+
+test('the processor runs the vehicle waiver after the other two, before the verdict is stamped', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  expect(src).toContain("if (wsAv === v2AddressValidation && isEnabled('callVehicleRoachBooking')) {");
+  expect(src.indexOf('ai_address_validation: v2AddressValidation')).toBeLessThan(src.lastIndexOf('vehicleServiceUnitWaiverForCall({'));
+  expect(src.lastIndexOf('vehicleServiceUnitWaiverForCall({')).toBeLessThan(src.indexOf('wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived'));
+});

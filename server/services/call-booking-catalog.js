@@ -87,6 +87,46 @@ function hasAffirmativeRoachMention(text) {
 // label). Most-specific first — inspection wins over trapping wins over a
 // general rodent call. A rodent mention with no specific action defaults to
 // the general "Rodent Pest Control Service".
+// Vehicle German roach job (owner ruling 2026-10-06, GATE_CALL_VEHICLE_ROACH_BOOKING):
+// roaches inside a car, truck or van book the vehicle_german_roach row, not the
+// home roach package. Judged on the extraction's own request fields only (never
+// the raw transcript, where "I'll be in my car" is small talk): ONE field must
+// name an affirmative roach problem AND roaches inside a vehicle ("in a car",
+// "inside her 2024 Jeep Grand Cherokee"). A request that also names a room of
+// the home is a home job (the car is the office-priced add-on), so it keeps
+// today's resolution.
+const VEHICLE_SERVICE_KEY = 'vehicle_german_roach';
+const VEHICLE_NOUN = '(?:cars?|vehicles?|trucks?|pickups?|suvs?|vans?|minivans?|jeeps?|sedans?|campers?|rvs?|motorhomes?)';
+const VEHICLE_FILLER = "(?:(?!(?:by|near|next|beside|behind|under|from|and|or|to|garage|carport|driveway|house|home|kitchen|yard)\\b)[a-z0-9'’-]+\\s+){0,3}?";
+const VEHICLE_PHRASE = `(?:in|inside|infesting|infested|throughout)\\s+(?:of\\s+)?(?:(?:my|her|his|their|our|the|a|an|your)\\s+)?(?:(?:19|20)\\d{2}\\s+)?${VEHICLE_FILLER}${VEHICLE_NOUN}\\b`;
+const VEHICLE_PHRASE_RE = new RegExp(`\\b${VEHICLE_PHRASE}`, 'i');
+const NEGATED_VEHICLE_PHRASE_RE = new RegExp(`\\b(?:not|no|never|isn['’]?t|aren['’]?t|without)\\s+(?:[\\w'’]+\\s+){0,2}?${VEHICLE_PHRASE}`, 'gi');
+const HOME_INFESTATION_RE = /\b(?:kitchen|bathrooms?|bedrooms?|cabinets?|pantry|house|home|apartment|condo|garage|laundry|living\s+room|attic)\b/i;
+
+function hasVehicleRoachRequest(extracted = {}) {
+  const fields = [extracted.requested_service, extracted.pain_points, extracted.call_summary]
+    .filter((v) => typeof v === 'string' && v.trim());
+  const vehicleField = fields.some((text) => hasAffirmativeRoachMention(text)
+    && VEHICLE_PHRASE_RE.test(text.replace(NEGATED_VEHICLE_PHRASE_RE, ' ')));
+  if (!vehicleField) return false;
+  const requestText = [extracted.requested_service, extracted.pain_points].filter(Boolean).join(' ');
+  return !HOME_INFESTATION_RE.test(requestText);
+}
+
+// A model pick the vehicle request may replace: nothing, a generic row, or a
+// one-time pest row (the home roach package, a one-time pest visit). A
+// recurring plan pick is a different sale and is never replaced.
+function vehicleRoachOverridesPick(pick) {
+  if (!pick) return true;
+  if (pick.service_key === VEHICLE_SERVICE_KEY) return false;
+  if (isGenericCallCatalogRow(pick)) return true;
+  return pick.category === 'pest_control' && pick.billing_type === 'one_time';
+}
+
+function vehicleRoachBookingLive() {
+  return require('../config/feature-gates').isEnabled('callVehicleRoachBooking');
+}
+
 const RODENT_RE = /\b(rodents?|rats?|mouse|mice)\b/i;
 // Rodent mentions get the same affirmative-only treatment as roaches: "not
 // rats, it's ants" and "we had mice last time but now need spiders treated"
@@ -360,6 +400,10 @@ function resolveCallBookingCatalogService({
   // but a revisit is the plan's free between-visits callback, not an extra
   // plan visit.
   const pickPlanLane = reServiceLaneForPlanRow(byModelPick);
+  if (vehicleRoachOverridesPick(byModelPick) && vehicleRoachBookingLive() && hasVehicleRoachRequest(extracted)) {
+    const vehicleRow = services.find((s) => s.service_key === VEHICLE_SERVICE_KEY);
+    if (vehicleRow) return vehicleRow;
+  }
   if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return byModelPick;
 
   const haystack = callBookingResolutionHaystack(extracted, transcription);
@@ -919,6 +963,8 @@ module.exports = {
   reServiceLaneForRow,
   reServiceLaneForPlanRow,
   resolveCallBookingCatalogService,
+  hasVehicleRoachRequest,
+  VEHICLE_SERVICE_KEY,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,

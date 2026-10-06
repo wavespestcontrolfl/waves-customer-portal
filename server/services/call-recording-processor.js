@@ -115,7 +115,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, applyVehicleServiceUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -6783,6 +6783,37 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   return out;
 }
 
+// Vehicle service unit waiver for one call (GATE_CALL_VEHICLE_ROACH_BOOKING;
+// caller checks the gate). Same views as the whole-structure waiver: the V1
+// service before V2-primary adoption, the merged fields at the gate, and the
+// V2-overridden view the approved booking will book. EVERY view must resolve
+// the vehicle catalog row, so a V2 pick that books a home service cannot carry
+// the waiver. No property-type test: the job is the car, not the unit. Returns
+// the SAME verdict object unless the waiver applies.
+function vehicleServiceUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], v2Extraction = null, unclearServiceAssessment = false } = {}) {
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
+  const views = [];
+  if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+  views.push(extracted);
+  const finalView = v2BookingServiceView(extracted, v2Extraction);
+  if (finalView) views.push(finalView);
+  let out = addressValidation;
+  for (const view of views) {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view,
+      transcription,
+      services,
+      coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    const waived = applyVehicleServiceUnitWaiver(addressValidation, { enabled: true, serviceKey: row?.service_key || null });
+    if (waived === addressValidation) return addressValidation;
+    out = waived;
+  }
+  out.wholeStructureUnitWaived.service = 'vehicle_german_roach';
+  return out;
+}
+
 // Business whole-building unit waiver for one call
 // (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT; caller checks the gate). No
 // service allowlist: the owner's ruling (2026-10-06) is about the ADDRESS, a
@@ -11027,7 +11058,7 @@ const CallRecordingProcessor = {
     // caller says they own or occupy the WHOLE building. It rides the same
     // open-card guard and persisted marker (reason 'business_whole_building'),
     // and runs only when the whole-structure rule did not already waive the call.
-    if (v2AddressValidation && (isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)) {
+    if (v2AddressValidation && (isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit') || isEnabled('callVehicleRoachBooking')) && isMissingUnitNumber(v2AddressValidation)) {
       try {
         // A reprocess of a call an earlier pass parked on the unit ask: the
         // open missing_unit_number card (and its clarify draft and merged
@@ -11060,6 +11091,17 @@ const CallRecordingProcessor = {
               v2Extraction: v2Result?.extraction,
               transcription,
               outbound: isOutboundCall(call),
+            });
+          }
+          if (wsAv === v2AddressValidation && isEnabled('callVehicleRoachBooking')) {
+            wsAv = vehicleServiceUnitWaiverForCall({
+              addressValidation: v2AddressValidation,
+              extracted,
+              preAdoptionExtracted,
+              transcription,
+              services: bookableCallServices,
+              v2Extraction: v2Result?.extraction,
+              unclearServiceAssessment: unclearServiceAssessmentActive(),
             });
           }
           if (wsAv !== v2AddressValidation) {
@@ -23209,6 +23251,7 @@ CallRecordingProcessor._test = {
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
   businessWholeBuildingUnitWaiverForCall,
+  vehicleServiceUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,
   applyUnclearServiceTranscriptVeto,

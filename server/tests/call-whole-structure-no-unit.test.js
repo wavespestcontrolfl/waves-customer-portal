@@ -334,7 +334,7 @@ describe('gate wiring', () => {
 
   test('the processor reads the gate and hands the waiver only the pure helper', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("(isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)");
+    expect(src).toContain("(isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit') || isEnabled('callVehicleRoachBooking')) && isMissingUnitNumber(v2AddressValidation)");
     expect(src).toContain("let wsAv = isEnabled('callWholeStructureNoUnit')");
     // The persisted shadow row is written BEFORE the waiver rewrites the verdict.
     expect(src.indexOf('ai_address_validation: v2AddressValidation')).toBeLessThan(src.lastIndexOf('wholeStructureUnitWaiverForCall({'));
