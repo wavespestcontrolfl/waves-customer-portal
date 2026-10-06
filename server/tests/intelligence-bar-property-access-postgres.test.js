@@ -163,6 +163,12 @@ postgres('update_property_access keeps history and keeps community codes off the
     expect((await prefs()).pet_details).toBe('Aggressive dog in yard');
   });
 
+  test('a bracketed qualifier on the stored note is part of its words', async () => {
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ parking_notes: '[DO NOT] Park on street' });
+    await run({ parking_notes: 'Park on street' });
+    expect((await prefs()).parking_notes.split('\n')[0]).toBe('[bar] Park on street');
+  });
+
   test('an empty field is simply filled', async () => {
     await run({ parking_notes: 'Park on the street' });
     expect((await prefs()).parking_notes).toBe('Park on the street');

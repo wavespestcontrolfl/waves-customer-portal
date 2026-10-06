@@ -2173,11 +2173,12 @@ const sameCode = (a, b) => String(a || '').replace(/\s+/g, '').toLowerCase() ===
 // side_gate_access is varchar(200); the other note fields are text.
 const PROPERTY_ACCESS_NOTE_LIMITS = { side_gate_access: 200 };
 const noteWords = (text) => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
-// A note is already there only when it is the current (first) line, "[bar]"-
-// style tags aside: an older line that becomes current again is added back
+// A note is already there only when it is the current (first) line, its
+// "[bar]" tag aside: an older line that becomes current again is added back
 // on top, and "Park on street" is new next to "Do not park on street".
 function noteHas(had, add) {
-  const plain = (line) => noteWords(String(line || '').replace(/^\s*\[[^\]]*\]\s*/, '')).replace(/[.\s]+$/, '');
+  // Only this tool's own tag is set aside: "[DO NOT] Park on street" keeps its words.
+  const plain = (line) => noteWords(String(line || '').replace(/^\s*\[bar(?: \d{4}-\d{2}-\d{2})?\]\s*/i, '')).replace(/[.\s]+$/, '');
   return plain(String(had || '').split('\n')[0]) === plain(add);
 }
 
