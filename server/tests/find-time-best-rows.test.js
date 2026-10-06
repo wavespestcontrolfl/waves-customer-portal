@@ -210,18 +210,18 @@ describe('capacity-mode chips (Codex #6045 r3)', () => {
 
   test('a middle stop carries its drive in and both neighbours', () => {
     const fit = { arrivals: [
-      { id: 'a', arrival: '11:00', departure: '12:00' }, { id: 't', arrival: '12:19', departure: '12:49' }, { id: 'b', arrival: '14:00', departure: '15:00' },
+      { id: 'a', arrival: '11:00', departure: '12:00', drive: 10 }, { id: 't', arrival: '12:19', departure: '12:49', drive: 19 }, { id: 'b', arrival: '14:00', departure: '15:00', drive: 30 },
     ] };
     const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
     expect(legs.driveIn).toBe(19);
     expect(legs.fromHome).toBe(false);
-    expect(legs.gap).toMatchObject({ prev: PREV, next: NEXT, prevEndMin: 720, prevIsHome: false, durationMinutes: 30 });
+    expect(legs.gap).toMatchObject({ prev: PREV, next: NEXT, prevEndMin: 720, prevIsHome: false, durationMinutes: 30, outDepartureMin: 769 });
   });
 
   test('the first stop drives in from the route origin, leaving at its start clock (r4)', () => {
     const fit = {
       origin: { lat: 27.43, lng: -82.41, isHome: true }, originDepartureMin: 8 * 60,
-      arrivals: [{ id: 't', arrival: '08:31', departure: '09:00' }, { id: 'a', arrival: '10:00', departure: '11:00' }],
+      arrivals: [{ id: 't', arrival: '08:31', departure: '09:00', drive: 31 }, { id: 'a', arrival: '10:00', departure: '11:00', drive: 20 }],
     };
     const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
     expect(legs.driveIn).toBe(31);
@@ -232,11 +232,25 @@ describe('capacity-mode chips (Codex #6045 r3)', () => {
   test("a first stop after today's completed visit starts from that visit, not home", () => {
     const fit = {
       origin: { lat: 27.40, lng: -82.45, isHome: false }, originDepartureMin: 13 * 60,
-      arrivals: [{ id: 't', arrival: '13:20', departure: '14:00' }],
+      arrivals: [{ id: 't', arrival: '13:20', departure: '14:00', drive: 20 }],
     };
     const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
     expect(legs).toMatchObject({ driveIn: 20, fromHome: false });
     expect(legs.gap.next).toEqual({ lat: expect.any(Number), lng: expect.any(Number) });
+  });
+
+  test('waiting for the window is not driving (r5)', () => {
+    const fit = {
+      origin: { lat: 27.43, lng: -82.41, isHome: true }, originDepartureMin: 8 * 60,
+      arrivals: [{ id: 't', arrival: '12:00', departure: '12:30', drive: 20 }],
+    };
+    expect(capacityLegs({ fit, byId: rows, target, durationMinutes: 30 }).driveIn).toBe(20);
+  });
+
+  test('the outbound leg leaves at the simulated departure (r5)', () => {
+    const chip = hour('2026-10-08', '12:00', 34, 19);
+    chip[GAP_LEGS] = { ...chip[GAP_LEGS], outDepartureMin: 13 * 60 + 40 };
+    expect(_test.chipLegs(chip).out.departureMin).toBe(13 * 60 + 40);
   });
 
   test('no known origin: no drive in, no road legs', () => {

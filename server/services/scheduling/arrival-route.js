@@ -471,7 +471,7 @@ function buildFeasibleResult({ target, capacity, startMin, own, windowStart, win
       originDepartureMin: startMin,
     } : {}),
     arrivalDelayMinutes: arrival.arrivalMin + (target.arrivalOffsetMinutes || 0) - minuteOfDay(windowStart),
-    arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin) })),
+    arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin), drive: row.driveMin })),
   };
 }
 

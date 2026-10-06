@@ -68,7 +68,10 @@ function chipLegs(chip, nowEt = null) {
   const leaveForIn = g.prevIsHome ? Math.max(0, startMin - modelIn) : g.prevEndMin;
   return {
     in: notBefore({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, nowEt),
-    out: notBefore({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, nowEt),
+    out: notBefore({
+      date: chip.date, from: g.newStop, to: g.next,
+      departureMin: Number.isFinite(g.outDepartureMin) ? g.outDepartureMin : startMin + (g.durationMinutes || 0),
+    }, nowEt),
     base: notBefore({ date: chip.date, from: g.prev, to: g.next, departureMin: g.prevEndMin }, nowEt),
   };
 }

@@ -800,8 +800,10 @@ function capacityLegs({ fit, byId, target, durationMinutes }) {
   const prevPin = first ? pin(fit.origin) : pin(byId.get(arrivals[at - 1].id));
   const prevEndMin = first ? fit.originDepartureMin : timeToMinutes(arrivals[at - 1].departure);
   const nextRow = at < arrivals.length - 1 ? byId.get(arrivals[at + 1].id) : null;
-  const arriveMin = timeToMinutes(arrivals[at].arrival);
-  const driveIn = prevPin && prevEndMin != null && arriveMin != null ? Math.max(0, arriveMin - prevEndMin) : null;
+  // The simulation's own inbound drive: never the gap between clocks, which
+  // also counts any wait for the window (Codex #6045 r5).
+  const drive = Number(arrivals[at].drive);
+  const driveIn = prevPin && Number.isFinite(drive) ? Math.max(0, Math.round(drive)) : null;
   return {
     driveIn,
     fromHome: first ? fit.origin.isHome === true : false,
@@ -813,6 +815,9 @@ function capacityLegs({ fit, byId, target, durationMinutes }) {
       prevIsHome: false,
       newStop: { lat: Number(target.lat), lng: Number(target.lng) },
       durationMinutes,
+      // The van leaves when the simulated work ends, which can be later than
+      // the window start + duration (a late arrival within the promise).
+      outDepartureMin: timeToMinutes(arrivals[at].departure),
     },
   };
 }
