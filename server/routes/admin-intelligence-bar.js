@@ -1342,6 +1342,30 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._ib_notes_before = current.crm_notes ?? null;
       notesReadVersion = current.version;
     }
+    if (toolUse.name === 'update_customer') {
+      // monthly_rate is the customer's WHOLE monthly bill (owner 2026-10-06):
+      // a rate edit names the one service whose price changes, the card lists
+      // every line before and after, and a total below the other lines is
+      // refused (rate-change.js). rate_service is model input only: it is
+      // resolved here into the pinned _rate_family, never stored as itself.
+      const rateService = params.rate_service;
+      delete params.rate_service;
+      if (params.customer_id && params.updates && params.updates.monthly_rate !== undefined) {
+        let rate;
+        try {
+          rate = await require('../services/intelligence-bar/rate-change')
+            .rateChangeProposal(String(params.customer_id), params.updates.monthly_rate, rateService);
+        } catch {
+          return { failed: true, modelResult: { error: 'Could not read this customer\'s monthly bill — nothing was proposed. Try again in a moment.' } };
+        }
+        if (rate?.error) return { failed: true, modelResult: { error: rate.error, ...(rate.code ? { code: rate.code } : {}) } };
+        if (rate) {
+          params._rate_family = rate.family;
+          params._rate_ledger_pin = rate.pin;
+          preview = { ...preview, rate_change: rate.display };
+        }
+      }
+    }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like
       // the Schedule screen): the stated price, else the catalog default the
@@ -1791,7 +1815,18 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Live rows only (pre-push r11 P1): a soft-deleted/merged customer
       // must never ride a proposal — the executors refuse or skip them,
       // but the card must not name them as approved targets either.
-      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name');
+      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name', 'monthly_rate');
+      // A bulk rate edit writes one number as each customer's WHOLE monthly
+      // bill (owner 2026-10-06): on a customer who already has a bill that
+      // would replace every service line. Only first rates go in bulk; an
+      // existing bill is edited one customer at a time, naming the service.
+      if (params.updates && params.updates.monthly_rate !== undefined) {
+        const billed = rows.filter((r) => Number(r.monthly_rate) > 0);
+        if (billed.length) {
+          const names = billed.slice(0, 5).map((r) => `${r.first_name || ''} ${r.last_name || ''}`.trim() || r.id).join(', ');
+          return { failed: true, modelResult: { error: `${billed.length} of these customers already have a monthly bill (${names}${billed.length > 5 ? ', …' : ''}). A bulk rate would replace their whole bill. Change each one with update_customer and rate_service, or leave them out. Nothing was proposed.`, code: 'bulk_rate_over_existing_bill' } };
+        }
+      }
       const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
       const missing = ids.filter((id) => !nameById.has(id));
       if (missing.length) {
@@ -2428,7 +2463,7 @@ ENGINE BASICS (so you can explain numbers):
 - Loaded labor rate: $35/hr
 - Pest frequencies: quarterly (~90d), bimonthly (~60d), monthly (~30d)
 - Lawn tracks: st_augustine, bermuda, zoysia, bahia. Tiers: basic, enhanced, premium
-- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+) — discount applies automatically based on service count
+- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+). The tier is a label the office sets; changing it changes NO price. Prices change only through a new estimate or a monthly-rate edit, so never tell the operator a discount "will apply" after a tier change. monthly_rate is the customer's whole monthly bill (all services summed; get_customer_detail shows the lines as monthly_bill).
 - Default sqft if unknown: 2000. Default lot: 4× home sqft.
 
 OUT-OF-SCOPE EXAMPLES (do not draft):

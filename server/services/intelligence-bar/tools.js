@@ -214,6 +214,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
+monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. No price-change notice is sent to the customer.
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
       type: 'object',
@@ -222,6 +223,10 @@ IMPORTANT: When asked to update, call this tool immediately once the required fa
         updates: {
           type: 'object',
           description: 'Field-value pairs to update',
+        },
+        rate_service: {
+          type: 'string',
+          description: 'With updates.monthly_rate on a customer who already has a monthly rate: the one service whose monthly price changes (e.g. "lawn", "pest control"), or "whole_bill" to replace the whole bill. updates.monthly_rate stays the new TOTAL.',
         },
       },
       required: ['customer_id', 'updates'],
@@ -405,7 +410,8 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'find_duplicates': return await findDuplicates(input);
       case 'create_customer': return await createCustomer(input);
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
-        Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null);
+        Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
+        input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -806,6 +812,16 @@ async function getCustomerDetail(customerId) {
     .orderByRaw('scored_at DESC NULLS LAST, created_at DESC')
     .first();
 
+  // The monthly bill by service (plan-rate ledger): monthly_rate is their sum,
+  // so a rate edit must say which line changes (update_customer rate_service).
+  // An unreadable ledger leaves the lines out rather than failing the read.
+  const PlanRateLedger = require('../plan-rate-ledger');
+  const { lineLabel } = require('./rate-change');
+  const monthlyBill = await PlanRateLedger.loadComponents(db, customerId)
+    .then((rows) => [...PlanRateLedger.billLines(rows, customer.monthly_rate)]
+      .map(([family, amount]) => ({ service: family, label: lineLabel(family), monthly: amount })))
+    .catch(() => null);
+
   return {
     profile: {
       id: customer.id,
@@ -821,6 +837,8 @@ async function getCustomerDetail(customerId) {
       tier: customer.waveguard_tier,
       stage: customer.pipeline_stage,
       monthly_rate: parseFloat(customer.monthly_rate || 0),
+      monthly_bill: monthlyBill,
+      billing_mode: customer.billing_mode || null,
       lifetime_revenue: parseFloat(customer.lifetime_revenue || 0),
       active: customer.active,
       member_since: customer.member_since,
@@ -1306,7 +1324,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion, notesPin = null) {
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
@@ -1495,12 +1513,32 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       if (clean.monthly_rate !== undefined
         && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
           !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
-        // Only an ACTUAL rate change invalidates per-family attribution
-        // (codex #3245 r2/r6) — resetting on a same-value write would
-        // replace seeded components with an unattributed blob. Gate-aware
-        // error policy lives in the helper.
-        await require('../plan-rate-ledger')
-          .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
+        // Only an ACTUAL rate change touches per-family attribution
+        // (codex #3245 r2/r6). The card named the one line that changes
+        // (rate-change.js, owner 2026-10-06): the bill must still be what the
+        // card was built from, then only that line moves. Gate-aware error
+        // policy lives in the ledger helpers.
+        const PlanRateLedger = require('../plan-rate-ledger');
+        if (ratePin) {
+          const { ledgerPin } = require('./rate-change');
+          const components = await PlanRateLedger.loadComponents(trx, customerId);
+          if (ledgerPin(components, lockedBefore?.monthly_rate) !== ratePin.ledgerPin) {
+            const err = new Error("This customer's monthly bill changed since the card was shown — nothing was updated. Ask again for a fresh card.");
+            err.previewChanged = true;
+            throw err;
+          }
+          if (ratePin.family === PlanRateLedger.WHOLE_BILL) {
+            await PlanRateLedger.syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
+          } else {
+            await PlanRateLedger.setLineForScalarWrite(trx, customerId, {
+              familyKey: ratePin.family, previousScalar: lockedBefore?.monthly_rate, newScalar: clean.monthly_rate,
+            }, { source: 'ib_update' });
+          }
+        } else {
+          // No rate pin: a card from before this check, or a first rate on a
+          // customer with no bill — one line, as before.
+          await PlanRateLedger.syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
+        }
       }
       if (addressSubmitted) {
         await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
@@ -1653,6 +1691,15 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 }
 
 
+// A bulk monthly_rate is one number written as each customer's WHOLE monthly
+// bill; on a customer who already has a different bill it would replace every
+// service line (owner 2026-10-06). Such rows are skipped and reported.
+const BULK_RATE_BILLED_ERROR = 'already had a monthly bill, so the bulk rate was not applied (change it with update_customer and rate_service)';
+function bulkRateWouldReplaceBill(row, newRate) {
+  const before = Number(row?.monthly_rate) || 0;
+  return before > 0 && Math.round(before * 100) !== Math.round((Number(newRate) || 0) * 100);
+}
+
 async function bulkUpdateCustomers(customerIds, updates) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
@@ -1763,7 +1810,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .whereIn('id', customerIds)
         .forUpdate()
         .whereNull('deleted_at')
-        .select('id', 'first_name', 'last_name', 'pipeline_stage', 'active', 'autopay_enabled', 'next_charge_date');
+        .select('id', 'first_name', 'last_name', 'pipeline_stage', 'active', 'autopay_enabled', 'next_charge_date', 'monthly_rate');
       const liveIds = new Set(liveRows.map((r) => String(r.id)));
       const skipped = customerIds
         .filter((cid) => !liveIds.has(String(cid)))
@@ -1819,6 +1866,16 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // this write, only the independent saved-method rails.
       const railsRepairedCount = clean.pipeline_stage === 'churned' ? railsRepairedOnlyIds.length : 0;
       const churnWoundDownCount = clean.pipeline_stage === 'churned' ? targetIds.length - railsRepairedCount : 0;
+      // A bulk rate is a first rate only (owner 2026-10-06): a customer who
+      // has a monthly bill by commit time is skipped and reported, never
+      // overwritten — the bill would lose every service line.
+      if (clean.monthly_rate !== undefined) {
+        const billedIds = new Set(liveRows.filter((r) => bulkRateWouldReplaceBill(r, clean.monthly_rate)).map((r) => String(r.id)));
+        if (billedIds.size) {
+          targetIds = targetIds.filter((id) => !billedIds.has(String(id)));
+          skipped.push(...[...billedIds].map((cid) => ({ customer_id: cid, error: BULK_RATE_BILLED_ERROR, rate_blocked: true })));
+        }
+      }
       if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
       if (laneStampRelevant) {
         const beforeRows = await trx('customers')
@@ -1885,9 +1942,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
         skipped_customers: skippedRows,
         warning: (() => {
           const churnBlocked = skippedRows.filter((r) => r.churn_blocked);
-          const other = skippedRows.length - churnBlocked.length;
+          const rateBlocked = skippedRows.filter((r) => r.rate_blocked);
+          const other = skippedRows.length - churnBlocked.length - rateBlocked.length;
           const parts = [];
           if (churnBlocked.length) parts.push(`${churnBlocked.length} refused (${churnBlocked.map((r) => r.error).join('; ')})`);
+          if (rateBlocked.length) parts.push(`${rateBlocked.length} ${BULK_RATE_BILLED_ERROR}`);
           if (other) parts.push(`${other} no longer live`);
           return `${skippedRows.length} approved customer(s) were NOT updated — ${parts.join('; ')}.${woundDownMessage ? ` ${woundDownMessage}` : ''}`;
         })(),
@@ -1966,6 +2025,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
           err.customerNoLongerLive = true;
           throw err;
         }
+        if (clean.monthly_rate !== undefined && bulkRateWouldReplaceBill(lockedBefore, clean.monthly_rate)) {
+          const err = new Error(BULK_RATE_BILLED_ERROR);
+          err.rateBlocked = true;
+          throw err;
+        }
         const lockedMerged = { ...lockedBefore, ...clean };
         // ADMIN-BUG-R10 (round 3): a bulk edit that combines a churn move
         // with an address/email field takes THIS per-row branch instead of
@@ -2024,6 +2088,10 @@ async function bulkUpdateCustomers(customerIds, updates) {
     } catch (e) {
       if (e && e.customerNoLongerLive) {
         errors.push({ customer_id: customerId, error: 'Customer record is no longer live (deleted or merged)' });
+        continue;
+      }
+      if (e && e.rateBlocked) {
+        errors.push({ customer_id: customerId, error: e.message, rate_blocked: true });
         continue;
       }
       if (e && e.churnBlocked) {

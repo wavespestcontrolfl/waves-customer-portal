@@ -34,6 +34,7 @@ const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, 
 const mockIbBookingOverlapProposal = jest.fn(async () => null);
 // Who the overlapping visit is (card text only): nobody named by default.
 const mockIbBookingOverlapWho = jest.fn(async () => []);
+const mockRateChangeProposal = jest.fn(async () => null);
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -42,6 +43,10 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
 })));
 
 jest.mock('../models/db', () => jest.fn(() => ({ insert: mockDbInsert })));
+jest.mock('../services/intelligence-bar/rate-change', () => ({
+  rateChangeProposal: (...a) => mockRateChangeProposal(...a),
+  money: (n) => `$${Number(n || 0).toFixed(2)}`,
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   getBreaker: jest.fn(() => ({
@@ -1480,6 +1485,61 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(toolName).toBe('bulk_update_leads');
       expect(params.dry_run).toBe(false);
       expect(params._approved_lead_ids).toEqual(['l1', 'l2']);
+    });
+  });
+});
+
+
+// Owner 2026-10-06: a monthly-rate edit names the service that changes and the
+// card shows the whole bill (rate-change.js has the rules; this is the wiring).
+describe('update_customer monthly-rate proposals', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_IB_UI_CONFIRM = 'true';
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+  afterEach(() => { delete process.env.GATE_IB_UI_CONFIRM; });
+
+  test('a refused rate edit makes no card', async () => {
+    mockRateChangeProposal.mockResolvedValueOnce({ error: 'monthly_rate is this customer\'s whole monthly bill', code: 'rate_family_required' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { monthly_rate: 60.33 } } }],
+      [{ type: 'text', text: 'Which service?' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'set her rate', context: 'customers' });
+      expect(mockRateChangeProposal).toHaveBeenCalledWith('c1', 60.33, undefined);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a split rate edit pins the line and the ledger, drops rate_service, and lists the bill on the card', async () => {
+    mockRateChangeProposal.mockResolvedValueOnce({
+      family: 'lawn_care',
+      pin: '41.33|pest_control=41.33',
+      display: {
+        billing_mode: 'monthly_membership', replaces_whole_bill: false,
+        lines: [{ label: 'Pest control', before: 41.33, after: 41.33 }, { label: 'Lawn care', before: 0, after: 61.33 }],
+        total_before: 41.33, total_after: 102.66,
+      },
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { monthly_rate: 102.66 }, rate_service: 'lawn' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'add lawn', context: 'customers' });
+      expect(mockRateChangeProposal).toHaveBeenCalledWith('c1', 102.66, 'lawn');
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
+      expect(params).toMatchObject({ _rate_family: 'lawn_care', _rate_ledger_pin: '41.33|pest_control=41.33' });
+      expect(params).not.toHaveProperty('rate_service');
+      const labels = contract.effects.map((e) => e.label);
+      expect(labels).toContain('Lawn care: $0.00 → $61.33 a month');
+      expect(labels).toContain('Monthly bill total: $41.33 → $102.66');
     });
   });
 });

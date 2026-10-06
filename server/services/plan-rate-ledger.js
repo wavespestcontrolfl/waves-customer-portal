@@ -566,6 +566,12 @@ async function syncScalarWriteToLedger(database, customerId, rate, { source = 's
     }
     logger.warn(`[plan-rate-ledger] advisory sync failed for customer ${customerId} (${source}): ${syncErr.message}`);
   }
+  await recordManualRateAudit(database, customerId, rate, source);
+}
+
+// The permanent manual-override audit event for a human scalar write (see
+// MANUAL_RATE_SOURCES). Shared by the whole-bill reset and the one-line edit.
+async function recordManualRateAudit(database, customerId, rate, source) {
   if (MANUAL_RATE_SOURCES.has(source)) {
     // Joined to the CALLER's handle (usually the edit's open transaction):
     // a rolled-back rate edit must not leave a cooldown-blocking audit
@@ -589,6 +595,104 @@ async function syncScalarWriteToLedger(database, customerId, rate, { source = 's
     });
   }
 }
+// One customer's monthly bill as lines for a confirm card, before and after a
+// human rate edit (owner 2026-10-06: the Intelligence Bar replaced Pest $41.33
+// with a lawn price and nothing on the card said so). Pure: the card and the
+// commit both call it on the same inputs, so what the card shows is what the
+// commit writes.
+//   components     current ledger rows [{ family_key, monthly_rate }]
+//   previousScalar customers.monthly_rate before the edit
+//   newScalar      the new monthly total
+//   familyKey      the one line that changes, or WHOLE_BILL to replace them all
+// Returns { lines: [{ family, before, after }], totalBefore, totalAfter } or
+// { error, code } when the edit cannot be split onto the lines.
+const WHOLE_BILL = 'whole_bill';
+
+// The bill's current lines as a Map family → amount. An empty ledger under a
+// positive rate is a legacy rate the ledger never split: one line, the same
+// 'unattributed' the whole-bill reset writes.
+function billLines(components = [], previousScalar = 0) {
+  const lines = new Map();
+  for (const row of components) {
+    const amount = roundMoney(row.monthly_rate);
+    if (amount !== 0) lines.set(row.family_key, roundMoney((lines.get(row.family_key) || 0) + amount));
+  }
+  if (lines.size === 0 && roundMoney(previousScalar) > 0) lines.set(UNATTRIBUTED, roundMoney(previousScalar));
+  return lines;
+}
+
+function planRateChange({ components = [], previousScalar = 0, newScalar = 0, familyKey } = {}) {
+  const before = billLines(components, previousScalar);
+  const totalBefore = roundMoney(previousScalar);
+  const totalAfter = roundMoney(newScalar);
+  const after = new Map();
+  if (familyKey === WHOLE_BILL) {
+    if (totalAfter > 0) after.set(UNATTRIBUTED, totalAfter);
+  } else {
+    const key = boundedFamilyKey(familyKey);
+    if (!key) return { error: 'Name the service whose price changes.', code: 'rate_family_required' };
+    let others = 0;
+    for (const [family, amount] of before) {
+      if (family !== key) { after.set(family, amount); others = roundMoney(others + amount); }
+    }
+    const line = roundMoney(totalAfter - others);
+    if (line < 0) {
+      return {
+        error: `The new total $${totalAfter.toFixed(2)} is less than the other services on this bill ($${others.toFixed(2)}).`,
+        code: 'rate_below_other_lines',
+      };
+    }
+    if (line > 0) after.set(key, line);
+  }
+  const families = [...new Set([...before.keys(), ...after.keys()])];
+  return {
+    lines: families.map((family) => ({ family, before: before.get(family) || 0, after: after.get(family) || 0 })),
+    totalBefore,
+    totalAfter,
+  };
+}
+
+// A human rate edit that names the ONE line it changes: that line becomes the
+// new total minus the other lines, and every other line stays (the whole-bill
+// reset above would fold them into one 'unattributed' blob). Same locking,
+// gate-aware error policy and manual-override audit as syncScalarWriteToLedger.
+// Throws an Error with `.code` when the edit no longer splits (the ledger
+// changed since the card).
+async function setLineForScalarWrite(database, customerId, { familyKey, previousScalar, newScalar }, { source = 'scalar_write' } = {}) {
+  try {
+    await database.transaction(async (sp) => {
+      if (!database.isTransaction) await lockCustomerComms(sp, customerId); // rung 6 — see LOCKING above
+      if (!(await ledgerTableExists(sp))) return;
+      const components = await loadComponents(sp, customerId);
+      const change = planRateChange({ components, previousScalar, newScalar, familyKey });
+      if (change.error) {
+        const err = new Error(change.error);
+        err.code = change.code;
+        throw err;
+      }
+      await sp('customer_plan_rates').where({ customer_id: customerId }).del();
+      for (const { family, after } of change.lines) {
+        if (after > 0) {
+          await sp('customer_plan_rates').insert({
+            customer_id: customerId,
+            family_key: family,
+            monthly_rate: after,
+            source,
+            effective_at: new Date(),
+            updated_at: new Date(),
+          });
+        }
+      }
+    });
+  } catch (lineErr) {
+    if (lineErr.code === 'rate_below_other_lines' || lineErr.code === 'rate_family_required' || planRateLedgerEnabled()) {
+      if (!lineErr.code) logger.error(`[plan-rate-ledger] authoritative line write failed for customer ${customerId} (${source}) — failing the write: ${lineErr.message}`);
+      throw lineErr;
+    }
+    logger.warn(`[plan-rate-ledger] advisory line write failed for customer ${customerId} (${source}): ${lineErr.message}`);
+  }
+  await recordManualRateAudit(database, customerId, newScalar, source);
+}
 
 module.exports = {
   UNATTRIBUTED,
@@ -605,6 +709,10 @@ module.exports = {
   applyAcceptToLedger,
   resetLedgerToScalar,
   syncScalarWriteToLedger,
+  WHOLE_BILL,
+  billLines,
+  planRateChange,
+  setLineForScalarWrite,
   MANUAL_RATE_SOURCES,
   MANUAL_RATE_AUDIT_ACTION,
   seedLedgerComponents,
