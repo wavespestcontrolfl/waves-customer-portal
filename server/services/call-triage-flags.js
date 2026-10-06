@@ -938,6 +938,153 @@ function applyWholeStructureUnitWaiver(av, opts = {}) {
   };
 }
 
+// The extraction JUDGES the language (owner ruling 2026-10-01; the
+// service_request.price_is_final precedent in call-commercial-dictated-booking.js):
+// property.whole_building_occupancy_final says the claim stood unhedged,
+// uncorrected, unshared and neither a question nor a condition for the WHOLE
+// call. The code only VERIFIES. It screens the pinned QUOTE TEXT itself (a
+// fragment that carries its own hedge, negation, question or condition is not a
+// plain statement) and keeps two hard vetoes for EXPLICIT signals across the
+// call: a unit designator with a number or letter in a caller turn, and
+// multi-tenant center wording in any turn. Chatty asides never decide it.
+// Uncertainty IN the pinned quote itself: the caller is guessing, not stating. A LOCAL superset on purpose: the shared hedge screen
+// (turnHasNegationOrHedge) is calibrated for agent commitments and other
+// callers depend on it as it is. Tested on the normalized turn ("I'm" reads
+// "i m", "I'd" reads "i d").
+const UNCERTAINTY_RE = new RegExp('(?:^| )(?:'
+  + 'i (?:think|thought|believe|guess|suppose|assume|reckon|hope|figure|d (?:assume|guess|say|think)|'
+  + '(?:m|am) (?:pretty|fairly|almost|not|kinda|kind of) (?:sure|certain|positive))'
+  + '|pretty sure|fairly sure|probably|prob|maybe|might|may|perhaps|possibly|supposedly|presumably|allegedly|apparently'
+  + '|as far as i know|to my knowledge|should be|kind of|kinda|sort of|sorta|not sure|unsure|not certain|not positive'
+  + '|no idea|think so|believe so|hopefully|more or less'
+  + ')(?: |$)');
+// A designator followed by a number or a single letter ("suite 4", "unit B",
+// "bay 3", "apt 2B", "# 12"): the caller named a specific unit. "unit" alone, or
+// "suite of services", is not a designator.
+const UNIT_DESIGNATOR_RE = /\b(?:suite|ste|unit|apt|apartment|bay|condo(?:minium)?|room)\.?\s*#?\s*(?:\d+[a-z]?|[a-z])\b|#\s*\d/i;
+// An interrogative quote is not an assertion. Punctuation is only a hint in a
+// transcript, so a question opener ("do we", "is it", "are we") counts too,
+// after any leading filler word.
+const QUESTION_FILLER_RE = /^(?:(?:well|so|and|but|okay|ok|um|uh|yeah|yes|no|hmm|like|then) )+/;
+const QUESTION_OPENER_RE = /^(?:do|does|did|is|are|was|were|am|will|would|can|could|should|shall|have|has|what|how|why|who|which|where|when)\b/;
+// The quote is a plain statement: no negation, hedge, open condition,
+// uncertainty or question inside the quote text itself.
+function quoteIsPlainStatement(quote) {
+  const nq = normalizeForGrounding(quote);
+  return !turnHasNegationOrHedge(nq)
+    && !turnHasUnresolvedConditional(nq)
+    && !UNCERTAINTY_RE.test(nq)
+    && !/\?/.test(quote)
+    && !QUESTION_OPENER_RE.test(nq.replace(QUESTION_FILLER_RE, ''));
+}
+
+// Outbound speaker labels have been swapped before (diarization): the lead is
+// labeled Agent and Waves staff Caller. A plain staff self-introduction at the
+// start of a turn ("Hi, this is Sam with Waves ...") is a deterministic tell.
+// On an OUTBOUND call, when a Caller-labeled turn introduces itself that way
+// and no Agent-labeled turn does, swap the roles. Both or neither introducing
+// is ambiguous and keeps the raw labels (fail closed). Inbound never swaps.
+const STAFF_INTRO_RE = /^\s*(?:(?:hi|hello|hey|good (?:morning|afternoon|evening|day)|thanks? for (?:calling|taking))\b[\s,.!:-]*)*this is [a-z'.-]+(?: [a-z'.-]+){0,3}? (?:calling )?(?:with|from|at) waves\b/i;
+function orientTranscriptForOutbound(transcript, outbound) {
+  if (outbound !== true) return transcript;
+  const { parseTurns } = require('./call-reschedule-agreement').groundingTools;
+  const turns = parseTurns(transcript);
+  if (!turns) return transcript;
+  const callerIntro = turns.some((t) => !t.agent && STAFF_INTRO_RE.test(t.raw));
+  const agentIntro = turns.some((t) => t.agent && STAFF_INTRO_RE.test(t.raw));
+  if (!callerIntro || agentIntro) return transcript;
+  return String(transcript).replace(/^(\s*)(agent|caller)(\s*:)/gim,
+    (_m, lead, who, colon) => `${lead}${who.toLowerCase() === 'agent' ? 'Caller' : 'Agent'}${colon}`);
+}
+
+// Wording that says the building sits in a multi-tenant center.
+const MULTI_TENANT_WORDING_RE = /\b(?:strip\s+(?:mall|center|centre|plaza)|plaza|shopping\s+(?:center|centre|mall|plaza)|mall|(?:office|business|industrial)\s+park|(?:office|apartment|business)\s+complex)\b/i;
+const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
+
+/**
+ * GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT (owner ruling 2026-10-06): skip the
+ * "which unit?" hold when Google says the address is a BUSINESS address AND the
+ * caller says they own, bought, lease or occupy the WHOLE building. The owner
+ * accepted the risk of a strip-mall caller who has a suite.
+ *
+ * Sibling of applyWholeStructureUnitWaiver with the same return contract: the
+ * SAME object untouched unless every condition holds, so gate-off (and every
+ * non-qualifying call) is byte-identical. Conditions:
+ *   - the gate is on and the verdict is exactly "PREMISE resolved, only
+ *     subpremise missing", in service area, nothing unconfirmed or replaced;
+ *   - Google's addressUse says business AND residential === false (unknown
+ *     residential keeps the hold);
+ *   - V2 property_type is commercial;
+ *   - V2 property.whole_building_occupancy AND whole_building_occupancy_final
+ *     are both true. The extraction judges the language (owner ruling
+ *     2026-10-01; the price_is_final precedent); this code only verifies that
+ *     its pinned quote (field_path /property/whole_building_occupancy, speaker
+ *     caller) is word for word inside a CALLER turn of a fully labeled
+ *     two-speaker transcript (roles swapped first on an outbound call whose
+ *     labels look swapped) and that the QUOTE TEXT itself carries no negation,
+ *     hedge, uncertainty, open condition or question;
+ *   - no caller turn names a unit designator with a number or letter (suite 4,
+ *     unit B, bay 3, apt 2B), and no turn at all names a strip mall, plaza,
+ *     shopping center, mall, office/business/industrial park or office/
+ *     apartment/business complex. A chatty aside never decides the call.
+ * The waived copy carries the same wholeStructureUnitWaived marker as the
+ * whole-structure waiver plus reason 'business_whole_building', so
+ * reconstructWaivedAddressValidation and the offline audits rebuild it.
+ */
+function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
+  if (!opts.enabled) return av;
+  if (!isMissingUnitNumber(av)) return av;
+  if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
+  // Both halves must be AFFIRMATIVE: unknown (null/absent) residential keeps the hold.
+  if (av.addressUse?.business !== true || av.addressUse?.residential !== false) return av;
+  if (opts.propertyType !== 'commercial') return av;
+  if (opts.wholeBuildingOccupancy !== true || opts.wholeBuildingFinal !== true) return av;
+  // Lazy: call-reschedule-agreement requires this module at load time.
+  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
+  const turns = parseTurns(orientTranscriptForOutbound(opts.transcript, opts.outbound));
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return av;
+  const quotes = (Array.isArray(opts.evidence) ? opts.evidence : [])
+    .filter((e) => e?.field_path === '/property/whole_building_occupancy' && e.speaker === 'caller' && typeof e.quote === 'string');
+  const grounded = quotes.some((e) => turnsHolding(turns, e.quote, 'caller').length > 0
+    && quoteIsPlainStatement(e.quote));
+  if (!grounded) return av;
+  if (turns.some((t) => !t.agent && UNIT_DESIGNATOR_RE.test(t.raw))) return av;
+  if (turns.some((t) => MULTI_TENANT_WORDING_RE.test(t.raw))) return av;
+  return {
+    ...av,
+    status: 'validated_accept',
+    missingComponents: [],
+    wholeStructureUnitWaived: {
+      missingComponents: [...av.missingComponents],
+      originalStatus: av.status,
+      reason: BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
+    },
+  };
+}
+
+// Offline audits judge a FRESH extraction against the persisted verdict of the
+// PRIOR one. Whether the waiver stamped on that row carries to the candidate:
+//   - a business whole-building waiver is recomputed against the candidate's own
+//     property fields, pinned evidence and the transcript, so a candidate that
+//     drops or misgrounds the /property/whole_building_occupancy pin keeps the
+//     hold even when the scalar inputs happen to match;
+//   - any other waiver (whole-structure) carries when the caller-supplied
+//     scalar inputs (service and property type) match: `scalarInputsMatch`.
+// `stored` is the persisted (unwaived, marker-stamped) verdict.
+function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true, outbound = false } = {}) {
+  if (stored?.wholeStructureUnitWaived?.reason !== BUSINESS_WHOLE_BUILDING_WAIVER_REASON) return scalarInputsMatch;
+  const property = candidate?.property || {};
+  return applyBusinessWholeBuildingUnitWaiver(stored, {
+    enabled: true,
+    propertyType: property.property_type,
+    wholeBuildingOccupancy: property.whole_building_occupancy,
+    wholeBuildingFinal: property.whole_building_occupancy_final,
+    evidence: candidate?.evidence,
+    transcript,
+    outbound,
+  }) !== stored;
+}
+
 // Offline audits (v2-promotion-readiness, verify-v2-shadow-path, replay
 // variance) read the PERSISTED verdict, which keeps the original ambiguous
 // status. A pass that waived the unit hold stamps `wholeStructureUnitWaived` on
@@ -3079,6 +3226,10 @@ module.exports = {
   suppressAddressFlagsForAV,
   isMissingUnitNumber,
   applyWholeStructureUnitWaiver,
+  applyBusinessWholeBuildingUnitWaiver,
+  orientTranscriptForOutbound,
+  BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
+  waiverCarriesToCandidate,
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,

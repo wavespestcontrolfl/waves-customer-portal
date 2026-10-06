@@ -5021,7 +5021,8 @@ start + 2h only, and the range is derived server-side with
 dispatch-owned unreviewed booking, or an inactive/cancelled account.
 `canMoveOnline` (dead-link guard, C3/C6, 2026-09-28) is an additional
 boolean, false when the visit itself already starts inside the self-serve
-MOVE notice window (`SELF_SERVE_MOVE_NOTICE_HOURS`, `visitInsideMoveNoticeWindow`)
+MOVE notice window (`SELF_SERVE_MOVE_NOTICE_HOURS`, `visitInsideMoveNoticeWindow`,
+which honors the office move approval above)
 — the CTA's own destination would refuse the move — and the client hides
 the card when either is falsy. The separate missed-visit "pick a new time"
 recovery link (a different, `state: 'past'` branch of this same GET) is
@@ -5202,7 +5203,10 @@ into a book window and a move window 2026-09-28, `SELF_SERVE_MOVE_NOTICE_HOURS`,
 default 24, independent of `SELF_SERVE_NOTICE_HOURS` — no fallback to it):
 GET answers `not_reschedulable` with reason `self_serve_notice` for a visit
 that itself currently starts within the MOVE window (a MISSED visit is being
-rebooked and is exempt); no offered target/destination starts within the
+rebooked and is exempt, and so is a visit whose
+`scheduled_services.office_move_approved_for` equals its current start — the
+admin composer stamps that when the office inserts the reschedule link inside
+the window, owner 2026-10-06, and any move ends it); no offered target/destination starts within the
 BOOK window (`SELF_SERVE_NOTICE_HOURS`, default 24); and POST refuses such a
 visit with 409 code
 `SELF_SERVE_NOTICE`. POST is a WRITE with two owner-authorized
