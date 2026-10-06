@@ -489,6 +489,8 @@ describe('screenAskAnswer', () => {
     expect(screen("It shouldn't affect children.")).toBe('safety claim');
     expect(screen("It can't pose any risk to pets.")).toBe('safety claim');
     expect(screen('The technician is scheduled to return.')).toBe('states_a_date');
+    expect(screen("We'll return soon.")).toBe('states_a_date');
+    expect(screen("We'll arrive soon.")).toBe('states_a_date');
     expect(screen('The technician was scheduled for today and treated the outside.')).toBeNull();
     expect(screen('We are coming soon.')).toBe('states_a_date');
     expect(screen("We're on our way.")).toBe('states_a_date');
@@ -721,6 +723,7 @@ describe('symptoms and exposure never reach the model', () => {
     'My dog took a bite of rodenticide',
     'My dog took more than two bites of bait',
     'My dog had a bite of bait',
+    'My dog took a bite of Advion Ant Bait Gel',
     'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
@@ -838,6 +841,7 @@ describe('symptoms and exposure never reach the model', () => {
     'Was there a little bit of bait left?',
     'Mosquitoes bit me after the treatment',
     'My child took a bite of lunch while I checked the bait',
+    'I had a bite of lunch near the bait',
     'Was the rodent bait eaten?',
     'Was any bait consumed?',
     'Was the rat poisoned?',
@@ -1171,6 +1175,8 @@ describe('street-address scrub keeps prose', () => {
     ['Call nine four one, triple five, triple one, two.', 'Call [phone].'],
     ['Call triple two, double five, double nine.', 'Call [phone].'],
     ['Call nine four one 55 five one two three four.', 'Call [phone].'],
+    ['Call nine hundred and forty-one, five hundred and fifty-five, twelve thirty-four.', 'Call [phone].'],
+    ['I saw two and three ants.', 'I saw two and three ants.'],
     ['We saw 2 ants and three spiders.', 'We saw 2 ants and three spiders.'],
     ['Ants at One Hundred F L 70.', 'Ants at [number] F L 70.'],
     ['Ants at One Hundred U S Forty One.', 'Ants at [number] U S Forty One.'],
