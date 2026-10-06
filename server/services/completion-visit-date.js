@@ -35,11 +35,10 @@
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { completionMovesDateLive } = require('../config/feature-gates');
+// A grouped partner in a terminal or replaced status no longer shares the stop.
+const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 
 const MOVE_SOURCE = 'completion_early';
-// Terminal + replaced statuses: a grouped partner in one of these no longer
-// shares the stop (visit-context/statuses.js JOIN_INELIGIBLE_STATUSES).
-const GROUP_INELIGIBLE_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
 
 function dayKey(value) {
   if (value == null || value === '') return null;
@@ -98,7 +97,11 @@ function seriesSlotUpdate(locked, bookedDay, cols) {
  *
  * @param trx            knex transaction (the closeout's own)
  * @param scheduledServiceId
- * @param serviceRecord  the visit's service record (its service_date is the work day)
+ * @param serviceRecord  the visit's service record
+ * @param workDate       the closeout's own work day (the project's project_date).
+ *                       Wins over serviceRecord.service_date: a REUSED record
+ *                       is never re-dated by the closeout, so its date can
+ *                       still be the booked day. Falls back to the record.
  * @param previousStatus the visit's status BEFORE this closeout flipped it
  * @param scheduledServiceCols  knex columnInfo() of scheduled_services (column guards)
  * @returns {Promise<{moved:boolean, reason?:string, from?:string, to?:string, invoicesDated?:number}>}
@@ -106,6 +109,7 @@ function seriesSlotUpdate(locked, bookedDay, cols) {
 async function moveCompletedVisitToWorkDay(trx, {
   scheduledServiceId,
   serviceRecord,
+  workDate = null,
   previousStatus,
   scheduledServiceCols = null,
   today = etDateString(),
@@ -123,7 +127,7 @@ async function moveCompletedVisitToWorkDay(trx, {
 
   const plan = planCompletionDateMove({
     bookedDate: locked.scheduled_date,
-    workDate: serviceRecord.service_date,
+    workDate: dayKey(workDate) || serviceRecord.service_date,
     previousStatus,
     today,
   });
@@ -133,7 +137,7 @@ async function moveCompletedVisitToWorkDay(trx, {
     const partner = await trx('scheduled_services')
       .where({ visit_id: locked.visit_id })
       .whereNot({ id: locked.id })
-      .whereNotIn('status', GROUP_INELIGIBLE_STATUSES)
+      .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
       .first('id');
     if (partner) return { moved: false, reason: 'grouped_visit' };
   }
@@ -154,6 +158,16 @@ async function moveCompletedVisitToWorkDay(trx, {
     .update(update);
   if (!changed) return { moved: false, reason: 'row_changed' };
 
+  // A reused service record can still carry the booked day: give it the work
+  // day too, under the same copy-only rule as the invoices below.
+  let recordDated = 0;
+  if (serviceRecord.id) {
+    recordDated = await trx('service_records')
+      .where({ id: serviceRecord.id })
+      .whereRaw('service_date = ?::date', [plan.from])
+      .update({ service_date: plan.to });
+  }
+
   // The visit's own invoices: only a service date that still equals the booked
   // day is a copy of it, so a deliberately different date is never overwritten.
   const invoiceMatch = (builder) => {
@@ -166,8 +180,8 @@ async function moveCompletedVisitToWorkDay(trx, {
     .whereRaw('service_date = ?::date', [plan.from])
     .update({ service_date: plan.to, updated_at: trx.fn.now() });
 
-  logger.info(`[completion-visit-date] visit ${locked.id} completed early: moved ${plan.from} -> ${plan.to}${locked.is_recurring === true ? ' (recurring: series slot kept)' : ''}; ${invoicesDated} invoice(s) re-dated`);
-  return { moved: true, from: plan.from, to: plan.to, invoicesDated };
+  logger.info(`[completion-visit-date] visit ${locked.id} completed early: moved ${plan.from} -> ${plan.to}${locked.is_recurring === true ? ' (recurring: series slot kept)' : ''}; ${invoicesDated} invoice(s) re-dated, ${recordDated} record(s) re-dated`);
+  return { moved: true, from: plan.from, to: plan.to, invoicesDated, recordDated };
 }
 
 module.exports = {

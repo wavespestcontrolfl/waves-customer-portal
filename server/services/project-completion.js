@@ -1037,6 +1037,7 @@ async function completeProjectBackedService({
           visitDateMove = await trx.transaction(async (sp) => require('./completion-visit-date').moveCompletedVisitToWorkDay(sp, {
             scheduledServiceId: scheduledService.id,
             serviceRecord,
+            workDate: normalizeDateOnly(project.project_date),
             previousStatus: scheduledService.status,
             scheduledServiceCols,
           }));

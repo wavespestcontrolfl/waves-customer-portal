@@ -99,4 +99,21 @@ describe('moveCompletedVisitToWorkDay guards', () => {
     const visitPatch = trx.updates.find((u) => u.table === 'scheduled_services').patch;
     expect(visitPatch).toMatchObject({ scheduled_date: '2026-10-05', original_scheduled_date: '2026-10-12' });
   });
+  test('the project work date wins over a reused record still on the booked day', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const trx = trxFor({ ...base });
+    const out = await moveCompletedVisitToWorkDay(trx, args({
+      serviceRecord: { id: 'r', service_date: '2026-10-08' },
+      workDate: '2026-10-04',
+    }));
+    expect(out).toMatchObject({ moved: true, from: '2026-10-08', to: '2026-10-04', recordDated: 1 });
+    expect(trx.updates.find((u) => u.table === 'scheduled_services').patch).toMatchObject({ scheduled_date: '2026-10-04' });
+    expect(trx.updates.find((u) => u.table === 'service_records').patch).toEqual({ service_date: '2026-10-04' });
+  });
+
+  test('without a work date the record date is used', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const trx = trxFor({ ...base });
+    expect(await moveCompletedVisitToWorkDay(trx, args({ workDate: null }))).toMatchObject({ moved: true, to: '2026-10-05' });
+  });
 });
