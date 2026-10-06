@@ -1990,3 +1990,112 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
     expect(await run(fakeConn(), { dnsDeps: { resolveMx: notFound, resolve4: async () => ['203.0.113.10'], resolve6: notFound } })).toEqual([['t1', 'email_unambiguous']]);
   });
 });
+
+describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / staff_booked_at_account_address)', () => {
+  const { staffBookingsAfterCard, visitAtSoleProperty, soleClaimant, estimateReachedCustomer, STAFF_WORK_MAX_AGE_DAYS } = require('../services/triage-auto-resolve');
+  const ctxOf = (flags, id = 't1') => ({ evidence: new Map([[id, flags]]) });
+  const CARD_AT = '2026-09-10T15:00:00Z';
+  const after = (hours) => new Date(new Date(CARD_AT).getTime() + hours * 3600 * 1000).toISOString();
+  const visit = (over = {}) => ({ id: 'v1', customer_id: 'c1', status: 'confirmed', created_at: after(1), parent_service_id: null, recurring_parent_id: null, source_call_log_id: null, service_type: 'Anything', ...over });
+  const card = (over = {}) => item({ id: 't1', call_log_id: 'call-1', call_customer_id: 'c1', created_at: CARD_AT, call_created_at: '2026-09-10T14:50:00Z', ...over });
+
+  test('each rule fires only on its own card and evidence flag', () => {
+    expect(classifyTriageItem(card({ reason_code: 'quote_promised' }), ctxOf({ estimate_sent_to_customer: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'quote_sent_to_customer' });
+    expect(classifyTriageItem(card({ reason_code: 'not_confirmed' }), ctxOf({ staff_booked_after_card: true }), { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'staff_booked_after_card' });
+    // The flag does nothing on another card type.
+    for (const code of ['not_confirmed', 'email_unverified', 'cancellation_request']) {
+      expect(classifyTriageItem(card({ reason_code: code }), ctxOf({ estimate_sent_to_customer: true }), { now: NOW })).toBeNull();
+    }
+    expect(classifyTriageItem(card({ reason_code: 'quote_promised' }), ctxOf({ staff_booked_after_card: true }), { now: NOW })).toBeNull();
+    // Gate off (no evidence): nothing.
+    expect(classifyTriageItem(card({ reason_code: 'quote_promised' }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ reason_code: 'not_confirmed' }), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('a soft-deleted customer keeps the quote and booking cards', () => {
+    expect(classifyTriageItem(card({ reason_code: 'quote_promised', customer_deleted_at: CARD_AT }), ctxOf({ estimate_sent_to_customer: true }), { now: NOW })).toBeNull();
+    expect(classifyTriageItem(card({ reason_code: 'not_confirmed', customer_deleted_at: CARD_AT }), ctxOf({ staff_booked_after_card: true }), { now: NOW })).toBeNull();
+  });
+
+  test.each(['caller_not_authorized', 'commercial_requires_quote', 'out_of_service_area', 'out_of_area', 'do_not_contact_requested'])(
+    '%s is never closed by any staff-work flag', (code) => {
+      const all = ctxOf({ estimate_sent_to_customer: true, staff_booked_after_card: true, staff_booked_at_account_address: true });
+      expect(classifyTriageItem(card({ reason_code: code }), all, { now: NOW })).toBeNull();
+    });
+
+  test('address cards close on the account-address flag only when the call named no other address', () => {
+    const flags = ctxOf({ staff_booked_at_account_address: true });
+    const base = { reason_code: 'missing_service_address', customer_pipeline_stage: 'new_lead', payload: { flag: 'missing_service_address', scheduling_status: 'requested' } };
+    expect(classifyTriageItem(card(base), flags, { now: NOW })).toEqual({ action: 'resolve', rule: 'staff_booked_at_account_address' });
+    // The call named an address that is not the on-file one: still held for validation.
+    const heardElsewhere = card({ ...base, customer_address_line1: '10 Oak St', customer_zip: '34205', payload: { flag: 'address_unverifiable', scheduling_status: 'requested', address_as_heard: '99 Elsewhere Rd, Bradenton, FL 34205' } });
+    expect(classifyTriageItem(heardElsewhere, flags, { now: NOW })).toBeNull();
+    // The call supplied an address and the card cannot show it is the on-file one.
+    expect(classifyTriageItem(card({ ...base, call_extraction: { property: { service_address: { street_line_1: '5 Pine Ave' } } } }), flags, { now: NOW })).toBeNull();
+    // A confirmed call still needs a booking matching its ask.
+    expect(classifyTriageItem(card({ ...base, payload: { flag: 'missing_service_address', scheduling_status: 'confirmed' } }), flags, { now: NOW })).toBeNull();
+    // No flag, no close.
+    expect(classifyTriageItem(card(base), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('staffBookingsAfterCard: parent rows created after the card inside the window, never another call\'s', () => {
+    const c = card({ reason_code: 'not_confirmed' });
+    const ok = visit();
+    const kept = staffBookingsAfterCard(c, [
+      ok,
+      visit({ id: 'early', created_at: after(-1) }),
+      visit({ id: 'late', created_at: after((STAFF_WORK_MAX_AGE_DAYS + 1) * 24) }),
+      visit({ id: 'child', parent_service_id: 'p' }),
+      visit({ id: 'series', recurring_parent_id: 'p' }),
+      visit({ id: 'other_call', source_call_log_id: 'call-9' }),
+      visit({ id: 'own_call', source_call_log_id: 'call-1' }),
+    ]).map((v) => v.id);
+    expect(kept).toEqual(['v1', 'own_call']);
+  });
+
+  test('staffBookingsAfterCard keeps the card\'s confirmed hour and requested days binding', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const c = card({ reason_code: 'not_confirmed', payload: { flag: 'not_confirmed', scheduling_status: 'requested', scheduling_window: {
+      status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null, preferred_time_of_day: 'unspecified',
+      requested_date_range_start: '2026-09-12', requested_date_range_end: '2026-09-12' } } });
+    expect(staffBookingsAfterCard(c, [visit({ scheduled_date: '2026-09-12' })]).length).toBe(1);
+    expect(staffBookingsAfterCard(c, [visit({ scheduled_date: '2026-09-20' })]).length).toBe(0);
+  });
+
+  test('visitAtSoleProperty: this property or no property, never a stamp for another address', () => {
+    const prop = { id: 'p1', address_line1: '10 Oak St', address_line2: null, zip: '34205' };
+    expect(visitAtSoleProperty(visit({ property_id: null }), prop)).toBe(true);
+    expect(visitAtSoleProperty(visit({ property_id: 'p1' }), prop)).toBe(true);
+    expect(visitAtSoleProperty(visit({ property_id: 'p2' }), prop)).toBe(false);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak Street', service_address_zip: '34205' }), prop)).toBe(true);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '99 Elm St', service_address_zip: '34205' }), prop)).toBe(false);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_zip: '34211' }), prop)).toBe(false);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_line2: 'Apt 4' }), prop)).toBe(false);
+    expect(visitAtSoleProperty(visit({ service_address_line1: 'Main Street' }), prop)).toBe(false);
+    expect(visitAtSoleProperty(visit(), null)).toBe(false);
+  });
+
+  test('soleClaimant: exactly this card among table and batch; a failed lookup is never sole', () => {
+    const me = card({ reason_code: 'quote_promised' });
+    expect(soleClaimant(me, new Map([['c1', new Set(['t1'])]]), [me])).toBe(true);
+    expect(soleClaimant(me, new Map(), [me])).toBe(true);
+    expect(soleClaimant(me, new Map([['c1', new Set(['t1', 't2'])]]), [me])).toBe(false);
+    const sibling = card({ id: 't3', reason_code: 'quote_promised' });
+    expect(soleClaimant(me, new Map(), [me, sibling])).toBe(false);
+    expect(soleClaimant(me, new Map(), [me, card({ id: 't4', reason_code: 'quote_promised', call_customer_id: 'c2' })])).toBe(true);
+    expect(soleClaimant(me, null, [me])).toBe(false);
+  });
+
+  test('estimateReachedCustomer: a real handoff, or the customer acted; never a suppressed send or a manual accept', () => {
+    const boundary = new Date(CARD_AT);
+    expect(estimateReachedCustomer({ handed_off_at: after(1), status: 'sent' }, boundary)).toBe(true);
+    expect(estimateReachedCustomer({ status: 'viewed' }, boundary)).toBe(true);
+    expect(estimateReachedCustomer({ status: 'declined' }, boundary)).toBe(true);
+    expect(estimateReachedCustomer({ status: 'accepted', price_locked_by: null }, boundary)).toBe(true);
+    expect(estimateReachedCustomer({ status: 'accepted', price_locked_by: 'manual_accept' }, boundary)).toBe(false);
+    expect(estimateReachedCustomer({ status: 'sent' }, boundary)).toBe(false);
+    expect(estimateReachedCustomer({ handed_off_at: after(-1), status: 'sent' }, boundary)).toBe(false);
+  });
+});
