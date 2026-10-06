@@ -44,6 +44,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/customers` | admin-customers |
 | GET | `/api/admin/customers/:customerId/turf-profile` | admin-customer-turf-profile |
 | PUT | `/api/admin/customers/:customerId/turf-profile` | admin-customer-turf-profile |
+| PUT | `/api/admin/customers/:customerId/turf-profile/bermuda-removal` | admin-customer-turf-profile |
 | GET | `/api/admin/customers/:id` | admin-customers |
 | GET | `/api/admin/customers/:id/cards` | admin-customers |
 | GET | `/api/admin/customers/:id/estimates-summary` | admin-customers |
