@@ -153,8 +153,9 @@ Use for: "move all unresponsive leads older than 30 days to lost", "mark all no-
   },
   {
     name: 'update_lead_contact',
-    description: `Correct a lead's contact details: first name, last name, phone, email, or address (street, city, zip) (the lead record only — a linked customer account is NOT changed). Pass ONLY the fields to change. A blank last_name / phone / email / address / city / zip clears that field; first_name cannot be cleared.
-Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email", "the Smith lead's street address is 12 Oak Ave, not 21 Oak Ave"
+    description: `Correct a lead's contact details: first name, last name, phone, email, or address (street only), city, zip (the lead record only — a linked customer account is NOT changed). Pass ONLY the fields to change. A blank last_name / phone / email / address / city / zip clears that field.
+Address rule: \`address\` is the STREET ONLY ("12 Oak Ave", "21 Oak Ave Unit 4"); put the city and ZIP in \`city\` and \`zip\`. Text that carries a city, state or ZIP in \`address\` is refused. A lead whose stored address is one line ("street, City, FL 34221") cannot have its address, city or zip edited here: tell the operator to edit it on the Leads screen.
+Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email", "the Smith lead's street is 12 Oak Ave, not 21 Oak Ave", "the Smith lead's zip is 34201"
 ALWAYS show the operator the before → after values and get approval before saving.`,
     input_schema: {
       type: 'object',
@@ -165,9 +166,9 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
-        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field. When the lead's address is stored as one line (street, City, FL zip), the only accepted edit is the whole corrected address (street, city, FL and zip in one string); it replaces the line and the city and zip columns together. On a street-only row a whole address writes the street to address and the city and zip to their columns." },
-        city: { type: 'string', description: "The lead's city (120 characters max); a blank clears it" },
-        zip: { type: 'string', description: "The lead's zip code (20 characters max); a blank clears it" },
+        address: { type: 'string', description: "The lead's STREET only (the leads.address field, 255 characters max), stored as typed; a blank clears it. Never include the city, state or ZIP here (they go in city and zip). Refused when the lead's stored address is one line: that lead is edited on the Leads screen." },
+        city: { type: 'string', description: "The lead's city (120 characters max); a blank clears it. Refused when the stored address is one line." },
+        zip: { type: 'string', description: "The lead's zip code (20 characters max); a blank clears it. Refused when the stored address is one line." },
       },
     },
   },
