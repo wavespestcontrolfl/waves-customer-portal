@@ -459,11 +459,22 @@ test('a whole address whose parsed city is over 120 characters, or whose line is
 test('bare row: a plain street is written as typed; a locality-shaped but incomplete text refuses; a whole address replaces all three', async () => {
   const leads = chain({ first: ADDR_LEAD });
   db.mockReturnValue(leads);
-  // Plain streets: a unit segment, a floor token, or the lead's own city.
-  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '21 Oak Ave, Testville', '12 Oak Ave, testville']) {
+  // Plain streets (a unit segment, a unit value) are stored as typed.
+  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B']) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
     expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
   }
+  // The lead's own city beside the street is stripped: the street alone is stored, columns untouched.
+  for (const address of ['12 Oak Ave, Testville', '12 Oak Ave Testville', '12 Oak Ave, testville']) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
+    expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: '12 Oak Ave' } });
+    const line = [res.changes.address.to, ADDR_LEAD.city, ADDR_LEAD.zip].join(', ');
+    const segs = line.split(',').map(x => x.trim().toLowerCase());
+    expect(new Set(segs).size).toBe(segs.length);
+  }
+  // Nothing left once the city is stripped: refused.
+  const cityOnly = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: 'Testville', confirmed: true });
+  expect(cityOnly.error).toBe(ONE_LINE_REFUSAL);
   // A state, or a different real city, without the rest: refused, nothing written.
   for (const address of ['12 Oak Ave, Bradenton, FL', '12 Oak Ave, FL', '123 Main St, Fl 2', '12 Oak Ave, Bradenton', '12 Oak Ave Bradenton FL']) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address, confirmed: true });

@@ -827,20 +827,31 @@ function resolveLeadAddressRequest(lead, requested) {
     if (fields.error) return { error: fields.error };
     return { requested: { ...requested, ...fields.values }, asserted: ADDRESS_FIELDS };
   }
-  if (oneLine || localityShaped(lead, requested.address)) return { error: COMPOSED_REFUSAL };
-  return { requested, asserted: [] };
+  if (oneLine) return { error: COMPOSED_REFUSAL };
+  const street = bareStreetValue(lead, requested.address);
+  if (street && street.error) return { error: street.error };
+  return { requested: street ? { ...requested, address: street.value } : requested, asserted: [] };
 }
 
-// On a bare row, a given text that is not whole but carries a state, or a real
-// city other than the lead's own, is locality-shaped but incomplete (Codex r7):
-// written as a street it would contradict the city column. "21 Oak Ave, Unit 4"
-// and "21 Oak Ave, Sarasota" for a Sarasota lead are plain streets.
-function localityShaped(lead, text) {
-  if (typeof text !== 'string' || !text.trim()) return false;
+// On a bare row, what a non-whole address text means for the `address` column.
+// A state, or a real city other than the lead's own, is locality-shaped but
+// incomplete (Codex r7): written as a street it would contradict the city
+// column, so it refuses. The lead's OWN city beside the street (Codex r10:
+// "12 Oak Ave, Testville" for a Testville lead) is stripped and the parsed
+// street alone is stored, so the row stays bare and the column is not doubled
+// by consumers that concatenate address + city + zip; no street left after the
+// strip refuses. "21 Oak Ave, Unit 4" (no real city) is a plain street, stored
+// as typed. Returns { value }, { error } or null (as typed).
+function bareStreetValue(lead, text) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  // The city name alone is no street (the parser reads a lone word as line1).
+  if (sameText(text, lead.city)) return { error: COMPOSED_REFUSAL };
   const parts = parseRawAddress(text);
-  if (parts.state) return true;
-  if (!cityIsReal(parts.city)) return false;
-  return !sameText(parts.city, lead.city);
+  if (parts.state) return { error: COMPOSED_REFUSAL };
+  if (!cityIsReal(parts.city)) return null;
+  if (!sameText(parts.city, lead.city)) return { error: COMPOSED_REFUSAL };
+  const street = String(parts.line1 || '').trim();
+  return street ? { value: street } : { error: COMPOSED_REFUSAL };
 }
 
 // { field: { from, to } } for every requested field whose stored value
