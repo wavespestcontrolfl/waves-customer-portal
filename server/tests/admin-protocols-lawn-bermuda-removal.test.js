@@ -305,6 +305,22 @@ describe('the account decides, on the server', () => {
     expect(stepNames(await lawnMix({ month: '4', scheduledServiceId: SERVICE_ID }))).toEqual(all);
   });
 
+  test('an unavailable step member is never a mixing-order input: a capped Recognition with the group selected leaves the base order as it was', async () => {
+    const orderText = (body) => JSON.stringify(body.mixingOrder);
+    const clean = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec' });
+    expect(orderText(clean)).toMatch(/Recognition|Fusilade|Surfactant/); // available: the three are in the order
+    applicationLimits.checkLimits.mockImplementation(async (_customer, productId) => (productId === 'rec'
+      ? { blocks: [{ message: 'Limit reached.' }], warnings: [] } : { blocks: [], warnings: [] }));
+    const capped = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec' });
+    expect(capped.items.filter((item) => item.bermudaStep).every((item) => item.unavailable)).toBe(true);
+    expect(orderText(capped)).not.toMatch(/Recognition|Fusilade|Surfactant/);
+    // The base visit's own order is the order of a visit with no step at all.
+    account.profile.bermuda_removal = false;
+    const plain = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    expect(capped.mixingOrder).toEqual(plain.mixingOrder);
+    applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
+  });
+
   test('a malformed visit id reads nothing and shows no step', async () => {
     expect(stepNames(await lawnMix({ scheduledServiceId: 'not-a-uuid' }))).toEqual([]);
     expect(db.mock.calls.some(([table]) => table === 'scheduled_services')).toBe(false);
@@ -328,6 +344,22 @@ describe('the account decides, on the server', () => {
       expect(body.actions.map((a) => a.product?.name)).not.toEqual(expect.arrayContaining([REC]));
       expect(body.warnings.map((w) => w.code)).toEqual(['lawn_bermuda_step_unavailable']);
       expect(body.actions.length).toBeGreaterThan(0);
+    });
+
+    test.each([['rec'], ['fus'], ['nis']])('%s has no staged row in the serving v13 window: none of the three removal actions is offered, with the warning', async (missing) => {
+      stage(Object.entries(ROWS).filter(([key]) => key !== missing).map(([, row]) => row));
+      const body = await actionsFor();
+      expect(body.actions.filter((a) => a.group)).toEqual([]);
+      expect(body.warnings.map((w) => w.code)).toEqual(['lawn_bermuda_step_unavailable']);
+      expect(body.actions.length).toBeGreaterThan(0);
+    });
+
+    test('no staged v13 protocol at all: the removal actions are withheld, never offered', async () => {
+      operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: '2026.06' } });
+      operatingLayer.summarizeProtocolContext.mockReturnValue({ version: '2026.06', products: [] });
+      const body = await actionsFor();
+      expect(body.actions.filter((a) => a.group)).toEqual([]);
+      expect(body.warnings.map((w) => w.code)).toEqual(['lawn_bermuda_step_unavailable']);
     });
 
     test('nothing limited: the three actions are offered and there is no warning; the program is passed to the limit check', async () => {

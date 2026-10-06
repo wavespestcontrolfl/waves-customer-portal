@@ -196,7 +196,13 @@ async function stepVisitOf(knex, serviceId) {
   if (!visit?.customer_id || !visit.scheduled_date) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
   const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month: visitMonthOf(visit) });
-  return step.active ? visit : null;
+  if (!step.active) return null;
+  // The property the step was proven for (the visit's own, or a one-property customer's
+  // sole property when the visit names none): the limits count it and the completion
+  // lock keys on it, so a propertyless visit and an explicit-property visit of the same
+  // lawn are one lock and one history.
+  const scope = await profilePropertyScope(knex, visit.customer_id, visit.property_id, false);
+  return { ...visit, effective_property_id: scope.effective || null };
 }
 
 // The catalog rows a completion submitted, by step product: { recognition, fusilade }
@@ -237,7 +243,7 @@ async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
   const limits = require('./application-limits');
   for (const product of sprayed) {
     const result = await limits.checkLimits(visit.customer_id, product.id, visit.scheduled_date, knex, {
-      program: BERMUDA_GROUP, propertyId: visit.property_id || null, excludeScheduledServiceId: visit.id,
+      program: BERMUDA_GROUP, propertyId: visit.effective_property_id || null, excludeScheduledServiceId: visit.id,
     });
     if (result.blocks.length) return `${result.blocks[0].message} Bermuda removal cannot be recorded on this visit.`;
   }
@@ -247,7 +253,9 @@ async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
 // Inside the completion transaction, right before the visit's application rows are
 // written: when the visit carries the step and a step product is being recorded, take a
 // transaction-scoped advisory lock keyed by the property (the customer when the visit
-// has none; the repo's pg_advisory_xact_lock(hashtext, hashtext) idiom, as triage-locks),
+// can be resolved; the property is resolved BEFORE locking: a propertyless visit of a
+// one-property customer locks on that sole property's key; the repo's
+// pg_advisory_xact_lock(hashtext, hashtext) idiom, as triage-locks),
 // then re-run the limit check on the SAME transaction. Two completions for one property
 // serialize here, so the second sees the first's committed spray; a violation throws
 // code lawn_bermuda_limit_reached and the transaction rolls back. The preflight
@@ -261,7 +269,7 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   const visit = await stepVisitOf(trx, serviceId);
   if (!visit) return;
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-    [LOCK_NAMESPACE, visit.property_id ? `property:${visit.property_id}` : `customer:${visit.customer_id}`]);
+    [LOCK_NAMESPACE, visit.effective_property_id ? `property:${visit.effective_property_id}` : `customer:${visit.customer_id}`]);
   const message = await bermudaLimitViolation(trx, products, { serviceId });
   if (message) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
 }
@@ -314,11 +322,91 @@ function settleStep(items, usable) {
   };
 }
 
+// An unavailable step line is never a mixing-order input, selected or not; the base
+// visit's order is unchanged.
+const inMixingOrder = (item) => !(isStepLine(item) && item.unavailable);
+
+const EXCLUDED_CULTIVAR_WARNING = {
+  code: 'lawn_bermuda_cultivar_excluded', severity: 'warning',
+  message: 'Bermuda removal is off for this lawn: the St. Augustine cultivar on file (ProVista, Captiva or Seville) is not eligible.',
+};
+
+// A CitraBlue or unconfirmed St. Augustine cultivar: a hard test-patch note on each step
+// line (required, so it also reaches the selected items' plan warnings).
+const addTestPatchNote = (items) => items.map((item) => (isStepLine(item)
+  ? { ...item, gateNotes: [...(item.gateNotes || []), { key: 'testPatchFirst', severity: 'required', text: TEST_PATCH_NOTE }] } : item));
+
+// The ONE decision about whether the step stands, for the plan, the tank sheet and the
+// completion actions alike. `items` carry the three marked step lines among the visit's
+// own; `rows` is the serving v13 window's staged rows by product id; `probeLimits(items)`
+// is the caller's own limit read (the plan's v13Limits, the sheet's v13VisitLimits) over
+// Recognition and Fusilade II as the step program, even when nobody selected them.
+// The step is usable only when all three lines have an active catalog product LINKED to a
+// staged row and neither limited product is capped or too soon. Then it settles (a
+// warning and no lines when nothing of it was selected, product-scoped blocks and
+// unavailable lines when some was). Returns { items, blocks, warnings }.
+async function projectBermudaStep(items, { rows, probeLimits, testPatch = false }) {
+  const members = items.filter(isStepLine);
+  if (!members.length) return { items, blocks: [], warnings: [] };
+  const probe = members.filter((m) => m.product?.id && (isRecognitionLine(m) || isFusiladeLine(m)))
+    .map((m) => ({ selected: true, bermudaStep: true, product: { id: m.product.id, name: m.product.name } }));
+  const limited = probe.length ? (await probeLimits(probe)).capped.size > 0 : false;
+  const usable = !limited && members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
+  const settled = settleStep(items, usable);
+  return { ...settled, items: testPatch ? addTestPatchNote(settled.items) : settled.items };
+}
+
+// The step as one reader sees it (the tank sheet, the completion actions): opened once
+// from the booked visit, then asked for its lines, its staged-row options, its one
+// selection, its settlement and its decoration of the response. Every method is a no-op
+// while the step is off (gate, track, month, account, cultivar), so a route carries no
+// branch of its own for it. `loadRows(options)` loads the window's staged rows;
+// `probeLimits` is the route's own limit read.
+async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows, probeLimits }) {
+  // `loadVisit` is called only when the step could apply at all (gate, track, month).
+  const eligible = bermudaRemovalVisit({ trackKey, month }) && featureGates.lawnV13Live?.() === true;
+  const step = eligible ? await stepForVisit(knex, await loadVisit(), { trackKey, month }) : { active: false };
+  const active = step.active === true;
+  const state = { blocks: [], mark: false };
+  const rowOptions = active ? { includeBermudaRemoval: true } : undefined;
+  return {
+    lines: active ? markStepLines(parseLines(step.addOn.secondary, 'conditional')) : [],
+    rowOptions,
+    // The cultivar policy's own warning for an excluded cultivar.
+    warnings: step.excluded ? [EXCLUDED_CULTIVAR_WARNING] : [],
+    select: (items) => (active ? selectStepAtomically(items) : items),
+    // Settle against `rows`, or (the completion actions, which load none) the window's
+    // staged rows loaded here; a missing v13 protocol reads as no rows.
+    async settle(items, rows = null) {
+      if (!active) return { items, blocks: [], warnings: [], warningFields: {} };
+      let staged = rows;
+      if (!staged) staged = await loadRows(rowOptions).catch((err) => { if (err.code === 'lawn_v13_protocol_missing') return new Map(); throw err; });
+      const settled = await projectBermudaStep(items, { rows: staged, probeLimits });
+      state.blocks = settled.blocks;
+      state.mark = step.cultivar === 'test_patch';
+      // `warningFields`: a response that carries warnings only when there are some.
+      return { ...settled, warningFields: settled.warnings.length ? { warnings: settled.warnings } : {} };
+    },
+    // The response items: the test-patch note, and the unavailable mark a blocked step keeps.
+    decorate(items) {
+      if (!active) return items;
+      const noted = state.mark ? addTestPatchNote(items) : items;
+      if (!state.blocks.length) return noted;
+      const reason = state.blocks[0].message;
+      return noted.map((item) => (isStepLine(item) ? { ...item, spot: null, unavailable: { reason } } : item));
+    },
+    // The three actions carry the group id and the mark the settlement reads.
+    tagActions: (actions, lines) => (active ? actions.map((action, index) => (lines[index].bermudaStep ? { ...action, bermudaStep: true, group: BERMUDA_GROUP } : action)) : actions),
+    mixable: inMixingOrder,
+    info: { active, source: step.source },
+  };
+}
+
 module.exports = {
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
-  selectStepAtomically, settleStep,
+  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, inMixingOrder, EXCLUDED_CULTIVAR_WARNING,
   stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
 };

@@ -1922,34 +1922,18 @@ async function buildPlanForService(serviceId, options = {}) {
   // An archived assignment cannot silently borrow a later field recipe or
   // catalog rate. Keep its stored protocol visible, but offer no calculated
   // products when the old recipe cannot be reproduced from the current inputs.
-  // The step is whole or absent: when any of its three lines cannot be applied (a
-  // limit on Recognition or Fusilade II, no staged row linked, an inactive catalog
-  // row), none of the three is offered. The limit read covers both limited products
-  // even when nobody selected them yet.
-  const bermudaBlocks = [];
-  const bermudaWarnings = [];
-  if (bermudaVisit && bermudaCultivar === 'excluded') {
-    bermudaWarnings.push({ code: 'lawn_bermuda_cultivar_excluded', severity: 'warning', message: 'Bermuda removal is off for this lawn: the St. Augustine cultivar on file (ProVista, Captiva or Seville) is not eligible.' });
-  }
-  if (bermudaActive && v13Active) {
-    const stepItems = planItems.filter(bermudaRemoval.isStepLine);
-    const limitProbe = stepItems.filter((item) => item.product?.id && (bermudaRemoval.isRecognitionLine(item) || bermudaRemoval.isFusiladeLine(item)))
-      .map((item) => ({ selected: true, bermudaStep: true, product: { id: item.product.id, name: item.product.name } }));
-    const limited = limitProbe.length
-      ? (await v13Limits(knex, service, serviceDate, limitProbe, { strict })).capped.size > 0
-      : false;
-    const usable = stepItems.length > 0 && !limited
-      && stepItems.every((item) => item.product && item.product.active !== false && item.spot);
-    const settled = bermudaRemoval.settleStep(planItems, usable);
-    planItems = settled.items;
-    bermudaBlocks.push(...settled.blocks);
-    bermudaWarnings.push(...settled.warnings);
-    // A lawn with a CitraBlue or unconfirmed cultivar gets the step with a hard note.
-    if (bermudaCultivar === 'test_patch') {
-      planItems = planItems.map((item) => (bermudaRemoval.isStepLine(item)
-        ? { ...item, gateNotes: [...(item.gateNotes || []), { key: 'testPatchFirst', severity: 'required', text: bermudaRemoval.TEST_PATCH_NOTE }] } : item));
-    }
-  }
+  // The step is whole or absent, decided by the ONE projection the tank sheet and the
+  // completion actions share (lawn-bermuda-removal.js projectBermudaStep): staged rows
+  // linked, products active, no limit capped, then settled (warning or product-scoped
+  // blocks) with the cultivar's test-patch note.
+  const bermudaProjection = bermudaActive && v13Active
+    ? await bermudaRemoval.projectBermudaStep(planItems, {
+      rows: v13Rows, probeLimits: (probe) => v13Limits(knex, service, serviceDate, probe, { strict }), testPatch: bermudaCultivar === 'test_patch',
+    })
+    : { items: planItems, blocks: [], warnings: [] };
+  planItems = bermudaProjection.items;
+  const bermudaBlocks = bermudaProjection.blocks;
+  const bermudaWarnings = [...(bermudaVisit && bermudaCultivar === 'excluded' ? [bermudaRemoval.EXCLUDED_CULTIVAR_WARNING] : []), ...bermudaProjection.warnings];
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
@@ -2212,7 +2196,7 @@ async function buildPlanForService(serviceId, options = {}) {
       assignedAt: service.lawn_protocol_assigned_at || null,
     },
     // An apply-alone conflict holds the mix: no combined order is offered.
-    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems, cappedProducts),
+    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems.filter(bermudaRemoval.inMixingOrder), cappedProducts),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,

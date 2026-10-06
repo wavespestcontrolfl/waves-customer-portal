@@ -58,7 +58,10 @@ function sizingNote(unsized, estimated) {
 // always in the mix and never used elsewhere in v13, so BOTH products' annual and
 // interval limits count Recognition applications.
 const BERMUDA_PROGRAM = 'bermuda_removal';
-const BERMUDA_COUNTED_PRODUCT = 'Recognition Post Emergent Herbicide';
+// The counted product is Recognition, found by its catalog ID, never its display name:
+// the id of the product on the program's tagged annual_max_rate row (the label rate
+// belongs to Recognition alone), read once per call. A program with no such row counts
+// the product being judged itself.
 const isBermudaProgramRow = (limit) => limit.match_value === BERMUDA_PROGRAM;
 
 // The treated property only: a ledger row at another of the customer's properties does
@@ -122,7 +125,7 @@ class ApplicationLimitChecker {
     for (const limit of allLimits) {
       let limitHistory = history;
       if (isBermudaProgramRow(limit)) {
-        if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, yearStart, proposedDate, ...opts });
+        if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, productId, yearStart, proposedDate, ...opts });
         limitHistory = bermudaHistory;
       }
       const check = await this.evaluateLimit(limit, limitHistory, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
@@ -147,11 +150,10 @@ class ApplicationLimitChecker {
   // marker, for both products), the treated property's rows plus rows with an unknown
   // property (no property: the whole customer), leaving out the visit being planned or
   // rebuilt.
-  async propertyHistory(database, { customerId, yearStart, proposedDate, propertyId, excludeScheduledServiceId }) {
+  async propertyHistory(database, { customerId, productId, yearStart, proposedDate, propertyId, excludeScheduledServiceId }) {
+    const rateRow = await database('product_limits').where({ match_value: BERMUDA_PROGRAM, limit_type: 'annual_max_rate' }).first('product_id');
     const query = database('property_application_history as pah')
-      .join('products_catalog as counted', 'counted.id', 'pah.product_id')
-      .where({ 'pah.customer_id': customerId })
-      .where('counted.name', BERMUDA_COUNTED_PRODUCT)
+      .where({ 'pah.customer_id': customerId, 'pah.product_id': rateRow?.product_id || productId })
       .where('pah.application_date', '>=', yearStart)
       // On or before the date judged, as the active-ingredient cap does: a plan rebuilt for
       // April is not withheld by a June spray that had not happened yet.

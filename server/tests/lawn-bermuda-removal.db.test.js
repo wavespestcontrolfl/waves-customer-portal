@@ -236,6 +236,19 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(result.status).not.toBe('blocked');
     });
 
+    test('a capped member with the group selected: the plan\'s mixing order has no bermuda products and is the base visit\'s order', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-16', bermuda: true });
+      const clean = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
+      await history(f.customerId, rec, ['2026-06-01']);
+      const capped = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
+      expect(capped.mixCalculator.items.filter((item) => item.bermudaStep).every((item) => item.unavailable)).toBe(true);
+      expect(JSON.stringify(capped.mixingOrder)).not.toMatch(/Recognition|Fusilade|Surfactant/);
+      const noStep = await plan((await lawn({ date: '2026-06-16' })).visit);
+      expect(capped.mixingOrder).toEqual(noStep.mixingOrder);
+      expect(clean.mixingOrder.length).toBeGreaterThanOrEqual(capped.mixingOrder.length);
+    });
+
     test('the April base visit stays computable beside an unavailable optional step', async () => {
       setGates();
       const f = await lawn({ date: '2026-04-14', bermuda: true });
@@ -589,6 +602,32 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
     });
 
+    test('a propertyless visit of a one-property customer locks on that sole property: it serializes with an explicit-property completion', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01'); // 1 of 2 used
+      const [propertyless] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: null, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      const explicit = f.visit; // names the property
+      const run = (visit) => knex.transaction(async (trx) => {
+        await enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: visit.id });
+        await sleep(300);
+        await ledger(trx, f, visit, '2026-06-20');
+      });
+      const results = await Promise.allSettled([run(propertyless), run(explicit)]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(results.find((r) => r.status === 'rejected').reason.code).toBe('lawn_bermuda_limit_reached');
+      expect(await knex('property_application_history').where({ customer_id: f.customerId, product_id: rec.id })).toHaveLength(2);
+    });
+
+    test('the propertyless visit is judged against that sole property\'s history', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01');
+      await priorSpray(f, '2026-04-20');
+      const [propertyless] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: null, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: propertyless.id })).toMatch(/LIMIT REACHED/);
+    });
+
     test('control: without the property lock the same two completions BOTH pass (the lock is what serializes them)', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20', bermuda: true });
@@ -706,6 +745,19 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const planned = await plan(f.visit);
       expect(codes(planned)).not.toContain('lawn_v13_annual_limit');
       expect(planned.propertyGate.warnings.map((w) => w.code)).not.toContain('lawn_bermuda_step_unavailable');
+    });
+
+    test('Recognition is counted by catalog id, not display name: a renamed Recognition still counts', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await history(f.customerId, rec, ['2026-03-01', '2026-04-20']);
+      await knex('products_catalog').where({ id: rec.id }).update({ name: 'Recognition (renamed by the office)' });
+      try {
+        expect((await check(f, f.property.id, {}, fus)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+        expect((await check(f, f.property.id, {}, rec)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      } finally {
+        await knex('products_catalog').where({ id: rec.id }).update({ name: REC });
+      }
     });
 
     test('every other product keeps whole-customer history, property named or not', async () => {
