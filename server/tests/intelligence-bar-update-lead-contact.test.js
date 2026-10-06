@@ -552,3 +552,41 @@ test('bare streets that end in a unit stay bare: a zip edit touches only the zip
     expect(res.changes).toEqual({ zip: { from: '34200', to: '34201' } });
   }
 });
+
+// ─── street + city given without a state or ZIP ─────────────────
+
+test('"12 Oak Ave, Sarasota" on a composed Sarasota row rebuilds once, with no doubled city', async () => {
+  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
+  for (const address of ['12 Oak Ave, Sarasota', '12 Oak Ave, sarasota', '12 Oak Ave Sarasota']) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
+    expect(res.changes).toEqual({ address: { from: TWO_SEG, to: '12 Oak Ave, Sarasota, FL 34200' } });
+    const segs = res.changes.address.to.split(',').map(x => x.trim().toLowerCase());
+    expect(new Set(segs).size).toBe(segs.length);
+  }
+});
+
+test('a different city with no state or ZIP on a composed row refuses; an explicit city field makes it a real move', async () => {
+  const leads = chain({ first: TWO_SEG_LEAD });
+  db.mockReturnValue(leads);
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Oak Ave, Bradenton' });
+  expect(res.error).toBe(ONE_LINE_REFUSAL);
+  expect(leads.update).not.toHaveBeenCalled();
+  const explicit = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Oak Ave, Bradenton', city: 'Bradenton' });
+  expect(explicit.changes).toEqual({
+    address: { from: TWO_SEG, to: '12 Oak Ave, Bradenton, FL 34200' },
+    city: { from: 'Sarasota', to: 'Bradenton' },
+  });
+  // On a bare row the same text is a plain street, as before.
+  db.mockReturnValue(chain({ first: ADDR_LEAD }));
+  const bare = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Oak Ave, Bradenton' });
+  expect(bare.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: '12 Oak Ave, Bradenton' } });
+});
+
+test('a combined address whose parsed city is over 120 characters refuses at preview', async () => {
+  const leads = chain({ first: TWO_SEG_LEAD });
+  db.mockReturnValue(leads);
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: `12 Oak Ave, ${'Longtown'.repeat(16)}, FL 34236` });
+  expect(res.error).toMatch(/city is too long \(120 characters max\)/);
+  expect(res.preview).toBeUndefined();
+  expect(leads.update).not.toHaveBeenCalled();
+});

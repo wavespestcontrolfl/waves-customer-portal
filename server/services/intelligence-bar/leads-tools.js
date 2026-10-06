@@ -756,11 +756,41 @@ function readStoredAddress(lead) {
   return namesCity ? { kind: 'opaque' } : { kind: 'bare' };
 }
 
-// The operator's own address text, when it is a whole composed address.
-function readGivenAddress(requested) {
+// The operator's own address text, when it carries more than a street.
+// A state or a ZIP makes it a whole address. A street plus a city only (Codex r4
+// P2: "12 Oak Ave, Sarasota") is accepted when that city is the lead's own city
+// (the column or the stored line), case-insensitively, so the stored state and
+// ZIP complete it; a DIFFERENT city with no ZIP on a composed row is ambiguous
+// and refuses unless the city field is given explicitly. On a bare row a
+// comma-free or city-only text stays the plain street. Returns parts, null (a
+// plain street) or { error }.
+function readGivenAddress(requested, lead, stored) {
   if (typeof requested.address !== 'string') return null;
   const parts = parseRawAddress(requested.address);
-  return parts.state || parts.zip ? parts : null;
+  if (parts.state || parts.zip) return parts;
+  if (!parts.city) return null;
+  const known = [lead.city, stored.parts && stored.parts.city]
+    .map(c => String(c || '').trim().toLowerCase()).filter(Boolean);
+  if (known.includes(parts.city.toLowerCase())) return parts;
+  if (stored.kind === 'composed' && !('city' in requested)) return { error: COMPOSED_REFUSAL };
+  return 'city' in requested ? parts : null;
+}
+
+// A city or ZIP the parser derived from the operator's combined address obeys
+// the same caps as a typed field (Codex r4 P2); over the cap refuses.
+function synthesizedFieldError(given) {
+  for (const field of ['city', 'zip']) {
+    if (!given || !given[field]) continue;
+    const norm = normalizeLeadAddressField(field, given[field]);
+    if (norm.error) return norm.error;
+  }
+  return null;
+}
+
+// Never a doubled segment ("12 Oak Ave, Sarasota, Sarasota, FL 34236").
+function hasRepeatedSegment(line) {
+  const segs = line.split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+  return new Set(segs).size !== segs.length;
 }
 
 // What the rebuilt line is made of: the street the operator gave (or the stored
@@ -802,8 +832,11 @@ function rebuildLeadAddress(lead, requested) {
   if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested };
   const stored = readStoredAddress(lead);
   if (stored.kind === 'opaque' && !ADDRESS_FIELDS.every(f => f in requested)) return { error: COMPOSED_REFUSAL };
-  const given = readGivenAddress(requested);
+  const given = readGivenAddress(requested, lead, stored);
+  if (given && given.error) return { error: given.error };
   if (stored.kind !== 'composed' && !given) return { requested };
+  const fieldError = synthesizedFieldError(given);
+  if (fieldError) return { error: fieldError };
 
   const out = { ...requested, ...syncedColumns(given, requested) };
   const parts = addressTargetParts(requested, stored, given);
@@ -812,6 +845,7 @@ function rebuildLeadAddress(lead, requested) {
   if (out.address && out.address.length > LEAD_ADDRESS_MAX.address) {
     return { error: `address is too long once the city and zip are included (${LEAD_ADDRESS_MAX.address} characters max).` };
   }
+  if (out.address && hasRepeatedSegment(out.address)) return { error: COMPOSED_REFUSAL };
   return { requested: out };
 }
 
