@@ -156,10 +156,12 @@ it('summary mode: a pick two weeks out asks once more for the next-7-days row (C
     .mockResolvedValueOnce({ ok: true, json: async () => week });
   vi.stubGlobal('fetch', fetch);
   const { result } = renderHook(() => useBestTimes({
-    summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
+    summary: true, bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
   }));
   await waitFor(() => expect(result.current.availability).not.toBeNull());
   expect(fetch).toHaveBeenCalledTimes(2);
+  // The picked search keeps its window around the pick (Codex #6045 r2).
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ bestRows: true, dateFrom: '2035-01-02', dateTo: '2035-01-12' });
   const second = JSON.parse(fetch.mock.calls[1][1].body);
   expect(second).toMatchObject({ summary: true, pickedDate: '2035-01-05' });
   expect(second.pickedStart).toBeUndefined();
@@ -167,6 +169,15 @@ it('summary mode: a pick two weeks out asks once more for the next-7-days row (C
   expect(result.current.availability.best.week.map((h) => h.start)).toEqual(['10:00']);
   // The pills stay the picked search's days.
   expect(result.current.availability.days.map((d) => d.date)).toEqual(['2035-01-01', '2035-01-02']);
+});
+
+it('summary mode without bestRows never asks for the rows', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(JSON.parse(fetch.mock.calls[0][1].body).bestRows).toBeUndefined();
+  expect(fetch).toHaveBeenCalledOnce();
 });
 
 it('summary mode keeps "could not check" apart from a miss', async () => {

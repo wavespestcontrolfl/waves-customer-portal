@@ -87,7 +87,9 @@ function pickedDetail(verdict) {
   if (added) parts.push(added === 'no added drive' ? 'No added drive' : `Adds ${added.replace(' day', '')} to the day`);
   const rain = rainPhrase(verdict.rainChance);
   if (rain) parts.push(rain);
-  if (parts.length && verdict.driveSource === 'estimate' && verdict.driveInMinutes != null) parts.push('estimated');
+  // Any number not priced by Google is the straight-line model, including
+  // an arrival-window detour with no single leg (Codex #6045 r2).
+  if ((added || verdict.driveInMinutes != null) && verdict.driveSource !== 'google' && verdict.detourMinutes != null) parts.push('estimated');
   return parts.length ? `${parts.join(' · ')}.` : null;
 }
 
@@ -301,6 +303,39 @@ function BestRow({ title, hours, withDay, empty, isCurrent, onPick }) {
   );
 }
 
+// The two best-times rows (New Appointment). While a re-check runs the rows
+// are the previous answer's, so they are titled with its date (Codex #6045
+// r2). No week row when its search did not answer, rather than a false
+// "nothing fits".
+function BestRows({ availability, currentDate, isCurrent, onPick }) {
+  const { best } = availability;
+  return (
+    <>
+      <BestRow
+        title={`Best on ${fmtDay(availability.pickedDate || currentDate)}`}
+        hours={best.day}
+        withDay={false}
+        empty="No open hours that day. The note above says why."
+        isCurrent={isCurrent}
+        onPick={onPick}
+      />
+      {best.weekCovered !== false && (
+        <BestRow
+          title="Best in the next 7 days"
+          hours={best.week}
+          withDay
+          empty="Nothing fits in the next 7 days."
+          isCurrent={isCurrent}
+          onPick={onPick}
+        />
+      )}
+      {[...best.day, ...best.week].some(isEstimate) ? (
+        <div style={{ marginTop: 6, color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>
+      ) : null}
+    </>
+  );
+}
+
 export default function AvailabilityStrip({ availability, currentDate, currentStart, currentTechnicianId, onPick, style, bestRows = false }) {
   const [viewDate, setViewDate] = useState(currentDate);
   // A new pick (typed, or filled by a chip) brings the browse row back to it.
@@ -321,9 +356,6 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
   // The two best-times rows replace the verdict's own offers when the
   // consumer asks for them and the server sent them.
   const showBest = bestRows && !!availability.best;
-  // A picked date more than two weeks out searches only the days around it:
-  // no week row then, rather than a false "nothing fits".
-  const weekCovered = showBest && availability.best.weekCovered !== false;
 
   return (
     <div data-testid="availability-strip" style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 14, ...style }}>
@@ -335,31 +367,7 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
             {verdict.detail ? ` ${verdict.detail}` : null}
           </div>
         </div>
-        {showBest && (
-          <>
-            <BestRow
-              title={`Best on ${fmtDay(currentDate)}`}
-              hours={availability.best.day}
-              withDay={false}
-              empty="No open hours that day. The note above says why."
-              isCurrent={isCurrent}
-              onPick={pick}
-            />
-            {weekCovered && (
-              <BestRow
-                title="Best in the next 7 days"
-                hours={availability.best.week}
-                withDay
-                empty="Nothing fits in the next 7 days."
-                isCurrent={isCurrent}
-                onPick={pick}
-              />
-            )}
-            {[...availability.best.day, ...availability.best.week].some(isEstimate) ? (
-              <div style={{ marginTop: 6, color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>
-            ) : null}
-          </>
-        )}
+        {showBest && <BestRows availability={availability} currentDate={currentDate} isCurrent={isCurrent} onPick={pick} />}
         {!showBest && verdict.offers.length > 0 && (
           <div style={{ marginTop: 10 }}>
             {verdict.lead ? <div style={{ marginBottom: 6, color: '#52525B' }}>{verdict.lead}</div> : null}

@@ -16,7 +16,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { GAP_LEGS } = require('../services/scheduling/find-time');
-const { pickBestRows, buildBestRows, rainForWindow } = require('../services/scheduling/find-time-hints');
+const { pickBestRows, buildBestRows, rainForWindow, buildHintSummary } = require('../services/scheduling/find-time-hints');
 const { priceChipsOnRoads, _test } = require('../services/scheduling/hint-road-times');
 
 const PREV = { lat: 27.4208, lng: -82.4929 };
@@ -189,5 +189,16 @@ describe('rain and the serialized rows', () => {
     expect(out.picked).toMatchObject({ fits: true, drive_in_minutes: 21, drive_source: 'google', rain_chance: 20 });
     const json = JSON.stringify({ rows: out.rows, picked: out.picked });
     expect(json).not.toContain('27.4');
+  });
+});
+
+describe('opt-in', () => {
+  test('a summary without bestRows has no rows and asks no one for rain or roads (Codex #6045 r2)', async () => {
+    const plan = { summary: true, from: '2026-10-08', to: '2026-10-08', verdictDate: '2026-10-08' };
+    const out = await buildHintSummary(plan, [hour('2026-10-08', '12:00', 34, 19)], {
+      startedAt: Date.now(), today: '2026-10-06', target: { lat: 1, lng: 2 }, picked: null, spanMin: 60,
+    });
+    expect(out.summary.best).toBeUndefined();
+    expect(out.summary.days[0].hours).toHaveLength(1);
   });
 });

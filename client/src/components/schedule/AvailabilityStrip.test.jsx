@@ -36,7 +36,7 @@ describe('labels', () => {
 describe('availabilityVerdict', () => {
   it('fits: says so with the added drive and offers the other hours that day, cheapest first', () => {
     const v = availabilityVerdict(answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11 }), at('2035-01-02', '09:00'));
-    expect(v).toMatchObject({ tone: 'ok', text: 'Tue Jan 2 · 9 AM fits.', detail: 'Adds +11 min to the day.', lead: 'Also open that day:', withDay: false });
+    expect(v).toMatchObject({ tone: 'ok', text: 'Tue Jan 2 · 9 AM fits.', detail: 'Adds +11 min to the day · estimated.', lead: 'Also open that day:', withDay: false });
     expect(starts(v)).toEqual(['02 11:00', '02 16:00']);
   });
 
@@ -172,7 +172,7 @@ describe('calendar facts on the days', () => {
 
   it('a pick on a closed day says so in the verdict', () => {
     const availability = answer({ start: '09:00', fits: true, reason: null, detourMinutes: 1 }, [closedDay]);
-    expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('Adds +1 min to the day. Wed Jan 3 is a closed day.');
+    expect(availabilityVerdict(availability, at('2035-01-03', '09:00')).detail).toBe('Adds +1 min to the day · estimated. Wed Jan 3 is a closed day.');
   });
 
   it('a held answer during a re-check shows "Checking…" and still covers the route warning', () => {
@@ -247,6 +247,17 @@ describe('best-times rows', () => {
     const empty = { day: [chip('2035-01-02', '08:00', 0, 30, { stopsThatDay: 0 })], week: [] };
     render(<AvailabilityStrip bestRows availability={withBest(null, { best: empty })} currentDate="2035-01-02" currentStart="08:00" onPick={() => {}} />);
     expect(screen.getByText('No stops on this route that day yet.')).toBeTruthy();
+  });
+
+  it('a re-check titles the old rows with their own date, not the new pick (Codex #6045 r2)', () => {
+    render(<AvailabilityStrip bestRows availability={{ ...withBest(null), stale: true }} currentDate="2035-01-04" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('Best on Tue Jan 2')).toBeTruthy();
+    expect(screen.queryByText('Best on Thu Jan 4')).toBeNull();
+  });
+
+  it('an arrival-window detour with no single leg still says estimated', () => {
+    const v = availabilityVerdict(answer({ start: '09:00', fits: true, reason: null, detourMinutes: 11, driveInMinutes: null }), at('2035-01-02', '09:00'));
+    expect(v.detail).toBe('Adds +11 min to the day · estimated.');
   });
 
   it('without bestRows the strip keeps its closest offers', () => {

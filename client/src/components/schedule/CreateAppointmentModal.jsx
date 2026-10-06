@@ -3992,6 +3992,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     compareTechsAt: techMode === 'choose' ? undefined : windowStart,
     serviceTypes: services.map((svc) => svc?.name).filter(Boolean),
     rangeFrom: etDateString(),
+    bestRows: true,
   });
 
   // Submit

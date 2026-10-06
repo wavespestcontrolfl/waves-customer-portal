@@ -47,9 +47,6 @@ const RANGE_DAYS = 3;
 // Availability strip window around the picked date (owner default 2026-10-02).
 const SUMMARY_BACK = 3;
 const SUMMARY_FORWARD = 7;
-// Latest picked date a summary still searches from today: the server covers
-// at most 14 days, and the picked date must be inside them.
-const SUMMARY_FROM_TODAY_MAX = 13;
 // The best-times week row: today and the six days after it.
 const WEEK_DAYS = 7;
 const SUMMARY_RETRY_MS = 10 * 60 * 1000;
@@ -182,6 +179,32 @@ function normalizeDay(day, scopedToTech) {
   return { bestTimes, picked: normalizePicked(day.picked, scopedToTech) };
 }
 
+// The summary search: the days around `date` (SUMMARY_BACK back, never
+// before today, through SUMMARY_FORWARD forward). With `bestRows` (New
+// Appointment) the server also answers the best-times rows; when that window
+// does not start today, the "best in the next 7 days" row gets its own
+// search from today (Codex #6045 r1/r2). Fail-open: no week row, never a
+// false one.
+async function searchSummary(search, { date, today, pickedArgs, bestRows }) {
+  const back = addDays(date, -SUMMARY_BACK);
+  const data = await search({
+    summary: true,
+    bestRows: bestRows || undefined,
+    dateFrom: back < today ? today : back,
+    dateTo: addDays(date, SUMMARY_FORWARD),
+    topN: 3,
+    pickedDate: date,
+    ...pickedArgs,
+  });
+  if (data?.summary?.best?.week_covered !== false) return data;
+  const week = await search({
+    summary: true, bestRows: true, dateFrom: today, dateTo: addDays(today, WEEK_DAYS - 1), topN: 3, pickedDate: date,
+  }).catch(() => null);
+  const weekRow = week?.summary?.best;
+  if (!weekRow || weekRow.week_covered === false) return data;
+  return { ...data, summary: { ...data.summary, best: { ...data.summary.best, week: weekRow.week || [], week_covered: true } } };
+}
+
 // `address` / `lat` / `lng` pin the search to a specific service address (the
 // create modal's property picker); the server prefers coords, then geocodes
 // the address, and only falls back to the customer's primary when both are
@@ -190,6 +213,9 @@ export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
   pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt, serviceTypes,
+  // New Appointment's two best-times rows: asked for only by the consumer
+  // that shows them (the server skips the rain and road-time work otherwise).
+  bestRows = false,
   // Edit appointment's choice on a shared stop ('together' | 'separate'):
   // the route check answers for the move the save will make.
   moveScope,
@@ -231,7 +257,7 @@ export function useBestTimes({
   const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
   const requestKey = [
     enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
-    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, bestRows,
   ].map((v) => v ?? '').join('|');
   const availability = useMemo(() => {
     if (!answer || !enabled) return null;
@@ -305,30 +331,7 @@ export function useBestTimes({
         // A past date has no days around it to offer (the engine never
         // searches before today) — the plain hint handles it as it always has.
         if (summary && date >= today && Date.now() >= summaryUnavailableUntil) {
-          const back = addDays(date, -SUMMARY_BACK);
-          const data = await search({
-            summary: true,
-            // From today whenever the picked date is close enough, so the
-            // "best in the next 7 days" row is covered by the same search.
-            dateFrom: back < today || date <= addDays(today, SUMMARY_FROM_TODAY_MAX) ? today : back,
-            dateTo: addDays(date, SUMMARY_FORWARD),
-            topN: 3,
-            pickedDate: date,
-            ...pickedArgs,
-          });
-          // A pick two weeks or more out searches only the days around it;
-          // the "best in the next 7 days" row then gets its own search from
-          // today (Codex #6045 r1). Fail-open: no row, never a false one.
-          if (data?.summary?.best?.week_covered === false) {
-            const week = await search({
-              summary: true, dateFrom: today, dateTo: addDays(today, WEEK_DAYS - 1), topN: 3, pickedDate: date,
-            }).catch(() => null);
-            if (controller.signal.aborted) return;
-            const weekRow = week?.summary?.best;
-            if (weekRow && weekRow.week_covered !== false) {
-              data.summary.best = { ...data.summary.best, week: weekRow.week || [], week_covered: true };
-            }
-          }
+          const data = await searchSummary(search, { date, today, pickedArgs, bestRows });
           if (controller.signal.aborted) return;
           const summarized = normalizeAvailability(data, { date, scopedToTech });
           if (summarized) {
@@ -364,6 +367,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey, bestRows]);
   return { bestTimes, picked, pickedByTech, bestInRange, availability, checking };
 }

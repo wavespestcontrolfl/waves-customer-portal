@@ -630,17 +630,20 @@ const SUMMARY_SLOW_MS = 1500;
 // Returns { summary, picked }: the summary (undefined for any other plan)
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
-  rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate, pickedEnd,
+  rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
-  const best = await buildBestRows(days, {
+  // Only New Appointment shows the best-times rows; other strips skip the
+  // rain and road-time work (Codex #6045 r2).
+  const best = bestRows ? await buildBestRows(days, {
     pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd,
-  });
+  }) : null;
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {
     logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
   }
+  if (!best) return { summary: { days, elapsed_ms: elapsedMs }, picked };
   return { summary: { days, best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
 }
 
