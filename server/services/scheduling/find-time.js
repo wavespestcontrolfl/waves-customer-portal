@@ -925,6 +925,10 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
         next: hasCoords(next) ? { lat: Number(next.lat), lng: Number(next.lng) } : null,
         prevEndMin: prev.endMin,
         prevIsHome: !prevIsStop,
+        // For a home-base baseline: when the van would leave home to reach
+        // the next stop just in time without this one (Codex #6045 r10).
+        nextStartMin: next.startMin,
+        baselineDriveMinutes: baselineDrive,
         newStop: { lat: Number(newStop.lat), lng: Number(newStop.lng) },
         durationMinutes,
       },

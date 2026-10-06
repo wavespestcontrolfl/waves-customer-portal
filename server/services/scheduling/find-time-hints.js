@@ -561,16 +561,18 @@ async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null,
     ]).finally(() => clearTimeout(timer));
   });
   const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
-  // Nothing to decorate: no forecast lookup either (Codex #6045 r1).
+  // No hour on screen: no forecast lookup either (Codex #6045 r1).
   const [priced, hourly] = await Promise.all([
     priceChips(chips),
-    chips.length ? rainLookup(lat, lng).catch(() => null) : null,
+    chips.length || days.some((day) => day.hours.length) ? rainLookup(lat, lng).catch(() => null) : null,
   ]);
   const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
   const nDay = rows.day.length;
   const nWeek = rows.week.length;
   const pricedPicked = pickedChip ? decorate(priced[nDay + nWeek]) : null;
   return {
+    // The forecast, so every listed hour gets its rain, not only the chips.
+    hourly,
     rows: {
       day: priced.slice(0, nDay).sort(byBest).map(decorate),
       week: priced.slice(nDay, nDay + nWeek).sort(byBest).map(decorate),
@@ -631,7 +633,8 @@ const SUMMARY_SLOW_MS = 1500;
 // The day list shows the same hours as the chips: give each hour that is
 // also a chip the chip's road-priced numbers and rain, so one hour never
 // shows two drive times (Codex #6045 r7).
-function withChipValues(days, rows) {
+// Every other hour gets its rain from the same forecast (Codex #6045 r10).
+function withChipValues(days, rows, hourly) {
   const chipKey = (date, h) => `${date}|${h.start_time}|${h.technician?.id ?? ''}`;
   const chips = new Map([...rows.day, ...rows.week].map((c) => [chipKey(c.date, c), c]));
   return days.map((day) => ({
@@ -640,7 +643,7 @@ function withChipValues(days, rows) {
       const c = chips.get(chipKey(day.date, h));
       return c ? {
         ...h, drive_in_minutes: c.drive_in_minutes, detour_minutes: c.detour_minutes, drive_source: c.drive_source, rain_chance: c.rain_chance,
-      } : h;
+      } : { ...h, rain_chance: rainForWindow(hourly, day.date, h.start_time, h.end_time) };
     }),
   }));
 }
@@ -662,7 +665,7 @@ async function buildHintSummary(plan, everyStart, {
     logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
   }
   if (!best) return { summary: { days, elapsed_ms: elapsedMs }, picked };
-  return { summary: { days: withChipValues(days, best.rows), best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
+  return { summary: { days: withChipValues(days, best.rows, best.hourly), best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
 }
 
 module.exports = {

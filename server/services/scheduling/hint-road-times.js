@@ -69,8 +69,15 @@ function chipLegs(chip, nowEt = null) {
   return {
     in: notBefore({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, nowEt),
     out: notBefore({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, nowEt),
-    base: notBefore({ date: chip.date, from: g.prev, to: g.next, departureMin: g.prevEndMin }, nowEt),
+    // From home base the van leaves just in time for the next stop, so the
+    // drive it makes anyway is priced at that hour, like the candidate's.
+    base: notBefore({ date: chip.date, from: g.prev, to: g.next, departureMin: baseDeparture(g) }, nowEt),
   };
+}
+
+function baseDeparture(g) {
+  if (!g.prevIsHome || !Number.isFinite(g.nextStartMin)) return g.prevEndMin;
+  return Math.max(0, g.nextStartMin - (Number(g.baselineDriveMinutes) || 0));
 }
 
 function etNow(ms) {

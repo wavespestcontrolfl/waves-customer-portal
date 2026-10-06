@@ -269,3 +269,28 @@ describe('capacity chips stay estimates (Codex #6045 r9)', () => {
     }
   });
 });
+
+describe('Codex #6045 r10', () => {
+  test('from home base the baseline leg leaves just in time for the next stop', () => {
+    const chip = hour('2026-10-08', '12:00', 34, 19);
+    chip[GAP_LEGS] = { ...chip[GAP_LEGS], prevIsHome: true, prevEndMin: 8 * 60, nextStartMin: 14 * 60, baselineDriveMinutes: 17 };
+    const legs = _test.chipLegs(chip);
+    expect(legs.base.departureMin).toBe(14 * 60 - 17);
+    expect(legs.in.departureMin).toBe(12 * 60 - 19);
+  });
+
+  test('every listed hour gets rain, not only the chips', async () => {
+    jest.resetModules();
+    jest.doMock('../services/weather-forecast', () => ({ getHourlyRainOutlook: async () => [{ startTime: '2026-10-08T16:00:00-04:00', rainChance: 70 }] }));
+    const hints = require('../services/scheduling/find-time-hints');
+    const hours = ['08:00', '09:00', '10:00', '11:00', '16:00'].map((t) => ({ date: '2026-10-08', start_time: t, end_time: `${String(Number(t.slice(0, 2)) + 1).padStart(2, '0')}:00`, detour_minutes: t === '16:00' ? 50 : 10 }));
+    const plan = { summary: true, from: '2026-10-08', to: '2026-10-08', verdictDate: '2026-10-08' };
+    const out = await hints.buildHintSummary(plan, hours, {
+      startedAt: Date.now(), today: '2026-10-06', target: { lat: 1, lng: 2 }, picked: null, spanMin: 60, bestRows: true,
+    });
+    const four = out.summary.days[0].hours.find((h) => h.start_time === '16:00');
+    expect(out.summary.best.day.map((c) => c.start_time)).not.toContain('16:00');
+    expect(four.rain_chance).toBe(70);
+    jest.dontMock('../services/weather-forecast');
+  });
+});
