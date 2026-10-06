@@ -20,7 +20,6 @@ const {
   sendManualCustomerSms,
   manualSmsDeliveryState,
 } = require('../messaging/send-manual-customer-sms');
-const { classifyDeliveryCertainty } = require('../messaging/send-customer-message');
 const { excludeRecruitingSmsLog, isRecruitingMessageType } = require('../../utils/recruiting-thread-scope');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // cancel_queued_message is SMS-only (owner ruling, dunning-unification-style
@@ -344,6 +343,12 @@ function uncertainManualSmsResponse(outcome) {
 function isUncertainManualSmsOutcome(outcome) {
   return manualSmsDeliveryState(outcome) === 'uncertain'
     || [outcome, outcome?.providerOutcome].some((o) => o?.deliveryOutcome && classifyDeliveryCertainty(o) === 'unknown');
+}
+
+// Required at call time: send-customer-message pulls the Twilio provider and
+// its route module, which the schema-only tests stub (CI on 4bf528bbb5).
+function classifyDeliveryCertainty(outcome) {
+  return require('../messaging/send-customer-message').classifyDeliveryCertainty(outcome);
 }
 
 
