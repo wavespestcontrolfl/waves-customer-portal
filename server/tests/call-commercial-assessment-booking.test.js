@@ -1213,3 +1213,54 @@ describe('codex #6046 round 8', () => {
     });
   });
 });
+
+describe('codex #6046 round 10: the appended schema agrees with the gated exception', () => {
+  const read = (f) => JSON.parse(fs.readFileSync(path.join(__dirname, `../schemas/call-extraction.${f}.schema.json`), 'utf8'));
+  const EXCEPTION = 'when this prompt contains the AGENT-PROPOSED SLOT block';
+  // every description (any depth) that restates the day-and-time rule for the agent commitment quote
+  const restaters = (node, out = []) => {
+    if (Array.isArray(node)) node.forEach((n) => restaters(n, out));
+    else if (node && typeof node === 'object') {
+      for (const [k, v] of Object.entries(node)) {
+        if (k === 'description' && typeof v === 'string' && /agent_committed_booking\)? must be the WHOLE clause|quote.{0,40}holding the day, date and time/i.test(v)) out.push(v);
+        else restaters(v, out);
+      }
+    }
+    return out;
+  };
+
+  test('both schemas state the exception wherever the day/time quote rule is restated', () => {
+    for (const f of ['model-output', 'persisted']) {
+      const found = restaters(read(f));
+      expect([f, found.length]).toEqual([f, 1]); // definite_commitment is the one place the rule is restated
+      for (const text of found) {
+        expect(text).toContain(EXCEPTION);
+        expect(text).toContain("the agent's bare commitment sentence after the caller's yes");
+      }
+    }
+  });
+
+  test('gate off is the block-stripped gate-on prompt (compared structurally, never to a pinned string)', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const off = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', {});
+    const on = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', { agentProposedSlotCommitment: true });
+    const stripped = on
+      .replace(/\nAGENT-PROPOSED SLOT[\s\S]*?\n(?=\n)/, '')
+      .replaceAll(' (except in the exceptions listed below)', '')
+      .replace('THREE EXCEPTIONS', 'TWO EXCEPTIONS')
+      .replace(/ \(3\) An agent-proposed slot[^\n]*?(?=\n)/, '')
+      .replace(/ For that agent-proposed shape the commitment quote[^\n]*?(?= null when no slot was agreed)/, '');
+    expect(stripped).toBe(off);
+    // the prompt text and the hashes agree: any gated edit moves only the APS hash
+    const { PROMPT_HASH, APS_PROMPT_HASH, PROMPT_VERSION } = require('../services/prompts/call-extraction-v1');
+    expect(PROMPT_HASH).toMatch(new RegExp(`^${PROMPT_VERSION}-[0-9a-f]{12}$`));
+    expect(APS_PROMPT_HASH).toMatch(new RegExp(`^${PROMPT_VERSION}a-[0-9a-f]{12}$`));
+  });
+
+  test('the version columns still fit (30 characters)', () => {
+    const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
+    for (const names of [undefined, ['Waves Assessment', 'Cockroach Control Service']]) {
+      for (const aps of [false, true]) expect(extractionPromptVersion(names, { agentProposedSlotCommitment: aps }).length).toBeLessThanOrEqual(30);
+    }
+  });
+});
