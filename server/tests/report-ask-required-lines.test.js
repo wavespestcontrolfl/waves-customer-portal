@@ -1742,3 +1742,17 @@ describe('answer screen, Codex round 43 (lines and measurements)', () => {
     expect(ask('Total rain was 1.23 inches.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 44', () => {
+  test('weather polarity is judged per clause', () => {
+    const data = pestData({ applications: [], conditions: { conditions: 'Cloudy', rain_24h_in: 0 } });
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer("It wasn't sunny, but it was raining during the visit.", { question: 'What was the weather?', data, facts })).toBe('weather_claim');
+  });
+
+  test('a plant health claim takes the Tree & Shrub score', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [] };
+    const facts = { tree_shrub_report: { plant_health_score_out_of_100: 20, plant_groups: [{ name: 'Hedge', status: 'healthy' }] } };
+    expect(screenAskAnswer('Your plants are healthy.', { question: 'How are my plants?', data, facts })).toBe('health_claim');
+  });
+});

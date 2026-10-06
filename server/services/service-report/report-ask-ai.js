@@ -1420,9 +1420,12 @@ function contradictsWeather(text, facts) {
   const sheet = String(facts?.weather_during_visit || '').toLowerCase();
   const sheetRain = /(?:^|,\s*)rain in the last 24 hours/.test(sheet) || /trace of rain/.test(sheet);
   const sheetDry = /no rain in the last 24 hours/.test(sheet);
-  return splitSentences(matchForm(text)).some((sentence) => {
+  return splitSentences(matchForm(text)).filter((sentence) => {
     const lower = sentence.toLowerCase();
-    if (OTHER_PERIOD.test(lower) || !VISIT_WEATHER.test(lower)) return false;
+    return !OTHER_PERIOD.test(lower) && VISIT_WEATHER.test(lower);
+  // Polarity per clause: "It wasn't sunny, but it was raining" (Codex P1 #5964 r44).
+  }).flatMap((sentence) => clausesOf(sentence)).some((clause) => {
+    const lower = clause.toLowerCase();
     const negated = NOT_CONFIRMED_RE.test(lower);
     if (!negated && SKY_WORDS.some((word) => new RegExp(`\\b${word}\\b`).test(lower) && !new RegExp(`\\b${word}`).test(sheet))) return true;
     if (SAYS_RAIN.test(lower)) {
@@ -1490,6 +1493,7 @@ const HEALTH_DIMENSIONS = [
 // (Codex P1 #5964 r42).
 const clausesOf = (text) => splitSentences(matchForm(text))
   .flatMap((sentence) => sentence.split(/[;,:]\s*|\s+(?:but|and|while|whereas|though|although|yet)\s+|\s+[—–-]\s+/i)).filter(Boolean);
+const PLANT_SUBJECT = /\b(?:plants?|shrubs?|trees?|hedges?|palms?|beds?|landscape)\b/i;
 const HEALTH_BAD = ['poor', 'unhealthy', 'bad', 'struggling', 'stressed', 'declining', 'thin', 'thinning', 'sparse', 'weak', 'sick', 'dying', 'dead', 'patchy', 'bare', 'damaged', 'diseased', 'worse', 'worsening', 'failing', 'suffering'];
 const HEALTH_GOOD = ['healthy', 'good', 'great', 'excellent', 'thriving', 'lush', 'strong', 'thick', 'dense', 'vibrant', 'perfect'];
 function contradictsHealth(text, facts) {
@@ -1506,11 +1510,17 @@ function contradictsHealth(text, facts) {
     // Each dimension is judged on its own score: "Density is excellent" on a
     // density of 20 fails even when the overall is 72 (Codex P1 #5964 r42).
     const scores = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower)).map(([, key]) => facts?.lawn_assessment?.[key]);
-    const pool = scores.length ? scores : [facts?.lawn_assessment?.overall_out_of_100];
+    // Plants, shrubs and trees take the Tree & Shrub score (Codex P1 #5964 r44).
+    const plantScore = facts?.tree_shrub_report?.plant_health_score_out_of_100;
+    const overall = PLANT_SUBJECT.test(lower) && plantScore != null ? [plantScore]
+      : [facts?.lawn_assessment?.overall_out_of_100 ?? plantScore];
+    const pool = scores.length ? scores : overall;
     const known = pool.filter((value) => value != null && Number.isFinite(Number(value))).map(Number);
-    const said = (words) => words.filter((word) => new RegExp(`\\b${word}\\b`).test(lower) && !has(word));
-    return said(HEALTH_BAD).some(() => !known.length || known.some((n) => n >= 60))
-      || said(HEALTH_GOOD).some(() => !known.length || known.some((n) => n < 70));
+    const used = (words) => words.filter((word) => new RegExp(`\\b${word}\\b`).test(lower));
+    // A score that plainly disagrees wins over any sheet wording; between the
+    // bands, wording from the same dimension or the score may ground it.
+    return used(HEALTH_BAD).some((word) => (known.length ? known.some((n) => n >= 75) || (!has(word) && known.some((n) => n >= 60)) : !has(word)))
+      || used(HEALTH_GOOD).some((word) => (known.length ? known.some((n) => n < 50) || (!has(word) && known.some((n) => n < 70)) : !has(word)));
   });
 }
 
