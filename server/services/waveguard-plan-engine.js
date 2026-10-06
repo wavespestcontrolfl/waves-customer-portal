@@ -1790,13 +1790,11 @@ async function buildPlanForService(serviceId, options = {}) {
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   const calendarProtocol = selectProtocolVisit(profile, serviceDate, service.lawn_type, { requireKnownGrass: completionDefaultsEnabled });
-  // GATE_LAWN_BERMUDA_REMOVAL: a St. Augustine or Zoysia lawn the account asked
-  // bermuda removal for (accepted estimate or the staff switch) reads the extra
-  // staged rows. Gate off or any other lawn: no read, the call below is unchanged.
-  const bermudaWanted = lawnV13On && bermudaRemoval.bermudaRemovalLive()
-    && bermudaRemoval.BERMUDA_REMOVAL_TRACKS.includes(calendarProtocol.trackKey)
-    ? await bermudaRemoval.accountWantsBermudaRemoval(knex, { customerId: service.customer_id, profile, trackKey: calendarProtocol.trackKey, propertyId: service.property_id || null, strict })
-    : { requested: false, source: null };
+  // GATE_LAWN_BERMUDA_REMOVAL: every bermuda removal decision (who wants the step, the extra
+  // staged rows, the month, the cultivar, the projection, the output) lives in
+  // lawn-bermuda-removal.js openPlanStep; the planner only passes what it knows. Gate off or any
+  // other lawn: every call below is a no-op and the plan is the old one.
+  const bermuda = await bermudaRemoval.openPlanStep(knex, { enabled: lawnV13On, service, profile, calendarTrackKey: calendarProtocol.trackKey, strict });
   // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
   // default gates say: a pinned older visit must be seen as pinned, never as
   // unpinned (which would resolve the staged v13 version for it).
@@ -1805,7 +1803,7 @@ async function buildPlanForService(serviceId, options = {}) {
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
     planning: true,
-    ...(bermudaWanted.requested && bermudaRemoval.cultivarState(calendarProtocol.trackKey, profile?.cultivar) !== 'excluded' ? { includeBermudaRemoval: true } : {}),
+    ...bermuda.protocolOptions,
     ...(completionDefaultsEnabled ? {
       strict: true, windowKey: service.lawn_protocol_window_key,
       protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
@@ -1830,21 +1828,12 @@ async function buildPlanForService(serviceId, options = {}) {
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
-  // The April and June bermuda removal step: its three spot lines join the visit's
-  // secondary list (opt-in lines, like every other spot product).
-  // The step month is the APPOINTMENT's own (ET calendar month of its date), as stepVisitOf and
-  // the tank sheet read it, never the assigned protocol window's: an April-window visit
-  // rescheduled into May has no step.
-  const bermudaVisit = bermudaWanted.requested && structuredProtocol?.version === LAWN_V13_VERSION
-    && bermudaRemoval.bermudaRemovalVisit({ trackKey, month })
-    && bermudaRemoval.visitMonthOf({ scheduled_date: service.scheduled_date }) === month;
-  // St. Augustine cultivar policy: an excluded cultivar never gets the step.
-  const bermudaCultivar = bermudaRemoval.cultivarState(trackKey, profile?.cultivar);
-  const bermudaAddOn = bermudaVisit ? bermudaRemoval.stepAddOn(trackKey, month) : null;
-  const bermudaActive = !!bermudaAddOn && bermudaCultivar !== 'excluded';
+  // The April and June bermuda removal step: its three spot lines join the visit's secondary
+  // list (opt-in lines, like every other spot product).
+  const step = bermuda.resolve({ structuredProtocol, trackKey, month, parseLines: (text) => parseProtocolLines(text, 'conditional', { exactName }) });
   const conditionalLines = [
     ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
-    ...(bermudaActive ? bermudaRemoval.markStepLines(parseProtocolLines(bermudaAddOn.secondary, 'conditional', { exactName })) : []),
+    ...step.lines,
   ];
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
   const resolvedItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
@@ -1853,7 +1842,7 @@ async function buildPlanForService(serviceId, options = {}) {
     stressFlags,
   });
   // The three step lines are one selection: any selected selects all.
-  const candidateItems = bermudaActive ? bermudaRemoval.selectStepAtomically(resolvedItems) : resolvedItems;
+  const candidateItems = step.select(resolvedItems);
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
   // A rig the visit names (assignment or explicit request) is the visit's;
@@ -1933,14 +1922,10 @@ async function buildPlanForService(serviceId, options = {}) {
   // completion actions share (lawn-bermuda-removal.js projectBermudaStep): staged rows
   // linked, products active, no limit capped, then settled (warning or product-scoped
   // blocks) with the cultivar's test-patch note.
-  const bermudaProjection = bermudaActive && v13Active
-    ? await bermudaRemoval.projectBermudaStep(planItems, {
-      knex, rows: v13Rows, probeLimits: (probe) => v13Limits(knex, service, serviceDate, probe, { strict }), testPatch: bermudaCultivar === 'test_patch',
-    })
-    : { items: planItems, blocks: [], warnings: [] };
+  const bermudaProjection = await step.project(planItems, {
+    enabled: v13Active, rows: v13Rows, probeLimits: (probe) => v13Limits(knex, service, serviceDate, probe, { strict }),
+  });
   planItems = bermudaProjection.items;
-  const bermudaBlocks = bermudaProjection.blocks;
-  const bermudaWarnings = [...(bermudaVisit && bermudaCultivar === 'excluded' ? [bermudaRemoval.EXCLUDED_CULTIVAR_WARNING] : []), ...bermudaProjection.warnings];
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
@@ -1974,9 +1959,9 @@ async function buildPlanForService(serviceId, options = {}) {
   // product holds the mix.
   warnings.push(...v13SelectedGateWarnings(plannedItems));
   if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
-  warnings.push(...bermudaWarnings);
+  warnings.push(...bermudaProjection.warnings);
   blocks.push(...applyAloneBlocks);
-  blocks.push(...bermudaBlocks);
+  blocks.push(...bermudaProjection.blocks);
   if (v13Active) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
     blocks.push(...notices.blocks);
@@ -2191,7 +2176,7 @@ async function buildPlanForService(serviceId, options = {}) {
     equipmentCalibration: calibrationSummary,
     inventory: inventorySummary,
     // Gate off, or not a bermuda removal visit: no field, the payload is the old one.
-    ...(bermudaActive ? { bermudaRemoval: { active: true, source: bermudaWanted.source, mix: bermudaAddOn.summary } } : {}),
+    ...step.field,
     appointmentAssignment: {
       protocolKey: service.lawn_protocol_key || null,
       protocolVersion: service.lawn_protocol_version || null,
@@ -2205,7 +2190,7 @@ async function buildPlanForService(serviceId, options = {}) {
     // An apply-alone conflict holds the mix: no combined order is offered.
     mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems.filter(bermudaRemoval.inMixingOrder), cappedProducts),
     // The backpack step's own order (water, Recognition, Fusilade II, surfactant last), when it is selected.
-    ...bermudaRemoval.mixOrderField(plannedItems, applyAloneBlocks.length > 0),
+    ...step.mixOrderField(plannedItems, applyAloneBlocks.length > 0),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,

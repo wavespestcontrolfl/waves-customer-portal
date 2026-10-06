@@ -26,4 +26,99 @@ function authoritativeEstimateResult(data, { pricingAuthority = null, hasPricedL
   return result;
 }
 
-module.exports = { authoritativeEstimateResult };
+// The commercial engine ids and their residential label-mapped twins are the SAME charge in two
+// spellings: canonicalized for the duplicate key only (each line keeps its own serviceKey).
+const DEDUPE_FAMILY = {
+  commercial_pest: 'pest_control',
+  commercial_lawn: 'lawn_care',
+  commercial_tree_shrub: 'tree_shrub',
+  commercial_mosquito: 'mosquito',
+  commercial_termite_bait: 'termite_bait',
+  commercial_rodent_bait: 'rodent_bait',
+  // Termite SPECIALTY twins: the mapped normalizer only has names ("Recurring Termite Foam
+  // Service", "Termite Bond") and keyFromName lands them on termite_bait, while the raw rows
+  // keep their canonical engine ids: same charge, two spellings again.
+  foam_recurring: 'termite_bait',
+  termite_station_rental: 'termite_bait',
+  termite_bond: 'termite_bait',
+};
+
+// Does a persisted result container price anything (a structured line or a raw engine line item)?
+const containerPricesAnything = (container, collectors, setupOpts) => collectors.mapped(container, setupOpts).length > 0
+  || collectors.raw(container, setupOpts).length > 0;
+
+// The priced lines of an estimate and the container they came from, in one call.
+//
+//   collectors.mapped(container, setupOpts)  the container's structured recurring and one-time lines
+//   collectors.raw(container, setupOpts)     the container's raw engine line items
+//   collectors.engineIdAliases               engine id -> canonical service id (for the duplicate key)
+//
+// A proposal-authoritative estimate keeps its proposal lines and `result` whenever it exists.
+// Otherwise the container is picked by authoritativeEstimateResult (above), the structured lines
+// of that container come first, then its raw line items, then the OTHER container (an earlier
+// engineResult left behind by a revision or reprice) as a consume-only source:
+//   - Real rows can MIX shapes (mapped blocks plus extra rows only in lineItems): merge and dedupe by
+//     service + cadence so no priced line is silently omitted. Duplicate = the SAME priced charge in
+//     TWO containers (same service, cadence and net price); each remembered charge is CONSUMED by at
+//     most one match, so two equal-priced lines in one container both survive.
+//   - Stale-revision guard: a service the chosen container already priced is consume-only (an engine row
+//     either price-matches and enriches, or is a stale revision of that service and drops); a service it
+//     never priced is the legitimate mixed shape and merges.
+//   - After a SERVER reprice the whole other container is consume-only (an unmatched row is a removed
+//     or re-priced service, never an extra).
+// A discarded duplicate may be the only carrier of cost and provenance metadata (explicitCogsCost,
+// cogsServiceTypes, visitsPerYear, quoted fields): what the retained line lacks is transferred.
+function resolveEstimateLines(data, { pricingAuthority = null, collectors, setupOpts, proposalLines = [] }) {
+  const proposalAuthoritative = proposalLines.length > 0;
+  const hasPricedLines = (container) => containerPricesAnything(container, collectors, setupOpts);
+  const result = authoritativeEstimateResult(data, proposalAuthoritative ? {} : { pricingAuthority, hasPricedLines });
+  if (proposalAuthoritative) return { result, rawLines: proposalLines };
+  const rawLines = collectors.mapped(result, setupOpts);
+  const covered = new Map();
+  const priceKey = (l) => {
+    const key = String(l.serviceKey || '');
+    // termite_bond persists with its term baked in (termite_bond_5yr).
+    const family = DEDUPE_FAMILY[key] || collectors.engineIdAliases[key] || (key.startsWith('termite_bond') ? 'termite_bait' : key);
+    return `${family}|${l.cadence}`;
+  };
+  const remember = (l) => {
+    const key = priceKey(l);
+    if (!covered.has(key)) covered.set(key, []);
+    covered.get(key).push({ price: Number(l.price) || 0, line: l });
+  };
+  rawLines.forEach(remember);
+  const mappedServiceKeys = new Set(rawLines.map(priceKey));
+  const serverRepriced = String(pricingAuthority || '').toUpperCase() === 'SERVER' && !!data.result && data.result !== data.engineResult;
+  const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false } = {}) => {
+    const survivors = [];
+    for (const line of extra) {
+      const entries = covered.get(priceKey(line)) || [];
+      const matchIdx = entries.findIndex((prev) => Math.abs(prev.price - (Number(line.price) || 0)) < 0.01);
+      if (matchIdx < 0 && (consumeOnly || (consumeOnlyMappedServices && mappedServiceKeys.has(priceKey(line))))) continue;
+      if (matchIdx >= 0) {
+        const [{ line: retained }] = entries.splice(matchIdx, 1);
+        if (retained.explicitCogsCost === undefined && line.explicitCogsCost !== undefined) retained.explicitCogsCost = line.explicitCogsCost;
+        if (!retained.cogsServiceTypes && line.cogsServiceTypes) {
+          retained.cogsServiceTypes = line.cogsServiceTypes;
+          retained.cogsServiceTypeFixedMultipliers = line.cogsServiceTypeFixedMultipliers;
+        }
+        if (retained.visitsPerYear === undefined && line.visitsPerYear !== undefined) retained.visitsPerYear = line.visitsPerYear;
+        if (line.quoted) retained.quoted = { ...line.quoted, ...(retained.quoted || {}) };
+        continue;
+      }
+      survivors.push(line);
+      rawLines.push(line);
+    }
+    // Intra-container siblings never dedupe against each other: they join the covered set only for LATER containers.
+    survivors.forEach(remember);
+  };
+  merge(collectors.raw(result, setupOpts));
+  const other = data.engineResult;
+  if (other && other !== result) {
+    merge(collectors.mapped(other, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
+    merge(collectors.raw(other, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
+  }
+  return { result, rawLines };
+}
+
+module.exports = { authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything };

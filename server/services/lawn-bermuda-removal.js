@@ -538,6 +538,54 @@ const optionNotes = (item) => {
 const STEP_FIELDS = { group: BERMUDA_GROUP, applicationMode: 'spot', prefillAmount: false };
 const stepOptionFields = (item) => ({ ...STEP_FIELDS, ...optionNotes(item) });
 
+// The step as the visit PLAN sees it, in the order the planner needs it, so the planner holds no
+// bermuda decision of its own: every eligibility, cultivar, month, projection and output-shaping
+// rule lives here, and every method is a no-op while the step is off.
+//   openPlanStep(...)        before the protocol window is read: is the step wanted (gate, v13, an
+//                            eligible grass, the account's switch or estimate); `protocolOptions`
+//                            is what the window read must add to load the staged rows.
+//   .resolve(...)            once the serving window and month are known: is the step active for
+//                            THIS appointment (v13 resolved, the step month, the cultivar policy);
+//                            returns the stage below.
+//   stage.lines              the three marked recipe lines to add to the visit's conditional lines.
+//   stage.select(items)      the one atomic selection of the three lines.
+//   stage.project(items,..)  the shared projection: usable or not, the limits, the warnings and blocks
+//                            (the excluded-cultivar warning included).
+//   stage.field              the plan's `bermudaRemoval` output field (or nothing).
+//   stage.mixOrderField(..)  the backpack step's own mixing order (or nothing).
+async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey, strict = false }) {
+  const live = enabled && bermudaRemovalLive() && BERMUDA_REMOVAL_TRACKS.includes(calendarTrackKey);
+  const wanted = live
+    ? await accountWantsBermudaRemoval(knex, { customerId: service.customer_id, profile, trackKey: calendarTrackKey, propertyId: service.property_id || null, strict })
+    : { requested: false, source: null };
+  const readsRows = wanted.requested && cultivarState(calendarTrackKey, profile?.cultivar) !== 'excluded';
+  return {
+    protocolOptions: readsRows ? { includeBermudaRemoval: true } : {},
+    resolve({ structuredProtocol, trackKey, month, parseLines }) {
+      // The step month is the APPOINTMENT's own (ET calendar month of its date), never the assigned
+      // protocol window's: an April-window visit rescheduled into May has no step.
+      const visit = wanted.requested && structuredProtocol?.version === LAWN_V13_VERSION
+        && bermudaRemovalVisit({ trackKey, month }) && visitMonthOf({ scheduled_date: service.scheduled_date }) === month;
+      const cultivar = cultivarState(trackKey, profile?.cultivar);
+      const addOn = visit ? stepAddOn(trackKey, month) : null;
+      const active = !!addOn && cultivar !== 'excluded';
+      const excludedWarnings = visit && cultivar === 'excluded' ? [EXCLUDED_CULTIVAR_WARNING] : [];
+      return {
+        lines: active ? markStepLines(parseLines(addOn.secondary)) : [],
+        select: (items) => (active ? selectStepAtomically(items) : items),
+        async project(items, { enabled: v13Active, rows, probeLimits }) {
+          const projected = active && v13Active
+            ? await projectBermudaStep(items, { knex, rows, probeLimits, testPatch: cultivar === 'test_patch' })
+            : { items, blocks: [], warnings: [] };
+          return { ...projected, warnings: [...excludedWarnings, ...projected.warnings] };
+        },
+        field: active ? { bermudaRemoval: { active: true, source: wanted.source, mix: addOn.summary } } : {},
+        mixOrderField,
+      };
+    },
+  };
+}
+
 // The step as one reader sees it (the tank sheet, the completion actions): opened once
 // from the booked visit, then asked for its lines, its staged-row options, its one
 // selection, its settlement and its decoration of the response. Every method is a no-op
@@ -587,6 +635,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
 }
 
 module.exports = {
+  openPlanStep,
   visitMonthOf,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,

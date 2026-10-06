@@ -2,7 +2,7 @@ const db = require('../models/db');
 const { costLineFromUsage } = require('./product-costing');
 const { matchServiceProtocol } = require('./protocol-matcher');
 const { lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
-const { authoritativeEstimateResult } = require('./estimate-result-container');
+const { resolveEstimateLines, containerPricesAnything } = require('./estimate-result-container');
 
 const SERVICE_MAP = {
   pest_control: {
@@ -1065,12 +1065,18 @@ function normalizeProposalLines(estimate) {
   return lines;
 }
 
+// How the audit reads a persisted result container's lines (the collectors the container module
+// merges): the structured recurring and one-time lines, and the raw engine line items.
+const LINE_COLLECTORS = {
+  mapped: (container, setupOpts) => [...normalizeRecurringLines(container), ...normalizeOneTimeLines(container, setupOpts)],
+  raw: (container, setupOpts) => normalizeEngineLineItems(container, setupOpts),
+  engineIdAliases: ENGINE_ID_ALIASES,
+};
+
 // Does a persisted result container price anything (a mapped recurring or one-time line, or a
 // raw engine line item)? The detector the shared container pick uses for an ancillary result.
 function hasPricedLines(container, setupOpts = {}) {
-  return normalizeRecurringLines(container).length > 0
-    || normalizeOneTimeLines(container, setupOpts).length > 0
-    || normalizeEngineLineItems(container, setupOpts).length > 0;
+  return containerPricesAnything(container, LINE_COLLECTORS, setupOpts);
 }
 
 async function buildEstimatePricingAudit(estimate, context = {}) {
@@ -1080,7 +1086,6 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // disabled fallback) must fall through to the engine lines instead of
   // freezing an empty audit (codex pre-push P1).
   const proposalLines = data.proposal?.enabled === true ? normalizeProposalLines(estimate) : [];
-  const proposalAuthoritative = proposalLines.length > 0;
   // The FROZEN setup-fee decision gates EVERY membership emission — the
   // raw initialFee path and the mapped oneTime.membershipFee row alike
   // (GH codex P1: the mapped row escaped a frozen $49 discount): a
@@ -1110,132 +1115,12 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     : null;
   const initialFeeGross = Number.isFinite(frozenSetupGross) && frozenSetupGross > 0 ? frozenSetupGross : null;
   const setupOpts = { emitInitialFee, initialFeeOverride, initialFeeGross };
-  // The container that holds the CURRENT priced result, picked by the rule shared with the
-  // bermuda removal reader (estimate-result-container.js): a SERVER reprice keeps `result`; an
-  // ancillary `result` with no priced lines yields to a priced engineResult (it then becomes THE
-  // result for the whole audit: dimensions, visit counts, provenance, not just the lines). The
-  // proposal path keeps `result` whenever it exists.
-  const result = authoritativeEstimateResult(data, proposalAuthoritative ? {} : {
-    pricingAuthority: estimate.pricing_authority,
-    hasPricedLines: (container) => hasPricedLines(container, setupOpts),
+  // The CURRENT priced result's container and the priced lines, in one call
+  // (estimate-result-container.js resolveEstimateLines): the container pick shared with the bermuda
+  // removal reader, then the structured lines, the raw engine lines and the cross-container dedupe.
+  const { result, rawLines } = resolveEstimateLines(data, {
+    pricingAuthority: estimate.pricing_authority, collectors: LINE_COLLECTORS, setupOpts, proposalLines,
   });
-  let rawLines = proposalAuthoritative
-    ? proposalLines
-    : [
-      ...normalizeRecurringLines(result),
-      ...normalizeOneTimeLines(result, setupOpts),
-    ];
-  // Quote-wizard rows persist their priced services ONLY at
-  // engineResult.lineItems (no recurring/oneTime blocks) — without this
-  // fallback such snapshots had empty lines, zero cost, and a falsely
-  // perfect margin (GH codex P1). An ancillary data.result can shadow
-  // the priced engineResult in the alias — when the alternate object is
-  // the one with priced lines, it becomes THE result for the whole audit
-  // (dimensions, visit counts, provenance), not just the lines (codex
-  // pre-push P1).
-  if (!proposalAuthoritative) {
-    // Real rows can MIX shapes: mapped recurring/oneTime blocks plus
-    // additional priced rows only in (engine)result.lineItems — merge and
-    // dedupe by service+cadence so no priced line is silently omitted
-    // (codex pre-push P1). When the alternate container is the only one
-    // with lines, it becomes THE result for the whole audit.
-    // Duplicate = the SAME priced charge represented in TWO CONTAINERS:
-    // same service, cadence, and net price — and each remembered charge is
-    // CONSUMED by at most one match, so two equal-priced buildings in one
-    // container both survive, and one mapped counterpart absorbs exactly
-    // one equal-priced engine row (codex pre-push P1 x2).
-    const covered = new Map();
-    // Commercial engine ids and their residential label-mapped twins are
-    // the SAME charge in two spellings — canonicalize for the dedupe key
-    // only; each line keeps its own serviceKey (GH codex P1).
-    const DEDUPE_FAMILY = {
-      commercial_pest: 'pest_control',
-      commercial_lawn: 'lawn_care',
-      commercial_tree_shrub: 'tree_shrub',
-      commercial_mosquito: 'mosquito',
-      commercial_termite_bait: 'termite_bait',
-      commercial_rodent_bait: 'rodent_bait',
-      // Termite SPECIALTY twins (GH codex P1): the mapped normalizer only
-      // has names ("Recurring Termite Foam Service", "Termite Bond") and
-      // keyFromName lands them on termite_bait, while the raw rows keep
-      // their canonical engine ids — same charge, two spellings again.
-      foam_recurring: 'termite_bait',
-      termite_station_rental: 'termite_bait',
-      termite_bond: 'termite_bait',
-    };
-    const priceKey = (l) => {
-      const key = String(l.serviceKey || '');
-      // termite_bond persists with its term baked in (termite_bond_5yr).
-      const family = DEDUPE_FAMILY[key]
-        || ENGINE_ID_ALIASES[key]
-        || (key.startsWith('termite_bond') ? 'termite_bait' : key);
-      return `${family}|${l.cadence}`;
-    };
-    const remember = (l) => {
-      const key = priceKey(l);
-      if (!covered.has(key)) covered.set(key, []);
-      covered.get(key).push({ price: Number(l.price) || 0, line: l });
-    };
-    rawLines.forEach(remember);
-    // Stale-revision guard (GH codex P1): a revised draft rewrites
-    // data.result but leaves the OLD engineResult behind. The guard is
-    // scoped by SERVICE IDENTITY (family|cadence), not whole cadence
-    // classes — a service the mapped result already priced is consume-only
-    // (an engine row either price-matches and enriches, or is a stale
-    // revision of that same service and drops), while a service the mapped
-    // result never priced is the legitimate mixed shape and merges even
-    // when its cadence class exists elsewhere (codex pre-push P1: a
-    // cadence-wide guard silently dropped a valid recurring service stored
-    // only in engineResult.lineItems).
-    const mappedServiceKeys = new Set(rawLines.map(priceKey));
-    // A SERVER-authoritative reprice rewrote data.result WHOLESALE
-    // (admin-estimate-persistence: estimateData.result = serverResult)
-    // and left the earlier engineResult behind — there, an unmatched
-    // engine row is a removed or re-priced service, never a mixed-shape
-    // extra, so the whole container is consume-only (GH codex P1: a
-    // service the operator removed was still recorded and costed).
-    const serverRepriced = String(estimate.pricing_authority || '').toUpperCase() === 'SERVER'
-      && !!data.result && data.result !== data.engineResult;
-    const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false } = {}) => {
-      const survivors = [];
-      for (const line of extra) {
-        const entries = covered.get(priceKey(line)) || [];
-        const matchIdx = entries.findIndex((prev) => Math.abs(prev.price - (Number(line.price) || 0)) < 0.01);
-        if (matchIdx < 0 && (consumeOnly || (consumeOnlyMappedServices && mappedServiceKeys.has(priceKey(line))))) continue;
-        if (matchIdx >= 0) {
-          // Consumed — but the discarded raw row may be the ONLY carrier of
-          // cost/provenance metadata (explicitCogsCost, mosquito overrides,
-          // quoted fields) — transfer what the retained row lacks (GH
-          // codex P1).
-          const [{ line: retained }] = entries.splice(matchIdx, 1);
-          if (retained.explicitCogsCost === undefined && line.explicitCogsCost !== undefined) retained.explicitCogsCost = line.explicitCogsCost;
-          if (!retained.cogsServiceTypes && line.cogsServiceTypes) {
-            retained.cogsServiceTypes = line.cogsServiceTypes;
-            retained.cogsServiceTypeFixedMultipliers = line.cogsServiceTypeFixedMultipliers;
-          }
-          if (retained.visitsPerYear === undefined && line.visitsPerYear !== undefined) retained.visitsPerYear = line.visitsPerYear;
-          if (line.quoted) retained.quoted = { ...line.quoted, ...(retained.quoted || {}) };
-          continue;
-        }
-        survivors.push(line);
-        rawLines.push(line);
-      }
-      // Intra-container siblings never dedupe against each other — they
-      // join the covered set only for LATER containers.
-      survivors.forEach(remember);
-    };
-    merge(normalizeEngineLineItems(result, setupOpts));
-    // An earlier engineResult that is not THE result is consume-only: it enriches a priced line
-    // it matches, and a service it alone carries is a stale revision (or, after a SERVER reprice,
-    // a removed service), never a mixed-shape extra.
-    if (data.engineResult && data.engineResult !== result) {
-      merge([
-        ...normalizeRecurringLines(data.engineResult),
-        ...normalizeOneTimeLines(data.engineResult, setupOpts),
-      ], { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
-      merge(normalizeEngineLineItems(data.engineResult, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
-    }
-  }
   const dimensions = dimensionsFrom(data, result);
   const inventory = context.inventory || await loadInventoryCostRows();
   const lines = [];
