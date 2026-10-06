@@ -12,6 +12,7 @@ const { randomUUID } = require('crypto');
 
 const migration = require('../models/migrations/20261007110000_kb_bermuda_zoysia_2ee');
 
+const wording = require('../models/migrations/20261007110100_kb_bermuda_zoysia_2ee_wording');
 const { _OLD_LINE: OLD_LINE, _NEW_LINES: NEW_LINES, _OLD_TITLE: OLD_TITLE, _NEW_TITLE: NEW_TITLE, _AUDIT_ACTION: AUDIT_ACTION } = migration;
 const SLUG = 'fusilade-ii-bermuda-bahia-eradication';
 
@@ -30,7 +31,8 @@ describe('kb-bermuda-zoysia-2ee source text', () => {
   test('the seed script carries the corrected lines for fresh environments', () => {
     const seed = read('scripts/seed-knowledge-base.js');
     expect(seed).not.toContain(OLD_LINE);
-    expect(seed).toContain(NEW_LINES);
+    // The seed carries the lines as 20261007110100 leaves them (fl oz, rate-qualified solo warning).
+    expect(seed).toContain(NEW_LINES.replace(wording._OLD_SENTENCE, wording._NEW_SENTENCE));
     expect(seed).toContain(`title: '${NEW_TITLE}'`);
   });
 
@@ -40,6 +42,14 @@ describe('kb-bermuda-zoysia-2ee source text', () => {
     expect(NEW_LINES).toContain('A 2(ee) is not the printed label');
     expect(NEW_LINES).toContain('Fusilade II ALONE injures zoysia');
     expect(NEW_LINES).not.toMatch(/AND zoysiagrass/);
+  });
+
+  test('20261007110100: Fusilade II reads fl oz and the solo warning keeps the 2(ee) rate and "may"', () => {
+    expect(NEW_LINES).toContain(wording._OLD_SENTENCE);
+    expect(wording._NEW_SENTENCE).toContain('Fusilade II 0.367–0.55 fl oz per 1,000 sq ft');
+    expect(wording._NEW_SENTENCE).toContain('Recognition 0.03–0.045 oz');
+    expect(wording._NEW_SENTENCE).toContain('Fusilade II ALONE at 12–24 fl oz/acre may injure zoysia');
+    expect(wording._NEW_SENTENCE).not.toContain('ALONE injures');
   });
 
   test('down is a documented no-op', async () => {
@@ -159,6 +169,41 @@ jest.setTimeout(30000);
 
   test('a missing article is a quiet no-op', async () => {
     await expect(migration.up(database)).resolves.toBeUndefined();
+    await expect(wording.up(database)).resolves.toBeUndefined();
     expect(await events()).toHaveLength(0);
+  });
+
+  test('20261007110100 after 110000: fl oz and the rate-qualified solo warning, audited once, idempotent', async () => {
+    await seedArticle();
+    await migration.up(database);
+    await seedChunk(SLUG, 0);
+    await wording.up(database);
+    const after = await article();
+    expect(after.content).toContain(wording._NEW_SENTENCE);
+    expect(after.content).not.toContain(wording._OLD_SENTENCE);
+    expect(await database('audit_log').where({ action: 'knowledge_base.bermuda_zoysia_2ee_wording' })).toHaveLength(1);
+    expect(await database('knowledge_embeddings').where({ source_id: SLUG })).toHaveLength(0);
+    await wording.up(database);
+    expect((await article()).content).toBe(after.content);
+    expect(await database('audit_log').where({ action: 'knowledge_base.bermuda_zoysia_2ee_wording' })).toHaveLength(1);
+  });
+
+  test('20261007110100: an admin already fixed the wrong line: content untouched, stale chunks purged', async () => {
+    const edited = seededContent.replace(OLD_LINE, '- The mix kills bermudagrass; zoysia needs a test patch first.');
+    await seedArticle({ content: edited });
+    await seedChunk(SLUG, 0);
+    await seedChunk('some-other-article', 0);
+    await wording.up(database);
+    expect((await article()).content).toBe(edited);
+    expect(await database('audit_log').where({ action: 'knowledge_base.bermuda_zoysia_2ee_wording' })).toHaveLength(0);
+    expect(await database('knowledge_embeddings').where({ source_id: SLUG })).toHaveLength(0);
+    expect(await database('knowledge_embeddings').where({ source_id: 'some-other-article' })).toHaveLength(1);
+  });
+
+  test('20261007110100: an article still carrying the original wrong line keeps its chunks', async () => {
+    await seedArticle();
+    await seedChunk(SLUG, 0);
+    await wording.up(database);
+    expect(await database('knowledge_embeddings').where({ source_id: SLUG })).toHaveLength(1);
   });
 });

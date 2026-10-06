@@ -224,7 +224,7 @@ An earlier version of this article described Fusilade II by itself at 1 oz per g
 - Sprayer cleanout: 2.5 oz household ammonia per gallon, recirculate 15+ min, repeat, rinse.
 
 ## Critical warnings
-- Zoysiagrass: the Recognition + Fusilade II tank mix is supported on established zoysia under the Syngenta FIFRA 2(ee) recommendation (2023-03-28, FL listed) at Recognition 0.03–0.045 oz + Fusilade II 0.367–0.55 oz per 1,000 sq ft. A 2(ee) is not the printed label: keep it on hand when applying. Fusilade II ALONE injures zoysia.
+- Zoysiagrass: the Recognition + Fusilade II tank mix is supported on established zoysia under the Syngenta FIFRA 2(ee) recommendation (2023-03-28, FL listed) at Recognition 0.03–0.045 oz + Fusilade II 0.367–0.55 fl oz per 1,000 sq ft. A 2(ee) is not the printed label: keep it on hand when applying. Fusilade II ALONE at 12–24 fl oz/acre may injure zoysia.
 - The mix kills bermudagrass (including bermudagrass lawns): confirm the lawn is St. Augustine or zoysia first.
 - Bahiagrass is NOT in the 2026 Fusilade II weed table — do not sell or apply this program for bahia.
 - Single-MOA for bermuda: never exceed the 2-application season ceiling — that is how resistant bermudagrass gets selected.
