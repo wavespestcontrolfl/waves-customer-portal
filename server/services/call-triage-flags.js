@@ -967,6 +967,7 @@ const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
  *     caller) is word for word inside ONE caller turn of a fully labeled
  *     two-speaker transcript, and that the quote itself carries no negation,
  *     hedge or condition;
+ *   - (the quote's WHOLE caller turn carries no negation, hedge or condition)
  *   - no CALLER turn says suite / ste / unit / bay / condo / apartment (an
  *     agent asking "is there a suite number?" does not count against the
  *     caller), and no turn at all names a strip mall, plaza, shopping center,
@@ -979,7 +980,8 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
   if (!opts.enabled) return av;
   if (!isMissingUnitNumber(av)) return av;
   if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
-  if (av.addressUse?.business !== true || av.addressUse?.residential === true) return av;
+  // Both halves must be AFFIRMATIVE: unknown (null/absent) residential keeps the hold.
+  if (av.addressUse?.business !== true || av.addressUse?.residential !== false) return av;
   if (opts.propertyType !== 'commercial') return av;
   if (opts.wholeBuildingOccupancy !== true) return av;
   // Lazy: call-reschedule-agreement requires this module at load time.
@@ -988,8 +990,15 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return av;
   const quotes = (Array.isArray(opts.evidence) ? opts.evidence : [])
     .filter((e) => e?.field_path === '/property/whole_building_occupancy' && e.speaker === 'caller' && typeof e.quote === 'string');
-  const grounded = quotes.some((e) => turnsHolding(turns, e.quote, 'caller').length > 0
-    && !turnHasNegationOrHedge(normalizeForGrounding(e.quote)));
+  // The quote must be plainly said: EVERY caller turn holding it, read WHOLE,
+  // carries no negation, hedge or open condition. A fragment can strip the
+  // words around it ("We do not own it yet; if closing happens, we'll own the
+  // whole building" holds the fragment "we'll own the whole building").
+  const grounded = quotes.some((e) => {
+    const holding = turnsHolding(turns, e.quote, 'caller');
+    return holding.length > 0 && holding.every((t) => !turnHasNegationOrHedge(t.ns)
+      && !turnHasUnresolvedConditional(t.ns));
+  });
   if (!grounded) return av;
   if (turns.some((t) => !t.agent && SUBUNIT_WORDING_RE.test(t.raw))) return av;
   if (turns.some((t) => MULTI_TENANT_WORDING_RE.test(t.raw))) return av;
@@ -1003,6 +1012,27 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
       reason: BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
     },
   };
+}
+
+// Offline audits judge a FRESH extraction against the persisted verdict of the
+// PRIOR one. Whether the waiver stamped on that row carries to the candidate:
+//   - a business whole-building waiver is recomputed against the candidate's own
+//     property fields, pinned evidence and the transcript, so a candidate that
+//     drops or misgrounds the /property/whole_building_occupancy pin keeps the
+//     hold even when the scalar inputs happen to match;
+//   - any other waiver (whole-structure) carries when the caller-supplied
+//     scalar inputs (service and property type) match: `scalarInputsMatch`.
+// `stored` is the persisted (unwaived, marker-stamped) verdict.
+function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true } = {}) {
+  if (stored?.wholeStructureUnitWaived?.reason !== BUSINESS_WHOLE_BUILDING_WAIVER_REASON) return scalarInputsMatch;
+  const property = candidate?.property || {};
+  return applyBusinessWholeBuildingUnitWaiver(stored, {
+    enabled: true,
+    propertyType: property.property_type,
+    wholeBuildingOccupancy: property.whole_building_occupancy,
+    evidence: candidate?.evidence,
+    transcript,
+  }) !== stored;
 }
 
 // Offline audits (v2-promotion-readiness, verify-v2-shadow-path, replay
@@ -3148,6 +3178,7 @@ module.exports = {
   applyWholeStructureUnitWaiver,
   applyBusinessWholeBuildingUnitWaiver,
   BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
+  waiverCarriesToCandidate,
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,

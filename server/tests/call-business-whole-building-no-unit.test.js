@@ -8,6 +8,7 @@
 const {
   applyBusinessWholeBuildingUnitWaiver,
   reconstructWaivedAddressValidation,
+  waiverCarriesToCandidate,
   canAutoRoute,
   computeDeterministicTriageFlags,
   suppressAddressFlagsForAV,
@@ -76,6 +77,8 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
     ['replaced components', { ...AV_BUSINESS, hasReplaced: true }],
     ['no addressUse', { ...AV_BUSINESS, addressUse: undefined }],
     ['addressUse not business', { ...AV_BUSINESS, addressUse: { business: false, residential: true, poBox: false } }],
+    ['addressUse residential null (unknown)', { ...AV_BUSINESS, addressUse: { business: true, residential: null, poBox: false } }],
+    ['addressUse residential absent', { ...AV_BUSINESS, addressUse: { business: true } }],
     ['addressUse business unknown', { ...AV_BUSINESS, addressUse: { business: null, residential: false } }],
     ['mixed business and residential use', { ...AV_BUSINESS, addressUse: { business: true, residential: true } }],
   ])('verdict check keeps the hold: %s', (_label, av) => {
@@ -127,6 +130,22 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
     const n = 'We do not own this building';
     const t2 = withTranscript(['Agent: Hello.', `Caller: ${n}.`]);
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t2, evidence: [{ ...EVIDENCE[0], quote: n }] })).toBe(AV_BUSINESS);
+  });
+
+  test('the WHOLE holding caller turn is screened, not only the pinned fragment', () => {
+    const fragment = "we'll own the whole building";
+    const evidence = [{ ...EVIDENCE[0], quote: fragment }];
+    for (const turn of [
+      "We do not own it yet; if closing happens, we'll own the whole building.",
+      "Maybe, but we'll own the whole building.",
+      "Once the sale closes we'll own the whole building.",
+    ]) {
+      const t = withTranscript(['Agent: Hello.', `Caller: ${turn}`]);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence })).toBe(AV_BUSINESS);
+    }
+    // The same fragment in a plain turn still waives.
+    const plain = withTranscript(['Agent: Hello.', "Caller: Good news, we'll own the whole building."]);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...plain, evidence })).not.toBe(AV_BUSINESS);
   });
 
   test.each([
@@ -292,11 +311,40 @@ describe('persisted marker + audits', () => {
     expect(reconstructWaivedAddressValidation(waived)).toBe(waived);
   });
 
-  test('the replay and shadow-path audits include whole_building_occupancy in the waiver inputs', () => {
-    for (const f of ['replay-call-extraction-variance', 'verify-v2-shadow-path']) {
-      const s = require('fs').readFileSync(require.resolve(`../scripts/${f}`), 'utf8');
-      expect(s).toContain('x?.property?.whole_building_occupancy');
-    }
+  describe('waiverCarriesToCandidate (audit transfer)', () => {
+    const waived = applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, OK);
+    const stored = JSON.parse(JSON.stringify({ ...AV_BUSINESS, wholeStructureUnitWaived: waived.wholeStructureUnitWaived }));
+    const candidate = (patch = {}) => ({
+      property: { property_type: 'commercial', whole_building_occupancy: true },
+      evidence: EVIDENCE,
+      ...patch,
+    });
+    const args = (extra = {}) => ({ transcript: TRANSCRIPT, scalarInputsMatch: true, ...extra });
+
+    test('a candidate that keeps a grounded pin keeps the waiver', () => {
+      expect(waiverCarriesToCandidate(stored, candidate(), args())).toBe(true);
+    });
+
+    test('matching scalar inputs are not enough: a dropped or misgrounded pin keeps the hold', () => {
+      expect(waiverCarriesToCandidate(stored, candidate({ evidence: [] }), args())).toBe(false);
+      expect(waiverCarriesToCandidate(stored, candidate({ evidence: [{ ...EVIDENCE[0], quote: 'We own the whole building outright' }] }), args())).toBe(false);
+      expect(waiverCarriesToCandidate(stored, candidate({ evidence: [{ ...EVIDENCE[0], speaker: 'agent' }] }), args())).toBe(false);
+      expect(waiverCarriesToCandidate(stored, candidate({ property: { property_type: 'commercial', whole_building_occupancy: null } }), args())).toBe(false);
+      expect(waiverCarriesToCandidate(stored, candidate(), args({ transcript: 'Agent: Hi.\nCaller: Hello.' }))).toBe(false);
+    });
+
+    test('the whole-structure waiver keeps its scalar-input transfer', () => {
+      const ws = { ...AV_BUSINESS, wholeStructureUnitWaived: { missingComponents: ['subpremise'], originalStatus: 'ambiguous' } };
+      expect(waiverCarriesToCandidate(ws, candidate({ evidence: [] }), args({ scalarInputsMatch: true }))).toBe(true);
+      expect(waiverCarriesToCandidate(ws, candidate(), args({ scalarInputsMatch: false }))).toBe(false);
+    });
+
+    test('the audit scripts route the transfer decision through it', () => {
+      for (const f of ['replay-call-extraction-variance', 'verify-v2-shadow-path']) {
+        const src = require('fs').readFileSync(require.resolve(`../scripts/${f}`), 'utf8');
+        expect(src).toContain('waiverCarriesToCandidate');
+      }
+    });
   });
 });
 

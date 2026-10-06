@@ -1443,9 +1443,15 @@ async function replayCall(call, context) {
 
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
-  const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type, x?.property?.whole_building_occupancy].join('|');
-  const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && priorV2Valid && currentExtraction
-    && waiverInputs(priorV2) !== waiverInputs(currentExtraction))
+  const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+  // A business whole-building waiver is recomputed against THIS extraction's pin
+  // and the transcript it was extracted from (waiverCarriesToCandidate); any
+  // other waiver keeps the scalar-input comparison.
+  const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && currentExtraction
+    && !require('../services/call-triage-flags').waiverCarriesToCandidate(storedAvUnwaived, currentExtraction, {
+      transcript: transcriptForExtraction,
+      scalarInputsMatch: !(priorV2Valid && waiverInputs(priorV2) !== waiverInputs(currentExtraction)),
+    }))
     ? storedAvUnwaived : storedAv;
   const currentRoute = currentExtraction
     ? routeForV2(currentExtraction, contactPhone, helpers,
