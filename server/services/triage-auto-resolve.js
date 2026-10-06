@@ -36,6 +36,22 @@
  *   - address flags → a visit COMPLETED after the card for a single-property
  *     customer whose on-file street matches every address the call named
  *
+ *   RESOLVE ON STAFF WORK (same evidence gate — a person did the work by hand
+ *   after the card was filed. The ONLY thing waived against the rules above is
+ *   the link to the call; the card's own ask must still be answered. 2026-10-05
+ *   audit: 2 of 157 open cards from one week of calls would close without it):
+ *   - quote_promised → an estimate to the call's current customer, really
+ *     delivered after the card within STAFF_WORK_MAX_AGE_DAYS, that covers the
+ *     card's quote_scope; the customer has ONE open quote card
+ *     (quote_sent_to_customer)
+ *   - not_confirmed → a hand-made live booking after the card within
+ *     STAFF_WORK_MAX_AGE_DAYS that answers the card's snapshotted ask
+ *     (bookingCoversRequest, handMade); one open card, contest clear
+ *     (staff_booked_after_card)
+ *   - address flags → such a booking at the single active property that the
+ *     card was filed against (street, unit and locality all agree with its
+ *     on-file snapshot) (staff_booked_at_account_address)
+ *
  *   DISMISS (informational card aged out unactioned):
  *   - spam_or_wrong_number after SPAM_AGE_DAYS
  *   - listed informational flags after ADVISORY_AGE_DAYS
@@ -76,6 +92,11 @@ const NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS = 7;
 // runs instead of one giant write burst (also bounds the knowledge-index
 // re-sync triggered by updated_at bumps).
 const MAX_TRANSITIONS_PER_RUN = 500;
+// Staff-work rules (quote_sent_to_customer / staff_booked_after_card /
+// staff_booked_at_account_address): how long after the CARD a hand-made
+// estimate or booking still reads as the answer to it. Later work is more
+// likely an unrelated request from the same customer.
+const STAFF_WORK_MAX_AGE_DAYS = 14;
 
 const ADDRESS_MOOT_CODES = new Set([
   'missing_service_address', 'low_confidence_address', 'address_unverifiable',
@@ -148,6 +169,9 @@ const RULE_NOTES = {
   // Evidence rules (GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE) — each proves the
   // owed action was PERFORMED after the card was filed.
   quote_fulfilled: 'Auto-resolved: an estimate linked to this call was delivered after the call; the promised quote went out.',
+  quote_sent_to_customer: 'Auto-resolved: an estimate covering the promised quote was delivered to this customer after the call (not linked to the call by the system); the promised quote went out.',
+  staff_booked_after_card: 'Auto-resolved: staff booked an appointment answering this call\'s request (not linked to the call by the system) after the card was filed.',
+  staff_booked_at_account_address: 'Auto-resolved: staff booked an appointment at the account\'s only service address after the call; the address question is answered.',
   email_engaged: 'Auto-resolved: the email captured on this call opened or clicked a later message; the read-back is moot.',
   // Keyed from the release engine's constant: the ledger tells this approval
   // from an operator's by resolution_rule (codex #4622 r4 P1, gate re-asked
@@ -1034,6 +1058,12 @@ const CLASSIFY_RULES = [
   // Evidence rules: each flag is true only when the proof postdates the
   // CARD — see loadEvidence for the exact predicates.
   { rule: 'quote_fulfilled', action: 'resolve', when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_direct === true },
+  // Staff work after the card, not linked to the call — evidence arms
+  // loadStaffEstimateEvidence / loadVisitEvidence. Distinct rule names keep
+  // them auditable apart from the linked-proof rules above. Never for
+  // caller_not_authorized, commercial, out-of-area or do-not-contact.
+  { rule: 'quote_sent_to_customer', action: 'resolve',
+    when: (item, ev) => item.reason_code === 'quote_promised' && ev?.estimate_sent_to_customer === true && !item.customer_deleted_at },
   { rule: 'email_engaged', action: 'resolve', when: (item, ev) => item.reason_code === 'email_unverified' && ev?.email_engaged === true },
   // GATE_FIRST_TOUCH_AUTO_RELEASE: the read-back question answers itself
   // when the dictation left nothing to read back — see
@@ -1047,6 +1077,8 @@ const CLASSIFY_RULES = [
     when: (item, ev) => item.reason_code === 'caller_not_authorized' && ev?.caller_phone_added === true
       && callerPhoneOnFile(item) && !cardConfirmedUnbooked(item, ev) },
   { rule: 'booking_created', action: 'resolve', when: (item, ev) => item.reason_code === 'not_confirmed' && ev?.booking_after_card === true },
+  { rule: 'staff_booked_after_card', action: 'resolve',
+    when: (item, ev) => item.reason_code === 'not_confirmed' && ev?.staff_booked_after_card === true && !item.customer_deleted_at },
   // A confirmed call held solely on its address card has no not_confirmed
   // sibling: an unrelated recurring visit completing at the address must
   // not close the call's only trace while the confirmed appointment was
@@ -1054,6 +1086,16 @@ const CLASSIFY_RULES = [
   { rule: 'visit_completed_at_address', action: 'resolve',
     when: (item, ev) => ADDRESS_MOOT_CODES.has(item.reason_code) && ev?.visit_completed_at_address === true
       && !item.customer_deleted_at && heardAddressMatchesOnFile(item) && !cardConfirmedUnbooked(item, ev) },
+  // A person booked the account's only address after the card. Same
+  // provenance guards as the completed-visit rule: the call must have
+  // named no address, or named exactly the one on file (a heard address
+  // that differs is the very thing the card holds for validation), and a
+  // confirmed call still needs a booking matching its ask.
+  { rule: 'staff_booked_at_account_address', action: 'resolve',
+    when: (item, ev) => ADDRESS_MOOT_CODES.has(item.reason_code) && ev?.staff_booked_at_account_address === true
+      && !item.customer_deleted_at && !cardConfirmedUnbooked(item, ev)
+      && (heardAddressMatchesOnFile(item)
+        || (!hasNewAddressEvidence(item.payload) && !callSuppliedAddress(item.call_extraction, item.call_extraction_v1))) },
   // The house-number disagreement answers itself when the record's street
   // now carries the number the caller stated (an operator or the correction
   // lane adopted it). Any other edit keeps the ask — the office still has
@@ -1224,6 +1266,83 @@ async function loadEstimateEvidence(conn, items, flag) {
     }
   } catch (err) {
     logger.warn(`[triage-sweep] estimate evidence lookup failed: ${err.message}`);
+  }
+}
+
+// The customers' OPEN or in_progress cards of one reason code, by the
+// customer their call is linked to: customer id → Set of card ids. The
+// staff-work rules close a card only when it is the customer's ONLY claimant
+// of that evidence (one estimate or one booking cannot answer two different
+// cards). Read from the table, never from the sweep's batch: the locked
+// revalidation pass reloads only the cards it is about to close, and a
+// human-claimed sibling is never in either. Returns null — not an empty
+// map — when the lookup fails: unknown is not "no sibling", so callers fail
+// closed.
+async function loadCardClaimants(conn, customerIds, reasonCode) {
+  if (!customerIds.length) return new Map();
+  try {
+    const rows = await conn('triage_items as t')
+      .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
+      .where('t.reason_code', reasonCode)
+      .whereIn('t.status', ['open', 'in_progress'])
+      .whereIn('cl.customer_id', customerIds)
+      .select('t.id', 'cl.customer_id as call_customer_id');
+    const out = new Map();
+    for (const r of rows) {
+      if (!r.call_customer_id) continue;
+      const key = String(r.call_customer_id);
+      out.set(key, (out.get(key) || new Set()).add(String(r.id)));
+    }
+    return out;
+  } catch (err) {
+    logger.warn(`[triage-sweep] ${reasonCode} claimant lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
+// This card is the customer's one claimant: the batch cards handed in plus
+// whatever the table holds, counted by id, come to exactly this card.
+function soleClaimant(item, claimants, batch) {
+  if (!claimants) return false;
+  const ids = new Set(claimants.get(String(item.call_customer_id)) || []);
+  for (const other of batch) {
+    if (other.reason_code === item.reason_code && String(other.call_customer_id) === String(item.call_customer_id)) ids.add(String(other.id));
+  }
+  return ids.size === 1 && ids.has(String(item.id));
+}
+
+// quote_promised → an estimate to the call's CURRENT customer, linked to the
+// call or not, really handed off after the card (a post-card delivery or
+// customer-acceptance witness — directEstimatesSentAfter's customerWide
+// route; never the current status alone) within STAFF_WORK_MAX_AGE_DAYS,
+// that COVERS the card's quote_scope (estimateCoversAsk, as the linked rule
+// does). A quote typed by hand in the admin carries no call tie — 2026-10-05
+// audit — and that tie is the only thing waived. Single claimant: a
+// customer with two open quote cards keeps both for a human.
+async function loadStaffEstimateEvidence(conn, items, flag) {
+  const quoteItems = items.filter((i) => i.reason_code === 'quote_promised' && i.call_customer_id);
+  if (!quoteItems.length) return;
+  const claimants = await loadCardClaimants(conn, [...new Set(quoteItems.map((i) => i.call_customer_id))], 'quote_promised');
+  if (!claimants) return;
+  const { directEstimatesSentAfter } = require('./call-commitments');
+  const sole = quoteItems.filter((item) => soleClaimant(item, claimants, quoteItems));
+  try {
+    const proofs = await directEstimatesSentAfter(conn, sole.map((item) => ({
+      key: item.id,
+      callId: item.call_log_id,
+      twilioCallSid: null,
+      customerWide: true,
+      customerId: item.call_customer_id,
+      phone: callerPhone(item),
+      after: cardBoundary(item),
+      covers: (row, siblings) => estimateCoversAsk(item, row, siblings),
+    })));
+    for (const item of sole) {
+      const proof = proofs.get(item.id);
+      if (proof && strictlyAfter(proof.matched_at, item.created_at) && ageDays(item.created_at, toDate(proof.matched_at)) <= STAFF_WORK_MAX_AGE_DAYS) flag(item.id, 'estimate_sent_to_customer');
+    }
+  } catch (err) {
+    logger.warn(`[triage-sweep] staff estimate evidence lookup failed: ${err.message}`);
   }
 }
 
@@ -1712,7 +1831,7 @@ function computeContestedNotConfirmedIds(visitItems, visitsByCustomer, places) {
 // house-number cards that share this evidence arm through the
 // confirmed-unbooked guard (cardConfirmedUnbooked / callConfirmedUnbooked)
 // keep the strict `return false` here unweakened.
-function bookingCoversRequest(item, mine, { singleProperty, places }) {
+function bookingCoversRequest(item, mine, { singleProperty, places, handMade = false }) {
   const categories = requestedServiceTokens(item);
   if (!categories.length) {
     // isBareNotConfirmedAsk reads the snapshot's RAW ask fields directly
@@ -1742,7 +1861,10 @@ function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const inAsk = (v) => cadenceMatches(item, v) && withinRequestedTiming(item, v);
   const asked = requestedPlaces(item);
   if (!asked) return false;
-  const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v));
+  // handMade (the staff-work rule): a booking carrying NO call id answers the
+  // ask too — the service, cadence, window, hour and address binding below
+  // are unchanged, only the call link is not required.
+  const direct = parents.filter((v) => (String(v.source_call_log_id) === String(item.call_log_id) || (handMade && !v.source_call_log_id)) && inAsk(v));
   // A house-number card whose record now carries the STATED street: the
   // office adopted the caller's number and booked by hand (admin bookings
   // carry no source_call_log_id) — the filing-time on-file snapshot can no
@@ -2196,14 +2318,74 @@ async function loadInProgressNotConfirmedSiblings(conn, customerIds) {
   }
 }
 
-// Bookings and completed visits for the not_confirmed / address arms.
-async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {}) {
+// The live PARENT bookings a person made for the customer after the card:
+// created strictly after it, within STAFF_WORK_MAX_AGE_DAYS, and carrying no
+// OTHER call's fingerprint (a booking sourced from another call answers
+// that call's ask — the same line notConfirmedClaimedBookings draws). A
+// follow-up child or a series occurrence is the system's, never the
+// booking staff made.
+function staffBookingsAfterCard(item, mine) {
+  return mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id
+    && strictlyAfter(v.created_at, item.created_at)
+    && ageDays(item.created_at, toDate(v.created_at) || new Date(NaN)) <= STAFF_WORK_MAX_AGE_DAYS
+    && (!v.source_call_log_id || String(v.source_call_log_id) === String(item.call_log_id))
+    // The card's own date / hour / blackout signals still bind (the service
+    // does not): a CONFIRMED hour the booking misses, or a day the caller
+    // excluded, leaves the appointment the call agreed on unbooked.
+    && withinRequestedTiming(item, v));
+}
+
+// Is this property the premise the card was FILED against: its on-file
+// snapshot keys to the same street (a non-null house-number key), the same
+// unit, and agrees on locality (ZIP, else city — a snapshot or property
+// carrying neither cannot show it). A card with no snapshot fails closed.
+function filedAgainstProperty(item, property) {
+  const snap = onFileAddress(item);
+  const key = addressKey(snap?.address_line1);
+  if (!key || key !== addressKey(property.address_line1)) return false;
+  if (unitOf(snap.address_line1, snap.address_line2) !== unitOf(property.address_line1, property.address_line2)) return false;
+  const zip = zip5(snap.zip);
+  if (zip || zip5(property.zip)) return zip === zip5(property.zip);
+  return Boolean(cityKey(snap.city)) && cityKey(snap.city) === cityKey(property.city);
+}
+
+// Is a booking at the account's ONLY active property: pointing at it, or
+// pointing at nothing (staff booked the account's one address by hand) —
+// and in either case never STAMPED to another address. A stamp that cannot
+// be keyed (no house number) or names another street, locality or unit is not
+// evidence of this property.
+function visitAtSoleProperty(visit, property) {
+  if (!property) return false;
+  if (visit.service_address_line1) {
+    const key = addressKey(visit.service_address_line1);
+    if (!key || key !== addressKey(property.address_line1)) return false;
+    // The stamp must CARRY a locality and agree with the property's: both
+    // ZIPs when either side has one, else the city. A street-only stamp, or
+    // one naming another city, loses even when property_id points here.
+    const zip = zip5(visit.service_address_zip);
+    if (zip || zip5(property.zip)) {
+      if (zip !== zip5(property.zip)) return false;
+    } else if (!cityKey(visit.service_address_city) || cityKey(visit.service_address_city) !== cityKey(property.city)) return false;
+    if (unitOf(visit.service_address_line1, visit.service_address_line2) !== unitOf(property.address_line1, property.address_line2)) return false;
+  }
+  if (visit.property_id) return String(visit.property_id) === String(property.id);
+  return true;
+}
+
+// not_confirmed cards, address cards, and every card whose call CONFIRMED
+// an appointment (the confirmed-unbooked guard is answered only by a
+// booking matching the card's snapshotted ask).
+const needsBooking = (i) => i.reason_code === 'not_confirmed' || cardSchedulingStatus(i) === 'confirmed';
+
+// The facts the booking arms share, gathered once per batch: every card
+// that needs a booking, its customers' ACTIVE properties, their live
+// visits, and the not_confirmed contest. Null when no card needs a booking.
+async function loadVisitFacts(conn, items) {
   // not_confirmed cards, address cards, and every card whose call CONFIRMED
   // an appointment (the confirmed-unbooked guard is answered only by a
   // booking matching the card's snapshotted ask).
-  const needsBooking = (i) => i.reason_code === 'not_confirmed' || cardSchedulingStatus(i) === 'confirmed';
   const visitItems = items.filter((i) => (needsBooking(i) || ADDRESS_MOOT_CODES.has(i.reason_code)) && i.call_customer_id);
-  if (!visitItems.length) return;
+  if (!visitItems.length) return null;
   const customerIds = [...new Set(visitItems.map((i) => i.call_customer_id))];
   // ACTIVE rows only — the uniqueness customer-properties'
   // soleActivePropertyId defines; an inactive historical duplicate does
@@ -2215,15 +2397,17 @@ async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {})
     .select('id', 'customer_id', 'address_line1', 'address_line2', 'city', 'zip');
   const places = new Map();
   const activeCount = new Map();
+  const soleProperty = new Map(); // customer id → the property row, when exactly one is active
   for (const r of propRows) {
     places.set(String(r.id), { customer_id: r.customer_id, key: addressKey(r.address_line1), line1: r.address_line1, unit: unitOf(r.address_line1, r.address_line2), city: r.city, zip: r.zip });
     activeCount.set(String(r.customer_id), (activeCount.get(String(r.customer_id)) || 0) + 1);
+    soleProperty.set(String(r.customer_id), r);
   }
   // The association and address arms need EXACTLY one active property —
   // an account with none (a legacy row whose only address is the customers
   // column) proves as little about WHICH address as one with several
   // (pre-push hook P1 on 12f3c751c).
-  const singleProperty = (customerId) => (activeCount.get(String(customerId)) || 0) === 1;
+  for (const [customerId, n] of activeCount) if (n !== 1) soleProperty.delete(customerId);
 
   // Positive allowlist: a live booking is one that is still going to happen
   // or did happen. cancelled / rescheduled / skipped / no_show rows prove
@@ -2272,7 +2456,14 @@ async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {})
   const contestedNotConfirmed = inProgressSiblings === null
     ? new Set(openNotConfirmed.map((i) => i.id))
     : computeContestedNotConfirmedIds([...openNotConfirmed, ...inProgressSiblings], visitsByCustomer, places);
+  return { visitItems, openNotConfirmed, visitsByCustomer, places, soleProperty, contestedNotConfirmed };
+}
 
+// Booking evidence for the not_confirmed / address arms.
+function loadVisitEvidence(facts, flag, { ignoreGate = false } = {}) {
+  if (!facts) return;
+  const { visitItems, visitsByCustomer, places, soleProperty, contestedNotConfirmed } = facts;
+  const singleProperty = (customerId) => soleProperty.has(String(customerId));
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
     // At VERDICT time (ignoreGate) the association path is admitted for a
@@ -2292,6 +2483,50 @@ async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {})
         && strictlyAfter(v.completed_at, item.created_at)
         && visitAtOnFileAddress(item, v, places));
       if (done) flag(item.id, 'visit_completed_at_address');
+    }
+  }
+}
+
+// A hand-made booking on a single-property account that names no property
+// and no address is the account's one address: give it that property so the
+// address binding (bookingAtReadings) can judge it like any stamped booking.
+const withSoleProperty = (visit, property) => (property && !visit.property_id && !visit.service_address_line1
+  ? { ...visit, property_id: property.id } : visit);
+
+// not_confirmed → a booking staff made WITHOUT a call link, answering the
+// card's own snapshotted ask (bookingCoversRequest's service, cadence,
+// window, hour and address binding; handMade admits a booking carrying no
+// call id). Single claimant: the contest check, in-progress siblings
+// included, plus the customer's one open card.
+async function loadStaffBookedEvidence(conn, facts, flag) {
+  if (!facts?.openNotConfirmed.length) return;
+  const { openNotConfirmed, visitsByCustomer, places, soleProperty, contestedNotConfirmed } = facts;
+  const claimants = await loadCardClaimants(conn, [...new Set(openNotConfirmed.map((i) => i.call_customer_id))], 'not_confirmed');
+  for (const item of openNotConfirmed) {
+    const customer = String(item.call_customer_id);
+    const sole = soleProperty.get(customer);
+    const staffMade = staffBookingsAfterCard(item, (visitsByCustomer.get(customer) || []).map((v) => withSoleProperty(v, sole)));
+    if (!contestedNotConfirmed.has(item.id) && soleClaimant(item, claimants, openNotConfirmed)
+      && bookingCoversRequest(item, staffMade, { singleProperty: Boolean(sole), places, handMade: true })) {
+      flag(item.id, 'staff_booked_after_card');
+    }
+  }
+}
+
+// Address cards → a booking staff made at the account's only property after
+// the card, when that property is the one the card was FILED against (street
+// key, unit and locality all agree with its on-file snapshot — a record
+// moved or re-unitted since filing proves nothing). A card with no snapshot
+// cannot show which premise it asked about and stays held.
+function loadStaffAddressEvidence(facts, flag) {
+  if (!facts) return;
+  const { visitItems, visitsByCustomer, soleProperty } = facts;
+  for (const item of visitItems.filter((i) => ADDRESS_MOOT_CODES.has(i.reason_code))) {
+    const customer = String(item.call_customer_id);
+    const sole = soleProperty.get(customer);
+    if (sole && filedAgainstProperty(item, sole)
+      && staffBookingsAfterCard(item, visitsByCustomer.get(customer) || []).some((v) => visitAtSoleProperty(v, sole))) {
+      flag(item.id, 'staff_booked_at_account_address');
     }
   }
 }
@@ -2320,10 +2555,14 @@ async function loadEvidence(conn, items, { ignoreGate = false } = {}) {
     logger.warn(`[triage-auto-resolve] catalog read for specific-service keys skipped: ${e.message}`);
   }
   await loadEstimateEvidence(conn, candidates, flag);
+  await loadStaffEstimateEvidence(conn, candidates, flag);
   await loadEmailEvidence(conn, candidates, flag);
   await loadUnambiguousEmailEvidence(conn, candidates, flag);
   await loadContactEvidence(conn, candidates, flag);
-  await loadVisitEvidence(conn, candidates, flag, { ignoreGate });
+  const visitFacts = await loadVisitFacts(conn, candidates);
+  loadVisitEvidence(visitFacts, flag, { ignoreGate });
+  await loadStaffBookedEvidence(conn, visitFacts, flag);
+  loadStaffAddressEvidence(visitFacts, flag);
   return evidence;
 }
 
@@ -2494,4 +2733,9 @@ module.exports = {
   SPAM_AGE_DAYS,
   ADVISORY_AGE_DAYS,
   MAX_TRANSITIONS_PER_RUN,
+  STAFF_WORK_MAX_AGE_DAYS,
+  staffBookingsAfterCard,
+  visitAtSoleProperty,
+  soleClaimant,
+  filedAgainstProperty,
 };
