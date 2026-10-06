@@ -551,8 +551,8 @@ describe('co-visit pair collapse', () => {
     const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, spanPair(), { dayEndMin: 845 });
     expect(sim).not.toBeNull();
     expect(sim.arrivals).toEqual([
-      { id: 'pest', arrivalMin: 780, departureMin: 840 },
-      { id: 'lawn', arrivalMin: 780, departureMin: 840 }, // pinned to the sibling's arrival — same stop
+      { id: 'pest', arrivalMin: 780, departureMin: 840, driveMin: 0 },
+      { id: 'lawn', arrivalMin: 780, departureMin: 840, driveMin: 0 }, // pinned to the sibling's arrival — same stop
     ]);
   });
 
@@ -606,8 +606,8 @@ describe('co-visit pair collapse', () => {
     ];
     const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, {});
     expect(sim.arrivals).toEqual([
-      { id: 'pest', arrivalMin: 780, departureMin: 840 }, // the 60-minute span floor
-      { id: 'lawn', arrivalMin: 780, departureMin: 865 }, // 780 + max(60, 45 + 40)
+      { id: 'pest', arrivalMin: 780, departureMin: 840, driveMin: 0 }, // the 60-minute span floor
+      { id: 'lawn', arrivalMin: 780, departureMin: 865, driveMin: 0 }, // 780 + max(60, 45 + 40)
     ]);
     expect(simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 860 })).toBeNull();
   });
@@ -625,8 +625,8 @@ describe('co-visit pair collapse', () => {
     const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { blockedIntervals });
     expect(sim).not.toBeNull();
     expect(sim.arrivals).toEqual([
-      { id: 'pest', arrivalMin: 780, departureMin: 840 },
-      { id: 'lawn', arrivalMin: 780, departureMin: 880 },
+      { id: 'pest', arrivalMin: 780, departureMin: 840, driveMin: 0 },
+      { id: 'lawn', arrivalMin: 780, departureMin: 880, driveMin: 0 },
     ]);
     const free = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, {});
     expect(free.arrivals[1].departureMin).toBe(855); // 780 + max(60, 75)
