@@ -28,9 +28,3 @@ export function pestSweepCompletionFields(checked) {
     }
     : {};
 }
-
-// What a checked box adds to the AI report writer's payload: the same
-// actionsCompleted field the full form sends, so the written report knows.
-export function pestSweepWriterFields(checked) {
-  return checked ? { actionsCompleted: [PEST_SWEEP_ACTION.label] } : {};
-}

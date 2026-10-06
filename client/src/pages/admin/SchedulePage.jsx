@@ -219,10 +219,6 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
-// The one protocol action a regular pest visit still records (owner
-// 2026-10-05) lives in lib/pest-sweep-action.js, shared with the Fast
-// Complete sheet.
-export { PEST_SWEEP_ACTION };
 // Completion-panel quick-entry chips are service-aware: pest-line services
 // (pest control, mosquito, termite, rodent) get a pest-focused list, while
 // plant-health services (lawn, tree/shrub) keep the original broad list that

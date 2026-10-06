@@ -73,7 +73,7 @@ import {
   amountText, categoryLabel, hasAmount, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
-import { pestSweepCompletionFields, pestSweepWriterFields } from '../../lib/pest-sweep-action';
+import { PEST_SWEEP_ACTION, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -360,6 +360,8 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
       };
     }),
     areasServiced: [...form.areas],
+    // The sweep box (owner 2026-10-05), as the report flow sends it.
+    ...pestSweepCompletionFields(form.sweptEaves),
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
     // Voice fill's office note: staff-only (the visit's internal notes),
@@ -380,6 +382,13 @@ function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
   // a callback included.
   if (laneKey || typedType) return false;
   return !reportFlow || isPestDefaultMixVisit({ ...visit, serviceType: visit.serviceType || serviceType });
+}
+
+// The sweep box shows where the full form shows it (isRegularPestVisit in
+// SchedulePage.jsx): a regular pest visit or a pest re-service. An initial
+// cleanout or a specialty visit records no general-pest protocol action.
+function offersSweep(service, visit) {
+  return isPestDefaultMixVisit({ ...service, ...visit, serviceType: visit?.serviceType || service?.serviceType });
 }
 
 // The identity the server re-checks under its lock. The report flow's pay
@@ -652,7 +661,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
     pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, methodPicked: false, linearFt: '', activity: '', note: '',
-    tipId: '', customTip: '',
+    tipId: '', customTip: '', sweptEaves: false,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -771,6 +780,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             ))}
           </ChoiceSection>
           <MethodSection form={form} rows={rows} setField={setField} chooseMethod={pickMethod} locked={formLocked} />
+          {offersSweep(service, ctx.visit) && <SweptEavesSection checked={form.sweptEaves} locked={formLocked} onChange={(checked) => setField('sweptEaves', checked)} />}
           {ctx.rating.allowed && (
             <ChoiceSection title="Activity seen" columns={4}>
               {ACTIVITY_LEVELS.map((level) => (
@@ -916,7 +926,7 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
     areasServiced: facts?.areas || [],
     customerInteraction: customerHomeWriterLabel(form.customerHome),
     // The full form's own writer field (owner 2026-10-05): the sweep the tech ticked.
-    ...pestSweepWriterFields(form.sweptEaves),
+    ...(form.sweptEaves ? { actionsCompleted: [PEST_SWEEP_ACTION.label] } : {}),
     // The first-visit 5 is a scoring default, not something the technician
     // saw: the writer gets a rating only once they choose one (codex local
     // r28 on #5538), as the completion recap leaves the default out.
@@ -1780,8 +1790,8 @@ function ReportFlowForm({
       onAddProduct={addProduct}
       productVoice={productVoice}
       noteClipEnabled={voiceFill}
-      // A lane or typed visit has its own record; only a plain pest visit sweeps.
-      showSweep={!mode}
+      // A lane or typed visit has its own record; only a regular pest visit sweeps.
+      showSweep={!mode && offersSweep(service, ctx.visit)}
       footer={action
         ? { reason: generateMissing.reason, label: action.label, onAction: () => write(action.fresh) }
         // A photo change in hand (a description open, a change saving, a

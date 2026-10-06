@@ -563,6 +563,13 @@ describe('the swept eaves and webs box', () => {
     expect(sweepBox().checked).toBe(false);
   });
 
+  test('an initial cleanout gets no box, as on the full form (not a regular pest visit)', async () => {
+    const request = makeRequest({ service: { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' } });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByRole('button', { name: 'Generate AI report' });
+    expect(sweepBox()).toBeNull();
+  });
+
   test('shows on a pest re-service too, as it does on the full form', async () => {
     await openSheet(makeRequest({ service: RESERVICE }), { ...SERVICE, serviceType: 'Pest Control Re-Service' });
     expect(sweepBox().checked).toBe(false);
