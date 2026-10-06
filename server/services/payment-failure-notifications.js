@@ -5,6 +5,11 @@ const { triggerNotification } = require('./notification-triggers');
 const TABLE = 'stripe_payment_notification_log';
 const SETTLED_STATUSES = ['paid', 'refunded', 'disputed'];
 
+function parseJson(value) {
+  if (value && typeof value === 'object') return value;
+  try { return value ? JSON.parse(value) || {} : {}; } catch { return {}; }
+}
+
 async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure, eventId) {
   const charge = paymentIntent.latest_charge;
   const attemptId = (typeof charge === 'object' ? charge?.id : charge) || eventId || 'no_charge';
@@ -33,6 +38,17 @@ async function dispatchPendingNotification(trx, key) {
     const payload = job.pending_payload;
     const deliveredSubscriptionIds = payload.deliveredSubscriptionIds || [];
     const invoice = await trx('invoices').where({ stripe_payment_intent_id: piId }).first() || {};
+    // The failed attempt's ledger row names its invoice when the invoice is
+    // not bound to this PaymentIntent (a retry on a new card rebinds it), so
+    // the alert still carries invoiceId and a later payment can close it.
+    let alertInvoiceId = invoice.id || null;
+    if (!alertInvoiceId) {
+      const ledgerMeta = parseJson(ledgerRow.metadata);
+      const ledgerInvoiceId = ledgerMeta.invoice_id ? String(ledgerMeta.invoice_id) : null;
+      const ledgerInvoice = ledgerInvoiceId
+        ? await trx('invoices').where({ id: ledgerInvoiceId }).first('id') : null;
+      alertInvoiceId = ledgerInvoice?.id || null;
+    }
     const customerId = [invoice.customer_id, ledgerRow.customer_id, payload.customerId].find(Boolean) || null;
     const customer = (customerId ? await trx('customers').where({ id: customerId }).first() : null) || {};
     const customerName = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim()
@@ -57,7 +73,7 @@ async function dispatchPendingNotification(trx, key) {
       customerName,
       customerId,
       reason: payload.reason,
-      invoiceId: invoice.id || null,
+      invoiceId: alertInvoiceId,
       paymentIntentId: piId,
       attemptId: job.attempt_id,
     }, {

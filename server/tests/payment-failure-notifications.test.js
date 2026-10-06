@@ -55,7 +55,7 @@ function query(table, session = null) {
         return row;
       }
       if (table === 'payments') return readPayment({ settledOnly, filters });
-      if (table === 'invoices') return invoice;
+      if (table === 'invoices') return typeof invoice === 'function' ? invoice(filters) : invoice;
       if (table === 'customers') return customer;
       throw new Error(`Unexpected table ${table}`);
     },
@@ -185,6 +185,23 @@ test('metadata customer fallback reaches the existing test-account suppression g
   await processPendingPaymentFailureNotifications();
   expect(triggerNotification.mock.calls[0][1]).toMatchObject({ customerId: 'cust_metadata', invoiceId: null });
   expect(rows[0].pending_payload).toBeNull();
+});
+
+test('the alert carries the invoice named by the failed ledger row when the PI is not bound to it', async () => {
+  rows = [job()];
+  ledger = { id: 'pmt_failed', status: 'failed', customer_id: 'cust_ledger',
+    metadata: JSON.stringify({ invoice_id: 'inv_retried' }) };
+  invoice = (filters) => (filters.id === 'inv_retried' ? { id: 'inv_retried', customer_id: 'cust_ledger' } : undefined);
+  await processPendingPaymentFailureNotifications();
+  expect(triggerNotification.mock.calls[0][1]).toMatchObject({ invoiceId: 'inv_retried', customerId: 'cust_ledger', paymentIntentId: 'pi_failure' });
+});
+
+test('the ledger invoice fallback accepts object metadata and stays null without an invoice row', async () => {
+  rows = [job()];
+  ledger = { id: 'pmt_failed', status: 'failed', metadata: { invoice_id: 'inv_gone' } };
+  invoice = () => undefined;
+  await processPendingPaymentFailureNotifications();
+  expect(triggerNotification.mock.calls[0][1]).toMatchObject({ invoiceId: null });
 });
 
 test('undelivered jobs survive and retry with the same bell dedupe key', async () => {
