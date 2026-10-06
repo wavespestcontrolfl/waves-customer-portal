@@ -2543,6 +2543,7 @@ router.put('/:id/receipt-address', async (req, res, next) => {
       actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
     });
     if (!result) return res.status(404).json({ error: 'Invoice not found' });
+    if (result.drift === 'void') return res.status(409).json({ error: 'A void invoice\'s address cannot be changed.', code: 'invoice_void' });
     res.json({ address: result.after });
   } catch (err) {
     if (err?.isOperational && err.statusCode) {

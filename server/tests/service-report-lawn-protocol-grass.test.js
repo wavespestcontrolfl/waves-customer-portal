@@ -67,6 +67,28 @@ describe('lawn protocol report context — never assume a grass', () => {
   });
 });
 
+describe('lawn protocol report context — service date', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test.each([
+    ['a YYYY-MM-DD string', '2026-06-15'],
+    ['the Date pg hands back for a DATE column', new Date(2026, 5, 15)],
+  ])('%s resolves the protocol window for that day', async (_label, serviceDate) => {
+    const knex = makeKnex({ customer_turf_profiles: [{ track_key: 'zoysia', active: true }] });
+    await buildLawnProtocolReportContext({ ...RECORD, service_date: serviceDate }, knex, new Date('2026-10-05T12:00:00Z'));
+    const [, opts] = getProtocolWindowContext.mock.calls[0];
+    expect(Number.isNaN(opts.serviceDate.getTime())).toBe(false);
+    expect([opts.serviceDate.getFullYear(), opts.serviceDate.getMonth(), opts.serviceDate.getDate()]).toEqual([2026, 5, 15]);
+  });
+
+  test('a record with no usable service date falls back to now', async () => {
+    const knex = makeKnex({ customer_turf_profiles: [{ track_key: 'zoysia', active: true }] });
+    const now = new Date('2026-10-05T12:00:00Z');
+    await buildLawnProtocolReportContext({ ...RECORD, service_date: null }, knex, now);
+    expect(getProtocolWindowContext.mock.calls[0][1].serviceDate).toBe(now);
+  });
+});
+
 describe('lawn protocol report context — actuals rows recorded without a plan', () => {
   beforeEach(() => jest.clearAllMocks());
   const AT = new Date('2026-06-15T12:00:00Z');

@@ -3271,3 +3271,15 @@ changes, both visual and placement only: same data, same polling, same
    text, tracking, open-visits nudge, storm) waits on Today, stays unread, and
    one in-page line at the top, "N notices on Today", links there. Review on a
    storm card still opens Quick Move, on Today.
+
+## 2026-10-05 — The open visit screen follows the Waves Admin look
+
+Owner 2026-10-05: "fix the visit screen ... also make sure you're following
+the admin UI for the headers, font etc". On `/admin/today?visit=…` the visit
+brief no longer repeats the address or adds a second Navigate button beside
+the visit's Directions; Call, Text, Report, Photos, Zone, Outcome and the flag
+button use the admin button look with line icons instead of emoji, and the
+flag button reads "Flag opportunity". Section labels (Access, Quoted, Money,
+Actions) are 14px / 500 sentence case like an admin card title, and amber
+stays only on a real warning (no card on file). The install hint card takes
+the admin palette. Visual only: same data, same actions.

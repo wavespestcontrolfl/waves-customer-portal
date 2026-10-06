@@ -123,10 +123,6 @@ function stripPayload(payload) {
     // Retained by the server only to honor stale clients' accept requests;
     // the current customer page does not offer these floor-clamped tiers.
     delete out.pricing.hiddenLawnFrequencies;
-    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS) carry a second full-bundle
-    // ladder the strips above never see; the bar reads the served ladder.
-    delete out.pricing.offerTiers;
-    delete out.pricing.offerTierDefaultKey;
     // The page renders the stamped service cards; its aggregate fallback
     // frequencies retain exact, unstamped prices in the same payload.
     if (out.pricing.combinedRecurring?.ranged) {

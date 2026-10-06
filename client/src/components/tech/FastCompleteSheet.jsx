@@ -92,7 +92,7 @@ import {
   typedFormTakesPlaces, typedTreatmentAreaField, typedZeroStateRefusesBody,
 } from '../../lib/typed-findings-rules';
 import {
-  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, ProductTileButton,
+  AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
   SavedView, SheetHeader, TipSection, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
   useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
@@ -487,7 +487,7 @@ function sheetTitle(reportFlow, visit, done) {
   return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
 }
 
-export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
+export default function FastCompleteSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -511,7 +511,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   });
   // Only the report flow renders the confirmable prompts (the edited-report
   // heads-up, a promise changed since the report was written).
-  const submission = useFastCompleteSubmit({ base, request, confirmable: reportFlow });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId, confirmable: reportFlow });
   const { submitting, done } = submission;
   const photoManager = usePhotoManager();
   // Another dialog a sheet opens over itself (the report flow's spray
@@ -548,7 +548,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   // for good; the recap modal (Full form) can't resume a /complete attempt,
   // so it is offered only before one may have reached the server.
   // A confirmable prompt (report flow) holds the sheet until it is answered.
-  const locked = submitting || submission.failure !== null || !!submission.prompt;
+  const locked = submissionHolds(submission) || !!submission.prompt;
 
   return (
     <FastCompleteFrame
@@ -571,13 +571,20 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
-  if (submission.done && !reportFlow) {
+  if (submission.done && (!reportFlow || submission.restored)) {
     return (
-      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
-        <CustomerTextResult outcome={submission.done.customerText} />
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
+        {reportFlow ? <>
+          <SentSummary result={submission.done.response} base={`/admin/dispatch/${service.id}`} request={request} followupBooking={ctx.followupBooking} />
+          <CollectPayment result={submission.done.response} />
+        </> : <CustomerTextResult outcome={submission.done.customerText} />}
       </SavedView>
     );
   }
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  const refusal = refusalWithoutContext(submission, ctx);
+  if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
@@ -1690,7 +1697,7 @@ function ReportFlowForm({
       description: visitPromises.promises.find((promise) => promise.id === mark.id)?.description || '',
     }));
     return (
-      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted}>
         <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
         <CollectPayment result={submission.done.response} />
       </SavedView>
@@ -1808,7 +1815,7 @@ function ReportStep({
   if (submission.prompt) {
     footer = (
       <footer className="tech-visit-footer tech-visit-footer--stacked">
-        <ConfirmPrompt prompt={submission.prompt} busy={submission.submitting} onBack={onBackFromPrompt} onConfirm={onConfirm} />
+        <ConfirmPrompt prompt={submission.prompt} error={submission.error} busy={submission.submitting} onBack={onBackFromPrompt} onConfirm={onConfirm} />
       </footer>
     );
   } else if (action) {

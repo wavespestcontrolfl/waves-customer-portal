@@ -103,8 +103,10 @@ async function correctInvoiceAddress(trx, invoiceId, input, { expect = null } = 
     .first('id', 'customer_id', 'status', 'customer_address_snapshot');
   if (!invoice) return null;
   const before = await loadDisplayedInvoiceAddress(trx, invoice);
+  // A void invoice's printed address is never rewritten, on any surface (the Invoices button is hidden
+  // for void; this is the server-side check behind it).
+  if (String(invoice.status || '').toLowerCase() === 'void') return { drift: 'void' };
   if (expect) {
-    if (String(invoice.status || '').toLowerCase() === 'void') return { drift: 'void' };
     if (ADDRESS_FIELDS.some((field) => (before[field] || null) !== (expect.before?.[field] || null))) return { drift: 'address' };
   }
   await trx('invoices').where({ id: invoiceId }).update({ customer_address_snapshot: after, updated_at: trx.fn.now() });

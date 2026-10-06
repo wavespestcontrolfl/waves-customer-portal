@@ -286,57 +286,6 @@ function pricingServices(pricing = {}) {
   }];
 }
 
-// Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): the server serves the
-// bundle's own sections / ladder / combos as the PEST-ONLY view (what Better
-// shows) and the Best tier carries its own full-bundle view. The page prices
-// from `pricingViewForOfferTier(pricing, key)` so every section, frequency,
-// combo, combined summary and prepay read follows the chosen tier. Anything
-// that is not a tiered payload with Best chosen returns `pricing` itself, so
-// non-tiered estimates stay byte-identical.
-export function offerTiersOfPricing(pricing) {
-  return Array.isArray(pricing?.offerTiers) ? pricing.offerTiers : [];
-}
-
-// The pest cadence survives a tier switch even though the pest-bearing
-// section changes key (the pest-only view serves one 'bundle' section, the
-// Best view a 'pest_control' section): seed the new section with the cadence
-// the customer already chose when that section offers it.
-export function carryPestCadenceAcrossTiers(nextServices = [], nextSelected = {}, carriedKey = null) {
-  if (!carriedKey) return nextSelected;
-  const pestSection = nextServices.find((section) => section?.key === 'pest_control')
-    || nextServices.find((section) => section?.key === 'bundle')
-    || nextServices.find((section) => section?.isPest === true);
-  if (!pestSection || !(pestSection.frequencies || []).some((frequency) => frequency?.key === carriedKey)) return nextSelected;
-  return { ...nextSelected, [pestSection.key]: carriedKey };
-}
-
-// The cross-sell card must not offer a manual "add this service" inquiry for
-// a program the customer can already pick as a tier: every service key an
-// offered tier carries joins the offer's suppress list.
-export function offerTierSuppressKeys(pricing, removedKeys = []) {
-  const keys = new Set(Array.isArray(removedKeys) ? removedKeys : []);
-  for (const tier of offerTiersOfPricing(pricing)) {
-    for (const key of (Array.isArray(tier?.services) ? tier.services : [])) {
-      if (typeof key === 'string' && key) keys.add(key);
-    }
-  }
-  return Array.from(keys);
-}
-
-export function pricingViewForOfferTier(pricing, tierKey) {
-  if (!pricing || tierKey !== 'best') return pricing;
-  const best = offerTiersOfPricing(pricing).find((tier) => tier?.key === 'best');
-  if (!best || !Array.isArray(best.frequencies) || best.frequencies.length === 0) return pricing;
-  return {
-    ...pricing,
-    frequencies: best.frequencies,
-    serviceCadenceCombos: best.serviceCadenceCombos,
-    services: Array.isArray(best.sections) && best.sections.length > 0 ? best.sections : pricing.services,
-    combinedRecurring: best.combinedRecurring ?? pricing.combinedRecurring,
-    waveGuardTier: best.waveGuardTier ?? pricing.waveGuardTier,
-  };
-}
-
 function defaultSelectedForServices(services = [], previous = {}, preserveSelection = false) {
   return services.reduce((next, section) => {
     const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -1752,6 +1701,16 @@ const ONE_TIME_TOGGLE_LABELS = {
 export function oneTimeToggleLabels(serviceCategory) {
   return ONE_TIME_TOGGLE_LABELS[serviceCategory]
     || { recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' };
+}
+
+// Which Good / Better / Best tile the page is on. The tiers are a view over
+// two ordinary page states (see OfferTierPicker): 'best' = the estimate as
+// quoted; 'pest_only' = lawn removed through the opt-out rail, recurring =
+// Better, one-time mode = Good. null when the payload carries no block.
+export function selectedOfferTierKey(offerTiers, serviceMode) {
+  if (!offerTiers) return null;
+  if (offerTiers.state === 'best') return 'best';
+  return serviceMode === 'one_time' ? 'good' : 'better';
 }
 
 export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false, serviceCategory = null }) {
@@ -5898,12 +5857,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // recurring; structurally one-time estimates are forced to one_time after
   // the data endpoint loads.
   const [serviceMode, setServiceMode] = useState('recurring');
-  // Good / Better / Best tier the customer has chosen ('good' | 'better' |
-  // 'best'); null until a tiered /data payload loads (and always null for an
-  // untiered estimate). The ref mirrors it for loadEstimate, which must read
-  // the live choice when a refresh re-derives the section defaults.
-  const [offerTierKey, setOfferTierKey] = useState(null);
-  const offerTierKeyRef = useRef(null);
   const [paymentPreference, setPaymentPreference] = useState(null);
   const [ctaPhase, setCtaPhaseState] = useState('configure');
   // "Does the lawn size look off?" sheet — holds the measuredBasis the
@@ -6234,14 +6187,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } catch { /* non-fatal */ }
   }, []);
 
-  const offerTiers = useMemo(() => offerTiersOfPricing(data?.pricing), [data?.pricing]);
-  const tiered = offerTiers.length > 0;
-  const bestOfferActive = tiered && offerTierKey === 'best' && offerTiers.some((tier) => tier?.key === 'best');
-  const pricingView = useMemo(
-    () => (tiered ? pricingViewForOfferTier(data?.pricing, offerTierKey) : data?.pricing),
-    [tiered, data?.pricing, offerTierKey],
-  );
-  const services = useMemo(() => pricingServices(pricingView), [pricingView]);
+  const services = useMemo(() => pricingServices(data?.pricing), [data]);
   const acceptance = data?.estimate?.acceptance || { mode: 'standard_slot_pick' };
   // C4 plan-restart quote: server-frozen offer (see /data planRestart) —
   // the repricing controls and the one-time mode toggle are omitted.
@@ -6255,12 +6201,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // commercial-manual list), so the accept CTA renders WITHOUT a slot pick —
   // the team schedules after approval.
   const manualScheduleAccept = acceptance.mode === 'commercial_site_confirmation';
-  const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(pricingView, services, selected), [pricingView, services, selected]);
+  const selectedFrequency = useMemo(() => selectedPricingFrequencyKey(data?.pricing, services, selected), [data?.pricing, services, selected]);
   // Per-service cadence (bundles): the precomputed combo matching every section's
   // independent selection, plus the non-pest selection map sent on accept.
   const serviceCadenceCombos = useMemo(
-    () => (Array.isArray(pricingView?.serviceCadenceCombos) ? pricingView.serviceCadenceCombos : []),
-    [pricingView],
+    () => (Array.isArray(data?.pricing?.serviceCadenceCombos) ? data.pricing.serviceCadenceCombos : []),
+    [data?.pricing],
   );
   // The combo's selection keys are the only INDEPENDENTLY selectable sections
   // (pest + lawn/tree). Any other recurring section (e.g. mosquito, which isn't
@@ -6280,8 +6226,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     [comboAxisKeys, services],
   );
   const selectedCombo = useMemo(
-    () => selectedServiceCadenceCombo(pricingView, services, selected),
-    [pricingView, services, selected],
+    () => selectedServiceCadenceCombo(data?.pricing, services, selected),
+    [data?.pricing, services, selected],
   );
   const serviceCadences = useMemo(() => {
     if (!serviceCadenceCombos.length) return null;
@@ -6301,6 +6247,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     const primarySection = pestSection || services.find((section) => section.isRecurring) || services[0];
     return selectedFrequencyForSection(primarySection, selected);
   }, [services, selected]);
+  // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): absent block = no
+  // picker and the page is exactly what it was before.
+  const offerTiers = data?.offerTiers || null;
+  const tiered = !!offerTiers;
+  const tierCompanionKey = offerTiers?.companionKey || null;
+  // The picker owns the companion's remove / add-back, so its "add it back"
+  // mirror offer is suppressed the way a removed service's is.
+  const addOfferSuppressKeys = useMemo(() => {
+    const removed = data?.serviceOptOut?.removedKeys;
+    if (!tierCompanionKey) return removed;
+    return Array.from(new Set([...(Array.isArray(removed) ? removed : []), tierCompanionKey]));
+  }, [data?.serviceOptOut?.removedKeys, tierCompanionKey]);
   const addServiceOffer = useMemo(
     // Accepted estimates always evaluate the offer in recurring terms (owner
     // ask 2026-07-09): the accepted page upsells the next recurring service
@@ -6311,11 +6269,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       services,
       data?.cta?.terminalState === 'accepted' ? 'recurring' : serviceMode,
       data?.estimate?.membership,
-      // Good / Better / Best: a program an offered tier already carries is
-      // never upsold as a manual inquiry beside the picker.
-      tiered ? offerTierSuppressKeys(data?.pricing, data?.serviceOptOut?.removedKeys) : data?.serviceOptOut?.removedKeys,
+      addOfferSuppressKeys,
     ),
-    [services, serviceMode, tiered, data?.pricing, data?.cta?.terminalState, data?.estimate?.membership, data?.serviceOptOut?.removedKeys]
+    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership, addOfferSuppressKeys]
   );
   // Priced add (GATE_ESTIMATE_SERVICE_ADD): the offer prices in place when the
   // server stamped its key addable — same optOut state and rail as a restore.
@@ -6325,7 +6281,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // is used only when the stamp covers it; otherwise the priced offer is
   // built from the stamp — a ladder pick the server did not stamp must
   // never hide a priced add-on behind the office inquiry (pre-push codex P1).
-  const addableStamp = data?.serviceOptOut?.addable || [];
+  const addableStamp = (data?.serviceOptOut?.addable || [])
+    .filter((a) => !(tierCompanionKey && a?.key === tierCompanionKey));
   // Recurring mode only, like the legacy ladder: a priced add rewrites the
   // estimate as a recurring bundle, never from the one-time flow (GH codex
   // r4 P2).
@@ -6441,28 +6398,12 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
     const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';
-    // Good / Better / Best: the tier is the choice, so it also decides the
-    // service mode. A refresh keeps the customer's tier when the payload
-    // still offers it; otherwise the server's default tier applies.
-    const bodyOfferTiers = offerTiersOfPricing(body?.pricing);
-    let nextOfferTierKey = null;
-    if (bodyOfferTiers.length > 0) {
-      const previousTierKey = offerTierKeyRef.current;
-      nextOfferTierKey = preserveSelection && bodyOfferTiers.some((tier) => tier?.key === previousTierKey)
-        ? previousTierKey
-        : (bodyOfferTiers.some((tier) => tier?.key === body?.pricing?.offerTierDefaultKey)
-          ? body.pricing.offerTierDefaultKey
-          : 'better');
-    }
-    offerTierKeyRef.current = nextOfferTierKey;
-    setOfferTierKey(nextOfferTierKey);
     setServiceMode((prev) => {
       if (isOneTimeOnly) return 'one_time';
-      if (nextOfferTierKey) return nextOfferTierKey === 'good' ? 'one_time' : 'recurring';
       if (preserveSelection) return prev;
       return defaultServiceMode === 'one_time' ? 'one_time' : 'recurring';
     });
-    const nextServices = pricingServices(pricingViewForOfferTier(body?.pricing, nextOfferTierKey));
+    const nextServices = pricingServices(body?.pricing);
     let nextSelected = defaultSelectedForServices(nextServices, selectedRef.current, preserveSelection);
     // For a reopened ACCEPTED estimate, pin the recurring frequency to the one
     // booked (acceptedFrequencyKey) so the read-only recap shows the agreed plan
@@ -6480,45 +6421,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     }
     setSelected(nextSelected);
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
+    // Callers that must act on the reloaded payload (the offer-tier picker)
+    // read it from the resolved value; every other caller ignores it.
+    return body;
   }, [token, adminPreviewRequested, pdfDocumentMode, pdfDocPin]);
 
-
-  // Switching service mode (the one-time toggle, or a Good / Better / Best
-  // tier that crosses recurring <-> one-time) drops every selection that does
-  // not apply in the other mode. One reset, shared by both controls.
-  const resetForServiceModeChange = useCallback((nextMode) => {
-    reserveAttemptRef.current += 1;
-    setServiceMode(nextMode);
-    setSelectedSlotId(null);
-    setSelectedSlotMeta(null);
-    setPaymentPreference(null);
-    setReservation(null);
-    setAcceptResult(null);
-    setError(null);
-    setCtaPhase('configure');
-    setSlotsRefreshSignal((v) => v + 1);
-  }, [setCtaPhase]);
-
-  // Good / Better / Best: choosing a tier swaps the section set (Best shows
-  // every quoted program) and the service mode (Good is the one-time visit).
-  const onSelectOfferTier = useCallback((key) => {
-    if (ctaPhaseRef.current === 'submitting') return;
-    if (!offerTiers.some((tier) => tier?.key === key)) return;
-    // Read the cadence in force BEFORE the tier (and its section keys) change.
-    const currentServices = pricingServices(pricingViewForOfferTier(data?.pricing, offerTierKeyRef.current));
-    const carriedPestKey = primarySelectedFrequencyKey(currentServices, selectedRef.current);
-    offerTierKeyRef.current = key;
-    setOfferTierKey(key);
-    const nextServices = pricingServices(pricingViewForOfferTier(data?.pricing, key));
-    const nextSelected = carryPestCadenceAcrossTiers(
-      nextServices,
-      defaultSelectedForServices(nextServices, selectedRef.current, true),
-      carriedPestKey,
-    );
-    setSelected(nextSelected);
-    setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
-    resetForServiceModeChange(key === 'good' ? 'one_time' : 'recurring');
-  }, [offerTiers, data?.pricing, resetForServiceModeChange]);
 
   // A different estimate token is a fresh session — let its first load count.
   useEffect(() => { initialViewCountedRef.current = false; }, [token]);
@@ -7217,9 +7124,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     try {
       const quote = await submitOptOut(sectionKey, false, true);
       setOptOut({ sectionKey, phase: 'preview', quote, message: '' });
+      return true;
     } catch (err) {
       setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
       setError(err.message);
+      return false;
     }
   }, [readOnlyPreview, submitOptOut]);
 
@@ -7241,9 +7150,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     try {
       const quote = await submitOptOut(sectionKey, true, true);
       setOptOut({ sectionKey, phase: 'preview', quote, message: '' });
+      return true;
     } catch (err) {
       setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
       setError(err.message);
+      return false;
     }
   }, [readOnlyPreview, submitOptOut]);
 
@@ -7276,22 +7187,141 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         // accept charge a different per-application amount than the panel
         // disclosed (codex #3684 r4 P1); the reload resets every section to
         // the server's cadence, the one the confirmed numbers describe.
-        await loadEstimate({ preserveSelection: false });
+        const reloaded = await loadEstimate({ preserveSelection: false });
         scrollToPriceSection();
+        return { ok: true, body: reloaded || null };
       } catch (err) {
         setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
         setError(err.message);
         // Resync to server truth — the PUT may have landed despite the error
         // surfacing here (same rationale as the bond/interior/add-on paths).
         await loadEstimate({ preserveSelection: true }).catch(() => {});
+        return { ok: false, body: null };
       } finally {
         repriceEpochRef.current += 1;
       }
     };
     const chained = addOnMutationChainRef.current.then(run, run);
     addOnMutationChainRef.current = chained;
-    await chained;
+    // Resolves { ok, body } once the reload settled (body = the reloaded
+    // /data payload) — the offer-tier picker acts on it; other callers ignore it.
+    return chained;
   }, [readOnlyPreview, submitOptOut, loadEstimate, scrollToPriceSection, releaseHeldReservation, reservation]);
+
+  // ── Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS) ───────────────────
+  // The picker drives the SAME opt-out rail the per-service controls use
+  // (dry-run preview → confirm with previewBasis → reload); it adds no fetch
+  // of its own. A move between Better and Good is only the page's one-time
+  // mode; every move that adds or removes the companion goes through the rail.
+  const resetForServiceModeChange = useCallback((nextMode) => {
+    reserveAttemptRef.current += 1;
+    setServiceMode(nextMode);
+    // Reset selection state that doesn't apply in the other mode
+    setSelectedSlotId(null);
+    setSelectedSlotMeta(null);
+    setPaymentPreference(null);
+    setReservation(null);
+    setAcceptResult(null);
+    setError(null);
+    setCtaPhase('configure');
+    setSlotsRefreshSignal((v) => v + 1);
+  }, [setCtaPhase]);
+
+  // The tile the customer is moving to while the rail change is previewed /
+  // committed (null | 'good' | 'better' | 'best').
+  const [pendingTier, setPendingTier] = useState(null);
+  const [tierCommitting, setTierCommitting] = useState(false);
+
+  const cancelTierMove = useCallback(() => {
+    setPendingTier(null);
+    cancelRemoveService();
+  }, [cancelRemoveService]);
+
+  const onSelectOfferTier = useCallback(async (key) => {
+    if (!offerTiers || tierCommitting) return;
+    if (ctaPhaseRef.current === 'submitting') return;
+    const companionKey = offerTiers.companionKey;
+    const companionBusy = optOut.sectionKey === companionKey;
+    if (companionBusy && (optOut.phase === 'previewing' || optOut.phase === 'submitting')) return;
+    if (companionBusy && optOut.phase === 'preview' && pendingTier) {
+      // An open confirm: the tile it targets is a no-op; any other tile closes it first.
+      if (key === pendingTier) return;
+      cancelTierMove();
+    }
+    if (key === selectedOfferTierKey(offerTiers, serviceMode)) return;
+    if (offerTiers.state === 'pest_only' && key !== 'best') {
+      // Better <-> Good: only the page's one-time mode changes.
+      if (key === 'good') {
+        const oneTimeAvailable = !!data?.estimate?.showOneTimeOption
+          && Number(data?.pricing?.anchorOneTimePrice || 0) > 0;
+        if (!oneTimeAvailable) return;
+      }
+      resetForServiceModeChange(key === 'good' ? 'one_time' : 'recurring');
+      return;
+    }
+    if (offerTiers.state === 'best' && key === 'best') return;
+    setPendingTier(key);
+    const started = offerTiers.state === 'pest_only'
+      ? await onPreviewRestoreService(companionKey)
+      : await onPreviewRemoveService(companionKey);
+    if (!started) setPendingTier(null);
+  }, [
+    offerTiers, tierCommitting, optOut.sectionKey, optOut.phase, pendingTier, serviceMode, data?.estimate?.showOneTimeOption,
+    data?.pricing?.anchorOneTimePrice, cancelTierMove, resetForServiceModeChange, onPreviewRestoreService, onPreviewRemoveService,
+  ]);
+
+  // Selection-aware figures for the tile the customer is on: the rows of the
+  // matched cadence combo, else of the selected pest cadence.
+  const tierCurrentRows = useMemo(() => {
+    if (!offerTiers || serviceMode === 'one_time') return null;
+    const source = Array.isArray(selectedCombo?.perServiceTreatments) && selectedCombo.perServiceTreatments.length
+      ? selectedCombo.perServiceTreatments
+      : selectedCombinedFrequency(data?.pricing, selectedFrequency)?.perServiceTreatments;
+    const rows = (Array.isArray(source) ? source : [])
+      .map((row) => ({
+        service: row?.service,
+        perApplication: Number(row?.displayPrice) > 0 ? Number(row.displayPrice) : (Number(row?.perTreatment) > 0 ? Number(row.perTreatment) : null),
+        visitsPerYear: Number(row?.visitsPerYear) || null,
+      }))
+      .filter((row) => row.service && row.perApplication != null);
+    return rows.length ? rows : null;
+  }, [offerTiers, serviceMode, selectedCombo, data?.pricing, selectedFrequency]);
+  const tierCadenceIsDefault = useMemo(() => {
+    const defaults = defaultSelectedForServices(services);
+    return services.every((section) => (selected?.[section.key] || defaults[section.key]) === defaults[section.key]);
+  }, [services, selected]);
+
+  const confirmTierMove = useCallback(async () => {
+    const target = pendingTier;
+    const companionKey = offerTiers?.companionKey;
+    if (!target || !companionKey || tierCommitting) return;
+    setTierCommitting(true);
+    try {
+      const restoring = offerTiers.state === 'pest_only';
+      const result = await commitOptOut(
+        companionKey,
+        restoring,
+        optOut.sectionKey === companionKey ? optOut.quote?.previewBasis || null : null,
+      );
+      if (!result?.ok) return;
+      const reloaded = result.body;
+      if (target === 'good') {
+        if (reloaded?.estimate?.showOneTimeOption && Number(reloaded?.pricing?.anchorOneTimePrice || 0) > 0) {
+          resetForServiceModeChange('one_time');
+        } else {
+          // The move was saved (lawn care is off the estimate) but the server
+          // did not open the one-time visit — say so rather than leaving the
+          // customer on the pest plan as if they had picked it.
+          setError('The one-time visit isn\'t available on this estimate right now. Your estimate now shows the pest control plan; you can add lawn care back above, or call us and we\'ll set up a single visit.');
+        }
+      } else if (target === 'best' && serviceMode === 'one_time') {
+        resetForServiceModeChange('recurring');
+      }
+    } finally {
+      setTierCommitting(false);
+      setPendingTier(null);
+    }
+  }, [pendingTier, offerTiers, tierCommitting, commitOptOut, optOut.sectionKey, optOut.quote, serviceMode, resetForServiceModeChange]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
     // Staff draft preview: every booking path starts here — keep it inert
@@ -7369,10 +7399,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (serviceModeForAttempt !== 'one_time' && serviceCadences) {
         reservePayload.serviceCadences = serviceCadences;
       }
-      // Good / Better / Best: only Best changes the reserved visit profile.
-      if (serviceModeForAttempt !== 'one_time' && bestOfferActive) {
-        reservePayload.offerTier = 'best';
-      }
       const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -7387,17 +7413,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           return;
         }
         const message = body.error || 'Unable to reserve this slot.';
-        if (body.code === 'offer_tier_unavailable') {
-          // Good / Better / Best: the tier is gone (nothing was reserved) —
-          // reload so the page re-derives its choices instead of retrying it.
-          setPaymentPreference(null);
-          setSelectedSlotId(null);
-          setSelectedSlotMeta(null);
-          setCtaPhase('configure');
-          await loadEstimate();
-          setError('That plan option is no longer available. We refreshed your estimate — please choose again.');
-          return;
-        }
         if (body.code === 'CUSTOMER_BUSY_RETRY') {
           // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the
           // server's own sentence - the customer's picked slot and payment choice stay, so they just tap again.
@@ -7433,7 +7448,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [readOnlyPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, bestOfferActive, token]);
+  }, [readOnlyPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -7684,9 +7699,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           })(),
           afterVisitTimingShown: (paymentPreference !== 'prepay_annual' && afterVisitTimingShownRef.current) ? true : undefined,
           serviceMode,
-          // Good / Better / Best: the server resolves the tier against its
-          // stored tiers and prices from them (never from this client).
-          selectedTier: tiered ? offerTierKey : undefined,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
@@ -7786,37 +7798,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           setPrepayChargeQuote(null);
           setPrepayConsentChecked(false);
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
-        }
-        if (body.code === 'offer_tier_unavailable') {
-          // Good / Better / Best: the tier this tab sent is no longer offered
-          // (gate turned off, or the customer became a member) — the server
-          // answers 400 before its transaction and 409 inside it. Retrying
-          // from review would resend the same tier forever, so leave review:
-          // drop the capture and the hold made for that plan, and reload so
-          // the page re-derives its choices (the picker disappears when the
-          // payload no longer carries tiers).
-          const tierHold = reservationRef.current;
-          const tierHeldId = tierHold?.scheduledServiceId && !tierHold?.existingAppointmentId
-            ? tierHold.scheduledServiceId
-            : null;
-          recurringCardSetupIntentIdRef.current = null;
-          setInlineCardIntent(null);
-          prepayChargeAckRef.current = null;
-          setPrepayChargeQuote(null);
-          setPrepayConsentChecked(false);
-          if (tierHeldId) {
-            let released = await releaseHeldReservation(tierHeldId);
-            if (!released) released = await releaseHeldReservation(tierHeldId);
-            if (!released) pendingRecoveryHoldRef.current = tierHeldId;
-          }
-          setCtaPhase('configure');
-          setReservation(null);
-          setSelectedSlotId(null);
-          setSelectedSlotMeta(null);
-          setPaymentPreference(null);
-          await loadEstimate();
-          setError('That plan option is no longer available. We refreshed your estimate — please choose again.');
-          return;
         }
         if (r.status === 409) {
           if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
@@ -7993,7 +7974,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, tiered, offerTierKey, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -8601,16 +8582,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // inputs derive from state, tolerating missing data during load.
   useEffect(() => {
     if (paymentPreference !== 'prepay_annual') return;
-    const pricingState = pricingView || {};
+    const pricingState = data?.pricing || {};
     const frequency = selectedCombinedFrequency(pricingState, selectedFrequency);
     // Same adjudication order as annualPrepayEligibleEffective below: the
     // matched combo's server-stamped flag wins (codex r18 P1), a seasonal
     // axis without one disables, then the tier/estimate-level flags.
     let eligible;
-    if (bestOfferActive) {
-      // The server refuses annual prepay on the Best tier.
-      eligible = false;
-    } else if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
+    if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
       eligible = selectedCombo.annualPrepayEligible;
     } else {
       eligible = !cadencesRequestSeasonal(serviceCadences)
@@ -8621,11 +8599,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     if (!eligible) {
       setPaymentPreference(null);
       setCtaPhase('configure');
-      setError(bestOfferActive
-        ? 'Annual prepay isn’t available with this plan — pick a payment option again.'
-        : 'Annual prepay isn’t available for the seasonal program — pick a payment option again.');
+      setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
     }
-  }, [pricingView, bestOfferActive, selectedFrequency, serviceCadences, selectedCombo, paymentPreference]);
+  }, [data?.pricing, selectedFrequency, serviceCadences, selectedCombo, paymentPreference]);
 
   if (loading) {
     return (
@@ -8692,8 +8668,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return <EstimateProposalDocument data={data} token={token} />;
   }
 
-  const { estimate, cta } = data;
-  const pricing = pricingView;
+  const { estimate, pricing, cta } = data;
   const canAccept = cta?.canAccept === true;
   // Review-before-booking (e.g. priced termite trenching) is NOT terminal: the
   // price + Ask-Waves stay visible and only self-booking is gated. A genuine
@@ -8910,8 +8885,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // estimate, which the estimate-level flag alone cannot); a seasonal axis
   // without a stamped combo still disables prepay.
   const annualPrepayEligibleEffective = (() => {
-    // The server refuses annual prepay on the Best tier (multi-program).
-    if (bestOfferActive) return false;
     if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
       return selectedCombo.annualPrepayEligible;
     }
@@ -9158,6 +9131,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // the read-only accepted recap (an accepted plan's price is
                 // frozen), and never while the cards are locked mid-submit.
                 serviceOptOut={section.removable === true && !readOnly && !cardsDisabled && !restartQuote
+                  && !(tiered && section.key === tierCompanionKey)
                   ? {
                     phase: optOut.sectionKey === section.key ? optOut.phase : 'idle',
                     quote: optOut.sectionKey === section.key ? optOut.quote : null,
@@ -9192,10 +9166,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               so the "Add it back" control must not render. */}
           {!readOnly && !restartQuote && data?.serviceOptOut?.restoreBlocked !== true
             && (data?.serviceOptOut?.removedKeys || []).some((key) =>
-              !(data?.serviceOptOut?.restoreBlockedKeys || []).includes(key)) ? (
+              !(data?.serviceOptOut?.restoreBlockedKeys || []).includes(key)
+              && !(tiered && key === tierCompanionKey)) ? (
             <div style={{ marginTop: 12 }}>
               {data.serviceOptOut.removedKeys.map((key, i) => {
                 if ((data.serviceOptOut.restoreBlockedKeys || []).includes(key)) return null;
+                // The picker owns the companion's add-back when tiers are offered.
+                if (tiered && key === tierCompanionKey) return null;
                 const label = data.serviceOptOut.removedLabels?.[i] || key;
                 const active = optOut.sectionKey === key;
                 // A line Waves parked at send time (GATE_ESTIMATE_LEAD_SERVICE_SEND)
@@ -10094,7 +10071,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   serviceMode={serviceMode}
                   selectedFrequency={selectedFrequency}
                   serviceCadences={serviceCadences}
-                  offerTier={bestOfferActive && serviceMode !== 'one_time' ? 'best' : null}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
                   onContactReview={(body) => enterContactReviewRef.current(body).catch(() => {})}
@@ -10241,21 +10217,32 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               ranged price is a recurring concept, and a one-time accept there
               dead-ends — no slots exist, and the one-time card-hold/deposit
               gates require a booked appointment the customer can't pick. */}
-          {tiered && !estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote ? (
-            // Good / Better / Best replaces the toggle on a tiered estimate.
-            <OfferTierPicker
-              tiers={offerTiers}
-              selectedKey={offerTierKey}
-              onSelect={onSelectOfferTier}
-              disabled={ctaPhase === 'submitting'}
-              pricing={data.pricing}
-              estimate={estimate}
-              // The tiles quote the cadence chosen below, like the price card.
-              selectedFrequencyKey={serviceMode !== 'one_time' ? selectedFrequency : null}
-              selectedCombo={bestOfferActive ? selectedCombo : null}
-            />
-          ) : null}
-          {!tiered && !estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+          {tiered ? (
+            !estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote ? (
+              <OfferTierPicker
+                tiers={offerTiers}
+                selectedKey={selectedOfferTierKey(offerTiers, serviceMode)}
+                onSelect={onSelectOfferTier}
+                // Same lock as the one-time toggle: a tile change mid-submit
+                // would clear the slot the request is committing.
+                disabled={ctaPhase === 'submitting'}
+                estimate={estimate}
+                // The selected tile quotes the cadence chosen below, like the
+                // price card; the other tiles stay at the standard schedule.
+                currentRows={tierCurrentRows}
+                cadenceIsDefault={tierCadenceIsDefault}
+                change={pendingTier ? {
+                  phase: tierCommitting || (optOut.sectionKey === tierCompanionKey && optOut.phase === 'submitting')
+                    ? 'committing'
+                    : (optOut.sectionKey === tierCompanionKey ? optOut.phase : 'idle'),
+                  targetKey: pendingTier,
+                  quote: optOut.sectionKey === tierCompanionKey ? optOut.quote : null,
+                  onConfirm: confirmTierMove,
+                  onCancel: cancelTierMove,
+                } : null}
+              />
+            ) : null
+          ) : !estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
@@ -10264,7 +10251,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               // 'submitting' (reserve/accept in flight) — a mode flip
               // mid-submit would clear the slot the request is committing.
               disabled={ctaPhase === 'submitting'}
-              onChange={(m) => resetForServiceModeChange(m)}
+              onChange={resetForServiceModeChange}
             />
           ) : null}
 

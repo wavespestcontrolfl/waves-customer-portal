@@ -199,6 +199,88 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
     .first('id');
 }
 
+// A receipt whose amount comes from the classifier (no PDF total) is booked
+// only when the classifier says the email confirms money was paid. Failed
+// or declined payments, payouts, renewal reminders and unpaid bills all
+// print an amount too; a phrase list on the subject could not tell them
+// apart reliably (Codex rounds 2-5 on #5932). Fail closed: a missing or
+// unknown status is not "paid" (json mode does not force the field).
+const PAID = 'paid';
+
+// The same email delivered twice (to two inboxes, or re-sent): an expense
+// already linked to an email from the same sender, received in the same
+// second, with the same subject and the same body, for the same amount.
+// Nothing weaker counts: separate receipts can share a sender, a second and
+// an amount, and a missed copy only costs a review, while a wrong match
+// silently drops a real expense. Emails with attachments are never matched
+// here (two PDF invoices can share one email template); they rely on the
+// invoice-number check. The description (vendor + invoice number) must also
+// match, so a different invoice number never matches.
+async function findSameNoticeExpense(conn, emailId, amount, description) {
+  const me = await conn('emails').where({ id: emailId }).first('from_address', 'received_at', 'subject', 'has_attachments');
+  if (!me?.from_address || !me?.received_at || !me?.subject || me.has_attachments) return null;
+  return conn('expenses as x')
+    .join('emails as e', 'e.expense_id', 'x.id')
+    .where('e.from_address', me.from_address)
+    .where('e.subject', me.subject)
+    .where('x.description', description)
+    .whereRaw('coalesce(e.has_attachments, false) = false')
+    .whereNot('e.id', emailId)
+    // Same second, not the same instant: Gmail keeps milliseconds.
+    .whereRaw("date_trunc('second', e.received_at) = date_trunc('second', ?::timestamptz)", [me.received_at])
+    // Each body compared on its own: a concatenation could equate two emails
+    // that split the same characters differently between text and HTML.
+    .whereRaw("md5(coalesce(e.body_text, '')) = (select md5(coalesce(body_text, '')) from emails where id = ?)", [emailId])
+    .whereRaw("md5(coalesce(e.body_html, '')) = (select md5(coalesce(body_html, '')) from emails where id = ?)", [emailId])
+    // The snippet too: with both bodies empty it is what the classifier read.
+    .whereRaw("md5(coalesce(e.snippet, '')) = (select md5(coalesce(snippet, '')) from emails where id = ?)", [emailId])
+    .whereRaw('x.amount = round(?::numeric, 2)', [String(amount)])
+    .first('x.id');
+}
+
+// expenses.amount is decimal(12,2). The value is returned as given, so
+// Postgres does the cent rounding exactly as before; a value that would
+// round past 9,999,999,999.99 is refused (JS cent rounding is not used: it
+// drifts, 1.005 -> 1.00).
+function inColumnRange(n) {
+  return Number.isFinite(n) && n < 9999999999.995 ? n : null;
+}
+
+// The expense date: the parsed invoice's date, else the classifier's, else
+// today (ET). dateFromInvoice is false for the today fallback, so it never
+// drives a duplicate match.
+// - The classifier's date counts only as a real YYYY-MM-DD calendar date:
+//   new Date() turns 20260231 into 1970 and "February 31, 2026" into March 3.
+// - A date taxPeriodFor cannot place (e.g. year 0012) falls back to today,
+//   date and tax period together, instead of throwing before the email
+//   outcome is recorded (Codex r20 on #4884).
+function receiptDate(parsedInvoice, classifierDate) {
+  // The classifier is asked for YYYY-MM-DD; anything else (a number, a
+  // written date new Date() would roll over) counts as no date.
+  const usableClassifierDate = typeof classifierDate === 'string'
+    ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
+    : null;
+  const raw = parsedInvoice?.invoice_date || usableClassifierDate;
+  const parsed = raw ? new Date(raw) : null;
+  const candidate = parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString().split('T')[0] : null;
+  return candidate && taxPeriodFor(candidate)
+    ? { invoiceDate: candidate, dateFromInvoice: true }
+    : { invoiceDate: etDateString(), dateFromInvoice: false };
+}
+
+// The classifier returns the amount as printed ("$10.06", "1,234.50 USD").
+// parseFloat read "$10.06" as NaN, so every such receipt was skipped as
+// "no_amount" (2026-10-05: 96 receipts, about $1,476, mostly Twilio, OpenAI,
+// Google). Accept one money figure with an optional $ and USD and thousands
+// commas; anything else is no amount.
+function classifierAmount(value) {
+  if (typeof value === 'number') return inColumnRange(value);
+  if (typeof value !== 'string') return null;
+  const m = value.trim().match(/^(?:USD\s*)?\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?\s*(?:USD)?$/i);
+  if (!m) return null;
+  return inColumnRange(Number(m[1].replace(/,/g, '') + (m[2] || '')));
+}
+
 // Booking phase: the AI category suggestion (outside any transaction), then
 // the duplicate check and the insert under one advisory lock. Logs carry ids
 // only: the vendor name can be a person's display name.
@@ -238,6 +320,29 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
     // transaction: no lock is held across a model call.
     const key = duplicateKey(vendorName, invoiceNumber, vendorSource, dateFromInvoice);
     const outcome = await db.transaction(async (trx) => {
+      // A reprocessed email (reclassify, replay) that already booked an
+      // expense keeps it: no second row, no orphaned first one.
+      const current = await trx('emails').where({ id: email.id }).forUpdate().first('expense_id');
+      // Only a link to a row that still exists counts: an expense an admin
+      // deleted leaves a stale id, and that email books again.
+      if (current?.expense_id && await trx('expenses').where({ id: current.expense_id }).first('id')) {
+        return { alreadyBooked: current.expense_id };
+      }
+      // Every receipt runs it, whatever the amount source, so the match does not
+      // depend on which copy is processed first; the per-sender lock covers
+      // two copies processed at once.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
+      // A clipped description is no identity (the same guard duplicateKey uses).
+      const fits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
+      const copy = fits ? await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber)) : null;
+      if (copy) {
+        await trx('emails').where({ id: email.id }).update({
+          expense_id: copy.id,
+          auto_action: `expense_duplicate:${amount}`,
+          updated_at: new Date(),
+        });
+        return { duplicateOf: copy.id };
+      }
       if (key) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
         const duplicate = await findDuplicateExpense(trx, vendorName, invoiceNumber, amount, invoiceDate);
@@ -273,7 +378,9 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
       return { expense: created };
     });
 
-    if (outcome.duplicateOf) {
+    if (outcome.alreadyBooked) {
+      logger.info(`[invoice-processor] Email ${email.id} already booked expense ${outcome.alreadyBooked}`);
+    } else if (outcome.duplicateOf) {
       logger.info(`[invoice-processor] Email ${email.id} is a duplicate of expense ${outcome.duplicateOf}`);
     } else {
       logger.info(`[invoice-processor] Expense ${outcome.expense.id} created from email ${email.id}`);
@@ -386,23 +493,24 @@ async function processVendorInvoice(email, classification) {
   // `??`, not `||`: a parsed total of 0 (a zero-total invoice or credit memo)
   // is the extraction's answer, not a missing one — `||` fell through to the
   // classifier's amount and created an expense for it (Codex r18 on #4884).
-  const amount = parsedInvoice?.total ?? (parseFloat(classification.extracted?.invoice_amount) || 0);
+  const amount = parsedInvoice?.total ?? (classifierAmount(classification.extracted?.invoice_amount) || 0);
+  // The paid check follows where the AMOUNT came from: a parsed PDF with no
+  // total also falls back to the classifier.
+  const amountFromClassifier = parsedInvoice?.total == null;
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
-  const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
-  const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
-  const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
-  // The classifier's own date is not calendar-checked upstream: a date
-  // taxPeriodFor cannot place (e.g. year 0012) falls back to today — date and
-  // tax period together — instead of throwing before the email outcome is
-  // recorded (Codex r20 on #4884).
-  const candidateDate = invoiceDateValid ? parsedDate.toISOString().split('T')[0] : null;
-  const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
+  const { invoiceDate, dateFromInvoice } = receiptDate(parsedInvoice, classification.extracted?.invoice_date);
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
-  if (amount > 0) {
+  const paymentStatus = classification.extracted?.payment_status;
+  if (amount > 0 && amountFromClassifier && String(paymentStatus || '').trim().toLowerCase() !== PAID) {
+    await db('emails').where({ id: email.id }).update({
+      auto_action: 'invoice_detected:not_paid',
+      updated_at: new Date(),
+    });
+  } else if (amount > 0) {
     await bookExpense(email, {
       vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate,
-      dateFromInvoice: invoiceDate === candidateDate, taxYear, quarter,
+      dateFromInvoice, taxYear, quarter,
     });
   } else {
     await db('emails').where({ id: email.id }).update({
@@ -412,4 +520,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, senderVendorKeys };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, senderVendorKeys, classifierAmount };

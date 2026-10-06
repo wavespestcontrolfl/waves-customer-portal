@@ -152,7 +152,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         {/* sr-v2-hero-title marks this as the V2 hero so glass hides the
             eyebrow above it (the ReportViewPage :has() rule) — lawn/tree get
             this via a direct-sibling h2; here the h2 sits in a flex wrapper. */}
-        <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 25, color: TEXT, margin: 0 }}>{status.label}</h2>
+        <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 20, color: TEXT, margin: 0 }}>{status.label}</h2>
       </div>
       {statusSummary ? (
         <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
@@ -181,8 +181,8 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
           text={aiSummary.body}
           sections={reportSections}
           nextVisitLabel={nextVisitLabel}
-          style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}
-          titleStyle={{ color: TEXT }}
+          style={{ fontSize: 16, color: TEXT, lineHeight: 1.55, margin: '12px 0 0' }}
+          titleStyle={{ color: TEXT, fontSize: 18 }}
         />
       ) : null}
       {/* Where we sprayed — the tech-traced application, combined into the
@@ -728,26 +728,14 @@ function Line({ label, value }) {
   );
 }
 
-// ── Expectations: rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS) ─
-// Three small, honest, deterministic cards driven by `pestReportV2.expectations`
+// ── Expectations: spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS) ─
+// Two small, honest, deterministic cards driven by `pestReportV2.expectations`
 // (server/services/service-report/pest-report-expectations.js). Each renders
 // nothing when its own payload key is absent — the gate being off, or that
 // visit simply having no relevant data, look identical to the client.
-// Body copy in these three expectation cards is 16px — the customer-surface
+// Body copy in these expectation cards is 16px — the customer-surface
 // body floor (docs/design/waves-customer-facing-design-brief.md); 14px is
 // reserved for the eyebrow labels (codex P2 #5137 round 4).
-export function PestRainExpectation({ rain }) {
-  if (!rain?.lines?.length) return null;
-  return (
-    <section data-glass="card" style={card}>
-      <div data-gt="eyebrow" style={eyebrow}>Rain and your treatment</div>
-      {rain.lines.map((line) => (
-        <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '4px 0' }}>{line}</p>
-      ))}
-    </section>
-  );
-}
-
 export function PestSpiderExpectation({ spiders }) {
   if (!spiders?.expectation) return null;
   return (

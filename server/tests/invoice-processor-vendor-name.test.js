@@ -13,12 +13,16 @@ jest.mock('../models/db', () => {
   const chain = (table) => {
     const filters = {};
     const q = {
-      where: (a) => { if (a && typeof a === 'object') Object.assign(filters, a); return q; },
+      where: (a, b) => { if (a && typeof a === 'object') Object.assign(filters, a); else if (typeof a === 'string' && b !== undefined) filters[a] = b; return q; },
       whereILike: (col, pat) => { filters.ilike = pat; return q; },
       whereIn: (col, vals) => { filters.in = vals; return q; },
-      whereRaw: (sql, binds) => { filters.raw = [sql, binds]; return q; },
+      whereRaw: (sql, binds) => { filters.raw = [sql, binds]; (filters.raws = filters.raws || []).push([sql, binds]); return q; },
+      join: () => q, whereNot: () => q, forUpdate: () => q,
       first: async () => {
+        if (table === 'expenses' && filters.id) return mockState.existingExpenseIds?.includes(filters.id) ? { id: filters.id } : null;
         if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
+        if (table === 'expenses as x') { mockState.copyFilter = { ...filters }; mockState.copyRaws = filters.raws || []; return mockState.copy || null; }
+        if (table === 'emails') return mockState.me || null;
         if (table === 'expense_categories') return mockState.categories.find((c) => filters.ilike && c.name.toLowerCase().includes(filters.ilike.replace(/%/g, '').toLowerCase())) || null;
         return null;
       },
@@ -49,6 +53,9 @@ beforeEach(() => {
   mockState.vendors = [{ domain: 'acme-cloud.example', vendor_name: 'Acme Cloud', expense_category: 'Software & Technology' }];
   mockState.duplicate = null;
   mockState.lastDuplicateFilter = undefined;
+  mockState.copy = null;
+  mockState.me = null;
+  mockState.existingExpenseIds = [];
   mockState.categories = [{ id: 'cat-sw', name: 'Software & Technology' }];
 });
 
@@ -92,7 +99,7 @@ test('a placeholder name on the invoice falls through to "Unknown Vendor"', asyn
 test('an HTML-only receipt from an unmapped sender takes the sender display name', async () => {
   noPdf();
   await processVendorInvoice({ id: 'e6', gmail_id: 'g', from_address: 'no-reply@mailer.example', from_name: 'Example Mailer', subject: 'Payment received' },
-    { extracted: { invoice_amount: '19.99', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '19.99', invoice_date: '2026-01-15' } });
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Example Mailer', amount: 19.99 }));
 });
 
@@ -105,9 +112,9 @@ test('the same receipt mailed twice links to the first expense instead of insert
 });
 
 test.each([
-  ['the sender display name', { from_name: 'Example Forwarder' }, { invoice_number: 'TEST-0008', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
-  ['the classifier guess', {}, { vendor_name: 'Example Platform', invoice_number: 'TEST-0009', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
-  ['no name at all', {}, { invoice_number: 'TEST-0010', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['the sender display name', { from_name: 'Example Forwarder' }, { invoice_number: 'TEST-0008', payment_status: 'paid', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['the classifier guess', {}, { vendor_name: 'Example Platform', invoice_number: 'TEST-0009', payment_status: 'paid', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['no name at all', {}, { invoice_number: 'TEST-0010', payment_status: 'paid', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
 ])('a vendor name from %s never drives a duplicate match', async (_label, emailExtra, extracted) => {
   mockState.duplicate = { id: 'exp-other-merchant' };
   noPdf();
@@ -145,7 +152,7 @@ test('no duplicate check runs when the vendor name or description would be clipp
 test('the log lines carry ids, never the vendor name', async () => {
   noPdf();
   await processVendorInvoice({ id: 'e13', gmail_id: 'g', from_address: 'a@unmapped.example', from_name: 'Pat Example', subject: 'Receipt' },
-    { extracted: { invoice_amount: '30.00', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '30.00', invoice_date: '2026-01-15' } });
   const logged = JSON.stringify([...mockLogger.info.mock.calls, ...mockLogger.warn.mock.calls, ...mockLogger.error.mock.calls]);
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Pat Example' }));
   expect(logged).not.toContain('Pat Example');
@@ -167,6 +174,106 @@ test('a receipt with no printed date (today fallback) never drives a duplicate m
   expect(mockState.lastDuplicateFilter).toBeUndefined();
 });
 
+test.each([['received'], ['failed'], ['due'], ['none'], [undefined], [null]])('a classifier-amount receipt with payment_status %p is never booked', async (status) => {
+  noPdf();
+  await processVendorInvoice({ id: 'e16', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your payment' },
+    { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15', ...(status ? { payment_status: status } : {}) } });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_paid' })]);
+});
+
+test('a copy of a notice (same sender, same second, same amount) links to the booked expense', async () => {
+  noPdf();
+  mockState.me = { from_address: 'noreply@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Notice: your card has been charged' };
+  mockState.copy = { id: 'exp-first-notice' };
+  await processVendorInvoice({ id: 'e17', gmail_id: 'g', from_address: 'noreply@acme-cloud.example', subject: 'Notice: your card has been charged' },
+    { extracted: { payment_status: 'paid', invoice_amount: '$10.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-first-notice', auto_action: 'expense_duplicate:10' })]);
+});
+
+test('a receipt with a parsed PDF total does not need payment_status', async () => {
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0018', invoice_date: '2026-01-15', total: 30 });
+  await processVendorInvoice({ id: 'e18', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Invoice due: paid in full' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 30 }));
+});
+
+test('a PDF receipt processed after its notice copy links to the booked expense (order does not matter)', async () => {
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Your receipt' };
+  mockState.copy = { id: 'exp-notice-first' };
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0024', invoice_date: '2026-01-15', total: 30 });
+  await processVendorInvoice({ id: 'e24', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your receipt' }, { extracted: {} });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-notice-first' })]);
+});
+
+test('the notice-copy check requires the same sender, second, subject, body and amount', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
+  await processVendorInvoice({ id: 'e19', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'Batch Biller', subject: 'Receipt' },
+    { extracted: { invoice_number: 'TEST-0019', payment_status: 'paid', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+  expect(mockState.copyFilter).toEqual(expect.objectContaining({ 'e.from_address': 'billing@batch.example', 'e.subject': 'Receipt' }));
+  expect(mockState.copyRaws.some(([sql]) => /md5/.test(sql))).toBe(true);
+  expect(mockState.copyRaws.some(([sql]) => /date_trunc\('second'/.test(sql))).toBe(true);
+});
+
+test('a parsed PDF with no total falls back to the classifier amount and keeps the paid check', async () => {
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0021', invoice_date: '2026-01-15' });
+  await processVendorInvoice({ id: 'e21', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: '$12.00 payment to Acme Cloud was unsuccessful' },
+    { extracted: { payment_status: 'failed', invoice_amount: '$12.00' } });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_paid' })]);
+});
+
+test('a reprocessed email that already booked an expense keeps it and inserts nothing', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), expense_id: 'exp-already' };
+  mockState.existingExpenseIds = ['exp-already'];
+  await processVendorInvoice({ id: 'e22', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' },
+    { extracted: { payment_status: 'paid', invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toBeUndefined();
+});
+
+test('a stale link to a deleted expense does not block booking the email again', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), expense_id: 'exp-deleted' };
+  await processVendorInvoice({ id: 'e23', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' },
+    { extracted: { payment_status: 'paid', invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
+});
+
+test('an email with an attachment never takes the copy shortcut (distinct PDF invoices can share one template)', async () => {
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Your invoice', has_attachments: true };
+  mockState.copy = { id: 'exp-other-pdf' };
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0025', invoice_date: '2026-01-15', total: 40 });
+  await processVendorInvoice({ id: 'e25', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 40 }));
+});
+
+test('an impossible ISO classifier date is no date (today fallback, no roll-over)', async () => {
+  noPdf();
+  await processVendorInvoice({ id: 'e29', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { payment_status: 'paid', invoice_amount: '$10.06', invoice_date: '2026-02-31' } });
+  expect(inserted().expense_date).not.toBe('2026-03-03');
+});
+
+test('the copy check compares the text and HTML bodies separately', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
+  await processVendorInvoice({ id: 'e30', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'Batch Biller', subject: 'Receipt' },
+    { extracted: { payment_status: 'paid', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+  const md5 = mockState.copyRaws.map(([sql]) => sql).filter((sql) => /md5/.test(sql));
+  expect(md5).toHaveLength(3);
+  expect(md5.some((sql) => /snippet/.test(sql))).toBe(true);
+  expect(md5.some((sql) => /body_text/.test(sql) && !/body_html/.test(sql))).toBe(true);
+  expect(md5.some((sql) => /body_html/.test(sql) && !/body_text/.test(sql))).toBe(true);
+});
+
+test('a non-string classifier date is no date (no 1970 instant)', async () => {
+  noPdf();
+  await processVendorInvoice({ id: 'e31', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { payment_status: 'paid', invoice_amount: '$10.06', invoice_date: 20260231 } });
+  expect(inserted().expense_date).not.toMatch(/^1970/);
+});
+
 test('vendor keys try the exact sender address before the domains', () => {
   expect(senderVendorKeys('Billing+Acct_1@Pay-Platform.example')).toEqual(['billing+acct_1@pay-platform.example', 'pay-platform.example']);
   expect(senderVendorKeys('nobody')).toEqual([]);
@@ -181,4 +288,19 @@ test('a vendor row for one exact address on a shared billing platform names that
   extraction({ vendor_name: 'Supplier B', invoice_number: 'TEST-0027', invoice_date: '2026-01-15', total: 88 });
   await processVendorInvoice({ id: 'e27', gmail_id: 'g', from_address: 'supplier-b@billing-platform.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Supplier B', category_id: null }));
+});
+
+test('the notice-copy check skips a description too long for its column', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
+  mockState.copy = { id: 'exp-clipped-copy' };
+  await processVendorInvoice({ id: 'e33', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'B'.repeat(250), subject: 'Receipt' },
+    { extracted: { payment_status: 'paid', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 25 }));
+});
+
+test.each(['02/31/2026', 'February 31, 2026', 'September 30, 2026'])('a classifier date not in YYYY-MM-DD form (%s) is no date', async (d) => {
+  noPdf();
+  await processVendorInvoice({ id: 'e34', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { payment_status: 'paid', invoice_amount: '$10.06', invoice_date: d } });
+  expect(inserted().expense_date).not.toMatch(/^2026-0(3-03|9-30)$/);
 });

@@ -57,6 +57,8 @@ const {
   buildReportAskFacts,
   buildReportAskPrompt,
   screenAskAnswer,
+  medicalExposureAnswer,
+  MEDICAL_EXPOSURE_ANSWER,
   placeOfApplication,
   answerReportQuestionWithAI,
 } = require('../services/service-report/report-ask-ai');
@@ -140,7 +142,7 @@ describe('buildReportAskFacts', () => {
 
   test('carries the pressure trend summary and bare index when there is no labeled gauge', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], pressureIndex: 2.4, dynamicContext: { pressureTrend: { customerSummary: 'Pressure is down from your last visit.' } } } });
-    expect(facts.pest_pressure).toEqual({ label: null, trend: null, score_out_of_5: 2.4, what_it_means: null, trend_summary: 'Pressure is down from your last visit.' });
+    expect(facts.pest_pressure).toEqual({ label: null, trend: null, score_out_of_5: 2.4, what_it_means: null, trend_summary: 'Pressure is down from your last visit.', scale: '0 to 5, lower is better' });
   });
 
   test('a missing pressure reading stays missing, never zero', () => {
@@ -411,6 +413,89 @@ describe('screenAskAnswer', () => {
   test('an answer that runs long is rejected', () => {
     expect(screen('We treated the yard. '.repeat(40))).toBe('too_long');
   });
+
+  // The shared owner screen (report-writer-rules.js writerRulesRejection) runs
+  // on every answer: its reasons come through unchanged.
+  test.each([
+    ['The retired brand "Waves Lawn & Pest" shows up.', 'We treated it for you at Waves Lawn & Pest.', 'company_name'],
+    ['The retired brand "Waves Pest Control & Lawn Care"', 'Waves Pest Control & Lawn Care treated the outside.', 'company_name'],
+    ['The retired brand "Waves Lawn Care"', 'Waves Lawn Care handled the outside.', 'company_name'],
+    ['a "-proof" claim', 'The bait is roach-proof.', 'owner_phrase'],
+    ['a property-wide absence', 'No pest activity was observed today.', 'unscoped_absence'],
+    ['a price word', 'The follow-up charge is on your invoice.', 'price'],
+    ['a per-visit price phrase', 'It is billed per visit.', 'per_visit'],
+  ])('shared screen: %s is rejected (%s)', (_label, answer, reason) => {
+    expect(screen(answer)).toBe(reason);
+  });
+
+  test('shared screen: a local absence, recorded re-entry words, a timeframe, a date and a product name pass', () => {
+    expect(screen('None were seen at the dishwasher today.')).toBeNull();
+    expect(screen('Keep pets off the treated areas until they are dry.', 'Can my dog go out?')).toBeNull();
+    expect(screen('Activity can stay up for a few days, and your next visit is Tuesday, January 5, 2027.')).toBeNull();
+    expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
+  });
+
+  test.each([
+    'Your home is child-friendly now.',
+    'The treatment is children friendly.',
+    'It is family-friendly.',
+    'The product is people friendly.',
+    "It is kid-friendly.",
+    'The mix is pet-friendly.',
+  ])('rejects a friendly claim: %s', (answer) => {
+    expect(screen(answer)).toBe('safety claim');
+  });
+
+  test.each([
+    'This will get rid of them.',
+    'The treatment will definitely stop the ants.',
+    'The bait will kill all of the roaches.',
+    'You will not see any more roaches.',
+    "You won't see any more ants after this.",
+    'There will be no more ants in the kitchen.',
+    'After this, no more roaches.',
+  ])('rejects a promise of results: %s', (answer) => {
+    expect(screen(answer)).toBe('result promise');
+  });
+
+  test('"will eliminate" is rejected too (the older overclaim rule names it)', () => {
+    expect(screen('The treatment will eliminate the problem.')).not.toBeNull();
+  });
+
+  test('a plain statement of what the product does is not a promise', () => {
+    expect(screen('It slows ants and roaches at the entry points.')).toBeNull();
+    expect(screen('You may still see a few ants for a few days.')).toBeNull();
+  });
+
+  test.each([
+    'We used three products.',
+    'We used 3 products.',
+    'We made two applications.',
+    'There were four treatments.',
+    'We put down two sprays.',
+  ])('counts of products and applications are rejected: %s', (answer) => {
+    expect(screen(answer)).toBe('count');
+  });
+
+  test('"a few days" and a single product still pass', () => {
+    expect(screen('Activity may stay up for a few days.')).toBeNull();
+    expect(screen('This product goes on the outside of the home.')).toBeNull();
+  });
+
+  test('a list is rejected even though the model put its line breaks first', () => {
+    expect(screen('Summary:\n1. We treated the kitchen.\n2. We checked the garage.')).toBe('markdown');
+    expect(screen('Summary: 1. We treated the kitchen. 2. We checked the garage.')).toBe('markdown');
+    expect(screen('We treated the kitchen.\n- We checked the garage.')).toBe('markdown');
+  });
+
+  test.each([
+    'See wavespestcontrol.com for more.',
+    'Go to example.org/page.',
+    'Visit report.io today.',
+    'Read about it on example.net.',
+  ])('a bare domain is a link: %s', (answer) => {
+    expect(screen(answer)).toBe('link');
+  });
 });
 
 describe('answerReportQuestionWithAI', () => {
@@ -480,6 +565,122 @@ describe('GATE_REPORT_ASK_AI', () => {
     }
     process.env.GATE_REPORT_ASK_AI = 'true';
     expect(featureGates.reportAskAiLive()).toBe(true);
+  });
+});
+
+describe('symptoms and exposure never reach the model', () => {
+  test.each([
+    'The spray made me dizzy',
+    "I am vomiting after today's treatment",
+    'My dog ate something in the yard',
+    'The cat licked the bait station',
+    'I got it in my eyes',
+    "I can't breathe since you sprayed",
+    'My son has a rash on his arm',
+    'My toddler swallowed some of it',
+    'Is it normal that my daughter feels sick after the spray?',
+    'The kids got sick after the treatment',
+    'It burned my skin',
+    'I am having trouble breathing',
+    'I feel lightheaded since this morning',
+    'He passed out in the kitchen',
+  ])('a fixed answer for: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
+  });
+
+  test.each([
+    'Why was Alpine WSG used?',
+    'What did you do about the cockroach?',
+    'Is my lawn looking sick this year?',
+    'The ants ate the bait. Is that normal?',
+    'When can my dog go back outside?',
+    'Are there bee hives near my shed?',
+    'How many numbers are on the pressure scale?',
+    '',
+  ])('no fixed answer for: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+
+  test('the fixed answer: Poison Control, 911, then the office, nothing about safety', () => {
+    expect(MEDICAL_EXPOSURE_ANSWER).toBe(
+      `Please call Poison Control at 1-800-222-1222 now (free, confidential, 24/7). In a medical emergency, call 911. If a pet is affected, call your veterinarian or an emergency animal hospital. Then text us or call Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
+    );
+    expect(MEDICAL_EXPOSURE_ANSWER).not.toMatch(/\bsaf/i);
+  });
+
+  test('the AI entry point answers it without building a fact sheet or calling the model', async () => {
+    const callModel = jest.fn();
+    const out = await answerReportQuestionWithAI({ question: 'The spray made me dizzy', data: reportData(), nextAppointment, now: NOW }, { callModel });
+    expect(out).toEqual({ answer: MEDICAL_EXPOSURE_ANSWER, provider: null, model: null });
+    expect(callModel).not.toHaveBeenCalled();
+  });
+});
+
+describe('prompt and facts, review round 5', () => {
+  test('the prompt lists the garage and entry point values the fact sheet can carry', () => {
+    expect(placeOfApplication('Garage, Entry points')).toBe('the garage and the entry points');
+    expect(placeOfApplication('Entry points')).toBe('the entry points');
+    for (const value of ['the garage', 'the entry points', 'the garage and the entry points']) {
+      expect(SYSTEM_PROMPT).toContain(value);
+    }
+  });
+
+  test('the prompt bans the friendly claims and result promises it screens', () => {
+    expect(SYSTEM_PROMPT).toMatch(/child-, family- or people-friendly/);
+    expect(SYSTEM_PROMPT).toMatch(/you will not see any more/);
+  });
+
+  test('a bare pressure index carries its scale; a labeled gauge does not need one', () => {
+    const bare = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], pressureIndex: 1.5 } });
+    expect(bare.pest_pressure).toMatchObject({ score_out_of_5: 1.5, scale: '0 to 5, lower is better' });
+    const gauge = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], pestPressure: { label: 'Low', score: 1 } } });
+    expect(gauge.pest_pressure.scale).toBeUndefined();
+  });
+
+  test.each([
+    ['12 Example Boulevard', '12 Example Boulevard'],
+    ['44 Palm Terrace', '44 Palm Terrace'],
+    ['55 State Parkway', '55 State Parkway'],
+    ['7 Oak Trail', '7 Oak Trail'],
+    ['9 Bay Pointe', '9 Bay Pointe'],
+    ['21 Harbor Crossing', '21 Harbor Crossing'],
+    ['30 Heron Cove', '30 Heron Cove'],
+    ['4 Sample Hwy', '4 Sample Hwy'],
+    ['18 Test Ln', '18 Test Ln'],
+    ['18 Test Ave', '18 Test Ave'],
+    ['18 Test St.', '18 Test St'],
+  ])('masks the street address %s', (address) => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `Ants at ${address}, near the lanai` } });
+    expect(facts.customer_concern).toBe('Ants at [address], near the lanai');
+  });
+});
+
+describe('scripts/dev/report-ask-prompt.js', () => {
+  const { execFileSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const script = path.resolve(__dirname, '../../scripts/dev/report-ask-prompt.js');
+  const run = (payload) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ask-prompt-'));
+    const file = path.join(dir, 'report.json');
+    fs.writeFileSync(file, JSON.stringify(payload));
+    try {
+      return JSON.parse(execFileSync('node', [script, file, 'When is my next visit?'], { encoding: 'utf8' }));
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  };
+  const camel = { serviceType: 'Quarterly Pest Control', scheduledDate: '2027-01-05', windowStart: '09:00:00' };
+
+  test('a bare report and a wrapped one read the same camelCase nextAppointment', () => {
+    const bare = run({ serviceLine: 'pest', applications: [], nextAppointment: camel });
+    const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: camel });
+    expect(bare.user).toContain('Tuesday, January 5, 2027');
+    expect(wrapped.user).toBe(bare.user);
+  });
+
+  test('a wrapped route-shaped (snake_case) appointment still works', () => {
+    const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: { service_type: 'Quarterly Pest Control', scheduled_date: '2027-01-05', window_start: '09:00:00' } });
+    expect(wrapped.user).toContain('Tuesday, January 5, 2027');
   });
 });
 
@@ -700,6 +901,29 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
       const { status, body } = await ask(baseUrl, QUESTION);
       expect(status).toBe(200);
       expect(body).toEqual({ answer: rulesAnswer });
+    });
+  });
+
+  test.each(['on', 'off'])('gate %s, a symptom question: the fixed Poison Control answer and no model call', async (gate) => {
+    if (gate === 'on') process.env.GATE_REPORT_ASK_AI = 'true'; else delete process.env.GATE_REPORT_ASK_AI;
+    const { eventInsert } = mockDb();
+    const q = 'The spray made me dizzy';
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, q);
+      expect(status).toBe(200);
+      expect(body).toEqual({ answer: MEDICAL_EXPOSURE_ANSWER });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'applied' });
+  });
+
+  test('a symptom question on a lawn report gets the fixed answer too', async () => {
+    delete process.env.GATE_REPORT_ASK_AI;
+    buildReportV1Data.mockResolvedValue({ serviceLine: 'lawn', applications: [] });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, 'My dog ate some of the granules');
+      expect(body).toEqual({ answer: MEDICAL_EXPOSURE_ANSWER });
     });
   });
 
