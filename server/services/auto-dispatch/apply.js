@@ -21,7 +21,7 @@ const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
-const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
+const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL (owner-approved 2026-09-26, dispatch
@@ -274,6 +274,12 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
+    // A person may have placed this visit since pass 1 (even back onto the
+    // same slot, which the field CAS cannot see): re-read its history on the
+    // move transaction (Codex #6055 r5).
+    const placed = await isPersonPlacedVisit(row, trx);
+    if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
+    if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
@@ -320,6 +326,13 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
     if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
     const plan = await isRecurringPlanActive(r, trx);
     if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
+    // A grouped move drags every member, so a member a person placed
+    // protects the whole visit, whichever member the run evaluated.
+    const placed = await isPersonPlacedVisit(r, trx);
+    // An unreadable history is a failure, not a refusal: it must reach the
+    // run's failed count (previewGroupMove rethrows any non-409 error).
+    if (placed.degraded) throw new Error(`grouped service ${r.id}: ${placed.reason_description}`);
+    if (placed.placed) throw refuse(r.id, `was placed by a person (${placed.reason_code}: ${placed.reason_description})`);
   }
 }
 
