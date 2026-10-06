@@ -162,6 +162,12 @@ describe('deterministic lines', () => {
     expect(FINDING_OF_PHOTO_LABEL).not.toHaveProperty(['a lawn condition we are monitoring']);
   });
 
+  test('a long catalog product name is printed whole, never cut (Codex r1: an 82-character row exists)', () => {
+    const name = 'LESCO Dimension 0.10% Plus Fertilizer 16-0-8 with 50% Polyon Slow Release Nitrogen Fertilizer';
+    expect(name.length).toBeGreaterThan(80);
+    expect(textFor({ technicianNote: '', products: [{ name }] }, [])).toBe(`Today we applied ${name}.`);
+  });
+
   test('the products line lists display names only, up to five', () => {
     const many = ['A1', 'B2', 'C3', 'D4', 'E5', 'F6'].map((name) => ({ name }));
     expect(textFor({ technicianNote: '', products: many }, [])).toBe('Today we applied A1, B2, C3, D4 and E5.');
@@ -176,7 +182,7 @@ describe('deterministic lines', () => {
     const slots = {
       observed: longest(CONDITIONS).slice(0, 3).map((condition) => ({ condition, place: longest(PLACES)[0] })),
       maybe: Object.keys(FINDING_LABELS).sort((a, b) => FINDING_LABELS[b].length - FINDING_LABELS[a].length).slice(0, 2),
-      products: ['A', 'B', 'C', 'D', 'E'].map((c) => `${c}${'x'.repeat(79)}`),
+      products: ['A', 'B', 'C', 'D', 'E'].map((c) => `${c}${'x'.repeat(tech.MAX_PRODUCT_NAME_CHARS - 1)}`),
     };
     const text = tech.render(slots);
     expect(text.length).toBeLessThanOrEqual(tech.MAX_TEXT_CHARS);

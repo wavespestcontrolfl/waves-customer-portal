@@ -13,8 +13,8 @@
  *   node server/scripts/lawn-tech-paragraph-replay.js <inputs.json> --answer <answer.json | ->
  *       runs the answer ({ "observations": [{ "condition": "chinch_bugs", "place": "front_lawn",
  *       "quote": "...", "seenToday": true }] }) and prints ACCEPTED (with the paragraph it
- *       would freeze) or REJECTED (with every reason);
- *       exit 0 accepted, 1 rejected, 2 bad usage
+ *       would freeze), NO PARAGRAPH (nothing to say) or REJECTED (with every reason);
+ *       exit 0 accepted, 1 rejected or no paragraph, 2 bad usage
  *
  * The inputs file is the normalized inputs shape (see server/scripts/fixtures/
  * lawn-tech-paragraph/chinch-bug-arena.json). Keys starting with "_" are ignored.
@@ -54,6 +54,12 @@ function main(argv) {
     return 0;
   }
   const verdict = tech.validateExtraction(readJson(answerFile, 'answer'), inputs);
+  // Same as production: a good answer with nothing to render is no paragraph (the
+  // completion step freezes a never-printed marker), not an acceptance.
+  if (verdict.ok && !verdict.paragraph) {
+    console.log('NO PARAGRAPH (nothing to say)');
+    return 1;
+  }
   if (verdict.ok) {
     console.log('ACCEPTED');
     console.log(verdict.paragraph);

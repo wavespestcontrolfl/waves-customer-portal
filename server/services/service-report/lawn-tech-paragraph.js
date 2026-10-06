@@ -42,11 +42,13 @@ const MAX_NOTE_CHARS = 1500;
 const MAX_OBSERVATIONS = 3;
 const MAX_MAYBE = 2;
 const MAX_PRODUCTS = 5;
-const MAX_PRODUCT_NAME_CHARS = 80;
+// The applied product's full display name, never cut (lawn-visit-memory.js keeps up
+// to 200; an 82-character catalog row exists).
+const MAX_PRODUCT_NAME_CHARS = 200;
 const MAX_QUOTE_CHARS = 200;
 // The longest text any valid slots can render (pinned by a test): the read-time
 // guard must never reject a paragraph the renderer can legally write.
-const MAX_TEXT_CHARS = 1000;
+const MAX_TEXT_CHARS = 1600;
 
 /**
  * EVERY sentence the paragraph can contain (owner approved 2026-10-06). Change it
@@ -366,6 +368,7 @@ module.exports = {
   FINDING_LABELS,
   FINDING_OF_PHOTO_LABEL,
   MAX_TEXT_CHARS,
+  MAX_PRODUCT_NAME_CHARS,
   SYSTEM_PROMPT,
   normalizeInputs,
   buildPrompt,
