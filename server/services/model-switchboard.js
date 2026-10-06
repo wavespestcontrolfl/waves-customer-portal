@@ -405,7 +405,7 @@ const LANES = [
   // issue at 0 approved events); normalizing stays on contentDraft. Two
   // laneIds means two lane rows, matching hero_alt/image_screen's precedent
   // for one file's two policies.
-  L('events_curation', 'Community events curation (scoring)', 'event-curation.js', 'fastText', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback')),
+  L('events_curation', 'Community events curation (scoring)', 'event-curation.js', 'fastText', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: "newsletterWriter's model at effort 'high' (owner 2026-10-05; the newsletter writer stays at 'max')" }),
   L('events_editorial', 'Community events normalizing (venue/type cleanup)', 'event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'flagship: Sonnet 5.5 filed equipment as Depreciation in the 2026-10-04 bake-off (owner kept it on Opus)' }),
 
