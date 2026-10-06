@@ -140,7 +140,7 @@ class ApplicationLimitChecker {
       }
 
       case 'annual_max_rate': {
-        if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, ctx, database);
+        if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, { ...ctx, proposedDate }, database);
         const totalApplied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
         const maxRate = limitValue;
         if (totalApplied >= maxRate * 0.95) return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
@@ -217,6 +217,9 @@ class ApplicationLimitChecker {
       })
       .where('pah.customer_id', ctx.customerId)
       .where('pah.application_date', '>=', ctx.yearStart)
+      // Applications on or before the date judged: a backdated January completion is not
+      // counted against October's application, which had not happened yet.
+      .where('pah.application_date', '<=', etCalendarDayOf(ctx.proposedDate))
       .whereNull('pah.retracted_at')
       .where(function sharesIngredient() {
         this.whereRaw('pc.active_ingredient ILIKE ?', [like]).orWhereRaw('pah.active_ingredient ILIKE ?', [like]);
