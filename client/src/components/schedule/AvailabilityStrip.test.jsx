@@ -149,7 +149,7 @@ describe('AvailabilityStrip', () => {
   it('names the technician on an all-technician search', () => {
     const days = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 0, { technicianName: 'Fixture Tech' })] }];
     render(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="12:00" onPick={() => {}} />);
-    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AMno added driveFixture Tech');
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added driveFixture Tech');
   });
 });
 
@@ -267,6 +267,13 @@ describe('best-times rows', () => {
 
   it('the "~" note shows on a strip without the rows too (Codex #6045 r4)', () => {
     render(<AvailabilityStrip availability={answer({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+  });
+
+  it('a model "no added drive" is marked and explained too (Codex #6045 r7)', () => {
+    const days = [{ date: '2035-01-02', status: 'open', hours: [hour('2035-01-02', '09:00', 0)] }];
+    render(<AvailabilityStrip availability={answer(null, days)} currentDate="2035-01-02" currentStart="10:00" onPick={() => {}} />);
+    expect(screen.getAllByTestId('availability-hour')[0].textContent).toBe('9 AM~no added drive');
     expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
   });
 

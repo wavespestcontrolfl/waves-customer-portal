@@ -628,6 +628,23 @@ async function loadSummaryDayFacts(plan, technicianId) {
 const SUMMARY_SLOW_MS = 1500;
 
 /** The response's `summary` for a summary plan; undefined for any other. */
+// The day list shows the same hours as the chips: give each hour that is
+// also a chip the chip's road-priced numbers and rain, so one hour never
+// shows two drive times (Codex #6045 r7).
+function withChipValues(days, rows) {
+  const chipKey = (date, h) => `${date}|${h.start_time}|${h.technician?.id ?? ''}`;
+  const chips = new Map([...rows.day, ...rows.week].map((c) => [chipKey(c.date, c), c]));
+  return days.map((day) => ({
+    ...day,
+    hours: day.hours.map((h) => {
+      const c = chips.get(chipKey(day.date, h));
+      return c ? {
+        ...h, drive_in_minutes: c.drive_in_minutes, detour_minutes: c.detour_minutes, drive_source: c.drive_source, rain_chance: c.rain_chance,
+      } : h;
+    }),
+  }));
+}
+
 // Returns { summary, picked }: the summary (undefined for any other plan)
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
@@ -645,7 +662,7 @@ async function buildHintSummary(plan, everyStart, {
     logger.warn(`[find-time] summary search slow: ${elapsedMs}ms for ${plan.from}..${plan.to}`);
   }
   if (!best) return { summary: { days, elapsed_ms: elapsedMs }, picked };
-  return { summary: { days, best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
+  return { summary: { days: withChipValues(days, best.rows), best: best.rows, elapsed_ms: elapsedMs }, picked: best.picked };
 }
 
 module.exports = {

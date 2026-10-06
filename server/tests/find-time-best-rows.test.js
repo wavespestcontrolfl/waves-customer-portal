@@ -203,58 +203,62 @@ describe('opt-in', () => {
   });
 });
 
-describe('capacity-mode chips (Codex #6045 r3)', () => {
+describe('capacity-mode chips (Codex #6045 r3-r7)', () => {
   const { _internals: { capacityLegs } } = require('../services/scheduling/find-time');
-  const rows = new Map([['a', { id: 'a', ...PREV }], ['b', { id: 'b', ...NEXT }]]);
   const target = { id: 't', ...NEW };
 
-  test('a middle stop carries its drive in and both neighbours', () => {
+  test('a middle stop shows the drive its own simulation drove', () => {
     const fit = { arrivals: [
-      { id: 'a', arrival: '11:00', departure: '12:00', drive: 10 }, { id: 't', arrival: '12:19', departure: '12:49', drive: 19 }, { id: 'b', arrival: '14:00', departure: '15:00', drive: 30 },
+      { id: 'a', arrival: '11:00', departure: '12:00', drive: 10 }, { id: 't', arrival: '12:19', departure: '12:49', drive: 19 },
     ] };
-    const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
-    expect(legs.driveIn).toBe(19);
-    expect(legs.fromHome).toBe(false);
-    expect(legs.gap).toMatchObject({ prev: PREV, next: NEXT, prevEndMin: 720, prevIsHome: false, durationMinutes: 30, outDepartureMin: 769 });
+    expect(capacityLegs({ fit, target })).toEqual({ driveIn: 19, fromHome: false });
   });
 
-  test('the first stop drives in from the route origin, leaving at its start clock (r4)', () => {
-    const fit = {
-      origin: { lat: 27.43, lng: -82.41, isHome: true }, originDepartureMin: 8 * 60,
-      arrivals: [{ id: 't', arrival: '08:31', departure: '09:00', drive: 31 }, { id: 'a', arrival: '10:00', departure: '11:00', drive: 20 }],
-    };
-    const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
-    expect(legs.driveIn).toBe(31);
-    expect(legs.fromHome).toBe(true);
-    expect(legs.gap).toMatchObject({ prev: { lat: 27.43, lng: -82.41 }, prevEndMin: 480, prevIsHome: false, next: PREV });
+  test('waiting for the window is not driving', () => {
+    const fit = { origin: { isHome: true }, arrivals: [{ id: 't', arrival: '12:00', departure: '12:30', drive: 20 }] };
+    expect(capacityLegs({ fit, target })).toEqual({ driveIn: 20, fromHome: true });
   });
 
-  test("a first stop after today's completed visit starts from that visit, not home", () => {
-    const fit = {
-      origin: { lat: 27.40, lng: -82.45, isHome: false }, originDepartureMin: 13 * 60,
-      arrivals: [{ id: 't', arrival: '13:20', departure: '14:00', drive: 20 }],
-    };
-    const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
-    expect(legs).toMatchObject({ driveIn: 20, fromHome: false });
-    expect(legs.gap.next).toEqual({ lat: expect.any(Number), lng: expect.any(Number) });
+  test("a first stop after today's completed visit does not claim home base", () => {
+    const fit = { origin: { isHome: false }, arrivals: [{ id: 't', arrival: '13:20', departure: '14:00', drive: 20 }] };
+    expect(capacityLegs({ fit, target })).toEqual({ driveIn: 20, fromHome: false });
   });
 
-  test('waiting for the window is not driving (r5)', () => {
-    const fit = {
-      origin: { lat: 27.43, lng: -82.41, isHome: true }, originDepartureMin: 8 * 60,
-      arrivals: [{ id: 't', arrival: '12:00', departure: '12:30', drive: 20 }],
-    };
-    expect(capacityLegs({ fit, byId: rows, target, durationMinutes: 30 }).driveIn).toBe(20);
+  test('no known origin: no drive in', () => {
+    const fit = { arrivals: [{ id: 't', arrival: '08:30', departure: '09:00', drive: 30 }] };
+    expect(capacityLegs({ fit, target })).toEqual({ driveIn: null, fromHome: null });
   });
 
-  test('the outbound leg leaves at the simulated departure (r5)', () => {
-    const chip = hour('2026-10-08', '12:00', 34, 19);
-    chip[GAP_LEGS] = { ...chip[GAP_LEGS], outDepartureMin: 13 * 60 + 40 };
-    expect(_test.chipLegs(chip).out.departureMin).toBe(13 * 60 + 40);
+  test('a capacity chip keeps the source its simulation priced it with; it is never re-priced', async () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    try {
+      const chip = { date: '2026-10-08', start_time: '12:00', end_time: '13:00', detour_minutes: 30, drive_in_minutes: 18, drive_source: 'google' };
+      const factory = jest.fn();
+      const [out] = await priceChipsOnRoads([chip], { travelFactory: factory });
+      expect(out).toMatchObject({ drive_in_minutes: 18, drive_source: 'google' });
+      expect(factory).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
+    }
   });
+});
 
-  test('no known origin: no drive in, no road legs', () => {
-    const fit = { arrivals: [{ id: 't', arrival: '08:30', departure: '09:00' }] };
-    expect(capacityLegs({ fit, byId: rows, target, durationMinutes: 30 })).toEqual({ driveIn: null, fromHome: null, gap: undefined });
+describe('the day list matches the chips (Codex #6045 r7)', () => {
+  test('an hour that is also a chip carries the chip numbers and rain', async () => {
+    const plan = { summary: true, from: '2026-10-08', to: '2026-10-08', verdictDate: '2026-10-08' };
+    jest.resetModules();
+    jest.doMock('../services/scheduling/hint-road-times', () => ({
+      priceChipsOnRoads: async (chips) => chips.map((c) => ({ ...c, drive_in_minutes: 21, drive_source: 'google' })),
+    }));
+    jest.doMock('../services/weather-forecast', () => ({ getHourlyRainOutlook: async () => [{ startTime: '2026-10-08T12:00:00-04:00', rainChance: 30 }] }));
+    const hints = require('../services/scheduling/find-time-hints');
+    const { GAP_LEGS: LEGS } = require('../services/scheduling/find-time');
+    const slot = { ...hour('2026-10-08', '12:00', 34, 19), [LEGS]: hour('2026-10-08', '12:00', 34, 19)[GAP_LEGS] };
+    const out = await hints.buildHintSummary(plan, [slot], {
+      startedAt: Date.now(), today: '2026-10-06', target: { lat: 1, lng: 2 }, picked: null, spanMin: 60, bestRows: true,
+    });
+    expect(out.summary.days[0].hours[0]).toMatchObject({ drive_in_minutes: 21, drive_source: 'google', rain_chance: 30 });
+    jest.dontMock('../services/scheduling/hint-road-times');
+    jest.dontMock('../services/weather-forecast');
   });
 });

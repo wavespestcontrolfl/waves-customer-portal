@@ -353,7 +353,9 @@ router.post('/', async (req, res) => {
       topN: hint ? Number.POSITIVE_INFINITY : requestedTopN,
       // A hint fires on every pick in every staff form; it must not spend
       // the Google drive-time allowance customer booking depends on.
-      ...(hint ? { providerTravel: false } : {}),
+      // New Appointment's rows with GATE_BEST_TIMES_ROAD_TIMES: a capacity
+      // search prices its simulated legs on the picker's own allowance.
+      ...(hint ? { providerTravel: bestRows === true && gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES') ? 'hint' : false } : {}),
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit

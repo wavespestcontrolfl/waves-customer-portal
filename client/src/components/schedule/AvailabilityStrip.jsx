@@ -60,7 +60,7 @@ export function drivePhrase(detourMinutes) {
 // (driveSource 'google') carries none (Codex #6045 r1).
 const isEstimate = (hour) => hour.driveSource !== 'google';
 // A chip that shows a "~" number: a model drive-in or a model added drive.
-const showsEstimate = (hour) => isEstimate(hour) && (hour.driveInMinutes != null || Number(hour.detourMinutes) > 0);
+const showsEstimate = (hour) => isEstimate(hour) && (hour.driveInMinutes != null || hour.detourMinutes != null);
 
 export function driveHerePhrase(hour) {
   const mins = Math.round(Number(hour.driveInMinutes));
@@ -70,7 +70,7 @@ export function driveHerePhrase(hour) {
 
 function addedPhrase(hour) {
   const added = drivePhrase(hour.detourMinutes);
-  return added && added.startsWith('+') && isEstimate(hour) ? `~${added}` : added;
+  return added && isEstimate(hour) ? `~${added}` : added;
 }
 
 export function rainPhrase(rainChance) {

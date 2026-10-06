@@ -68,10 +68,7 @@ function chipLegs(chip, nowEt = null) {
   const leaveForIn = g.prevIsHome ? Math.max(0, startMin - modelIn) : g.prevEndMin;
   return {
     in: notBefore({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, nowEt),
-    out: notBefore({
-      date: chip.date, from: g.newStop, to: g.next,
-      departureMin: Number.isFinite(g.outDepartureMin) ? g.outDepartureMin : startMin + (g.durationMinutes || 0),
-    }, nowEt),
+    out: notBefore({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, nowEt),
     base: notBefore({ date: chip.date, from: g.prev, to: g.next, departureMin: g.prevEndMin }, nowEt),
   };
 }
@@ -90,7 +87,9 @@ function etNow(ms) {
  * Never throws.
  */
 async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() } = {}) {
-  const estimate = (c) => ({ ...c, drive_source: 'estimate' });
+  // A chip that already carries its source (a capacity slot, priced inside
+  // its own simulation) keeps it; only gap chips are re-priced here.
+  const estimate = (c) => ({ ...c, drive_source: c.drive_source || 'estimate' });
   if (!Array.isArray(chips) || !chips.length) return [];
   if (!gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES')) return chips.map(estimate);
   try {
