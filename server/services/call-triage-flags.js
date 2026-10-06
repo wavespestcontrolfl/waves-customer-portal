@@ -715,13 +715,17 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 //      missing address there blocks nothing and is nobody's work. A new
 //      service ask (any other service_intent), a quote, or any time asked,
 //      offered or confirmed keeps them. out_of_service_area is never touched.
-//   4. caller_not_authorized for callers the owner treats as authorized: a
-//      family member (owner ruling 2026-09-28 — any service, with or without
-//      a time agreed), a client's own employee (commercial jobs keep their own
-//      commercial_requires_quote hold), and a realtor / lender / buyer
-//      arranging a WDO inspection (owner ruling 2026-09-26). Tenants,
-//      property managers, HOA members and "other" keep the card.
-//   5. missing_last_name when the linked customer record already has one.
+//   4. caller_not_authorized on a call that asked for no visit time (status
+//      none / canceled) from a caller the owner treats as authorized: a
+//      family member (owner ruling 2026-09-28), a client's own employee, or a
+//      realtor / lender / buyer arranging a WDO inspection (owner ruling
+//      2026-09-26). With no time asked there is nothing to authorize. Any
+//      time requested, offered or confirmed keeps the card: there the flag
+//      may still be the routing veto, and the card is the only trace of the
+//      unbooked visit (confirmed family / WDO-arranger bookings are already
+//      cleared upstream by isAuthorizedFamilyMemberBooking /
+//      isAuthorizedWdoArrangerBooking). Tenants, property managers, HOA
+//      members and "other" keep the card.
 const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
 const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
 const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address', 'address_unverified', 'low_confidence_address']);
@@ -735,7 +739,7 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction, { knownLastName = null } = {}) {
+function dropUnneededCallCards(flags, extraction) {
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set();
   const has = (f) => list.includes(f);
@@ -745,16 +749,17 @@ function dropUnneededCallCards(flags, extraction, { knownLastName = null } = {})
   } else if (has('reschedule_or_cancel')) {
     dropped.add('existing_appointment_coordination');
   }
-  if (String(extraction?.scheduling?.status || 'none') === 'none') dropped.add('existing_appointment_coordination');
+  const status = String(extraction?.scheduling?.status || 'none');
+  if (status === 'none') dropped.add('existing_appointment_coordination');
   if (callMakesNoServiceAsk(extraction)) {
     for (const f of NO_ASK_ADDRESS_CARDS) dropped.add(f);
   }
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
-  if (AUTHORIZED_THIRD_PARTY_RELATIONSHIPS.has(relationship)
-      || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {}))) {
+  if (SCHEDULING_NO_ASK_STATUSES.has(status)
+      && (AUTHORIZED_THIRD_PARTY_RELATIONSHIPS.has(relationship)
+        || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {})))) {
     dropped.add('caller_not_authorized');
   }
-  if (String(knownLastName || '').trim()) dropped.add('missing_last_name');
   const kept = list.filter((f) => !dropped.has(f));
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
 }

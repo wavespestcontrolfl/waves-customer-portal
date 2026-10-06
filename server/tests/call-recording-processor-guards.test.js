@@ -1071,16 +1071,16 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
 
   test('summarizes a known caller for the extraction prompt', () => {
     expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won' }))
-      .toEqual({ name: 'Uma Satyendra', lastName: 'Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: false, pipelineStage: 'won', addressTrusted: true, addressOnly: false, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: false, pipelineStage: 'won', addressTrusted: true, addressOnly: false, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
     expect(summarizeKnownCaller({ first_name: 'Uma', last_name: 'Satyendra', pipeline_stage: 'won', address_line1: '123 Main St', address_line2: 'Apt 4', city: 'Venice', state: 'FL', zip: '34285' }))
-      .toEqual({ name: 'Uma Satyendra', lastName: 'Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: true, pipelineStage: 'won', addressTrusted: true, addressOnly: false, addressLine1: '123 Main St', addressLine2: 'Apt 4', addressCity: 'Venice', addressState: 'FL', addressZip: '34285' });
+      .toEqual({ name: 'Uma Satyendra', accountType: 'established_customer', isExistingCustomer: true, hasAddress: true, pipelineStage: 'won', addressTrusted: true, addressOnly: false, addressLine1: '123 Main St', addressLine2: 'Apt 4', addressCity: 'Venice', addressState: 'FL', addressZip: '34285' });
     expect(summarizeKnownCaller({ first_name: 'Jake', pipeline_stage: 'new_lead' }))
-      .toEqual({ name: 'Jake', lastName: null, accountType: 'open_lead', isExistingCustomer: false, hasAddress: false, pipelineStage: 'new_lead', addressTrusted: false, addressOnly: false, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
+      .toEqual({ name: 'Jake', accountType: 'open_lead', isExistingCustomer: false, hasAddress: false, pipelineStage: 'new_lead', addressTrusted: false, addressOnly: false, addressLine1: null, addressLine2: null, addressCity: null, addressState: null, addressZip: null });
     // Terminal/lapsed stages classify as established for the PROMPT but never
     // earn fail-open trust (codex r10 P2): stale on-file data must not clear
     // address/confidence blockers.
     expect(summarizeKnownCaller({ first_name: 'Old', pipeline_stage: 'churned', address_line1: '9 Stale St' }))
-      .toEqual({ name: 'Old', lastName: null, accountType: 'established_customer', isExistingCustomer: false, hasAddress: true, pipelineStage: 'churned', addressTrusted: false, addressOnly: false, addressLine1: '9 Stale St', addressLine2: null, addressCity: null, addressState: null, addressZip: null });
+      .toEqual({ name: 'Old', accountType: 'established_customer', isExistingCustomer: false, hasAddress: true, pipelineStage: 'churned', addressTrusted: false, addressOnly: false, addressLine1: '9 Stale St', addressLine2: null, addressCity: null, addressState: null, addressZip: null });
     expect(summarizeKnownCaller({ first_name: 'Ann', pipeline_stage: 'active_customer' }).isExistingCustomer).toBe(true);
     expect(summarizeKnownCaller({ first_name: 'Amy', pipeline_stage: 'at_risk' }).isExistingCustomer).toBe(true);
     expect(summarizeKnownCaller(null)).toBeNull();

@@ -1249,6 +1249,56 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
   return sameDayWindowElapsed(scheduledDate, start);
 }
 
+// Spelled-email trust (owner ruling 2026-10-05) applies only to an address no
+// OTHER contact already owns — the same ownership gate the decoder adopt and
+// the domain-typo adopt use. An address the primary extractor captured
+// itself never went through those adopt paths, so it is checked here before
+// the read-back card (and with it the first-touch hold) is dropped. Fails
+// closed: a failed lookup keeps the card.
+async function spelledEmailTrusted({ call, contactPhone, extracted, dictationEmailPayload, correctedEmail }) {
+  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
+  const ownCustomerId = call.customer_id
+    || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+    || null;
+  const ownedElsewhere = await require('./email-bounce-recovery')
+    .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), ownCustomerId)
+    .catch(() => true);
+  return !ownedElsewhere;
+}
+
+// Retires the OPEN cards an earlier pass filed for reasons this pass's
+// dropUnneededCallCards found unneeded (force-reprocess convergence). Same
+// shape as fileSkippedBookingCard: its own transaction, the shared per-call
+// triage lock first, then the processing-token fence, then the
+// review_status aggregate. in_progress (human-claimed) cards are never
+// touched. Best-effort: a failure leaves the old cards, as before.
+async function retireUnneededCallCards({ call, procToken, reasons, callSid }) {
+  if (!reasons.length) return;
+  try {
+    await db.transaction(async (trx) => {
+      await lockTriageCall(trx, call.id);
+      const stillOwner = await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
+      if (!stillOwner) return;
+      const now = new Date();
+      const retired = await trx('triage_items')
+        .where({ call_log_id: call.id, status: 'open' })
+        .whereIn('reason_code', reasons)
+        .update({
+          status: 'dismissed',
+          resolution_source: 'auto',
+          resolution_rule: 'unneeded_card',
+          resolution_note: 'Reprocess: nothing for the office to do on this call',
+          resolved_at: now,
+          updated_at: now,
+        })
+        .returning('id');
+      if (retired.length) await syncCallReviewStatus(trx, call.id);
+    });
+  } catch (e) {
+    logger.warn(`[call-proc] unneeded-card retire skipped for ${maskSid(callSid)}: ${e.message}`);
+  }
+}
+
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
 // each opened an identical shadow/legacy-mode "approved but unbooked" review
 // card in their own copy-pasted block — lock the call, check ownership under
@@ -1568,9 +1618,6 @@ function summarizeKnownCaller(customer) {
   const hasAddress = !!String(customer.address_line1 || '').trim();
   return {
     name: name || null,
-    // The record's own surname: a missing_last_name card for a caller whose
-    // record already carries one is noise (dropUnneededCallCards).
-    lastName: String(customer.last_name || '').trim() || null,
     // The matched row's identity — carried alongside the on-file address so a
     // fail-open proof computed against THIS customer can be checked against
     // whichever customer Step 3's canonical resolution retains before the
@@ -11310,9 +11357,13 @@ const CallRecordingProcessor = {
           // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
           // cards only; finalFlags, the route decision and the routing
           // verdict keep every flag.
-          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { knownLastName: knownCaller?.lastName }).dropped);
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction).dropped);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
+            // A force-reprocess must converge to the new card set: an OPEN
+            // card an earlier pass filed for a reason this pass finds
+            // unneeded is retired (human-claimed in_progress cards stay).
+            await retireUnneededCallCards({ call, procToken, reasons: [...unneededCards], callSid });
           }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
@@ -11521,7 +11572,7 @@ const CallRecordingProcessor = {
             // set, so without this loop it would appear on no card at all.
             // Mirrors the allowed branch's fail-open advisory loop; onConflict
             // dedups against any same-reason row.
-            for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
+            for (const f of (routingResult.failedOpenFlags || []).filter((x) => !unneededCards.has(x)).slice(0, 10)) {
               try {
                 await db('triage_items')
                   .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11549,7 +11600,7 @@ const CallRecordingProcessor = {
             // (phone via ANI, garbled email, on-file address, low confidence) —
             // book-and-flag, never book-and-hide (owner directive).
             if (routingResult.failedOpenFlags?.length) {
-              for (const f of routingResult.failedOpenFlags) {
+              for (const f of routingResult.failedOpenFlags.filter((x) => !unneededCards.has(x))) {
                 try {
                   await db('triage_items')
                     .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11746,7 +11797,7 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
         // and it is the address being saved — no read-back card, no hold.
-        if (spelledEmailSettled(dictationEmailPayload, extracted.email, normalizedEmail)) {
+        if (await spelledEmailTrusted({ call, contactPhone, extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
           const at = needsConfirmation.indexOf('email_unverified');
           if (at !== -1) needsConfirmation.splice(at, 1);
         }
@@ -11961,7 +12012,7 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
         // shadow branch.
-        if (spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) {
+        if (await spelledEmailTrusted({ call, contactPhone, extracted, dictationEmailPayload, correctedEmail })) {
           const at = emailReasons.indexOf('email_unverified');
           if (at !== -1) emailReasons.splice(at, 1);
         }

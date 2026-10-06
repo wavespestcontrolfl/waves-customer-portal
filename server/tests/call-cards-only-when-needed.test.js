@@ -63,15 +63,21 @@ describe('dropUnneededCallCards', () => {
     expect(r.flags).toEqual(['out_of_service_area']);
   });
 
-  test('family members and client employees are authorized callers', () => {
-    expect(dropUnneededCallCards(['caller_not_authorized'], ext({ relationship: 'family_member', status: 'offered' })).flags).toEqual([]);
-    expect(dropUnneededCallCards(['caller_not_authorized'], ext({ relationship: 'employee', status: 'requested' })).flags).toEqual([]);
+  test('family members and client employees need no authorization card when no time was asked', () => {
+    expect(dropUnneededCallCards(['caller_not_authorized'], ext({ relationship: 'family_member', status: 'none' })).flags).toEqual([]);
+    expect(dropUnneededCallCards(['caller_not_authorized'], ext({ relationship: 'employee', status: 'canceled' })).flags).toEqual([]);
   });
 
-  test('a realtor arranging a WDO inspection is authorized; a realtor asking for treatment is not', () => {
-    const wdo = ext({ relationship: 'real_estate_agent', status: 'requested', intent: 'inspection_only', service: { primary_service_category: 'wdo', specific_service_name: 'WDO Inspection' } });
+  test('an authorization card stays whenever a time was asked, offered or confirmed', () => {
+    for (const status of ['requested', 'offered', 'confirmed', 'ambiguous']) {
+      expect(dropUnneededCallCards(['caller_not_authorized'], ext({ relationship: 'family_member', status })).flags).toEqual(['caller_not_authorized']);
+    }
+  });
+
+  test('a realtor arranging a WDO inspection with no time asked needs no card; a realtor asking for treatment keeps it', () => {
+    const wdo = ext({ relationship: 'real_estate_agent', status: 'none', intent: 'inspection_only', service: { primary_service_category: 'wdo', specific_service_name: 'WDO Inspection' } });
     expect(dropUnneededCallCards(['caller_not_authorized'], wdo).flags).toEqual([]);
-    const treat = ext({ relationship: 'real_estate_agent', status: 'requested', service: { primary_service_category: 'pest_general', specific_service_name: 'General Pest Control' } });
+    const treat = ext({ relationship: 'real_estate_agent', status: 'none', service: { primary_service_category: 'pest_general', specific_service_name: 'General Pest Control' } });
     expect(dropUnneededCallCards(['caller_not_authorized'], treat).flags).toEqual(['caller_not_authorized']);
   });
 
@@ -80,9 +86,7 @@ describe('dropUnneededCallCards', () => {
     expect(dropUnneededCallCards(['caller_not_authorized'], ext({ relationship: 'property_manager' })).flags).toEqual(['caller_not_authorized']);
   });
 
-  test('missing_last_name drops only when the record has a surname', () => {
-    expect(dropUnneededCallCards(['missing_last_name'], ext(), { knownLastName: 'Quentrell' }).flags).toEqual([]);
-    expect(dropUnneededCallCards(['missing_last_name'], ext(), { knownLastName: '  ' }).flags).toEqual(['missing_last_name']);
+  test('missing_last_name is never dropped here (the resolver closes it on the resolved customer)', () => {
     expect(dropUnneededCallCards(['missing_last_name'], ext()).flags).toEqual(['missing_last_name']);
   });
 
