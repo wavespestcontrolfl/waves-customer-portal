@@ -21,6 +21,7 @@ const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_o
 const commercialMigration = require('../models/migrations/20261007130000_lawn_v13_october_dimension_commercial_rate');
 const siteOneMigration = require('../models/migrations/20261007133000_lawn_v13_dimension_siteone_row_reconcile');
 const priceMigration = require('../models/migrations/20261007134000_lawn_v13_dimension_price_and_cap_clamp');
+const finalizeMigration = require('../models/migrations/20261007136000_lawn_v13_dimension_price_finalize');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { randomUUID } = require('crypto');
@@ -481,6 +482,133 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         await knex('product_limits').where({ id: liquid.id }).del();
         await knex('lawn_protocol_audit_log').where({ action: siteOneMigration.ACTION }).del();
       }
+    });
+
+    describe('the price seed, finalized (136000)', () => {
+      let productId;
+      let savedCatalog;
+      let siteOneVendor;
+      const PRICE_COLUMNS = ['best_price', 'best_vendor', 'best_vendor_pricing_id', 'best_price_amount_cached', 'best_price_vendor_id_cached', 'best_price_status', 'needs_pricing', 'cost_per_unit', 'cost_unit', 'unit_size_oz'];
+      const catalogRow = () => knex('products_catalog').where({ id: productId }).first();
+      const vendorRows = () => knex('vendor_pricing').where({ product_id: productId });
+      const upChain = async () => { await siteOneMigration.up(knex); await priceMigration.up(knex); await finalizeMigration.up(knex); };
+      const downChain = async () => { await finalizeMigration.down(knex); await priceMigration.down(knex); await siteOneMigration.down(knex); };
+      const quote = {
+        price: 0, price_amount: 0, quantity: '50 lb', price_type: 'manual', source_type: 'manual', approval_status: 'pending', is_active: false, currency: 'USD',
+      };
+
+      beforeEach(async () => {
+        productId = catalog[DIMENSION].id;
+        const row = await catalogRow();
+        savedCatalog = Object.fromEntries(PRICE_COLUMNS.map((column) => [column, row[column] ?? null]));
+        [siteOneVendor] = await knex('vendors').where({ name: 'SiteOne' }).select('id');
+      });
+      afterEach(async () => {
+        await knex('lawn_protocol_audit_log').whereIn('action', [finalizeMigration.ACTION, priceMigration.ACTION, siteOneMigration.ACTION]).del();
+        await knex('price_snapshots').where({ product_id: productId }).del();
+        await knex('price_history').where({ product_id: productId }).del();
+        await knex('vendor_pricing').where({ product_id: productId }).del();
+        await knex('vendors').where({ name: 'Other Supply' }).del();
+        await knex('products_catalog').where({ id: productId }).update(savedCatalog);
+        await knex('product_limits').where({ product_id: productId, match_value: 'dithiopyr' }).update({ limit_value: 16.3977 });
+      });
+
+      test('another vendor already has an eligible row (133000 and 134000 wrote nothing): the catalog still held 130000\'s direct price, and 136000 recalculates it to the canonical winner with its cache fields; down puts the direct price back', async () => {
+        const [other] = await knex('vendors').insert({ name: 'Other Supply' }).returning('*');
+        const [row] = await knex('vendor_pricing').insert({
+          product_id: productId, vendor_id: other.id, price: 41, price_amount: 41, quantity: '50 lb', price_type: 'manual', source_type: 'manual',
+          approval_status: 'approved', is_active: true, currency: 'USD', price_per_oz: 41 / 800, normalized_unit_price: 41 / 800, unit_normalized: 'oz',
+        }).returning('*');
+        const direct = await catalogRow();
+        expect(direct.best_vendor_pricing_id).toBeNull();
+        expect(Number(direct.best_price)).toBe(44.23);
+        try {
+          await siteOneMigration.up(knex);
+          await priceMigration.up(knex);
+          expect(await knex('vendor_pricing').where({ product_id: productId, vendor_id: siteOneVendor.id })).toHaveLength(0);
+          expect((await catalogRow()).best_vendor_pricing_id).toBeNull();
+          await finalizeMigration.up(knex);
+          const winner = await catalogRow();
+          expect([Number(winner.best_price), winner.best_vendor, winner.best_vendor_pricing_id, winner.best_price_status, winner.needs_pricing]).toEqual([41, 'Other Supply', row.id, 'current', false]);
+          expect(Number(winner.best_price_amount_cached)).toBe(41);
+          expect(String(winner.best_price_vendor_id_cached)).toBe(String(other.id));
+          expect((await vendorRows())[0].is_best_price).toBe(true);
+          // A second run changes nothing and writes no second audit row.
+          await finalizeMigration.up(knex);
+          expect(await knex('lawn_protocol_audit_log').where({ action: finalizeMigration.ACTION })).toHaveLength(1);
+        } finally {
+          await downChain();
+        }
+        const restored = await catalogRow();
+        expect([Number(restored.best_price), restored.best_vendor, restored.best_vendor_pricing_id]).toEqual([44.23, 'SiteOne', null]);
+        expect(await vendorRows()).toHaveLength(1);
+      });
+
+      test('a reused SiteOne row that carried landed and shipping metadata has it cleared (it ranked ahead of the sticker price); down puts it back', async () => {
+        await knex('vendor_pricing').insert({
+          ...quote, product_id: productId, vendor_id: siteOneVendor.id, landed_unit_price: 0.95, landed_cost: 52, shipping_cost: 5, shipping_estimate: 6, tax_rate: 0.07,
+        });
+        try {
+          await upChain();
+          const [row] = await vendorRows();
+          expect(await vendorRows()).toHaveLength(1);
+          expect(Number(row.price)).toBe(44.23);
+          for (const column of finalizeMigration.LANDED_COLUMNS) expect({ column, value: row[column] }).toEqual({ column, value: null });
+          const priced = await catalogRow();
+          expect([Number(priced.best_price), priced.best_vendor, priced.best_vendor_pricing_id, priced.best_price_status]).toEqual([44.23, 'SiteOne', row.id, 'current']);
+        } finally {
+          await downChain();
+        }
+        const [restored] = await vendorRows();
+        expect(restored).toMatchObject({ approval_status: 'pending', is_active: false });
+        expect([Number(restored.landed_unit_price), Number(restored.landed_cost), Number(restored.shipping_cost), Number(restored.shipping_estimate), Number(restored.tax_rate)]).toEqual([0.95, 52, 5, 6, 0.07]);
+      });
+
+      // An admin re-quote after the migration: the same row, a new price, a new snapshot, the catalog recalculated.
+      async function adminRequote(vendorPricingId, price) {
+        const [snapshot] = await knex('price_snapshots').insert({
+          product_id: productId, vendor_id: siteOneVendor.id, vendor_pricing_id: vendorPricingId, price, price_amount: price, quantity: '50 lb',
+          normalized_unit_price: price / 800, normalized_unit: 'oz', fetched_at: new Date(), captured_at: new Date(), source_type: 'manual', price_type: 'manual', availability_status: 'unknown',
+        }).returning('id');
+        await knex('vendor_pricing').where({ id: vendorPricingId }).update({ price, price_amount: price, price_per_oz: price / 800, normalized_unit_price: price / 800, latest_snapshot_id: snapshot.id });
+        await knex('price_history').insert({ product_id: productId, vendor_id: siteOneVendor.id, price, quantity: '50 lb', source: 'manual' });
+        await require('../routes/admin-inventory').recalcBestPrice(productId, knex);
+      }
+
+      test.each([
+        ['a row 133000 reconciled', true],
+        ['a row 134000 inserted', false],
+      ])('%s, then re-quoted by an admin: the full rollback keeps the new quote, its history and snapshots, and the catalog price', async (_label, reuse) => {
+        if (reuse) await knex('vendor_pricing').insert({ ...quote, product_id: productId, vendor_id: siteOneVendor.id });
+        try {
+          await upChain();
+          const [row] = await vendorRows();
+          await adminRequote(row.id, 47.5);
+        } finally {
+          await downChain();
+        }
+        const rows = await vendorRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ approval_status: 'approved', is_active: true });
+        expect(Number(rows[0].price)).toBe(47.5);
+        expect(await knex('price_snapshots').where({ vendor_pricing_id: rows[0].id }).count('* as n').then((r) => Number(r[0].n))).toBeGreaterThanOrEqual(2);
+        const catalogAfter = await catalogRow();
+        expect([Number(catalogAfter.best_price), catalogAfter.best_vendor, catalogAfter.best_vendor_pricing_id]).toEqual([47.5, 'SiteOne', rows[0].id]);
+      });
+
+      test('values unchanged since the migrations: the full rollback still removes the vendor row, history and snapshots and restores the catalog', async () => {
+        try {
+          await upChain();
+          expect(await vendorRows()).toHaveLength(1);
+        } finally {
+          await downChain();
+        }
+        expect(await vendorRows()).toHaveLength(0);
+        expect(await knex('price_history').where({ product_id: productId })).toHaveLength(0);
+        expect(await knex('price_snapshots').where({ product_id: productId })).toHaveLength(0);
+        const restored = await catalogRow();
+        expect({ ...Object.fromEntries(PRICE_COLUMNS.map((column) => [column, restored[column] ?? null])) }).toEqual(savedCatalog);
+      });
     });
 
     // The whole stack, in deployment order and in rollback order.
