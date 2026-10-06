@@ -389,6 +389,10 @@ describe('reconcileSeriesMoveEffects selection', () => {
     // A pass that failed to stamp reminders_synced_at still has its text
     // released at the end of the hold; the effects pass retries the sync.
     expect(calls.some((c) => c[0] === 'whereNotNull' && c[1] === 'reminders_synced_at')).toBe(false);
+    // A text the last pre-cap attempt held is still selected after the
+    // 30-minute cap, so its capped send comes from this sweep.
+    const lower = calls.find((c) => c[0] === 'where' && c[1] === 'created_at' && c[2] === '>');
+    expect(Date.now() - lower[3].getTime()).toBeGreaterThan(coalesce.SERIES_TEXT_HELD_WINDOW_MS + 2 * 60 * 1000);
   });
 
   test("'with' (quarter hour): the normal rule OR held staff texts", async () => {

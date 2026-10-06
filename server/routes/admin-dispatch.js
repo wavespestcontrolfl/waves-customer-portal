@@ -5648,8 +5648,10 @@ const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_mo
 // text still waits once its 3-minute hold has ended, whatever else is
 // unfinished on the row (the effects pass retries that too): 'with' = those
 // rows OR the normal rule (the quarter-hour tick), 'only' = just those rows
-// (the ticks between), under 30 minutes old (older rows belong to the normal
-// rule) and retried at most every 2 minutes.
+// (the ticks between), up to 5 minutes past the 30-minute cap (older rows
+// belong to the normal rule) and retried at most every 2 minutes.
+const HELD_TEXT_RETRY_MS = 2 * 60 * 1000;
+const HELD_TEXT_CAP_GRACE_MS = 5 * 60 * 1000;
 function scopeReconcileRows(q, { olderThanMs, heldTexts }) {
   const normal = (c) => c.whereIn('source_surface', RECONCILE_SURFACES)
     .where('created_at', '<', new Date(Date.now() - olderThanMs));
@@ -5658,8 +5660,11 @@ function scopeReconcileRows(q, { olderThanMs, heldTexts }) {
     .where({ status: 'committed', notify_requested: true })
     .whereNull('notified_at')
     .where('created_at', '<', new Date(Date.now() - SERIES_TEXT_HOLD_MS))
-    .where('created_at', '>', new Date(Date.now() - SERIES_TEXT_HELD_WINDOW_MS))
-    .where((r) => r.whereNull('effects_attempted_at').orWhere('effects_attempted_at', '<', new Date(Date.now() - 2 * 60 * 1000)));
+    // The window runs 5 minutes past the 30-minute cap so a text held by
+    // the last pre-cap attempt gets its capped send from this sweep (next
+    // retry is 2 minutes later) instead of waiting for the quarter hour.
+    .where('created_at', '>', new Date(Date.now() - SERIES_TEXT_HELD_WINDOW_MS - HELD_TEXT_CAP_GRACE_MS))
+    .where((r) => r.whereNull('effects_attempted_at').orWhere('effects_attempted_at', '<', new Date(Date.now() - HELD_TEXT_RETRY_MS)));
   return q.where((c) => (heldTexts === 'only' ? held(c) : c.where(normal).orWhere(held)));
 }
 async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25, heldTexts = null } = {}) {
