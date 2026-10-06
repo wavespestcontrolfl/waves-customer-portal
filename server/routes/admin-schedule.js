@@ -19996,10 +19996,36 @@ async function otherGroupStopRows(conn, parent, parentId, candidate, clashRows) 
       [...new Set([...ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
         ...require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES])]))
     .select('ss.*', 'svc.group_family as stop_group_family');
-  const stop = rows.filter((r) => r.stop_group_family !== ownFamily);
-  const ok = ownFamily && new Set(stop.map((r) => r.stop_group_family)).size === 1
-    && clashRows.every((c) => stop.some((r) => String(r.id) === String(c.id)));
+  const stop = connectedStop(rows.filter((r) => r.stop_group_family !== ownFamily), clashRows);
+  const ok = ownFamily && stop && new Set(stop.map((r) => r.stop_group_family)).size === 1;
   return ok ? stop : null;
+}
+
+const rowWorkMinutes = (r) => Number(r.estimated_duration_minutes)
+  || ((parseHHMM(r.window_end) ?? parseHHMM(r.window_start) + 60) - parseHHMM(r.window_start));
+
+// The stop the clash belongs to: the clashing rows plus every row that touches
+// their span, grown until nothing more touches it. Members work one after
+// another, so the span runs from the first arrival for the summed work (or to
+// the latest window end, when later). A separate appointment later that day
+// is not part of it. null when a clash row is not among the rows or has no window.
+function connectedStop(rows, clashRows) {
+  if (rows.some((r) => parseHHMM(r.window_start) == null)) return null;
+  let stop = rows.filter((r) => clashRows.some((c) => String(c.id) === String(r.id)));
+  if (stop.length !== clashRows.length) return null;
+  for (;;) {
+    const [lo, hi] = stopSpan(stop);
+    const grown = rows.filter((r) => parseHHMM(r.window_start) <= hi
+      && parseHHMM(r.window_start) + rowWorkMinutes(r) >= lo);
+    if (grown.length === stop.length) return stop;
+    stop = grown;
+  }
+}
+
+function stopSpan(stop) {
+  const lo = Math.min(...stop.map((r) => parseHHMM(r.window_start)));
+  const work = stop.reduce((sum, r) => sum + rowWorkMinutes(r), 0);
+  return [lo, Math.max(lo + work, ...stop.map((r) => parseHHMM(r.window_end) ?? 0))];
 }
 
 // The same premise on every side, judged like the rider preview: a row's own
@@ -20025,21 +20051,12 @@ async function stopSharesSeriesPremise(conn, parent, stop) {
   return rows.every((scope) => Preview.seriesPropertyVerdict(series, scope) === 'same');
 }
 
-// The first whole hour after the stop's work (members sharing an arrival work
-// one after another), through the canonical appointment-window rules.
+// The first whole hour after the stop's work, through the canonical
+// appointment-window rules.
 function followOnWindow(stop, parent) {
-  const workByStart = new Map();
-  for (const r of stop) {
-    const start = parseHHMM(r.window_start);
-    if (start == null) return null;
-    const minutes = Number(r.estimated_duration_minutes) || ((parseHHMM(r.window_end) ?? start + 60) - start);
-    workByStart.set(start, (workByStart.get(start) || 0) + minutes);
-  }
-  const stopEnd = Math.max(...[...workByStart].map(([start, work]) => start + work),
-    ...stop.map((r) => parseHHMM(r.window_end) ?? 0));
   try {
     return assertAdminAppointmentWindow({
-      windowStart: minutesToHHMM(Math.ceil(stopEnd / 60) * 60),
+      windowStart: minutesToHHMM(Math.ceil(stopSpan(stop)[1] / 60) * 60),
       durationMinutes: Number(parent.estimated_duration_minutes) || 60,
     });
   } catch {
@@ -28105,6 +28122,8 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 }
 
 router._test = {
+  connectedStop,
+  followOnWindow,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,
