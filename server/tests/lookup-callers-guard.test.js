@@ -19,7 +19,7 @@ const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', '
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) { if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name), out); continue; }
-    if (entry.name.endsWith('.js')) out.push(path.join(dir, entry.name));
+    if (/\.(js|cjs|mjs)$/.test(entry.name)) out.push(path.join(dir, entry.name));
   }
   return out;
 }
@@ -49,6 +49,15 @@ function callLines(src, name) {
   return src.split('\n').map((line, i) => ({ line, n: i + 1 }))
     .filter(({ line }) => re.test(line) && !/^\s*(\/\/|\*)/.test(line) && !def.test(line) && !mock.test(line));
 }
+
+// The modules that define or read `commercialSuiteSizing`. A new file under
+// services/property-lookup/ is NOT one of them until it is listed here.
+const OPTION_OWNERS = new Set([
+  'routes/property-lookup-v2.js', // the sanctioned whole-property switch-off (checked line by line below)
+  'services/property-lookup/lookup-callers.js', // the registry sets it
+  'services/property-lookup/ai-property-lookup.js', // the lookup reads it
+  'config/feature-gates.js', // the gate reader's doc comment
+]);
 
 describe('property-lookup callers declare their scope decision', () => {
   test('the registry and every entry are frozen; no file reassigns a policy field', () => {
@@ -101,9 +110,10 @@ describe('property-lookup callers declare their scope decision', () => {
       }
       // ...and a caller never SETS the option anywhere else in its file
       // either, except the one sanctioned whole-property switch-off in the
-      // admin route. The lookup's own modules read the option; they are not
-      // callers.
-      if (!/^(routes\/property-lookup-v2\.js$|services\/property-lookup\/|config\/feature-gates\.js$)/.test(r)) {
+      // admin route. Only the three modules that define or read the option
+      // are exempt, named one by one: any other file, the lookup directory
+      // included, is a caller.
+      if (!OPTION_OWNERS.has(r)) {
         src.split('\n').forEach((line, i) => {
           if (/^\s*(\/\/|\*)/.test(line) || !/commercialSuiteSizing\s*[:=]/.test(line)) return;
           offenders.push(`${r}:${i + 1}: sets commercialSuiteSizing outside the registry`);
@@ -123,19 +133,21 @@ describe('property-lookup callers declare their scope decision', () => {
     // profile are exempt; a helper anywhere else, the lookup directory
     // included, must declare itself.
     const EXEMPT = new Set(['routes/property-lookup-v2.js', 'services/property-lookup/ai-property-lookup.js']);
-    const found = [];
+    const found = {};
     for (const file of files) {
       const r = rel(file);
       if (EXEMPT.has(r)) continue;
       const src = fs.readFileSync(file, 'utf8');
       const calls = aliasesOf(src, 'lookupPropertyFromAITrio').flatMap((name) => callLines(src, name)
         .filter(({ line }) => !new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)));
-      if (calls.length) found.push(r);
+      if (calls.length) found[r] = calls.length;
     }
-    // Both directions: a direct caller the registry does not name is a new,
-    // unreviewed bypass; a registry entry with no direct call left is stale
-    // and would pre-approve whatever lands in that file next.
-    expect(found.sort()).toEqual(Object.keys(TRIO_CALLERS).sort());
+    // Both directions, with the call count: a direct caller the registry
+    // does not name is a new, unreviewed bypass; a registry entry with no
+    // direct call left is stale; and a second call in a declared file is a
+    // second purpose the one-line declaration does not cover.
+    const declared = Object.fromEntries(Object.entries(TRIO_CALLERS).map(([f, d]) => [f, d.calls]));
+    expect(found).toEqual(declared);
   });
 
   test('every caller id is used in exactly the one file the registry binds it to, always as a single-quoted literal', () => {

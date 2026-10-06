@@ -62,10 +62,12 @@ function freezeEntries(registry) {
 
 // Direct callers of lookupPropertyFromAITrio (the raw record trio, no
 // enriched profile, no suite leg): WDO intelligence prompts that read home
-// facts only. Listed so the guard can tell a declared bypass from a new one.
-const TRIO_CALLERS = Object.freeze({
-  'routes/admin-projects.js': 'WDO project intelligence prompt: home facts only, no price',
-  'services/appointment-tagger.js': 'WDO appointment tagger: home facts only, no price',
+// facts only. Listed with the number of direct calls each file makes, so
+// the guard can tell a declared bypass from a new one, a stale entry from a
+// live one, and a second call (a second purpose) from the declared one.
+const TRIO_CALLERS = freezeEntries({
+  'routes/admin-projects.js': { calls: 1, why: 'WDO project intelligence prompt: home facts only, no price' },
+  'services/appointment-tagger.js': { calls: 1, why: 'WDO appointment tagger: home facts only, no price' },
 });
 
 /**
