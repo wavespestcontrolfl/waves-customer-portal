@@ -482,6 +482,13 @@ describe('screenAskAnswer', () => {
     expect(screen('The treatment poses no risk to pets.')).toBe('safety claim');
     expect(screen('It will not harm your children.')).toBe('safety claim');
     expect(screen('It is gentle around pets.')).toBe('safety claim');
+    expect(screen('The treatment does not pose any risk to pets.')).toBe('safety claim');
+    expect(screen('The treatment is unlikely to harm pets.')).toBe('safety claim');
+    expect(screen('The treatment will never harm pets.')).toBe('safety claim');
+    // Past or negative facts are no visit promise.
+    expect(screen('A technician did return today.')).toBeNull();
+    expect(screen('The next visit is not scheduled.')).toBeNull();
+    expect(screen('Your next appointment was scheduled last week.')).toBeNull();
     expect(screen('The gate code is BLUE.')).toBe('banned_copy');
     expect(screen('We will return two days from now.')).toBe('states_a_date');
     expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
@@ -697,6 +704,9 @@ describe('symptoms and exposure never reach the model', () => {
     'My dog took 4 bites of bait',
     'My child took 1 sip of pesticide',
     'My dog took another bite of bait',
+    'My dog has taken a bite of bait',
+    'My dog is taking a bite of bait',
+    'My dog takes a bite of bait',
     'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
@@ -1143,6 +1153,9 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at One Hundred Bay Drive.', 'Ants at [number] Bay Drive.'],
     ['Ants at Twelve U S 41.', 'Ants at [number] U S 41.'],
     ['Call me at nine four one five five five one two three four.', 'Call me at [phone].'],
+    ['Call nine forty-one, two ninety-seven, fifty-seven forty-nine.', 'Call [phone].'],
+    ['Ants at One Oh Five U S 41.', 'Ants at [number] U S 41.'],
+    ['We saw twenty five ants.', 'We saw twenty five ants.'],
     ['I saw two or three ants.', 'I saw two or three ants.'],
     ['Ants at Twelve U.S. 41.', 'Ants at [number] U.S. 41.'],
     ['Ants at One Hundred SR 70.', 'Ants at [number] SR 70.'],
