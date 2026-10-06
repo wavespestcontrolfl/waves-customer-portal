@@ -43,9 +43,27 @@ describe('moveCompletedVisitToWorkDay guards', () => {
     expect(completionMovesDateLive()).toBe(true);
   });
 
-  test('gate off writes and reads nothing', async () => {
-    const out = await moveCompletedVisitToWorkDay(explodingTrx(), { scheduledServiceId: 'v', serviceRecord: { id: 'r', service_date: '2026-10-01' }, previousStatus: 'confirmed' });
-    expect(out).toEqual({ moved: false, reason: 'gate_off' });
+  test('gate off and no work-day invoice: nothing moves and nothing is written', async () => {
+    const trx = trxFor({ ...base }, { invoiceFirsts: [null] });
+    expect(await moveCompletedVisitToWorkDay(trx, args())).toEqual({ moved: false, reason: 'gate_off' });
+    expect(trx.updates).toEqual([]);
+  });
+
+  test('gate turned off AFTER the invoice was minted with the work day: the started move is finished', async () => {
+    // First invoices read = the marker (a non-void invoice already on the work day), second = the disagreement guard.
+    const trx = trxFor({ ...base }, { invoiceFirsts: [{ id: 'inv' }, null] });
+    expect(await moveCompletedVisitToWorkDay(trx, args())).toMatchObject({ moved: true, from: '2026-10-08', to: '2026-10-05' });
+    expect(trx.updates.find((u) => u.table === 'scheduled_services').patch).toMatchObject({ scheduled_date: '2026-10-05' });
+  });
+
+  test('gate off with the marker still obeys every other rule (late closeout, grouped row, mismatch)', async () => {
+    const late = trxFor({ ...base, scheduled_date: '2026-10-01' }, { invoiceFirsts: [{ id: 'inv' }, null] });
+    expect(await moveCompletedVisitToWorkDay(late, args())).toMatchObject({ moved: false, reason: 'late_completion' });
+    const grouped = trxFor({ ...base, visit_id: 'stop-1' }, { invoiceFirsts: [{ id: 'inv' }, null] });
+    expect(await moveCompletedVisitToWorkDay(grouped, args())).toEqual({ moved: false, reason: 'grouped_visit' });
+    const mismatch = trxFor({ ...base }, { invoiceFirsts: [{ id: 'inv' }, { id: 'other' }] });
+    expect(await moveCompletedVisitToWorkDay(mismatch, args())).toEqual({ moved: false, reason: 'invoice_date_mismatch' });
+    expect(late.updates.concat(grouped.updates, mismatch.updates)).toEqual([]);
   });
 
   test('gate on but the column is missing (migration not run): nothing moves', async () => {
@@ -57,12 +75,13 @@ describe('moveCompletedVisitToWorkDay guards', () => {
   });
 
   // A trx whose scheduled_services row is `row` and whose update/partner calls are recorded.
-  function trxFor(row, { partner = null, stray = null, strayRecord = null } = {}) {
+  function trxFor(row, { partner = null, stray = null, strayRecord = null, invoiceFirsts = null } = {}) {
     const updates = [];
+    const queue = invoiceFirsts ? [...invoiceFirsts] : null;
     const trx = (table) => {
       const chain = {
         where() { return chain; }, whereNot() { return chain; }, whereNotIn() { return chain; }, whereNull() { return chain; }, whereNotNull() { return chain; }, whereRaw() { return chain; }, forUpdate() { return chain; },
-        first: async () => (table === 'invoices' ? stray : table === 'service_records' ? strayRecord : (table === 'scheduled_services' && !chain._partnerQuery ? row : partner)),
+        first: async () => (table === 'invoices' ? (queue && queue.length ? queue.shift() : stray) : table === 'service_records' ? strayRecord : (table === 'scheduled_services' && !chain._partnerQuery ? row : partner)),
         update: async (patch) => { updates.push({ table, patch }); return 1; },
       };
       const origWhereNot = chain.whereNot;
@@ -105,9 +124,9 @@ describe('moveCompletedVisitToWorkDay guards', () => {
     expect(trx.updates.map((u) => u.table)).not.toContain('invoices');
   });
 
-  test('a visit grouped with a live partner keeps its date', async () => {
+  test('a row still attached to a visit group keeps its date, even with every sibling terminal', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
-    const trx = trxFor({ ...base, visit_id: 'stop-1' }, { partner: { id: 'p' } });
+    const trx = trxFor({ ...base, visit_id: 'stop-1' });
     expect(await moveCompletedVisitToWorkDay(trx, args())).toEqual({ moved: false, reason: 'grouped_visit' });
     expect(trx.updates).toEqual([]);
   });
@@ -171,7 +190,7 @@ describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery
     expect(await run({ ...visit, status: 'rescheduled' })).toBeNull();
     // The closeout's own status rule: a visit already finished or closed gets no early date.
     for (const status of ['completed', 'cancelled', 'skipped', 'no_show']) expect(await run({ ...visit, status })).toBeNull();
-    expect(await run({ ...visit, visit_id: 'stop-1' }, project, { id: 'p' })).toBeNull();
+    expect(await run({ ...visit, visit_id: 'stop-1' })).toBeNull();
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project: {}, scheduledServiceId: 'v', today })).toBeNull();
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: null, today })).toBeNull();
   });
@@ -189,10 +208,22 @@ describe('date reading', () => {
 });
 
 describe('moveCompletedVisitToWorkDaySafe', () => {
-  test('gate off: returns before any statement', async () => {
-    const trx = () => { throw new Error('unexpected query'); };
-    trx.transaction = () => { throw new Error('unexpected savepoint'); };
-    expect(await moveCompletedVisitToWorkDaySafe(trx, { scheduledServiceId: 'v' })).toEqual({ moved: false, reason: 'gate_off' });
+  const markerTrx = (marker) => {
+    const chain = { where() { return chain; }, whereRaw() { return chain; }, first: async () => marker };
+    const trx = () => chain;
+    trx.transaction = jest.fn(async () => ({ moved: false, reason: 'ran' }));
+    return trx;
+  };
+  const safeArgs = { scheduledServiceId: 'v', serviceRecord: { id: 'r', service_date: '2026-10-05' }, workDate: '2026-10-05' };
+  test('gate off and no work-day invoice: one read, no savepoint, no write', async () => {
+    const trx = markerTrx(null);
+    expect(await moveCompletedVisitToWorkDaySafe(trx, safeArgs)).toEqual({ moved: false, reason: 'gate_off' });
+    expect(trx.transaction).not.toHaveBeenCalled();
+  });
+  test('gate off but a work-day invoice exists: the started move runs in its savepoint', async () => {
+    const trx = markerTrx({ id: 'inv' });
+    expect(await moveCompletedVisitToWorkDaySafe(trx, safeArgs)).toEqual({ moved: false, reason: 'ran' });
+    expect(trx.transaction).toHaveBeenCalledTimes(1);
   });
   test('a failure inside the savepoint is logged and never thrown', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';

@@ -2907,24 +2907,16 @@ async function previewWdoInvoiceTotals(project, customer, fee) {
   });
 }
 
-// GATE_COMPLETION_MOVES_DATE: the service date a NEWLY minted project invoice
-// carries when the closeout will move the visit to an earlier work day (the
-// project's project_date), else null. The invoice is delivered before closeout,
-// so it is dated here at creation; it is never re-dated afterwards.
-// `scheduledServiceId` null = derive it from the project / its service record.
-// Gate off = no query at all.
-async function earlyCloseoutInvoiceDateFor(runner, project, scheduledServiceId) {
-  if (!require('../config/feature-gates').completionMovesDateLive()) return null;
-  let visitId = scheduledServiceId || null;
-  if (!visitId && project.service_record_id) {
-    const link = await runner('service_records')
-      .where({ id: project.service_record_id, customer_id: project.customer_id })
-      .first('scheduled_service_id');
-    visitId = link?.scheduled_service_id || null;
-  }
-  visitId = visitId || project.scheduled_service_id || null;
-  return require('../services/completion-visit-date')
-    .earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId: visitId });
+// GATE_COMPLETION_MOVES_DATE: for InvoiceService.create's serviceDateResolver.
+// create() calls it AFTER the visit's mint lock is held, so the booked day is
+// read under the lock (a racing reschedule cannot change it afterwards) and the
+// project date comes from the freshly LOCKED project row. Returns the work day
+// when the closeout will move the visit early, else null (the default date).
+// A new invoice gets it at creation; it is never re-dated afterwards. Gate off =
+// no query at all.
+function projectInvoiceDateResolver(projectRow) {
+  return (runner, scheduledServiceId) => require('../services/completion-visit-date')
+    .earlyCloseoutInvoiceDate(runner, { project: projectRow, scheduledServiceId });
 }
 
 // Find an invoice already linked to this project, else create a draft. Returns
@@ -3088,15 +3080,12 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // Real send — create a draft, carrying the scheduled-service / service-record
       // linkage forward so completion + future lookups can find it, and record it
       // on the project (inside the lock) so the racing/resend POST reuses it.
-      // GATE_COMPLETION_MOVES_DATE: an early closeout moves the visit to the
-      // work day, so the invoice is dated that day NOW, before it is delivered.
-      // From the freshly LOCKED project row, not the route's earlier read.
-      const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, locked || project, null);
       const created = await InvoiceService.create({
         customerId: project.customer_id,
         serviceRecordId: project.service_record_id || undefined,
         scheduledServiceId: project.scheduled_service_id || undefined,
-        ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
+        // GATE_COMPLETION_MOVES_DATE: dated the early work day under the mint lock.
+        serviceDateResolver: projectInvoiceDateResolver(locked || project),
         title: 'WDO Inspection',
         lineItems: [{
           description: WDO_INVOICE_LINE_DESCRIPTION,
@@ -3232,8 +3221,6 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       err.code = 'invoice_build_failed';
       throw err;
     }
-    // GATE_COMPLETION_MOVES_DATE: same early-closeout date as the WDO draft above.
-    const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, locked || project, scheduledServiceId);
     if (dryRun) {
       // Preview only (ADMIN-BUG-R49): build the draft through the SAME
       // create() call the real send uses below — replaying the discount/tax
@@ -3250,7 +3237,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
           customerId: project.customer_id,
           serviceRecordId: project.service_record_id || undefined,
           scheduledServiceId: scheduledServiceId || undefined,
-          ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
+          serviceDateResolver: projectInvoiceDateResolver(locked || project),
           lineItems: built.lineItems,
           discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
           trustedStoredDiscountSources: ['scheduled_service'],
@@ -3273,7 +3260,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       customerId: project.customer_id,
       serviceRecordId: project.service_record_id || undefined,
       scheduledServiceId: scheduledServiceId || undefined,
-      ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
+      serviceDateResolver: projectInvoiceDateResolver(locked || project),
       lineItems: built.lineItems,
       discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
       // The scheduled-service lines carry stored discount amounts; trust them so

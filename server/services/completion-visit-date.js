@@ -32,16 +32,17 @@
  * Never moved: a late completion (work day after the booked day: the visit
  * keeps its booked day on purpose), a completion dated after today, a visit
  * that was not completed by this closeout, a legacy `rescheduled` row, and a
- * visit grouped with live partners (a stop's members share one date).
+ * visit still attached to a visit group (a stop's members share one date).
  *
- * Gate off = this module writes nothing.
+ * Gate off = nothing new starts: no invoice gets an early date and no visit
+ * moves, except that a move STARTED under the gate is finished (a non-void
+ * invoice already carries the work day; see startedUnderGate), so turning the
+ * gate off never strands a work-day invoice on a visit left on the booked day.
  */
 const logger = require('./logger');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { completionMovesDateLive } = require('../config/feature-gates');
-// A grouped partner in a terminal or replaced status no longer shares the stop.
-const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 
 const MOVE_SOURCE = 'completion_early';
 const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
@@ -93,18 +94,6 @@ function seriesSlotUpdate(locked, bookedDay, cols) {
   return out;
 }
 
-// A grouped partner in a live status shares the stop's date: such a visit never moves.
-async function hasLiveGroupPartner(runner, row) {
-  if (!row.visit_id) return false;
-  const partner = await runner('scheduled_services')
-    .where({ visit_id: row.visit_id })
-    .whereNot({ id: row.id })
-    // A NULL status is live: SQL's NOT IN drops NULL rows (as visit-groups.js does).
-    .where((builder) => builder.whereNotIn('status', JOIN_INELIGIBLE_STATUSES).orWhereNull('status'))
-    .first('id');
-  return !!partner;
-}
-
 /**
  * The ONE eligibility rule, shared by the mover and the creation-time invoice
  * dater: does a closeout dated `workDate` move this visit? `previousStatus` is
@@ -112,13 +101,13 @@ async function hasLiveGroupPartner(runner, row) {
  * Checks, in order: gate, the
  * `original_scheduled_date` column (the booked day cannot be kept without it),
  * the visit row, its status (when `requireStatus` is given), the date plan,
- * and a live grouped partner.
+ * and any visit-group membership.
  * Resolves to { move:false, reason } or { move:true, from, to, visit, cols }.
  */
 async function planEarlyMove(runner, {
-  scheduledServiceId, workDate, previousStatus, cols = null, today, lock = false, requireStatus = null,
+  scheduledServiceId, workDate, previousStatus, cols = null, today, lock = false, requireStatus = null, allowGateOff = false,
 }) {
-  if (!completionMovesDateLive()) return { move: false, reason: 'gate_off' };
+  if (!allowGateOff && !completionMovesDateLive()) return { move: false, reason: 'gate_off' };
   const columns = cols || await runner('scheduled_services').columnInfo();
   if (!columns.original_scheduled_date) return { move: false, reason: 'column_missing' };
   const query = runner('scheduled_services').where({ id: scheduledServiceId });
@@ -129,8 +118,10 @@ async function planEarlyMove(runner, {
   const plan = planCompletionDateMove({
     bookedDate: visit.scheduled_date, workDate, previousStatus: previousStatus ?? visit.status, today,
   });
-  const grouped = plan.move && columns.visit_id && await hasLiveGroupPartner(runner, visit);
-  return grouped ? { move: false, reason: 'grouped_visit' } : { ...plan, visit, cols: columns };
+  // Any row still attached to a visit group stays put, even with every sibling
+  // terminal: service_visits.scheduled_date and the retained members would
+  // keep the booked day and the group's completion packet would discard the move.
+  return plan.move && visit.visit_id ? { move: false, reason: 'grouped_visit' } : { ...plan, visit, cols: columns };
 }
 
 /**
@@ -173,6 +164,25 @@ async function dateDisagreement(trx, { visitId, recordId, from, to }) {
   return strayRecord ? 'record_date_mismatch' : null;
 }
 
+// The invoice row IS the marker of a move started under the gate: a non-void
+// invoice of the visit (or its record) already carrying the work day. With the
+// gate turned off after that invoice was sent, the closeout finishes the move
+// (every other rule still applies) so the visit does not stay on the booked day
+// under a work-day invoice. No such invoice = no move, as with the gate off today.
+async function startedUnderGate(trx, { scheduledServiceId, serviceRecord, workDate }) {
+  const workDay = dayKey(workDate) || dayKey(serviceRecord?.service_date);
+  if (!workDay) return false;
+  const marker = await trx('invoices')
+    .where((builder) => {
+      builder.where({ scheduled_service_id: scheduledServiceId });
+      if (serviceRecord?.id) builder.orWhere({ service_record_id: serviceRecord.id });
+    })
+    .whereRaw("status IS DISTINCT FROM 'void'")
+    .whereRaw('service_date = ?::date', [workDay])
+    .first('id');
+  return !!marker;
+}
+
 /**
  * Move a just-completed visit to its work day. Call inside the closeout's
  * transaction, after the visit's status is `completed`.
@@ -197,6 +207,8 @@ async function moveCompletedVisitToWorkDay(trx, {
   today = etDateString(),
 } = {}) {
   if (!scheduledServiceId || !serviceRecord) return { moved: false, reason: 'no_record' };
+  const gateOff = !completionMovesDateLive();
+  if (gateOff && !await startedUnderGate(trx, { scheduledServiceId, serviceRecord, workDate })) return { moved: false, reason: 'gate_off' };
 
   const plan = await planEarlyMove(trx, {
     scheduledServiceId,
@@ -206,6 +218,7 @@ async function moveCompletedVisitToWorkDay(trx, {
     today,
     lock: true,
     requireStatus: 'completed',
+    allowGateOff: true,
   });
   if (!plan.move) return { moved: false, reason: plan.reason };
   const { visit: locked, cols } = plan;
@@ -247,11 +260,14 @@ async function moveCompletedVisitToWorkDay(trx, {
 /**
  * The closeout's one call: the move inside its own savepoint, never throwing.
  * A failure logs and leaves the closeout (and the visit's date) as it was.
- * Gate off = returns before any statement.
+ * Gate off = one marker query (a work-day invoice that was sent under the
+ * gate), and no savepoint or write unless that marker exists.
  */
 async function moveCompletedVisitToWorkDaySafe(trx, args = {}) {
-  if (!completionMovesDateLive()) return { moved: false, reason: 'gate_off' };
   try {
+    if (!completionMovesDateLive() && !(args.scheduledServiceId && args.serviceRecord && await startedUnderGate(trx, args))) {
+      return { moved: false, reason: 'gate_off' };
+    }
     return await trx.transaction((savepoint) => moveCompletedVisitToWorkDay(savepoint, args));
   } catch (err) {
     logger.warn(`[completion-visit-date] visit date move failed for ${args.scheduledServiceId}: ${err.message}`);

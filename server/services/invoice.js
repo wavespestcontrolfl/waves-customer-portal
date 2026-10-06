@@ -5248,6 +5248,11 @@ const InvoiceService = {
       taxRate,
       discountIds,
       serviceDate,
+      // Optional async (database, scheduledServiceId) => 'YYYY-MM-DD' | null,
+      // run AFTER the visit's mint lock chain is held (so it reads the visit's
+      // booked day under the lock, not a stale earlier read). Used only when no
+      // explicit serviceDate was given; null = the default date.
+      serviceDateResolver = null,
       trustedStoredDiscountSources = [],
       // Deposit credit REQUEST: create() caps it against its own
       // post-discount, after-tax total and appends the line item itself —
@@ -5385,6 +5390,9 @@ const InvoiceService = {
         return (database || db).transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
       // Harness databases may omit transaction(); production knex does not.
+    }
+    if (serviceDateResolver && !serviceDate && linkedScheduledServiceId) {
+      serviceDate = (await serviceDateResolver(database, linkedScheduledServiceId)) || serviceDate;
     }
     if (linkedScheduledServiceId) {
       const { assertScheduledInvoiceNotPacketOwned } = require('./scheduled-invoice-mint');

@@ -188,7 +188,7 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
     }
   });
 
-  test('gate on: a grouped partner whose status is NULL counts as LIVE (NOT IN drops NULL), so the visit keeps its date', async () => {
+  test('gate on: a row still attached to a visit group keeps its date even when every sibling is terminal', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
     const f = await seed({ bookedOffset: 3, projectOffset: -1 });
     const stopId = randomUUID();
@@ -198,10 +198,9 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
       await mockPg('service_visits').insert({ id: stopId, customer_id: f.customerId, scheduled_date: f.booked, stop_base_key: `fx-${stopId}`, created_by: 'fixture' });
       await mockPg('scheduled_services').insert({
         id: partnerId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId, service_type: 'Fixture partner',
-        scheduled_date: f.booked, window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 50,
+        scheduled_date: f.booked, window_start: '09:00', window_end: '10:00', status: 'cancelled', estimated_price: 50,
       });
       await mockPg('scheduled_services').whereIn('id', [f.serviceId, partnerId]).update({ visit_id: stopId });
-      await mockPg('scheduled_services').where({ id: partnerId }).update({ status: null });
       const out = await close(f);
       expect(out.visitDateMove).toEqual({ moved: false, reason: 'grouped_visit' });
       expect(day((await visitRow(f)).scheduled_date)).toBe(f.booked);
@@ -210,6 +209,27 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
       await cleanup(f);
       await mockPg('service_visits').where({ id: stopId }).del().catch(() => {});
     }
+  });
+
+  test('gate turned OFF after the invoice was minted with the work day: the closeout finishes the started move', async () => {
+    // seed's invoice is delivered on the work day (what the gate-on mint produced); the gate is off at closeout.
+    const f = await seed({ bookedOffset: 3, projectOffset: -1 });
+    try {
+      const out = await close(f);
+      expect(out.visitDateMove).toMatchObject({ moved: true, from: f.booked, to: f.work });
+      const visit = await visitRow(f);
+      expect(day(visit.scheduled_date)).toBe(f.work);
+      expect(day(visit.original_scheduled_date)).toBe(f.booked);
+      expect(day((await invoiceRow(f)).service_date)).toBe(f.work);
+    } finally { await cleanup(f); }
+  });
+
+  test('gate OFF with a work-day invoice still obeys every other rule: a late closeout and a grouped row stay put', async () => {
+    const f = await seed({ bookedOffset: -3, projectOffset: 0 });
+    try {
+      expect((await close(f)).visitDateMove).toMatchObject({ moved: false, reason: 'late_completion' });
+      expect(day((await visitRow(f)).scheduled_date)).toBe(f.booked);
+    } finally { await cleanup(f); }
   });
 
   test('gate on: a service record corrected by hand to another day keeps the visit where it is (record_date_mismatch)', async () => {
@@ -361,6 +381,57 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
       } finally { await cleanup(f); }
     });
 
+    test('InvoiceService.create runs serviceDateResolver INSIDE the mint transaction, after the visit lock; an explicit serviceDate wins', async () => {
+      const InvoiceService = require('../services/invoice');
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
+      try {
+        const seen = [];
+        const resolver = async (database, visitId) => {
+          const locked = await database('scheduled_services').where({ id: visitId }).first('scheduled_date');
+          seen.push({ inTransaction: !!database.isTransaction, visitId, booked: day(locked.scheduled_date) });
+          return f.work;
+        };
+        const created = await InvoiceService.create({
+          customerId: f.customerId, scheduledServiceId: f.serviceId, serviceDateResolver: resolver,
+          lineItems: [{ description: 'Fixture', quantity: 1, unit_price: 100, amount: 100 }],
+        });
+        expect(seen).toEqual([{ inTransaction: true, visitId: f.serviceId, booked: f.booked }]);
+        expect(day((await mockPg('invoices').where({ id: created.id }).first()).service_date)).toBe(f.work);
+        const explicit = await InvoiceService.create({
+          customerId: f.customerId, scheduledServiceId: f.serviceId, serviceDateResolver: resolver, serviceDate: f.booked,
+          lineItems: [{ description: 'Fixture 2', quantity: 1, unit_price: 100, amount: 100 }],
+        });
+        expect(seen).toHaveLength(1);
+        expect(day((await mockPg('invoices').where({ id: explicit.id }).first()).service_date)).toBe(f.booked);
+      } finally { await cleanup(f); }
+    });
+
+    test('a visit rescheduled before the mint is judged on its CURRENT booked day (read under the lock)', async () => {
+      process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
+      try {
+        // The route read the visit at +3; a reschedule moves it to the work day itself before the mint:
+        // there is no early move left, so the invoice keeps the (new) booked day.
+        await mockPg('scheduled_services').where({ id: f.serviceId }).update({ scheduled_date: f.work });
+        expect(day((await mint(f)).service_date)).toBe(f.work);
+        await mockPg('invoices').where({ customer_id: f.customerId }).del();
+        // ...and moved even earlier than the work day: late completion, default date.
+        await mockPg('scheduled_services').where({ id: f.serviceId }).update({ scheduled_date: dayOffset(-4) });
+        expect(day((await mint(f)).service_date)).toBe(dayOffset(-4));
+      } finally { await cleanup(f); }
+    });
+
+    test('the WDO creation branch dates the invoice the same way (resolver under the lock)', async () => {
+      process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
+      try {
+        await mockPg('projects').where({ id: f.projectId }).update({ project_type: 'wdo_inspection' });
+        const invoice = await mint(f);
+        expect(invoice.title).toBe('WDO Inspection');
+        expect(day(invoice.service_date)).toBe(f.work);
+      } finally { await cleanup(f); }
+    });
+
     test('gate OFF: the minted draft keeps the booked day (today\'s behavior)', async () => {
       const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
       try {
@@ -476,7 +547,8 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
     // resolves it through the (customer, service_date, service_type) soft join.
     const run = async (gateOn) => {
       if (gateOn) process.env.GATE_COMPLETION_MOVES_DATE = 'true'; else delete process.env.GATE_COMPLETION_MOVES_DATE;
-      const f = await seed({ bookedOffset: 3, projectOffset: -1 });
+      // The gate-off control carries a booked-day invoice (a work-day one would finish the started move).
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceDate: gateOn ? 'work' : 'booked' });
       try {
         await close(f);
         const record = await recordRow(f);
