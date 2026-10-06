@@ -590,7 +590,8 @@ describe('the extraction prompt reads the agent-proposed shape only under the ga
       expect(on).not.toBe(base);
       expect(on.startsWith(`${PROMPT_VERSION}a-`)).toBe(true); // the cohort mark sits INSIDE the leading version token
       expect(on.endsWith('-aps')).toBe(false);
-      expect(on.replace(`${PROMPT_VERSION}a-`, `${PROMPT_VERSION}-`)).toBe(base);
+      expect(on.startsWith(`${PROMPT_VERSION}a-`)).toBe(true);
+      expect(on.endsWith('-aps')).toBe(false);
     }
     expect(extractionPromptVersion([], {})).toBe(PROMPT_HASH);
     // both stamps (the extractor's and the processor's per-call one) pass the block's own switch
@@ -619,7 +620,8 @@ describe('codex #6046 round 2', () => {
     expect(evaluateApsCohort(rows(95, 5))).toMatchObject({ attempts: 100, valid: 95, enough: true, schemaOk: true });
     expect(evaluateApsCohort(rows(94, 6))).toMatchObject({ enough: true, schemaOk: false });
     expect(evaluateApsCohort(rows(10, 0))).toMatchObject({ enough: false, schemaOk: true });
-    expect(src).toContain('${APS_PROMPT_HASH}%');
+    expect(src).not.toContain('${APS_PROMPT_HASH}%');
+    expect(src).toContain(".where('ai_extraction_prompt_version', apsCohortVersion(liveCatalogNames))");
     expect(src).toContain('.then(() => apsCohortReport())');
     // gate off: no section, no database read, no output (output identical to main)
     const log = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -880,7 +882,7 @@ describe('codex #6046 round 5', () => {
       }
     }
     expect(PROMPT_VERSION).toMatch(/^v\d{2}$/);
-    expect(APS_PROMPT_HASH).toBe(`${PROMPT_VERSION}a-${PROMPT_HASH.slice(PROMPT_VERSION.length + 1)}`);
+    expect(APS_PROMPT_HASH).toMatch(new RegExp(`^${PROMPT_VERSION}a-[0-9a-f]{12}$`));
   });
 
   test('every column that stores this value is varchar(30) or wider (migrations scanned)', () => {
@@ -1031,5 +1033,94 @@ describe('codex #6046 round 6: any number in an agent turn is price talk (bare a
     const views = [{ requested_service: 'Waves Assessment', quoted_price: null, quote_requested: false, quote_promised: false }];
     expect(grounded(extraction(), real, { assessmentBooking: assess({ outbound: true, v1Views: views }) })).toEqual({ ok: true, reason: 'assessment_booking_grounded', mode: 'agent_proposed', assessment: true });
     expect(route(extraction(), { transcript: real, commercialAssessmentV1Views: views }).allowed).toBe(true);
+  });
+});
+
+describe('codex #6046 round 7', () => {
+  const PV = require('../services/prompts/call-extraction-v1');
+  const { extractionPromptVersion, PROMPT_HASH, APS_PROMPT_HASH, buildExtractionPrompt } = PV;
+
+  test('APS_PROMPT_HASH comes from the GATE-ON prompt contract; PROMPT_HASH is the gate-off one and unchanged', () => {
+    const crypto = require('crypto');
+    const src = fs.readFileSync(path.join(__dirname, '../services/prompts/call-extraction-v1.js'), 'utf8');
+    expect(src).toContain("buildExtractionPrompt('', '', '', { agentProposedSlotCommitment: true })");
+    expect(src).toContain("buildExtractionPrompt('', '', '') + '\\n' + JSON.stringify(modelOutputSchema)");
+    // the two hashes differ, and the gate-on text really is part of the APS one
+    expect(APS_PROMPT_HASH.split('-')[1]).not.toBe(PROMPT_HASH.split('-')[1]);
+    expect(buildExtractionPrompt('', '', '', { agentProposedSlotCommitment: true })).not.toBe(buildExtractionPrompt('', '', ''));
+    // changing the gated text changes the hash: rebuild the module with one gated string edited
+    const jsPath = path.join(__dirname, '../services/prompts/call-extraction-v1.js');
+    const edited = src.replace('AGENT-PROPOSED SLOT (NEW bookings only;', 'AGENT-PROPOSED SLOT (EDITED NEW bookings only;');
+    expect(edited).not.toBe(src);
+    const tmp = path.join(path.dirname(jsPath), '_round7_edit_tmp.js');
+    fs.writeFileSync(tmp, edited);
+    try {
+      const changed = require(tmp);
+      expect(changed.APS_PROMPT_HASH).not.toBe(APS_PROMPT_HASH);
+      expect(changed.PROMPT_HASH).toBe(PROMPT_HASH); // gate-off hash untouched by a gated-only edit
+    } finally {
+      fs.unlinkSync(tmp);
+    }
+    expect(PROMPT_HASH).toBe('v22-6bbc6d372ed2');
+    expect(APS_PROMPT_HASH.length).toBe(PROMPT_HASH.length + 1);
+    expect(crypto).toBeTruthy();
+  });
+
+  test('readiness matches the EXACT live gate-on catalog version, no prefix match', () => {
+    const { apsCohortVersion } = require('../scripts/v2-promotion-readiness');
+    const names = ['Waves Assessment', 'Cockroach Control Service'];
+    expect(apsCohortVersion(names)).toBe(extractionPromptVersion(names, { agentProposedSlotCommitment: true }));
+    expect(apsCohortVersion(names)).toMatch(/^v\d+a-[0-9a-f]{12}-cat\.[0-9a-f]{8}$/);
+    // another catalog is another cohort; an empty live catalog is the bare APS version
+    expect(apsCohortVersion([...names, 'Other'])).not.toBe(apsCohortVersion(names));
+    expect(apsCohortVersion([])).toBe(APS_PROMPT_HASH);
+    expect(apsCohortVersion(undefined)).toBe(APS_PROMPT_HASH);
+    const src = fs.readFileSync(path.join(__dirname, '../scripts/v2-promotion-readiness.js'), 'utf8');
+    expect(src).not.toMatch(/like.*APS_PROMPT_HASH/);
+    expect(src).toContain('loadBookableCallServices(db)');
+  });
+
+  describe('V2 quote signals and estimate words are price talk', () => {
+    test('V2 quote_requested / quote_promised true counts; false, null and undefined do not', () => {
+      for (const k of ['quote_requested', 'quote_promised']) {
+        expect([k, priceDiscussed({ [k]: true }, OUTBOUND)]).toEqual([k, true]);
+        for (const quiet of [false, null, undefined]) expect([k, quiet, priceDiscussed({ [k]: quiet }, OUTBOUND)]).toEqual([k, quiet, false]);
+        expect([k, grounded(extraction({ service: { [k]: true } }))]).toEqual([k, { ok: false, reason: 'price_discussed' }]);
+        expect([k, route(extraction({ service: { [k]: true } })).allowed]).toEqual([k, false]);
+        expect([k, grounded(extraction({ service: { [k]: false } })).ok]).toEqual([k, true]);
+      }
+    });
+
+    test('"Can I get an estimate?": with V2 quote_requested true, and with only the transcript word', () => {
+      const talk = OUTBOUND.replace('Caller: Great, thank you.', 'Caller: Great, can I get an estimate?');
+      expect(grounded(extraction({ service: { quote_requested: true } }), talk)).toEqual({ ok: false, reason: 'price_discussed' });
+      expect(grounded(extraction(), talk)).toEqual({ ok: false, reason: 'price_discussed' }); // transcript word alone
+      for (const word of ['estimate', 'estimates', 'estimated', 'estimating', 'quoted', 'quoting']) {
+        const t = OUTBOUND.replace('Caller: Great, thank you.', `Caller: Great, ${word}.`);
+        expect([word, grounded(extraction(), t)]).toEqual([word, { ok: false, reason: 'price_discussed' }]);
+      }
+      expect(grounded(extraction()).ok).toBe(true);
+    });
+  });
+
+  test('the real shape (synthetic names) still grounds', () => {
+    const real = [
+      'Agent: Hey Jordan, this is Alex with Waves. How are you?', 'Caller: Good, thanks.',
+      'Agent: What you got going on?', 'Caller: We have some critters in the break room at the office.',
+      "Agent: Do you think they're mice?", 'Caller: Probably, we hear scratching in the ceiling.',
+      'Agent: And where are you located?', 'Caller: It is 4120 Palm Lane in Bradenton.',
+      "Agent: What's the zip there, do you know?", 'Caller: 34202.',
+      'Agent: Let me just quickly check my schedule and see if we can get someone out there to do an assessment.', 'Caller: Sure.',
+      "Agent: Yep. Just give me a second, I'll just get to my—", 'Caller: No problem.',
+      'Agent: How does noon on Thursday sound?', 'Caller: Perfect.',
+      "Agent: Awesome. I'll book you for that, and we'll see you then.", 'Caller: Great.',
+      "Agent: Perfect. Yep, we'll get you notifications to your phone.", 'Caller: Thank you.',
+      'Agent: Thank you.', 'Caller: Bye-bye.', 'Agent: Bye-bye.',
+    ].join('\n');
+    const views = [{ requested_service: 'Waves Assessment', quoted_price: null, quote_requested: false, quote_promised: false }];
+    const ex = extraction({ service: { quote_requested: false, quote_promised: false } });
+    expect(grounded(ex, real, { assessmentBooking: assess({ outbound: true, v1Views: views }) })).toEqual({ ok: true, reason: 'assessment_booking_grounded', mode: 'agent_proposed', assessment: true });
+    expect(route(ex, { transcript: real, commercialAssessmentV1Views: views }).allowed).toBe(true);
+    expect(grounded(extraction(), real, { assessmentBooking: assess({ outbound: true, v1Views: views }) }).ok).toBe(true);
   });
 });

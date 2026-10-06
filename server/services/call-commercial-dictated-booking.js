@@ -218,7 +218,7 @@ function acceptedEntryFor(svc, quoted) {
 //    recorded slot words of the grounded slot turn.
 // The no-price assessment mode needs ALL of these quiet; one of them sends the call to the
 // priced path.
-const PRICE_TALK = /\$\s*\d|\b(?:dollars?|bucks?|price[sd]?|pricing|costs?|charg(?:e|es|ed|ing)|fees?|totals?|quot(?:e|es|ed|ing)|rates?|pay|pays|paying|paid|payments?|invoic(?:e|es|ed|ing)|bill|bills|billed|billing|deposits?)\b/i;
+const PRICE_TALK = /\$\s*\d|\b(?:dollars?|bucks?|price[sd]?|pricing|costs?|charg(?:e|es|ed|ing)|fees?|totals?|quot(?:e|es|ed|ing)|estimat(?:e|es|ed|ing)|rates?|pay|pays|paying|paid|payments?|invoic(?:e|es|ed|ing)|bill|bills|billed|billing|deposits?)\b/i;
 const NO_CHARGE = /\b(?:no|without|free of)\s+(?:extra\s+|additional\s+|any\s+)?(?:charge|charges|cost|costs|fee|fees)\b/gi;
 const hasAmount = (e) => !!e && typeof e === 'object' && (e.amount_usd != null || e.amount_max_usd != null);
 function v1ViewPriced(view) {
@@ -259,6 +259,8 @@ function priceDiscussed(svc = {}, transcript = '', v1Views = [], v2 = null) {
   const entries = [svc.price, ...(Array.isArray(svc.prices) ? svc.prices : [])];
   return svc.quoted_price_usd != null
     || [svc.price_offered_by_staff, svc.price_accepted_by_caller, svc.price_is_final].some((j) => j != null)
+    // V2 quote signals: true counts (any value other than false / null / undefined fails closed)
+    || [svc.quote_requested, svc.quote_promised].some((q) => q !== false && q != null)
     || entries.some(hasAmount)
     || (Array.isArray(v1Views) ? v1Views : []).some(v1ViewPriced)
     || PRICE_TALK.test(String(transcript || '').replace(NO_CHARGE, ' '))

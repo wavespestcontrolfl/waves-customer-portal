@@ -45,7 +45,7 @@ const {
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
-const { PROMPT_HASH, APS_PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const { PROMPT_HASH, extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -536,14 +536,23 @@ function evaluateApsCohort(rows) {
   return { attempts, valid, schemaPassRate, enough: attempts >= MIN_CALLS, schemaOk: attempts > 0 && schemaPassRate >= SCHEMA_PASS_THRESHOLD };
 }
 
+// The EXACT version the processor stamps on a gate-on call under the live catalog (the same
+// computation as main()'s LIVE_PROMPT_VERSION, with the cohort mark): with an empty catalog
+// that is the bare APS version. No prefix match, so a stale catalog's cohort never folds in.
+function apsCohortVersion(liveCatalogNames) {
+  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true });
+}
+
 async function apsCohortReport(env = process.env) {
   if (env.GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING !== 'true') return null;
   const db = dbConn();
   try {
+    const { loadBookableCallServices } = require('../services/call-booking-catalog');
+    const liveCatalogNames = (await loadBookableCallServices(db)).map((s) => s.name).filter(Boolean);
     const rows = await db('call_log')
       .whereNotNull('v2_extraction_status').whereNot('v2_extraction_status', 'not_run')
       .whereIn('ai_extraction_model', [CURRENT_PRIMARY])
-      .where('ai_extraction_prompt_version', 'like', `${APS_PROMPT_HASH}%`)
+      .where('ai_extraction_prompt_version', apsCohortVersion(liveCatalogNames))
       .select('v2_extraction_status');
     const r = evaluateApsCohort(rows);
     console.log(`\n-aps cohort (agent-proposed-slot prompt; scored separately, never merged above): ${r.attempts} attempt(s), schema pass ${(r.schemaPassRate * 100).toFixed(1)}% (${r.valid}/${r.attempts}) — ≥ ${MIN_CALLS} attempts: ${r.enough ? 'yes' : 'no'}, ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid: ${r.schemaOk ? 'yes' : 'no'}.`);
@@ -557,4 +566,4 @@ if (require.main === module) {
   main().then(() => apsCohortReport()).catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { contactPhoneForCall, evaluateApsCohort, apsCohortReport };
+module.exports = { contactPhoneForCall, evaluateApsCohort, apsCohortReport, apsCohortVersion };

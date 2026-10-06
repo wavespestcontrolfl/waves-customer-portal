@@ -487,7 +487,14 @@ const PROMPT_HASH = `${PROMPT_VERSION}-${_contractHash}`;
 // and a catalog-suffixed version is already 29 characters (`v22-` + 12 + `-cat.` + 8), so
 // the agent-proposed-slot cohort cannot be a suffix. It is marked INSIDE the leading version
 // token instead: `v22a-<hash>[-cat.<hash>]`, one character longer at most (30). No migration.
-const APS_PROMPT_HASH = `${PROMPT_VERSION}a-${_contractHash}`;
+// Its hash comes from the GATE-ON prompt contract (the block, the third exception and the
+// commitment-quote rule all render), so any edit to the gated text changes this version.
+// Same 12 hex characters as PROMPT_HASH: the length does not change.
+const _apsContractHash = crypto.createHash('sha256')
+  .update(buildExtractionPrompt('', '', '', { agentProposedSlotCommitment: true }) + '\n' + JSON.stringify(modelOutputSchema))
+  .digest('hex')
+  .slice(0, 12);
+const APS_PROMPT_HASH = `${PROMPT_VERSION}a-${_apsContractHash}`;
 function extractionPromptVersion(bookableServiceNames, opts = {}) {
   const names = Array.isArray(bookableServiceNames)
     ? bookableServiceNames.filter(Boolean)
