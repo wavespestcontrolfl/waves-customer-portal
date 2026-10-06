@@ -52,7 +52,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const id = randomUUID();
     await mockPg('estimates').insert({
       id, customer_id: customerId, status, created_at: createdAt, updated_at: updatedAt, sent_at: sentAt,
-      token: randomUUID().replace(/-/g, ''), customer_name: 'Fixture Retire', estimate_data: JSON.stringify(data), ...rest,
+      token: randomUUID().replace(/-/g, ''), customer_name: 'Fixture Retire', address: '100 Fixture Way, Testville, FL 34000', estimate_data: JSON.stringify(data), ...rest,
     });
     return id;
   }
@@ -101,12 +101,38 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const grouped = await estimate(c, { createdAt: minutesAgo(60), estimate_group_id: randomUUID() });
     const repricing = await estimate(c, { createdAt: minutesAgo(60), data: { estimatorEngine: { reprice_pending_at: minutesAgo(50).toISOString() } } });
     const delivering = await estimate(c, { createdAt: minutesAgo(60), data: { estimatorEngine: { delivering_at: new Date().toISOString() } } });
-    const addressHold = await estimate(c, { createdAt: minutesAgo(60), data: { addressUnverifiedFlag: { reason: 'fixture' } } });
+    const addressHold = await estimate(c, { createdAt: minutesAgo(60), data: { addressUnverified: true } });
+    const oneTap = await estimate(c, { createdAt: minutesAgo(60), source: 'one_tap_purchase' });
+    const otherAddress = await estimate(c, { createdAt: minutesAgo(60), address: '200 Other Rd, Testville, FL 34000' });
+    const noAddress = await estimate(c, { createdAt: minutesAgo(60), address: null });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
-    for (const id of [loneDraft, scheduled, locked, grouped, repricing, delivering, addressHold]) {
+    for (const id of [loneDraft, scheduled, locked, grouped, repricing, delivering, addressHold, oneTap, otherAddress, noAddress]) {
       expect((await row(id)).archived_at).toBeNull();
     }
+  });
+
+  test('a cleared address hold does not block, and an invalidated send is not proof of a send', async () => {
+    const c = await customer();
+    const cleared = await estimate(c, { createdAt: minutesAgo(60), data: { addressUnverifiedFlag: null, addressUnverified: null } });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    const c2 = await customer();
+    const kept = await estimate(c2, { createdAt: minutesAgo(60) });
+    await estimate(c2, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10), data: { estimatorEngine: { linkage_invalidated_at: minutesAgo(5).toISOString() } } });
+    await estimate(c2, { status: 'draft', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(cleared)).archived_at).not.toBeNull();
+    expect((await row(kept)).archived_at).toBeNull();
+  });
+
+  test('the same door in another spelling matches; another unit does not', async () => {
+    const c = await customer();
+    const spelled = await estimate(c, { createdAt: minutesAgo(60), address: '100 Fixture Terrace, Testville, FL 34000' });
+    const otherUnit = await estimate(c, { createdAt: minutesAgo(60), address: '100 Fixture Ter Apt 3, Testville, FL 34000' });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10), address: '100 Fixture Ter, Testville, FL 34000, USA' });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(spelled)).archived_at).not.toBeNull();
+    expect((await row(otherUnit)).archived_at).toBeNull();
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
