@@ -110,17 +110,20 @@ describe('property-lookup callers declare their scope decision', () => {
       }
       // ...and a caller never SETS the option anywhere else in its file
       // either, except the one sanctioned whole-property switch-off in the
-      // admin route. Only the three modules that define or read the option
-      // are exempt, named one by one: any other file, the lookup directory
-      // included, is a caller.
+      // admin route. Only the modules that define or read the option are
+      // exempt, named one by one: any other file, the lookup directory
+      // included, is a caller. A caller has no reason to spell the option
+      // at all, so ANY non-comment mention is an offender: dot or bracket
+      // assignment, a string key, Object.assign / defineProperty, a spread
+      // of an object that names it, whatever the form.
       if (!OPTION_OWNERS.has(r)) {
         src.split('\n').forEach((line, i) => {
-          if (/^\s*(\/\/|\*)/.test(line) || !/commercialSuiteSizing\s*[:=]/.test(line)) return;
-          offenders.push(`${r}:${i + 1}: sets commercialSuiteSizing outside the registry`);
+          if (/^\s*(\/\/|\*)/.test(line) || !/commercialSuiteSizing/.test(line)) return;
+          offenders.push(`${r}:${i + 1}: names commercialSuiteSizing outside the registry`);
         });
       } else if (r === SANCTIONED_OVERRIDE.file) {
         src.split('\n').forEach((line, i) => {
-          if (/^\s*(\/\/|\*)/.test(line) || !/callerOptions\.commercialSuiteSizing/.test(line)) return;
+          if (/^\s*(\/\/|\*)/.test(line) || !/callerOptions\s*(\.|\[)\s*['"`]?commercialSuiteSizing/.test(line)) return;
           if (!SANCTIONED_OVERRIDE.line.test(line)) offenders.push(`${r}:${i + 1}: unsanctioned override of callerOptions`);
         });
       }
