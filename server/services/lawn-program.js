@@ -48,6 +48,26 @@ function lawnV13AnyGrassTrack(grass = null) {
   return LAWN_V13_ANY_GRASS_TRACK;
 }
 
+// The display names of the tracks the live program holds, for copy that lists them (the pricing
+// knowledge entry, the customer guide): the old program's four, or v13's three (no bahia).
+const LAWN_TRACK_NAMES = { st_augustine: 'St. Augustine', bermuda: 'Bermuda', zoysia: 'Zoysia', bahia: 'Bahia' };
+function lawnTrackNames() {
+  return Object.keys(lawnProtocols() || {}).map((key) => LAWN_TRACK_NAMES[key] || key);
+}
+// True when the live program leaves bahiagrass without a program (v13): the copy then says the
+// office reviews bahia lawns instead of promising a bahia track.
+function lawnProgramHasNoBahia() {
+  return featureGates.lawnV13Live?.() === true && !lawnProtocols()?.bahia;
+}
+
+// The "Tracks:" lines of the pricing knowledge entry. Gate off: the one old line, word for word.
+function lawnTrackKnowledgeLines() {
+  return [
+    `Tracks: ${lawnTrackNames().join(' | ')}`,
+    ...(lawnProgramHasNoBahia() ? ['Bahiagrass lawns: no program (Celsius and Blindside are not labeled for bahiagrass); the office reviews each one before quoting'] : []),
+  ];
+}
+
 // A protocol version that can serve a visit: the published one, or the staged
 // v13 version (loaded by the migration, never active until the follow-up PR
 // retires the old program) ONLY while GATE_LAWN_V13 is live. Unsetting the gate
@@ -104,4 +124,4 @@ function unknownCadenceWarning(unknownCadence) {
   };
 }
 
-module.exports = { lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };
+module.exports = { lawnTrackKnowledgeLines, lawnTrackNames, lawnProgramHasNoBahia, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };

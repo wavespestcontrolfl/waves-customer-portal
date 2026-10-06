@@ -960,7 +960,8 @@ const KnowledgeBaseService = {
         '**Lawn Care Pricing**',
         `Version: ${LAWN_PRICING_V2?.pricingVersion || 'LAWN_PRICING_V2'} — market bracket table (grass track × turf sqft × tier), DB-authoritative via lawn_pricing_brackets`,
         `Tiers: ${Object.values(LAWN_TIERS || {}).map((t) => `${t.label}${t.hidden ? ' (retired/hidden)' : ''}`).join(' | ')}`,
-        'Tracks: St. Augustine | Bermuda | Zoysia | Bahia',
+        // The tracks the live lawn program holds (v13 has no bahia track: those lawns are reviewed by the office).
+        ...require('./lawn-program').lawnTrackKnowledgeLines(),
         'Turf area: fixed hardscape (800sf base + 3% excess) + complexity scoring + smoothed turf factor',
       ].join('\n');
       await upsert('pricing-engine-current', 'Pest & Lawn Pricing Engine', pricingContent, 'pricing', ['pest', 'lawn', 'modifiers']);

@@ -893,7 +893,9 @@ function generateEstimate(input) {
         bermudaSuppression: services.lawn.bermudaSuppression === true,
         // A stored estimate replayed as sold (extractEngineInputs, the persisted-replay recompute)
         // keeps its price; only a fresh bahia quote is parked under GATE_LAWN_V13.
-        skipBahiaNoProgramReview: input.savedEstimateReplay === true,
+        // A lawn line this replay's mutation adds (addedServiceKeys) was never sold: it is reviewed.
+        skipBahiaNoProgramReview: input.savedEstimateReplay === true
+          && !(Array.isArray(input.addedServiceKeys) && input.addedServiceKeys.includes('lawn_care')),
       });
       lineItems.push(result);
       activeServiceKeys.push('lawn_care');

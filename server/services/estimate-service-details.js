@@ -443,7 +443,7 @@ const SERVICE_DETAILS_COPY = {
       heading: 'Your program at a glance',
       rows: [
         ['Visits', 'The count on your estimate, timed to turf growth, pest season, weather, and local fertilizer rules — not a fixed monthly date'],
-        ['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another'],
+        ['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another', { lawnTracks: true }],
         ['Every visit', 'Inspect first. Then turf-specific fertilization, weed and sedge control, and insect or disease treatment when the evidence supports it'],
         ['Covered insects', 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets — checked every visit, treated on evidence. Fire ants only when your proposal includes them'],
         ['Disease', 'Scouted every visit. Fungicide is applied when disease is present or the risk is documented, on comprehensive plans; fertilization-only and weed-only plans quote it separately'],
@@ -926,6 +926,16 @@ function formatGuidePhone(raw) {
   return raw ? String(raw) : null;
 }
 
+// The "Built for your grass" row follows the live lawn program: GATE_LAWN_V13 has no bahia track, so
+// the guide stops promising one and says the office reviews bahia lawns. Gate off, the row is as written.
+function lawnTracksRowText(written) {
+  const { lawnTrackNames, lawnProgramHasNoBahia } = require('./lawn-program');
+  if (!lawnProgramHasNoBahia()) return written;
+  const names = lawnTrackNames();
+  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}` : names.join('');
+  return `We confirm your grass (${list}) before anything goes down, because a product that helps one grass can injure another. Bahiagrass lawns: our team reviews these before quoting`;
+}
+
 function serviceDetailsAvailable(serviceKey) {
   return Object.prototype.hasOwnProperty.call(SERVICE_DETAILS_COPY, serviceKey);
 }
@@ -1138,6 +1148,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
         .filter((row) => bondGateOn || !(Array.isArray(row) && row[2] && row[2].requiresTermiteBondGate))
         .filter((row) => !(Array.isArray(row) && row[2])
           || ownershipMatches(row[2].requiresStationOwnership))
+        .map((row) => (Array.isArray(row) && row[2]?.lawnTracks ? [row[0], lawnTracksRowText(row[1])] : row))
         .map((row) => (Array.isArray(row) && row.length > 2 ? [row[0], row[1]] : row));
       return { ...copy.systemBox, rows };
     })(),
