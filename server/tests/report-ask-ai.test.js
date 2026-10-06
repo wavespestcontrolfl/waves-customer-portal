@@ -461,6 +461,9 @@ describe('screenAskAnswer', () => {
     expect(screen('Your window is from two to four.')).toBe('states_a_date');
     expect(screen('Your next visit is in two days.')).toBe('states_a_date');
     expect(screen('We will return later this month.')).toBe('states_a_date');
+    expect(screen('We will return in Sept.')).toBe('states_a_date');
+    expect(screen('Your next visit is in Jan.')).toBe('states_a_date');
+    expect(screen('We will come in Oct')).toBe('states_a_date');
     expect(screen('Activity often drops between 2 and 4 weeks after treatment.')).toBeNull();
     expect(screen('This may take a few days.')).toBeNull();
     expect(screen('This may help with the ants.')).toBeNull();
@@ -612,7 +615,7 @@ describe('schedule questions keep the rule answer', () => {
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
     'What time will you be here?', 'What day are you coming?',
-    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
@@ -646,6 +649,10 @@ describe('symptoms and exposure never reach the model', () => {
     'The pesticide splashed my eyes',
     'The pesticide splashed me in the eyes',
     'The chemical hit me in the eye',
+    'The pesticide hit me in both eyes',
+    'The chemical got into my left eye',
+    'It splashed into her right eye',
+    'My dog consumed the bait',
     'The product touched my skin',
     'My eyes were sprayed',
     'My skin was sprayed',
@@ -726,6 +733,8 @@ describe('symptoms and exposure never reach the model', () => {
     'Are there bee hives near my shed?',
     'How many numbers are on the pressure scale?',
     'What was sprayed on the face of the house?',
+    'Were the ants poisoned by the bait?',
+    'Was the rat poisoned?',
     'What was sprayed on my lawn?',
     'What was sprayed on the fence?',
     'Was anything sprayed on my patio?',

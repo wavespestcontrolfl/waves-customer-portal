@@ -34,6 +34,8 @@ function main(argv) {
   const data = wrapped ? parsed.data : parsed;
   // Keep stdout pure JSON: the portal logger prints module-load warnings there.
   process.env.LOG_LEVEL = 'error';
+  // dotenv 17 prints a banner on stdout unless told to stay quiet (Codex P1 #6016 r20).
+  process.env.DOTENV_CONFIG_QUIET = 'true';
   const { buildReportAskPrompt } = require('../../server/services/service-report/report-ask-ai');
   process.stdout.write(`${JSON.stringify(buildReportAskPrompt({ question, data }), null, 2)}\n`);
   return 0;
