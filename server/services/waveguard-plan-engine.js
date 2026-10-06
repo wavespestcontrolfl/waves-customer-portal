@@ -1277,11 +1277,6 @@ async function getProducts(knex, { strict = false } = {}) {
   }));
 }
 
-// The visit's active product substitutions, original product id → the row
-// with its `substitute` catalog product. `products` is the catalog list the
-// substitutes are looked up in (the plan's getProducts read); a caller with
-// no list in hand (the lawn-fast context's protocol window) passes null and
-// the substitutes' catalog rows are read here, so one mechanism serves both.
 async function getAppointmentSubstitutions(knex, serviceId, products, { strict = false } = {}) {
   if (!(await knex.schema.hasTable('lawn_protocol_product_substitutions'))) return new Map();
   const rows = await savepointRead(knex, (k) => k('lawn_protocol_product_substitutions as lpps')
@@ -1295,11 +1290,7 @@ async function getAppointmentSubstitutions(knex, serviceId, products, { strict =
       'sp.name as substitute_product_name',
     ))
     .catch((err) => { if (strict) throw err; return []; });
-  const catalog = products || (rows.length
-    ? await savepointRead(knex, (k) => k('products_catalog').whereIn('id', rows.map((row) => row.substitute_product_id)).select('*'))
-      .catch((err) => { if (strict) throw err; return []; })
-    : []);
-  const productById = new Map((catalog || []).map((product) => [String(product.id), product]));
+  const productById = new Map((products || []).map((product) => [String(product.id), product]));
   const map = new Map();
   for (const row of rows) {
     const substitute = productById.get(String(row.substitute_product_id));
@@ -2106,7 +2097,6 @@ async function buildPlanForService(serviceId, options = {}) {
 module.exports = {
   buildProductInventorySnapshot,
   buildPlanForService,
-  getAppointmentSubstitutions,
   customerBillingModeColumnExists,
   selectProtocolVisit,
   calculateProductAmount,

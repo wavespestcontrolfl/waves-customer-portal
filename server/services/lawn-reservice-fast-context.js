@@ -287,5 +287,4 @@ module.exports = {
   findLastLawnRecord,
   loadLastVisit,
   loadStockAdvisory,
-  customerHasSeveralProperties,
 };

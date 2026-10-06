@@ -25,7 +25,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
-const { etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
+const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 
@@ -476,160 +476,6 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
   }
 }
 
-// ── this month's protocol window ────────────────────────────────────────────
-
-// The product's application method as the completion records it: the
-// planned rows' own classifier (lawn-completion-defaults completionMethod), so
-// one product reads the same method here as when planned — the operating
-// layer's explicit mode, then the catalog's application_method, then the
-// formulation (Codex #5993 r6 P1).
-function protocolMethod(product, row) {
-  const { completionMethod } = require('./lawn-completion-defaults');
-  return completionMethod(
-    { product: { applicationMethod: row?.application_method || null, formulation: row?.formulation } },
-    { applicationMode: product.application_mode },
-  );
-}
-
-// A protocol rate the sheet can figure an amount from: a number in a real
-// unit. 'label_rate' and 'lb_n' (a nutrient target) are not rates per 1,000.
-const RATE_UNIT_RE = /^(fl[ _]?oz|oz|lb|g|gal|tsp)$/i;
-function protocolRate(product) {
-  const rate = Number(product.ratePer1000);
-  const unit = String(product.rateUnit || '').trim();
-  return rate > 0 && RATE_UNIT_RE.test(unit) ? { ratePer1000: rate, rateUnit: unit.toLowerCase().replace(/\s+/g, '_') } : { ratePer1000: null, rateUnit: null };
-}
-
-/**
- * The names a substituted product goes by (the window's own product_name, the
- * catalog name), each mapped to its substitute's name, so a line that names a
- * partner ("tank mix with Celsius WG") names the substitute when Celsius is
- * substituted on this visit. Lower-cased keys.
- */
-function substituteNames(substitutions, rows, listed) {
-  const renamed = new Map();
-  for (const [originalId, substitution] of substitutions) {
-    const names = [rows.get(originalId)?.name, substitution.original_product_name, ...listed.filter((p) => String(p.product_id) === originalId).map((p) => p.product_name)];
-    for (const name of names) if (typeof name === 'string' && name.trim()) renamed.set(name.trim().toLowerCase(), substitution.substitute.name);
-  }
-  return renamed;
-}
-
-/** One window product as the sheet reads it; `row` is the catalog row offered (the substitute's when substituted). */
-function windowProduct(product, { row, substitution, originalName, renamed }) {
-  const rawGates = product.gates && typeof product.gates === 'object' ? product.gates : {};
-  const partner = typeof rawGates.tankMixWith === 'string' ? rawGates.tankMixWith : null;
-  const tankMixWith = partner ? (renamed.get(partner.trim().toLowerCase()) || partner) : null;
-  const gates = partner && tankMixWith !== partner ? { ...rawGates, tankMixWith } : rawGates;
-  // A substituted product's rate: the substitution's, else the substitute's
-  // own catalog rate (the plan engine's rule), never the original's.
-  const rate = substitution
-    ? { ratePer1000: substitution.rate_per_1000 != null ? substitution.rate_per_1000 : row.default_rate_per_1000, rateUnit: substitution.rate_unit || row.rate_unit }
-    : { ratePer1000: product.rate_per_1000, rateUnit: product.rate_unit };
-  return {
-    productId: row.id,
-    name: row.name,
-    substituteFor: substitution ? (originalName || substitution.original_product_name || null) : null,
-    role: product.role || null,
-    defaultInPlan: product.default_in_plan === true,
-    applicationMethod: protocolMethod(product, row),
-    ...protocolRate(rate),
-    // The protocol's own words for when this product goes down, and EVERY
-    // operating gate on the row (spreaderVisitOnly, stressGate,
-    // minDistanceFromWaterFt, ...): the sheet reads them all out, so an add-on
-    // never shows without the conditions that make it valid.
-    trigger: typeof gates.trigger === 'string' ? gates.trigger : null,
-    tankMixWith,
-    gates,
-  };
-}
-
-/**
- * The window's products as the sheet reads them, each catalog product ONCE
- * (the sheet keys its rows by product): a product's own listing beats a
- * substitute that collides with it; among colliding substitutes, the first in
- * window order wins. Only products with a catalog row.
- */
-function windowProducts(listed, { rows, substitutions }) {
-  const renamed = substituteNames(substitutions, rows, listed);
-  const products = new Map();
-  for (const product of listed) {
-    const substitution = substitutions.get(String(product.product_id)) || null;
-    const row = substitution ? substitution.substitute : rows.get(String(product.product_id));
-    if (!row) continue;
-    const id = String(row.id);
-    if (products.has(id) && (substitution || !products.get(id).substituteFor)) continue;
-    products.set(id, windowProduct(product, { row, substitution, originalName: rows.get(String(product.product_id))?.name, renamed }));
-  }
-  return [...products.values()];
-}
-
-/**
- * The structured lawn protocol window for this visit's grass track and month,
- * with the products it lists, so the sheet can offer them as one-tap add-ons
- * ("Also in October's protocol"; owner 2026-10-05). `{ title, month, visitType,
- * products }` or null when no protocol or window resolves. The read mirrors the
- * plan engine's completion-defaults read: the customer's active turf profile
- * (or the legacy lawn_type) sets the track, and an UNKNOWN track resolves no
- * window at all (requireKnownGrass; never a guessed St. Augustine recipe
- * offered as one-tap add-ons), an assigned protocol / window on the visit is
- * honored, and the active protocol for the track otherwise. The visit's own
- * product substitutions (lawn_protocol_product_substitutions, the plan
- * engine's getAppointmentSubstitutions) apply to the window's products as they
- * do to the plan's: a substituted product is offered as its substitute, at the
- * substitution's rate (else the substitute's catalog rate), named for the
- * original (`substituteFor`); a tank-mix partner the window names by a
- * substituted product's name is named by the substitute's. The window offers
- * each catalog product ONCE (the sheet keys its rows by product): where a
- * substitute collides with the product's own listing, the listing wins (its
- * own rate, trigger and gates); where two substitutions collide, the first in
- * window order does. The turf profile
- * is customer-owned (one per customer), so with SEVERAL properties on file it
- * may describe another lawn than this visit's: then only a visit with its own
- * protocol assignment resolves a window (the lawn re-service context's rule,
- * customerHasSeveralProperties). Every lawn visit type gets it: a
- * one-time visit has no plan, so the window's defaults are add-ons there too
- * (`defaultInPlan` says which; the sheet decides). Only products with a catalog
- * row are listed (the sheet builds its row from the catalog). A failed read is
- * advisory: null, with 'protocol_window' in readFailures.
- */
-async function loadProtocolWindow(svc, knex, readFailures) {
-  try {
-    const profile = await knex('customer_turf_profiles').where({ customer_id: svc.customer_id, active: true }).first();
-    const serviceDate = parseETDateTime(`${etCalendarDayOf(svc.scheduled_date)}T12:00`);
-    const { selectProtocolVisit } = require('./waveguard-plan-engine');
-    const { getProtocolWindowContext } = require('./lawn-protocol-operating-layer');
-    const { trackKey } = selectProtocolVisit(profile, serviceDate, svc.lawn_type, { requireKnownGrass: true });
-    if (!trackKey) return null;
-    const { customerHasSeveralProperties } = require('./lawn-reservice-fast-context');
-    if (!svc.lawn_protocol_key && await customerHasSeveralProperties(svc, knex)) return null;
-    const context = await getProtocolWindowContext(knex, {
-      serviceDate,
-      grassTrack: trackKey,
-      region: 'swfl',
-      windowKey: svc.lawn_protocol_window_key || undefined,
-      protocolKey: svc.lawn_protocol_key || undefined,
-      protocolVersion: svc.lawn_protocol_version || undefined,
-      strict: true,
-    });
-    if (!context?.window) return null;
-    const substitutions = await require('./waveguard-plan-engine').getAppointmentSubstitutions(knex, svc.id, null, { strict: true });
-    const listed = (context.products || []).filter((product) => product.product_id);
-    const rows = await loadCatalogRows(listed.map((product) => String(product.product_id)), knex);
-    const products = windowProducts(listed, { rows, substitutions });
-    return {
-      title: context.window.title || null,
-      month: Number(context.window.month) || null,
-      visitType: context.window.visit_type || null,
-      products,
-    };
-  } catch (err) {
-    logger.warn(`[lawn-fast] protocol window unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    readFailures.add('protocol_window');
-    return null;
-  }
-}
-
 // ── planned products ────────────────────────────────────────────────────────
 
 /**
@@ -784,7 +630,6 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   const { unavailable: plannedProductsUnavailable, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
   const reCheck = await loadReCheckNote(svc, knex);
-  const protocolWindow = await loadProtocolWindow(svc, knex, readFailures);
 
   return {
     ok: true,
@@ -806,9 +651,6 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // The application methods a product row may take, the lawn re-service
     // sheet's own list ({ value, label, common, requiresSqft }).
     methods: require('./lawn-reservice-fast-context').lawnMethodChoices(),
-    // This month's protocol window and its products, for the sheet's add-on row
-    // (null when none resolves; see loadProtocolWindow).
-    protocolWindow,
     // The assessment must be CONFIRMED before the visit completes; the sheet
     // reads `confirmed` to enable Complete.
     assessment: {

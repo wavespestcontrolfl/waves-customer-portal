@@ -7,16 +7,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
-jest.mock('../services/waveguard-plan-engine', () => ({
-  buildPlanForService: jest.fn(),
-  selectProtocolVisit: jest.fn(() => ({ trackKey: 'st_augustine', track: null, month: 'Oct', visit: null })),
-  getAppointmentSubstitutions: jest.fn(async () => new Map()),
-}));
-jest.mock('../services/lawn-protocol-operating-layer', () => ({ getProtocolWindowContext: jest.fn(async () => null) }));
+jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-const { buildPlanForService, selectProtocolVisit, getAppointmentSubstitutions } = require('../services/waveguard-plan-engine');
-const { getProtocolWindowContext } = require('../services/lawn-protocol-operating-layer');
+const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { recapVisitIdentityChanged, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('../services/pest-recap');
 const {
   lawnFastIneligibleReason,
@@ -38,7 +32,6 @@ const ASSESSMENT = uuid(2);
 const P_HERB = uuid(11);
 const P_GRAN = uuid(12);
 const P_UN = uuid(13);
-const P_OTHER = uuid(15);
 const P_MISSING = uuid(14);
 
 const PROFILE = (extra = {}) => ({
@@ -57,7 +50,7 @@ function fakeKnex(tables) {
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereIn', 'whereNot', 'leftJoin', 'join', 'orderBy', 'select', 'count']) chain[m] = () => chain;
+    for (const m of ['where', 'whereIn', 'whereNot', 'leftJoin', 'join', 'orderBy', 'select']) chain[m] = () => chain;
     chain.first = async () => {
       if (data instanceof Error) throw data;
       return Array.isArray(data) ? data[0] : data;
@@ -81,8 +74,6 @@ const granular = {
   post_application_watering: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' },
 };
 const unapproved = { id: P_UN, name: 'Test Unapproved', category: 'fertilizer', formulation: 'granular', approved_for_service_report: false };
-// Not in any window: a substitute only.
-const other = { id: P_OTHER, name: 'Test Other Spray', category: 'herbicide', product_type: 'pesticide', formulation: 'SC', approved_for_service_report: true, default_rate_per_1000: '0.5000', rate_unit: 'fl oz' };
 
 describe('lawnFastIneligibleReason: one rule for every lawn visit type', () => {
   const reason = (profile, extra = {}) => lawnFastIneligibleReason({ svc: visit(), profile, ...extra });
@@ -745,151 +736,5 @@ describe('the preflight reasons are ones the shared client hook classifies', () 
     [{ status: 400, code: 'lawn_assessment_unconfirmed' }, 'correctable'],
   ])('%j is %s', (err, expected) => {
     expect(outcome(err)).toBe(expected);
-  });
-});
-
-describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
-  const tables = (extra = {}) => ({ scheduled_services: visit({ lawn_protocol_window_key: 'oct_v13_spreader_fall', lawn_protocol_key: 'swfl_st_augustine_10_10', lawn_protocol_version: '2026.10-v13' }), customers: { billing_mode: null }, customer_turf_profiles: { track_key: 'st_augustine', grass_type: 'st_augustine' }, lawn_assessments: undefined, ...extra });
-  const window = () => ({
-    protocol: { id: 'proto-1', protocol_key: 'swfl_st_augustine_10_10', version: '2026.10-v13' },
-    window: { id: 'w-10', window_key: 'oct_v13_spreader_fall', month: 10, title: 'October Fall Feeding + Pre-Emergent (spreader)', visit_type: 'granular_production_plus_spots' },
-    products: [
-      { product_id: P_GRAN, product_name: 'Stonewall 15-0-15', role: 'fall_pre_emergent_nutrition', application_mode: 'broadcast', rate_per_1000: '4.0200', rate_unit: 'lb', default_in_plan: true, gates: { targetN: '0.6 lb N/1000' } },
-      { product_id: P_HERB, product_name: 'Celsius WG', role: 'post_emergent_spot', application_mode: 'spot', rate_per_1000: '0.0850', rate_unit: 'oz', default_in_plan: false, gates: { annualCounter: 'celsius_oz_per_1000', stressGate: true } },
-      { product_id: P_UN, product_name: 'Certainty', role: 'post_emergent_spot', application_mode: 'spot', rate_per_1000: null, rate_unit: 'label_rate', default_in_plan: false, gates: { trigger: 'repeat_sedge', tankMixWith: 'Celsius WG' } },
-      // No catalog row: the sheet cannot build a row for it, so it is not listed.
-      { product_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff', product_name: 'Ghost', role: 'x', application_mode: 'spot', default_in_plan: false, gates: {} },
-      // No catalog id at all.
-      { product_id: null, product_name: 'Unmapped line', role: 'x', application_mode: 'spot', default_in_plan: false, gates: {} },
-    ],
-    gates: [],
-  });
-  const catalog = [herbicide, granular, unapproved];
-
-  beforeEach(() => { getProtocolWindowContext.mockReset(); getProtocolWindowContext.mockResolvedValue(null); selectProtocolVisit.mockClear(); getAppointmentSubstitutions.mockReset(); getAppointmentSubstitutions.mockResolvedValue(new Map()); });
-
-  test('the context carries the window: title, month, and each listed product with the method, a figurable rate, the trigger and the tank mix', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    getProtocolWindowContext.mockResolvedValue(window());
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: catalog })), technicianId: 'tech-1' });
-    expect(ctx.protocolWindow).toEqual({
-      title: 'October Fall Feeding + Pre-Emergent (spreader)',
-      month: 10,
-      visitType: 'granular_production_plus_spots',
-      products: [
-        { productId: P_GRAN, name: 'Test Feed Granular', substituteFor: null, role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null, gates: { targetN: '0.6 lb N/1000' } },
-        { productId: P_HERB, name: 'Test Weed Spray', substituteFor: null, role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: 0.085, rateUnit: 'oz', trigger: null, tankMixWith: null, gates: { annualCounter: 'celsius_oz_per_1000', stressGate: true } },
-        { productId: P_UN, name: 'Test Unapproved', substituteFor: null, role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'repeat_sedge', tankMixWith: 'Celsius WG', gates: { trigger: 'repeat_sedge', tankMixWith: 'Celsius WG' } },
-      ],
-    });
-    expect(ctx.readFailures).not.toContain('protocol_window');
-    // The visit's assigned protocol and window are honored; the track is the turf profile's.
-    expect(getProtocolWindowContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      grassTrack: 'st_augustine', region: 'swfl', windowKey: 'oct_v13_spreader_fall', protocolKey: 'swfl_st_augustine_10_10', protocolVersion: '2026.10-v13', strict: true,
-    }));
-  });
-
-  test('a broadcast window product takes the catalog\'s own application method before the formulation, as a planned row does', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    getProtocolWindowContext.mockResolvedValue(window());
-    const drench = { ...granular, application_method: 'soil_drench' };
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, drench, unapproved] })), technicianId: 'tech-1' });
-    expect(ctx.protocolWindow.products.find((p) => p.productId === P_GRAN)).toMatchObject({ applicationMethod: 'soil_drench' });
-    // An explicit spot mode still wins over the catalog method.
-    expect(ctx.protocolWindow.products.find((p) => p.productId === P_HERB)).toMatchObject({ applicationMethod: 'spot_treatment' });
-  });
-
-  test('the visit\'s product substitutions apply: a substituted window product is offered as its substitute, at the substitution\'s rate, named for the original; a tank mix naming the original names the substitute; a substitute colliding with a product\'s own listing is offered once, as the listing', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    getProtocolWindowContext.mockResolvedValue(window());
-    getAppointmentSubstitutions.mockResolvedValue(new Map([
-      // Test Weed Spray (the window's "Celsius WG") → Test Other Spray at the substitution's own rate.
-      [P_HERB, { original_product_id: P_HERB, substitute_product_id: P_OTHER, rate_per_1000: '3.0000', rate_unit: 'fl oz', substitute: other, original_product_name: 'Test Weed Spray' }],
-      // Test Feed Granular → Test Unapproved, which the window lists itself: offered once, as its own listing.
-      [P_GRAN, { original_product_id: P_GRAN, substitute_product_id: P_UN, rate_per_1000: null, rate_unit: null, substitute: unapproved, original_product_name: 'Test Feed Granular' }],
-    ]));
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [...catalog, other] })), technicianId: 'tech-1' });
-    expect(getAppointmentSubstitutions).toHaveBeenCalledWith(expect.anything(), VISIT, null, { strict: true });
-    expect(ctx.protocolWindow.products.map(({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod, tankMixWith, gates }) => ({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod, tankMixWith, gates }))).toEqual([
-      // Certainty's "tank mix with Celsius WG" now names Celsius's substitute, in the line and in the gates alike.
-      { productId: P_UN, name: 'Test Unapproved', substituteFor: null, ratePer1000: null, rateUnit: null, applicationMethod: 'spot_treatment', tankMixWith: 'Test Other Spray', gates: { trigger: 'repeat_sedge', tankMixWith: 'Test Other Spray' } },
-      { productId: P_OTHER, name: 'Test Other Spray', substituteFor: 'Test Weed Spray', ratePer1000: 3, rateUnit: 'fl_oz', applicationMethod: 'spot_treatment', tankMixWith: null, gates: { annualCounter: 'celsius_oz_per_1000', stressGate: true } },
-    ]);
-  });
-
-  test('two substitutions to one product the window does not list: offered once, the first in window order, at the substitute\'s catalog rate when the substitution carries none', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    getProtocolWindowContext.mockResolvedValue(window());
-    getAppointmentSubstitutions.mockResolvedValue(new Map([
-      [P_GRAN, { original_product_id: P_GRAN, substitute_product_id: P_OTHER, rate_per_1000: null, rate_unit: null, substitute: other, original_product_name: 'Test Feed Granular' }],
-      [P_HERB, { original_product_id: P_HERB, substitute_product_id: P_OTHER, rate_per_1000: '3.0000', rate_unit: 'fl oz', substitute: other, original_product_name: 'Test Weed Spray' }],
-    ]));
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [...catalog, other] })), technicianId: 'tech-1' });
-    expect(ctx.protocolWindow.products.map(({ productId, substituteFor, ratePer1000, rateUnit, applicationMethod }) => ({ productId, substituteFor, ratePer1000, rateUnit, applicationMethod }))).toEqual([
-      { productId: P_OTHER, substituteFor: 'Test Feed Granular', ratePer1000: 0.5, rateUnit: 'fl_oz', applicationMethod: 'broadcast_spray' },
-      { productId: P_UN, substituteFor: null, ratePer1000: null, rateUnit: null, applicationMethod: 'spot_treatment' },
-    ]);
-  });
-
-  test('a broadcast product that is a tank mix (WDG) is a broadcast spray, not a granular broadcast', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    const w = window();
-    w.products = [{ product_id: P_HERB, product_name: 'WDG thing', role: 'insecticide', application_mode: 'broadcast', rate_per_1000: null, rate_unit: 'label_rate', default_in_plan: false, gates: {} }];
-    getProtocolWindowContext.mockResolvedValue(w);
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: catalog })), technicianId: 'tech-1' });
-    expect(ctx.protocolWindow.products[0].applicationMethod).toBe('broadcast_spray');
-  });
-
-  test.each([
-    ['no window resolves', null],
-    ['a protocol with no window for the month', { protocol: { id: 'p' }, window: null, products: [], gates: [] }],
-  ])('%s: protocolWindow is null and nothing is marked failed', async (_label, answer) => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    getProtocolWindowContext.mockResolvedValue(answer);
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()), technicianId: 'tech-1' });
-    expect(ctx.protocolWindow).toBeNull();
-    expect(ctx.readFailures).not.toContain('protocol_window');
-  });
-
-  test('an unknown grass track resolves no window: nothing is guessed, no protocol read is made', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    selectProtocolVisit.mockReturnValueOnce({ trackKey: null, track: null, month: 'Oct', visit: null });
-    getProtocolWindowContext.mockResolvedValue(window());
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ customer_turf_profiles: undefined })), technicianId: 'tech-1' });
-    expect(ctx.protocolWindow).toBeNull();
-    expect(getProtocolWindowContext).not.toHaveBeenCalled();
-    expect(ctx.readFailures).not.toContain('protocol_window');
-    expect(selectProtocolVisit).toHaveBeenCalledWith(undefined, expect.any(Date), undefined, { requireKnownGrass: true });
-  });
-
-  test('a customer with several properties and no protocol assignment on the visit gets no window (the turf profile may be another lawn\'s); an assigned visit does', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    getProtocolWindowContext.mockResolvedValue(window());
-    const several = { customer_properties: { n: 2 }, products_catalog: catalog };
-    const unassigned = await buildLawnFastContext(VISIT, { knex: fakeKnex({ ...tables(several), scheduled_services: visit() }), technicianId: 'tech-1' });
-    expect(unassigned.protocolWindow).toBeNull();
-    expect(getProtocolWindowContext).not.toHaveBeenCalled();
-    expect(unassigned.readFailures).not.toContain('protocol_window');
-    const assigned = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(several)), technicianId: 'tech-1' });
-    expect(assigned.protocolWindow.products).toHaveLength(3);
-    // One property on file: the profile is this lawn's.
-    const one = await buildLawnFastContext(VISIT, { knex: fakeKnex({ ...tables({ customer_properties: { n: 1 }, products_catalog: catalog }), scheduled_services: visit() }), technicianId: 'tech-1' });
-    expect(one.protocolWindow.products).toHaveLength(3);
-  });
-
-  test('a failed window read is advisory: null, protocol_window in readFailures, the sheet still opens', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
-    getProtocolWindowContext.mockRejectedValue(new Error('db down'));
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()), technicianId: 'tech-1' });
-    expect(ctx).toMatchObject({ ok: true, eligible: true, protocolWindow: null });
-    expect(ctx.readFailures).toContain('protocol_window');
-  });
-
-  test('a one-time visit gets the window too (its defaults are add-ons there)', async () => {
-    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
-    getProtocolWindowContext.mockResolvedValue(window());
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: catalog })), technicianId: 'tech-1' });
-    expect(ctx.visitType).toBe('one_time');
-    expect(ctx.protocolWindow.products.map((p) => p.defaultInPlan)).toEqual([true, false, false]);
   });
 });

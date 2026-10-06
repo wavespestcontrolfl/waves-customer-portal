@@ -9,8 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // profile resolver, the feature-flag read and the week-plan loader all run for real.
 // The global db is the week-plan loader's (it reads the module-level connection).
 jest.mock('../models/db', () => jest.fn());
-// No grass track known here: the protocol-window read resolves nothing and reads nothing.
-jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), selectProtocolVisit: jest.fn(() => ({ trackKey: null, track: null, month: 'Oct', visit: null })), getAppointmentSubstitutions: jest.fn(async () => new Map()) }));
+jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
 
 const globalDb = require('../models/db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
