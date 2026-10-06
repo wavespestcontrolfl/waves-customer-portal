@@ -1499,15 +1499,28 @@ function operationMatches(toolName, texts, preview) {
 
 const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
 
-// `lookedUp` is the bar's own lookup target (see lookupTarget below), or
-// null. It stands in only when the operator's words named NO product at all
-// (`silent`): never over a name that conflicts, names two products, names a
-// different product, or asks for a different operation.
+// `lookedUp` is the server-verified target from resolveInventoryWriteTarget
+// (the bar's own lookup, or an earlier card on this thread), or null. It
+// stands in only when the operator's words named NO product at all
+// (`silent`): never over a name that conflicts, names two products, or names
+// a different product. A lookup-only target also needs the words to ask for
+// this operation; a prior card already fixed the operation, so a bare "Yes"
+// or "I didn't see the confirm button" after it is enough.
 async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null, lookedUp = null } = {}) {
   const grounded = await groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName });
   if (grounded?.productId) return { productId: grounded.productId };
-  if (grounded?.silent && lookedUp) return lookedUp;
+  if (grounded?.silent && lookedUp && (grounded.operation || lookedUp.fromCard)) return { productId: lookedUp.productId };
   return grounded?.mismatch ? { ...TARGET_UNAVAILABLE, code: 'target_relationship_mismatch' } : TARGET_UNAVAILABLE;
+}
+
+// An unreadable card history grounds nothing (fail closed).
+async function priorCardTargeted(productId, actorId, threadId) {
+  try {
+    return await require('./pending-actions').threadCardTargetedProduct({ threadId, requestedBy: actorId, toolName: 'adjust_stock', productId });
+  } catch (err) {
+    logger.warn(`[intelligence-bar:procurement] prior card read failed: ${err.message}`);
+    return false;
+  }
 }
 
 // The bar's own catalog readers. A result that lists exactly ONE product
@@ -1561,7 +1574,7 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
   // The operator's words named no product anywhere this look-back reads, and
   // they ask for this tool's operation: the caller may let the bar's own
   // lookup stand in (resolveByOperatorGrounding's `lookedUp`).
-  const silent = texts => (operationMatches(toolName, texts, preview) ? { silent: true } : null);
+  const silent = texts => ({ silent: true, operation: operationMatches(toolName, texts, preview) });
   // A stale tab never grounds off turns it never saw (two tabs on one
   // thread): observedSeq is the requesting tab's own tail seq, from the
   // route's thread_seq. Without one there is no prior-turn grounding at all.
@@ -1595,17 +1608,23 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
 // One narrow exception, for adjust_stock only (always carded, owner
 // 2026-10-05): when the operator's words name no product the catalog can
 // read (a short name the grammar's lookup misses, or free phrasing naming
-// nothing), the preview's product stands when the bar's own lookup showed
-// the model exactly that product, alone, earlier in this request
-// (`lookedUpProductIds`, from productsShownAlone). The id is server-verified:
-// it must be in a tool result this route produced, so a model-invented id is
-// still refused. It never overrides a name that matched several products, a
-// different product, a page reference, a question, or a different operation.
+// nothing), the preview's product stands when the server itself already
+// established it, from either of two sources:
+//   - the bar's own lookup showed the model exactly that product, alone,
+//     earlier in this request (`lookedUpProductIds`, from productsShownAlone);
+//   - an adjust_stock card the server built for that product on this same
+//     thread, for this actor, in the last 24 hours, in any status (owner IB
+//     history 09-25: the card expired unseen and "Yes" / "I didn't see the
+//     confirm button" in a later request was refused).
+// Both are server records, so a model-invented id is still refused. Neither
+// overrides a name that matched several products, a different product, a
+// page reference, or a question.
 async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, lookedUpProductIds = null }) {
   const { targetClause, UUID_RE } = require('./task-context');
-  const lookedUp = toolName === 'adjust_stock' && preview?.product?.id && !isNotAnInstruction(prompt)
-    && lookedUpProductIds instanceof Set && lookedUpProductIds.has(String(preview.product.id))
-    ? { productId: preview.product.id } : null;
+  const candidateId = toolName === 'adjust_stock' && preview?.product?.id && !isNotAnInstruction(prompt) ? String(preview.product.id) : null;
+  const fromLookup = Boolean(candidateId && lookedUpProductIds instanceof Set && lookedUpProductIds.has(candidateId));
+  const fromCard = Boolean(candidateId) && await priorCardTargeted(candidateId, actorId, threadId);
+  const lookedUp = fromLookup || fromCard ? { productId: preview.product.id, fromCard } : null;
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
   // The anchored inventory grammar below excludes communication/note intents.
@@ -1697,7 +1716,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // A named product the catalog does not find ("the Guard" for "Synthetic
   // Guard CS") may stand on the bar's own lookup; a name that matched
   // several products (candidates) stays a question for the operator.
-  if (resolved.error) return !resolved.candidates && !selector.product_id && lookedUp ? lookedUp
+  if (resolved.error) return !resolved.candidates && !selector.product_id && lookedUp ? { productId: lookedUp.productId }
     : { ...resolved, code: 'target_clarification_required' };
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };

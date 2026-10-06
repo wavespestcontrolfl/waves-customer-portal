@@ -559,7 +559,27 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
   // that legitimately resolves does so directly, and a grammar match that
   // legitimately fails (e.g. a typo-mangled name) genuinely reaches the
   // fallback under test rather than an artifact of a dumb pass-through mock.
-  function setGroundingDb({ products = [], aliases = [] } = {}) {
+  // `cards` are stored ib_pending_actions rows: { thread_id, requested_by,
+  // tool_name, created_at, params: { product_id } }. The builder applies the
+  // same filters threadCardTargetedProduct issues.
+  function cardsBuilder(cards) {
+    let rows = [...cards];
+    const api = {
+      where(cond, op, value) {
+        if (cond && typeof cond === 'object') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
+        else if (cond === 'created_at' && op === '>=') rows = rows.filter((r) => r.created_at >= value);
+        return api;
+      },
+      whereRaw(sql, params) {
+        if (/params->>'product_id' = \?/.test(sql)) rows = rows.filter((r) => r.params?.product_id === params[0]);
+        return api;
+      },
+      first: async () => (rows[0] ? { id: rows[0].id || 'card-1' } : undefined),
+    };
+    return api;
+  }
+
+  function setGroundingDb({ products = [], aliases = [], cards = [] } = {}) {
     function catalogBuilder() {
       let rows = [...products];
       let single = false;
@@ -593,6 +613,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     }
     dbMock.mockImplementation((table) => {
       if (table === 'products_catalog') return catalogBuilder();
+      if (table === 'ib_pending_actions') return cardsBuilder(cards);
       if (table === 'product_aliases as pa') {
         return {
           join: () => ({
@@ -1857,6 +1878,59 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         toolName: 'create_restock_request', prompt: 'request 2 gallons of the Guard', preview: { product: { id: GUARD.id, name: GUARD.name } }, lookedUpProductIds: new Set([GUARD.id]),
       });
       expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+  });
+
+  // Owner IB history 09-25: the bar built an adjust_stock card for one
+  // product, the card expired unseen, and the owner's "Yes" / "OK I didn't
+  // see the confirm button" in a LATER request was refused. A card the server
+  // built for that product on the same thread, for the same actor, in the
+  // last 24 hours, now establishes the target.
+  describe('an earlier adjust_stock card on the same thread grounds a re-proposal', () => {
+    const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
+    const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
+    const OTHER_THREAD = '22222222-2222-2222-2222-222222222222';
+    const card = (over = {}) => ({ thread_id: THREAD_ID, requested_by: 'actor-1', tool_name: 'adjust_stock',
+      status: 'expired', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000), params: { product_id: GUARD.id }, ...over });
+    const repropose = (prompt, extra = {}) => resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt, preview: { product: { id: GUARD.id, name: GUARD.name }, movement_type: 'restock' },
+      actorId: 'actor-1', threadId: THREAD_ID, ...extra,
+    });
+
+    test.each(['OK I didn\'t see the confirm button', 'Yes'])('re-proposal after an expired card in an earlier request stands: "%s"', async (prompt) => {
+      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
+      expect(await repropose(prompt)).toEqual({ productId: GUARD.id });
+    });
+
+    test('without that card the same words are refused (the 09-25 failure)', async () => {
+      setGroundingDb({ products: [GUARD, OTHER], cards: [] });
+      expect(await repropose('OK I didn\'t see the confirm button')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a card on another thread, for another actor, older than 24 hours, for another product, or another tool is refused', async () => {
+      for (const other of [
+        card({ thread_id: OTHER_THREAD }),
+        card({ requested_by: 'actor-2' }),
+        card({ created_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }),
+        card({ params: { product_id: OTHER.id } }),
+        card({ tool_name: 'create_restock_request' }),
+      ]) {
+        setGroundingDb({ products: [GUARD, OTHER], cards: [other] });
+        expect(await repropose('Yes')).toMatchObject({ code: 'target_clarification_required' });
+      }
+    });
+
+    test('a model-claimed id with no prior card and no lookup is refused', async () => {
+      setGroundingDb({ products: [GUARD, OTHER], cards: [card({ params: { product_id: OTHER.id } })] });
+      expect(await repropose('Add 2 gallons of the Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('the prior card never overrides a different named product, a question, or a name matching several products', async () => {
+      const GUARD_TWO = { id: 'p-guard-2', name: 'Synthetic Guard CS 2', active: true };
+      setGroundingDb({ products: [GUARD, GUARD_TWO, OTHER], cards: [card()] });
+      expect(await repropose('We got the Synthetic Other WSG in today')).toMatchObject({ code: 'target_relationship_mismatch' });
+      expect(await repropose('Did you add it?')).toMatchObject({ code: 'target_clarification_required' });
+      expect(await repropose('Add 2 gallons of Synthetic Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
     });
   });
 

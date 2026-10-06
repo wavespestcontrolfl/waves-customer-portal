@@ -486,8 +486,28 @@ async function attachThread(ids, threadId, turnSeq, requestedBy) {
     .update({ thread_id: threadId, thread_turn_seq: turnSeq, updated_at: db.fn.now() });
 }
 
+/**
+ * Did a card this server built, on this thread and for this actor, target
+ * `productId` with `toolName` in the last `withinHours`? Any status counts
+ * (pending, confirmed, cancelled, expired): an expired card still proves the
+ * server resolved that target for this conversation. The product id is read
+ * from the stored params, which the route sets from its own target
+ * resolution, never from client history or model text.
+ */
+async function threadCardTargetedProduct({ threadId, requestedBy, toolName, productId, withinHours = 24 }) {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!UUID.test(String(threadId || '')) || !requestedBy || !toolName || !productId) return false;
+  const row = await db('ib_pending_actions')
+    .where({ thread_id: threadId, requested_by: String(requestedBy), tool_name: toolName })
+    .where('created_at', '>=', new Date(Date.now() - withinHours * 60 * 60 * 1000))
+    .whereRaw("params->>'product_id' = ?", [String(productId)])
+    .first('id');
+  return Boolean(row);
+}
+
 module.exports = {
   actionReceipt,
+  threadCardTargetedProduct,
   TTL_MINUTES,
   paramsHash,
   stepKey,
