@@ -2840,9 +2840,9 @@ const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 // Stamp the office's approval to move a visit online inside the self-serve
 // move notice window: the start instant of the snapshot the link lookup
-// refused, written only while the row still has that snapshot's date, start
-// and status (a concurrent move or cancel wins and gets no approval — codex
-// #6039 r1 P1, r2 P2). Only this column changes, so no reminder or
+// refused, written only while the row still has that snapshot's date, start,
+// status and group (a concurrent move, cancel or grouping wins and gets no
+// approval — codex #6039 r1 P1, r2 P2, r4 P2). Only this column changes, so no reminder or
 // confirmation re-arms; a later move clears it (trigger in 20261006230100).
 // True when the row now carries the approval.
 async function approveOfficeMove(svc) {
@@ -2853,6 +2853,9 @@ async function approveOfficeMove(svc) {
   const updated = await db('scheduled_services')
     .where({ id: svc.id, window_start: svc.window_start, status: svc.status })
     .whereRaw('scheduled_date = ?::date', [etCalendarDayOf(svc.scheduled_date)])
+    // Grouping changes only visit_id and the page refuses a grouped row
+    // (codex #6039 r4 P2).
+    .whereRaw('visit_id IS NOT DISTINCT FROM ?', [svc.visit_id ?? null])
     .update({ office_move_approved_for: startsAt });
   if (updated) logger.info(`[reschedule-link] office approved online move inside notice window for ${svc.id}`);
   return updated > 0;

@@ -671,6 +671,7 @@ describe('POST /admin/communications/reschedule-link', () => {
     expect(services.calls.update).toEqual({ office_move_approved_for: new Date('2099-08-04T17:00:00.000Z') });
     expect(services.calls.where).toContainEqual([{ id: 'svc-soon', window_start: '13:00:00', status: 'confirmed' }]);
     expect(services.calls.whereRaw).toContainEqual(['scheduled_date = ?::date', ['2099-08-04']]);
+    expect(services.calls.whereRaw).toContainEqual(['visit_id IS NOT DISTINCT FROM ?', [null]]);
     expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-soon', { customerId: CUSTOMER_UUID, officeApproving: true });
   });
 
