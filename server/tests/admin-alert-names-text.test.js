@@ -112,6 +112,88 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(opts.metadata.verification).toBe('kept_late');
   });
 
+  test('two promises from one text each quote their own words, not the same first sentence', async () => {
+    const quote = 'Sure, we can switch the spray day to Friday. Also I will mail the receipt to the new billing address';
+    const bodies = [];
+    for (const description of ['switch the spray day to Friday', 'mail the receipt']) {
+      await ring({ row: { kind: 'other', description, evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+      const [, , body, opts] = lastCall();
+      bodies.push(body);
+      expect(opts.detail).toContain(quote);
+    }
+    expect(bodies[0]).toBe('We said “switch the spray day to Friday” (Sep 29) — nothing on record shows it done.');
+    expect(bodies[1]).toBe('We said “mail the receipt” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('short descriptions are quoted too, as the sender wrote them', async () => {
+    const quote = "OK, I'll Call and Refund today";
+    await ring({ row: { kind: 'other', description: 'call', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Call” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'refund', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Refund” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a description found only inside another word keeps the first sentence', async () => {
+    await ring({ row: { kind: 'other', description: 'change address', evidence: [{ quote: 'We can exchange address labels tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “We can exchange address labels tomorrow” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('descriptions in any script are matched, with word edges where the script has them', async () => {
+    const arabic = 'نعم سنغير موعد الرش. سأرسل الفاتورة غدا';
+    await ring({ row: { kind: 'other', description: 'سأرسل الفاتورة', evidence: [{ quote: arabic }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسل الفاتورة” (Sep 29) — nothing on record shows it done.');
+    const chinese = '好的，我们明天改喷洒时间。我也会寄发票给您';
+    await ring({ row: { kind: 'other', description: '寄发票', evidence: [{ quote: chinese }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “寄发票” (Sep 29) — nothing on record shows it done.');
+    // a kana description ending in the prolonged-sound mark matches inside unspaced text
+    await ring({ row: { kind: 'other', description: 'フォロー', evidence: [{ quote: '明日フォローします' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “フォロー” (Sep 29) — nothing on record shows it done.');
+    // a description ending in a combining vowel mark still needs a whole word
+    await ring({ row: { kind: 'other', description: 'سأرسلُ', evidence: [{ quote: 'سأرسلُها غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسلُها غدا” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'سأرسلُ', evidence: [{ quote: 'نعم. سأرسلُ غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسلُ” (Sep 29) — nothing on record shows it done.');
+    // an Arabic description found only inside a longer word keeps the first sentence
+    await ring({ row: { kind: 'other', description: 'سأرسل', evidence: [{ quote: 'وسأرسلها غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “وسأرسلها غدا” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a matched slice with sentence punctuation inside keeps the first-sentence headline', async () => {
+    await ring({ row: { kind: 'other', description: 'mail the receipt. Then I will call you', evidence: [{ quote: 'I will mail the receipt. Then I will call you Friday' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “I will mail the receipt” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'call! then issue the refund', evidence: [{ quote: 'Okay. I will call! then issue the refund' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a slice the alert rules reject (a redacted address tag) keeps the first-sentence headline', async () => {
+    await ring({ row: { kind: 'other', description: 'service 123 Main St tomorrow', evidence: [{ quote: 'Okay. I will service 123 Main St tomorrow' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('promises that differ only in a contact detail each find their own slice before redaction', async () => {
+    const quote = 'I will email alice@example.test and then email amy@example.test';
+    const bodies = [];
+    for (const description of ['email alice@example.test', 'email amy@example.test']) {
+      await ring({ row: { kind: 'other', description, evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+      bodies.push(lastCall()[2]);
+    }
+    for (const b of bodies) expect(b).not.toContain('alice@example.test');
+    for (const b of bodies) expect(b).not.toContain('amy@example.test');
+  });
+
+  test('Korean noun stems with attached endings are matched without a word edge', async () => {
+    const quote = '네 전화드리고 환불하겠습니다';
+    await ring({ row: { kind: 'other', description: '전화', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “전화” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: '환불', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “환불” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a description that is not in the quote keeps the first sentence', async () => {
+    await ring({ row: { kind: 'other', description: 'reschedule the visit', evidence: [{ quote: 'Gonna knock out your quarterly spray tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — nothing on record shows it done.');
+  });
+
   test('an uncertain verdict says the agent cannot tell', async () => {
     await ring({ row: { kind: 'callback', evidence: [{ quote: 'please call me back about the gate' }] }, verdict: { verdict: 'uncertain' } });
     const [, title, body] = lastCall();

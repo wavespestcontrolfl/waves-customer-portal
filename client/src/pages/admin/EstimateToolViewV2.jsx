@@ -4526,6 +4526,10 @@ export default function EstimateToolViewV2({
         // generate-then-save path saves a result this render has not stored
         // yet, and its form has not seen the auto-check either.
         offerTiers: !!nextFormForOfferTiers(form, E).offerTiers && E?.offerTiersAvailable === true,
+        // A staff uncheck, as distinct from the availability flag merely
+        // missing on a regenerated pest-only result: the server keeps a
+        // parked row's mark unless this is true.
+        offerTiersDeclined: !!form._offerTiersDeclined,
         billByInvoice: !!form.billByInvoice,
         // Explicit staff confirmation of a county-roll-flagged address
         // (never inferred from copied data — the server reads only this
@@ -4835,7 +4839,11 @@ export default function EstimateToolViewV2({
       setReopenNotice(notice);
       setEditMode((current) => ({ ...current, status: source.status, editVersion: source.editVersion }));
       if (!source.editable) setEditLoadError(source.blockReason);
-      setEstimate(source.result && !stale ? { ...source.result, engineRequest: source.engineRequest } : null);
+      // Same as the edit loader: the stored result carries no tier-availability
+      // flag, so the Good / Better / Best checkbox survives the post-send refresh.
+      setEstimate(source.result && !stale
+        ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
+        : null);
 
     } catch (err) {
       setSaveError(err.message);

@@ -1219,7 +1219,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
     if (parcelLookupAddress) {
       try {
-        const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
+        // Scope decision: lookup-callers.js (public_quote: customer surface, never suite sizing).
+        const { lookupOptionsFor } = require('../services/property-lookup/lookup-callers');
+        const serverLookup = await performPropertyLookup(parcelLookupAddress, lookupOptionsFor('public_quote', { cacheOnly: true, persist: false }));
         if (serverLookup?.enriched) {
           trustedTurf = serverLookup.enriched;
           trustedProfileFound = true;

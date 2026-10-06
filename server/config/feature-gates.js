@@ -222,9 +222,13 @@
  *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires a live read engine (visitPrepPestReadLive() or visitPrepPlantReadLive()). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same dispatchVisitPrepRead (services/visit-prep-read-dispatch.js, which runs only live engines) for at most 10 submissions from the last 14 ET days on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), 'unsupported' where a live engine now reads the stop, and a 'done' or 'failed' read made by the wrong engine or subject for the stop as it is now (released to 'none', then re-read; a row checked and needing nothing is skipped for an hour). Pending rows, and failed rows on the line they failed on, are never retried. One retry per row per case, per settled attempt for a stale read (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP on the ET day it runs, like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *   GATE_CALL_COMMERCIAL_DICTATED_BOOKING=true (owner ruling 2026-09-30: a commercial job staff dictate on the call and the caller accepts, with a price agreed, auto-books on INBOUND calls (outbound waits for staff identity independent of the speaker labels) instead of always going to the office. The staff commitment quote AND the caller's acceptance quote must each appear word for word in a turn of their own speaker (call-reschedule-agreement.js groundRescheduleAgreement, reused unchanged); a missing/unlabeled transcript or a quote only in the other speaker's turn fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears commercial_requires_quote — capacity, address validation, unit checks and the on-the-hour rule still apply, and no price agreed still goes to the office. Strict opt-in, read at call time via callCommercialDictatedBookingLive(). Off = byte-identical. hasAgentCommittedEvidence is untouched. See services/call-commercial-dictated-booking.js.)
+ *   GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING=true (owner ruling 2026-10-06: a commercial Waves Assessment that Waves staff book on the call with NO price discussed auto-books, on OUTBOUND callback calls (lead_auto_bridge) as well as inbound, instead of always going to the office. Only the Waves Assessment catalog row (every service view of the call must resolve to it) and only when no price came up at all; any price mentioned goes to the priced path (GATE_CALL_COMMERCIAL_DICTATED_BOOKING), unchanged. The staff commitment and the caller acceptance are grounded word for word in the right speaker's turns (call-reschedule-agreement.js), including the shape where STAFF proposes the day and time, the caller says yes and staff then commits ("How does noon on Thursday sound?" / "Perfect." / "I'll book you for that"), which has its own extraction instruction while this gate is on. On an OUTBOUND recording the speaker labels are LLM-inferred and have swapped, so staff identity is proven independent of the labels: an Agent-labeled turn says "this is <name> with|from|at Waves" and no Caller-labeled turn does; otherwise it holds. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. OUTBOUND calls qualify only as lead callback bridges (call metadata.type lead_auto_bridge) AND only when outbound booking creation itself is on: GATE_CALL_OUTBOUND_BOOKING plus V2 routing in enforce mode (CALL_EXTRACTION_V2_ENABLED=true and CALL_EXTRACTION_V2_DRIVES_ROUTING=true or CALL_TRIAGE_ENFORCE_V2_GATES=true); this gate never authorizes outbound creation by itself, and the routing lane and the creation path read one predicate (outboundAutoBookingEnabled). Only clears commercial_requires_quote and the advisory card still files; the on-the-hour rule, capacity, address validation and unit checks still apply. Strict opt-in, read at call time via callCommercialAssessmentBookingLive(). Off = byte-identical, outbound stays excluded. See services/call-commercial-dictated-booking.js.)
  *   GATE_LEAD_EMAIL_LINKS=true (Activity timeline only: also lists email that was sent to a prospect before they became a customer, matched by the lead / estimate the send recorded (email_messages.lead_id / estimate_id) through leads.customer_id and estimates.customer_id, not by address. Strict opt-in, read at call time via leadEmailLinksLive(). Dark = the timeline lists exactly what it did before. Recording the link on each send is not gated (additive columns).)
  *   GATE_RATE_REVIEW=true (annual rate review RANKING backend, plan annual-rate-review-2026-09-30 step 2: the monthly 1st-of-month job (scheduler.js, 6:20 AM ET) ranks every active recurring plan line whose anniversary falls in the following month into rate_review_snapshots (current rate per billing lane, today's list rate, treatment-minute median, revenue/hour, band A-D, whole-dollar proposal, exception flags) and sends ONE ACT:/OK: ops email to contact@; admin-only read routes + a recompute POST under /api/admin/rate-review. Strict opt-in, read at call time via rateReviewLive(). Dark = the cron tick returns before any query, the routes answer 404, nothing is written. The ranking never writes a rate or sends a customer anything. The APPLY lane (services/rate-review-apply.js, step 3) rides the same gate: an admin POST creates draft notice rows for approved rows (nothing sent — the comms lane sends), and the nightly 3:10 AM ET job writes the noticed rate on its effective date for SENT notices (per-application visits + per_application_fee + ledger slice, monthly dues + slice, or the prepaid term's next_term_prepay_amount), one transaction per notice, holds belled. Off = the apply tick returns before any query and the schedule route answers 404; customers keep the lower, current rate. The notice-sending lane is a later PR.)
+ *   GATE_ADMIN_MFA=true (staff two-step sign-in: a staff member who has set up an authenticator app must enter its 6-digit code (or a single-use recovery code) after the password before a session is issued, and a session minted without that step is refused; the enrollment page /admin/two-step and its /api/admin/auth/mfa routes answer only while on. Read at call time via adminMfaLive() in server/services/staff-mfa.js; off = login, /me and every staff session are exactly as before, whatever was enrolled, so unset is the kill switch.)
+ *   GATE_ADMIN_MFA_ENFORCE=true (needs GATE_ADMIN_MFA: an ADMIN with no authenticator set up is held on the two-step enrollment page — every other staff route answers 403 MFA_ENROLLMENT_REQUIRED — until they finish it. Read at call time via adminMfaEnforceLive(); unset = enrollment stays optional.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
+ *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -1967,6 +1971,13 @@ const gates = {
   // callCommercialDictatedBookingLive() below. Creates real appointments —
   // owner-flip only.
   callCommercialDictatedBooking: process.env.GATE_CALL_COMMERCIAL_DICTATED_BOOKING === 'true',
+  // A commercial Waves Assessment that staff book on the call with no price
+  // discussed auto-books, outbound callback calls included (owner ruling
+  // 2026-10-06). Ships DARK: off unless exactly 'true'. This entry is for
+  // logGateStatus only — the canonical CALL-TIME reader is
+  // callCommercialAssessmentBookingLive() below. Creates real appointments —
+  // owner-flip only.
+  callCommercialAssessmentBooking: process.env.GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING === 'true',
   // A new caller who gave a last name but no first name still becomes a customer and
   // books; the missing first name files an advisory card (owner ruling 2026-10-02).
   // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
@@ -3391,6 +3402,17 @@ const gates = {
   // the plain three-line hint, so pickers render exactly as today.
   rescheduleAvailability: gateEnvValue('GATE_RESCHEDULE_AVAILABILITY'),
 
+  // Best-times road times (owner 2026-10-06): the best-times chips in the
+  // availability strip (summary.best) and the picked hour's verdict get
+  // their drive-in and added-drive numbers from Google's traffic-aware route
+  // matrix instead of the straight-line model. Only the shown chips are
+  // priced, on the picker's own allowance (route-optimizer hintTravelBudget,
+  // never customer booking's), with a 6-hour cache per pin pair and hour.
+  // Which hours fit is still decided by the model. OFF in every environment;
+  // scheduling/hint-road-times.js reads it through gateEnvValue() at call
+  // time. Kill switch: unset — chips show the model's numbers.
+  bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
@@ -4454,6 +4476,13 @@ function fastCompleteVoiceFillLive() {
   return process.env.GATE_FAST_COMPLETE_VOICE_FILL === 'true';
 }
 
+// GATE_SERVER_DICTATION read at CALL time — strict `=== 'true'`, dark in every
+// environment. Every staff mic (useSpeechDictation) records a clip and the
+// server transcribes it (routes/tech-dictation.js); off = browser speech.
+function serverDictationLive() {
+  return process.env.GATE_SERVER_DICTATION === 'true';
+}
+
 // GATE_LLM_COST_TRACKING read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for estimated AI spend (services/llm-cost.js: the
 // price pull and the daily spend check; agent-control/hub-read.js: the
@@ -4588,6 +4617,18 @@ function emailAreaIntelLive() {
 // `reportPhotoContent` gates-map entry above is for logGateStatus only.
 function reportPhotoContentLive() {
   return process.env.GATE_REPORT_PHOTO_CONTENT === 'true';
+}
+
+// GATE_ADMIN_MFA / GATE_ADMIN_MFA_ENFORCE read at CALL time — strict
+// `=== 'true'`, ships DARK. The ONLY readers (server/services/staff-mfa.js):
+// off, every persisted enrollment is ignored, so unset is the kill switch and
+// needs no redeploy. Enforce is honoured only while the master gate is on.
+function adminMfaLive() {
+  return process.env.GATE_ADMIN_MFA === 'true';
+}
+
+function adminMfaEnforceLive() {
+  return adminMfaLive() && process.env.GATE_ADMIN_MFA_ENFORCE === 'true';
 }
 
 // GATE_TYPED_DECISIONS read at CALL time — ships DARK, off unless set
@@ -5357,6 +5398,20 @@ function callCommercialDictatedBookingLive() {
   return process.env.GATE_CALL_COMMERCIAL_DICTATED_BOOKING === 'true';
 }
 
+// GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING read at CALL time — strict
+// `=== 'true'`, dark by default (owner ruling 2026-10-06). The canonical reader
+// for call-recording-processor.js's canAutoRoute call sites (the enforce lane,
+// the shadow pass and the audit reconstruction): on, a commercial_requires_quote
+// hold clears for a Waves Assessment staff booked on the call with no price
+// discussed — outbound callback calls too, once staff identity is proven
+// independent of the speaker labels (see services/call-commercial-dictated-booking.js).
+// Needs GATE_CALL_AGENT_COMMIT_BOOKING on (processor). Off, byte-identical to
+// before. The `callCommercialAssessmentBooking` gates-map entry above is for
+// logGateStatus only.
+function callCommercialAssessmentBookingLive() {
+  return process.env.GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING === 'true';
+}
+
 // GATE_CALL_FIRST_NAME_ADVISORY read at CALL time — strict `=== 'true'`, dark by
 // default (owner ruling 2026-10-02: the AI booker approved two confirmed bookings,
 // then skipped one because the caller gave only a last name). The canonical reader
@@ -5713,6 +5768,9 @@ module.exports.riderPairsMonthlyLawnLive = riderPairsMonthlyLawnLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.knownGateCatalog = knownGateCatalog;
+// GATE_ADMIN_MFA readers (mid-list, away from the end other gate PRs append to).
+module.exports.adminMfaLive = adminMfaLive;
+module.exports.adminMfaEnforceLive = adminMfaEnforceLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
@@ -5725,6 +5783,7 @@ module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callCommercialDictatedBookingLive = callCommercialDictatedBookingLive;
+module.exports.callCommercialAssessmentBookingLive = callCommercialAssessmentBookingLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
@@ -5870,4 +5929,7 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
+module.exports.serverDictationLive = serverDictationLive;
+// GATE_ESTIMATE_DRAFT_RETIRE_ON_SEND reader, on its own line so gate PRs never conflict.
 module.exports.estimateDraftRetireOnSendLive = estimateDraftRetireOnSendLive;

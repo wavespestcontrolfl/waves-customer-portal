@@ -23,6 +23,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
+const { GRASS_SOURCE } = require('../services/lawn-grass-context');
 const { COUNTY_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
 
 router.use(adminAuthenticate);
@@ -203,10 +204,16 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
       // an unchanged value proves nothing (same lesson as the county —
       // codex #3565 gh-r32/r41).
       const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type', 'lawn_sqft');
+      // A grass staff changed or explicitly reviewed on this save is theirs:
+      // a later photo AI read never replaces it. The form re-sends every
+      // loaded field, so an unchanged, unreviewed grass keeps its source.
+      const staffGrass = typeof fields.grass_type === 'string' && !!fields.grass_type.trim()
+        && (fields.grass_type !== (priorRow ? priorRow.grass_type : null) || grassReviewed);
+      const sourceField = staffGrass ? { grass_type_source: GRASS_SOURCE.STAFF } : {};
       const rows = await trx('customer_turf_profiles')
-        .insert(insertRow)
+        .insert({ ...insertRow, ...sourceField })
         .onConflict('customer_id')
-        .merge({ ...fields, updated_at: new Date() })
+        .merge({ ...fields, ...sourceField, updated_at: new Date() })
         .returning('*');
       const nextLawnSqft = fields.lawn_sqft == null ? null : Number(fields.lawn_sqft);
       if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft !== (priorRow?.lawn_sqft ?? null)) {

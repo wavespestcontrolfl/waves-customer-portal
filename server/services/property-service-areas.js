@@ -148,9 +148,11 @@ async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lo
     // A repeat refresh inside the cooldown reuses the cached lookup.
     const liveRefresh = refresh && await claimRefresh(address);
     const performLookup = lookup || require('../routes/property-lookup-v2').performPropertyLookup;
+    // Scope decision: lookup-callers.js (property_service_areas: area editor, no suite sizing).
+    const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
     // A missing/offline cache cannot hide already saved measurements or
     // turn a successful review save into an apparent failure.
-    const result = await performLookup(address, liveRefresh ? { refresh: true } : { cacheOnly: true, persist: false })
+    const result = await performLookup(address, lookupOptionsFor('property_service_areas', liveRefresh ? { refresh: true } : { cacheOnly: true, persist: false }))
       .catch(error => {
         if (!liveRefresh) return null;
         // Upstream messages can name providers, keys, URLs or the street

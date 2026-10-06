@@ -1859,18 +1859,9 @@ router.get('/:id/treatment-zone', async (req, res, next) => {
 // transcription only, no extraction.
 // The accepted containers, the size cap and the multer handling are shared with
 // Fast Complete voice fill (services/dictation-upload.js).
-const { dictationAudioUpload, dictationClipType } = require('../services/dictation-upload');
-// Paid transcription: cap clips per staff bucket (same key as every other
-// paid-LLM limiter — rate-limit-key.js) so a stuck retry loop cannot bill
-// unbounded. 40 clips / 15 min is far above one tech's honest cadence.
-const dictationLimiter = require('express-rate-limit')({
-  windowMs: 15 * 60 * 1000,
-  max: 40,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
-  message: { error: 'Too many dictation clips — type your notes for now' },
-});
+// The paid-transcription limiter is one budget shared with server dictation
+// (tech-dictation.js): services/dictation-upload.js.
+const { dictationAudioUpload, dictationClipType, dictationLimiter } = require('../services/dictation-upload');
 const DICTATION_TRANSCRIPTION_PROMPT = `Transcribe a pest control technician's dictated field notes for Waves Pest Control (Southwest Florida): areas treated, pests found, products and application rates, follow-up recommendations. Keep product names, numbers, and units exactly as spoken. Do not summarize or add commentary.`;
 
 function dictationUploadGateOn() {

@@ -36,7 +36,16 @@ const SCHEDULING_TRAVEL_BUDGET_MS = 15 * 60 * 1000;
 
 /** Request-scoped road estimates under both local and shared provider limits.
  * The caller preloads before taking any scheduling lock. */
-function createSchedulingTravel({ maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now() } = {}) {
+// The admin picker's own allowance (best-times chips, GATE_BEST_TIMES_ROAD_TIMES):
+// separate from the one above, so staff picks never spend customer booking's.
+const hintTravelBudget = { resetAt: 0, requests: 0, elements: 0, maxRequests: 240, maxElements: 600 };
+
+function createSchedulingTravel({
+  maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now(),
+  sharedBudget = schedulingTravelBudget,
+} = {}) {
+  const sharedMaxRequests = sharedBudget.maxRequests ?? 40;
+  const sharedMaxElements = sharedBudget.maxElements ?? 800;
   const { parseETDateTime } = require('../utils/datetime-et');
   const results = new Map();
   const attempted = new Set();
@@ -96,19 +105,19 @@ function createSchedulingTravel({ maxRequests = 40, maxElements = 800, budgetMs 
         if (!batch) return;
         if (requests >= maxRequests || elements + batch.legs.length > maxElements || now() >= deadline) return;
         const currentTime = now();
-        if (currentTime >= schedulingTravelBudget.resetAt) {
-          schedulingTravelBudget.resetAt = currentTime + SCHEDULING_TRAVEL_BUDGET_MS;
-          schedulingTravelBudget.requests = 0;
-          schedulingTravelBudget.elements = 0;
+        if (currentTime >= sharedBudget.resetAt) {
+          sharedBudget.resetAt = currentTime + SCHEDULING_TRAVEL_BUDGET_MS;
+          sharedBudget.requests = 0;
+          sharedBudget.elements = 0;
         }
-        if (schedulingTravelBudget.requests >= 40 || schedulingTravelBudget.elements + batch.legs.length > 800) {
+        if (sharedBudget.requests >= sharedMaxRequests || sharedBudget.elements + batch.legs.length > sharedMaxElements) {
           for (const leg of batch.legs) results.set(keyFor(leg), fallback(leg, 'shared_provider_budget'));
           return;
         }
         // Reserve synchronously before awaiting the network so simultaneous
         // calendars and workers consume the same allowance without a race.
-        schedulingTravelBudget.requests++;
-        schedulingTravelBudget.elements += batch.legs.length;
+        sharedBudget.requests++;
+        sharedBudget.elements += batch.legs.length;
         requests++;
         elements += batch.legs.length;
         let reason = 'provider_error';
@@ -597,6 +606,7 @@ module.exports = {
   optimizeRoute,
   callGoogleRoutesAPI,
   createSchedulingTravel,
+  hintTravelBudget,
   nearestNeighborOptimize,
   calcUnoptimizedDistance,
   haversine,
