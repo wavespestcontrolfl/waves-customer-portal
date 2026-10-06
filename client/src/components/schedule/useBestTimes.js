@@ -50,6 +50,8 @@ const SUMMARY_FORWARD = 7;
 // Latest picked date a summary still searches from today: the server covers
 // at most 14 days, and the picked date must be inside them.
 const SUMMARY_FROM_TODAY_MAX = 13;
+// The best-times week row: today and the six days after it.
+const WEEK_DAYS = 7;
 const SUMMARY_RETRY_MS = 10 * 60 * 1000;
 let summaryUnavailableUntil = 0;
 // The parent kill switch (GATE_BEST_TIME_HINTS off answers `gated: true`):
@@ -314,6 +316,19 @@ export function useBestTimes({
             pickedDate: date,
             ...pickedArgs,
           });
+          // A pick two weeks or more out searches only the days around it;
+          // the "best in the next 7 days" row then gets its own search from
+          // today (Codex #6045 r1). Fail-open: no row, never a false one.
+          if (data?.summary?.best?.week_covered === false) {
+            const week = await search({
+              summary: true, dateFrom: today, dateTo: addDays(today, WEEK_DAYS - 1), topN: 3, pickedDate: date,
+            }).catch(() => null);
+            if (controller.signal.aborted) return;
+            const weekRow = week?.summary?.best;
+            if (weekRow && weekRow.week_covered !== false) {
+              data.summary.best = { ...data.summary.best, week: weekRow.week || [], week_covered: true };
+            }
+          }
           if (controller.signal.aborted) return;
           const summarized = normalizeAvailability(data, { date, scopedToTech });
           if (summarized) {

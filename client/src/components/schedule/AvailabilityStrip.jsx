@@ -56,10 +56,19 @@ export function drivePhrase(detourMinutes) {
 
 // The drive INTO the stop. null with a priced detour = an unpinned
 // neighbour; null with no detour either = no single leg (arrival windows).
+// "~" marks a straight-line estimate; a number Google priced on real roads
+// (driveSource 'google') carries none (Codex #6045 r1).
+const isEstimate = (hour) => hour.driveSource !== 'google';
+
 export function driveHerePhrase(hour) {
   const mins = Math.round(Number(hour.driveInMinutes));
   if (hour.driveInMinutes == null || !Number.isFinite(mins)) return hour.detourMinutes == null ? 'drive unknown' : null;
-  return `${mins} min here`;
+  return `${isEstimate(hour) ? '~' : ''}${mins} min here`;
+}
+
+function addedPhrase(hour) {
+  const added = drivePhrase(hour.detourMinutes);
+  return added && added.startsWith('+') && isEstimate(hour) ? `~${added}` : added;
 }
 
 export function rainPhrase(rainChance) {
@@ -248,7 +257,7 @@ function emptyDayLine(day) {
 // the drive here, what it adds to the day, rain, and whose route it is.
 function HourChip({ hour, withDay, current, onPick, compact = false }) {
   const here = driveHerePhrase(hour);
-  const added = drivePhrase(hour.detourMinutes);
+  const added = addedPhrase(hour);
   const rain = rainPhrase(hour.rainChance);
   const lines = [here, added, rain, hour.technicianName].filter(Boolean);
   const label = withDay && compact ? fmtHour(hour.start) : `${withDay ? `${fmtDay(hour.date)} · ` : ''}${fmtHour(hour.start)}`;
@@ -279,7 +288,7 @@ function BestRow({ title, hours, withDay, empty, isCurrent, onPick }) {
     <div style={{ marginTop: 10 }}>
       <div style={{ marginBottom: 6, color: '#52525B' }}>{title}</div>
       {!withDay && hours.length > 0 && hours.every((hour) => hour.stopsThatDay === 0) ? (
-        <div style={{ marginBottom: 6, color: '#52525B' }}>No stops that day yet. Any hour works.</div>
+        <div style={{ marginBottom: 6, color: '#52525B' }}>No stops on this route that day yet.</div>
       ) : null}
       {hours.length ? (
         <div data-testid="best-row" style={bestRowStyle}>
@@ -346,6 +355,9 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
                 onPick={pick}
               />
             )}
+            {[...availability.best.day, ...availability.best.week].some(isEstimate) ? (
+              <div style={{ marginTop: 6, color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>
+            ) : null}
           </>
         )}
         {!showBest && verdict.offers.length > 0 && (

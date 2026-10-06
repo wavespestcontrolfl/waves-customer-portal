@@ -535,12 +535,20 @@ function publicChip(chip) {
  * chance of rain for each chip's hour. Both lookups fail open: a chip keeps
  * the model's numbers, or shows no rain.
  */
-async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null, spanMin = 60, deps = {} }) {
+async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, deps = {} }) {
   const rows = pickBestRows(days, { pickedDate, today });
   // The picked hour's verdict gets the same treatment, so its sentence and
-  // its own chip never disagree.
-  const pickedChip = picked?.fits === true && picked[GAP_LEGS] ? {
-    ...picked, date: pickedDate, start_time: picked.start, end_time: toHHMM(toMin(picked.start) + spanMin),
+  // its own chip never disagree. Its window is the one scorePickedHour
+  // scored: max(the form's end, start + duration) (Codex #6045 r1).
+  const pickedStartMin = picked ? toMin(picked.start) : null;
+  const pickedEndMin = pickedStartMin == null ? null
+    : Math.max(pickedStartMin + spanMin, toMin(pickedEnd) ?? 0);
+  const pickedChip = picked?.fits === true && picked[GAP_LEGS] && pickedStartMin != null ? {
+    ...picked,
+    date: pickedDate,
+    start_time: picked.start,
+    end_time: toHHMM(pickedEndMin),
+    [GAP_LEGS]: { ...picked[GAP_LEGS], durationMinutes: pickedEndMin - pickedStartMin },
   } : null;
   const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
   const rainLookup = deps.hourlyRain || (async (la, ln) => {
@@ -552,9 +560,10 @@ async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null,
     ]).finally(() => clearTimeout(timer));
   });
   const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
+  // Nothing to decorate: no forecast lookup either (Codex #6045 r1).
   const [priced, hourly] = await Promise.all([
     priceChips(chips),
-    rainLookup(lat, lng).catch(() => null),
+    chips.length ? rainLookup(lat, lng).catch(() => null) : null,
   ]);
   const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
   const nDay = rows.day.length;
@@ -621,12 +630,12 @@ const SUMMARY_SLOW_MS = 1500;
 // Returns { summary, picked }: the summary (undefined for any other plan)
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
-  rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate,
+  rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate, pickedEnd,
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
   const best = await buildBestRows(days, {
-    pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin,
+    pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd,
   });
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {

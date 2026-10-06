@@ -48,9 +48,17 @@ function remember(leg, minutes, now) {
   roadCache.set(legKey(leg), { minutes, at: now });
 }
 
+// A leg cannot leave in the past: Google refuses a past departure, so a
+// same-day leg whose stop already ended leaves a minute from now instead
+// (Codex #6045 r1). `nowEt` = { date, minute } in ET.
+function notBefore(leg, nowEt) {
+  if (!nowEt || leg.date !== nowEt.date || leg.departureMin > nowEt.minute) return leg;
+  return { ...leg, departureMin: nowEt.minute + 1 };
+}
+
 // The three legs of one chip, or null when a neighbour has no pin (the
 // engine already reports that chip's drive as unknown).
-function chipLegs(chip) {
+function chipLegs(chip, nowEt = null) {
   const g = chip[GAP_LEGS];
   const startMin = toMin(chip.start_time);
   if (!g || !g.prev || !g.next || !g.newStop || startMin == null) return null;
@@ -59,10 +67,17 @@ function chipLegs(chip) {
   // that stop's window ends.
   const leaveForIn = g.prevIsHome ? Math.max(0, startMin - modelIn) : g.prevEndMin;
   return {
-    in: { date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn },
-    out: { date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) },
-    base: { date: chip.date, from: g.prev, to: g.next, departureMin: g.prevEndMin },
+    in: notBefore({ date: chip.date, from: g.prev, to: g.newStop, departureMin: leaveForIn }, nowEt),
+    out: notBefore({ date: chip.date, from: g.newStop, to: g.next, departureMin: startMin + (g.durationMinutes || 0) }, nowEt),
+    base: notBefore({ date: chip.date, from: g.prev, to: g.next, departureMin: g.prevEndMin }, nowEt),
   };
+}
+
+function etNow(ms) {
+  const { etParts, etDateString } = require('../../utils/datetime-et');
+  const d = new Date(ms);
+  const p = etParts(d);
+  return { date: etDateString(d), minute: p.hour * 60 + p.minute };
 }
 
 /**
@@ -76,8 +91,9 @@ async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() 
   if (!Array.isArray(chips) || !chips.length) return [];
   if (!gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES')) return chips.map(estimate);
   try {
-    const plans = chips.map(chipLegs);
     const t = now();
+    const nowEt = etNow(t);
+    const plans = chips.map((chip) => chipLegs(chip, nowEt));
     const missing = [];
     for (const legs of plans) {
       if (!legs) continue;

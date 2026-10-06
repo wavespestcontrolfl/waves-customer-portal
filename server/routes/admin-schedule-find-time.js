@@ -428,7 +428,7 @@ router.post('/', async (req, res) => {
     // buildBestRows), with the picked verdict's drive numbers priced the
     // same way as the chips.
     const built = await buildHintSummary(plan, every, {
-      rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate,
+      rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,
     });
     const pickedOut = built.picked;
 

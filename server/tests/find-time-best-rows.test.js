@@ -117,6 +117,16 @@ describe('priceChipsOnRoads', () => {
     expect(chip).toMatchObject({ drive_in_minutes: 19, detour_minutes: 34, drive_source: 'estimate' });
   });
 
+  test('a same-day leg whose stop already ended leaves from now, not the past', () => {
+    // 15:30 ET on the chip's own day; the previous stop ended at 12:00.
+    const nowEt = { date: '2026-10-08', minute: 15 * 60 + 30 };
+    const legs = _test.chipLegs(hour('2026-10-08', '16:00', 34, 19), nowEt);
+    expect(legs.in.departureMin).toBe(15 * 60 + 31);
+    expect(legs.base.departureMin).toBe(15 * 60 + 31);
+    expect(legs.out.departureMin).toBe(16 * 60 + 30);
+    expect(_test.chipLegs(hour('2026-10-09', '16:00', 34, 19), nowEt).in.departureMin).toBe(12 * 60);
+  });
+
   test('an unpinned neighbour is never priced', async () => {
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     const travel = fakeTravel({ 'prev>new': 21, 'new>next': 28, 'prev>next': 15 });
@@ -139,6 +149,30 @@ describe('rain and the serialized rows', () => {
     expect(rainForWindow(hourly, '2026-10-08', '12:00', '14:00')).toBe(60);
     expect(rainForWindow(hourly, '2026-10-09', '12:00', '13:00')).toBeNull();
     expect(rainForWindow(null, '2026-10-08', '12:00', '13:00')).toBeNull();
+  });
+
+  test('the picked verdict is priced over the window the form will save', async () => {
+    const seen = [];
+    const picked = { start: '12:00', fits: true, detour_minutes: 34, drive_in_minutes: 19, [GAP_LEGS]: hour('2026-10-08', '12:00', 34, 19)[GAP_LEGS] };
+    const out = await buildBestRows([day('2026-10-08', [])], {
+      pickedDate: '2026-10-08', today: '2026-10-06', lat: 1, lng: 2, picked, spanMin: 30, pickedEnd: '14:00',
+      deps: {
+        priceChipsOnRoads: async (chips) => { seen.push(...chips); return chips; },
+        hourlyRain: async () => hourly,
+      },
+    });
+    expect(seen[0]).toMatchObject({ end_time: '14:00' });
+    expect(seen[0][GAP_LEGS].durationMinutes).toBe(120);
+    expect(out.picked.rain_chance).toBe(60);
+  });
+
+  test('no chips: no forecast lookup', async () => {
+    const hourlyRain = jest.fn(async () => hourly);
+    await buildBestRows([day('2026-10-08', [])], {
+      pickedDate: '2026-10-08', today: '2026-10-06', lat: 1, lng: 2,
+      deps: { priceChipsOnRoads: async (chips) => chips, hourlyRain },
+    });
+    expect(hourlyRain).not.toHaveBeenCalled();
   });
 
   test('buildBestRows decorates rain, prices the picked verdict and never serializes pins', async () => {

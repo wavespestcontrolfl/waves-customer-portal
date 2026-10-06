@@ -106,7 +106,7 @@ describe('AvailabilityStrip', () => {
     render(<AvailabilityStrip availability={missed} currentDate="2035-01-02" currentStart="14:00" onPick={onPick} />);
     expect(screen.getByRole('status').getAttribute('data-tone')).toBe('miss');
     const chip = screen.getAllByTestId('availability-hour')[0];
-    expect(chip.textContent).toBe('11 AM+5 min day');
+    expect(chip.textContent).toBe('11 AM~+5 min day');
     fireEvent.click(chip);
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-02', start: '11:00', end: '12:00', technicianId: 't1' }));
   });
@@ -195,13 +195,17 @@ describe('calendar facts on the days', () => {
 describe('best-times rows', () => {
   const chip = (date, start, detourMinutes, driveInMinutes, over = {}) => hour(date, start, detourMinutes, { driveInMinutes, ...over });
   const best = {
-    day: [chip('2035-01-02', '12:00', 34, 19, { rainChance: 20 }), chip('2035-01-02', '13:00', 34, 19, { rainChance: 60 })],
+    day: [
+      chip('2035-01-02', '12:00', 34, 19, { rainChance: 20, driveSource: 'google' }),
+      chip('2035-01-02', '13:00', 34, 19, { rainChance: 60, driveSource: 'google' }),
+    ],
     week: [chip('2035-01-01', '10:00', 9, 7), chip('2035-01-04', '13:00', 2, 4)],
   };
   const withBest = (picked, extra = {}) => ({ ...answer(picked), best, ...extra });
 
   it('labels the drive here, unknown legs and rain', () => {
-    expect(driveHerePhrase({ driveInMinutes: 19.2, detourMinutes: 34 })).toBe('19 min here');
+    expect(driveHerePhrase({ driveInMinutes: 19.2, detourMinutes: 34 })).toBe('~19 min here');
+    expect(driveHerePhrase({ driveInMinutes: 19.2, detourMinutes: 34, driveSource: 'google' })).toBe('19 min here');
     expect(driveHerePhrase({ driveInMinutes: null, detourMinutes: null })).toBe('drive unknown');
     // Arrival-window hours carry no single leg: the added drive stands alone.
     expect(driveHerePhrase({ driveInMinutes: null, detourMinutes: 12 })).toBeNull();
@@ -226,7 +230,9 @@ describe('best-times rows', () => {
     expect([...rows[0].querySelectorAll('button')].map((b) => b.textContent)).toEqual([
       '12 PM19 min here+34 min day20% rain', '1 PM19 min here+34 min day60% rain',
     ]);
-    expect(rows[1].querySelector('button').textContent).toBe('Mon 110 AM7 min here+9 min day');
+    // Model numbers carry "~" and the legend says what it means.
+    expect(rows[1].querySelector('button').textContent).toBe('Mon 110 AM~7 min here~+9 min day');
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
     fireEvent.click(rows[1].querySelector('button'));
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ date: '2035-01-01', start: '10:00' }));
   });
@@ -240,7 +246,7 @@ describe('best-times rows', () => {
   it('a day with no stops yet says any hour works', () => {
     const empty = { day: [chip('2035-01-02', '08:00', 0, 30, { stopsThatDay: 0 })], week: [] };
     render(<AvailabilityStrip bestRows availability={withBest(null, { best: empty })} currentDate="2035-01-02" currentStart="08:00" onPick={() => {}} />);
-    expect(screen.getByText('No stops that day yet. Any hour works.')).toBeTruthy();
+    expect(screen.getByText('No stops on this route that day yet.')).toBeTruthy();
   });
 
   it('without bestRows the strip keeps its closest offers', () => {

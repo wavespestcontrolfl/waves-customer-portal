@@ -142,6 +142,33 @@ it('summary mode: one search around the picked date answers availability and not
   expect(result.current.bestInRange).toBeNull();
 });
 
+it('summary mode: a pick two weeks out asks once more for the next-7-days row (Codex #6045 r1)', async () => {
+  const far = {
+    ...summaryAnswer,
+    summary: { ...summaryAnswer.summary, best: { day: [], week: [], week_covered: false } },
+  };
+  const week = {
+    slots: [],
+    summary: { days: [], best: { day: [], week: [{ date: '2035-01-02', start_time: '10:00', end_time: '11:00', detour_minutes: 12 }], week_covered: true } },
+  };
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => far })
+    .mockResolvedValueOnce({ ok: true, json: async () => week });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
+  }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(fetch).toHaveBeenCalledTimes(2);
+  const second = JSON.parse(fetch.mock.calls[1][1].body);
+  expect(second).toMatchObject({ summary: true, pickedDate: '2035-01-05' });
+  expect(second.pickedStart).toBeUndefined();
+  expect(result.current.availability.best.weekCovered).toBe(true);
+  expect(result.current.availability.best.week.map((h) => h.start)).toEqual(['10:00']);
+  // The pills stay the picked search's days.
+  expect(result.current.availability.days.map((d) => d.date)).toEqual(['2035-01-01', '2035-01-02']);
+});
+
 it('summary mode keeps "could not check" apart from a miss', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: true, json: async () => ({ ...summaryAnswer, picked: { start: '14:00', fits: null, reason: 'route_unverified' } }),
