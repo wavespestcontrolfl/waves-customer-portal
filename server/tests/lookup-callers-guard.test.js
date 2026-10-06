@@ -43,9 +43,12 @@ const SANCTIONED_OVERRIDE = { file: 'routes/property-lookup-v2.js', line: /^\s*i
 
 // Lines that CALL the lookup (not the definition, not a comment, not a jest mock).
 // One record per line that calls `name`, with `count` = how many calls that
-// line makes (two lookups inside one Promise.all([...]) count as two).
+// line makes (two lookups inside one Promise.all([...]) count as two). A
+// member-expression call (`propertyLookup.performPropertyLookup(...)`, or
+// `require('...').performPropertyLookup(...)` inline) is a call like any
+// other: the lookbehind refuses only a longer identifier, not a `.`.
 function callLines(src, name) {
-  const re = new RegExp('(?<![\\w.])' + name + '\\(', 'g');
+  const re = new RegExp('(?<!\\w)' + name + '\\(', 'g');
   const def = new RegExp('function\\s+' + name + '\\(');
   const mock = new RegExp(name + ':\\s*jest');
   return src.split('\n').map((line, i) => ({ line, n: i + 1, count: (line.match(re) || []).length }))
