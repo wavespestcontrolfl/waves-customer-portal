@@ -938,6 +938,73 @@ function applyWholeStructureUnitWaiver(av, opts = {}) {
   };
 }
 
+// Wording that says the caller's space is one of several in a shared building.
+// The first half is the unit-level wording the whole-structure waiver already
+// screens (condo, apartment); the rest names a suite, bay or unit.
+const SUBUNIT_WORDING_RE = new RegExp(
+  `${UNIT_LEVEL_WORDING_RE.source}|\\b(?:suites?|ste|units?|bays?)\\b`, 'i');
+// Wording that says the building sits in a multi-tenant center.
+const MULTI_TENANT_WORDING_RE = /\b(?:strip\s+(?:mall|center|centre|plaza)|plaza|shopping\s+(?:center|centre|mall|plaza)|mall|(?:office|business|industrial)\s+park|complex)\b/i;
+const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
+
+/**
+ * GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT (owner ruling 2026-10-06): skip the
+ * "which unit?" hold when Google says the address is a BUSINESS address AND the
+ * caller says they own, bought, lease or occupy the WHOLE building. The owner
+ * accepted the risk of a strip-mall caller who has a suite.
+ *
+ * Sibling of applyWholeStructureUnitWaiver with the same return contract: the
+ * SAME object untouched unless every condition holds, so gate-off (and every
+ * non-qualifying call) is byte-identical. Conditions:
+ *   - the gate is on and the verdict is exactly "PREMISE resolved, only
+ *     subpremise missing", in service area, nothing unconfirmed or replaced;
+ *   - Google's addressUse says business and not residential (mixed use keeps
+ *     the hold);
+ *   - V2 property_type is commercial;
+ *   - V2 property.whole_building_occupancy is true. The extraction judges the
+ *     language (owner ruling 2026-10-01); this code only verifies that its
+ *     pinned quote (field_path /property/whole_building_occupancy, speaker
+ *     caller) is word for word inside ONE caller turn of a fully labeled
+ *     two-speaker transcript, and that the quote itself carries no negation,
+ *     hedge or condition;
+ *   - no CALLER turn says suite / ste / unit / bay / condo / apartment (an
+ *     agent asking "is there a suite number?" does not count against the
+ *     caller), and no turn at all names a strip mall, plaza, shopping center,
+ *     mall, office/business/industrial park or complex.
+ * The waived copy carries the same wholeStructureUnitWaived marker as the
+ * whole-structure waiver plus reason 'business_whole_building', so
+ * reconstructWaivedAddressValidation and the offline audits rebuild it.
+ */
+function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
+  if (!opts.enabled) return av;
+  if (!isMissingUnitNumber(av)) return av;
+  if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
+  if (av.addressUse?.business !== true || av.addressUse?.residential === true) return av;
+  if (opts.propertyType !== 'commercial') return av;
+  if (opts.wholeBuildingOccupancy !== true) return av;
+  // Lazy: call-reschedule-agreement requires this module at load time.
+  const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
+  const turns = parseTurns(opts.transcript);
+  if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return av;
+  const quotes = (Array.isArray(opts.evidence) ? opts.evidence : [])
+    .filter((e) => e?.field_path === '/property/whole_building_occupancy' && e.speaker === 'caller' && typeof e.quote === 'string');
+  const grounded = quotes.some((e) => turnsHolding(turns, e.quote, 'caller').length > 0
+    && !turnHasNegationOrHedge(normalizeForGrounding(e.quote)));
+  if (!grounded) return av;
+  if (turns.some((t) => !t.agent && SUBUNIT_WORDING_RE.test(t.raw))) return av;
+  if (turns.some((t) => MULTI_TENANT_WORDING_RE.test(t.raw))) return av;
+  return {
+    ...av,
+    status: 'validated_accept',
+    missingComponents: [],
+    wholeStructureUnitWaived: {
+      missingComponents: [...av.missingComponents],
+      originalStatus: av.status,
+      reason: BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
+    },
+  };
+}
+
 // Offline audits (v2-promotion-readiness, verify-v2-shadow-path, replay
 // variance) read the PERSISTED verdict, which keeps the original ambiguous
 // status. A pass that waived the unit hold stamps `wholeStructureUnitWaived` on
@@ -3079,6 +3146,8 @@ module.exports = {
   suppressAddressFlagsForAV,
   isMissingUnitNumber,
   applyWholeStructureUnitWaiver,
+  applyBusinessWholeBuildingUnitWaiver,
+  BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,

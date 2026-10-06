@@ -53,6 +53,9 @@ const FIELD_GROUPS = {
     'price_is_final',
     'staff_accepted_proposed_slot',
     'selected_day_words',
+    // Whole-building occupancy (schema 1.23.0): decides whether a business
+    // address with no unit is held for the unit ask, so drift must show.
+    'whole_building_occupancy',
     // On-site flags (schema 1.22.0): they decide whether a spouse/buyer/tenant/
     // family member is sent the recipient opt-in ask, so drift must show.
     'secondary_wants_appointment_texts',
@@ -483,7 +486,7 @@ const BOOL_FIELDS = new Set([
 // means "not committed", identical to false — collapse them so replays
 // don't report a spurious high-severity delta on every pre-1.8.0 row
 // (codex P2). A genuine true↔false disagreement still surfaces.
-const COLLAPSED_BOOL_FIELDS = new Set(['agent_committed_booking', 'caller_accepted_slot', 'secondary_wants_appointment_texts', 'secondary_on_site']);
+const COLLAPSED_BOOL_FIELDS = new Set(['agent_committed_booking', 'caller_accepted_slot', 'secondary_wants_appointment_texts', 'secondary_on_site', 'whole_building_occupancy']);
 
 function normalizeField(field, value) {
   if (Object.hasOwn(FIELD_NORMALIZERS, field)) return FIELD_NORMALIZERS[field](value);
@@ -1440,7 +1443,7 @@ async function replayCall(call, context) {
 
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
-  const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+  const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type, x?.property?.whole_building_occupancy].join('|');
   const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && priorV2Valid && currentExtraction
     && waiverInputs(priorV2) !== waiverInputs(currentExtraction))
     ? storedAvUnwaived : storedAv;

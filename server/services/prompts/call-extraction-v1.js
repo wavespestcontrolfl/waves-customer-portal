@@ -118,7 +118,15 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // (3) Staff hedges ("I'm thinking", "probably", "around four") do not unconfirm
 // a NEW booking the caller accepted; a hedge by the CALLER or an open condition
 // still does. A new cohort.
-const PROMPT_VERSION = 'v22';
+// v23: property.whole_building_occupancy (schema 1.23.0; owner ruling
+// 2026-10-06, a commercial caller who bought a whole building and gave no unit
+// was held for a unit ask). The model, not code, judges whether the caller
+// states they own, bought, lease or occupy the ENTIRE building at the service
+// address (not a suite, unit, bay or space inside it) and pins the caller's
+// sentence; the pipeline verifies the quote and Google's business verdict
+// before it skips the unit ask (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT).
+// New field and instructions: a new cohort.
+const PROMPT_VERSION = 'v23';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -285,6 +293,7 @@ ADDRESS:
 PROPERTY:
 - hoa_community_flag: true if property is IN an HOA community (e.g. Lakewood Ranch, Heritage Harbor).
 - hoa_common_area_service: true ONLY if service is FOR HOA-owned common areas (clubhouse, retention ponds, entry beds). A single-family home inside an HOA is hoa_community_flag=true but hoa_common_area_service=false.
+- whole_building_occupancy: true ONLY when the CALLER states they own, bought, lease, rent or occupy the ENTIRE building at the service address ("we just bought this building", "we own the whole building", "the building is ours and we're making it a flower shop"). false when the caller says the address is only part of a building (a suite, unit, bay, space, a storefront in a plaza or strip center). null when unstated. A business name or property_type=commercial alone is NOT enough, and neither is "my business" or "our shop" (a tenant of one suite says that too). When true, pin the caller's sentence to /property/whole_building_occupancy with speaker "caller".
 
 MULTIPLE PROPERTIES (service_address vs additional_properties):
 - When the caller wants service at MORE THAN ONE property (a second home, a rental, another unit, "we bought a condo AND a house"), service_address holds the PRIMARY property and EVERY other property goes into property.additional_properties — never drop one, never merge two addresses into one.
@@ -390,6 +399,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - service_request.urgency
 - caller.on_site_authorization (when caller != owner)
 - property.hoa_common_area_service (when true)
+- property.whole_building_occupancy (when true — the CALLER's sentence stating they own/bought/lease/occupy the entire building; speaker must be "caller")
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
 - scheduling.confirmed_start_at (the quote must contain the agreed date AND time — except for a NEW booking whose day was already set earlier in the call, e.g. the caller's "today between 1:30 and 3:30" and then the agent's "can we plan on 2 o'clock?": then quote the one turn that states the agreed time, verbatim, and resolve the day from that earlier turn; never stitch two turns into one quote)

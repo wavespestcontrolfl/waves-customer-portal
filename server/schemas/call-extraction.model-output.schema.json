@@ -714,6 +714,13 @@
             "null"
           ],
           "description": "true ONLY when the caller states/strongly implies the service_address is the home they LIVE in as their main residence; false when they state it is not (rental, seasonal, tenant-occupied); null when unstated."
+        },
+        "whole_building_occupancy": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.23.0, additive/optional (never `required`): true ONLY when the CALLER states they own, bought, lease, rent or occupy the ENTIRE building at the service address, not a suite, unit, bay, space or storefront inside a larger building (\"we just bought this building\", \"we own the whole building\", \"the building is ours, we're making it a flower shop\"). false when the caller says the service address is only part of a building (a suite, unit, bay, space, a plaza or strip center unit). null when unstated. Do not infer it from a business name or a commercial property_type alone. Pin the caller's sentence to /property/whole_building_occupancy with speaker \"caller\" when true."
         }
       }
     },
@@ -1509,7 +1516,7 @@
     },
     "evidence": {
       "type": "array",
-      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it), scheduling.relative_date_used=true and scheduling.moved_appointment_relative_date_used=true (the whole clause holding the relative expression).",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, property.whole_building_occupancy=true (CALLER-spoken quote), sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it), scheduling.relative_date_used=true and scheduling.moved_appointment_relative_date_used=true (the whole clause holding the relative expression).",
       "items": {
         "type": "object",
         "additionalProperties": false,

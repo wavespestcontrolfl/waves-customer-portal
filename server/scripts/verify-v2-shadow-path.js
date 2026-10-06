@@ -123,7 +123,7 @@ async function main() {
       // A whole-structure unit waiver was decided for the PRIOR extraction's
       // service and property type: keep it only when this extraction names the
       // same; otherwise judge on the persisted, unwaived verdict.
-      const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+      const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type, x?.property?.whole_building_occupancy].join('|');
       const rawAv = (rawAvWaived !== rawAvUnwaived && waiverInputs(priorEnriched) !== waiverInputs(e)) ? rawAvUnwaived : rawAvWaived;
       const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
       // Recovery reconstruction (codex round-12 P2): a recovered call routed
