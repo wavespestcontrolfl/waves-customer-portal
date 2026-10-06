@@ -247,7 +247,7 @@ IMPORTANT: Always show the list of affected customers and ask for confirmation b
 Pass ONLY the fields you want to set or change:
 - neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code ONLY for a gate on the customer's own lot; a community/HOA/subdivision gate such as \"Del Webb gate\" is neighborhood_gate_code. A community code is never also saved as property_gate_code)
 - parking_notes / side_gate_access / access_notes — where to park / how to get in (ADDED as a new first line; existing notes are never replaced — pass only the new line)
-- pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property
+- pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property (pet_details, pets_secured_plan and special_instructions REPLACE what is there)
 - pets_secured_plan — how the tech should keep pets safe, e.g. "keep the screen doors closed during service so the cats don't get out"
 - special_instructions — any other field instruction
 
@@ -2166,7 +2166,9 @@ function sanitizePropertyAccess(input) {
 // Free-text fields keep their history: a new line is ADDED with a [bar] tag,
 // never written over what is there (2026-10-05: a bar write replaced a
 // customer's access notes and lost where his gate code came from).
-const PROPERTY_ACCESS_NOTE_FIELDS = ['parking_notes', 'side_gate_access', 'access_notes', 'pet_details', 'pets_secured_plan', 'special_instructions'];
+// Pet details, the pet plan and special instructions are current state, not
+// history: they are replaced, as the tool description says.
+const PROPERTY_ACCESS_NOTE_FIELDS = ['parking_notes', 'side_gate_access', 'access_notes'];
 const sameCode = (a, b) => String(a || '').replace(/\s+/g, '').toLowerCase() === String(b || '').replace(/\s+/g, '').toLowerCase();
 // side_gate_access is varchar(200); the other note fields are text.
 const PROPERTY_ACCESS_NOTE_LIMITS = { side_gate_access: 200 };
@@ -2179,27 +2181,11 @@ function noteHas(had, add) {
     .some((line) => noteWords(line.replace(/^\s*\[[^\]]*\]\s*/, '')).replace(/[.\s]+$/, '') === want);
 }
 
-// Is this code the community gate code the stop card already shows? The stop
-// card shows the saved neighborhood code when there is one (this call's, else
-// the one on file); only with none saved does it show the directory codes of
-// the home's switched-on neighborhood (active, or needing confirmation). These
-// fields are one per customer, so the directory counts only for a customer
-// with exactly one active home: with more, which home's stop card shows which
-// code depends on the visit.
-async function communityCodeShown(conn, customerId, neighborhoodCode, code) {
-  if (!code) return false;
-  if (neighborhoodCode) return sameCode(neighborhoodCode, code);
-  // The directory reaches the stop card only while GATE_NEIGHBORHOOD_ACCESS is on.
-  if (!require('../../config/feature-gates').neighborhoodAccessLive()) return false;
-  const homes = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('neighborhood_id');
-  if (homes.length !== 1 || !homes[0].neighborhood_id) return false;
-  const directory = await conn('neighborhood_access')
-    .join('neighborhoods', 'neighborhoods.id', 'neighborhood_access.neighborhood_id')
-    .where({ 'neighborhood_access.neighborhood_id': homes[0].neighborhood_id, 'neighborhoods.active': true })
-    .whereIn('neighborhood_access.status', ['active', 'needs_confirm'])
-    .whereNotNull('neighborhood_access.code').pluck('neighborhood_access.code');
-  return directory.some((c) => sameCode(c, code));
-}
+// Is this code the community gate code the stop card already shows? Only the
+// saved neighborhood code (this call's, else the one on file) counts: it shows
+// on every stop. Directory codes are not counted: whether one reaches a stop
+// depends on the visit (its home, its address, the directory gate).
+const communityCodeShown = (neighborhoodCode, code) => !!code && !!neighborhoodCode && sameCode(neighborhoodCode, code);
 
 // What the write will actually do against the row as it is now: notes are
 // added as a new first line (or skipped when the same line is there), and a
@@ -2235,14 +2221,14 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
     kept.push(`${field}: added as a new first line; the earlier notes stay below`);
   }
   const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
-  if (updates.property_gate_code !== undefined && await communityCodeShown(conn, customerId, neighborhoodCode, updates.property_gate_code)) {
+  if (updates.property_gate_code !== undefined && communityCodeShown(neighborhoodCode, updates.property_gate_code)) {
     delete updates.property_gate_code;
     kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
   }
   // A property code on file that is the community code shows twice on the
   // stop card (as the gate and as the yard gate): clear it.
   if (updates.property_gate_code === undefined && current.property_gate_code
-    && await communityCodeShown(conn, customerId, neighborhoodCode, current.property_gate_code)) {
+    && communityCodeShown(neighborhoodCode, current.property_gate_code)) {
     updates.property_gate_code = null;
     kept.push('property_gate_code: cleared; the code on file there is the community gate code');
   }
