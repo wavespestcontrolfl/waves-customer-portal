@@ -1033,6 +1033,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // The step is one selection and whole or absent: selecting one line selects all
     // three; when any line has no staged row, none of the three is on the sheet.
     const bermudaBlocks = [];
+    const bermudaWarnings = [];
     if (bermudaOn) {
       resolvedLines = bermudaRemoval.selectStepAtomically(resolvedLines);
       const stepLines = resolvedLines.filter(bermudaRemoval.isStepLine);
@@ -1040,14 +1041,17 @@ router.get('/lawn-mix', async (req, res, next) => {
       // yet, so a limited product takes the whole step off the sheet.
       const probe = await v13VisitLimits(db, scheduled,
         stepLines.filter((line) => bermudaRemoval.isRecognitionLine(line) || bermudaRemoval.isFusiladeLine(line)).map((line) => ({ ...line, selected: true })), v13Rows);
-      const dropped = bermudaRemoval.dropUnusableStep(
+      const settled = bermudaRemoval.settleStep(
         resolvedLines,
         stepLines.length > 0 && probe.capped.size === 0 && stepLines.every((line) => line.product && v13Rows.get(String(line.product.id))),
       );
-      resolvedLines = dropped.items;
-      bermudaBlocks.push(...dropped.blocks);
+      resolvedLines = settled.items;
+      bermudaBlocks.push(...settled.blocks);
+      bermudaWarnings.push(...settled.warnings);
     }
-    const blocks = bermudaBlocks.concat(v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext));
+    // Step blocks are product-scoped and ride the response beside the limit blocks: they
+    // never hold the base products' quantities or the mixing order.
+    const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
     // The plan's own application-limit decision for a sheet opened from a visit: a capped
     // product gets no amount and its limit message (a block beside the apply-alone ones, not
     // holding the rest of the mix), a warning-level limit a sheet warning.
@@ -1095,6 +1099,13 @@ router.get('/lawn-mix', async (req, res, next) => {
         plannedFullTankMix,
       };
     });
+    // A selected step that cannot be applied stays on the sheet with its three lines
+    // marked unavailable (and no amount); the product-scoped blocks say why.
+    if (bermudaBlocks.length) {
+      for (const item of items) {
+        if (item.bermudaStep) { item.spot = null; item.unavailable = { reason: bermudaBlocks[0].message }; }
+      }
+    }
     // A CitraBlue or unconfirmed St. Augustine cultivar: a hard test-patch note on
     // each step line, as on the plan.
     if (bermudaOn && bermudaStep.cultivar === 'test_patch') {
@@ -1109,6 +1120,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       mix: item.jobMix,
     })));
     const warnings = [];
+    warnings.push(...bermudaWarnings);
     if (bermudaStep.excluded) {
       warnings.push({ code: 'lawn_bermuda_cultivar_excluded', severity: 'warning', message: 'Bermuda removal is off for this lawn: the St. Augustine cultivar on file (ProVista, Captiva or Seville) is not eligible.' });
     }
@@ -1167,7 +1179,7 @@ router.get('/lawn-mix', async (req, res, next) => {
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
       })), limitCheck.capped),
       warnings,
-      blocks: [...blocks, ...limitCheck.blocks],
+      blocks: [...blocks, ...limitCheck.blocks, ...bermudaBlocks],
     };
     res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }

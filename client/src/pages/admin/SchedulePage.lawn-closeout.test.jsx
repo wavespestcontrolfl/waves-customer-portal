@@ -1482,12 +1482,26 @@ it('the bermuda removal mix options go on together and come off together', async
   optionalOptions = mix;
   render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
   await waitFor(() => expect(totals()).toHaveLength(2));
-  // Picking ONE option adds all three rows.
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  // Picking ONE option adds all three rows, and the three labels with their note lines.
   fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
   await waitFor(() => expect(totals()).toHaveLength(5));
-  // Removing ONE row removes all three.
+  for (const { name } of mix) expect(notes.value).toContain(`[Protocol] ${name}`);
+  // Removing ONE row removes all three rows AND the three labels, scopes and note lines.
   fireEvent.click(screen.getAllByRole('button', { name: /remove/i }).at(-1));
   await waitFor(() => expect(totals()).toHaveLength(2));
+  expect(notes.value).not.toMatch(/\[Protocol(?: optional)?\]/);
+  for (const { name } of mix) expect(notes.value).not.toContain(name);
+  // Nothing of the mix is left in what the completion submits.
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  for (const { name } of mix) {
+    expect((body.protocolActionsCompleted || []).includes(name)).toBe(false);
+    expect(String(body.technicianNotes || '')).not.toContain(name);
+    expect(JSON.stringify(body.actionScopes || body.protocolActionScopes || {})).not.toContain(name);
+  }
+  expect((body.products || []).map((p) => p.productId)).not.toEqual(expect.arrayContaining(mix.map((m) => m.id)));
 });
 
 it.each([

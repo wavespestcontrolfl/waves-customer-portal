@@ -1940,9 +1940,10 @@ async function buildPlanForService(serviceId, options = {}) {
       : false;
     const usable = stepItems.length > 0 && !limited
       && stepItems.every((item) => item.product && item.product.active !== false && item.spot);
-    const dropped = bermudaRemoval.dropUnusableStep(planItems, usable);
-    planItems = dropped.items;
-    bermudaBlocks.push(...dropped.blocks);
+    const settled = bermudaRemoval.settleStep(planItems, usable);
+    planItems = settled.items;
+    bermudaBlocks.push(...settled.blocks);
+    bermudaWarnings.push(...settled.warnings);
     // A lawn with a CitraBlue or unconfirmed cultivar gets the step with a hard note.
     if (bermudaCultivar === 'test_patch') {
       planItems = planItems.map((item) => (bermudaRemoval.isStepLine(item)

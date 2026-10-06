@@ -128,10 +128,16 @@ async function stepForVisit(knex, visit, { trackKey, month }) {
 // together.
 const BERMUDA_GROUP = 'bermuda_removal';
 
-// Completion check: Recognition or Fusilade II recorded without the other is refused
-// (the surfactant is optional). `products` is the submitted completion product list.
-// Returns the refusal message, or null. Gate off: always null.
-async function bermudaPairViolation(knex, products) {
+// Completion check: on a visit that carries the bermuda removal step (the account's
+// staff switch or accepted estimate, an eligible grass, an April or June visit, v13
+// live, not an excluded cultivar), Recognition or Fusilade II recorded without the
+// other is refused (the surfactant is optional). Any other visit is never judged:
+// Fusilade II alone on bed or border work, tree and shrub, or an unflagged lawn
+// completes normally. `products` is the submitted completion product list; `serviceId`
+// the visit. Returns the refusal message, or null. Gate off: always null.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+async function bermudaPairViolation(knex, products, { serviceId } = {}) {
   if (!bermudaRemovalLive() || !Array.isArray(products)) return null;
   const ids = [...new Set(products.map((p) => p?.productId).filter(Boolean).map(String))];
   if (!ids.length) return null;
@@ -140,6 +146,14 @@ async function bermudaPairViolation(knex, products) {
   const hasRecognition = names.has(RECOGNITION_KEY);
   const hasFusilade = names.has(FUSILADE_KEY);
   if (hasRecognition === hasFusilade) return null;
+  // One of the two alone: judged only when this visit carries the step.
+  if (featureGates.lawnV13Live?.() !== true || !UUID_RE.test(String(serviceId || ''))) return null;
+  const visit = await knex('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+  if (!visit?.customer_id || !visit.scheduled_date) return null;
+  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
+  const month = MONTH_ABBR[Number(require('../utils/datetime-et').etCalendarDayOf(visit.scheduled_date).slice(5, 7)) - 1];
+  const step = await stepForVisit(knex, visit, { trackKey: profile?.grass_type, month });
+  if (!step.active) return null;
   return hasRecognition
     ? 'Recognition goes on with Fusilade II in the bermuda removal mix. Add Fusilade II too, or take Recognition off this visit.'
     : 'Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.';
@@ -160,17 +174,36 @@ function selectStepAtomically(items) {
     ? { ...item, selected: true, selectionReason: 'bermuda_step_selected_together' } : item));
 }
 
-// When the step cannot be applied as a whole, none of it is offered. `usable` says
-// whether the step's lines can all be applied; the caller knows the plan's or the
-// sheet's own line states.
-function dropUnusableStep(items, usable) {
-  if (usable || !items.some(isStepLine)) return { items, blocks: [] };
+// The step is whole or absent. `usable` says whether all three lines can be applied
+// (the caller knows the plan's or the sheet's own line states).
+//   - Not usable and nothing of it is selected: the three lines leave and the visit gets
+//     a WARNING, never a block, so the visit's base products, quantities and mixing
+//     order are untouched.
+//   - Not usable and some line is selected: the three lines stay, each marked
+//     unavailable with the reason and no amount, and each carries a product-scoped
+//     block. Only the step's own lines are blocked.
+function settleStep(items, usable) {
+  const none = { items, blocks: [], warnings: [] };
+  const stepItems = items.filter(isStepLine);
+  if (usable || !stepItems.length) return none;
+  if (!stepItems.some((item) => item.selected)) {
+    return {
+      items: items.filter((item) => !isStepLine(item)),
+      blocks: [],
+      warnings: [{
+        code: 'lawn_bermuda_step_unavailable', severity: 'warning',
+        message: 'Bermuda removal is not offered on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row.',
+      }],
+    };
+  }
+  const reason = 'Bermuda removal is blocked: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row. Enter the actual work.';
   return {
-    items: items.filter((item) => !isStepLine(item)),
-    blocks: [{
+    items: items.map((item) => (isStepLine(item) ? { ...item, spot: null, unavailable: { reason } } : item)),
+    blocks: stepItems.map((item) => ({
       code: 'lawn_bermuda_step_unavailable', severity: 'block',
-      message: 'Bermuda removal is not available on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row. Enter the actual work.',
-    }],
+      productId: item.product?.id || null, productName: item.product?.name || null, message: reason,
+    })),
+    warnings: [],
   };
 }
 
@@ -179,6 +212,6 @@ module.exports = {
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, stepAddOn, cultivarState,
   markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
-  selectStepAtomically, dropUnusableStep,
+  selectStepAtomically, settleStep,
   stepForVisit, BERMUDA_GROUP, bermudaPairViolation,
 };

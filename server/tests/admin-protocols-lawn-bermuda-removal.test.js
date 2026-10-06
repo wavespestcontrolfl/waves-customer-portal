@@ -116,11 +116,31 @@ test.each([['fus'], ['rec'], ['nis']])('selecting only %s selects all three line
   expect(blockCodes(body)).toEqual([]);
 });
 
-test.each([['rec'], ['fus'], ['nis']])('%s has no staged row: none of the three is on the sheet, with the reason', async (missing) => {
-  stage(Object.entries(ROWS).filter(([key]) => key !== missing).map(([, row]) => row));
-  const body = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec,fus' });
-  for (const name of [REC, FUS, NIS]) expect(itemFor(body, name)).toBeUndefined();
-  expect(blockCodes(body)).toContain('lawn_bermuda_step_unavailable');
+describe('a step that cannot be applied', () => {
+  const warningCodes = (body) => body.warnings.map((w) => w.code);
+  const f24 = (body) => itemFor(body, 'LESCO 24-0-11 with PolyPlus OPTI');
+
+  test.each([['rec'], ['fus'], ['nis']])('%s has no staged row, nothing selected: the three lines leave with a warning; base quantities and mixing order stay', async (missing) => {
+    stage(Object.entries(ROWS).filter(([key]) => key !== missing).map(([, row]) => row));
+    const body = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    for (const name of [REC, FUS, NIS]) expect(itemFor(body, name)).toBeUndefined();
+    expect(warningCodes(body)).toContain('lawn_bermuda_step_unavailable');
+    expect(blockCodes(body)).not.toContain('lawn_bermuda_step_unavailable');
+    expect(body.blocks).toEqual([]);
+    expect(f24(body).jobMix).toMatchObject({ amountUnit: 'lb' });
+    expect(f24(body).jobMix.amount).toBeGreaterThan(0);
+  });
+
+  test.each([['rec'], ['fus'], ['nis']])('%s has no staged row, the step selected: the three lines stay unavailable with product-scoped blocks, and base quantities and mixing order still stand', async (missing) => {
+    stage(Object.entries(ROWS).filter(([key]) => key !== missing).map(([, row]) => row));
+    const body = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec,fus' });
+    const lines = body.items.filter((item) => item.bermudaStep);
+    expect(lines).toHaveLength(3);
+    for (const line of lines) { expect(line.unavailable.reason).toMatch(/Bermuda removal is blocked/); expect(line.spot).toBeNull(); }
+    expect(body.blocks.filter((b) => b.code === 'lawn_bermuda_step_unavailable')).toHaveLength(3);
+    expect(f24(body).jobMix.amount).toBeGreaterThan(0);
+    expect(body.mixingOrder.length).toBeGreaterThan(0);
+  });
 });
 
 describe('/completion-actions', () => {
@@ -211,12 +231,14 @@ describe('the account decides, on the server', () => {
     expect(body.warnings.filter((w) => w.code === 'lawn_v13_product_gate' && /Test patch first/.test(w.message))).toHaveLength(3);
   });
 
-  test.each([['rec'], ['fus']])('%s limited by an application limit: none of the three is on the sheet, with the limit block and the reason', async (limited) => {
+  test.each([['rec'], ['fus']])('%s limited by an application limit, nothing selected: the three lines leave with a warning; the sheet is not blocked', async (limited) => {
     applicationLimits.checkLimits.mockImplementation(async (_customer, productId) => (productId === limited
       ? { blocks: [{ message: 'Limit reached.' }], warnings: [] } : { blocks: [], warnings: [] }));
     const body = await lawnMix({ scheduledServiceId: SERVICE_ID });
     expect(stepNames(body)).toEqual([]);
-    expect(blockCodes(body)).toEqual(expect.arrayContaining(['lawn_bermuda_step_unavailable']));
+    expect(body.warnings.map((w) => w.code)).toContain('lawn_bermuda_step_unavailable');
+    expect(body.blocks).toEqual([]);
+    expect(body.mixingOrder.length).toBeGreaterThan(0);
     applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
   });
 

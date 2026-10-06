@@ -17282,6 +17282,13 @@ export function CompletionPanel({
     const removedIds = new Set([productId, ...(group
       ? protocolActions.filter((a) => a.group === group && a.product?.id).map((a) => a.product.id)
       : [])]);
+    // The group's chips go with its products: the labels, scopes and [Protocol] note
+    // lines handleProtocolActionSelect added for each member.
+    if (group) {
+      for (const member of protocolActions.filter((a) => a.group === group)) {
+        removeSelectedLabel("protocol", String(member.note || member.label || member.raw || "Completed protocol item"));
+      }
+    }
     setSelectedProducts((prev) =>
       promoteTankOwner(prev.filter((p) => !removedIds.has(p.productId))),
     );

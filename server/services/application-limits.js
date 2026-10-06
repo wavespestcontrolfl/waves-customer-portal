@@ -48,6 +48,23 @@ function sizingNote(unsized, estimated) {
   return notes.length ? ` (${notes.join('; ')})` : '';
 }
 
+// product_limits rows written for the lawn bermuda removal step (migration
+// 20261006190300) carry this program tag in match_value (unused on product rows). They
+// apply only while GATE_LAWN_BERMUDA_REMOVAL is on, and they count history for the
+// treated property alone.
+const BERMUDA_PROGRAM = 'bermuda_removal';
+const isBermudaProgramRow = (limit) => limit.match_value === BERMUDA_PROGRAM;
+
+// The treated property only: a ledger row at another of the customer's properties does
+// not count. A row whose property is unknown (no visit, or a visit with no property)
+// cannot be proven elsewhere, so it still counts. `query` selects from
+// property_application_history as pah.
+function scopeToProperty(query, propertyId) {
+  return query.leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
+    .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+    .where(function sameProperty() { this.whereNull('ss.property_id').orWhere('ss.property_id', propertyId); });
+}
+
 class ApplicationLimitChecker {
   // opts.proposed ({ ratePer1000, unit }) is the application being planned: a yearly
   // cap shared across formulations counts it with the season's earlier ones. A
@@ -89,10 +106,20 @@ class ApplicationLimitChecker {
           this.whereNull('jurisdiction').orWhere('jurisdiction', county).orWhere('jurisdiction', 'all');
         }) : [];
 
-    const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits];
+    // Bermuda removal rows: inert unless the gate is on (gate off, every result is the
+    // one before the rows existed); when on, their history is the treated property's.
+    const bermudaLive = require('../config/feature-gates').lawnBermudaRemovalLive?.() === true;
+    const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits]
+      .filter((limit) => bermudaLive || !isBermudaProgramRow(limit));
+    let bermudaHistory = null;
 
     for (const limit of allLimits) {
-      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
+      let limitHistory = history;
+      if (isBermudaProgramRow(limit)) {
+        if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, productId, yearStart, ...opts });
+        limitHistory = bermudaHistory;
+      }
+      const check = await this.evaluateLimit(limit, limitHistory, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
 
       if (check.violated) {
         const entry = { type: limit.limit_type, matchType: limit.match_type || null, matchValue: limit.match_value || null, message: check.message, description: limit.description, current: check.current, max: check.max };
@@ -108,6 +135,24 @@ class ApplicationLimitChecker {
     }
 
     return results;
+  }
+
+  // The product's season history for a bermuda removal limit: the treated property's
+  // rows plus rows with an unknown property (no property: the whole customer), leaving
+  // out the visit being planned or rebuilt.
+  async propertyHistory(database, { customerId, productId, yearStart, propertyId, excludeScheduledServiceId }) {
+    const query = database('property_application_history as pah')
+      .where({ 'pah.customer_id': customerId, 'pah.product_id': productId })
+      .where('pah.application_date', '>=', yearStart)
+      .whereNull('pah.retracted_at');
+    if (propertyId) scopeToProperty(query, propertyId);
+    if (excludeScheduledServiceId) {
+      query.where(function notThisVisit() {
+        this.whereNull('pah.service_record_id')
+          .orWhereNotIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: excludeScheduledServiceId }).select('id'));
+      });
+    }
+    return query.select('pah.*').orderBy('pah.application_date', 'desc');
   }
 
   async evaluateLimit(limit, history, moaHistory, proposedDate, product, database = db, ctx = {}) {
@@ -227,14 +272,7 @@ class ApplicationLimitChecker {
       })
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
         'pl.limit_value', 'pl.limit_unit', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
-    if (ctx.propertyId) {
-      // The treated property only: a row ledgered at another of the customer's properties
-      // does not count. A row whose property is unknown (no visit, or a visit with no
-      // property) cannot be proven elsewhere, so it still counts.
-      query.leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
-        .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-        .where(function sameProperty() { this.whereNull('ss.property_id').orWhere('ss.property_id', ctx.propertyId); });
-    }
+    if (ctx.propertyId) scopeToProperty(query, ctx.propertyId);
     if (ctx.excludeScheduledServiceId) {
       query.where(function notThisVisit() {
         this.whereNull('pah.service_record_id')

@@ -11,6 +11,7 @@ const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const rowsMigration = require('../models/migrations/20261006190100_lawn_bermuda_removal_rows');
+const programMigration = require('../models/migrations/20261006190300_lawn_bermuda_removal_limit_program');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
 const { bermudaPairViolation } = require('../services/lawn-bermuda-removal');
 
@@ -79,6 +80,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
     }
     // The real migration writes the rows and the limits into the fixture protocols.
     await rowsMigration.up(knex);
+    await programMigration.up(knex);
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   });
@@ -220,42 +222,68 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(optionNames(result)).toEqual(expect.arrayContaining([REC, FUS, NIS]));
     });
 
-    test('Recognition blocked by the 42-day interval: all three leave the plan, with the reason', async () => {
+    // Unselected and unusable: the three lines leave with a WARNING, never a block, and the
+    // visit's own products, quantities and status are untouched.
+    test.each([['rec'], ['fus']])('%s limited, nothing selected: the three lines leave with a warning, the visit is not blocked', async (limited) => {
       setGates();
       const f = await lawn({ date: '2026-06-16', bermuda: true });
-      await history(f.customerId, rec, ['2026-06-01']);
+      await history(f.customerId, { rec, fus }[limited], ['2026-06-01']);
+      const result = await plan(f.visit);
+      for (const name of [REC, FUS, NIS]) expect(optionNames(result)).not.toContain(name);
+      expect(result.propertyGate.warnings.map((w) => w.code)).toContain('lawn_bermuda_step_unavailable');
+      expect(codes(result)).not.toContain('lawn_bermuda_step_unavailable');
+      expect(codes(result)).not.toContain('lawn_v13_annual_limit');
+      expect(result.status).not.toBe('blocked');
+    });
+
+    test('the April base visit stays computable beside an unavailable optional step', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-04-14', bermuda: true });
+      const clean = await plan(f.visit);
+      await history(f.customerId, rec, ['2026-03-20']);
+      const limited = await plan(f.visit);
+      expect(limited.propertyGate.warnings.map((w) => w.code)).toContain('lawn_bermuda_step_unavailable');
+      // Same blocks, same planned products and amounts as the visit without the limit.
+      expect(codes(limited)).toEqual(codes(clean));
+      expect(JSON.stringify(limited.mixCalculator.items)).toBe(JSON.stringify(clean.mixCalculator.items));
+      expect(limited.mixingOrder).toEqual(clean.mixingOrder);
+    });
+
+    test.each([['rec'], ['fus']])('%s limited AND selected: the three lines stay, unavailable, each with its own block', async (limited) => {
+      setGates();
+      const f = await lawn({ date: '2026-06-16', bermuda: true });
+      await history(f.customerId, { rec, fus }[limited], ['2026-06-01']);
       const result = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
-      expect(codes(result)).toEqual(expect.arrayContaining(['lawn_v13_annual_limit', 'lawn_bermuda_step_unavailable']));
-      for (const name of [REC, FUS, NIS]) expect(optionNames(result)).not.toContain(name);
-      expect(result.status).toBe('blocked');
+      const lines = result.mixCalculator.items.filter((item) => item.bermudaStep);
+      expect(lines.map((l) => l.product.name).sort()).toEqual([FUS, NIS, REC].sort());
+      for (const line of lines) expect(line.unavailable.reason).toMatch(/Bermuda removal is blocked/);
+      const stepBlocks = result.propertyGate.blocks.filter((b) => b.code === 'lawn_bermuda_step_unavailable');
+      expect(stepBlocks.map((b) => b.productName).sort()).toEqual([FUS, NIS, REC].sort());
+      expect(codes(result)).toContain('lawn_v13_annual_limit');
     });
 
-    test('Fusilade II limited on its own: Recognition and the surfactant leave too', async () => {
-      setGates();
-      const f = await lawn({ date: '2026-06-16', bermuda: true });
-      await history(f.customerId, fus, ['2026-06-01']);
-      const result = await plan(f.visit);
-      for (const name of [REC, FUS, NIS]) expect(optionNames(result)).not.toContain(name);
-      expect(codes(result)).toContain('lawn_bermuda_step_unavailable');
-    });
-
-    test('limited with nobody selecting anything: the options are gone too', async () => {
-      setGates();
-      const f = await lawn({ date: '2026-06-16', bermuda: true });
-      await history(f.customerId, rec, ['2026-06-01']);
-      const result = await plan(f.visit);
-      for (const name of [REC, FUS, NIS]) expect(optionNames(result)).not.toContain(name);
-    });
-
-    test.each([[REC], [FUS], [NIS]])('%s inactive in the catalog: none of the three is planned', async (name) => {
+    test.each([[REC], [FUS], [NIS]])('%s inactive in the catalog and nothing selected: the three lines leave with a warning', async (name) => {
       setGates();
       await knex('products_catalog').where({ name }).update({ active: false });
       try {
-        const result = await plan((await lawn({ bermuda: true })).visit, { selectedConditionalProductIds: [rec.id, fus.id] });
+        const result = await plan((await lawn({ bermuda: true })).visit);
         for (const step of [REC, FUS, NIS]) expect(optionNames(result)).not.toContain(step);
-        expect(codes(result)).toContain('lawn_bermuda_step_unavailable');
+        expect(result.propertyGate.warnings.map((w) => w.code)).toContain('lawn_bermuda_step_unavailable');
+        expect(codes(result)).not.toContain('lawn_bermuda_step_unavailable');
       } finally {
         await knex('products_catalog').where({ name }).update({ active: true });
+      }
+    });
+
+    test('Recognition inactive AND selected: only the step lines block', async () => {
+      setGates();
+      await knex('products_catalog').where({ name: REC }).update({ active: false });
+      try {
+        const result = await plan((await lawn({ bermuda: true })).visit, { selectedConditionalProductIds: [fus.id] });
+        expect(codes(result)).toContain('lawn_bermuda_step_unavailable');
+        expect(result.propertyGate.blocks.filter((b) => b.code === 'lawn_bermuda_step_unavailable').every((b) => [FUS, NIS, null].includes(b.productName))).toBe(true);
+      } finally {
+        await knex('products_catalog').where({ name: REC }).update({ active: true });
       }
     });
   });
@@ -314,8 +342,9 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await history(early.customerId, rec, ['2026-04-30']);
       const blocked = await plan(early.visit, { selectedConditionalProductIds: [rec.id, fus.id] });
       expect(blocked.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/only 41 days since last app \(min 42\)/);
+      // Selected and limited: the three lines stay, unavailable, each with its own block.
       expect(codes(blocked)).toContain('lawn_bermuda_step_unavailable');
-      for (const name of [REC, FUS, NIS]) expect(optionNames(blocked)).not.toContain(name);
+      for (const line of blocked.mixCalculator.items.filter((item) => item.bermudaStep)) expect(line.unavailable).toBeTruthy();
       const ok = await lawn({ date: '2026-06-11', bermuda: true });
       await history(ok.customerId, rec, ['2026-04-30']);
       const allowed = await plan(ok.visit, { selectedConditionalProductIds: [rec.id, fus.id] });
@@ -330,7 +359,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const third = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
       const block = third.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit');
       expect(block.message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
-      expect(optionNames(third)).not.toContain(FUS);
+      for (const line of third.mixCalculator.items.filter((item) => item.bermudaStep)) expect(line.unavailable).toBeTruthy();
       // The count is per calendar year: the same two sprays do not count next year.
       const nextYear = await lawn({ date: '2027-04-13', bermuda: true });
       await history(nextYear.customerId, rec, ['2026-03-01', '2026-04-20']);
@@ -369,6 +398,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await rowsMigration.down(knex);
       expect(await count()).toEqual({ rows: 0, limits: 0 });
       await rowsMigration.up(knex);
+      await programMigration.up(knex);
       expect(await count()).toEqual({ rows: 12, limits: 5 });
     });
 
@@ -383,31 +413,148 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await knex('lawn_protocol_product_actuals').where({ protocol_product_id: row.id }).del();
       await rowsMigration.down(knex);
       await rowsMigration.up(knex);
+      await programMigration.up(knex);
       expect(await count()).toEqual({ rows: 12, limits: 5 });
     });
   });
 
-  describe('completion: Recognition and Fusilade II are recorded together', () => {
+  describe('completion: Recognition and Fusilade II are recorded together on a bermuda removal visit', () => {
     const submitted = (...items) => items.map((item) => ({ productId: item.id }));
+    const check = async (f, ...items) => bermudaPairViolation(knex, submitted(...items), { serviceId: f.visit.id });
 
-    test('one without the other is refused with a clear message; the surfactant is optional', async () => {
+    test('on a visit that carries the step, one without the other is refused with a clear message; the surfactant is optional', async () => {
       setGates();
-      expect(await bermudaPairViolation(knex, submitted(rec))).toMatch(/Recognition goes on with Fusilade II/);
-      expect(await bermudaPairViolation(knex, submitted(fus))).toMatch(/Fusilade II is never applied without Recognition/);
-      expect(await bermudaPairViolation(knex, submitted(fus, nis))).toMatch(/without Recognition/);
-      expect(await bermudaPairViolation(knex, submitted(rec, fus))).toBeNull();
-      expect(await bermudaPairViolation(knex, submitted(rec, fus, nis))).toBeNull();
+      for (const date of ['2026-04-14', '2026-06-16']) {
+        const f = await lawn({ date, bermuda: true });
+        expect(await check(f, rec)).toMatch(/Recognition goes on with Fusilade II/);
+        expect(await check(f, fus)).toMatch(/Fusilade II is never applied without Recognition/);
+        expect(await check(f, fus, nis)).toMatch(/without Recognition/);
+        expect(await check(f, rec, fus)).toBeNull();
+        expect(await check(f, rec, fus, nis)).toBeNull();
+      }
+      const viaEstimate = await lawn({ acceptedEstimate: true });
+      expect(await check(viaEstimate, fus)).toMatch(/without Recognition/);
     });
 
-    test('other products, no products and gate off are never refused', async () => {
+    test('Fusilade II or Recognition alone on a visit that does NOT carry the step completes normally', async () => {
       setGates();
-      expect(await bermudaPairViolation(knex, submitted(nis))).toBeNull();
-      expect(await bermudaPairViolation(knex, [])).toBeNull();
-      expect(await bermudaPairViolation(knex, undefined)).toBeNull();
-      expect(await bermudaPairViolation(knex, [{ productId: null }])).toBeNull();
-      setGates({ removal: false });
-      expect(await bermudaPairViolation(knex, submitted(rec))).toBeNull();
+      const unflagged = await lawn({});
+      expect(await check(unflagged, fus)).toBeNull();
+      expect(await check(unflagged, rec)).toBeNull();
+      const wrongMonth = await lawn({ date: '2026-05-12', bermuda: true });
+      expect(await check(wrongMonth, fus)).toBeNull();
+      const otherGrass = await lawn({ grass: 'bermuda', bermuda: true });
+      expect(await check(otherGrass, fus)).toBeNull();
+      const excluded = await lawn({ bermuda: true, cultivar: 'ProVista' });
+      expect(await check(excluded, fus)).toBeNull();
+      // No visit named, a malformed id, or an unknown visit: nothing is judged.
       expect(await bermudaPairViolation(knex, submitted(fus))).toBeNull();
+      expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: 'not-a-uuid' })).toBeNull();
+      expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: '99999999-9999-4999-8999-999999999999' })).toBeNull();
+    });
+
+    test('other products, no products, gate off and v13 off are never refused', async () => {
+      setGates();
+      const f = await lawn({ bermuda: true });
+      expect(await check(f, nis)).toBeNull();
+      expect(await bermudaPairViolation(knex, [], { serviceId: f.visit.id })).toBeNull();
+      expect(await bermudaPairViolation(knex, undefined, { serviceId: f.visit.id })).toBeNull();
+      expect(await bermudaPairViolation(knex, [{ productId: null }], { serviceId: f.visit.id })).toBeNull();
+      setGates({ removal: false });
+      expect(await check(f, rec)).toBeNull();
+      setGates({ v13: false });
+      expect(await check(f, fus)).toBeNull();
+    });
+  });
+
+  describe('application limits: the bermuda removal rows (20261006190300)', () => {
+    const limits = require('../services/application-limits');
+    const rowsFor = (product) => knex('product_limits').where({ product_id: product.id });
+
+    test('the migration marks exactly the 5 rows; down clears them; up restores; other rows are never touched', async () => {
+      const tagged = () => knex('product_limits').where({ match_value: 'bermuda_removal' });
+      expect(await tagged()).toHaveLength(5);
+      const celsius = await product('Celsius WG');
+      await knex('product_limits').insert({ product_id: celsius.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 3, severity: 'hard_block', description: 'Celsius cap' });
+      await programMigration.down(knex);
+      expect(await tagged()).toHaveLength(0);
+      await programMigration.up(knex);
+      await programMigration.up(knex);
+      expect(await tagged()).toHaveLength(5);
+      expect((await rowsFor(celsius)).every((row) => row.match_value == null)).toBe(true);
+    });
+
+    // Two properties, one customer: a spray on the OTHER property, a spray at this property,
+    // and one with an unknown property (no visit).
+    async function twoProperties() {
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      const [other] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Other Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const ledger = async (propertyId, date, product = rec) => {
+        const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: propertyId, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+        const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: product.id, application_date: date, service_record_id: record.id });
+      };
+      return { f, other, ledger };
+    }
+    const check = (f, propertyId, extra = {}) => limits.checkLimits(f.customerId, rec.id, '2026-06-20', knex, { propertyId, ...extra });
+
+    test('gate off: the rows are inert (compliance results as before), gate on they block', async () => {
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await history(f.customerId, rec, ['2026-03-01', '2026-04-20']);
+      setGates({ removal: false });
+      const off = await check(f, f.property.id);
+      expect(off.blocks).toEqual([]);
+      expect(off.warnings.filter((w) => w.type === 'annual_max_rate')).toEqual([]);
+      setGates();
+      const on = await check(f, f.property.id);
+      expect(on.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      // A gate-off compliance read of the customer is the same read with no marked rows.
+      setGates({ removal: false });
+      const status = await limits.getPropertyComplianceStatus(f.customerId);
+      expect(status.blocks).toBe(0);
+    });
+
+    test('with the treated property known, a spray at ANOTHER property does not count; this property and unknown-property rows do', async () => {
+      setGates();
+      const { f, other, ledger } = await twoProperties();
+      await ledger(other.id, '2026-03-01');
+      await ledger(other.id, '2026-04-20');
+      expect((await check(f, f.property.id)).blocks).toEqual([]);
+      expect((await check(f, other.id)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      await ledger(f.property.id, '2026-03-02');
+      await history(f.customerId, rec, ['2026-04-21']); // property unknown (no service record)
+      expect((await check(f, f.property.id)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+    });
+
+    test('with no property named, the whole customer counts', async () => {
+      setGates();
+      const { f, other, ledger } = await twoProperties();
+      await ledger(other.id, '2026-03-01');
+      await ledger(other.id, '2026-04-20');
+      expect((await check(f, null)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+    });
+
+    test('the 42-day interval is per property too; the visit being planned is left out', async () => {
+      setGates();
+      const { f, other, ledger } = await twoProperties();
+      await ledger(other.id, '2026-06-10');
+      expect((await check(f, f.property.id)).blocks).toEqual([]);
+      expect((await check(f, other.id)).blocks.map((b) => b.type)).toEqual(['min_interval_days']);
+      await ledger(f.property.id, '2026-06-10');
+      const [mine] = await knex('scheduled_services').where({ property_id: f.property.id, scheduled_date: '2026-06-10' });
+      expect((await check(f, f.property.id, { excludeScheduledServiceId: mine.id })).blocks).toEqual([]);
+    });
+
+    test('every other product keeps whole-customer history, property named or not', async () => {
+      setGates();
+      const { f, other, ledger } = await twoProperties();
+      const celsius = await knex('products_catalog').where({ name: 'Celsius WG' }).first();
+      await knex('product_limits').where({ product_id: celsius.id }).del();
+      await knex('product_limits').insert({ product_id: celsius.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 2, severity: 'hard_block', description: 'Celsius cap' });
+      await ledger(other.id, '2026-03-01', celsius);
+      await ledger(other.id, '2026-04-20', celsius);
+      const result = await limits.checkLimits(f.customerId, celsius.id, '2026-06-20', knex, { propertyId: f.property.id });
+      expect(result.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
     });
   });
 
