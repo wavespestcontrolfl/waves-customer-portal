@@ -449,3 +449,65 @@ test('confirmed: a composed row that changed after the card refuses with preview
   expect(res.preview_changed).toBe(true);
   expect(leads.update).not.toHaveBeenCalled();
 });
+
+// ─── the two-segment form, units, length, omitted parts, state ──
+
+const TWO_SEG = '21 Oak Ave, Sarasota FL 34200';
+const TWO_SEG_LEAD = { ...LEAD, address: TWO_SEG, city: 'Sarasota', zip: '34200' };
+
+test('two-segment "street, City FL zip": street-only, city-only and zip-only edits rebuild the line', async () => {
+  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
+  const street = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Oak Ave' });
+  expect(street.changes).toEqual({ address: { from: TWO_SEG, to: '12 Oak Ave, Sarasota, FL 34200' } });
+  const city = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton' });
+  expect(city.changes).toEqual({
+    address: { from: TWO_SEG, to: '21 Oak Ave, Bradenton, FL 34200' },
+    city: { from: 'Sarasota', to: 'Bradenton' },
+  });
+  const zip = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' });
+  expect(zip.changes).toEqual({
+    address: { from: TWO_SEG, to: '21 Oak Ave, Sarasota, FL 34201' },
+    zip: { from: '34200', to: '34201' },
+  });
+});
+
+test('a unit segment stays with the street on a composed row', async () => {
+  const unit = { ...TWO_SEG_LEAD, address: '21 Oak Ave Unit 4, Sarasota FL 34200' };
+  db.mockReturnValue(chain({ first: unit }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' });
+  expect(res.changes.address).toEqual({ from: unit.address, to: '21 Oak Ave Unit 4, Sarasota, FL 34201' });
+  const comma = { ...TWO_SEG_LEAD, address: '21 Oak Ave, Unit 4, Sarasota, FL 34200' };
+  db.mockReturnValue(chain({ first: comma }));
+  const res2 = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton' });
+  expect(res2.changes.address.to).toBe('21 Oak Ave Unit 4, Bradenton, FL 34200');
+});
+
+test('a rebuilt line over 255 characters is refused at preview', async () => {
+  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: `${'1'.repeat(240)} Oak Ave` });
+  expect(res.error).toMatch(/too long once the city and zip are included/);
+  expect(res.preview).toBeUndefined();
+});
+
+test('a whole address that omits a component never clears that column', async () => {
+  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
+  const noCity = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Oak Ave, FL 34236' });
+  expect(noCity.changes.city).toBeUndefined();
+  expect(noCity.changes.zip).toEqual({ from: '34200', to: '34236' });
+  expect(noCity.changes.address.to).toBe('12 Oak Ave, Sarasota, FL 34236');
+  const noZip = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Oak Ave, Bradenton, FL' });
+  expect(noZip.changes.zip).toBeUndefined();
+  expect(noZip.changes.city).toEqual({ from: 'Sarasota', to: 'Bradenton' });
+  // Only an explicit blank input clears a column.
+  const blank = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '' });
+  expect(blank.changes.zip).toEqual({ from: '34200', to: null });
+  expect(blank.changes.address.to).toBe('21 Oak Ave, Sarasota, FL');
+});
+
+test('a state-only change on a composed row is a real change', async () => {
+  const typo = { ...COMPOSED_LEAD, address: '21 Synthetic Oak Ave, Testville, GA 34200' };
+  db.mockReturnValue(chain({ first: typo }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '21 Synthetic Oak Ave, Testville, FL 34200' });
+  expect(res.error).toBeUndefined();
+  expect(res.changes).toEqual({ address: { from: typo.address, to: '21 Synthetic Oak Ave, Testville, FL 34200' } });
+});
