@@ -592,6 +592,51 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       });
     });
 
+    describe('a step visit is a LAWN visit on the v13 program', () => {
+      const V13 = '2026.10-v13';
+      const asService = async (f, serviceType, pin = null) => {
+        await knex('scheduled_services').where({ id: f.visit.id }).update({ service_type: serviceType, lawn_protocol_version: pin });
+        return f;
+      };
+
+      test.each([['Pest Control Quarterly'], ['Tree & Shrub Care']])('an April %s visit on a flagged account: Fusilade II alone completes (no pair refusal, no cap), even with the quota used', async (serviceType) => {
+        setGates();
+        const f = await asService(await lawn({ date: '2026-04-14', bermuda: true }), serviceType);
+        await spray(f, '2026-03-01');
+        await spray(f, '2026-03-02');
+        expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toBeNull();
+        expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: f.visit.id })).toBeNull();
+        expect(await bermudaLimitViolation(knex, submitted(fus), { serviceId: f.visit.id })).toBeNull();
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+      });
+
+      test('a recorded Recognition is still locked and capped in the transaction on any visit with the gate on (the round-10 rule), a pest visit included', async () => {
+        setGates();
+        const f = await asService(await lawn({ date: '2026-04-14', bermuda: true }), 'Pest Control Quarterly');
+        await spray(f, '2026-03-01');
+        await spray(f, '2026-03-02');
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+      });
+
+      test('a lawn visit pinned to 2026.05 is not a step visit; pinned to v13 or unpinned it is, and is enforced', async () => {
+        setGates();
+        const old = await asService(await lawn({ date: '2026-04-14', bermuda: true }), 'Lawn fixture', '2026.05');
+        expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: old.visit.id })).toBeNull();
+        expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: old.visit.id })).toBeNull();
+        await spray(old, '2026-03-01');
+        await spray(old, '2026-03-02');
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: old.visit.id }))).resolves.toBeUndefined();
+        for (const pin of [V13, null]) {
+          const f = await asService(await lawn({ date: '2026-04-14', bermuda: true }), 'Lawn Care', pin);
+          expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toMatch(/without Recognition/);
+          expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: f.visit.id })).toMatch(/with Fusilade II/);
+          await spray(f, '2026-03-01');
+          await spray(f, '2026-03-02');
+          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+        }
+      });
+    });
+
     describe('a staff-switched ZOYSIA lawn in April (the switch and the grass ride on the active profile)', () => {
       const zoysia = () => lawn({ grass: 'zoysia', date: '2026-04-14', bermuda: true });
 

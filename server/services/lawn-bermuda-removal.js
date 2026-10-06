@@ -32,6 +32,8 @@
  * same path every other v13 line takes.
  */
 const featureGates = require('../config/feature-gates');
+const { detectServiceLine } = require('./service-report/service-line-configs');
+const { LAWN_V13_VERSION } = require('./lawn-program');
 
 const RECOGNITION = 'Recognition Post Emergent Herbicide';
 const FUSILADE = 'Fusilade II Post Emergent Liquid Herbicide';
@@ -204,6 +206,14 @@ async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
   // explicit-property visit of the same lawn are one lock and one history.
   const visit = await resolvedVisitOf(knex, serviceId, { strict });
   if (!visit) return null;
+  // A step visit is a LAWN visit on the v13 program: the service line is the repo's own lawn
+  // classifier (the one lawn-completion-defaults uses), and a visit pinned to another
+  // protocol version (the recorded version the plan honors) is not on v13. Unpinned = the
+  // current serving version. Anything else (a pest or tree and shrub visit on a flagged
+  // account, a lawn visit pinned to 2026.05) is never judged by the pair check or the
+  // Fusilade II cap.
+  if (detectServiceLine(visit.service_type) !== 'lawn') return null;
+  if (visit.lawn_protocol_version && visit.lawn_protocol_version !== LAWN_V13_VERSION) return null;
   // The ACTIVE profile, whole (the staff switch and the cultivar ride on it), read once and
   // handed to stepForVisit.
   const profile = (await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first()) || null;
@@ -216,7 +226,7 @@ async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
 // (effective_property_id; null when none resolves).
 async function resolvedVisitOf(knex, serviceId, { strict = false } = {}) {
   if (!UUID_RE.test(String(serviceId || ''))) return null;
-  const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date');
+  const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_type', 'lawn_protocol_version');
   if (!visit?.customer_id || !visit.scheduled_date) return null;
   const scope = await profilePropertyScope(knex, visit.customer_id, visit.property_id, strict);
   return { ...visit, effective_property_id: scope.effective || null };
