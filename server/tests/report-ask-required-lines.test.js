@@ -1246,3 +1246,45 @@ describe('answer screen, Codex round 24', () => {
     expect(ask('The report shows no product applications for this visit.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 26', () => {
+  test('a number from report text grounds only a claim about the same thing', () => {
+    const data = lawnData({ reportV2: null, reportSections: [{ title: 'Mowing', text: 'Mowing height was 4 inches.' }] });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'q', data, facts });
+    expect(ask('We found 4 nests.')).toBe('unstated_number');
+    expect(ask('The report says the mowing height was 4 inches.')).toBeNull();
+  });
+
+  test('a required line with no end mark takes only a period', () => {
+    const line = 'No further turf runs this week';
+    const data = lawnData({ reportV2: null });
+    const facts = buildReportAskFacts({ data, requiredLines: [line] });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'q', data, facts, requiredLines: [line] });
+    expect(ask(`${line}?`)).toBe('missing_required_line');
+    expect(ask(`${line}.`)).toBeNull();
+  });
+
+  test.each(['Alpine WSG was applied in the garage.', 'It was applied in the garage.'])('a garage claim against an outside record is rejected: %s', (answer) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ question: 'q', data }) })).toBe('scope_claim');
+  });
+
+  test.each(['Your next service is in the spring.', 'A follow-up is planned for spring.', 'Expect another visit soon.'])('a noun-led visit promise is rejected: %s', (answer) => {
+    const data = pestData();
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('states_a_date');
+  });
+
+  test.each(['My dog bit into the bait.', 'My child took a bite of the bait.', 'My puppy took a bite of the pesticide block.'])('biting bait gets the full answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test('an insect bite is not a pesticide exposure', () => {
+    expect(medicalExposureAnswer('My son was bitten by fire ants')).toBeNull();
+  });
+
+  test('whitespace-separated lockbox segments mask whole', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Use lockbox 12 34 by the door. lockbox BLUE RED.' }) });
+    expect(facts.customer_concern).toBe('Use lockbox [redacted] by the door. lockbox [redacted].');
+  });
+});

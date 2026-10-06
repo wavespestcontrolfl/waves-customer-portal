@@ -333,19 +333,29 @@ const SPELLED_ROUTE_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value is a credential even with no "code" or "pin"
 // noun (Codex P1 #5964 r7). The shared redactor needs the noun.
-const LOCKBOX_SHORTHAND = /\b(lock[\s-]?box|key[\s-]?box|key[\s-]?safe|keypad)(\s*(?:#|no\.?|number|is|=|:|-)?\s*)([a-z0-9*#]{1,10}(?:[-/][a-z0-9*#]{1,10})*)\b/gi;
+// Up to three space-separated segments ("lockbox 12 34", "lockbox BLUE RED")
+// until a prose word (Codex P1 #5964 r26).
+const LOCKBOX_SHORTHAND = /\b(lock[\s-]?box|key[\s-]?box|key[\s-]?safe|keypad)(\s*(?:#|no\.?|number|is|=|:|-)?\s*)([a-z0-9*#]{1,10}(?:[-/][a-z0-9*#]{1,10})*(?:\s+[a-z0-9*#]{1,10}(?:[-/][a-z0-9*#]{1,10})*){0,3})\b/gi;
 // Words that follow a box word as prose, not as its value ("the lockbox is
 // on the gate"). Any other short token is the credential, letters included
 // ("lockbox BLUE", "keypad AB") (Codex P1 #5964 r11).
 const LOCKBOX_PROSE_WORDS = new Set(('is on in at by the a an to of for near next under over behind beside inside outside '
   + 'and or but was were has have will would can could should code pin combo combination').split(' '));
 
+function maskLockboxValue(match, box, gap, value) {
+  const parts = value.split(/\s+/);
+  const end = parts.findIndex((part) => LOCKBOX_PROSE_WORDS.has(part.toLowerCase()));
+  const code = end === -1 ? parts : parts.slice(0, end);
+  if (!code.length) return match;
+  return `${box}${gap}[redacted]${end === -1 ? '' : ` ${parts.slice(end).join(' ')}`}`;
+}
+
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, (match, box, gap, value) => (LOCKBOX_PROSE_WORDS.has(value.toLowerCase()) ? match : `${box}${gap}[redacted]`)))
+  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -948,7 +958,7 @@ const COMPACT_24H = /\b(?:at|around|about|by|after|before|until)\s+(?:[01]\d|2[0
 // A promised visit with no date ("We will be back soon", "the technician will
 // come back in the spring"): the model has no appointment to promise (Codex
 // P1 #5964 r25).
-const VISIT_PROMISE = /\b(?:we|we['’]ll|the\s+(?:tech|technician|team)|waves|someone|our\s+(?:team|technician|tech))\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to|can)?\s*(?:\w+\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\bin\s+a\s+fortnight\b/i;
+const VISIT_PROMISE = /\b(?:we|we['’]ll|the\s+(?:tech|technician|team)|waves|someone|our\s+(?:team|technician|tech))\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to|can)?\s*(?:\w+\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\bin\s+a\s+fortnight\b|\b(?:next|another|follow[\s-]?up|return|second|future)\s+(?:service|visit|treatment|appointment|follow[\s-]?up|stop)s?\b[^.?!]*\b(?:is|are|will|planned|scheduled|set|coming|soon|in\s+the|expected|due)\b|\b(?:a|the)\s+follow[\s-]?up\s+(?:is|will|was)\b|\bexpect\s+(?:another|a|your\s+next|the\s+next)\s+(?:visit|service|treatment|follow[\s-]?up)\b/i;
 const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
@@ -1009,9 +1019,15 @@ function digitsForWords(text) {
 }
 
 // Every number leaf of the sheet with the key path it sits under.
+// The word a number counts or measures: "4 nests" -> "nest", "4 inches" -> "inch".
+function nounAfter(rest) {
+  const m = /^\s*(?:(?:affected|treated|active|new|more|other|small|large|live|dead)\s+)?([a-z]+)/i.exec(String(rest || ''));
+  return m ? stemWord(m[1].toLowerCase()) : '';
+}
+
 function factNumbers(value, key = '', out = []) {
   if (typeof value === 'number') out.push({ value, key });
-  else if (typeof value === 'string') for (const n of value.match(NUMBER_RE) || []) out.push({ value: numberValue(n), key: '' });
+  else if (typeof value === 'string') for (const m of value.matchAll(NUMBER_RE)) out.push({ value: numberValue(m[0]), key: '', noun: nounAfter(value.slice(m.index + m[0].length)) });
   else if (Array.isArray(value)) value.forEach((item) => factNumbers(item, key, out));
   else if (value && typeof value === 'object') Object.entries(value).forEach(([child, item]) => factNumbers(item, `${key}.${child}`, out));
   return out;
@@ -1037,12 +1053,16 @@ function numberIsKnown(value, after, sentence, known) {
   // names ("the score went from 70 to 100"); with none named ("82 days") it
   // may only repeat a number the report's own text states (Codex P1 r12).
   if (!kind) {
+    // A number from report text grounds only a claim about the same thing:
+    // "4 inches" in a section is no "4 nests" (Codex P1 #5964 r26).
+    const noun = nounAfter(after);
     return known.some((fact) => fact.value === value
-      && (named.length ? named.some((keyRe) => keyRe.test(fact.key)) : fact.key === ''));
+      && (named.length ? named.some((keyRe) => keyRe.test(fact.key)) : (fact.key === '' && fact.noun === noun)));
   }
+  const noun = nounAfter(unitText);
   return known.some((fact) => fact.value === value
-    && kind[2].test(fact.key)
-    && (!named.length || named.some((keyRe) => keyRe.test(fact.key))));
+    && ((fact.key === '' && fact.noun && fact.noun === noun)
+      || (kind[2].test(fact.key) && (!named.length || named.some((keyRe) => keyRe.test(fact.key))))));
 }
 
 // Fact-sheet lines that hold digits but no measurement: the office phone,
@@ -1085,7 +1105,8 @@ const DISMISSES_NEXT = [
 function statesLineAlone(sentences, line) {
   const wanted = splitSentences(matchForm(line));
   // A line with no end mark may take one from the answer.
-  const bare = (value, want) => (/[.!?]$/.test(want) ? value : value.replace(/[.!?]$/, ''));
+  // A line with no end mark may take only a period (Codex P1 #5964 r26).
+  const bare = (value, want) => (/[.!?]$/.test(want) ? value : value.replace(/\.$/, ''));
   return sentences.some((_, start) => (
     wanted.every((want, i) => bare(sentences[start + i] || '', want) === want)
     && !(start > 0 && DISMISSES_NEXT.some((dismisses) => dismisses(sentences[start - 1])))
@@ -1111,7 +1132,7 @@ function ownSentences(text, requiredLines) {
 }
 
 // Rooms are inside; yard features are outside (Codex P1 #5964 r22).
-const SAYS_INSIDE = /\b(?:inside|indoors?|interior|in\s+the\s+(?:home|house)|kitchen|bathrooms?|bedrooms?|living\s+room|dining\s+room|family\s+room|attic|basement|closets?|pantry|laundry|hallways?|cabinets?|baseboards?|under\s+the\s+sink)\b/i;
+const SAYS_INSIDE = /\b(?:inside|indoors?|interior|in\s+the\s+(?:home|house)|kitchen|bathrooms?|bedrooms?|living\s+room|dining\s+room|family\s+room|attic|basement|closets?|pantry|laundry|hallways?|cabinets?|baseboards?|under\s+the\s+sink|garage)\b/i;
 const SAYS_OUTSIDE = /\b(?:outside|outdoors?|exterior|perimeter|around\s+the\s+(?:home|house|outside)|yard|lawn|garden|flower\s+beds?|landscape\s+beds?|lanai|patio|pool\s+(?:cage|deck|area)|fence(?:\s+line)?|driveway|eaves|soffits?|mulch|shrubs?|hedges?|trees?|palms?|turf)\b/i;
 const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|wasn['’]?t|weren['’]?t|didn['’]?t|isn['’]?t|aren['’]?t)\b/i;
 // A claim that something was applied: "treated areas" and "went from 70" are not.
@@ -1344,7 +1365,7 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
 // bait", "the bait was swallowed by John"): an eating verb and an exposure
 // word in one sentence, unless a pest is the one eating ("the ants ate the
 // bait") (Codex P1 #6016 r32). No subject list can name every person.
-const INGESTION_VERB = /\b(?:swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
+const INGESTION_VERB = /\b(?:bit\s+into|bite[sd]?\s+(?:into|of|on)|took\s+a\s+bite|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
 const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
 // The pest is the eater only as the subject of the eating verb ("the ants ate
 // the bait", "eaten by the roaches"); a pest word right before a product word
@@ -1361,7 +1382,7 @@ const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\
 const NOT_A_NAME = '(?:was|were|is|are|did|does|do|has|have|had|be|been|got|what|why|how|when|where|which|who|will|can|could|should|the|this|that|these|those|some|any|it|its|a|an|and|or|but|then|also|just|bait\\w*|spray\\w*|products?|pesticides?|chemicals?|granules?|poison\\w*|gel|pellets?|powder|dust|treatment|insecticides?|herbicides?|fertilizer|nothing|everything|something|anything|ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)';
 const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
 const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
-const INGEST = '(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
+const INGEST = '(?:bit\\s+into|bite[sd]?\\s+(?:into|of|on)|took\\s+a\\s+bite|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
 const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
