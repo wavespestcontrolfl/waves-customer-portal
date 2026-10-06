@@ -1822,6 +1822,23 @@ async function createRestockRequest(input, actionContext) {
 }
 
 async function updateRestockRequest(input, actionContext) {
+  // A received amount with no stated unit never changes stock: the writer would read it in the request's saved unit
+  // (or the product's inventory unit), so "received 3" became 3 of whatever the request said. Refused at the preview too,
+  // so no card and no owner-direct write is built on an assumed unit; the model asks the operator one short question and
+  // calls again with the unit they said. Receive with NO amount stays as it is: it takes the ordered or requested amount
+  // in the request's own unit, which is the recorded fact and not a guess.
+  if (input.action === 'receive' && input.quantity != null && !String(input.unit ?? '').trim()) {
+    const request = await db('product_restock_requests').where({ id: input.request_id }).first('requested_quantity', 'unit');
+    // No request found: let the writer report the normal request_not_found error.
+    if (request) {
+      const requested = toNumber(request.requested_quantity);
+      const requestFact = requested != null && requested > 0
+        ? ` The request is for ${requested}${request.unit ? ` ${request.unit}` : ''}.`
+        : request.unit ? ` The request is in ${request.unit}.` : '';
+      return { success: false, code: 'unit_required',
+        error: `The unit is missing, so no stock was changed.${requestFact} Ask the operator one short question about the unit of the amount received (for example "received 2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
+    }
+  }
   const fields = { action: input.action, quantity: input.quantity, unit: input.unit, note: input.note };
   if (!actionContext.confirmed) return inventory.previewRestockAction(input.request_id, fields);
   const result = await inventory.updateRestockRequest(input.request_id, fields,
