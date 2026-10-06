@@ -728,28 +728,37 @@ function normalizeLeadContactField(field, raw) {
 // customer conversion copies leads.address into customers.address_line1
 // verbatim). The split is the shared parseRawAddress (utils/address-normalizer),
 // which reads "street, City, FL zip", "street, City FL zip" and unit segments.
-// A stored value is COMPOSED when it has a comma and parses to a state or a zip.
+// A stored value is COMPOSED when it parses to a state, or to the lead's own zip.
 // Editing city or zip, or only the street, on a composed row rebuilds the whole
 // line (formatAddress) so the lead never holds two places.
 const ADDRESS_FIELDS = ['address', 'city', 'zip'];
 const COMPOSED_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
 
 // What the stored address is: 'bare' (a street only), 'composed' (parts in
-// `parts`) or 'opaque' (a one-line address that carries the lead's city or zip
-// but that the parser cannot split, so a partial edit is not safe).
+// `parts`) or 'opaque' (a one-line address that names the lead's city but that
+// the parser cannot split, so a partial edit is not safe). Every value goes
+// through parseRawAddress, commas or not (Codex r3 P1: "100 Main St Sarasota FL
+// 34236" is a legacy comma-free line). A row is composed when the parser finds a
+// state, or a ZIP that equals the lead's zip column: the parser reads any
+// trailing five digits as a ZIP, so a bare "100 Main St Apt 34236" with a
+// different zip column is not called composed on the unit number alone.
 function readStoredAddress(lead) {
   const stored = String(lead.address || '').trim();
-  if (!stored.includes(',')) return { kind: 'bare' };
+  if (!stored) return { kind: 'bare' };
   const parts = parseRawAddress(stored);
-  if (parts.state || parts.zip) return { kind: 'composed', parts };
-  const segments = stored.split(',').slice(1).map(x => x.trim().toLowerCase());
+  const zipColumn = String(lead.zip || '').trim();
+  if (parts.state || (parts.zip && parts.zip === zipColumn)) return { kind: 'composed', parts };
   const city = String(lead.city || '').trim().toLowerCase();
-  return city && segments.includes(city) ? { kind: 'opaque' } : { kind: 'bare' };
+  const namesCity = city && (
+    (parts.city || '').toLowerCase() === city
+    || stored.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city)
+  );
+  return namesCity ? { kind: 'opaque' } : { kind: 'bare' };
 }
 
 // The operator's own address text, when it is a whole composed address.
 function readGivenAddress(requested) {
-  if (typeof requested.address !== 'string' || !requested.address.includes(',')) return null;
+  if (typeof requested.address !== 'string') return null;
   const parts = parseRawAddress(requested.address);
   return parts.state || parts.zip ? parts : null;
 }

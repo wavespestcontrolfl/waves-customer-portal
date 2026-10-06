@@ -511,3 +511,44 @@ test('a state-only change on a composed row is a real change', async () => {
   expect(res.error).toBeUndefined();
   expect(res.changes).toEqual({ address: { from: typo.address, to: '21 Synthetic Oak Ave, Testville, FL 34200' } });
 });
+
+// ─── comma-free legacy lines ────────────────────────────────────
+
+const NO_COMMA = '100 Main St Sarasota FL 34236';
+const NO_COMMA_LEAD = { ...LEAD, address: NO_COMMA, city: 'Sarasota', zip: '34236' };
+
+test('comma-free "100 Main St Sarasota FL 34236": street, city and zip edits rebuild the line with the columns in sync', async () => {
+  db.mockReturnValue(chain({ first: NO_COMMA_LEAD }));
+  const street = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '200 Main St' });
+  expect(street.changes).toEqual({ address: { from: NO_COMMA, to: '200 Main St, Sarasota, FL 34236' } });
+  const city = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton' });
+  expect(city.changes).toEqual({
+    address: { from: NO_COMMA, to: '100 Main St, Bradenton, FL 34236' },
+    city: { from: 'Sarasota', to: 'Bradenton' },
+  });
+  const zip = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34237' });
+  expect(zip.changes).toEqual({
+    address: { from: NO_COMMA, to: '100 Main St, Sarasota, FL 34237' },
+    zip: { from: '34236', to: '34237' },
+  });
+  // The rebuilt line carries the new zip exactly once.
+  expect(zip.changes.address.to.match(/\b3423\d\b/g)).toEqual(['34237']);
+});
+
+test('comma-free "100 Main St FL 34236" (no city): a zip edit keeps the city column', async () => {
+  db.mockReturnValue(chain({ first: { ...NO_COMMA_LEAD, address: '100 Main St FL 34236' } }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34237' });
+  expect(res.changes).toEqual({
+    address: { from: '100 Main St FL 34236', to: '100 Main St, FL 34237' },
+    zip: { from: '34236', to: '34237' },
+  });
+  expect(res.changes.city).toBeUndefined();
+});
+
+test('bare streets that end in a unit stay bare: a zip edit touches only the zip column', async () => {
+  for (const address of ['21 Oak Ave Unit 4', '1200 Main St 2B', '100 Main St Apt 34236']) {
+    db.mockReturnValue(chain({ first: { ...ADDR_LEAD, address } }));
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' });
+    expect(res.changes).toEqual({ zip: { from: '34200', to: '34201' } });
+  }
+});
