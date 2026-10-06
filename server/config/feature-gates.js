@@ -35,8 +35,8 @@
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
- *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 25s+, no answer, no voicemail — texts them back from the line they called)
- *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 25s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
+ *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 15s+, no answer, no voicemail — texts them back from the line they called)
+ *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 15s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -2225,7 +2225,7 @@ const gates = {
   callBookingLinkText: process.env.GATE_CALL_BOOKING_LINK_TEXT === 'true',
   // Missed-call text-back (services/missed-call-text-back.js): an UNKNOWN
   // caller (no customer record on file) calls a Waves line,
-  // nobody answers, they wait >= 25s (missed-call-bell's own floor) and
+  // nobody answers, they wait >= 15s (missed-call-bell's own floor) and
   // hang up with no voicemail — one text goes from the exact line they
   // called ("it's Waves... someone will follow up... text us here... or
   // call back anytime"), at any hour (owner ruling 2026-09-28: no 8 AM
@@ -2237,7 +2237,7 @@ const gates = {
   // no claim taken. The sweep still reconciles claims this lane left
   // orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
-  // Widens the text-back lane ONLY (not the bell): a caller who waited 25s+
+  // Widens the text-back lane ONLY (not the bell): a caller who waited 15s+
   // at the voicemail greeting and hung up without speaking leaves a recording
   // the processor rejects as no-speech; the voicemail lane does nothing with
   // it, so the caller got no text. On → that call counts as "no message

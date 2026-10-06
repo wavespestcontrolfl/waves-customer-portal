@@ -1,6 +1,6 @@
 /**
  * Missed-call text-back — an UNKNOWN caller (no customer record on file)
- * calls a Waves line, nobody answers, they wait 25s+ (the missed-call
+ * calls a Waves line, nobody answers, they wait 15s+ (the missed-call
  * bell's own floor) and hang up with no voicemail: text them ONE reply from
  * the exact line they called.
  *
@@ -23,7 +23,7 @@
  * status), then sends inside its normal 30-minute slot like any other call.
  *
  * Eligibility reuses server/services/missed-call-bell.js's
- * `missedCallShapeEligible` (outcome-unanswered, the 25s unknown-caller
+ * `missedCallShapeEligible` (outcome-unanswered, the 15s unknown-caller
  * floor, withheld/sentinel IDs, Nomorobo spam, voice_relay_sandbox, no
  * recording, no voicemail_callback_alerted_at, not ai_handled /
  * ai_transferred) with `unknownCallers` forced true. It deliberately skips
