@@ -87,9 +87,9 @@ per-product target pests; the question and all free text scrubbed of phones,
 emails, codes and street addresses, but a customer name written in prose is
 not detectable), screened, with the fixed-rule answer as the reply on
 any model miss
-(`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word.
+(`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word. Next-visit questions, and any schedule question the rule router leaves unrouted ("when are you coming again?", `asksAboutSchedule`), keep the fixed-rule answer; the fact sheet carries no appointment; and an AI answer that states a calendar date, weekday, clock time, month or relative day ("tomorrow", "next week", "next weekend") is rejected; "today" (the visit itself) and "this week" (rain and watering facts) are allowed (2026-10-06). The symptom guard replaces the answer only for symptoms or ingestion (dizzy, vomiting, trouble breathing, ate or licked the bait, in the eyes); a question that mentions spray plus a person, a pet or a body part from the cue list (`exposureSafetyLine`: people and relationships, pets and animals, body parts, personal pronouns; an unlisted word gets no line) gets the fixed line "If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911." before the normal answer, with the gate on or off (owner 2026-10-05, option A). A house number before a street (one to six street-name words and any USPS Publication 28 street type, any case) is masked; the street name itself passes, as a name without its number is not an address.
 
-Symptom and exposure questions (behavior change to the public route, owner review round 5, 2026-10-05): a question that reports a symptom or an exposure ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged.
+Symptom and ingestion questions (behavior change to the public route, owner review round 5, 2026-10-05; narrowed by owner option A, 2026-10-05): a question that reports a symptom or an ingestion or eye/skin contact ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged. A question that only says something was sprayed on a person or pet (no symptom) is not replaced: it keeps its normal answer with the fixed Poison Control line in front (`exposureSafetyLine`, see above).
 
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
@@ -2373,37 +2373,34 @@ stamp while the gate is on, so gate-off PDFs are never served after the flip
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
 surface): instead of the peak / shoulder / dormant note it is one calendar-based,
-tier-neutral sentence for the visit's month and grass (St. Augustine,
-Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
-says what the program focuses on that time of year, never what the visit
-applied. It is written from `server/config/protocols.json` months, and any step
-the protocol makes conditional (skipped, soil-test or weather gated, optional,
-or on request) is only stated with a qualifier such as "where the
-lawn needs it" or "when conditions allow". It is at most about 30 words, and
-never naming a product, an ordinance, a county, a blackout, a law, a clock time,
-plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
-wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
-carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
-is null, and the old note stays, for a visit that is not a recurring lawn plan
+tier-neutral sentence for the visit's month that says what the lawn program
+focuses on that time of year, never what the visit applied. It is the universal
+lawn program v13 month sentence (the same twelve sentences for every grass,
+written from `server/config/lawn-protocol-v13.json`), and any step the program makes
+conditional is only stated with a qualifier such as "where needed" or "where it
+fits the property". It is at most about 30 words, and never naming a product,
+an ordinance, a county, a blackout, a law, a clock time, plan tiers, a soil
+test, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year.
+While the line is in use the snapshot also carries
+`seasonalNoteSource: "program"` (the key is absent otherwise). The line is
+null, and the old note stays, for a visit that is not a recurring lawn plan
 visit (the visit's catalog service identity must be a recurring lawn plan:
 one-time lawn jobs, callbacks and unresolved identities get no line; the
 WaveGuard tier is never the signal), for a visit with no assessment date, and
 for a June to September visit that may have applied nitrogen (the program
 applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
 with no `analysis_n`, or any applied product the catalog cannot resolve.
-With `GATE_LAWN_V13` ALSO on (dark; read at call time), the sentence may instead
-be the universal v13 month sentence (the same twelve sentences for every grass,
-written from `server/config/lawn-protocol-v13.json`, same customer-copy rules as
-above), but only when the visit's RECORDED lawn protocol version is
-`2026.10-v13`: the version on the visit's completion ledger row, or, only when the
-visit has no completion row at all, the version pinned on its scheduled visit. A
-completion row whose version is empty (attribution `none`) is authoritative and
-takes the grass-specific legacy sentence, as does any visit with no recorded
-version (completed before protocol assignment existed), one pinned to an older
-version, and every visit while `GATE_LAWN_V13` is off; a visit whose record
-cannot be read gets no program line at all and keeps the old peak / shoulder /
-dormant note. A permanent past report is never rewritten with a program its visit did
-not run. `seasonalNoteSource` stays `"program"` either way; the payload shape
+The line also needs `GATE_LAWN_V13` on (read at call time) and the visit's
+RECORDED lawn protocol version to be `2026.10-v13`: the version on the visit's
+completion ledger row, or, only when the visit has no completion row at all,
+the version pinned on its scheduled visit. A completion row whose version is
+empty (attribution `none`) is authoritative and gets no line, as does any visit
+with no recorded version (completed before protocol assignment existed), one
+pinned to an older version, every visit while `GATE_LAWN_V13` is off, and a
+visit whose record cannot be read: each keeps the old peak / shoulder / dormant
+note. The retired per-grass sentences were removed, so a permanent past report
+is never rewritten with a program its visit did not run. The payload shape
 (keys, types, route, token, privacy, rate limit) is unchanged.
 The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
 lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,

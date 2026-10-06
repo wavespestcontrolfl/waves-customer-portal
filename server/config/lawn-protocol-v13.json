@@ -80,7 +80,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11."
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
+        "cadenceVariants": {
+          "9": {
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
+          }
+        }
       },
       {
         "visit": 5,
@@ -269,7 +274,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11."
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
+        "cadenceVariants": {
+          "9": {
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
+          }
+        }
       },
       {
         "visit": 5,
@@ -458,7 +468,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11."
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
+        "cadenceVariants": {
+          "9": {
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
+          }
+        }
       },
       {
         "visit": 5,
@@ -647,7 +662,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11."
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11.",
+        "cadenceVariants": {
+          "9": {
+            "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
+          }
+        }
       },
       {
         "visit": 5,

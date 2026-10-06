@@ -9,30 +9,17 @@
  *   node scripts/dev/report-ask-prompt.js <report-data.json> "<question>"
  *
  * <report-data.json> is the body of GET /api/reports/:token/data (what
- * buildServiceReportV1ResponseData returns), or { "data": {...},
- * "nextAppointment": {...} }. A report payload's own camelCase
- * `nextAppointment` is mapped the same way POST /:token/ask maps it.
+ * buildServiceReportV1ResponseData returns), or { "data": {...} }. The
+ * prompt carries no appointment: next-visit and schedule questions keep the
+ * fixed-rule answer.
  *
  * From Node:
  *   const { buildReportAskPrompt } = require('./server/services/service-report/report-ask-ai');
- *   buildReportAskPrompt({ question, data, nextAppointment }) // -> { system, user }
+ *   buildReportAskPrompt({ question, data }) // -> { system, user }
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
-
-// `source.nextAppointment` in the report payload's camelCase (as POST
-// /:token/ask maps it) or already in the route's snake_case.
-function nextAppointmentFor(source = {}) {
-  const next = source.nextAppointment;
-  return next
-    ? {
-      service_type: next.serviceType ?? next.service_type,
-      scheduled_date: next.scheduledDate ?? next.scheduled_date,
-      window_start: next.windowStart ?? next.window_start,
-    }
-    : null;
-}
 
 function main(argv) {
   const [file, ...rest] = argv;
@@ -45,12 +32,12 @@ function main(argv) {
   const wrapped = parsed && typeof parsed === 'object' && parsed.data && typeof parsed.data === 'object'
     && !parsed.reportVersion;
   const data = wrapped ? parsed.data : parsed;
-  // Bare or wrapped, the same mapping; the wrapper's own appointment wins.
-  const nextAppointment = nextAppointmentFor(wrapped ? parsed : data) || (wrapped ? nextAppointmentFor(data) : null);
   // Keep stdout pure JSON: the portal logger prints module-load warnings there.
   process.env.LOG_LEVEL = 'error';
+  // dotenv 17 prints a banner on stdout unless told to stay quiet (Codex P1 #6016 r20).
+  process.env.DOTENV_CONFIG_QUIET = 'true';
   const { buildReportAskPrompt } = require('../../server/services/service-report/report-ask-ai');
-  process.stdout.write(`${JSON.stringify(buildReportAskPrompt({ question, data, nextAppointment }), null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(buildReportAskPrompt({ question, data }), null, 2)}\n`);
   return 0;
 }
 

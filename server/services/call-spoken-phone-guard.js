@@ -1,5 +1,5 @@
 /**
- * Spoken-phone guard. NANP area and exchange codes cannot start with 0 or 1, so
+ * Spoken-phone guard. A NANP area code cannot start with 0 or 1, so
  * a spoken number that does ("173-303-8616") is a mishearing, never a line.
  * Saved as a contact number it sends texts to a stranger (audited call
  * 2026-10-01). Called right after extraction, BEFORE ai_extraction_enriched is

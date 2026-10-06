@@ -3622,6 +3622,67 @@ function AutoReorderEditor({
     </div>
   );
 }
+// Which service lines apply this product (products_catalog.service_lines).
+// The tech lawn sheet lists lawn-tagged products only; "Not tagged" leaves
+// the sheets to go by the category. Saved on its own, like Auto-reorder.
+function ServiceLinesEditor({ product, showToast, onInventoryChanged }) {
+  const [lines, setLines] = useState(
+    Array.isArray(product.serviceLines) ? product.serviceLines : null,
+  );
+  const [saving, setSaving] = useState(false);
+  const tagged = Array.isArray(lines);
+  const saveServiceLines = async () => {
+    setSaving(true);
+    try {
+      await adminFetch(`/admin/inventory/${product.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ serviceLines: lines }),
+      });
+      showToast?.("Service lines saved");
+      onInventoryChanged?.();
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="mb-[12px]">
+      <div className="text-ui-body text-ink-secondary mb-[6px]">
+        Service lines
+      </div>
+      <div
+        title="Which service lines apply this product. The tech lawn sheet lists Lawn products only; Not tagged = the sheets go by the category."
+        className="flex gap-[10px] items-center flex-wrap text-ui-body"
+      >
+        <span className="text-ink-secondary">Applied on:</span>
+        <Checkbox
+          label="Not tagged"
+          checked={!tagged}
+          onChange={(e) => setLines(e.target.checked ? null : [])}
+        />
+        {COMPLETION_SERVICE_LINES.map((line) => (
+          <Checkbox
+            key={line.id}
+            label={line.label}
+            disabled={!tagged}
+            checked={tagged && lines.includes(line.id)}
+            onChange={(e) =>
+              setLines((cur) =>
+                e.target.checked
+                  ? [...new Set([...(cur || []), line.id])]
+                  : (cur || []).filter((x) => x !== line.id),
+              )
+            }
+          />
+        ))}
+        <Button type="button" onClick={saveServiceLines} disabled={saving} variant="primary">
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+    </div>
+  );
+}
 function ExpandedProduct({
   labelPipelineEnabled = false,
   labelRatesEnabled = false,
@@ -3762,6 +3823,13 @@ function ExpandedProduct({
       </div>
       {/* Authoring only: PUT /admin/inventory/:id is requireAdmin, so a
            technician would only ever see a 403 here. */}
+      {canAuthor && (
+        <ServiceLinesEditor
+          product={product}
+          showToast={showToast}
+          onInventoryChanged={onInventoryChanged}
+        />
+      )}
       {canAuthor && (
         <AutoReorderEditor
           product={product}

@@ -73,6 +73,7 @@ import {
   amountText, categoryLabel, hasAmount, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
+import { pestSweepActions, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -102,7 +103,7 @@ export { isSendableRateUnit };
 import {
   OfficeNote, ProductHeardLines, VisitHeardLine, VoiceFillMicBar, VoiceFillReview, useNoteClip, useProductVoiceFill, useVoiceFillSheet,
 } from './FastCompleteVoiceFill';
-import { Button, Field, Input, ActionFeedback } from '../ui';
+import { Button, Checkbox, Field, Input, ActionFeedback } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // How the SPRAY products went down. Spot treatment needs no measured area;
@@ -359,6 +360,8 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
       };
     }),
     areasServiced: [...form.areas],
+    // The sweep box (owner 2026-10-05), as the report flow sends it.
+    ...pestSweepCompletionFields(form.sweptEaves),
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
     // Voice fill's office note: staff-only (the visit's internal notes),
@@ -425,6 +428,7 @@ function useFastCompleteContext({
         // A typed visit keeps its own activity (the completion ignores the
         // 1 to 5 rating on a typed form), so it asks for none.
         const rates = ratingContract?.allowed === true && !typedType;
+        const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType });
         setCtx({
           loading: false,
           loadError: '',
@@ -438,9 +442,13 @@ function useFastCompleteContext({
           // The house totals are in the unit the resolver gives (4 fl oz), so
           // a house row never takes a usual unit: that is for picked products
           // (a Taurus usually logged in gal would otherwise open as "4 gal").
-          rows: seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType })
+          rows: houseMix
             ? pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, { serviceType, totalAmount }))
             : [],
+          // A visit on the house mix is a regular pest visit or a pest
+          // re-service, never a lane or typed one: the visits the full form
+          // shows the sweep box on (isRegularPestVisit in SchedulePage.jsx).
+          houseMix,
           visitIdentity: sheetVisitIdentity(visit, reportFlow),
           // A lane visit: whether its saved trace would show on the report
           // (an older server says nothing, so the trace holds stand).
@@ -658,7 +666,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
     pests: new Set(), otherPest: '', areas: new Set(), method: DEFAULT_METHOD, methodPicked: false, linearFt: '', activity: '', note: '',
-    tipId: '', customTip: '',
+    tipId: '', customTip: '', sweptEaves: false,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -777,6 +785,8 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
             ))}
           </ChoiceSection>
           <MethodSection form={form} rows={rows} setField={setField} chooseMethod={pickMethod} locked={formLocked} />
+          {/* This form only opens for a pest re-service, always a house-mix visit. */}
+          <SweptEavesSection checked={form.sweptEaves} locked={formLocked} onChange={(checked) => setField('sweptEaves', checked)} />
           {ctx.rating.allowed && (
             <ChoiceSection title="Activity seen" columns={4}>
               {ACTIVITY_LEVELS.map((level) => (
@@ -868,6 +878,7 @@ function writerSignature(form, rows, promiseMarks, photos, recordPart = null) {
       .map((row) => [String(row.productId), row.methodInput || null, row.rateInput ?? null, row.rateMethod ?? null])
       .sort(([a], [b]) => a.localeCompare(b)),
     customerHome: form.customerHome,
+    sweptEaves: !!form.sweptEaves,
     rating: form.rating,
     // Choosing the default's own value still changes what the writer reads.
     ratingPrefilled: !!form.ratingPrefilled,
@@ -920,6 +931,9 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
     products: active.map((row) => ({ productId: row.productId || null, name: row.name, ...recordedApplication(row, facts) })),
     areasServiced: facts?.areas || [],
     customerInteraction: customerHomeWriterLabel(form.customerHome),
+    // The full form's own writer field (owner 2026-10-05), sent as it sends it:
+    // the sweep the tech ticked, or an empty list.
+    actionsCompleted: pestSweepActions(form.sweptEaves),
     // The first-visit 5 is a scoring default, not something the technician
     // saw: the writer gets a rating only once they choose one (codex local
     // r28 on #5538), as the completion recap leaves the default out.
@@ -971,6 +985,9 @@ function reportCompletionBody({
     areasServiced: heard?.areas || [],
     ...completionExtras,
     customerInteraction: form.customerHome,
+    // The sweep box (owner 2026-10-05): the full form's protocol action and its
+    // exterior / no-treatment scope, which the report's spider section reads.
+    ...pestSweepCompletionFields(form.sweptEaves),
     ...(ratingSent ? { clientPestRating: form.rating } : {}),
     // The untouched first-visit 5: the server re-checks it is still the
     // first visit (owner ruling 2026-09-24).
@@ -1507,6 +1524,8 @@ function ReportFlowForm({
   const [form, setForm] = useState(() => ({
     note: '',
     customerHome: DEFAULT_CUSTOMER_HOME,
+    // The "Swept eaves and webs" box (owner 2026-10-05), a plain pest visit only.
+    sweptEaves: false,
     rating: ctx.rating.firstVisit ? FIRST_VISIT_RATING : null,
     ratingPrefilled: !!ctx.rating.firstVisit,
     tipId: '',
@@ -1778,6 +1797,9 @@ function ReportFlowForm({
       onAddProduct={addProduct}
       productVoice={productVoice}
       noteClipEnabled={voiceFill}
+      // Only a regular pest visit sweeps: an initial cleanout, a lane or a
+      // typed visit records no general-pest protocol action.
+      showSweep={ctx.houseMix}
       footer={action
         ? { reason: generateMissing.reason, label: action.label, onAction: () => write(action.fresh) }
         // A photo change in hand (a description open, a change saving, a
@@ -1864,7 +1886,7 @@ function VisitStep({
   service, ctx, form, setForm, products, active, sprayMethod, tips, blog, visitPromises, photos, onPhotos, locked, dictationPending,
   onDictationPending, onFullForm, isMobile, onAddProduct, footer, writing, warn, stockButton,
   noteBoxPhotos, photosReadFailed, request, photoHold, onPhotoHold, onPhotosUpdate, onPhotosChanged,
-  productVoice, noteClipEnabled = false,
+  productVoice, noteClipEnabled = false, showSweep = false,
 }) {
   const [editAmounts, setEditAmounts] = useState(false);
   const [productsOpen, setProductsOpen] = useState(false);
@@ -1938,6 +1960,7 @@ function VisitStep({
               photos wait until the dictation is finished. */}
           {!noteBoxPhotos && <PhotoStripSection photos={photos} locked={locked || dictationPending} onOpen={onPhotos} />}
           <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
+          {showSweep && <SweptEavesSection checked={form.sweptEaves} locked={locked} onChange={(checked) => setField('sweptEaves', checked)} />}
           {ctx.rating.allowed && (
             <ActivitySection
               value={form.rating}
@@ -1975,6 +1998,19 @@ function VisitStep({
       </StepFooter>
       {picker.sheet}
     </div>
+  );
+}
+
+// The one protocol action a plain pest visit records (owner 2026-10-05, the
+// full form's own box): unchecked by default, one tap, no step of its own.
+function SweptEavesSection({ checked, locked, onChange }) {
+  return (
+    <section className="tech-visit-choice-section">
+      <label className="ui-choice-label tech-visit-choice">
+        <Checkbox className="tech-visit-checkbox" checked={checked} disabled={locked} onChange={(e) => onChange(e.target.checked)} />
+        <span>Swept eaves and webs</span>
+      </label>
+    </section>
   );
 }
 

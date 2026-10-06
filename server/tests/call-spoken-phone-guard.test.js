@@ -28,12 +28,12 @@ const v2 = (caller = {}, over = {}) => ({
 });
 
 describe('isImpossibleNanpPhone', () => {
-  test('area or exchange code starting 0 or 1 is impossible', () => {
+  test('an area code starting 0 or 1 is impossible; the exchange is not judged (isValidNanpNumber)', () => {
     expect(isImpossibleNanpPhone('+11733038616')).toBe(true);
     expect(isImpossibleNanpPhone('173-303-8616')).toBe(true);
-    expect(isImpossibleNanpPhone('(941) 155-0123')).toBe(true);
-    expect(isImpossibleNanpPhone('+19410550123')).toBe(true);
     expect(isImpossibleNanpPhone('1 073 555 0123')).toBe(true);
+    expect(isImpossibleNanpPhone('(941) 155-0123')).toBe(false);
+    expect(isImpossibleNanpPhone('+19410550123')).toBe(false);
   });
 
   test('real NANP numbers, international numbers and fragments are not flagged', () => {

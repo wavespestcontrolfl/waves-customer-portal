@@ -588,3 +588,42 @@ describe('GATE_TS_WATCH_LIST: the fast-context watchList', () => {
     expect('watchList' in ctx).toBe(false);
   });
 });
+
+describe('GATE_TS_PEST_CHECK: the fast-context pestCheck', () => {
+  const saved = process.env.GATE_TS_PEST_CHECK;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_PEST_CHECK; else process.env.GATE_TS_PEST_CHECK = saved;
+  });
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = () => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: '2026-10-01' }), products_catalog: catalog,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent', async () => {
+    delete process.env.GATE_TS_PEST_CHECK;
+    const ctx = await build();
+    expect(ctx.eligible).toBe(true);
+    expect('pestCheck' in ctx).toBe(false);
+  });
+
+  test('gate on: the six insect types, key and label', async () => {
+    process.env.GATE_TS_PEST_CHECK = 'true';
+    const ctx = await build();
+    expect(ctx.pestCheck.insectTypes.map((type) => type.key)).toEqual([
+      'armored_scale', 'soft_scale', 'whitefly', 'caterpillars', 'mites', 'other',
+    ]);
+    expect(ctx.pestCheck.insectTypes[0]).toEqual({ key: 'armored_scale', label: 'Armored scale' });
+  });
+
+  test('an ineligible visit carries no pestCheck even with the gate on', async () => {
+    process.env.GATE_TS_PEST_CHECK = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build();
+    expect(ctx.eligible).toBe(false);
+    expect('pestCheck' in ctx).toBe(false);
+  });
+});

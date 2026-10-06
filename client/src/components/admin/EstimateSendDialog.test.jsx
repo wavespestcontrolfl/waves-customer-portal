@@ -62,4 +62,13 @@ describe('saved estimate send confirmation',()=>{
   expect(await screen.findByText(/Text message to .*SMS suppressed/)).toBeInTheDocument();
   expect(screen.queryByText(/provider accepted/)).not.toBeInTheDocument();
  });
+ it('an impossible saved US phone shows the reason and leaves only the email channel selectable',async()=>{
+  const reason='+11035550123 is not a valid US phone number. Fix the phone on the contact or the estimate, then send again. Nothing was sent.';
+  vi.stubGlobal('fetch',vi.fn(()=>json({...preview,customerPhone:'+11035550123',smsBlockReason:reason})));
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+  expect(await screen.findByText(reason)).toBeInTheDocument();
+  expect(screen.getByRole('radio',{name:'Text message',exact:true})).toBeDisabled();
+  expect(screen.getByRole('radio',{name:'Text message and email',exact:true})).toBeDisabled();
+  expect(screen.getByRole('radio',{name:'Email',exact:true})).not.toBeDisabled();
+ });
 });

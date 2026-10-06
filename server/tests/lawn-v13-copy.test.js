@@ -1,11 +1,13 @@
 // Lawn protocol v13 customer copy, behind GATE_LAWN_V13 (PR 3 of 3).
 // Synthetic inputs: no database.
 //
-// Pins: gate off the program line, the report season note and the service outline
-// stamp are the old output; the v13 monthly program line is clean customer copy
-// whose every claim the v13 visit backs; v13 copy reaches a visit only when its
-// plan resolved the staged v13 version (a visit with no recorded version or an
-// older one keeps the legacy sentences); service outlines are stamped lawn-v13.
+// Pins: gate off no visit gets a program line (the report keeps the season note)
+// and the service outline stamp is the old output; the v13 monthly program line
+// is clean customer copy whose every claim the v13 visit backs; the line reaches
+// a visit only when its plan resolved the staged v13 version (a visit with no
+// recorded version or an older one gets no line and keeps the season note: the
+// retired per-grass sentences were removed); service outlines are stamped
+// lawn-v13.
 
 const protocolsJson = require('../config/protocols.json');
 const v13 = require('../config/lawn-protocol-v13.json');
@@ -17,7 +19,7 @@ const lineModule = require('../services/service-report/lawn-program-line');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
-const { buildProgramLine, PROGRAM_LINES, PROGRAM_LINES_V13, QUALIFIERS } = lineModule;
+const { buildProgramLine, PROGRAM_LINES_V13, QUALIFIERS } = lineModule;
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
@@ -34,14 +36,14 @@ function withGate(value, fn) {
 
 const visitFor = (month) => v13.st_augustine.visits.find((v) => v.month === MONTH_ABBR[month - 1]);
 
-describe('gate off is byte-identical for the program line', () => {
-  test('every grass and month is the old table', () => {
+describe('gate off: no program line', () => {
+  test('every grass and month, with or without a recorded v13 version, gets none', () => {
     withGate(undefined, () => {
       for (const grass of GRASSES) {
         for (const month of MONTHS) {
-          expect(buildProgramLine({ programVisit: true, grassType: grass, month })).toBe(PROGRAM_LINES[grass][month].line);
+          expect(buildProgramLine({ programVisit: true, grassType: grass, month })).toBeNull();
           // A recorded v13 version changes nothing with the gate off.
-          expect(buildProgramLine({ programVisit: true, grassType: grass, month, protocolVersion: LAWN_V13_VERSION })).toBe(PROGRAM_LINES[grass][month].line);
+          expect(buildProgramLine({ programVisit: true, grassType: grass, month, protocolVersion: LAWN_V13_VERSION })).toBeNull();
         }
       }
     });
@@ -74,7 +76,7 @@ describe('v13 monthly program line', () => {
   const ORDINAL = /\b(first|second|third|final|last|continu\w*|again|re-?check\w*|complet\w*|another|next|follow-?up|start\w*|begin\w*|round)\b/i;
   const BRANDS = /(prodiamine|celsius|acelepryn|tetrino|dimension|stonewall|nutra|artavia|velista|gravex|arena|talak|dylox|dismiss|certainty|dispatch|lesco|bifen|nis\b)/i;
 
-  test('a line for every month; gate on every grass (and an unknown one) with a v13 visit gets it; gate off keeps the old table', () => {
+  test('a line for every month; gate on every grass (and an unknown one) with a v13 visit gets it; gate off gives none', () => {
     expect(Object.keys(PROGRAM_LINES_V13).map(Number)).toEqual(MONTHS);
     withGate('true', () => {
       for (const grassType of [...GRASSES, null, 'unknown', 'mixed']) {
@@ -83,7 +85,7 @@ describe('v13 monthly program line', () => {
       // The Jun-Sep rule is unchanged: a visit that applied nitrogen gets no line.
       expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 7, nitrogenApplied: true, protocolVersion: LAWN_V13_VERSION })).toBeNull();
     });
-    withGate(undefined, () => expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 3 })).toBe(PROGRAM_LINES.bermuda[3].line));
+    withGate(undefined, () => expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 3, protocolVersion: LAWN_V13_VERSION })).toBeNull());
   });
 
   test.each(MONTHS)('month %i: clean customer copy', (month) => {
@@ -117,21 +119,21 @@ describe('v13 monthly program line', () => {
 
 describe('v13 program line follows the protocol version the visit\'s plan resolved', () => {
   const OLD_VERSION = '2026.06';
-  test('gate on: only a visit that resolved v13 gets v13 copy; no recorded version or an older one keeps the old copy', () => {
+  test('gate on: only a visit that resolved v13 gets v13 copy; no recorded version or an older one gets none', () => {
     withGate('true', () => {
       const input = { programVisit: true, grassType: 'bermuda', month: 10 };
       expect(buildProgramLine({ ...input, protocolVersion: LAWN_V13_VERSION })).toBe(PROGRAM_LINES_V13[10].line);
       // Historical or unattributed (no ledger row, no scheduled pin): never rewritten with v13.
-      expect(buildProgramLine(input)).toBe(PROGRAM_LINES.bermuda[10].line);
-      expect(buildProgramLine({ ...input, protocolVersion: null })).toBe(PROGRAM_LINES.bermuda[10].line);
-      expect(buildProgramLine({ ...input, protocolVersion: OLD_VERSION })).toBe(PROGRAM_LINES.bermuda[10].line);
+      expect(buildProgramLine(input)).toBeNull();
+      expect(buildProgramLine({ ...input, protocolVersion: null })).toBeNull();
+      expect(buildProgramLine({ ...input, protocolVersion: OLD_VERSION })).toBeNull();
     });
   });
 
-  test('gate off: the recorded version changes nothing', () => {
+  test('gate off: no line whatever the recorded version', () => {
     withGate(undefined, () => {
       for (const protocolVersion of [null, OLD_VERSION, LAWN_V13_VERSION]) {
-        expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 10, protocolVersion })).toBe(PROGRAM_LINES.bermuda[10].line);
+        expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 10, protocolVersion })).toBeNull();
       }
     });
   });
@@ -147,10 +149,14 @@ describe('v13 program line follows the protocol version the visit\'s plan resolv
     const saved = process.env.GATE_LAWN_EXPECTATIONS;
     process.env.GATE_LAWN_EXPECTATIONS = 'true';
     try {
-      const note = (protocolVersion) => withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment, programVisit: true, ...(protocolVersion ? { protocolVersion } : {}) }).snapshot.seasonalNote);
-      expect(note(LAWN_V13_VERSION)).toBe(PROGRAM_LINES_V13[10].line);
-      expect(note(null)).toBe(PROGRAM_LINES.bermuda[10].line);
-      expect(note('2026.06')).toBe(PROGRAM_LINES.bermuda[10].line);
+      const snapshot = (protocolVersion) => withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment, programVisit: true, ...(protocolVersion ? { protocolVersion } : {}) }).snapshot);
+      expect(snapshot(LAWN_V13_VERSION).seasonalNote).toBe(PROGRAM_LINES_V13[10].line);
+      expect(snapshot(LAWN_V13_VERSION).seasonalNoteSource).toBe('program');
+      // No recorded version or an older one: the old season note, unmarked.
+      for (const protocolVersion of [null, '2026.06']) {
+        expect(snapshot(protocolVersion).seasonalNote).toMatch(/transitional stretch/);
+        expect(snapshot(protocolVersion)).not.toHaveProperty('seasonalNoteSource');
+      }
     } finally {
       if (saved === undefined) delete process.env.GATE_LAWN_EXPECTATIONS; else process.env.GATE_LAWN_EXPECTATIONS = saved;
     }
@@ -186,8 +192,8 @@ describe('the protocol version a completed visit recorded (resolveRecordedProtoc
     const knex = fakeKnex({ lawn_protocol_service_completions: { protocol_version: null }, scheduled_services: { lawn_protocol_version: LAWN_V13_VERSION } });
     expect(await resolveRecordedProtocolVersion(knex, service)).toBeNull();
     expect(knex.reads).toEqual(['lawn_protocol_service_completions']);
-    // ... and the program line it feeds is the legacy one.
-    withGate('true', () => expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 10, protocolVersion: null })).toBe(PROGRAM_LINES.bermuda[10].line));
+    // ... and the visit it feeds gets no program line.
+    withGate('true', () => expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 10, protocolVersion: null })).toBeNull());
   });
 
   test('no completion row at all: the scheduled visit\'s pin, else nothing', async () => {
