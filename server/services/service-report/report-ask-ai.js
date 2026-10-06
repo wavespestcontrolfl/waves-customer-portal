@@ -647,12 +647,6 @@ function buildReportAskFacts({
   // The visit summary is only needed when the reviewed sections are absent.
   const summary = clip(data.summary, 700);
 
-  // Same watering screen as the sections: a held aftercare drops an
-  // "increase irrigation" recommendation before the three-row cap.
-  const recommendations = asArray(data.recommendations)
-    .map((rec) => clip(typeof rec === 'string' ? rec : rec?.text || rec?.title, 240))
-    .filter((rec) => rec && keep(rec))
-    .slice(0, 3);
   // The saved Waves summary takes the same watering screen (Codex P1 #5964 r5):
   // a stored "increase irrigation" headline or body must not reach the model
   // while the aftercare holds watering.
@@ -677,8 +671,9 @@ function buildReportAskFacts({
     lawn_assessment: lawnAssessmentFacts(data, keep),
     tree_shrub_report: treeShrubFacts(data, keep),
     lawn_report: lawnV2Facts(data, keep),
-    // A report with no findings rows can still carry its recommendations.
-    recommendations,
+    // Technician recommendations never reach the model: they are typed text
+    // that can hold a customer's name (Codex P1 #5964 r20). A question they
+    // answer keeps the rule answer through its technician required lines.
     // The Waves summary the rule router answers a no-rule question with.
     waves_summary: Object.keys(aiSummary).length ? aiSummary : null,
     // The visit's own conditions only. Rain over the past week is in
@@ -772,6 +767,8 @@ const INLINE_LIST_RE = /(?:^|[:.;]\s)1[.)]\s+\S.*\s2[.)]\s/;
 // that neither covers. Promises of a result are the owner's rule 1 of 2026-09-30
 // in a form the writer's own word list does not match.
 const ASK_EXTRA_BANNED = [
+  // "You should see improvement", "the lawn should show improvement" (Codex P1 #5964 r20).
+  [/\b(?:will|should|ought\s+to|(?:is|are)\s+going\s+to|expect\s+to)\s+(?:start\s+to\s+|begin\s+to\s+)?(?:see|notice|show|find)\s+(?:\w+\s+){0,3}?(?:improvement|results?|difference|progress|reduction|fewer|less|greener|better|healthier|thicker)\b/i, 'result promise'],
   // Modal, future and expected results (Codex P1 #5964 r13, r17): "should
   // disappear", "will disappear soon",
   // "this should get rid of the crabgrass", "is expected to clear up".
@@ -854,7 +851,7 @@ function leaksTargetList(text, {
 }) {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for]);
   const allowed = stemmedTerms([
-    question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.recommendations,
+    question, data.customerConcern, facts?.report_sections, facts?.findings,
     facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report,
     approvedWording, requiredLines,
   ]
@@ -1044,7 +1041,10 @@ function statesUnknownNumber(text, { facts, requiredLines }) {
   if (!NUMBER_RE.test(own)) return false;
   NUMBER_RE.lastIndex = 0;
   const governed = Object.fromEntries(Object.entries(facts || {}).filter(([key]) => !METADATA_FACTS.has(key)));
-  const known = factNumbers([governed, requiredLines]);
+  // Required lines keep their own numbers (removed from `own` above) but
+  // ground nothing else: "20 minutes" in a line is no "20 days" (Codex P1 r20).
+  delete governed.required_lines;
+  const known = factNumbers([governed]);
   // Each number is bound to its own clause ("Rain was 1.23 inches, and the
   // mowing height was 3.5 inches"), not the whole sentence (Codex P1 r10).
   const clauses = splitSentences(own).flatMap((sentence) => sentence.split(/[,;:]\s*|\s+(?:and|but|while|whereas)\s+/i));
@@ -1084,7 +1084,7 @@ const WATERING_DIRECTIVE = /\b(?:keep\s+(?:the\s+|your\s+)?(?:soil|lawn|turf|gra
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
 // A grant of permission with no condition: "can go out", "right away", "no
 // need to wait". "Once it is dry" and "until" keep the instruction's terms.
-const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead|(?:let|allow)\s+(?:your\s+|the\s+)?(?:pets?|dogs?|cats?|kids?|children|family|them|everyone)\s+(?:back|out|in|go|play|return|onto)|(?:allowed|permitted|cleared)\s+(?:back|out|to\s+(?:go|return|play|use))|(?:is|are)\s+(?:allowed|permitted|cleared|fine|okay|ok)\b)\b/i;
+const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:can|may|could)\s+(?:be|stay|get|remain)\s+(?:out|outside|in|inside|back|on|there)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead|(?:let|allow)\s+(?:your\s+|the\s+)?(?:pets?|dogs?|cats?|kids?|children|family|them|everyone)\s+(?:back|out|in|go|play|return|onto)|(?:allowed|permitted|cleared)\s+(?:back|out|to\s+(?:go|return|play|use))|(?:is|are)\s+(?:allowed|permitted|cleared|fine|okay|ok)\b)\b/i;
 // The condition must govern the restriction: drying, a wait in hours or
 // minutes, or the treatment settling ("once it is dry", "after 2 hours").
 // "After reading this" is no condition (Codex P1 #5964 r11).
@@ -1093,6 +1093,21 @@ const CONDITION_RE = /\b(?:once|after|until|when|as\s+soon\s+as)\s+(?:\w+\s+){0,
 function ownSentences(text, requiredLines) {
   const lines = requiredLines.map(matchForm);
   return splitSentences(matchForm(text)).filter((sentence) => !lines.some((line) => line.includes(sentence.replace(/[.!?]$/, ''))));
+}
+
+const SAYS_INSIDE = /\b(?:inside|indoors|interior|in\s+the\s+(?:home|house|kitchen|bathroom|garage))\b/i;
+const SAYS_OUTSIDE = /\b(?:outside|outdoors|exterior|perimeter|around\s+the\s+(?:home|house|outside))\b/i;
+function statesWrongScope(text, { facts }) {
+  const products = asArray(facts?.products).filter((product) => product?.name);
+  return splitSentences(matchForm(text)).some((sentence) => products.some((product) => {
+    const name = normalizeKey(product.name);
+    const said = ` ${normalizeKey(sentence)} `;
+    const first = name.split(' ')[0];
+    if (!said.includes(` ${name} `) && !(first.length >= 4 && said.includes(` ${first} `))) return false;
+    const where = String(product.applied_where || '');
+    if (SAYS_INSIDE.test(sentence) && !/inside|garage|entry/.test(where)) return true;
+    return SAYS_OUTSIDE.test(sentence) && !/outside|entry/.test(where);
+  }));
 }
 
 const ASK_CHECKS = [
@@ -1113,6 +1128,9 @@ const ASK_CHECKS = [
     && ownSentences(text, requiredLines).some((sentence) => REQUIRED_SUBJECT_RE.test(sentence)
       && UNCONDITIONAL_PERMISSION_RE.test(sentence) && !CONDITION_RE.test(sentence))],
   ['states_a_date', statesADate],
+  // An inside or outside claim about a product must match its recorded
+  // applied_where (Codex P1 #5964 r20).
+  ['scope_claim', statesWrongScope],
   ['unstated_number', statesUnknownNumber],
   // While the aftercare holds watering, no sentence of the model's own may
   // tell the customer to water (Codex P1 #5964 r7): a required line states
@@ -1179,7 +1197,13 @@ const MEDICAL_EXPOSURE_ANSWER = `Please call Poison Control at ${POISON_CONTROL_
 
 // A person or pet as the subject: "I", "my dog", "the baby", "our son".
 const PATIENT_NOUNS = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|birds?|horses?|rabbits?|child(?:ren)?|kids?|bab(?:y|ies)|toddlers?|sons?|daughters?|wife|husband|mom|mother|dad|father|grand(?:ma|pa|mother|father|son|daughter|kids?|children)|sisters?|brothers?|nephews?|nieces?|friends?|neighbou?rs?|guests?)';
-const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
+// Any "my/our/his/her/their <noun>" counts as the one affected ("my partner",
+// "my cousin"): a list of relationships never ends (Codex P1 #6016 r26).
+// "The ants" stays out.
+// Plants, places and pests are never the one affected: "my lawn is sick" is
+// a lawn question (Codex P1 #6016 r27).
+const NOT_PATIENT_NOUNS = '(?:lawn|lawns|grass|turf|yard|yards|sod|palms?|trees?|shrubs?|bush(?:es)?|hedges?|plants?|garden|gardens|flowers?|roses?|beds?|mulch|soil|house|home|roof|garage|fence|pool|patio|lanai|deck|porch|driveway|sidewalk|siding|foundation|kitchen|bathroom|attic|ants?|roach(?:es)?|spiders?|termites?|fleas?|ticks?|mosquito(?:e?s)?|weeds?|crabgrass|ficus|hibiscus|ixora|crotons?|oaks?|citrus)';
+const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS}|(?:my|our|his|her|their)\\s+(?!${NOT_PATIENT_NOUNS}\\b)[\\w-]+)`;
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
   /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
@@ -1262,7 +1286,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|booked|book(?:ing)?\s+(?:a|an|the|my|our)?\s*(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|booked|book(?:ing)?\s+(?:a|an|the|my|our)?\s*(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }

@@ -159,10 +159,11 @@ describe('buildReportAskFacts', () => {
     expect(facts.customer_concern).toMatch(/roaches in kitchen/);
   });
 
-  test('a report with no findings rows still carries its recommendations', () => {
-    const out = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], recommendations: ['Trim the shrubs back from the wall.', 'Keep the pantry sealed.'] } });
-    expect(out.recommendations).toEqual(['Trim the shrubs back from the wall.', 'Keep the pantry sealed.']);
-    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [] } }).recommendations).toBeUndefined();
+  test('technician recommendations never reach the model (they can hold a customer name)', () => {
+    const data = { serviceLine: 'pest', applications: [], recommendations: ['Ask Mrs. Example to trim the shrubs.', 'Keep the pantry sealed.'] };
+    const out = buildReportAskFacts({ data });
+    expect(out.recommendations).toBeUndefined();
+    expect(buildReportAskPrompt({ question: 'What was applied?', data }).user).not.toMatch(/Mrs\. Example|pantry/);
   });
 
   test('the Waves summary headline and body are carried when the report has no summary text', () => {

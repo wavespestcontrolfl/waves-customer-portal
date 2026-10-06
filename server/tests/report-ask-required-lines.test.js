@@ -467,13 +467,11 @@ describe('the fact sheet and prompt carry required lines', () => {
     });
   });
 
-  test('while the aftercare holds watering, a recommendation that changes watering is not carried', () => {
+  test('recommendations are not carried, held watering or not (technician text)', () => {
     const recommendations = ['Increase irrigation to twice this week.', { text: 'Mow at 3.5 inches.' }];
-    const facts = buildReportAskFacts({ data: lawnData({ recommendations }) });
-    expect(JSON.stringify(facts)).not.toMatch(/irrigation/);
-    expect(facts.recommendations).toEqual(['Mow at 3.5 inches.']);
+    expect(buildReportAskFacts({ data: lawnData({ recommendations }) }).recommendations).toBeUndefined();
     const free = lawnData({ reportV2: { water: { weekPlan: null }, aftercare: {} }, recommendations });
-    expect(buildReportAskFacts({ data: free }).recommendations).toHaveLength(2);
+    expect(buildReportAskFacts({ data: free }).recommendations).toBeUndefined();
   });
 });
 
@@ -1139,5 +1137,38 @@ describe('answer screen, Codex round 19', () => {
   test.each(['The treatment will work.', 'The treatment should work.', 'Your lawn will get better.'])('a generic promise is rejected: %s', (answer) => {
     const data = lawnData({ reportV2: null });
     expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('result promise');
+  });
+});
+
+describe('answer screen, Codex round 20', () => {
+  test('a required-line number grounds nothing else', () => {
+    const line = 'Run each zone for about 20 minutes.';
+    const data = lawnData({ reportV2: null });
+    const facts = buildReportAskFacts({ data, requiredLines: [line] });
+    expect(screenAskAnswer(`${line} It may take 20 days to improve.`, { question: 'q', data, facts, requiredLines: [line] })).toBe('unstated_number');
+  });
+
+  test('"pets can be outside" beside the dry line is rejected', () => {
+    const line = 'Keep pets off treated zones until fully dry.';
+    const data = pestData();
+    const facts = buildReportAskFacts({ data, requiredLines: [line] });
+    expect(screenAskAnswer(`${line} Pets can be outside before it dries.`, { question: 'q', data, facts, requiredLines: [line] })).toBe('second_instruction');
+  });
+
+  test.each(['You should see improvement in the lawn.', 'The lawn should show improvement.', 'You should notice better results.'])(
+    'a perception promise is rejected: %s',
+    (answer) => {
+      const data = lawnData({ reportV2: null });
+      expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('result promise');
+    },
+  );
+
+  test('an inside or outside claim must match the recorded area', () => {
+    const data = pestData({ serviceLine: 'tree_shrub', applications: [{ product: { name: 'Merit' }, applicationArea: 'Outside' }] });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'q', data, facts });
+    expect(ask('Merit was applied inside.')).toBe('scope_claim');
+    expect(ask('Merit was applied inside and outside.')).toBe('scope_claim');
+    expect(ask('Merit was applied outside.')).toBeNull();
   });
 });
