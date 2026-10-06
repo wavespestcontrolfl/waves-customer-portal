@@ -165,7 +165,7 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
-        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field. When the lead's address is stored as one line (street, City, FL zip), the only accepted edit is the whole corrected address (street, city, state and 5-digit zip in one string); it replaces the line and the city and zip columns together." },
+        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field. When the lead's address is stored as one line (street, City, FL zip), the only accepted edit is the whole corrected address (street, city, FL and zip in one string); it replaces the line and the city and zip columns together. On a street-only row a whole address writes the street to address and the city and zip to their columns." },
         city: { type: 'string', description: "The lead's city (120 characters max); a blank clears it" },
         zip: { type: 'string', description: "The lead's zip code (20 characters max); a blank clears it" },
       },
@@ -727,19 +727,27 @@ function normalizeLeadContactField(field, raw) {
 // 34221" string, depending on which intake path wrote the row (client
 // LeadsTabs.jsx formatLeadAddress documents both shapes, and lead → customer
 // conversion copies leads.address into customers.address_line1 verbatim). The
-// rule is closed (Codex r6, after five rounds of partial-rebuild grammar):
-//   BARE row (the stored line parses to no state and no ZIP, and does not name
-//   the lead's city): a street-only edit writes `address` as typed, city / zip
-//   edits write their columns, and a WHOLE address replaces all three.
-//   ONE-LINE row (parses to a state or ZIP, or names the lead's city): the only
-//   accepted edit is a WHOLE corrected address; any partial edit refuses.
+// rule is closed (Codex r6, after five rounds of partial-rebuild grammar), and
+// it PRESERVES THE ROW'S REPRESENTATION (Codex r8: several consumers
+// concatenate address + city + zip, so a bare row must stay bare):
+//   BARE row (the stored line parses to no state, and to no ZIP equal to the
+//   lead's zip column, and does not name the lead's city): a plain street edit
+//   writes `address` as typed, city / zip edits write their columns, and a
+//   WHOLE address writes the parsed STREET to `address` and the parsed city /
+//   zip to their columns.
+//   ONE-LINE row: the only accepted edits are a WHOLE corrected address, which
+//   writes one canonical line (formatAddress) and syncs the columns, or an
+//   explicit blank for all three fields together, which clears the location.
+//   Any partial edit refuses.
 //   WHOLE address: parseRawAddress yields a street, a city with a letter that is
-//   not a unit / floor designator, a state and a ZIP (5 digits, or ZIP+4). `address` is
-//   written as formatAddress of the parts (one canonical line); city and zip
-//   come from the parse. Explicit city / zip fields beside it must agree.
+//   not a unit / floor designator, the state FL (leads have no state column and
+//   conversion hardcodes FL) and a ZIP (5 digits, or ZIP+4). Explicit city /
+//   zip fields beside it must agree, compared trimmed and case-insensitively;
+//   the canonical parsed value is stored.
 // Nothing is ever rebuilt from parts.
 const ADDRESS_FIELDS = ['address', 'city', 'zip'];
 const COMPOSED_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
+const LEAD_STATE = 'FL';
 
 // A city the parse can be trusted on: at least one letter, and not a unit or
 // floor designator ("Fl", "Unit", "Apt B"), nor a unit value like "2B".
@@ -758,12 +766,17 @@ function parseWholeAddress(text) {
   return parts;
 }
 
-// Does the stored line carry more than a street?
+// Does the stored line carry more than a street? A parsed state always says
+// so; a parsed ZIP only when it equals the lead's zip column (the parser reads
+// any trailing five digits as a ZIP, so "21 Oak Ave Apt 34236" with another
+// zip column is a bare street with a unit number); so does a line that names
+// the lead's city.
 function storedIsOneLine(lead) {
   const stored = String(lead.address || '').trim();
   if (!stored) return false;
   const parts = parseRawAddress(stored);
-  if (parts.state || parts.zip) return true;
+  if (parts.state) return true;
+  if (parts.zip && parts.zip === String(lead.zip || '').trim()) return true;
   const city = String(lead.city || '').trim().toLowerCase();
   return Boolean(city) && (
     (parts.city || '').toLowerCase() === city
@@ -777,11 +790,17 @@ function hasRepeatedSegment(line) {
   return new Set(segs).size !== segs.length;
 }
 
+const sameText = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+
 // The three fields a whole address writes, each through the typed-field caps.
-function wholeAddressFields(parts, requested) {
-  const values = { address: formatAddress(parts), city: parts.city, zip: parts.zip };
+// `oneLine` picks the representation: the canonical line, or the street only.
+function wholeAddressFields(parts, requested, oneLine) {
+  if (parts.state !== LEAD_STATE) {
+    return { error: `Leads are Florida addresses; this one says ${parts.state}. Fix the state or convert the lead on the Customers screen.` };
+  }
+  const values = { address: oneLine ? formatAddress(parts) : parts.line1, city: parts.city, zip: parts.zip };
   for (const field of ADDRESS_FIELDS) {
-    if (field !== 'address' && field in requested && requested[field] !== values[field]) {
+    if (field !== 'address' && field in requested && !sameText(requested[field], values[field])) {
       return { error: `${field} "${requested[field]}" does not match the ${field} in the address given. Give one address.` };
     }
     const norm = normalizeLeadAddressField(field, values[field]);
@@ -791,18 +810,24 @@ function wholeAddressFields(parts, requested) {
   return { values };
 }
 
+// An explicit blank for address, city and zip together: the location is cleared
+// as one atomic change, on either representation.
+const clearsLocation = requested => ADDRESS_FIELDS.every(f => f in requested && requested[f] === null);
+
 // Applies the closed rule above. Returns { requested, asserted } or { error }.
 // `asserted` lists the address fields a whole address states, changed or not,
 // so a card for it supersedes an older city / zip card on the same lead.
 function resolveLeadAddressRequest(lead, requested) {
   if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested, asserted: [] };
+  if (clearsLocation(requested)) return { requested, asserted: ADDRESS_FIELDS };
+  const oneLine = storedIsOneLine(lead);
   const whole = parseWholeAddress(requested.address);
   if (whole) {
-    const fields = wholeAddressFields(whole, requested);
+    const fields = wholeAddressFields(whole, requested, oneLine);
     if (fields.error) return { error: fields.error };
     return { requested: { ...requested, ...fields.values }, asserted: ADDRESS_FIELDS };
   }
-  if (storedIsOneLine(lead) || localityShaped(lead, requested.address)) return { error: COMPOSED_REFUSAL };
+  if (oneLine || localityShaped(lead, requested.address)) return { error: COMPOSED_REFUSAL };
   return { requested, asserted: [] };
 }
 
@@ -815,7 +840,7 @@ function localityShaped(lead, text) {
   const parts = parseRawAddress(text);
   if (parts.state) return true;
   if (!cityIsReal(parts.city)) return false;
-  return parts.city.toLowerCase() !== String(lead.city || '').trim().toLowerCase();
+  return !sameText(parts.city, lead.city);
 }
 
 // { field: { from, to } } for every requested field whose stored value
