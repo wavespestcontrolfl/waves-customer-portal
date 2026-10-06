@@ -2383,7 +2383,13 @@ function parseTimeWindowStart(timeWindow) {
   // rather than silently rounding: the operator asked for a specific time
   // and the model can re-ask with the corrected value.
   if (minute !== 0) {
-    return { error: `Appointment windows start on the hour — got "${timeWindow}"; use e.g. "${hour > 12 ? hour - 12 : hour || 12}:00 ${hour >= 12 ? 'PM' : 'AM'}"` };
+    // Names the nearest valid starts ("Visits start on the hour. Use 2:00 PM
+    // or 3:00 PM.") so the model can re-ask. The code is stable: the
+    // proposal returns it with no card (W5-dev-03), and the executor still
+    // refuses the same start if no card was ever made.
+    const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
+    const options = hour + 1 > 23 ? [hour12(hour)] : [hour12(hour), hour12(hour + 1)];
+    return { error: `Visits start on the hour. Use ${options.join(' or ')}.`, code: 'window_not_on_the_hour' };
   }
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
@@ -2869,7 +2875,11 @@ function ibBookingCustomerRequest(rawRequest, catalogRow) {
 // booking will carry and a booking that would be refused never reaches a
 // card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest) {
+async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest, timeWindow) {
+  // The window verdict comes first and reads nothing (W5-dev-03): a start the
+  // executor would refuse gets a coded refusal here, never a card.
+  const windowRefusal = ibBookingWindowRefusal(timeWindow);
+  if (windowRefusal) return windowRefusal;
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
@@ -2934,6 +2944,27 @@ async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
   return overlap.length > 0;
 }
 
+// Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
+// parse (parseTimeWindowStart) and the SAME shared admin window rule
+// (assertAdminAppointmentWindow) the executor runs, asked before a card
+// exists so a start the executor would refuse (a :30 start) is a refusal
+// with a code, not a card whose Confirm saves nothing. Returns null when the
+// window is acceptable or absent, else { error, code }.
+function ibBookingWindowRefusal(timeWindow) {
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error) return { error: win.error, code: win.code || 'invalid_appointment_window' };
+  if (!win.start) return null;
+  const windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return { error: 'That window would cross midnight — pick an earlier start.', code: 'invalid_appointment_window' };
+  try {
+    assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 });
+  } catch (err) {
+    if (err?.status === 422) return { error: err.message, code: 'invalid_appointment_window' };
+    throw err;
+  }
+  return null;
+}
+
 async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
@@ -2942,7 +2973,7 @@ async function createAppointment(input, actionContext = {}) {
     return { error: `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${scheduled_date}")` };
   }
   const win = parseTimeWindowStart(time_window);
-  if (win.error) return { error: win.error };
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   // Flat-60 convention (admin-schedule: every service call defaults to 60
   // minutes) so overlap checks see a real block, not an open-ended start.
