@@ -130,8 +130,7 @@ function oneTimeOptionUpdateForMixChange({
 // was removed through the rail and whose recurring rows are pest alone. The
 // opt-out history (the add-back path on the customer's token) must survive a
 // revision whatever the gates say; only the VISIBILITY of the tiers is gated.
-function offerTiersParkedHistory(estData) {
-  if (!offerTiersRequested(estData)) return false;
+function lawnParkedPestOnly(estData) {
   try {
     const OptOut = require('./estimate-service-opt-out');
     if (!OptOut.currentlyOptedOutKeys(estData).includes(COMPANION_KEY)) return false;
@@ -142,6 +141,14 @@ function offerTiersParkedHistory(estData) {
   }
 }
 
+// The same fact for a row that carries the tier mark. Kept for callers that
+// need the mark; the history carry on a revision uses lawnParkedPestOnly
+// alone, since a save that dropped the mark (dark, or staff declined) must
+// not drop the lawn removal's add-back path on the next one.
+function offerTiersParkedHistory(estData) {
+  return offerTiersRequested(estData) && lawnParkedPestOnly(estData);
+}
+
 function offerTiersMarkedPestOnlyState(estData, { gateOn = offerTiersGateLive(), railGateOn = optOutRailGateLive() } = {}) {
   // Dark feature: a mark saved earlier must not resurface the checkbox or
   // survive a save while either gate is off.
@@ -150,6 +157,7 @@ function offerTiersMarkedPestOnlyState(estData, { gateOn = offerTiersGateLive(),
 }
 
 module.exports = {
+  lawnParkedPestOnly,
   offerTiersParkedHistory,
   offerTiersMarkedPestOnlyState,
   optOutRailGateLive,

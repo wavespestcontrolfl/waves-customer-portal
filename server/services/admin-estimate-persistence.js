@@ -2152,8 +2152,11 @@ async function resolveEstimateWritePayload({
     // The V2 revision payload rebuilds estimateData from the browser (inputs,
     // result, summary, engineRequest) and carries neither the opt-out history
     // nor the mark, so the parked state is judged on the ROW's stored data.
-    // Read WITHOUT the gates: the history is a fact about the row.
-    const storedParkedHistory = OfferTiers.offerTiersParkedHistory(storedEstimateData);
+    // Read WITHOUT the gates and WITHOUT the mark: the lawn removal is a
+    // fact about the row, and it must survive every later revision even
+    // after a save dropped the mark (dark deployment, or staff declined).
+    const storedParkedHistory = OfferTiers.lawnParkedPestOnly(storedEstimateData);
+    const storedHadMark = OfferTiers.offerTiersRequested(storedEstimateData);
     let newKeys = [];
     try { newKeys = OfferTiers.storedRecurringKeys(trustedEstimateData); } catch (_) { newKeys = []; }
     const newResultPestOnly = newKeys.length === 1 && newKeys[0] === 'pest_control';
@@ -2167,7 +2170,7 @@ async function resolveEstimateWritePayload({
     }
     const parkedNow = storedParkedHistory && newResultPestOnly && !!trustedEstimateData.serviceOptOut;
     // The MARK is gated: a dark deployment drops it (the history above stays).
-    const markedPestOnly = parkedNow
+    const markedPestOnly = parkedNow && storedHadMark
       && OfferTiers.offerTiersMarkedPestOnlyState({ ...trustedEstimateData, offerTiersRequested: true });
     // On a parked row the office checkbox cannot be re-derived from a fresh
     // /calculate-estimate result (pest alone is "no_lawn" there), so the mark

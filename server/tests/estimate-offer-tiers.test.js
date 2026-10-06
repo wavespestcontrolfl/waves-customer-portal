@@ -299,7 +299,8 @@ describe('revising a parked row keeps its opt-out history', () => {
     process.env.GATE_ESTIMATE_OFFER_TIERS = 'true'; process.env.GATE_ESTIMATE_SERVICE_OPT_OUT = 'true';
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/admin-estimate-persistence.js'), 'utf8');
     // History carried on the gate-free predicate; the mark on the gated one; a staff decline drops the mark.
-    expect(src).toMatch(/const storedParkedHistory = OfferTiers\.offerTiersParkedHistory\(storedEstimateData\);/);
+    expect(src).toMatch(/const storedParkedHistory = OfferTiers\.lawnParkedPestOnly\(storedEstimateData\);/);
+    expect(src).toMatch(/const markedPestOnly = parkedNow && storedHadMark/);
     expect(src).toMatch(/if \(storedParkedHistory && newResultPestOnly && !trustedEstimateData\.serviceOptOut && storedEstimateData\?\.serviceOptOut\) \{\s*\n\s*trustedEstimateData\.serviceOptOut = storedEstimateData\.serviceOptOut;/);
     expect(src).toMatch(/const tiersOk = markedPestOnly\s*\n\s*\? body\.offerTiersDeclined !== true/);
     // The predicates the write uses on the stored row.
@@ -307,8 +308,12 @@ describe('revising a parked row keeps its opt-out history', () => {
     parked.result.recurring.services = parked.result.recurring.services.filter((s) => s.service === 'pest_control');
     recordServiceOptOutEvent(parked, { serviceKey: 'lawn_care', included: false, mode: 'remove', actor: 'staff', at: 'now', removedInputs: {} }, {});
     expect(OfferTiers.offerTiersMarkedPestOnlyState(parked)).toBe(true);
-    // The history is a fact about the row: read true with every gate off.
+    // The history is a fact about the row: read true with every gate off, and with the mark gone.
     expect(OfferTiers.offerTiersParkedHistory(parked)).toBe(true);
+    expect(OfferTiers.lawnParkedPestOnly(parked)).toBe(true);
+    expect(OfferTiers.lawnParkedPestOnly({ ...parked, offerTiersRequested: undefined })).toBe(true);
+    expect(OfferTiers.offerTiersParkedHistory({ ...parked, offerTiersRequested: undefined })).toBe(false);
+    expect(OfferTiers.lawnParkedPestOnly(pestLawnData())).toBe(false);
     delete process.env.GATE_ESTIMATE_OFFER_TIERS;
     expect(OfferTiers.offerTiersParkedHistory(parked)).toBe(true);
     expect(OfferTiers.offerTiersMarkedPestOnlyState(parked)).toBe(false);
