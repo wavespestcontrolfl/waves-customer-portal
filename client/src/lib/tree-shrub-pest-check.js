@@ -24,7 +24,6 @@ const LIVE_FINDS_ONLY = [
   { pattern: /\bconserve\b/i, label: 'Conserve' },
   { pattern: /\bmainspring\b/i, label: 'Mainspring' },
   { pattern: /\bfloramite\b/i, label: 'Floramite' },
-  { pattern: /\btritek\b/i, label: 'TriTek' },
 ];
 
 const MERIT_NAME = /\bmerit\b/i;
