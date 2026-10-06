@@ -58,6 +58,13 @@ function createDbMock(initialRows = {}) {
     if (sql.includes("reviewer_name IS NULL OR reviewer_name != '_stats'")) {
       return row => row.reviewer_name == null || row.reviewer_name !== '_stats';
     }
+    // notifyAdmin's keyed dedupe probe: only a row carrying THIS key matches.
+    if (sql.includes("metadata->>'dedupeKey' = ?")) {
+      const key = bindings[0];
+      return row => {
+        try { return (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}).dedupeKey === key; } catch { return false; }
+      };
+    }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
       return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
@@ -1580,6 +1587,45 @@ describe('Google Business review sync', () => {
     expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
     expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(1);
     spy.mockRestore();
+  });
+
+  test('a review that flaps (removed, reinstated, removed again) rings one removal row, not two (prod 2026-10-05)', async () => {
+    seedSyncedReview({
+      id: 'flap-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-flap',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-flap',
+      reviewer_name: 'Flappy Fran',
+      review_created_at: '2026-04-01T12:00:00Z',
+    });
+    const staleSync = () => { db.__state.rows.google_reviews.find(r => r.id === 'flap-1').synced_at = new Date(Date.now() - 60 * 60 * 1000).toISOString(); };
+    const removed = () => (db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'));
+
+    gbpFeed([]);
+    await service.syncAllReviews();
+    expect(removed()).toHaveLength(1);
+    expect(JSON.parse(removed()[0].metadata).dedupeKey).toMatch(/^gbp-reviews-removed:bradenton:[0-9a-f]{20}$/);
+
+    // Google reinstates it: the stamp clears.
+    db.__state.rows.google_reviews.find(r => r.id === 'flap-1').missing_since = null;
+    // ...then drops it again: the claim wins again, the alert must not.
+    staleSync();
+    gbpFeed([]);
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'flap-1').missing_since).toBeTruthy();
+    expect(removed()).toHaveLength(1);
+
+    // A different removed set is news: it still rings its own row.
+    seedSyncedReview({
+      id: 'gone-2',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone-2',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone-2',
+      reviewer_name: 'Other Olive',
+      review_created_at: '2026-04-02T12:00:00Z',
+    });
+    gbpFeed([]);
+    await service.syncAllReviews();
+    expect(removed()).toHaveLength(2);
   });
 
   test('Places fallback clears missing_since when the sample confirms the review is live again', async () => {

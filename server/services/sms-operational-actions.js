@@ -1032,6 +1032,21 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  // The 24h window rolls from created_at, so a promise still overdue after a
+  // day gets a NEW row and the old one stayed open: one promise piled up four
+  // to six unread rows (prod 2026-10-05). The daily re-ring stays; only the
+  // newest row for this key may stay open. Runs for a deduped result too, so
+  // rows an older build left behind close on the next ring. Only rows still
+  // open: a row a person already marked done keeps its closer.
+  if (notification.id) {
+    const { doneColumns } = require('./notification-service')._private;
+    await trx('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .whereNot({ id: notification.id })
+      .whereNull('done_at')
+      .update(doneColumns({ by: 'supersede', resolution: 'Replaced by a newer reminder for the same promise', keepExisting: true, conn: trx }));
+  }
   return notification;
 }
 

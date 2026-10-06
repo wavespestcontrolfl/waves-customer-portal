@@ -4,6 +4,7 @@ function getGoogle() {
   if (!_googleapis) { try { _googleapis = require('googleapis').google; } catch { _googleapis = null; } }
   return _googleapis;
 }
+const crypto = require('crypto');
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const {
@@ -2414,7 +2415,17 @@ class GoogleBusinessService {
               bell: true,
               link: '/admin/reviews',
               metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
-              connection: trx,
+              // A review that flaps (reinstated, then removed again) clears
+              // and re-stamps missing_since, so the claim above wins again and
+              // the same removal rang a second row (prod 2026-10-05, Oct 3 and
+              // Oct 5). Keyed on the location and the exact set of removed
+              // reviews: that set never rings twice; a different set does.
+              // `trx` (not `connection`) is the dedupe path's caller
+              // transaction: the lock, probe and insert stay atomic with the
+              // claim. A deduped return is a truthy row, so the null check
+              // below still means "insert failed".
+              dedupeKey: `gbp-reviews-removed:${loc.id}:${crypto.createHash('sha1').update(gone.map(r => String(r.id)).sort().join(',')).digest('hex').slice(0, 20)}`,
+              trx,
             },
           );
           if (!notif) throw new Error('removal-alert notification insert failed');

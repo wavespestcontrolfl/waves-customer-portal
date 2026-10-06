@@ -3,7 +3,10 @@
 // "Payment failed", "Prepaid coverage needs review", and "Estimate accepted". All names are
 // synthetic. docs/admin-notifications.md is the contract (composeAdminAlert throws under
 // NODE_ENV=test on any breach, so a green run proves the rule too).
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  _private: { doneColumns: jest.fn((cols) => ({ doneColumns: cols })) },
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -14,7 +17,16 @@ const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
 const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
 const { _prepayCoverageCopy: prepayCoverageCopy } = require('../services/schedule-integrity-watchdog');
 
-const trxFor = (customer) => () => ({ where: () => ({ first: async () => customer }) });
+// Every transaction call is recorded. `first` answers the customer lookup; the
+// supersede of older bell rows is a notifications chain ending in `update`.
+const trxCalls = [];
+const trxFor = (customer) => (table) => {
+  const call = { table, steps: [], update: null };
+  trxCalls.push(call);
+  const q = { first: async () => customer, update: async (cols) => { call.update = cols; return 1; } };
+  for (const step of ['where', 'whereRaw', 'whereNot', 'whereNull']) q[step] = (...args) => { call.steps.push([step, ...args]); return q; };
+  return q;
+};
 const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
 const sourceAt = new Date('2026-09-29T14:46:00Z'); // 10:46 AM ET
 
@@ -29,7 +41,11 @@ const ring = (over = {}, customer = { first_name: 'Albert', last_name: 'Clark' }
 });
 const lastCall = () => NotificationService.notifyAdmin.mock.calls.at(-1);
 
-beforeEach(() => NotificationService.notifyAdmin.mockClear());
+beforeEach(() => {
+  NotificationService.notifyAdmin.mockClear();
+  NotificationService._private.doneColumns.mockClear();
+  trxCalls.length = 0;
+});
 
 describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   test('an unanswered estimate request names the customer and quotes their words', async () => {
@@ -52,6 +68,35 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_followup', customerId: CUSTOMER_ID, sms_log_id: 'sms-1',
       commitment_id: 'commit-1', kind: 'send_estimate', verification: 'open',
       area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', subject: { type: 'customer', id: CUSTOMER_ID } });
+  });
+
+  test('one open row per promise: a fresh row closes the older open rows with the same key', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-new', deduped: false });
+    await ring();
+    const supersede = trxCalls.find((c) => c.table === 'notifications');
+    expect(supersede.steps).toEqual([
+      ['where', { recipient_type: 'admin' }],
+      ['whereRaw', "metadata->>'dedupeKey' = ?", ['sms-commitment:commit-1']],
+      ['whereNot', { id: 'n-new' }],
+      ['whereNull', 'done_at'],
+    ]);
+    expect(NotificationService._private.doneColumns).toHaveBeenCalledWith(expect.objectContaining({
+      by: 'supersede', keepExisting: true, resolution: 'Replaced by a newer reminder for the same promise' }));
+    expect(supersede.update).toEqual({ doneColumns: expect.objectContaining({ by: 'supersede' }) });
+  });
+
+  test('a deduped ring also closes rows an older build left open; the email bell shares the fix', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-standing', deduped: true });
+    await ring({ args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
+    const supersede = trxCalls.find((c) => c.table === 'notifications');
+    expect(supersede.steps).toContainEqual(['whereNot', { id: 'n-standing' }]);
+    expect(supersede.update).toBeTruthy();
+  });
+
+  test('a suppressed ring has no row to keep, so nothing is closed', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    await ring();
+    expect(trxCalls.some((c) => c.table === 'notifications')).toBe(false);
   });
 
   test('a staff promise is worded as ours, and a late finish says so', async () => {
