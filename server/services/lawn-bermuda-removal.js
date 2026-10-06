@@ -169,13 +169,14 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
 // the plan uses (staff switch or accepted estimate), then the cultivar policy.
 // Returns { active, excluded, source, cultivar, addOn }. Gate off, another track or
 // month, or no visit reads as inactive with no read at all.
-async function stepForVisit(knex, visit, { trackKey, month, strict = false }) {
+async function stepForVisit(knex, visit, { trackKey, month, strict = false, profile: loadedProfile }) {
   const off = { active: false, excluded: false, source: null, cultivar: null, addOn: null };
   if (!bermudaRemovalVisit({ trackKey, month }) || !visit?.customer_id) return off;
   // The month is the VISIT's, never the request's: a request month that is not the
   // visit's own month opens nothing.
   if (visitMonthOf(visit) !== month) return off;
-  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
+  // A caller that already read the active profile passes it (null when there is none): one read.
+  const profile = loadedProfile !== undefined ? loadedProfile : await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
   const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile, trackKey, propertyId: visit.property_id, strict });
   if (!wants.requested) return off;
   const cultivar = cultivarState(trackKey, profile?.cultivar);
@@ -203,8 +204,10 @@ async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
   // explicit-property visit of the same lawn are one lock and one history.
   const visit = await resolvedVisitOf(knex, serviceId, { strict });
   if (!visit) return null;
-  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
-  const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month: visitMonthOf(visit), strict });
+  // The ACTIVE profile, whole (the staff switch and the cultivar ride on it), read once and
+  // handed to stepForVisit.
+  const profile = (await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first()) || null;
+  const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month: visitMonthOf(visit), strict, profile });
   return step.active ? visit : null;
 }
 

@@ -592,6 +592,41 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       });
     });
 
+    describe('a staff-switched ZOYSIA lawn in April (the switch and the grass ride on the active profile)', () => {
+      const zoysia = () => lawn({ grass: 'zoysia', date: '2026-04-14', bermuda: true });
+
+      test('Fusilade II alone and Recognition alone are each refused with the pair message; the pair passes', async () => {
+        setGates();
+        const f = await zoysia();
+        expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toMatch(/Fusilade II is never applied without Recognition/);
+        expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: f.visit.id })).toMatch(/Recognition goes on with Fusilade II/);
+        expect(await bermudaPairViolation(knex, submitted(fus, nis), { serviceId: f.visit.id })).toMatch(/without Recognition/);
+        expect(await bermudaPairViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+      });
+
+      test('the in-transaction caps apply on that step visit: a third spray is refused, and Fusilade II alone is capped there too', async () => {
+        setGates();
+        const f = await zoysia();
+        await spray(f, '2026-03-01');
+        await spray(f, '2026-03-02'); // Recognition x2: the year's quota used (and < 42 days apart)
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
+          .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+        // Fusilade II alone is capped on a step visit (it is bed work only where the step is not carried).
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id })))
+          .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+        expect(await bermudaLimitViolation(knex, submitted(fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED|days since last app/);
+      });
+
+      test('with the switch OFF the same Zoysia visit is not a step visit: Fusilade II alone is bed work (not refused, not capped)', async () => {
+        setGates();
+        const f = await lawn({ grass: 'zoysia', date: '2026-04-14' });
+        await spray(f, '2026-03-01');
+        await spray(f, '2026-03-02');
+        expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toBeNull();
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+      });
+    });
+
     test('the program\'s tagged rows missing: a step product on a step visit is refused with a clear message (fail closed); other visits are untouched', async () => {
       setGates();
       const saved = await knex('product_limits').where({ match_value: 'bermuda_removal' });
