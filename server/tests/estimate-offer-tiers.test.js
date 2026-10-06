@@ -269,7 +269,8 @@ describe('Codex r2 on #5970', () => {
 
   test('the lead-service send overrides the lead only while the tier gate is live', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-estimates.js'), 'utf8');
-    expect(src).toMatch(/OfferTiersForSend\.offerTiersGateLive\(\)\s*\n\s*&& OfferTiersForSend\.offerTiersRequested\(estData\)/);
+    // Both gates: with the rail dark the picker and the add-back path are dark too, so the ordinary lead order stands.
+    expect(src).toMatch(/OfferTiersForSend\.offerTiersGateLive\(\)\s*\n\s*&& OfferTiersForSend\.optOutRailGateLive\(\)\s*\n\s*&& OfferTiersForSend\.offerTiersRequested\(estData\)/);
   });
 });
 

@@ -1785,6 +1785,7 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null, preserve
     // and no picker.
     const OfferTiersForSend = require('../services/estimate-offer-tiers');
     const leadKey = OfferTiersForSend.offerTiersGateLive()
+      && OfferTiersForSend.optOutRailGateLive()
       && OfferTiersForSend.offerTiersRequested(estData)
       && recurringKeys.includes('pest_control')
       ? 'pest_control'
