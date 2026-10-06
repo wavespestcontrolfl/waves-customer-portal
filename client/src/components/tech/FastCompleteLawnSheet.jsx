@@ -736,7 +736,7 @@ function CustomerContact({ service, visit, request }) {
       {address ? <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer">{address}</a> : null}
       {service?.customerPhone
         ? (canCall
-          ? <CallBridgeLink className="tech-lawn-call" phone={service.customerPhone} customerName={name === 'Customer' ? '' : name} customerIdHint={customerId}>{service.customerPhone}</CallBridgeLink>
+          ? <CallBridgeLink styledButton className="tech-lawn-call" phone={service.customerPhone} customerName={name === 'Customer' ? '' : name} customerIdHint={customerId}>{service.customerPhone}</CallBridgeLink>
           : <a href={`tel:${service.customerPhone}`}>{service.customerPhone}</a>)
         : null}
       {email ? <a href={`mailto:${email}`} style={{ wordBreak: 'break-word' }}>{email}</a> : null}

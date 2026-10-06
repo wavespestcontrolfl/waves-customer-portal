@@ -1910,7 +1910,10 @@ describe('header and customer block, as on the full form\'s Complete service pag
     expect(maps.getAttribute('target')).toBe('_blank');
     // The phone is the Waves call bridge, not a tel: link (owner 2026-10-06).
     expect(screen.queryByRole('link', { name: '+19415550100' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Call Pat Jones' }).textContent).toBe('+19415550100');
+    const call = screen.getByRole('button', { name: 'Call Pat Jones' });
+    expect(call.textContent).toBe('+19415550100');
+    // No inline font/color: the contact block's CSS sizes it like the other links.
+    expect(call.getAttribute('style') || '').not.toMatch(/font|color/);
     expect((await screen.findByRole('link', { name: 'pat@example.com' })).getAttribute('href')).toBe('mailto:pat@example.com');
   });
 
