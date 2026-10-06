@@ -6550,8 +6550,26 @@ best: { rows, oneTimeTotal, waveGuardTier } }`, `rows` being
 row is NOT in are this rail's own dry run (a removal in `best`, an add-back
 in `pest_only`), so a tile never shows a price the rail would not persist;
 any refusal or error omits the block. The dry-run response carries
-`perApplication` (the per-line terms the `previewBasis` digest binds) as
-data. The commit sets `show_one_time_option` on a marked row from the lawn
+`perApplication` (the per-line terms the `previewBasis` digest binds) and
+`oneTimeChoiceAmount` (ONLY while `GATE_ESTIMATE_OFFER_TIERS` is live — off,
+the response is byte-identical to before: the one-time choice the
+POST-change row would offer and accept, resolved by the same
+`oneTimeChoiceAmountForEstimate` acceptance uses on the post-change result,
+so a removal that reallocates a discount is already netted; the Good tile
+shows it in the as-quoted state, and the `previewBasis` digest binds it so a
+one-time floor or multiplier change between preview and commit refuses the
+commit) as data. The
+picker's member judgement follows the accept's own order for an unlinked
+estimate: the shared `resolveGroupedEstimateOwnerId` (an accepted sibling's
+live customer) first, then the phone match; strict and fail-closed. The same
+judgement applies to the plain service opt-out rail for an UNLINKED
+estimate: `/data` stamps no `removable` and no `addable` / staff add-back
+offer, and the write answers 409 `reprice_unavailable` when the prospective
+owner is an active member; the write fences that expected owner (the
+customer-comms lock) before the estimate lock, re-resolves the owner under
+the group-accept lock, aborts 409 on any identity drift, and locks the
+customer row FOR UPDATE, like a linked one. The
+staff compensation restore of an undelivered send is exempt, as before. The commit sets `show_one_time_option` on a marked row from the lawn
 line: on when lawn is removed (customer, or the staff send-time park) and
 the delivery validator allows the option on the repriced row; always off
 when lawn is added back, with the gate on or off — the one-time option never

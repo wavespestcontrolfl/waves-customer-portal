@@ -1904,6 +1904,7 @@ async function resolveEstimateWritePayload({
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
   pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
   storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
+  storedEstimateData = null, // revise only: the ROW's parsed estimate_data (the offer-tier parked state lives there)
   requireLivePricing = false,
   priorPhone = null, // revise only: the ROW's customer_phone, so an unchanged echo is not re-judged
 }) {
@@ -2163,11 +2164,46 @@ async function resolveEstimateWritePayload({
   {
     const OfferTiers = require('./estimate-offer-tiers');
     const { isCommercialEstimateData } = require('./estimate-delivery-options');
-    const tiersOk = body.offerTiers === true && !showOneTimeOption
-      && OfferTiers.offerTiersSaveEligibility({
-        estData: trustedEstimateData,
-        commercial: isCommercialEstimateData(trustedEstimateData),
-      }).eligible === true;
+    // A row already in the pest-only state (lawn removed through the rail) is
+    // the model's own second state: the mark stays, and there the one-time
+    // option legitimately rides along (the rail turned it on).
+    // The V2 revision payload rebuilds estimateData from the browser (inputs,
+    // result, summary, engineRequest) and carries neither the opt-out history
+    // nor the mark, so the parked state is judged on the ROW's stored data.
+    // Read WITHOUT the gates and WITHOUT the mark: the lawn removal is a
+    // fact about the row, and it must survive every later revision even
+    // after a save dropped the mark (dark deployment, or staff declined).
+    const storedParkedHistory = OfferTiers.lawnParkedPestOnly(storedEstimateData);
+    const storedHadMark = OfferTiers.offerTiersRequested(storedEstimateData);
+    let newKeys = [];
+    try { newKeys = OfferTiers.storedRecurringKeys(trustedEstimateData); } catch (_) { newKeys = []; }
+    const newResultPestOnly = newKeys.length === 1 && newKeys[0] === 'pest_control';
+    // The revision replaces estimate_data wholesale, so a reopened parked row
+    // saved without lawn (a notes-only edit, or a re-priced pest-only result)
+    // keeps the ROW's opt-out history — the lawn removal and its add-back
+    // path on the customer's token — gates on or off. A revision whose new
+    // result carries lawn again put it back on purpose.
+    if (storedParkedHistory && newResultPestOnly && !trustedEstimateData.serviceOptOut && storedEstimateData?.serviceOptOut) {
+      trustedEstimateData.serviceOptOut = storedEstimateData.serviceOptOut;
+    }
+    const parkedNow = storedParkedHistory && newResultPestOnly && !!trustedEstimateData.serviceOptOut;
+    // The MARK is gated: a dark deployment drops it (the history above stays).
+    const markedPestOnly = parkedNow && storedHadMark
+      && OfferTiers.offerTiersMarkedPestOnlyState({ ...trustedEstimateData, offerTiersRequested: true });
+    // On a parked row the office checkbox cannot be re-derived from a fresh
+    // /calculate-estimate result (pest alone is "no_lawn" there), so the mark
+    // stays unless staff explicitly declined it (body.offerTiersDeclined);
+    // elsewhere the mark follows the checkbox as before.
+    // ... and only while the one-time option stays ON: Good on the parked
+    // row IS that option, so a staff clear of "Offer one-time option" drops
+    // the mark too (a Good tile that cannot be taken is worse than none).
+    const tiersOk = markedPestOnly
+      ? (body.offerTiersDeclined !== true && showOneTimeOption)
+      : (body.offerTiers === true && !showOneTimeOption
+        && OfferTiers.offerTiersSaveEligibility({
+          estData: trustedEstimateData,
+          commercial: isCommercialEstimateData(trustedEstimateData),
+        }).eligible === true);
     if (tiersOk) trustedEstimateData.offerTiersRequested = true;
     else delete trustedEstimateData.offerTiersRequested;
   }
@@ -3056,15 +3092,19 @@ async function reviseAdminEstimate({
   // stays exactly as PUT /:id/proposal left it). The browser's copy is never
   // written — see stripClientProposal.
   let storedProposal = null;
+  let storedEstimateData = null;
   try {
     const parsedPrior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     storedProposal = parsedPrior?.proposal ?? null;
+    storedEstimateData = parsedPrior && typeof parsedPrior === 'object' ? parsedPrior : null;
   } catch {
     storedProposal = null;
+    storedEstimateData = null;
   }
   const writeFields = await resolveEstimateWritePayload({
     database,
     storedProposal,
+    storedEstimateData,
     priorPhone: estimate.customer_phone,
     body: {
       ...body,
