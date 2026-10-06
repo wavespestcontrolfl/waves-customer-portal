@@ -2611,6 +2611,11 @@ function lawnReportPhotoFindingsLive() {
   return lawnReportPhotoSetLive() && typeof featureGates.lawnReportPhotoFindingsLive === 'function' && featureGates.lawnReportPhotoFindingsLive();
 }
 
+// GATE_REPORT_PLAN_RESCHEDULE: read at call time; a partial feature-gates mock (or a missing export) means off.
+function reportPlanRescheduleLive() {
+  return typeof featureGates.reportPlanRescheduleLive === 'function' && featureGates.reportPlanRescheduleLive();
+}
+
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
@@ -6732,14 +6737,39 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
 
         if (matched.length) {
-          const visits = matched.map((row) => ({
-            serviceType: row.service_type || null,
-            scheduledDate: row.scheduled_date instanceof Date
-              ? row.scheduled_date.toISOString().slice(0, 10)
-              : String(row.scheduled_date).slice(0, 10),
-            windowStart: row.window_start || null,
+          // GATE_REPORT_PLAN_RESCHEDULE (owner 2026-10-06, dark): "Your plan"
+          // and "Your upcoming visits" become one section with a per-visit
+          // Reschedule button. Off = the card is byte-identical to before
+          // (no rescheduleUrl, no `merged`). On, each visit carries the
+          // self-serve reschedule link. The reschedule token is a BEARER
+          // credential, same as the report token this payload already rides
+          // on (live view only, no-store, stripped from pdf/static).
+          // reuseExisting keeps a repeat report view from minting a new
+          // short-link row each time. null when no link applies (too close
+          // to the visit, dispatch-owned pending, grouped visit, ...) and on
+          // ANY failure: the report never breaks.
+          const planReschedule = reportPlanRescheduleLive();
+          const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
+          const visits = await Promise.all(matched.map(async (row) => {
+            let rescheduleUrl = null;
+            if (planReschedule) {
+              try {
+                const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true });
+                if (link && link.url && !link.tooSoonToMove) rescheduleUrl = link.url;
+              } catch { /* best-effort: no link, no button */ }
+            }
+            return {
+              serviceType: row.service_type || null,
+              scheduledDate: row.scheduled_date instanceof Date
+                ? row.scheduled_date.toISOString().slice(0, 10)
+                : String(row.scheduled_date).slice(0, 10),
+              windowStart: row.window_start || null,
+              ...(planReschedule ? { rescheduleUrl } : {}),
+            };
           }));
-          upcomingVisitsCard = { visits };
+          // `merged: true` tells the client to fold the visits into the
+          // "Your plan" section instead of the standalone card.
+          upcomingVisitsCard = planReschedule ? { visits, merged: true } : { visits };
         }
       }
     } catch { /* best-effort */ }
