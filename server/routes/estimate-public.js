@@ -17435,8 +17435,14 @@ async function offerTierMemberBlock(estimate, database = db) {
         .whereNotNull('customer_id')
         .orderBy('accepted_at', 'asc')
         .first('customer_id');
-      if (sibling?.customer_id) {
-        return !!(await isActivePlanCustomer(database, sibling.customer_id, { strict: true }));
+      // The accept takes that owner only while the customer row is live
+      // (not soft-deleted); otherwise it falls through to the phone match,
+      // and so does this judgement.
+      const liveOwner = sibling?.customer_id
+        ? await database('customers').where({ id: sibling.customer_id }).whereNull('deleted_at').first('id')
+        : null;
+      if (liveOwner?.id) {
+        return !!(await isActivePlanCustomer(database, liveOwner.id, { strict: true }));
       }
     }
     const { match } = await matchAcceptCustomerByPhone(estimate, database);

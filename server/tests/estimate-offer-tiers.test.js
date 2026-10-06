@@ -280,10 +280,15 @@ describe('member judgement order for an unlinked estimate', () => {
     const database = (table) => ({
       where: () => ({
         whereNot: () => ({ whereNotNull: () => ({ orderBy: () => ({ first: async () => (table === 'estimates' ? { customer_id: 'm1' } : null) }) }) }),
+        // The live-owner read (whereNull('deleted_at')) and the member read both land here.
+        whereNull: () => ({ first: async () => (table === 'customers' ? { id: 'm1' } : null) }),
         first: async () => (table === 'customers' ? member : null),
       }),
     });
     await expect(offerTierMemberBlock({ id: 'e1', customer_id: null, estimate_group_id: 'g1', customer_phone: '9415550100' }, database)).resolves.toBe(true);
+    // The sibling owner counts only while its customer row is live; a soft-deleted owner falls through to the phone match (pinned).
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src).toMatch(/\.where\(\{ id: sibling\.customer_id \}\)\.whereNull\('deleted_at'\)\.first\('id'\)/);
     // A read error anywhere fails closed.
     await expect(offerTierMemberBlock({ id: 'e2', customer_id: null, estimate_group_id: 'g1' }, () => { throw new Error('db'); })).resolves.toBe(true);
   });
