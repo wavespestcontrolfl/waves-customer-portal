@@ -331,7 +331,7 @@ async function isDuplicateEnter(techId, customerId, cooldownMinutes = 15) {
     const cutoff = new Date(Date.now() - cooldownMinutes * 60_000);
     const row = await db('geofence_events')
       .where({ technician_id: techId, matched_customer_id: customerId, event_type: 'ENTER' })
-      .whereIn('action_taken', ['timer_started', 'clocked_in_timer_started', 'reminder_sent', 'clocked_in_reminder_sent', 'timer_already_running'])
+      .whereIn('action_taken', ['timer_started', 'clocked_in_timer_started', 'reminder_sent', 'timer_already_running'])
       .where('event_timestamp', '>', cutoff)
       .first();
     return !!row;

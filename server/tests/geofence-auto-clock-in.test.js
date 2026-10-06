@@ -1,6 +1,7 @@
-// GATE_GEOFENCE_AUTO_CLOCK_IN: in automatic geofence mode, the first arrival
-// at the tech's own scheduled visit for today clocks them in (source
-// geofence_auto) and then starts the job timer. Every "no" leaves today's path.
+// GATE_GEOFENCE_AUTO_CLOCK_IN, handler side: in automatic geofence mode the
+// handler asks timeTracking.startJob to clock in a tech with no shift today
+// (one transaction; the eligibility is re-checked there on the locked visit).
+// Every "no" leaves today's call, and the result of startJob decides the notice.
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -32,6 +33,7 @@ jest.mock('../services/track-transition-alerts', () => ({
 const db = require('../models/db');
 const matcher = require('../services/geofence-matcher');
 const timeTracking = require('../services/time-tracking');
+const trackTransitions = require('../services/track-transitions');
 const { etDateString } = require('../utils/datetime-et');
 const geofenceHandler = require('../services/geofence-handler');
 
@@ -70,37 +72,38 @@ beforeEach(() => {
   }));
   matcher.getMode.mockResolvedValue('automatic');
   matcher.getShiftStateToday.mockResolvedValue({ active: false, anyToday: false });
-  timeTracking.clockIn.mockResolvedValue({ id: 'shift-1' });
   timeTracking.startJob.mockResolvedValue({ id: 'job-entry-1' });
 });
 
 afterAll(() => { delete process.env[GATE]; });
 
-describe('geofence auto clock-in', () => {
-  test('gate on: clocks in with geofence_auto, then starts the timer, and says so', async () => {
-    await geofenceHandler.handleArrival(baseArgs());
+const AUTO = { source: 'geofence_auto', notes: 'Auto clock-in on arrival at first stop' };
+const startOpts = () => timeTracking.startJob.mock.calls[0][2];
+const NOT_CLOCKED = () => new Error('Must be clocked in to start a job.');
 
-    expect(timeTracking.clockIn).toHaveBeenCalledTimes(1);
-    expect(timeTracking.clockIn).toHaveBeenCalledWith('tech-1', {
-      lat: 27.1, lng: -82.4,
-      source: 'geofence_auto',
-      notes: 'Auto clock-in on arrival at first stop',
-    });
-    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-1', { lat: 27.1, lng: -82.4 });
-    // clock-in lands before the timer starts
-    expect(timeTracking.clockIn.mock.invocationCallOrder[0])
-      .toBeLessThan(timeTracking.startJob.mock.invocationCallOrder[0]);
-    expect(insertedNotifications).toHaveLength(1);
-    expect(insertedNotifications[0].type).toBe('geofence_timer_started');
-    expect(insertedNotifications[0].message).toBe('Clocked in and timer started at Pat Sample');
-    expect(lastAction()).toBe('clocked_in_timer_started');
-  });
-
-  test('gate off: exactly today (no clock-in, plain notice, timer_started)', async () => {
-    delete process.env[GATE];
+describe('geofence auto clock-in (handler)', () => {
+  test('gate on + eligible: asks startJob to clock in, and the notice and log say so', async () => {
+    timeTracking.startJob.mockResolvedValue({ id: 'job-entry-1', clocked_in_shift_id: 'shift-1' });
     await geofenceHandler.handleArrival(baseArgs());
 
     expect(timeTracking.clockIn).not.toHaveBeenCalled();
+    expect(timeTracking.startJob).toHaveBeenCalledTimes(1);
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-1', {
+      lat: 27.1, lng: -82.4, geofenceArrival: true, autoClockIn: AUTO,
+    });
+    expect(insertedNotifications).toHaveLength(1);
+    expect(insertedNotifications[0].type).toBe('geofence_timer_started');
+    expect(insertedNotifications[0].message).toBe('Clocked in and timer started at Pat Sample');
+    expect(JSON.parse(insertedNotifications[0].payload)).toMatchObject({ clocked_in: true, shift_entry_id: 'shift-1', time_entry_id: 'job-entry-1' });
+    expect(lastAction()).toBe('clocked_in_timer_started');
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off: exactly today (startJob gets only lat/lng, plain notice, timer_started)', async () => {
+    delete process.env[GATE];
+    await geofenceHandler.handleArrival(baseArgs());
+
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-1', { lat: 27.1, lng: -82.4 });
     expect(matcher.getShiftStateToday).not.toHaveBeenCalled();
     expect(insertedNotifications[0].message).toBe('Timer started at Pat Sample');
     expect(lastAction()).toBe('timer_started');
@@ -108,10 +111,9 @@ describe('geofence auto clock-in', () => {
 
   test('gate off and no shift: the old "start timer?" reminder still fires', async () => {
     delete process.env[GATE];
-    timeTracking.startJob.mockRejectedValue(new Error('Must be clocked in to start a job.'));
+    timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
     await geofenceHandler.handleArrival(baseArgs());
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
     expect(insertedNotifications[0].type).toBe('geofence_arrival_reminder');
     expect(insertedNotifications[0].message).toBe("You're at Pat Sample. Start timer?");
     expect(lastAction()).toBe('reminder_sent');
@@ -135,105 +137,101 @@ describe('geofence auto clock-in', () => {
       job: { id: 'job-1', technician_id: 'tech-1', status: 'cancelled', track_state: 'scheduled', scheduled_date: today() },
     }],
     ['a stale (delayed) ENTER', { eventTime: new Date(Date.now() - 30 * 60 * 1000) }],
-  ])('never clocks in on %s', async (_label, overrides) => {
-    timeTracking.startJob.mockRejectedValue(new Error('Must be clocked in to start a job.'));
+  ])('never requests a clock-in on %s', async (_label, overrides) => {
+    timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
     await geofenceHandler.handleArrival(baseArgs(overrides));
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
+    expect(startOpts()).not.toHaveProperty('autoClockIn');
     expect(insertedNotifications[0].type).toBe('geofence_arrival_reminder');
   });
 
-  test('never clocks in a tech who is already clocked in (shop first); normal path runs', async () => {
+  test('never requests a clock-in for a tech already clocked in (shop first); normal start', async () => {
     matcher.getShiftStateToday.mockResolvedValue({ active: true, anyToday: true });
     await geofenceHandler.handleArrival(baseArgs());
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
-    expect(timeTracking.startJob).toHaveBeenCalledTimes(1);
+    expect(startOpts()).not.toHaveProperty('autoClockIn');
     expect(insertedNotifications[0].message).toBe('Timer started at Pat Sample');
     expect(lastAction()).toBe('timer_started');
   });
 
-  test('never clocks in again after a shift already worked today (not the first stop)', async () => {
+  test('never requests a clock-in after a shift already worked today (not the first stop)', async () => {
     matcher.getShiftStateToday.mockResolvedValue({ active: false, anyToday: true });
-    timeTracking.startJob.mockRejectedValue(new Error('Must be clocked in to start a job.'));
+    timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
     await geofenceHandler.handleArrival(baseArgs());
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
+    expect(startOpts()).not.toHaveProperty('autoClockIn');
     expect(lastAction()).toBe('reminder_sent');
   });
 
-  test('never clocks in when the shift state cannot be read', async () => {
+  test('never requests a clock-in when the shift state cannot be read', async () => {
     matcher.getShiftStateToday.mockResolvedValue(null);
-    timeTracking.startJob.mockRejectedValue(new Error('Must be clocked in to start a job.'));
+    timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
     await geofenceHandler.handleArrival(baseArgs());
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
+    expect(startOpts()).not.toHaveProperty('autoClockIn');
     expect(lastAction()).toBe('reminder_sent');
   });
 
-  test('an inactive tech is refused by clockIn: falls back to the old reminder', async () => {
-    const inactive = Object.assign(new Error('Staff account is inactive; clock-in was cancelled.'), { code: 'ACCOUNT_INACTIVE' });
-    timeTracking.clockIn.mockRejectedValue(inactive);
-    timeTracking.startJob.mockRejectedValue(new Error('Must be clocked in to start a job.'));
+  test.each([
+    ['an inactive tech', Object.assign(new Error('Staff account is inactive; clock-in was cancelled.'), { code: 'ACCOUNT_INACTIVE' })],
+    ['a visit that failed the in-transaction recheck', Object.assign(NOT_CLOCKED(), { code: 'auto_clock_in_ineligible' })],
+  ])('%s: nothing was clocked in, so the old reminder is sent', async (_label, err) => {
+    timeTracking.startJob.mockRejectedValue(err);
     await geofenceHandler.handleArrival(baseArgs());
 
+    expect(insertedNotifications).toHaveLength(1);
+    expect(insertedNotifications[0].type).toBe('geofence_arrival_reminder');
     expect(insertedNotifications[0].message).toBe("You're at Pat Sample. Start timer?");
     expect(lastAction()).toBe('reminder_sent');
   });
 
-  test('race: a concurrent ENTER won the clock-in, the loser falls through to startJob', async () => {
-    timeTracking.clockIn
-      .mockResolvedValueOnce({ id: 'shift-1' })
-      .mockRejectedValueOnce(Object.assign(new Error('Already clocked in. Clock out before starting a new shift.'), { code: 'ALREADY_CLOCKED_IN' }));
+  test.each([
+    ['job_already_completed', 'skipped_job_completed'],
+    ['job_not_live', 'skipped_job_not_live'],
+  ])('startJob %s: logged %s, no notice, no shift left behind', async (code, action) => {
+    timeTracking.startJob.mockRejectedValue(Object.assign(new Error('x'), { code }));
+    await geofenceHandler.handleArrival(baseArgs());
+
+    expect(insertedNotifications).toHaveLength(0);
+    expect(lastAction()).toBe(action);
+    expect(timeTracking.clockOut).not.toHaveBeenCalled();
+  });
+
+  test('a repeat/concurrent ENTER that finds the same job timer running sends nothing and changes nothing', async () => {
+    timeTracking.startJob.mockResolvedValue({ id: 'job-entry-1', reused: true });
+    await geofenceHandler.handleArrival(baseArgs());
+
+    expect(insertedNotifications).toHaveLength(0);
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(matcher.logEvent).toHaveBeenCalledTimes(1);
+    expect(lastAction()).toBe('ignored_duplicate');
+  });
+
+  test('race: winner and loser together produce exactly one notice and one timer_started-type log', async () => {
+    timeTracking.startJob
+      .mockResolvedValueOnce({ id: 'job-entry-1', clocked_in_shift_id: 'shift-1' })
+      .mockResolvedValueOnce({ id: 'job-entry-1', reused: true });
 
     await Promise.all([
       geofenceHandler.handleArrival(baseArgs()),
       geofenceHandler.handleArrival(baseArgs()),
     ]);
 
-    // Both attempted, one shift exists; both still reach startJob.
-    expect(timeTracking.clockIn).toHaveBeenCalledTimes(2);
-    expect(timeTracking.startJob).toHaveBeenCalledTimes(2);
-    const messages = insertedNotifications.map((n) => n.message).sort();
-    expect(messages).toEqual([
-      'Clocked in and timer started at Pat Sample',
-      'Timer started at Pat Sample',
-    ]);
+    expect(insertedNotifications.map((n) => n.message)).toEqual(['Clocked in and timer started at Pat Sample']);
+    const actions = matcher.logEvent.mock.calls.map((c) => c[0].action_taken).sort();
+    expect(actions).toEqual(['clocked_in_timer_started', 'ignored_duplicate']);
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledTimes(1);
   });
 
-  test('startJob fails after the auto clock-in: shift is KEPT and the tech is told (no silent shift)', async () => {
-    timeTracking.startJob.mockRejectedValue(Object.assign(new Error('Street hold'), { code: 'street_level_hold' }));
-    await geofenceHandler.handleArrival(baseArgs());
-
-    expect(timeTracking.clockIn).toHaveBeenCalledTimes(1);
-    expect(timeTracking.clockOut).not.toHaveBeenCalled();
-    expect(insertedNotifications).toHaveLength(1);
-    expect(insertedNotifications[0].type).toBe('geofence_arrival_reminder');
-    expect(insertedNotifications[0].message).toBe('Clocked in at Pat Sample. Start timer?');
-    expect(JSON.parse(insertedNotifications[0].payload)).toMatchObject({ job_id: 'job-1', clocked_in_time_entry_id: 'shift-1' });
-    expect(lastAction()).toBe('clocked_in_reminder_sent');
-  });
-
-  test('visit completed in the gap after the auto clock-in: shift kept, tech told, no timer prompt for it', async () => {
-    timeTracking.startJob.mockRejectedValue(Object.assign(new Error('This visit is already completed.'), { code: 'job_already_completed' }));
-    await geofenceHandler.handleArrival(baseArgs());
-
-    expect(timeTracking.clockOut).not.toHaveBeenCalled();
-    expect(insertedNotifications[0].message).toBe('Clocked in at Pat Sample. This visit is already completed.');
-    expect(JSON.parse(insertedNotifications[0].payload).job_id).toBeNull();
-    expect(lastAction()).toBe('clocked_in_reminder_sent');
-  });
-
-  test('reminder mode never clocks in', async () => {
+  test('reminder mode never starts or clocks in', async () => {
     matcher.getMode.mockResolvedValue('reminder');
     await geofenceHandler.handleArrival(baseArgs());
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
     expect(timeTracking.startJob).not.toHaveBeenCalled();
     expect(lastAction()).toBe('reminder_sent');
   });
 
-  test('a multi-candidate arrival stays a reminder and never clocks in', async () => {
+  test('a multi-candidate arrival stays a reminder and never starts or clocks in', async () => {
     const job = (id, tech) => ({ id, technician_id: tech, status: 'confirmed', track_state: 'scheduled', scheduled_date: today() });
     matcher.getTechByImei.mockResolvedValue({ id: 'tech-1' });
     matcher.findNearbyCustomers.mockResolvedValue([{ id: 'cust-1' }, { id: 'cust-2' }]);
@@ -244,16 +242,16 @@ describe('geofence auto clock-in', () => {
       geozone: { event: 'ENTER', location: { lat: 27.1, lon: -82.4 }, timestamp: new Date().toISOString() },
     });
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
     expect(timeTracking.startJob).not.toHaveBeenCalled();
+    expect(timeTracking.clockIn).not.toHaveBeenCalled();
     expect(insertedNotifications[0].type).toBe('geofence_arrival_select');
   });
 
-  test('an existing running job timer short-circuits before any clock-in', async () => {
+  test('an existing running job timer short-circuits before any start', async () => {
     matcher.getActiveJobTimer.mockResolvedValueOnce({ id: 'te-1', job_id: 'job-1' });
     await geofenceHandler.handleArrival(baseArgs());
 
-    expect(timeTracking.clockIn).not.toHaveBeenCalled();
+    expect(timeTracking.startJob).not.toHaveBeenCalled();
     expect(lastAction()).toBe('timer_already_running');
   });
 });
