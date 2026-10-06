@@ -899,6 +899,18 @@ postgres('access codes section', () => {
       expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('retired');
     });
 
+    test('a waiting code whose text loses its customer is filed again as unlinked', async () => {
+      const owner = await customer();
+      const id = await text(owner.id, 'The garage code is 1357');
+      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
+      expect(await rows(owner.id)).toHaveLength(1);
+      await trx('sms_log').where({ id }).update({ customer_id: null });
+      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
+      expect(await rows(owner.id)).toEqual([]);
+      const unlinked = await trx('customer_access_codes').whereNull('customer_id').where({ source_id: id });
+      expect(unlinked.map((r) => [r.status, r.code])).toEqual([['found', '1357']]);
+    });
+
     test('with the gate off the sweep still retires a code whose text moved', async () => {
       const winner = await customer();
       const loser = await customer();

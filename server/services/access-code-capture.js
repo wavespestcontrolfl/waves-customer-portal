@@ -495,11 +495,15 @@ async function reconcileSource(trx, message, items) {
   const latest = new Map(items.map((item) => [rowKey(item), item]));
   const q = trx('customer_access_codes').where({ source_type: 'sms', source_id: message.id, status: 'found' });
   if (message.customer_id) q.where((w) => w.where('customer_id', message.customer_id).orWhereNull('customer_id'));
-  const waiting = await q.forUpdate().select('id', 'customer_id', 'kind', 'value_hash', 'instructions', 'life', 'source_quote');
+  const waiting = await q.forUpdate().select('id', 'customer_id', 'linked_at', 'kind', 'value_hash', 'instructions', 'life', 'source_quote');
   const stale = [];
   for (const row of waiting) {
     const item = latest.get(rowKey(row));
-    if (!item || (message.customer_id && !row.customer_id)) { stale.push(row.id); continue; }
+    // A row of the wrong owner goes: an unlinked row once the text has a
+    // customer, and a customer's row (not one the office linked) once the
+    // text has lost its customer. What the text still states is filed again.
+    const wrongOwner = message.customer_id ? !row.customer_id : (row.customer_id && !row.linked_at);
+    if (!item || wrongOwner) { stale.push(row.id); continue; }
     if (item.life !== row.life || item.quote !== row.source_quote) {
       await trx('customer_access_codes').where({ id: row.id })
         .update({ life: item.life, source_quote: item.quote, updated_at: trx.fn.now() });
