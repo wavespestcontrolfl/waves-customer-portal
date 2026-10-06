@@ -2189,6 +2189,8 @@ function noteHas(had, add) {
 async function communityCodeShown(conn, customerId, neighborhoodCode, code) {
   if (!code) return false;
   if (neighborhoodCode) return sameCode(neighborhoodCode, code);
+  // The directory reaches the stop card only while GATE_NEIGHBORHOOD_ACCESS is on.
+  if (!require('../../config/feature-gates').neighborhoodAccessLive()) return false;
   const homes = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('neighborhood_id');
   if (homes.length !== 1 || !homes[0].neighborhood_id) return false;
   const directory = await conn('neighborhood_access')
@@ -2217,7 +2219,9 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
     if (updates[field] === undefined) continue;
     const had = String(current[field] || '').trim();
     const add = updates[field];
-    if (!add || noteHas(had, add)) { delete updates[field]; kept.push(`${field}: already holds this, left as is`); continue; }
+    // An empty value is an explicit clear of the field.
+    if (!add) continue;
+    if (noteHas(had, add)) { delete updates[field]; kept.push(`${field}: already holds this, left as is`); continue; }
     if (!had) continue;
     // Newest line first: the job card cuts these notes to their first
     // 80-120 characters, so the latest instruction must lead.

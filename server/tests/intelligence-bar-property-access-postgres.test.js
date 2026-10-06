@@ -23,7 +23,10 @@ postgres('update_property_access keeps history and keeps community codes off the
     }
     database = knex({ client: 'pg', connection, pool: { min: 0, max: 3 } });
   });
+  const OLD_HOOD_GATE = process.env.GATE_NEIGHBORHOOD_ACCESS;
+  afterAll(() => { if (OLD_HOOD_GATE === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS; else process.env.GATE_NEIGHBORHOOD_ACCESS = OLD_HOOD_GATE; });
   beforeEach(async () => {
+    process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
     mockDb = await database.transaction();
     customerId = randomUUID();
     await mockDb('customers').insert({ id: customerId, first_name: 'Avery', last_name: 'Fixture', phone: `+1555${Date.now().toString().slice(-7)}` });
@@ -166,6 +169,25 @@ postgres('update_property_access keeps history and keeps community codes off the
     await mockDb('customer_properties').insert([home('4455 Example Lane', null), home('710 Other Court', hoodId)]);
     await run({ property_gate_code: '#6060' });
     expect((await prefs()).property_gate_code).toBe('#6060');
+  });
+
+  test('an empty value clears a note field', async () => {
+    await run({ access_notes: '' });
+    expect((await prefs()).access_notes).toBe('');
+  });
+
+  test('with the directory gate off, a directory code is not taken as shown', async () => {
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: null });
+    const hoodId = randomUUID();
+    await mockDb('neighborhoods').insert({ id: hoodId, name: 'Example Glen', match_key: `example-glen-${hoodId}`, source: 'office' });
+    await mockDb('neighborhood_access').insert({ neighborhood_id: hoodId, access_type: 'keypad', code: '#5050', status: 'active', source: 'office' });
+    await mockDb('customer_properties').insert({
+      id: randomUUID(), customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true,
+      address_line1: '4455 Example Lane', city: 'Lakewood Ranch', zip: '34202', active: true, neighborhood_id: hoodId,
+    });
+    process.env.GATE_NEIGHBORHOOD_ACCESS = 'false';
+    await run({ property_gate_code: '#5050' });
+    expect((await prefs()).property_gate_code).toBe('#5050');
   });
 
   test('an empty field is simply filled', async () => {
