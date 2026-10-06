@@ -437,13 +437,16 @@ describe('event provenance', () => {
     const block = src.slice(txStart, txStart + 3000);
     expect(block).toMatch(/await db\.transaction\(async \(trx\) => \{/);
     // Every new-customer-priced write, the staff park included; the staff compensation restore excepted (GH codex r10 P1).
-    expect(block).toMatch(/!memberEvidence && !\(actor === 'staff' && mode === 'restore'\) && estimate\.customer_id/);
+    // Linked rows lock their own customer; UNLINKED rows re-resolve and lock the prospective owner (GH #6006 r10 P0).
+    expect(block).toMatch(/!memberEvidence && !\(actor === 'staff' && mode === 'restore'\)\) \{/);
+    expect(block).toMatch(/let ownerIdToLock = estimate\.customer_id \|\| null;/);
+    expect(block).toMatch(/ownerIdToLock = await resolveProspectiveOwnerId\(estimate, trx\)/);
     // One common advisory fence serializes booking's customer -> estimate
     // ownership checks with this path's mandated estimate -> customer row
     // order. The estimate owner is revalidated before any customer row lock;
     // drift aborts without taking an unfenced new owner's lock.
     const estimateLock = block.indexOf('await lockEstimateOwnerForUpdate(trx, estimate)');
-    const customerLock = block.indexOf("trx('customers').where({ id: estimate.customer_id }).forUpdate().first()");
+    const customerLock = block.indexOf("trx('customers').where({ id: ownerIdToLock }).forUpdate().first()");
     expect(estimateLock).toBeGreaterThan(0);
     expect(customerLock).toBeGreaterThan(estimateLock);
     expect(block).toMatch(/isMembershipCustomerRow\(customerRow\)/);

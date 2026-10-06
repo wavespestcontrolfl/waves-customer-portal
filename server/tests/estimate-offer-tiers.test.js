@@ -287,6 +287,10 @@ describe('member judgement order for an unlinked estimate', () => {
       }),
     });
     await expect(offerTierMemberBlock({ id: 'e1', customer_id: null, estimate_group_id: 'g1', customer_phone: '9415550100' }, database)).resolves.toBe(true);
+    const { resolveProspectiveOwnerId } = require('../routes/estimate-public');
+    await expect(resolveProspectiveOwnerId({ id: 'e1', customer_id: null, estimate_group_id: 'g1' }, database)).resolves.toBe('m1');
+    await expect(resolveProspectiveOwnerId({ id: 'e3', customer_id: 'linked' }, database)).resolves.toBe('linked');
+    await expect(resolveProspectiveOwnerId({ id: 'e4', customer_id: null, estimate_group_id: 'g9' }, () => { throw new Error('db'); })).rejects.toThrow('db');
     // The sibling owner counts only while its customer row is live; a soft-deleted owner falls through to the phone match (pinned).
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
     expect(src).toMatch(/resolveGroupedEstimateOwnerId\(estimate, database, \{ throwOnError: true \}\)/);
@@ -326,7 +330,11 @@ describe('revising a parked row keeps its opt-out history', () => {
 describe('the plain opt-out rail for an unlinked prospective member', () => {
   test('the write refuses before pricing and /data stamps no removable control', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
-    expect(src).toMatch(/if \(!estimate\.customer_id\) \{\s*\n\s*let prospectiveMember = true;\s*\n\s*try \{ prospectiveMember = !!\(await offerTierMemberBlock\(estimate, db\)\); \} catch \(_\) \{ prospectiveMember = true; \}\s*\n\s*if \(prospectiveMember\) return \{ status: 409, body: \(\{ error: 'reprice_unavailable' \}\) \};/);
+    expect(src).toMatch(/if \(!estimate\.customer_id && !\(actor === 'staff' && mode === 'restore'\)\) \{\s*\n\s*let prospectiveMember = true;/);
     expect(src).toMatch(/if \(unlinkedMemberHidesMixChange\) return \{\};/);
+    // The add lane reads the same verdict; the write re-resolves and locks the prospective owner.
+    expect(src).toMatch(/let addStampBlockedByMembership = unlinkedMemberHidesMixChange;/);
+    expect(src).toMatch(/try \{ ownerIdToLock = await resolveProspectiveOwnerId\(estimate, trx\); \}\s*\n\s*catch \(_\) \{ memberActivatedMidWrite = true; return; \}/);
+    expect(src).toMatch(/await trx\('customers'\)\.where\(\{ id: ownerIdToLock \}\)\.forUpdate\(\)\.first\(\)/);
   });
 });

@@ -17420,22 +17420,26 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
 // (matchAcceptCustomerByPhone) — an unlinked estimate whose phone belongs to
 // a member must not see new-customer tier prices. Strict and fail-closed:
 // any read error reads as "member".
+// The customer an UNLINKED estimate's accept would land on, in the accept's
+// own order: an accepted sibling in the property group hands over its (live)
+// customer first (one resolver for all readers, recurring-card-on-file),
+// only then the unambiguous phone match. Throws on a read error (callers
+// fail closed); null when nothing resolves.
+async function resolveProspectiveOwnerId(estimate, database = db) {
+  if (!estimate || estimate.customer_id) return estimate?.customer_id || null;
+  const { resolveGroupedEstimateOwnerId } = require('../services/recurring-card-on-file');
+  const groupedOwnerId = await resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true });
+  if (groupedOwnerId) return groupedOwnerId;
+  const { match } = await matchAcceptCustomerByPhone(estimate, database, { authoritative: true });
+  return match?.id || null;
+}
+
 async function offerTierMemberBlock(estimate, database = db) {
   if (!estimate) return true;
   try {
-    if (estimate.customer_id) {
-      return !!(await isActivePlanCustomer(database, estimate.customer_id, { strict: true }));
-    }
-    // The accept's own order for an unlinked estimate: an accepted sibling in
-    // the property group hands over its (live) customer first; only then the
-    // phone. One resolver for all readers (recurring-card-on-file), strict.
-    const { resolveGroupedEstimateOwnerId } = require('../services/recurring-card-on-file');
-    const groupedOwnerId = await resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true });
-    if (groupedOwnerId) {
-      return !!(await isActivePlanCustomer(database, groupedOwnerId, { strict: true }));
-    }
-    const { match } = await matchAcceptCustomerByPhone(estimate, database);
-    return !!match && match.active !== false && isMembershipCustomerRow(match);
+    const ownerId = await resolveProspectiveOwnerId(estimate, database);
+    if (!ownerId) return false;
+    return !!(await isActivePlanCustomer(database, ownerId, { strict: true }));
   } catch (_) {
     return true;
   }
@@ -17770,7 +17774,11 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // phone match — the accept's own order) is an active member: nothing
     // here may price new-customer terms onto a member plan, and the accept
     // would link that member. Strict and fail-closed, same 409 as below.
-    if (!estimate.customer_id) {
+    // The staff compensation restore (an undelivered send's park reverted)
+    // returns the estimate to the shape it was sent in and is exempt, as in
+    // the write below: a member who appeared since the park must not leave
+    // the row stuck in its reduced shape.
+    if (!estimate.customer_id && !(actor === 'staff' && mode === 'restore')) {
       let prospectiveMember = true;
       try { prospectiveMember = !!(await offerTierMemberBlock(estimate, db)); } catch (_) { prospectiveMember = true; }
       if (prospectiveMember) return { status: 409, body: ({ error: 'reprice_unavailable' }) };
@@ -18042,11 +18050,23 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // later inside the converter) so an add racing an acceptance can never
       // deadlock (GH codex r10 P2); the CAS below still decides the write.
       await lockEstimateOwnerForUpdate(trx, estimate);
-      if (!memberEvidence && !(actor === 'staff' && mode === 'restore') && estimate.customer_id) {
-        const customerRow = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
-        if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
-          memberActivatedMidWrite = true;
-          return;
+      if (!memberEvidence && !(actor === 'staff' && mode === 'restore')) {
+        // Linked: the row itself. Unlinked: the PROSPECTIVE owner, re-resolved
+        // inside the transaction (grouped sibling, then phone match) so a plan
+        // activated for that customer between the pre-check and this write is
+        // seen on its locked row. Same lock order (estimate first, customer
+        // later); a resolution error fails closed with the same 409.
+        let ownerIdToLock = estimate.customer_id || null;
+        if (!ownerIdToLock) {
+          try { ownerIdToLock = await resolveProspectiveOwnerId(estimate, trx); }
+          catch (_) { memberActivatedMidWrite = true; return; }
+        }
+        if (ownerIdToLock) {
+          const customerRow = await trx('customers').where({ id: ownerIdToLock }).forUpdate().first();
+          if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
+            memberActivatedMidWrite = true;
+            return;
+          }
         }
       }
       updateCount = await trx('estimates')
@@ -30001,21 +30021,20 @@ async function composeEstimateDataPayload(estimate, {
     // for a linked active member, and the page must never advertise an add
     // the write refuses (pre-push codex P0). Computed once, ahead of the
     // payload literal; a lookup error withholds the stamp.
-    let addStampBlockedByMembership = false;
+    // An UNLINKED estimate whose prospective owner (grouped sibling, then
+    // phone match — the accept's own order) is an active member gets no
+    // service-removal control and no add offer: the rail's write refuses
+    // both (strict, fail-closed), and a control that can only fail is worse
+    // than none. A linked member is handled by the live check just below.
+    let unlinkedMemberHidesMixChange = false;
+    if ((serviceOptOutGateOn() || serviceAddGateOn()) && !adminDraftPreview && !estimate.customer_id) {
+      try { unlinkedMemberHidesMixChange = !!(await offerTierMemberBlock(estimate, db)); }
+      catch (_) { unlinkedMemberHidesMixChange = true; }
+    }
+    let addStampBlockedByMembership = unlinkedMemberHidesMixChange;
     if (serviceAddGateOn() && !adminDraftPreview && estimate.customer_id) {
       try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { addStampBlockedByMembership = true; }
-    }
-
-    // An UNLINKED estimate whose prospective owner (grouped sibling, then
-    // phone match — the accept's own order) is an active member gets no
-    // service-removal control either: the rail's write refuses it below
-    // (strict, fail-closed), and a control that can only fail is worse
-    // than none. A linked member is handled by the rail's own live check.
-    let unlinkedMemberHidesMixChange = false;
-    if (serviceOptOutGateOn() && !adminDraftPreview && !estimate.customer_id) {
-      try { unlinkedMemberHidesMixChange = !!(await offerTierMemberBlock(estimate, db)); }
-      catch (_) { unlinkedMemberHidesMixChange = true; }
     }
 
     // Good / Better / Best tiles (GATE_ESTIMATE_OFFER_TIERS): null unless
@@ -31227,3 +31246,4 @@ module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBu
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
 module.exports.buildOfferTiersBlock = buildOfferTiersBlock;
 module.exports.offerTierMemberBlock = offerTierMemberBlock;
+module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
