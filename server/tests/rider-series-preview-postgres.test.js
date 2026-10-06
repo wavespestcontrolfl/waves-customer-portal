@@ -779,9 +779,10 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
         status: 'confirmed', is_recurring: true, recurring_ongoing: true,
         recurring_pattern: 'every_6_weeks', service_type: 'Lawn Care - Every 6 Weeks', scheduled_date: LAWN_START,
       });
+      // findCandidatePairs is the retired lawn + PEST discovery reader.
       const pestAt = (propertyId) => row({
         status: 'completed', is_recurring: true, recurring_ongoing: true, recurring_pattern: 'quarterly',
-        service_type: 'Tree and Shrub Quarterly', scheduled_date: ANCHOR, property_id: propertyId,
+        service_type: 'Quarterly Pest Control', scheduled_date: ANCHOR, property_id: propertyId,
       });
       const pestSame = await pestAt(same);
       let pairs = await findCandidatePairs(trx, { customerId });
