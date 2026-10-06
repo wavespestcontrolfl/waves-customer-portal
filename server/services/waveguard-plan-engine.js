@@ -1596,6 +1596,7 @@ function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {})
 }
 
 const NORTH_PORT_HOLD_REASON = 'north_port_product_window';
+const CITY_HOLD_KIND = 'city_hold';
 
 // A staged v13 row the city bans for the visit's window (gates.northPortProductWindow) in North
 // Port. The product has no N or P analysis, so the ordinance check cannot see it: the plan holds
@@ -1723,7 +1724,8 @@ function v13LineNotices(planItems, capped, ignoredSubstitutionIds) {
   const blocks = [...capped].flatMap(([productId, found]) => found.map((block) => ({
     code: 'lawn_v13_annual_limit', severity: 'block', productId, productName: block.productName, message: block.message,
   })));
-  const warnings = planItems.filter((item) => item.unavailable && item.product).map((item) => ({
+  // A product the city holds back has its own warning (v13HoldWarnings); it is not an unlinked line.
+  const warnings = planItems.filter((item) => item.unavailable && item.unavailable.kind !== CITY_HOLD_KIND && item.product).map((item) => ({
     code: 'lawn_v13_line_unlinked', severity: 'warning', productId: item.product.id, productName: item.product.name,
     message: `${item.product.name}: no protocol row is linked to this product, so no amount is planned.`,
   }));
@@ -1746,7 +1748,7 @@ function v13ItemFields(line, gateContext, product) {
       ? { note: 'Spot: enter the area treated and the amount used.', reference: v13SpotReference(row, product) }
       : null,
     // A line the plan cannot size at all: say why; the tech enters the actual work.
-    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state] } : null,
+    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}) } : null,
   };
 }
 

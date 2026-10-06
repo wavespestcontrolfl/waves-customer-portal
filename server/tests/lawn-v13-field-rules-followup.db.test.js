@@ -6,6 +6,7 @@ const { randomUUID } = require('crypto');
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const fieldRules = require('../models/migrations/20261007150000_lawn_v13_field_rules');
 const followup = require('../models/migrations/20261007155000_lawn_v13_field_rules_followup');
+const reorderFix = require('../models/migrations/20261007157000_lawn_v13_dismiss_reorder_fix');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const V13 = '2026.10-v13';
@@ -154,6 +155,50 @@ describeDb('v13 field rules follow-up through PostgreSQL', () => {
       await fieldRules.down(knex);
       expect(await gates(protocols.completion.acelepryn.id)).toEqual({ delayWateringOrMowingHours: 24 });
       expect(await gates(protocols.unused.acelepryn.id)).toEqual({});
+    });
+  });
+  describe('20261007157000: a rollback never re-enables reorder for the retired product', () => {
+    const auditRow = () => knex('lawn_protocol_audit_log').where({ action: 'v13_field_rules_followup', entity_id: product[DISMISS].id }).first();
+
+    beforeEach(async () => {
+      await knex('lawn_protocol_audit_log').del();
+      await knex('products_catalog').where({ name: DISMISS }).update({ auto_reorder_enabled: true });
+    });
+
+    test('up neutralizes the reorder switch in the 155000 audit row and keeps the cancelled requests on record', async () => {
+      const open = await request(DISMISS);
+      await followup.up(knex);
+      await reorderFix.up(knex);
+      expect((await auditRow()).after_snapshot).toEqual({ autoReorderEnabled: null, keptOff: true, cancelledRequestIds: [open.id] });
+      await reorderFix.up(knex);
+      expect((await auditRow()).after_snapshot).toEqual({ autoReorderEnabled: null, keptOff: true, cancelledRequestIds: [open.id] });
+      await knex('product_restock_requests').where({ id: open.id }).update({ status: 'cancelled' });
+    });
+
+    test('rolled back newest first, Dismiss stays off whether or not it was edited after the migration, and the gates rule still holds', async () => {
+      await followup.up(knex);
+      await reorderFix.up(knex);
+      await reorderFix.down(knex);
+      await followup.down(knex);
+      expect(await enabled(DISMISS)).toBe(false);
+      expect(await enabled('Dismiss NXT')).toBe(true);
+      expect(await knex('lawn_protocol_audit_log').where({ action: 'v13_field_rules_followup' })).toHaveLength(0);
+    });
+
+    test('without up having run its neutralization (down alone) the rollback still keeps it off', async () => {
+      await followup.up(knex);
+      await reorderFix.down(knex);
+      await followup.down(knex);
+      expect(await enabled(DISMISS)).toBe(false);
+    });
+
+    test('an owner edit after the migration is never undone: on stays on, off stays off', async () => {
+      await followup.up(knex);
+      await reorderFix.up(knex);
+      await knex('products_catalog').where({ id: product[DISMISS].id }).update({ auto_reorder_enabled: true });
+      await followup.down(knex);
+      expect(await enabled(DISMISS)).toBe(true);
+      await knex('products_catalog').where({ name: DISMISS }).update({ auto_reorder_enabled: true });
     });
   });
 });
