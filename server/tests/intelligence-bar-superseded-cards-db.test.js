@@ -122,6 +122,17 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     expect(await status(rawOlder.id)).toBe('cancelled');
   });
 
+  test('a later address correction replaces an earlier address card; a card for another field coexists', async () => {
+    const change = (from, to) => ({ from, to });
+    const older = await propose('update_lead_contact', { lead_id: leadId, address: '1 Wrong Synthetic St', _approved_changes: { address: change('9 Old Synthetic St', '1 Wrong Synthetic St') } }, { noTask: true, startedAt: at(-3000) });
+    const city = await propose('update_lead_contact', { lead_id: leadId, city: 'Testville', _approved_changes: { city: change(null, 'Testville') } }, { noTask: true, startedAt: at(-2000) });
+    expect(await status(older.id)).toBe('pending');
+    const fix = await propose('update_lead_contact', { lead_id: leadId, address: '2 Right Synthetic St', _approved_changes: { address: change('9 Old Synthetic St', '2 Right Synthetic St') } }, { noTask: true, startedAt: at(-1000) });
+    expect(await status(older.id)).toBe('cancelled');
+    expect(await status(city.id)).toBe('pending');
+    expect(await status(fix.id)).toBe('pending');
+  });
+
   test('a booking request started long ago and resumed after a newer card was confirmed is stored cancelled', async () => {
     const day = '2030-04-12';
     const minutesAgo = m => new Date(Date.now() - m * 60 * 1000);

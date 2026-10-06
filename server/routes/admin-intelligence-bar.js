@@ -2247,7 +2247,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
-- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
+- Fix a lead's contact details — first/last name, phone, email, address, city, zip (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost

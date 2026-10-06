@@ -152,8 +152,8 @@ Use for: "move all unresponsive leads older than 30 days to lost", "mark all no-
   },
   {
     name: 'update_lead_contact',
-    description: `Correct a lead's contact details: first name, last name, phone, or email (the lead record only — a linked customer account is NOT changed). Pass ONLY the fields to change. A blank last_name / phone / email clears that field; first_name cannot be cleared.
-Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email"
+    description: `Correct a lead's contact details: first name, last name, phone, email, or address (street, city, zip) (the lead record only — a linked customer account is NOT changed). Pass ONLY the fields to change. A blank last_name / phone / email / address / city / zip clears that field; first_name cannot be cleared.
+Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email", "the Smith lead's street address is 12 Oak Ave, not 21 Oak Ave"
 ALWAYS show the operator the before → after values and get approval before saving.`,
     input_schema: {
       type: 'object',
@@ -164,6 +164,9 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
+        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field." },
+        city: { type: 'string', description: "The lead's city (120 characters max); a blank clears it" },
+        zip: { type: 'string', description: "The lead's zip code (20 characters max); a blank clears it" },
       },
     },
   },
@@ -652,7 +655,13 @@ async function matchBulkLeads(input) {
 // re-asserts every old value as well (same atomic guard as the status
 // write) — the fingerprint check and the commit are not one statement.
 
-const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email'];
+const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'];
+
+// Length caps the admin lead form enforces on create (createLeadSchema in
+// routes/admin-leads.js: address 255, city 120, zip 20). The PUT route has no
+// address check of its own, so the create-side caps are the rule; this tool
+// refuses an over-long value rather than silently cutting a street address.
+const LEAD_ADDRESS_MAX = { address: 255, city: 120, zip: 20 };
 
 // Normalize one requested contact field. Returns { value } (null = clear)
 // or { error }.
@@ -684,6 +693,11 @@ function normalizeLeadContactField(field, raw) {
     const canonical = e164 && (e164.startsWith('+1') ? /^\+1[2-9]\d{9}$/.test(e164) : /^\+[2-9]\d{7,14}$/.test(e164));
     if (!canonical) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
     return { value: e164 };
+  }
+  if (LEAD_ADDRESS_MAX[field]) {
+    if (!text) return { value: null };
+    if (text.length > LEAD_ADDRESS_MAX[field]) return { error: `${field} is too long (${LEAD_ADDRESS_MAX[field]} characters max).` };
+    return { value: text };
   }
   if (field === 'email') {
     if (!text) return { value: null };
@@ -738,7 +752,7 @@ async function updateLeadContact(input) {
     requested[field] = norm.value;
   }
   if (Object.keys(requested).length === 0) {
-    return { error: 'Nothing to update — pass at least one of first_name, last_name, phone, email.' };
+    return { error: 'Nothing to update — pass at least one of first_name, last_name, phone, email, address, city, zip.' };
   }
 
   const lead = await resolveLeadForUpdate(input);

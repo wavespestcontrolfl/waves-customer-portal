@@ -116,6 +116,11 @@ describe('which writes skip the card', () => {
     }
   });
 
+  test('a lead address correction by lead_id alone is direct; with a name only it keeps the card', () => {
+    expect(OwnerDirect.executesWithoutCard('update_lead_contact', { lead_id: LEAD, address: '12 Synthetic Oak Ave', city: 'Testville' })).toBe(true);
+    expect(OwnerDirect.executesWithoutCard('update_lead_contact', { lead_name: 'Fixture', address: '12 Synthetic Oak Ave' })).toBe(false);
+  });
+
   test('reschedule_appointment is direct only for a pinned ungrouped appointment', () => {
     const input = { appointment_id: A, new_date: '2026-10-03' };
     expect(OwnerDirect.executesWithoutCard('reschedule_appointment', input, { pinned_appointment: { id: A, visit_id: null } })).toBe(true);

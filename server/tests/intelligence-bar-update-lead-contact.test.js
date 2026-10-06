@@ -252,3 +252,89 @@ test('authorization contract: one before/after effect per changed field, tier ye
   ]));
   expect(c.preview_fingerprint).toEqual(expect.any(String));
 });
+
+// ─── address fields (the lead's own address, city and zip) ──────
+
+const ADDR_LEAD = { ...LEAD, address: '21 Synthetic Oak Ave', city: 'Testville', zip: '34200' };
+
+test('the tool schema offers address, city and zip, and the description says so', () => {
+  const tool = LEADS_TOOLS.find(t => t.name === 'update_lead_contact');
+  expect(Object.keys(tool.input_schema.properties)).toEqual(expect.arrayContaining(['address', 'city', 'zip']));
+  expect(tool.description).toMatch(/address/);
+});
+
+test('address-only change: diffs just the address and writes nothing on preview', async () => {
+  const leads = chain({ first: ADDR_LEAD });
+  db.mockReturnValue(leads);
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '  12 Synthetic Oak Ave ' });
+  expect(res.preview).toBe(true);
+  expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: '12 Synthetic Oak Ave' } });
+  expect(leads.update).not.toHaveBeenCalled();
+});
+
+test('an unchanged address (or city, zip) is "nothing to change"; a mixed request keeps only the real change', async () => {
+  db.mockReturnValue(chain({ first: ADDR_LEAD }));
+  const same = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '21 Synthetic Oak Ave', city: 'Testville', zip: '34200' });
+  expect(same.error).toMatch(/already has those contact details/);
+  const mixed = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '21 Synthetic Oak Ave', zip: '34201' });
+  expect(mixed.changes).toEqual({ zip: { from: '34200', to: '34201' } });
+});
+
+test('address, city and zip over the admin form caps are refused before any lookup; blank clears', async () => {
+  db.mockReturnValue(chain({ first: ADDR_LEAD }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: 'a'.repeat(256) })).error).toMatch(/address is too long/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'c'.repeat(121) })).error).toMatch(/city is too long/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '1'.repeat(21) })).error).toMatch(/zip is too long/);
+  expect(db).not.toHaveBeenCalled();
+  const cleared = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: '  ' });
+  expect(cleared.changes).toEqual({ city: { from: 'Testville', to: null } });
+});
+
+test('confirmed address change: guarded UPDATE re-asserts the old address and the activity row names it', async () => {
+  const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', address: '12 Synthetic Oak Ave', confirmed: true,
+    _approved_changes: { address: { from: '21 Synthetic Oak Ave', to: '12 Synthetic Oak Ave' } },
+  });
+  expect(res.success).toBe(true);
+  expect(res.updated_fields).toEqual(['address']);
+  expect(leads.where).toHaveBeenCalledWith('address', '21 Synthetic Oak Ave');
+  const written = leads.update.mock.calls[0][0];
+  expect(written).toEqual(expect.objectContaining({ address: '12 Synthetic Oak Ave', updated_at: expect.any(Date) }));
+  // An address edit stamps nothing else (no email confirmation, no geocode field).
+  expect(Object.keys(written).sort()).toEqual(['address', 'updated_at']);
+  expect(activities.insert).toHaveBeenCalledWith(expect.objectContaining({ description: 'Contact updated: address' }));
+});
+
+test('confirmed: a changed city between card and commit refuses with preview_changed', async () => {
+  const leads = chain({ first: ADDR_LEAD, update: [] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', city: 'Newtown', confirmed: true,
+    _approved_changes: { city: { from: 'Testville', to: 'Newtown' } },
+  });
+  expect(leads.where).toHaveBeenCalledWith('city', 'Testville');
+  expect(res.preview_changed).toBe(true);
+  expect(activities.insert).not.toHaveBeenCalled();
+});
+
+test('authorization contract: the card shows the old and new address and says nothing else is re-looked-up', () => {
+  const preview = {
+    preview: true, lead_id: 'lead-1', lead_name: 'Testc Beta', lead_status: 'contacted',
+    changes: { address: { from: '21 Synthetic Oak Ave', to: '12 Synthetic Oak Ave' } },
+  };
+  const c = buildContract({
+    toolName: 'update_lead_contact',
+    params: { lead_id: 'lead-1', address: '12 Synthetic Oak Ave' },
+    displayParams: { lead: 'Testc Beta (contacted)', address: '21 Synthetic Oak Ave → 12 Synthetic Oak Ave' },
+    preview,
+  });
+  expect(c.effects).toEqual(expect.arrayContaining([
+    expect.objectContaining({ kind: 'customer', label: 'Lead Testc Beta: address 21 Synthetic Oak Ave → 12 Synthetic Oak Ave', before: '21 Synthetic Oak Ave', after: '12 Synthetic Oak Ave' }),
+    expect.objectContaining({ kind: 'operational', label: expect.stringMatching(/own address fields change.*keeps its own address/) }),
+  ]));
+  expect(c.effects.map(e => e.label)).not.toEqual(expect.arrayContaining([expect.stringMatching(/email-confirmed/)]));
+});
