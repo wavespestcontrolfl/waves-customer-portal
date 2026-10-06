@@ -12172,7 +12172,9 @@ export function CompletionPanel({
     // GATE_TECH_DICTATION_UPLOAD: where the browser has no SpeechRecognition
     // (iOS home-screen PWA) the mic records a clip and the server transcribes
     // it into this same notes box. Typing always works — the mic is optional.
-    { uploadServiceId: service?.id },
+    // GATE_SERVER_DICTATION: with it on, every browser records and the server
+    // spells this customer's name right (ids only).
+    { uploadServiceId: service?.id, dictationContext: { customerId: service?.customerId || service?.customer_id, serviceId: service?.id } },
   );
   // Customer email isn't on the schedule payload (only name/phone are), so fetch
   // it for the header contact card's tap-to-email link. The same fetch surfaces

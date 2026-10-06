@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ImagePlus, X } from "lucide-react";
 import { ChartCard, EmptyState, CHART_PRIMARY } from "./charts";
 import DictationButton from "../tech/DictationButton";
+import useDictationPending from "../../hooks/dictationPending";
 import {
   ActionFeedback,
   Button,
@@ -288,9 +289,11 @@ export default function AiChartsPanel() {
 
   useEffect(() => { loadWidgets(); }, [loadWidgets]);
 
+  // A mic still recording or transcribing: its words are on the way (server dictation).
+  const dictationPending = useDictationPending();
   const onGenerate = async () => {
     const p = prompt.trim();
-    if ((!p && !images.length) || busy) return;
+    if ((!p && !images.length) || busy || dictationPending) return;
     setBusy(true); setError(null); setPreview(null);
     try {
       const data = await aiFetch("/admin/dashboard/ai-chart/preview", {
@@ -371,7 +374,7 @@ export default function AiChartsPanel() {
           type="button"
           onClick={onGenerate}
           loading={busy}
-          disabled={!prompt.trim() && !images.length}
+          disabled={(!prompt.trim() && !images.length) || dictationPending}
           className="shrink-0"
         >
           {busy ? "Building…" : "Generate"}

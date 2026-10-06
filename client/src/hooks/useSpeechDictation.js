@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { checkServerDictation, forgetServerDictation, knownServerDictation, transcribeOnServer } from "./serverDictation";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -11,6 +12,15 @@ const IDLE_STOP_MS = 60000;
 // Clip mode: the longest one recording runs. A visit said aloud is well under a
 // minute; three minutes of speech is also about what the fill accepts at once.
 export const CLIP_MAX_MS = 3 * 60 * 1000;
+
+// A storage read can throw (private window, blocked site data): no token, no server dictation.
+function readToken() {
+  try {
+    return localStorage.getItem("waves_admin_token");
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Voice dictation, extracted from CommunicationsPageV2 so the completion
@@ -52,6 +62,20 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  * can hold it open); `uploading` is true while a clip is in flight. Browsers
  * with SpeechRecognition never change behavior.
  *
+ * Server dictation (GATE_SERVER_DICTATION, every mic): on a browser that can
+ * record, the hook asks `/tech/dictation/availability` once per session; when
+ * the server says yes, the mic records a clip on EVERY such browser (the
+ * browser's speech recognition is never used) and the clip is POSTed to
+ * `/tech/dictation`, where our transcriber hears it with a word list the server
+ * builds itself. Words arrive after the mic stops, not live: `mode` is "upload"
+ * and the same `starting` / `listening` / `uploading` states apply. Pass
+ * `{ dictationContext: { customerId, serviceId } }` where the field belongs to a
+ * customer or visit: the ids steer the word list (the customer's name is
+ * spelled right) and nothing else; the client never sends words for it. A
+ * recording stops on its own when the page is hidden or after CLIP_MAX_MS, as
+ * clip mode does. Gate off, key missing, or a browser that cannot record: the
+ * paths above run exactly as before.
+ *
  * Clip mode: pass `{ clipHandler }` (async (blob, durationSeconds) => void) and
  * the mic ALWAYS records, on every browser that can record, and hands the
  * finished clip to the handler instead of transcribing it here: no speech
@@ -61,6 +85,10 @@ export const CLIP_MAX_MS = 3 * 60 * 1000;
  */
 export default function useSpeechDictation(onTranscript, options = {}) {
   const uploadServiceId = options.uploadServiceId ?? null;
+  // Server dictation's context: ids only. A visit id given for the older upload
+  // path doubles as the visit context.
+  const ctxCustomerId = options.dictationContext?.customerId ?? null;
+  const ctxServiceId = options.dictationContext?.serviceId ?? uploadServiceId;
   const clipMode = typeof options.clipHandler === "function";
   const clipMaxMs = Number(options.clipMaxMs) > 0 ? Number(options.clipMaxMs) : CLIP_MAX_MS;
   const clipHandlerRef = useRef(options.clipHandler);
@@ -68,6 +96,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   const [listening, setListening] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadAvailable, setUploadAvailable] = useState(false);
+  const [serverAvailable, setServerAvailable] = useState(() => knownServerDictation(readToken()) === true);
   const recognitionRef = useRef(null);
   const recorderRef = useRef(null);
   // Removes the clip's hidden-page guard (set while a clip records).
@@ -81,6 +110,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // target is dropped (the panel can move to another visit mid-upload).
   const serviceIdRef = useRef(uploadServiceId);
   serviceIdRef.current = uploadServiceId;
+  const contextKey = `${ctxCustomerId || ""}|${ctxServiceId || ""}`;
+  const contextKeyRef = useRef(contextKey);
+  contextKeyRef.current = contextKey;
   // Keep the latest callback without re-creating `toggle` each render.
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
@@ -113,10 +145,29 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     typeof window.MediaRecorder === "function" &&
     !!navigator.mediaDevices?.getUserMedia;
 
-  // Upload availability is only worth asking about where speech recognition
-  // is missing — the gate never changes a SpeechRecognition browser.
+  // Server dictation: asked once per session on any browser that can record.
   useEffect(() => {
-    if (clipMode || speechSupported || !recorderSupported || !uploadServiceId) {
+    if (clipMode || !recorderSupported) {
+      setServerAvailable(false);
+      return undefined;
+    }
+    const token = readToken();
+    if (!token) return undefined;
+    let disposed = false;
+    checkServerDictation(token).then((yes) => {
+      if (!disposed) setServerAvailable(yes === true);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [clipMode, recorderSupported]);
+  const serverMode = !clipMode && recorderSupported && serverAvailable;
+
+  // Upload availability is only worth asking about where speech recognition
+  // is missing and server dictation is not on: the gate never changes a
+  // SpeechRecognition browser.
+  useEffect(() => {
+    if (clipMode || serverMode || speechSupported || !recorderSupported || !uploadServiceId) {
       setUploadAvailable(false);
       return undefined;
     }
@@ -137,10 +188,10 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     return () => {
       disposed = true;
     };
-  }, [clipMode, speechSupported, recorderSupported, uploadServiceId]);
+  }, [clipMode, serverMode, speechSupported, recorderSupported, uploadServiceId]);
 
   const clipOrSpeech = clipMode ? (recorderSupported ? "upload" : null) : "speech";
-  const mode = clipMode || speechSupported ? clipOrSpeech : uploadAvailable ? "upload" : null;
+  const mode = clipMode ? clipOrSpeech : serverMode ? "upload" : speechSupported ? "speech" : uploadAvailable ? "upload" : null;
   const supported = mode !== null;
 
   const uploadClip = useCallback(
@@ -155,9 +206,29 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         }
         return;
       }
-      const token = localStorage.getItem("waves_admin_token");
+      const token = readToken();
       if (!token || !blob || !blob.size) return;
       setUploading(true);
+      if (serverMode) {
+        const startedKey = contextKeyRef.current;
+        try {
+          const text = await transcribeOnServer(blob, durationSeconds, { customerId: ctxCustomerId, serviceId: ctxServiceId }, token);
+          // The round trip can outlive the field: unmounted, or the mic now
+          // belongs to another customer or visit. Never append into the wrong field.
+          if (!mountedRef.current || contextKeyRef.current !== startedKey) return;
+          if (text && onTranscriptRef.current) onTranscriptRef.current(text);
+        } catch (e) {
+          // 404 = the gate went off mid-session: the next tap uses the browser's mic again.
+          if (e?.status === 404) {
+            forgetServerDictation();
+            if (mountedRef.current) setServerAvailable(false);
+          }
+          if (mountedRef.current) alert(`Dictation error: ${e.message}`);
+        } finally {
+          if (mountedRef.current) setUploading(false);
+        }
+        return;
+      }
       try {
         const form = new FormData();
         const type = (blob.type || "audio/webm").split(";")[0];
@@ -184,7 +255,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
         if (mountedRef.current) setUploading(false);
       }
     },
-    [uploadServiceId],
+    [uploadServiceId, serverMode, ctxCustomerId, ctxServiceId],
   );
 
   const toggleUpload = useCallback(async () => {
@@ -248,7 +319,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     const onHidden = () => {
       if (document.visibilityState === "hidden") stopRecording();
     };
-    const guarded = clipMode && typeof document !== "undefined";
+    const guarded = (clipMode || serverMode) && typeof document !== "undefined";
     let cutoffTimer = null;
     const unguard = () => {
       if (!guarded) return;
@@ -312,13 +383,22 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // `starting || listening` never sees a gap between them.
     doneStarting();
     setListening(true);
-  }, [uploadClip, uploading, clipMode, clipMaxMs]);
+  }, [uploadClip, uploading, clipMode, serverMode, clipMaxMs]);
 
   const toggle = useCallback((event) => {
     const SR =
       typeof window !== "undefined"
         ? window.SpeechRecognition || window.webkitSpeechRecognition
         : null;
+    // Second tap stops an in-progress session; onend sees stopRequestedRef
+    // and finishes instead of restarting. First, so a session that started
+    // before the server's answer arrived (mode flipped to upload under it) is
+    // still stopped by its own tap.
+    if (recognitionRef.current) {
+      stopRequestedRef.current = true;
+      recognitionRef.current.stop();
+      return;
+    }
     if (mode === "upload") {
       toggleUpload();
       return;
@@ -327,13 +407,6 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       alert(
         "Voice dictation isn't supported in this browser. Use the keyboard mic on your phone, or try Chrome/Safari.",
       );
-      return;
-    }
-    // Second tap stops an in-progress session; onend sees stopRequestedRef
-    // and finishes instead of restarting.
-    if (recognitionRef.current) {
-      stopRequestedRef.current = true;
-      recognitionRef.current.stop();
       return;
     }
     const rec = new SR();

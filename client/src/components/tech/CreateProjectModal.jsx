@@ -2708,6 +2708,7 @@ export default function CreateProjectModal({
                         overwritten (same rule as the Schedule report draft). */}
                     <DictationButton
                       palette={P}
+                      dictationContext={{ customerId }}
                       disabled={aiWriting || saving}
                       onAppend={(text) => {
                         if (aiWriting) return;

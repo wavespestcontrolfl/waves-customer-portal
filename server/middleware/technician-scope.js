@@ -54,6 +54,10 @@ const TECHNICIAN_ALLOW_LIST = [
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/visit-closeouts(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/services(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/line(\/.*)?$/ },
+  // Voice-to-text for every staff mic (GATE_SERVER_DICTATION): returns only the words the
+  // caller spoke; a customer or visit id only steers spelling hints, never returns data.
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/tech\/dictation\/availability$/ },
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/tech\/dictation$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/field-lead(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/lawn-diagnostic(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/social(\/.*)?$/ },

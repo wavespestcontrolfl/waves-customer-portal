@@ -222,6 +222,7 @@
  *   GATE_LEAD_EMAIL_LINKS=true (Activity timeline only: also lists email that was sent to a prospect before they became a customer, matched by the lead / estimate the send recorded (email_messages.lead_id / estimate_id) through leads.customer_id and estimates.customer_id, not by address. Strict opt-in, read at call time via leadEmailLinksLive(). Dark = the timeline lists exactly what it did before. Recording the link on each send is not gated (additive columns).)
  *   GATE_RATE_REVIEW=true (annual rate review RANKING backend, plan annual-rate-review-2026-09-30 step 2: the monthly 1st-of-month job (scheduler.js, 6:20 AM ET) ranks every active recurring plan line whose anniversary falls in the following month into rate_review_snapshots (current rate per billing lane, today's list rate, treatment-minute median, revenue/hour, band A-D, whole-dollar proposal, exception flags) and sends ONE ACT:/OK: ops email to contact@; admin-only read routes + a recompute POST under /api/admin/rate-review. Strict opt-in, read at call time via rateReviewLive(). Dark = the cron tick returns before any query, the routes answer 404, nothing is written. The ranking never writes a rate or sends a customer anything. The APPLY lane (services/rate-review-apply.js, step 3) rides the same gate: an admin POST creates draft notice rows for approved rows (nothing sent — the comms lane sends), and the nightly 3:10 AM ET job writes the noticed rate on its effective date for SENT notices (per-application visits + per_application_fee + ledger slice, monthly dues + slice, or the prepaid term's next_term_prepay_amount), one transaction per notice, holds belled. Off = the apply tick returns before any query and the schedule route answers 404; customers keep the lower, current rate. The notice-sending lane is a later PR.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
+ *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -4424,6 +4425,13 @@ function fastCompleteVoiceFillLive() {
   return process.env.GATE_FAST_COMPLETE_VOICE_FILL === 'true';
 }
 
+// GATE_SERVER_DICTATION read at CALL time — strict `=== 'true'`, dark in every
+// environment. Every staff mic (useSpeechDictation) records a clip and the
+// server transcribes it (routes/tech-dictation.js); off = browser speech.
+function serverDictationLive() {
+  return process.env.GATE_SERVER_DICTATION === 'true';
+}
+
 // GATE_LLM_COST_TRACKING read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for estimated AI spend (services/llm-cost.js: the
 // price pull and the daily spend check; agent-control/hub-read.js: the
@@ -5838,3 +5846,5 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
+module.exports.serverDictationLive = serverDictationLive;

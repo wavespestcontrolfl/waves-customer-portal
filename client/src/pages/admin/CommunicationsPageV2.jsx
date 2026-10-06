@@ -1229,11 +1229,15 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   // Delayed send: 'now' | 'tomorrow_8' | 'custom'. Mirrors invoice builder pattern.
   // Scheduled rows land in sms_log with status='scheduled' and are picked up by
   // the /5min cron in server/services/scheduler.js.
+  // GATE_SERVER_DICTATION: the mic records and our server transcribes (the
+  // customer's name is spelled right); words land after the mic stops.
   const dictation = useSpeechDictation((text) => {
     setMsgBody((b) => (b ? `${b} ${text}` : text));
-  });
+  }, { dictationContext: { customerId: selectedCustomerId } });
   const { listening, supported: dictationSupported, toggle: toggleDictation } =
     dictation;
+  // The mic is open, opening or its clip is being transcribed: words are on the way, so Send waits.
+  const hearing = listening || dictation.starting || dictation.uploading;
   useEffect(() => {
     if (!active && listening) toggleDictation();
   }, [active, listening, toggleDictation]);
@@ -1307,7 +1311,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
 
   const selectSmsRecipient = (contactPhone, ourNumber, customerId, replyTo) => {
-    if (sending || uploading || listening) return;
+    if (sending || uploading || hearing) return;
     const selectedDraft = setDraftForRecipient(contactPhone ? smsThreadKey(contactPhone) : "", (draft) => {
       const hasDraft = draft.msgBody.trim() || draft.attachments.length || draft.loadedMessageDraft;
       if (hasDraft && (draft.selectedCustomerId || null) !== (customerId || null)) {
@@ -1901,7 +1905,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       (selectedCustomerId || null) === (replyContext.customerId || null)
         ? replyContext.messageId
         : undefined;
-    if (sendInFlightRef.current || uploading || rewritingSms || aiDrafting || listening) return;
+    if (sendInFlightRef.current || uploading || rewritingSms || aiDrafting || hearing) return;
     if (!toNumber.trim() || (!msgBody.trim() && attachments.length === 0))
       return;
     const { value: scheduledFor, error: scheduleErr } = resolveScheduledFor();
@@ -3120,7 +3124,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   };
 
   const handleThreadReply = (contactPhone, ourNumber, customerId = null, replyTo = null) => {
-    if (sending || uploading || listening) return;
+    if (sending || uploading || hearing) return;
     selectSmsRecipient(contactPhone, ourNumber, customerId, replyTo);
     setSmsView("threads");
     setActiveThread(null);
@@ -3313,7 +3317,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           aria-label="Send from"
           value={fromNumber}
           onChange={(e) => setFromNumber(e.target.value)}
-          disabled={!!threadLock || sending || uploading || listening}
+          disabled={!!threadLock || sending || uploading || hearing}
           className={cn(
             "w-full bg-white border-hairline rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 min-h-[44px] md:min-h-0",
             "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
@@ -3346,7 +3350,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         <Input
           type="text"
           placeholder="Search by name or enter phone number…"
-          disabled={sending || uploading || listening}
+          disabled={sending || uploading || hearing}
           value={toSearch || toNumber}
           onChange={async (e) => {
             const val = e.target.value;
@@ -3392,7 +3396,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               <div
                 key={c.id}
                 onClick={() => {
-                  if (sending || uploading || listening) return;
+                  if (sending || uploading || hearing) return;
                   const name = getCustomerOptionName(c);
                   const selectedDraft = selectSmsRecipient(c.phone || "", null, c.id);
                   if (selectedDraft?.selectedCustomerId === c.id) setToSearch(`${name} — ${c.phone || ""}`);
@@ -3580,7 +3584,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               onClick={handleRewriteSms}
               disabled={
                 rewritingSms ||
-                listening ||
+                hearing ||
                 sending ||
                 uploading ||
                 !msgBody.trim()
@@ -3599,9 +3603,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               <Button
                 variant={listening ? "danger" : "secondary"}
                 onClick={toggleDictation}
-                disabled={rewritingSms}
-                aria-label={listening ? "Stop dictation" : "Start voice dictation"}
-                title={listening ? "Stop dictation" : "Start voice dictation"}
+                disabled={rewritingSms || dictation.uploading}
+                aria-busy={dictation.uploading || undefined}
+                aria-label={dictation.uploading ? "Transcribing" : listening ? "Stop dictation" : "Start voice dictation"}
+                title={dictation.uploading ? "Transcribing" : listening ? "Stop dictation" : "Start voice dictation"}
                 className={cn(
                   "sms-writing-tool ui-icon-action",
                   listening && "animate-pulse",
@@ -3809,7 +3814,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               uploading ||
               rewritingSms ||
               aiDrafting ||
-              listening ||
+              hearing ||
               // Mid-lookup send would go out WITHOUT the link the operator
               // just asked for (and clearing the recipient on send discards
               // the response) — wait out the link fetches.
@@ -3837,7 +3842,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <Button
             variant="secondary"
             onClick={handleAiDraft}
-            disabled={aiDrafting || sending || uploading || rewritingSms || listening || !toNumber.trim()}
+            disabled={aiDrafting || sending || uploading || rewritingSms || hearing || !toNumber.trim()}
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
@@ -3846,7 +3851,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <Button
             variant="secondary"
             className="mt-3"
-            disabled={sending || uploading || listening || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
+            disabled={sending || uploading || hearing || rewritingSms || aiDrafting || insertingResched || insertingReservice || !!insertingCustomerLink}
             onClick={leaveApprovalDraft}
           >
             Leave approval draft
@@ -4036,7 +4041,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                   <div
                     key={i}
                     onClick={() => {
-                      if (sending || uploading || listening) return;
+                      if (sending || uploading || hearing) return;
                       const openedThread = { ...t };
                       setActiveThread(openedThread);
                       setSmsView("conversation");
@@ -4165,7 +4170,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                   key={m.id}
                   msg={m}
                   onReply={(phone, from, customerId, replyTo) => {
-                    if (sending || uploading || listening) return;
+                    if (sending || uploading || hearing) return;
                     selectSmsRecipient(phone, from, customerId, replyTo);
                     // The admin shell scrolls .admin-main, not the window —
                     // window.scrollTo() is a no-op here.

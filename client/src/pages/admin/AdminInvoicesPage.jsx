@@ -8600,6 +8600,7 @@ function CreateInvoice({
                 />
                 <DictationButton
                   presentation="admin"
+                  dictationContext={{ customerId: selectedCustomer?.id || editInvoice?.customer_id }}
                   disabled={builderBusy}
                   onAppend={(t) => {
                     if (!builderBusy)
@@ -8667,6 +8668,7 @@ function CreateInvoice({
                   />
                   <DictationButton
                     presentation="admin"
+                    dictationContext={{ customerId: selectedCustomer?.id || editInvoice?.customer_id }}
                     disabled={builderBusy}
                     onAppend={(t) =>
                       !builderBusy &&
