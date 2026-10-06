@@ -2498,6 +2498,22 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:40AM + 3:00PM — AI Overview pinned-query captures (desktop +
+  // mobile, full overview text). No pinned query = no DataForSEO call. Paid
+  // job, so runExclusive keeps a deploy overlap from double-capturing.
+  for (const [cronExpr, pass] of [['40 3 * * *', 'am'], ['0 15 * * *', 'pm']]) {
+    cron.schedule(cronExpr, async () => {
+      if (!isEnabled('seoIntelligence')) return;
+      logger.info(`Running: AI Overview pinned captures (${pass})`);
+      try {
+        await runExclusive(`aio-pinned-capture-${pass}`, async () => {
+          const { runPinnedCaptures } = require('./seo/aio-pinned-capture');
+          await runPinnedCaptures({ pass });
+        });
+      } catch (err) { logger.error(`AI Overview pinned captures (${pass}) failed: ${err.message}`); }
+    }, { timezone: 'America/New_York' });
+  }
+
   // =========================================================================
   // MONTHLY, 1ST–7TH 6:20 AM ET — Annual rate review ranking batch (plan
   // annual-rate-review-2026-09-30 step 2). On the 1st it ranks every active

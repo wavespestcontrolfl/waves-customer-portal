@@ -167,11 +167,13 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     // sweep leaves it", not as the raw seed. The 2026-09-26 customer copy
     // audit then rewrites exactly that swept body (exact-body CAS), and the
     // 2026-09-28 "say Waves once" pass (owner report) rewrites that body
-    // again (also exact-body CAS) — same chained-before/after check one link
-    // further.
+    // again (also exact-body CAS), and the 2026-10-06 tighten pass (owner:
+    // "wordy", PR #6051) rewrites it once more — same chained-before/after
+    // check one link further each time.
     const stopSweep = require('../models/migrations/20260911000010_stop_line_off_remaining_transactional');
     const copyAudit = require('../models/migrations/20260926120000_customer_copy_audit_sms');
     const brandFix = require('../models/migrations/20260928210000_sms_brand_just_waves');
+    const tighten = require('../models/migrations/20261006220000_sms_template_tighten');
     const swept = stopSweep._dropStop(migration.TEMPLATE.body);
     const [, auditBefore, auditAfter] = copyAudit._SWAPS
       .find(([key]) => key === migration.TEMPLATE.template_key);
@@ -179,8 +181,11 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     const [, brandBefore, brandAfter] = brandFix._SWAPS
       .find(([key]) => key === migration.TEMPLATE.template_key);
     expect(brandBefore).toBe(auditAfter);
+    const [, tightenBefore, tightenAfter] = tighten._SWAPS
+      .find(([key]) => key === migration.TEMPLATE.template_key);
+    expect(tightenBefore).toBe(brandAfter);
     const row = await trx('sms_templates').where({ template_key: migration.TEMPLATE.template_key }).first();
-    expect(row.body).toBe(brandAfter);
+    expect(row.body).toBe(tightenAfter);
     expect(swept).not.toBe(migration.TEMPLATE.body);
     expect(row.variables).toEqual(['first_name', 'start_date', 'window_text']);
     await trx('sms_templates').where({ id: row.id }).update({ body: 'Administrator test edit' });
