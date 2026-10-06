@@ -658,8 +658,10 @@ const MEDICAL_CUES = [
 const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, call Poison Control at ${POISON_CONTROL_PHONE_DISPLAY} (free, confidential, 24/7). In an emergency, call 911.`;
 const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
 const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
-// "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
-const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you|they)(?:['’](?:ve|s|re|m|d))?\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b|\\b(?:i|we)\\s+(?:\\w+\\s+){0,2}?(?:go|going|went|be|been|walk\\w*|play\\w*|step\\w*|touch\\w*|smell\\w*|breath\\w*|sit|sat|stay\\w*|let\\s+(?:the|my|our))\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
+// "Me" and "us" count only as the object of a spray or contact verb
+// ("sprayed me", "got on us"); "explain to me" names no one exposed (Codex P2
+// #6016 r33).
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you|they)(?:['’](?:ve|s|re|m|d))?\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|\\b(?:spray\\w*|got|get|gets|landed|splash\\w*|drift\\w*|blew|dripp?\\w*)\\s+(?:\\w+\\s+){0,2}?(?:on\\s+|onto\\s+|at\\s+|in\\s+)?(?:me|us)\\b|\\b(?:i|we)\\s+(?:\\w+\\s+){0,2}?(?:go|going|went|be|been|walk\\w*|play\\w*|step\\w*|touch\\w*|smell\\w*|breath\\w*|sit|sat|stay\\w*|let\\s+(?:the|my|our))\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
@@ -671,7 +673,9 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
 // bait") (Codex P1 #6016 r32). No subject list can name every person.
 const INGESTION_VERB = /\b(?:swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
 const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
-const PEST_EATING = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|rats?|mice|mouse|rodents?|pests?|bugs?|insects?|termites?|squirrels?|raccoons?|fleas?|ticks?|spiders?|snails?|slugs?|wildlife|colony|colonies)\b[^.?!]{0,25}\b(?:ate|eaten|eating|eats|swallow\w*|consum\w*|lick\w*|chew\w*|nibbl\w*|took|taking|takes|feed\w*|carr\w*)\b|\b(?:eaten|consumed|taken)\s+by\s+(?:the\s+)?(?:ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)\b/i;
+// A pest word right before a product word names the product ("ant bait",
+// "rat poison"), not the eater (Codex P1 #6016 r33).
+const PEST_EATING = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|rats?|mice|mouse|rodents?|pests?|bugs?|insects?|termites?|squirrels?|raccoons?|fleas?|ticks?|spiders?|snails?|slugs?|wildlife|colony|colonies)\b(?!\s+(?:bait\w*|poison\w*|gel|killer|spray\w*|traps?|stations?|granules?|control|treatment|products?|pellets?|blocks?|dust|powder))[^.?!]{0,25}\b(?:ate|eaten|eating|eats|swallow\w*|consum\w*|lick\w*|chew\w*|nibbl\w*|took|taking|takes|feed\w*|carr\w*)\b|\b(?:eaten|consumed|taken)\s+by\s+(?:the\s+)?(?:ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)\b/i;
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence) && !PEST_EATING.test(sentence));
 }
