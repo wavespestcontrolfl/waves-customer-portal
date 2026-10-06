@@ -314,9 +314,14 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
   const primary = getPrimaryContact(customer);
   const recipients = [];
 
-  for (const slot of getServiceContactSlots(customer)) {
+  // Deny wins: an address recorded on any withheld slot is withheld, even when
+  // another slot carries it too.
+  const slots = getServiceContactSlots(customer);
+  const withheldEmails = new Set(slots.filter((slot) => slot.email && slotWithheldFromReports(customer, slot))
+    .map((slot) => cleanEmail(slot.email)));
+  for (const slot of slots) {
     const distinct = !!slot.email && !sameEmail(slot.email, primary.email);
-    if (!distinct || slotWithheldFromReports(customer, slot)) continue;
+    if (!distinct || withheldEmails.has(cleanEmail(slot.email))) continue;
     recipients.push({
       phone: slot.phone || primary.phone,
       email: slot.email,

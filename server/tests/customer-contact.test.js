@@ -364,6 +364,15 @@ describe('customer contact recipient routing', () => {
       .toEqual(['terry@example.com', 'lana@example.com']);
   });
 
+  test('deny wins: an email recorded on a tenant slot is withheld even when another slot repeats it', () => {
+    const dup = {
+      ...customer,
+      service_contact_role: 'tenant',
+      service_contact2_name: 'Terry Again', service_contact2_email: 'TERRY@example.com', service_contact2_role: 'home_buyer',
+    };
+    expect(getServiceReportEmailRecipients(dup, {}).map((r) => r.email)).toEqual(['lana@example.com']);
+  });
+
   test('a property profile whose account role is unknown withholds every unlabeled contact', () => {
     const unresolved = { ...customer, account_id: 'acct-1', is_primary_profile: false };
     expect(getServiceReportEmailRecipients(unresolved, {}).map((r) => r.email)).toEqual(['lana@example.com']);

@@ -22,8 +22,10 @@ async function summarySmsRecipient(customer, opts) {
   const primary = getPrimaryContact(customer);
   if (ContactReportText.enabled() && primary.phone) return primary;
   const recipient = await resolveServiceContactSmsRecipient(customer, opts);
-  const slot1 = getServiceContactSlots(customer)[0];
-  if (recipient?.role === 'service_contact' && slot1 && slotWithheldFromReports(customer, slot1)) {
+  // Deny wins: the slot-1 phone is withheld when any slot carrying it is.
+  const key = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  if (recipient?.role === 'service_contact' && getServiceContactSlots(customer)
+    .some((slot) => slot.phone && key(slot.phone) === key(recipient.phone) && slotWithheldFromReports(customer, slot))) {
     return { ...primary, role: 'primary' };
   }
   return recipient;

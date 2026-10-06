@@ -132,8 +132,9 @@ function projectTitle(project = {}) {
 // mail with no findings still reach the on-site person who preps the property.
 function resolveProjectEmailRecipient(customer = {}, { applyReportRule = false } = {}) {
   const serviceEmail = clean(customer.service_contact_email);
-  const slot1 = getServiceContactSlots(customer)[0];
-  const withheld = applyReportRule && slot1 && slotWithheldFromReports(customer, slot1);
+  // Deny wins: slot 1's address is withheld when any slot carrying it is.
+  const withheld = applyReportRule && isEmailLike(serviceEmail) && getServiceContactSlots(customer)
+    .some((slot) => cleanEmail(slot.email) === cleanEmail(serviceEmail) && slotWithheldFromReports(customer, slot));
   if (isEmailLike(serviceEmail) && !withheld) {
     const service = getServiceContact(customer);
     return {

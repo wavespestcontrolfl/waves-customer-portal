@@ -78,11 +78,13 @@ function slotContacts(customer) {
   const {
     getAppointmentContacts, getServiceContactSlots, isServiceContactRole, slotWithheldFromReports,
   } = require('./customer-contact');
-  const withheld = new Set(getServiceContactSlots(customer)
-    .filter((slot) => slotWithheldFromReports(customer, slot))
-    .map((slot) => slot.role));
+  // Deny wins: a phone recorded on any withheld slot is withheld, even when
+  // another slot carries it too.
+  const withheldPhones = new Set(getServiceContactSlots(customer)
+    .filter((slot) => slot.phone && slotWithheldFromReports(customer, slot))
+    .map((slot) => phoneKey(slot.phone)));
   return getAppointmentContacts(customer, { appointment_notify_primary: false })
-    .filter((c) => isServiceContactRole(c.role) && !withheld.has(c.role));
+    .filter((c) => isServiceContactRole(c.role) && !withheldPhones.has(phoneKey(c.phone)));
 }
 
 // The contacts who get the report text, by the appointment-text rule. An

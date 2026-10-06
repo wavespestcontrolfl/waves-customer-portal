@@ -149,6 +149,12 @@ describe('queueContactReportTexts', () => {
     expect(inserts().map((r) => r.to_phone)).toEqual(['941-555-0456']);
   });
 
+  test('deny wins: a phone recorded on a tenant slot gets no report text even through another slot', async () => {
+    queueReads({ ...CUSTOMER, service_contact_role: 'tenant', service_contact2_phone: '941.555.0123', service_contact2_role: 'home_buyer' });
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(0);
+    expect(inserts()).toEqual([]);
+  });
+
   test('each contact is greeted by their own first name; a nameless contact is never greeted by the account holder\'s', async () => {
     queueReads({ ...CUSTOMER, service_contact2_name: null });
     expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(2);

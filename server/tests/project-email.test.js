@@ -195,6 +195,12 @@ describe('resolveProjectEmailRecipient: the tenant report rule', () => {
       .toBe('riley@example.com');
   });
 
+  test('deny wins: slot 1\'s address is withheld when a tenant slot repeats it', () => {
+    expect(ProjectEmail.resolveProjectEmailRecipient({
+      ...base, service_contact2_name: 'Riley', service_contact2_email: 'Riley@example.com', service_contact2_role: 'tenant',
+    }, { applyReportRule: true }).email).toBe('dana@example.com');
+  });
+
   test('prep mail with no findings (the default) still reaches the on-site tenant', () => {
     expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, service_contact_role: 'tenant' }).email).toBe('riley@example.com');
   });
