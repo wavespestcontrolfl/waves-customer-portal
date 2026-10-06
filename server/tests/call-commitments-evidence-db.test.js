@@ -379,6 +379,67 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { kind: 'outbound_call', record_id: back.id, strength: 'direct' } });
   });
 
+  test('a promise to call is also kept by a Call Log callback-card leg correlated to the source call, on the card policy\'s stricter customer-leg bar', async () => {
+    const cardCall = (w, extra = {}, leg = { status: 'completed', duration_seconds: 90 }) => db('call_log').insert({
+      twilio_call_sid: `CA${'2'.repeat(24)}${w.n}cd${Object.keys(extra).length}${Math.random().toString(36).slice(2, 5)}`, direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone,
+      status: 'completed', duration_seconds: 5, customer_id: w.customerId, created_at: later(), source: 'admin-callback',
+      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }),
+      metadata: JSON.stringify({ relatedCallId: w.call.id, callback_policy: 'card', customer_leg: leg }), ...extra,
+    }).returning('id').then(([r]) => { made.callIds.push(r.id); return r; });
+    // Staff leg only (customer never picked up), a short customer leg, voicemail: none keeps it.
+    for (const [extra, leg] of [[{}, { status: 'no-answer', duration_seconds: 0 }], [{}, { status: 'completed', duration_seconds: 30 }], [{ ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }, undefined]]) {
+      const w = await world({ kind: 'other', channel: 'call' });
+      await cardCall(w, extra, leg);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    }
+    const w = await world({ kind: 'other', channel: 'call' });
+    const done = await cardCall(w);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { kind: 'outbound_call', record_id: done.id } });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+    // The proof call reprocessed to voicemail: the scan lists it and the promise reopens.
+    await db('call_log').where({ id: done.id }).update({ ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(w.call.id);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+  });
+
+  test('the lapse scan mirrors the promise medium for every proof kind: a text, a call or an estimate that no longer matches a reworded or re-channelled "other" promise reopens it', async () => {
+    const closeWith = async (attrs, proofFor) => {
+      const w = await world({ kind: 'other', ...attrs });
+      const proof = { strength: 'association', closed_by: 'promise_evidence', judged_customer_id: w.customerId, closed_at: new Date().toISOString(), matched_at: later().toISOString(), ...(await proofFor(w)) };
+      await db('call_commitments').where({ id: w.commitment.id }).update({ status: 'fulfilled', fulfillment: JSON.stringify(proof), fulfilled_at: later() });
+      return w;
+    };
+    const textProof = async (w) => ({ kind: 'sms_sent', record_type: 'sms_log', record_id: (await staffText(w)).id, basis: 'text_sent_to_caller_within_14_days' });
+    const callProof = async (w) => ({ kind: 'outbound_call', record_type: 'call_log', record_id: (await outboundCall(w)).id, basis: 'outbound_call_to_caller_within_14_days' });
+    const estimateProof = async (w) => ({ kind: 'estimate_sent', record_type: 'estimate', record_id: (await estimate(w)).id, basis: 'estimate_sent_to_same_customer_within_14_days' });
+    const stale = [
+      await closeWith({ channel: 'call' }, textProof), // a text on a promise now channelled call
+      await closeWith({ description: 'Call the customer with the pricing' }, textProof), // reworded to call
+      await closeWith({ description: 'Add them to the email list' }, textProof), // reworded to neither
+      await closeWith({ channel: 'sms' }, callProof),
+      await closeWith({ description: 'Text appointment options' }, callProof),
+      await closeWith({ channel: 'email' }, callProof),
+      await closeWith({ description: 'Phone them with the quote' }, estimateProof),
+      await closeWith({ channel: 'sms' }, estimateProof),
+    ];
+    const fine = [
+      await closeWith({ channel: 'sms' }, textProof),
+      await closeWith({ description: 'Text appointment options' }, textProof),
+      await closeWith({ channel: 'call' }, callProof),
+      await closeWith({ description: 'Call the customer with the pricing' }, callProof),
+      await closeWith({ description: 'Add them to the email list' }, estimateProof),
+    ];
+    const listed = await cc.listLapsedEvidenceClosedCallIds(db);
+    for (const w of stale) expect(listed).toContain(w.call.id);
+    for (const w of fine) expect(listed).not.toContain(w.call.id);
+    for (const w of stale) {
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfilled_at: null });
+    }
+  });
+
   test('an "other" promise with no channel whose words say call is kept by a call placed, never by an estimate', async () => {
     const w = await world({ kind: 'other', description: 'Call the customer with the pricing' });
     await estimate(w);

@@ -1818,6 +1818,19 @@ async function textToCaller(conn, { after, until = null, phone, customerId }) {
   return row ? { id: row.id, at: row.created_at } : null;
 }
 
+// A call placed to the caller that keeps an "other" call promise: a staff-bridge
+// call that reached them (returnedOutboundCall, which leaves out every
+// card-policy call), or a completed card-policy customer leg for this promise or
+// its source call (cardConnectedCall's stricter bar). The earlier wins.
+async function callPlacedTo(conn, x, commitment) {
+  if (!x.phone && !x.customerId) return null;
+  const plain = await returnedOutboundCall(conn, x);
+  const card = commitment ? await cardConnectedCall(conn, commitment, x) : null;
+  const cardHit = card ? { id: card.id, at: cardCallAt(card) } : null;
+  if (plain && cardHit) return new Date(plain.at).getTime() <= new Date(cardHit.at).getTime() ? plain : cardHit;
+  return plain || cardHit;
+}
+
 // name → how to look, and what the proof is called.
 const EVIDENCE = {
   visit_done: { find: completedVisit, kind: "visit_completed", type: "scheduled_service", basis: `visit_completed_for_same_customer_${WITHIN}` },
@@ -1825,7 +1838,7 @@ const EVIDENCE = {
   report_text: { find: reportTextTo, kind: "sms_sent", type: "sms_log", basis: `service_report_text_to_caller_${WITHIN}` },
   report_email: { find: reportEmailTo, kind: "email_sent", type: "email_message", basis: `service_report_email_to_customer_${WITHIN}` },
   text_sent: { find: textToCaller, kind: "sms_sent", type: "sms_log", basis: `text_sent_to_caller_${WITHIN}` },
-    call_placed: { find: (conn, x) => (x.phone || x.customerId ? returnedOutboundCall(conn, x) : null), kind: "outbound_call", type: "call_log", basis: `outbound_call_to_caller_${WITHIN}` },
+    call_placed: { find: callPlacedTo, kind: "outbound_call", type: "call_log", basis: `outbound_call_to_caller_${WITHIN}` },
 };
 // Kind → the follow-up evidence beyond what its own case already looks for.
 // Each name answers "what keeps THIS kind of promise" and nothing else: a
@@ -1859,8 +1872,14 @@ const PROMISE_WORD_RES = Object.freeze({
   text: new RegExp(`\\b${wordsRegexSource(PROMISE_WORDS.text)}\\b`, "i"),
   call: new RegExp(`\\b${wordsRegexSource(PROMISE_WORDS.call)}\\b`, "i"),
 });
-// The same words for Postgres (~*): \m / \M are its word edges.
-const PROMISE_WORDS_SQL = `\\m${wordsRegexSource([...PROMISE_WORDS.text, ...PROMISE_WORDS.call])}\\M`;
+// The same words for Postgres (~*): \m / \M are its word edges. The SQL twin
+// of otherPromiseMedia over a call_commitments alias: the channel names the
+// medium, else (channel absent or unknown) the words do.
+const promiseWordsSql = (medium) => `\\m${wordsRegexSource(PROMISE_WORDS[medium])}\\M`;
+const promiseMediumSql = (medium, cc = "cc") => {
+  const channelOf = { text: "sms", call: "call" }[medium];
+  return `(COALESCE(${cc}.channel, 'unknown') = '${channelOf}' OR (COALESCE(${cc}.channel, 'unknown') = 'unknown' AND COALESCE(${cc}.description, '') ~* '${promiseWordsSql(medium)}'))`;
+};
 // The media a catch-all promise names: its channel, else its words. A promise
 // that names both ("call or text") is kept by either.
 function otherPromiseMedia(commitment) {
@@ -1921,7 +1940,7 @@ async function associationProof(ctx, tries) {
   }
   const extra = evidenceNamesFor(commitment).map((name) => async () => {
     const spec = EVIDENCE[name];
-    const hit = await spec.find(conn, ctx.associated);
+    const hit = await spec.find(conn, ctx.associated, commitment);
     return hit ? { kind: spec.kind, record_type: spec.type, record_id: hit.id, matched_at: hit.at, strength: "association", basis: spec.basis } : null;
   });
   // The earliest proof that can close the promise wins; a hint_only proof (a
@@ -2060,6 +2079,31 @@ async function resolveAppointmentConfirmation({ conn, commitment, phone, custome
   return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
 }
 
+// A card-policy attempt (the callback card, or the Call Log action's
+// source-call link) whose CUSTOMER leg completed >= 60 s with a reviewed
+// extraction of a real conversation: the stricter bar a card call needs (the
+// stored parent-leg duration and status are the staff leg's). Shared by the
+// callback proof and by an "other" call promise, which the same Call Log
+// action can return. Answers the call row, or null.
+async function cardConnectedCall(conn, commitment, { after, phone, customerId }) {
+  if (!phone) return null;
+  const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
+  return conn('call_log').where('direction', 'outbound')
+    .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+    .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+    .whereRaw(policyLink, [commitment.id, commitment.call_log_id])
+    .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+    .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+    .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+    .modify((b) => { phoneWhere(b, 'to_phone', phone); if (customerId) b.where('customer_id', customerId); })
+    .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+}
+// When that call kept the promise: the customer leg's end, not the staff dial.
+const cardCallAt = (call) => {
+  const legEnded = Date.parse(call.metadata?.customer_leg?.ended_at || '');
+  return Number.isFinite(legEnded) ? new Date(legEnded) : call.created_at;
+};
+
 async function resolveCallback(ctx) {
   const { conn, commitment, after, phone, customerId, evidence } = ctx;
   // A call with no usable contact phone (blocked caller ID) has no
@@ -2084,22 +2128,12 @@ async function resolveCallback(ctx) {
   // text-fallback suppressor.
   const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
   const policyBindings = [commitment.id, commitment.call_log_id];
-  const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
-  const connected = phone && await conn('call_log').where('direction', 'outbound')
-    .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-    .where('created_at', '>', after).where('v2_extraction_status', 'valid')
-    .whereRaw(policyLink, policyBindings)
-    .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
-    .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
-    .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
-    .modify((b) => { phoneWhere(b, 'to_phone', phone); sameCustomer(b, 'customer_id'); })
-    .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+  const connected = await cardConnectedCall(conn, commitment, { after, phone, customerId });
   if (connected) {
     // The proof is the completed customer leg, so the promise is kept
     // when that leg ended, not when the staff leg was dialed.
-    const legEnded = Date.parse(connected.metadata?.customer_leg?.ended_at || '');
     return { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
-      matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
+      matched_at: cardCallAt(connected),
       strength: 'direct', basis: 'callback_customer_conversation' };
   }
   // A returned callback IS the fulfilment — the phone is the linkage.
@@ -2698,6 +2732,14 @@ async function listSlotKeptCallIds(conn) {
 // calls and estimates are not taken back. Nothing while the switch is off
 // (refreshFulfillment does not re-judge those rows then).
 const LAPSE_SCAN_DAYS = 30;
+// A card-policy call that reached the customer, as SQL over a call_log alias:
+// the same stricter bar cardConnectedCall reads (a valid extraction of a live
+// conversation, the customer leg completed >= 60 s).
+const cardLegSql = (t) => `(${t}.v2_extraction_status = 'valid'
+  AND ${t}.ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'
+  AND ${t}.metadata->'customer_leg'->>'status' = 'completed'
+  AND CASE WHEN ${t}.metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (${t}.metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END)`;
+
 async function listLapsedEvidenceClosedCallIds(conn) {
   if (!promiseEvidenceCloseLive()) return [];
   // The recent automatic closes first (a handful, off the partial index
@@ -2737,9 +2779,12 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           -- text or call (read by the same channel / words rule as
           -- otherPromiseMedia, from the one PROMISE_WORDS table).
           OR ((cc.fulfillment ->> 'kind') = 'estimate_sent'
-              AND (cc.kind = 'callback'
-                OR (cc.kind = 'other' AND (cc.channel IN ('sms', 'call')
-                  OR (COALESCE(cc.channel, 'unknown') = 'unknown' AND cc.description ~* '${PROMISE_WORDS_SQL}')))))
+              AND (cc.kind = 'callback' OR (cc.kind = 'other' AND (${promiseMediumSql('text')} OR ${promiseMediumSql('call')}))))
+          -- ... and, for an "other" promise a reprocess has since reworded or
+          -- moved to another channel (otherPromiseMedia's SQL twin): a text
+          -- that keeps only a text promise, a call that keeps only a call one.
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'sms_sent' AND NOT ${promiseMediumSql('text')})
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'outbound_call' AND NOT ${promiseMediumSql('call')})
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           -- A close resting on a call (the customer phoning in): the evidence
@@ -2753,8 +2798,9 @@ async function listLapsedEvidenceClosedCallIds(conn) {
                 -- it must still be a staff-bridge call that reached the customer
                 -- (personCallBack's SQL twin, >= 60 s), or a reprocess that
                 -- reads it as voicemail / invalid reopens the promise.
-                OR ((cc.fulfillment ->> 'kind') = 'outbound_call'
-                  AND (ev.direction IS DISTINCT FROM 'outbound' OR COALESCE(ev.duration_seconds, 0) < 60 OR (${personCallBackSql('ev')}) IS NOT TRUE))
+                OR ((cc.fulfillment ->> 'kind') = 'outbound_call' AND (ev.direction IS DISTINCT FROM 'outbound'
+                  OR (CASE WHEN ev.metadata->>'callback_policy' = 'card' THEN (${cardLegSql('ev')})
+                    ELSE (COALESCE(ev.duration_seconds, 0) >= 60 AND ${personCallBackSql('ev')}) END) IS NOT TRUE))
                 -- A model-judged close on a person's call back: it must still
                 -- be a call a person placed that reached the customer
                 -- (personCallBack, read from the same extraction fields).
