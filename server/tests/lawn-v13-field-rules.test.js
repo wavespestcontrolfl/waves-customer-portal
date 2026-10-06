@@ -69,6 +69,29 @@ describe('recipe text', () => {
     for (const month of ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jul', 'Oct', 'Nov', 'Dec']) expect(visit(grass, month).notes).not.toMatch(/North Port: skip Nutra-TECH/);
   });
 
+  test.each(TRACKS)('%s: North Port April gets no fertilizer and no Nutra-TECH (inspect and spot work only)', (grass) => {
+    const track = v13[grass];
+    expect(JSON.stringify(track)).not.toMatch(/April to Nutra-TECH|swaps? April/);
+    expect(visit(grass, 'Mar').notes).toContain('April is inspect and spot work only, with no fertilizer of any kind');
+    expect(visit(grass, 'Apr').notes).toContain('North Port: no fertilizer or Nutra-TECH on this visit, inspect and spot work only, until the city confirms.');
+    expect(track.notes.find((line) => line.startsWith('North Port: no Nutra-TECH'))).toMatch(/no fertilizer or Nutra-TECH on the April visit/);
+    expect(track.safety_rules.find((line) => line.startsWith('North Port: no Nutra-TECH'))).toMatch(/no fertilizer or Nutra-TECH in April/);
+    // The April recipe lines keep the N rows the ordinance check already holds back; no Nutra-TECH line is added.
+    expect(visit(grass, 'Apr').primary).not.toMatch(/Nutra-TECH/);
+    expect(visit(grass, 'Apr').cadenceVariants['9'].primary).not.toMatch(/Nutra-TECH/);
+  });
+
+  test('no staged April row delivers Nutra-TECH, so there is nothing for the product window to gate there', () => {
+    const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
+    const april = staged.PRODUCTS.filter(([windowKey]) => windowKey === 'apr_v13_spreader_feeding').map(([, spec]) => spec[0]);
+    expect(april.length).toBeGreaterThan(0);
+    expect(april).not.toContain(staged.NAMES.NT);
+    // The summer Nutra-TECH rows are the ones the migration gates.
+    for (const windowKey of rules.NORTH_PORT_WINDOWS) {
+      expect(staged.PRODUCTS.some(([key, spec]) => key === windowKey && spec[0] === staged.NAMES.NT)).toBe(true);
+    }
+  });
+
   test('the tracks stay one program (identical but for the name)', () => {
     const body = ({ name, ...rest }) => JSON.stringify(rest);
     for (const grass of TRACKS) expect(body(v13[grass])).toBe(body(v13.st_augustine));
