@@ -123,6 +123,24 @@ beforeEach(() => {
   mockActivePlanCustomer.mockReset().mockResolvedValue(false);
 });
 
+test('lawn_pricing_v2 offers bahia as a new lawn plan only while GATE_LAWN_V13 is off', async () => {
+  const prior = process.env.GATE_LAWN_V13;
+  mockPricingConfigRow = { config_key: 'lawn_pricing_v2', data: {} };
+  try {
+    await withServer(async (baseUrl) => {
+      for (const [gate, offered] of [[undefined, true], ['false', true], ['1', true], ['true', false]]) {
+        if (gate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = gate;
+        const response = await call(baseUrl, 'GET', '/lawn_pricing_v2', { role: 'admin' });
+        expect(response.status).toBe(200);
+        expect(response.json.subFeaturesAvailable.bahiaOffered).toBe(offered);
+        expect(response.json.subFeaturesAvailable).toHaveProperty('bermudaSuppression');
+      }
+    });
+  } finally {
+    if (prior === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = prior;
+  }
+});
+
 test('annual availability follows both prerequisite gates at request time', async () => {
   const keys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
   const prior = keys.map((key) => process.env[key]);

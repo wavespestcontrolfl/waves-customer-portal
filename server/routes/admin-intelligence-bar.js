@@ -2042,6 +2042,13 @@ function getConfirmedActionIdempotencyKey(req, params) {
 }
 
 // Context-specific system prompt extensions
+// The lawn tracks the estimate prompt names: the v13 program (GATE_LAWN_V13) has no bahia track,
+// so a bahia lawn is parked for review rather than offered as a track. Read per request.
+function lawnTracksPromptText() {
+  if (require('../config/feature-gates').lawnV13Live?.() !== true) return 'st_augustine, bermuda, zoysia, bahia';
+  return 'st_augustine, bermuda, zoysia (bahia has no v13 program: a bahia lawn is parked for review, never priced as a plan)';
+}
+
 const CONTEXT_PROMPTS = {
   agent_estimate: `
 AGENT ESTIMATE CONTEXT:
@@ -2474,7 +2481,7 @@ QUOTING WORKFLOW:
 ENGINE BASICS (so you can explain numbers):
 - Loaded labor rate: $35/hr
 - Pest frequencies: quarterly (~90d), bimonthly (~60d), monthly (~30d)
-- Lawn tracks: st_augustine, bermuda, zoysia, bahia. Tiers: basic, enhanced, premium
+- Lawn tracks: __LAWN_TRACKS__. Tiers: basic, enhanced, premium
 - WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+). The tier is a label the office sets; changing it changes NO price. Prices change only through a new estimate or a monthly-rate edit, so never tell the operator a discount "will apply" after a tier change. monthly_rate is the customer's whole monthly bill (all services summed; get_customer_detail shows the lines as monthly_bill).
 - Default sqft if unknown: 2000. Default lot: 4× home sqft.
 
@@ -3041,7 +3048,8 @@ async function runQuery(req, res, next) {
     // Build context-aware system prompt
     let systemPrompt = SYSTEM_PROMPT;
     if (context && CONTEXT_PROMPTS[context]) {
-      systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
+      // The lawn track list follows GATE_LAWN_V13 (bahia has no v13 program), read per request.
+      systemPrompt += '\n\n' + CONTEXT_PROMPTS[context].replace('__LAWN_TRACKS__', lawnTracksPromptText());
     }
     // Infra tools load on every admin context (getToolsForContext), so their
     // guidance rides along for every admin request. The tech and

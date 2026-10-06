@@ -891,6 +891,9 @@ function generateEstimate(input) {
         lawnLaborMinutesBase: services.lawn.lawnLaborMinutesBase ?? input.lawnLaborMinutesBase,
         lawnLaborMinutesPerK: services.lawn.lawnLaborMinutesPerK ?? input.lawnLaborMinutesPerK,
         bermudaSuppression: services.lawn.bermudaSuppression === true,
+        // A stored estimate replayed as sold (extractEngineInputs, the persisted-replay recompute)
+        // keeps its price; only a fresh bahia quote is parked under GATE_LAWN_V13.
+        skipBahiaNoProgramReview: input.savedEstimateReplay === true,
       });
       lineItems.push(result);
       activeServiceKeys.push('lawn_care');

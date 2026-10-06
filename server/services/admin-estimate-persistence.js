@@ -1218,6 +1218,9 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // above, and every other save prices off freshly synced live config and
   // stamps the resulting server values afterward.
   if (deps.replaySavedPricingKnobs === true) {
+    // A persisted estimate re-priced as it was sold: the lawn pricer's v13 bahia review (new
+    // quotes only) must not park an estimate that was already issued.
+    v1Input.savedEstimateReplay = true;
     // Lawn cost floor, lawn program minimum and pest program floor. The public
     // read path has threaded these since #2827 (savedFloorReplayOverrides);
     // this branch did not, so an authoritative recompute resolved them from

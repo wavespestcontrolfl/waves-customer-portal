@@ -1,4 +1,4 @@
-// GET /api/admin/protocols/completion-actions with GATE_LAWN_V13 on: Celsius and Blindside are not
+// GET /api/admin/protocols/completion-actions, /lawn/active and /lawn/window with GATE_LAWN_V13 on: Celsius and Blindside are not
 // labeled for bahiagrass, so v13 has no bahia track (owner 2026-10-06). An explicit bahia lawn gets the
 // same no-program answer here as in the plan, never the St. Augustine chips; mixed and unknown lawns
 // keep the one-program fallback; with the gate off the old bahia track still answers.
@@ -69,4 +69,20 @@ test('gate off: the old bahia track still answers', async () => {
   const res = await completionActions({ grassType: 'bahia' });
   expect(res.status).not.toHaveBeenCalled();
   expect(res.json.mock.calls[0][0]).toMatchObject({ track: 'bahia' });
+});
+
+// The structured readers never serve the staged bahia protocol (swfl_bahia_10_10) for planning.
+describe.each([['/lawn/active'], ['/lawn/window']])('GET %s with GATE_LAWN_V13 on', (path) => {
+  const route = adminProtocolsRouter.stack.find((layer) => layer.route?.path === path && layer.route.methods.get).route.stack[0].handle;
+
+  test.each([['grassTrack'], ['grass_track']])('?%s=bahia is the same no-program 404, with no database read', async (param) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    db.mockImplementation(() => { throw new Error('the staged bahia rows must not be read'); });
+    const res = { json: jest.fn(), status: jest.fn() };
+    res.status.mockReturnValue(res);
+    const next = jest.fn();
+    await route({ query: { [param]: 'bahia' } }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
 });

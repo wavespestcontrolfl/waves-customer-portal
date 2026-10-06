@@ -140,7 +140,11 @@ describeDb('the v13 plan through PostgreSQL', () => {
   // Celsius and Blindside are not labeled for bahiagrass, so v13 has no bahia track (owner 2026-10-06):
   // an explicit bahia lawn plans nothing and never borrows the St. Augustine program.
   describe.each(PREREQ)('an explicit bahia lawn: completion defaults %s, property history %s', (completion, history) => {
-    test.each([['grass_type', { grass_type: 'bahia', track_key: null }], ['track_key', { grass_type: null, track_key: 'bahia' }]])('recorded by %s: the bahia block, no products, no amounts', async (_name, turf) => {
+    test.each([
+      ['grass_type', { grass_type: 'bahia', track_key: null }], ['track_key', { grass_type: null, track_key: 'bahia' }],
+      ['grass_type bahia over track_key st_augustine', { grass_type: 'bahia', track_key: 'st_augustine' }],
+      ['track_key bahia over grass_type st_augustine', { grass_type: 'st_augustine', track_key: 'bahia' }],
+    ])('recorded by %s: the bahia block, no products, no amounts', async (_name, turf) => {
       setGates({ v13: 'on', completion, history });
       const result = await plan(await plannedVisit({}, turf));
       expect(codes(result)).toContain('lawn_v13_bahia_no_program');

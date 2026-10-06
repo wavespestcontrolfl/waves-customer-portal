@@ -134,7 +134,10 @@ describe('gate off is byte-identical for the readers', () => {
     const date = new Date(Date.UTC(2026, 1, 15, 16));
     expect(v13.bahia).toBeUndefined();
     withGate('true', () => {
-      for (const [profile, legacy] of [[{ grass_type: 'bahia' }, null], [{ track_key: 'bahia' }, null], [{ grass_type: 'bahia', track_key: 'bahia' }, null], [{ grass_type: 'mixed', track_key: 'bahia' }, null], [null, 'Argentine Bahia']]) {
+      for (const [profile, legacy] of [[{ grass_type: 'bahia' }, null], [{ track_key: 'bahia' }, null], [{ grass_type: 'bahia', track_key: 'bahia' }, null], [{ grass_type: 'mixed', track_key: 'bahia' }, null],
+        // Either field naming bahia ends the lookup, whichever other track the other field names.
+        [{ grass_type: 'bahia', track_key: 'st_augustine' }, null], [{ grass_type: 'st_augustine', track_key: 'bahia' }, null],
+        [{ grass_type: 'bahia', track_key: 'zoysia' }, null], [{ grass_type: 'bermuda', track_key: 'bahia' }, null], [null, 'Argentine Bahia']]) {
         for (const requireKnownGrass of [false, true]) {
           const got = engine.selectProtocolVisit(profile, date, legacy, { requireKnownGrass });
           expect({ profile, legacy, trackKey: got.trackKey, track: got.track, visit: got.visit, noProgram: got.v13NoProgram }).toEqual({ profile, legacy, trackKey: null, track: null, visit: null, noProgram: true });
@@ -151,6 +154,14 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.trackKey).toBe('st_augustine');
         expect('v13NoProgram' in got).toBe(false);
       }
+    });
+  });
+
+  test('gate off: conflicting recorded fields resolve as before (the explicit track key wins), no flag', () => {
+    withGate(undefined, () => {
+      const got = engine.selectProtocolVisit({ grass_type: 'bahia', track_key: 'st_augustine' }, new Date(Date.UTC(2026, 1, 15, 16)));
+      expect(got.trackKey).toBe('st_augustine');
+      expect('v13NoProgram' in got).toBe(false);
     });
   });
 
@@ -297,7 +308,7 @@ function recordingKnex() {
   const calls = [];
   const knex = (table) => {
     const b = {};
-    for (const m of ['where', 'orWhere', 'orderBy', 'orderByRaw']) {
+    for (const m of ['where', 'whereNot', 'orWhere', 'orderBy', 'orderByRaw']) {
       b[m] = (...args) => {
         if (typeof args[0] === 'function') {
           const inner = {};
@@ -331,7 +342,8 @@ describe('getActiveLawnProtocol', () => {
     const { knex, calls } = recordingKnex();
     await withGateAsync('true', () => getActiveLawnProtocol(knex, { grassTrack: 'bermuda', region: 'swfl', planning: true }));
     expect(calls).toEqual([
-      ['table', 'lawn_protocols'], ['where', { status: 'staged', version: LAWN_V13_VERSION }],
+      // The staged bahia rows are never served for planning (the v13 program has no bahia track).
+      ['table', 'lawn_protocols'], ['where', { status: 'staged', version: LAWN_V13_VERSION }], ['whereNot', 'grass_track', 'bahia'],
       ['orderBy', 'effective_from', 'desc'], ['orderBy', 'created_at', 'desc'],
       ['where', { grass_track: 'bermuda' }], ['where', { region: 'swfl' }],
     ]);
@@ -347,10 +359,12 @@ describe('getActiveLawnProtocol', () => {
   function tableKnex(protocols) {
     return (table) => {
       const conds = [];
+      const nots = [];
       const b = {
         where(obj) { conds.push(obj); return b; },
+        whereNot(column, value) { nots.push([column, value]); return b; },
         orderBy() { return b; },
-        first() { return Promise.resolve(table === 'lawn_protocols' ? protocols.find((row) => conds.every((c) => Object.entries(c).every(([k, v]) => row[k] === v))) : undefined); },
+        first() { return Promise.resolve(table === 'lawn_protocols' ? protocols.find((row) => conds.every((c) => Object.entries(c).every(([k, v]) => row[k] === v)) && nots.every(([k, v]) => row[k] !== v)) : undefined); },
         then(resolve) { return Promise.resolve([]).then(resolve); },
       };
       return b;
@@ -358,6 +372,32 @@ describe('getActiveLawnProtocol', () => {
   }
   const ACTIVE = { id: 'a1', protocol_key: 'k', version: '2026.06', status: 'active', grass_track: 'bermuda', region: 'swfl' };
   const STAGED = { id: 's1', protocol_key: 'k', version: LAWN_V13_VERSION, status: 'staged', grass_track: 'bermuda', region: 'swfl' };
+
+  // The v13 program has no bahia track: the staged bahia rows stay in the table for history but are
+  // never served for planning, whatever the caller filters on.
+  const STAGED_BAHIA = { id: 's2', protocol_key: 'swfl_bahia_10_10', version: LAWN_V13_VERSION, status: 'staged', grass_track: 'bahia', region: 'swfl' };
+
+  test('gate on, planning caller: the staged bahia protocol is never served', async () => {
+    const rows = tableKnex([STAGED_BAHIA, STAGED]);
+    for (const filters of [{ grassTrack: 'bahia', region: 'swfl' }, { grassTrack: 'bahia', protocolKey: 'swfl_bahia_10_10' }, { protocolKey: 'swfl_bahia_10_10' }]) {
+      expect(await withGateAsync('true', () => getActiveLawnProtocol(rows, { ...filters, planning: true }))).toBeNull();
+    }
+    // With no track filter the bahia row is skipped, not returned ahead of the real tracks.
+    expect((await withGateAsync('true', () => getActiveLawnProtocol(rows, { region: 'swfl', planning: true }))).grass_track).toBe('bermuda');
+    // Gate off, and a historical reader, keep the old reads (bahia has its own active protocol then).
+    const active = { ...STAGED_BAHIA, id: 'a2', version: '2026.06', status: 'active' };
+    expect((await withGateAsync(undefined, () => getActiveLawnProtocol(tableKnex([active]), { grassTrack: 'bahia', planning: true }))).id).toBe('a2');
+    expect((await withGateAsync('true', () => getActiveLawnProtocol(tableKnex([active]), { grassTrack: 'bahia' }))).id).toBe('a2');
+  });
+
+  test('a visit pinned to the staged bahia version plans from no protocol; a historical read still gets it', async () => {
+    const { getProtocolWindowContext } = require('../services/lawn-protocol-operating-layer');
+    const knex = tableKnex([STAGED_BAHIA]);
+    const pinned = { protocolId: 's2', region: 'swfl' };
+    expect(await withGateAsync('true', () => getProtocolWindowContext(knex, { ...pinned, planning: true }))).toBeNull();
+    expect((await withGateAsync('true', () => getProtocolWindowContext(knex, pinned))).protocol.grass_track).toBe('bahia');
+    expect((await withGateAsync(undefined, () => getProtocolWindowContext(knex, { ...pinned, planning: true }))).protocol.grass_track).toBe('bahia');
+  });
 
   test('gate on with the staged row missing returns nothing instead of the old active version', async () => {
     const filters = { grassTrack: 'bermuda', region: 'swfl', planning: true };

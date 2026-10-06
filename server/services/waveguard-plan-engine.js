@@ -1166,27 +1166,26 @@ function explicitBahia(profile, legacyGrass, profileRecorded) {
   return bahia ? 'bahia' : null;
 }
 
-// Only a v13 plan of a bahia lawn carries the flag; every other result keeps its old shape.
-function noProgramFlag(track, grass) {
-  return !track && lawnV13NoProgramGrass(grass) ? { v13NoProgram: true } : {};
-}
-
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
   const profileRecorded = [profile?.track_key, profile?.grass_type]
     .some((value) => String(value || '').trim());
   const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const grass = explicitBahia(profile, legacyGrass, profileRecorded);
+  // GATE_LAWN_V13: any recorded field that says bahia ends the lookup here, before another
+  // recorded value (a conflicting track key or grass type) can pick a track. Only this
+  // result carries the flag; every other keeps its old shape.
+  if (lawnV13NoProgramGrass(grass)) return { trackKey: null, track: null, month, visit: null, v13NoProgram: true };
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
-    // free text) runs the one v13 program instead of blocking the visit. Bahiagrass
-    // is the exception: it has no v13 program and never borrows another grass's.
-    || (recorded ? lawnV13AnyGrassTrack(grass) : null)
+    // free text) runs the one v13 program instead of blocking the visit (bahia never
+    // reaches this: it returned above).
+    || (recorded ? lawnV13AnyGrassTrack() : null)
     || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? lawnProtocols()?.[trackKey] : null;
-  const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
-  return { trackKey, track, month, visit, ...noProgramFlag(track, grass) };
+  return { trackKey, track, month, visit };
 }
 
 // The ordinance jurisdictions (county + city) one visit is judged under —

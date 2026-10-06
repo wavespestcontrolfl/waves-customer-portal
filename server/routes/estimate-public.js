@@ -19423,7 +19423,9 @@ function extractEngineInputs(estData) {
   // Injected at the INPUT level only: explicit services.* signals stored in
   // the inputs still win inside the engine's own resolution, and a silent
   // estimate (no stamp, no evidence) injects nothing and replays live.
-  const out = { ...base, ...savedFloorReplayOverrides(estData) };
+  // savedEstimateReplay: a stored estimate re-priced as sold, so the lawn pricer's v13 bahia review
+  // (which parks NEW bahia quotes) leaves an estimate that was already sent alone.
+  const out = { ...base, ...savedFloorReplayOverrides(estData), savedEstimateReplay: true };
   // Existing-customer reprice: replay the prior qualifying services persisted at
   // save so any public recompute (bundle CTA, frequency slider) keeps the
   // COMBINED WaveGuard tier instead of reverting to this estimate's services

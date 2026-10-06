@@ -120,6 +120,16 @@ function normalizeGate(row) {
 // callers that persist derived state keyed on this data (pre-visit brief
 // grounding hash) must not read a transient outage as "no protocol".
 // Default stays fail-soft for existing consumers (waveguard plan engine).
+// GATE_LAWN_V13: the v13 program has no bahia track (Celsius and Blindside are not labeled for
+// bahiagrass), so the staged bahia rows are never served for planning. The rows stay in the
+// database for the history that points at them; only the planning readers skip them.
+const V13_NO_PROGRAM_TRACK = 'bahia';
+function v13NoProgramRow(protocol) {
+  return featureGates.lawnV13Live?.() === true
+    && protocol?.version === LAWN_V13_VERSION
+    && protocol?.grass_track === V13_NO_PROGRAM_TRACK;
+}
+
 async function getActiveLawnProtocol(knex = db, filters = {}) {
   const { strict = false, planning = false } = filters;
   const soft = (query, fallback) => {
@@ -137,9 +147,12 @@ async function getActiveLawnProtocol(knex = db, filters = {}) {
   // planning, so a legacy completed record with no ledger row and no pin keeps the
   // pre-gate resolution and never reads as having followed v13. Off, the query is
   // exactly the old one.
+  const v13Planning = planning && featureGates.lawnV13Live?.() === true;
+  if (v13Planning && filters.grassTrack === V13_NO_PROGRAM_TRACK) return null;
   const query = knex('lawn_protocols');
-  if (planning && featureGates.lawnV13Live?.() === true) query.where({ status: 'staged', version: LAWN_V13_VERSION });
-  else query.where({ status: 'active' });
+  if (v13Planning) {
+    query.where({ status: 'staged', version: LAWN_V13_VERSION }).whereNot('grass_track', V13_NO_PROGRAM_TRACK);
+  } else query.where({ status: 'active' });
   query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc');
 
   if (filters.protocolKey) query.where({ protocol_key: filters.protocolKey });
@@ -204,6 +217,8 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
     ? await getLawnProtocolById(knex, protocolId, { strict })
     : await getActiveLawnProtocol(knex, { grassTrack, region, strict, planning });
   if (!protocol) return null;
+  // A visit pinned to the staged bahia version plans from nothing too (the rows stay for history).
+  if (planning && v13NoProgramRow(protocol)) return null;
 
   const month = etParts(serviceDate).month;
   const window = windowKey
