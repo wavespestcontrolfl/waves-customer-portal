@@ -54,7 +54,8 @@ class ApplicationLimitChecker {
   // caller that reads AFTER the application was ledgered (completion, the compliance
   // page) passes none, so the application is never counted twice.
   // opts.excludeScheduledServiceId leaves that visit's own ledger rows out of the
-  // shared cap, for a plan rebuilt after the visit completed.
+  // shared cap, for a plan rebuilt after the visit completed. opts.propertyId limits the
+  // shared cap to the treated property (no property: every property of the customer).
   async checkLimits(customerId, productId, proposedDate = new Date(), database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };
@@ -226,6 +227,14 @@ class ApplicationLimitChecker {
       })
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
         'pl.limit_value', 'pl.limit_unit', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+    if (ctx.propertyId) {
+      // The treated property only: a row ledgered at another of the customer's properties
+      // does not count. A row whose property is unknown (no visit, or a visit with no
+      // property) cannot be proven elsewhere, so it still counts.
+      query.leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
+        .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+        .where(function sameProperty() { this.whereNull('ss.property_id').orWhere('ss.property_id', ctx.propertyId); });
+    }
     if (ctx.excludeScheduledServiceId) {
       query.where(function notThisVisit() {
         this.whereNull('pah.service_record_id')

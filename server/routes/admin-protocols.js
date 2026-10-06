@@ -20,6 +20,9 @@ const {
   v13SelectedGateWarnings,
   v13SelectionBlocks,
   lawnVisitsPerYear,
+  v13Limits,
+  v13LineNotices,
+  toServiceDate,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -971,11 +974,13 @@ router.get('/lawn-mix', async (req, res, next) => {
     // no visit) the sheet keeps the 12x step and warns.
     let visitsPerYear = Number(req.query.visitsPerYear) > 0 ? Number(req.query.visitsPerYear) : null;
     const visitId = String(req.query.scheduledServiceId || '');
-    if (visitsPerYear == null && recipeVisit.cadenceVariants && UUID_RE.test(visitId)) {
-      const scheduled = await db('scheduled_services').where({ id: visitId })
-        .first('service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days');
-      if (scheduled) visitsPerYear = await lawnVisitsPerYear(db, scheduled);
-    }
+    // The visit the sheet is opened from: its plan picks the step, and its customer,
+    // property and date decide the application limits (no visit, no customer to check).
+    const scheduled = UUID_RE.test(visitId)
+      ? await db('scheduled_services').where({ id: visitId })
+        .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')
+      : null;
+    if (visitsPerYear == null && recipeVisit.cadenceVariants && scheduled) visitsPerYear = await lawnVisitsPerYear(db, scheduled);
     const { visit, unknownCadence } = visitForCadence(recipeVisit, visitsPerYear);
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
@@ -1024,11 +1029,19 @@ router.get('/lawn-mix', async (req, res, next) => {
     // offers no combined mixing order (the plan does the same).
     const v13Active = lawnV13On();
     const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
+    // The plan's own application-limit decision (v13Limits) for a sheet opened from a
+    // visit: a capped product gets no amount and its limit message, a warning-level limit
+    // a sheet warning. The limit blocks are reported beside the apply-alone ones but do not
+    // hold the rest of the mix. Without a visit there is no customer to check.
+    const limitCheck = v13Active && scheduled
+      ? await v13Limits(db, scheduled, toServiceDate(scheduled.scheduled_date), resolvedLines, { rows: v13Rows })
+      : { capped: new Map(), warnings: [] };
+    const limitBlocks = v13LineNotices([], limitCheck.capped, new Set()).blocks;
     const items = resolvedLines.map((line) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
-      // no quantity at all); the sheet has no visit, so no application limits.
-      const v13Line = v13Active && product ? v13LineState(product, v13Rows) : null;
+      // no quantity at all; a capped line none either).
+      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped) : null;
       const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
@@ -1092,6 +1105,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // Required v13 gate notes on the selected items are warnings, as in the plan.
     warnings.push(...v13SelectedGateWarnings(selectedItems));
     if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
+    warnings.push(...limitCheck.warnings);
 
     const seesPricing = viewerSeesPricing(req);
     const payload = {
@@ -1129,7 +1143,7 @@ router.get('/lawn-mix', async (req, res, next) => {
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
       }))),
       warnings,
-      blocks,
+      blocks: [...blocks, ...limitBlocks],
     };
     res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }

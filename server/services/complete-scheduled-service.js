@@ -8917,7 +8917,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const capDate = svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${svc.scheduled_date}T12:00:00`);
         const reported = new Set();
         for (const { product_id: productId } of ledgered) {
-          const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection);
+          const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection, { propertyId: svc.property_id || null });
           for (const v of blocks.filter((b) => b.type === 'annual_max_rate' && b.matchType === 'active_ingredient')) {
             if (reported.has(v.matchValue)) continue;
             reported.add(v.matchValue);

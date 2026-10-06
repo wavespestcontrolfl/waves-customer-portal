@@ -14,6 +14,10 @@ jest.mock('../services/lawn-protocol-operating-layer', () => ({
   lockDraftProtocol: jest.fn(),
 }));
 
+// The application-limit reader the plan and the sheet share (v13Limits calls it per selected product).
+const mockCheckLimits = jest.fn();
+jest.mock('../services/application-limits', () => ({ checkLimits: (...args) => mockCheckLimits(...args) }));
+
 const db = require('../models/db');
 const operatingLayer = require('../services/lawn-protocol-operating-layer');
 const adminProtocolsRouter = require('../routes/admin-protocols');
@@ -74,6 +78,7 @@ let visitRows = [];
 beforeEach(() => {
   jest.clearAllMocks();
   visitRows = [];
+  mockCheckLimits.mockReset().mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
   process.env.GATE_LAWN_V13 = 'true';
   operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: LAWN_V13_VERSION } });
   operatingLayer.summarizeProtocolContext.mockReturnValue(V13_SUMMARY);
@@ -123,6 +128,55 @@ test('April on a 12x plan keeps the 24-0-11; with no plan given it keeps it too 
   expect(unknown.warnings.find((w) => w.code === 'lawn_v13_plan_cadence_unknown').message).toContain(DIMENSION);
   // Months with one step never ask.
   expect((await lawnMix({ month: '1' })).warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
+});
+
+describe('the sheet opened from a visit applies the plan\'s application limits (v13Limits)', () => {
+  const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const visit = { id: VISIT, customer_id: 'cust-1', property_id: 'prop-A', scheduled_date: '2026-01-12', service_id: null, service_type: 'Lawn Care', recurring_pattern: null, recurring_interval_days: null };
+  const capBlock = { type: 'annual_max_rate', matchType: 'active_ingredient', message: `${STONEWALL}: prodiamine across all products this year is 96.4% of the yearly label cap; this application brings it to 141.8% — THIS APPLICATION WOULD EXCEED IT.` };
+
+  test('a visit whose customer is at the prodiamine cap: the Stonewall line has no amount, says why, and the sheet carries the limit message; the rest of the mix stays', async () => {
+    visitRows = [visit];
+    mockCheckLimits.mockImplementation(async (customerId, productId) => (productId === 'stw' ? { allowed: false, blocks: [capBlock], warnings: [] } : { allowed: true, blocks: [], warnings: [] }));
+    const body = await lawnMix({ month: '1', scheduledServiceId: VISIT });
+    const stonewall = itemFor(body, STONEWALL);
+    expect(stonewall.jobMix).toBeNull();
+    expect(stonewall.unavailable.reason).toMatch(/application limit is reached/);
+    expect(body.blocks).toEqual([expect.objectContaining({ code: 'lawn_v13_annual_limit', productName: STONEWALL, message: capBlock.message })]);
+    // Nutra-TECH (a different line) still computes.
+    expect(itemFor(body, NUTRA).jobMix).toMatchObject({ amount: 60 });
+    // The same call the plan makes: the visit's customer, product, date, the line's staged rate, the visit's property.
+    expect(mockCheckLimits).toHaveBeenCalledWith('cust-1', 'stw', expect.any(Date), db,
+      { proposed: { ratePer1000: 0.5, unit: 'fl oz' }, excludeScheduledServiceId: VISIT, propertyId: 'prop-A' });
+  });
+
+  test('a warning-level limit is a sheet warning and leaves the dose', async () => {
+    visitRows = [visit];
+    mockCheckLimits.mockImplementation(async (customerId, productId) => (productId === 'stw'
+      ? { allowed: true, blocks: [], warnings: [{ type: 'annual_max_rate', message: 'Stonewall: 95.7% of the yearly label cap.' }] } : { allowed: true, blocks: [], warnings: [] }));
+    const body = await lawnMix({ month: '1', scheduledServiceId: VISIT });
+    expect(body.warnings).toContainEqual(expect.objectContaining({ code: 'lawn_v13_limit_warning', message: 'Stonewall: 95.7% of the yearly label cap.' }));
+    expect(itemFor(body, STONEWALL).jobMix).toMatchObject({ amount: 5 });
+    expect(body.blocks).toEqual([]);
+  });
+
+  test('no visit, an unknown visit and a malformed id check no limits (no customer to check)', async () => {
+    mockCheckLimits.mockResolvedValue({ allowed: false, blocks: [capBlock], warnings: [] });
+    for (const query of [{ month: '1' }, { month: '1', scheduledServiceId: 'not-a-uuid' }, { month: '1', scheduledServiceId: VISIT }]) {
+      visitRows = [];
+      const body = await lawnMix(query);
+      expect(itemFor(body, STONEWALL).jobMix).toMatchObject({ amount: 5 });
+      expect(body.blocks).toEqual([]);
+    }
+    expect(mockCheckLimits).not.toHaveBeenCalled();
+  });
+
+  test('gate off: no limit check at all', async () => {
+    delete process.env.GATE_LAWN_V13;
+    visitRows = [visit];
+    await lawnMix({ month: '1', track: 'st_augustine', scheduledServiceId: VISIT });
+    expect(mockCheckLimits).not.toHaveBeenCalled();
+  });
 });
 
 describe('the April step follows the visit the sheet is opened from (?scheduledServiceId=)', () => {

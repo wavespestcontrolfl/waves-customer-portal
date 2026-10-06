@@ -145,7 +145,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       { service_key: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', category: 'lawn_care' },
       { service_key: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', category: 'lawn_care' },
     ]).catch(() => { /* a catalog row needing more columns: the visit's service_type carries the cadence instead */ });
-  });
+  }, 60000);
   afterAll(async () => { if (owned) await owned.dispose(); });
   afterEach(() => {
     for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
@@ -386,6 +386,41 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(codes(result)).toContain('lawn_v13_annual_limit');
       expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/is 101\.2% of the yearly label cap; this application brings it to 146\.7% — LIMIT REACHED/);
       expect(item(result, STW_4FL).mix).toBeNull();
+    });
+
+    describe('the cap is the treated property\'s (a customer with two properties)', () => {
+      // Property A holds a 65 WDG application at 0.84 oz (past the cap); property B has none.
+      async function twoProperties() {
+        const { scheduled, customerId } = await visit('2026-01-12');
+        const propertyA = scheduled.property_id;
+        const [propertyB] = await knex('customer_properties').insert({ customer_id: customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+        const [past] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: propertyA, scheduled_date: '2026-01-05', service_type: 'Lawn fixture' }).returning('*');
+        const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: past.id, service_date: '2026-01-05', service_type: 'Lawn fixture' }).returning('*');
+        await applied(customerId, WDG, '2026-01-05', 0.84, 'oz', { service_record_id: record.id });
+        const [visitB] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: propertyB.id, scheduled_date: '2026-01-12', service_type: 'Lawn fixture' }).returning('*');
+        return { visitA: scheduled, visitB, customerId, propertyA, propertyB: propertyB.id };
+      }
+
+      test('the plan for A is blocked, the plan for B is not', async () => {
+        setGates();
+        const { visitA, visitB } = await twoProperties();
+        expect(codes(await plan(visitA))).toContain('lawn_v13_annual_limit');
+        const resultB = await plan(visitB);
+        expect(codes(resultB)).not.toContain('lawn_v13_annual_limit');
+        expect(item(resultB, STW_4FL).mix).toMatchObject({ amount: 5 });
+      });
+
+      test('checkLimits: the property scopes the cap; a row with no known property still counts for any property, and no property means the whole customer', async () => {
+        const { customerId, propertyA, propertyB } = await twoProperties();
+        const date = new Date('2026-01-12T16:00:00Z');
+        const check = (propertyId) => applicationLimits.checkLimits(customerId, catalog[STW_4FL].id, date, knex, { propertyId });
+        expect((await check(propertyA)).blocks).toHaveLength(1);
+        expect((await check(propertyB)).blocks).toEqual([]);
+        expect((await check(null)).blocks).toHaveLength(1);
+        // A ledger row with no service record cannot be placed at another property: it counts at B too.
+        await applied(customerId, WDG, '2026-01-06', 0.84, 'oz');
+        expect((await check(propertyB)).blocks).toHaveLength(1);
+      });
     });
 
     test('the season is judged on its own date: a January completion entered after an October application does not count it', async () => {

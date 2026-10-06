@@ -1593,7 +1593,7 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     checked.add(id);
     const row = rows.get(id);
     const proposed = Number(row?.ratePer1000) > 0 ? { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit } : null;
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id }))
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
@@ -2160,6 +2160,9 @@ module.exports = {
   v13SelectionBlocks,
   v13LineState,
   lawnVisitsPerYear,
+  v13Limits,
+  v13LineNotices,
+  toServiceDate,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,
