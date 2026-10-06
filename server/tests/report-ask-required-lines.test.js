@@ -940,7 +940,7 @@ describe('answer screen, Codex round 11', () => {
     const facts = buildReportAskFacts({ data, requiredLines: [line] });
     const ask = (answer) => screenAskAnswer(answer, { question: 'Can my dog go out?', data, facts, requiredLines: [line] });
     expect(ask(`${line} After reading this, pets can go out right away.`)).toBe('second_instruction');
-    expect(ask(`${line} After it is dry, pets can go out.`)).toBeNull();
+    expect(ask(`${line} After it is fully dry, pets can go out.`)).toBeNull();
   });
 
   test('the office phone and the visit date ground no claim', () => {
@@ -1361,5 +1361,36 @@ describe('answer screen, Codex round 29', () => {
   test.each(['The treatment poses no risk to pets.', 'It will not harm your children.', 'It is gentle around pets.'])('a no-harm assurance is rejected: %s', (answer) => {
     const data = pestData();
     expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('safety claim');
+  });
+});
+
+describe('answer screen, Codex round 30', () => {
+  test('an ingredient is checked against the product its sentence names', () => {
+    const data = pestData({ applications: [
+      { product: { name: 'Alpine WSG', active_ingredient: 'Dinotefuran 40%' }, applicationArea: 'Outside', method: 'spray' },
+      { product: { name: 'Taurus SC', active_ingredient: 'Fipronil 9.1%' }, applicationArea: 'Outside', method: 'spray' },
+    ] });
+    const facts = buildReportAskFacts({ question: 'q', data });
+    expect(screenAskAnswer('Alpine WSG contains fipronil.', { question: 'q', data, facts })).toBe('ingredient_claim');
+    expect(screenAskAnswer('Taurus SC contains fipronil.', { question: 'q', data, facts })).toBeNull();
+  });
+
+  test.each(['Pets can return once the treatment is partly dry.', 'Pets can return once it starts drying.', 'Pets can go out once it is dry.'])(
+    'a weakened dry condition is rejected beside "until fully dry": %s',
+    (sentence) => {
+      const line = 'Keep pets off treated zones until fully dry.';
+      const data = pestData();
+      const facts = buildReportAskFacts({ data, requiredLines: [line] });
+      expect(screenAskAnswer(`${line} ${sentence}`, { question: 'q', data, facts, requiredLines: [line] })).toBe('second_instruction');
+    },
+  );
+
+  test('all-caps lockbox values mask even when they spell a word', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Use lockbox ON RED. Use lockbox IN BLUE. The lockbox is on the gate.' }) });
+    expect(facts.customer_concern).toBe('Use lockbox [redacted]. Use lockbox [redacted]. The lockbox is on the gate.');
+  });
+
+  test.each(['My dog got a mouthful of bait.', 'My child had a sip of pesticide.'])('got / had a mouthful is ingestion: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
   });
 });
