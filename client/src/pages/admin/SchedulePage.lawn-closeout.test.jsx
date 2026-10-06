@@ -1599,6 +1599,28 @@ it('a St. Augustine mix (no 2(ee) note on its lines) shows no 2(ee) line', async
   expect(screen.queryByText(/2\(ee\)/)).toBeNull();
 });
 
+it.each([[false], [true]])('a group member added by hand BEFORE the group is applied takes the group\'s spot shape: spot method, empty rate and area and no derived total; a typed total is kept (typed: %s)', async (typed) => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'adjuvant', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', applicationMode: 'spot', prefillAmount: false, group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, applicationMode, prefillAmount, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  // Recognition first, by the product search: a broadcast-style row with the catalog rate and a derived total.
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Mix rec' } });
+  fireEvent.click(screen.getByText('Mix rec', { selector: 'button, div, span, li' }));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(totals()[2].value).not.toBe('');
+  expect(within(totals()[2].parentElement).getAllByRole('combobox')[2].value).not.toBe('spot_treatment');
+  if (typed) fireEvent.change(totals()[2], { target: { value: '7' } });
+  // Then the group: no row is added twice, and Recognition's row is now the grouped spot shape.
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  const recRow = totals()[2];
+  expect(recRow.value).toBe(typed ? '7' : '');
+  expect(within(recRow.parentElement).getAllByRole('combobox')[2].value).toBe('spot_treatment');
+  if (!typed) expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
+});
+
 it('the bermuda removal mix options go on together and come off together', async () => {
   enableDefaults();
   const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));

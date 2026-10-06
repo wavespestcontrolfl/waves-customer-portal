@@ -801,6 +801,34 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       }
     });
 
+    test('the tagged rows missing: a mix spelled by a catalog alias or linked from the staged rows still triggers the refusal (links and aliases before names)', async () => {
+      setGates();
+      const saved = await knex('product_limits').where({ match_value: 'bermuda_removal' });
+      await knex('product_limits').where({ match_value: 'bermuda_removal' }).del();
+      // Office-spelled catalog rows that no name match finds: one linked from the staged rows, one by alias.
+      const [linkedRec] = await knex('products_catalog').insert({ name: 'Recog 20.4 WG', category: 'herbicide', active: true, rate_unit: 'oz' }).returning('*');
+      const [aliasFus] = await knex('products_catalog').insert({ name: 'Fusilade (office)', category: 'herbicide', active: true, rate_unit: 'fl_oz' }).returning('*');
+      const stagedRec = await knex('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: REC }).select('id', 'product_id');
+      await knex('lawn_protocol_products').whereIn('id', stagedRec.map((r) => r.id)).update({ product_id: linkedRec.id });
+      await knex('product_aliases').insert({ product_id: aliasFus.id, alias_name: FUS });
+      try {
+        const f = await lawn({ date: '2026-06-20', bermuda: true });
+        // The step visit refuses either spelled product, alone or together.
+        for (const items of [[linkedRec], [aliasFus], [linkedRec, aliasFus]]) {
+          expect(await bermudaPairViolation(knex, submitted(...items), { serviceId: f.visit.id })).toMatch(/limits are not loaded/);
+          expect(await bermudaLimitViolation(knex, submitted(...items), { serviceId: f.visit.id })).toMatch(/limits are not loaded/);
+        }
+        // A non-step visit is untouched.
+        const plain = await lawn({ date: '2026-06-20' });
+        expect(await bermudaPairViolation(knex, submitted(linkedRec, aliasFus), { serviceId: plain.visit.id })).toBeNull();
+      } finally {
+        await knex('lawn_protocol_products').whereIn('id', stagedRec.map((r) => r.id)).update({ product_id: rec.id });
+        await knex('product_aliases').where({ product_id: aliasFus.id }).del();
+        await knex('products_catalog').whereIn('id', [linkedRec.id, aliasFus.id]).del();
+        await knex('product_limits').insert(saved.map(({ id, ...row }) => row));
+      }
+    });
+
     test('the staff switch\'s SQL cultivar rule mirrors the policy: excluded names (any spelling) never match, everything else does', async () => {
       const rule = excludedCultivarSql();
       const eligible = async (grass, cultivar) => {

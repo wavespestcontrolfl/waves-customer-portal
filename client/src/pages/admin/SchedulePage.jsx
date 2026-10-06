@@ -19256,8 +19256,26 @@ export function CompletionPanel({
         for (const mate of effectiveProtocolActions) {
           if (mate !== option.action && mate.group === option.action.group) applyProtocolAction(mate);
         }
+        normalizeGroupRows(option.action.group);
       }
     }
+  }
+  // A product of the group that was added or restored BEFORE the group was applied has its own row
+  // (a catalog method, a catalog rate and area): it takes the group's spot shape, no catalog area,
+  // rate or total, unless the tech typed that total. Rows the group adds already have it.
+  function normalizeGroupRows(group) {
+    const members = new Map(effectiveProtocolActions.filter((a) => a.group === group && a.product?.id).map((a) => [String(a.product.id), a]));
+    setSelectedProducts((prev) => prev.map((row) => {
+      const member = members.get(String(row.productId));
+      if (!member || (member.prefillAmount !== false && member.applicationMode !== "spot")) return row;
+      const method = member.product.applicationMethod || "spot_treatment";
+      const unit = requiredApplicationArea(method, serviceTypeForArea)?.unit || "";
+      const kept = row.totalAmountManual === true;
+      return {
+        ...row, applicationMethod: method, group, areaUnit: unit,
+        ...(kept ? {} : { rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used." }),
+      };
+    }));
   }
   // The "Swept eaves and webs" box on a regular pest visit (owner 2026-10-05).
   // Ticking it is the same as picking the sweep from the old dropdown

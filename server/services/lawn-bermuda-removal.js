@@ -262,6 +262,20 @@ function submittedRate(products, id) {
   return Number(entry?.rate) > 0 && entry?.rateUnit ? { ratePer1000: Number(entry.rate), unit: entry.rateUnit } : null;
 }
 
+// Catalog ids of the two step herbicides when the program's tagged limit rows are missing: the
+// product each staged bermuda removal row is linked to (lawn_protocol_products.product_id, by the
+// row's own recipe name) and each product alias that spells the name. Sets of id strings by
+// normalized name.
+async function stepProductIdsByLink(knex) {
+  const known = { [RECOGNITION_KEY]: new Set(), [FUSILADE_KEY]: new Set() };
+  const staged = await knex('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").whereNotNull('product_id').select('product_id', 'product_name');
+  for (const row of staged) known[normalize(row.product_name)]?.add(String(row.product_id));
+  if (await knex.schema.hasTable('product_aliases')) {
+    for (const row of await knex('product_aliases').select('product_id', 'alias_name')) known[normalize(row.alias_name)]?.add(String(row.product_id));
+  }
+  return known;
+}
+
 // The step products a completion submitted: { recognition, fusilade } (each a { id, name }
 // or null), matched by catalog ID; `unconfigured` is true when the program's tagged rows
 // are missing yet a step product is present by name (a completion check then refuses).
@@ -279,9 +293,12 @@ async function submittedStepProducts(knex, products) {
     };
     return { recognition: byId(ids.recognition), fusilade: byId(ids.fusilade), unconfigured: false };
   }
-  const byName = (key) => rows.find((row) => normalize(row.name) === key) || null;
-  const recognition = byName(RECOGNITION_KEY);
-  const fusilade = byName(FUSILADE_KEY);
+  // The tagged limit rows are missing: the step products are known by the staged protocol links
+  // (the bermuda rows' product_id) and the product aliases first, then by name.
+  const known = await stepProductIdsByLink(knex);
+  const find = (key) => rows.find((row) => known[key].has(String(row.id))) || rows.find((row) => normalize(row.name) === key) || null;
+  const recognition = find(RECOGNITION_KEY);
+  const fusilade = find(FUSILADE_KEY);
   return { recognition, fusilade, unconfigured: !!(recognition || fusilade) };
 }
 
