@@ -334,7 +334,18 @@ describe('the plain opt-out rail for an unlinked prospective member', () => {
     expect(src).toMatch(/if \(unlinkedMemberHidesMixChange\) return \{\};/);
     // The add lane reads the same verdict; the write re-resolves and locks the prospective owner.
     expect(src).toMatch(/let addStampBlockedByMembership = unlinkedMemberHidesMixChange;/);
-    expect(src).toMatch(/try \{ ownerIdToLock = await resolveProspectiveOwnerId\(estimate, trx\); \}\s*\n\s*catch \(_\) \{ memberActivatedMidWrite = true; return; \}/);
+    // The grouped-owner re-resolution takes the accept path's group lock first, after the estimate lock and before the customer lock.
+    const txStart = src.indexOf('let memberActivatedMidWrite = false;');
+    const block = src.slice(txStart, txStart + 4000);
+    const estimateLock = block.indexOf('await lockEstimateOwnerForUpdate(trx, estimate)');
+    const groupLock = block.indexOf("['estimate-group-accept', String(estimate.estimate_group_id)]");
+    const resolve = block.indexOf('ownerIdToLock = await resolveProspectiveOwnerId(estimate, trx)');
+    const customerLock = block.indexOf("trx('customers').where({ id: ownerIdToLock }).forUpdate().first()");
+    expect(estimateLock).toBeGreaterThan(0);
+    expect(groupLock).toBeGreaterThan(estimateLock);
+    expect(resolve).toBeGreaterThan(groupLock);
+    expect(customerLock).toBeGreaterThan(resolve);
+    expect(block).toMatch(/\} catch \(_\) \{ memberActivatedMidWrite = true; return; \}/);
     expect(src).toMatch(/await trx\('customers'\)\.where\(\{ id: ownerIdToLock \}\)\.forUpdate\(\)\.first\(\)/);
   });
 });

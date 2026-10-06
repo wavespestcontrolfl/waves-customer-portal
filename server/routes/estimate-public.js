@@ -18058,8 +18058,19 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         // later); a resolution error fails closed with the same 409.
         let ownerIdToLock = estimate.customer_id || null;
         if (!ownerIdToLock) {
-          try { ownerIdToLock = await resolveProspectiveOwnerId(estimate, trx); }
-          catch (_) { memberActivatedMidWrite = true; return; }
+          try {
+            // Serialized with a sibling's acceptance by the SAME advisory
+            // lock that path takes (estimate row, then this lock, then the
+            // customer row — the same order here), so a grouped owner cannot
+            // appear between this lookup and the write.
+            if (estimate.estimate_group_id) {
+              await trx.raw(
+                'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                ['estimate-group-accept', String(estimate.estimate_group_id)],
+              );
+            }
+            ownerIdToLock = await resolveProspectiveOwnerId(estimate, trx);
+          } catch (_) { memberActivatedMidWrite = true; return; }
         }
         if (ownerIdToLock) {
           const customerRow = await trx('customers').where({ id: ownerIdToLock }).forUpdate().first();

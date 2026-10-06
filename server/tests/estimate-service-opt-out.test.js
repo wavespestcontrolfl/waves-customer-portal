@@ -434,7 +434,7 @@ describe('event provenance', () => {
     const src = require('fs').readFileSync(require.resolve('../routes/estimate-public'), 'utf8');
     const txStart = src.indexOf('let memberActivatedMidWrite = false;');
     expect(txStart).toBeGreaterThan(0);
-    const block = src.slice(txStart, txStart + 3000);
+    const block = src.slice(txStart, txStart + 4500);
     expect(block).toMatch(/await db\.transaction\(async \(trx\) => \{/);
     // Every new-customer-priced write, the staff park included; the staff compensation restore excepted (GH codex r10 P1).
     // Linked rows lock their own customer; UNLINKED rows re-resolve and lock the prospective owner (GH #6006 r10 P0).
