@@ -6674,7 +6674,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             .orderBy('id', 'asc')
             .limit(PAGE_SIZE)
             .offset(page * PAGE_SIZE)
-            .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id', 'source_estimate_id',
+            .select('id', 'service_type', 'scheduled_date', 'window_start', 'status', 'property_id', 'source_estimate_id',
               'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
             .catch(() => null);
 
@@ -6754,8 +6754,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             let rescheduleUrl = null;
             if (planReschedule) {
               try {
-                const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true });
-                if (link && link.url && !link.tooSoonToMove) rescheduleUrl = link.url;
+                // The public reschedule page's own verdict first (codex #6088 r1):
+                // an en_route / on_site visit (in progress) would show a dead button.
+                const verdict = require('../reschedule-eligibility').eligibility(row);
+                if (verdict && verdict.ok) {
+                  const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true });
+                  if (link && link.url && !link.tooSoonToMove) rescheduleUrl = link.url;
+                }
               } catch { /* best-effort: no link, no button */ }
             }
             return {

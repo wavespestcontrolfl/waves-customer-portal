@@ -327,6 +327,21 @@ describe('per-visit rescheduleUrl (owner 2026-10-06, GATE_REPORT_PLAN_RESCHEDULE
     expect(buildRescheduleLink).toHaveBeenCalledWith('scheduled-lawn', { customerId: 'customer-1', reuseExisting: true });
   });
 
+  test('an in-progress visit (en_route / on_site) gets no link: the reschedule page would refuse it (codex #6088 r1)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
+    const f = fixtures();
+    f.scheduled_services[1] = { ...f.scheduled_services[1], status: 'on_site' };
+    f.scheduled_services[2] = { ...f.scheduled_services[2], status: 'en_route' };
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-inprogress', makeKnex(f), LIVE);
+    const urls = Object.fromEntries(data.upcomingVisitsCard.visits.map((v) => [v.serviceType, v.rescheduleUrl]));
+    expect(urls['Lawn Care Treatment'] ?? null).toBeNull();
+    expect(urls['Mosquito Service'] ?? null).toBeNull();
+    expect(buildRescheduleLink).not.toHaveBeenCalledWith('scheduled-lawn', expect.anything());
+    expect(buildRescheduleLink).not.toHaveBeenCalledWith('scheduled-soon', expect.anything());
+  });
+
   test('a tooSoonToMove result is null even if a url were present', async () => {
     process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
     process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
