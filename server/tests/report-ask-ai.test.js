@@ -472,6 +472,9 @@ describe('screenAskAnswer', () => {
     expect(screen('We will be back soon.')).toBe('states_a_date');
     expect(screen('Your next service is in the spring.')).toBe('states_a_date');
     expect(screen('Expect another visit soon.')).toBe('states_a_date');
+    expect(screen('Your follow-up is soon.')).toBe('states_a_date');
+    expect(screen('A technician will return soon.')).toBe('states_a_date');
+    expect(screen('Your technician will return soon.')).toBe('states_a_date');
     expect(screen('The gate code is BLUE.')).toBe('banned_copy');
     expect(screen('We will return two days from now.')).toBe('states_a_date');
     expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
@@ -680,6 +683,10 @@ describe('symptoms and exposure never reach the model', () => {
     'the bait was swallowed by john',
     'The ant bait was swallowed by John',
     'My dog bit the bait.',
+    'My dog is biting the bait',
+    'My dog bites the bait',
+    'The bait was bitten by my dog',
+    'My dog took two bites of bait',
     'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
