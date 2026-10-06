@@ -93,7 +93,7 @@ function loadProtocols() {
   // Require inside the loader so a malformed JSON edit breaks one corpus,
   // not module load of every connector.
    
-  const protocols = require('../../config/protocols.json');
+  const protocols = { ...require('../../config/protocols.json'), lawn: require('../lawn-program').lawnProtocols() };
   const docs = [];
   const walk = (node, keyPath) => {
     for (const [key, value] of Object.entries(node)) {

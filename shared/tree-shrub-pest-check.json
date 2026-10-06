@@ -1,0 +1,10 @@
+{
+  "insectTypes": [
+    { "key": "armored_scale", "label": "Armored scale" },
+    { "key": "soft_scale", "label": "Soft scale" },
+    { "key": "whitefly", "label": "Whitefly" },
+    { "key": "caterpillars", "label": "Caterpillars" },
+    { "key": "mites", "label": "Mites" },
+    { "key": "other", "label": "Other" }
+  ]
+}

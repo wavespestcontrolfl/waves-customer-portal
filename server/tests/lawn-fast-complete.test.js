@@ -202,6 +202,15 @@ describe('buildLawnFastContext', () => {
       photoStatus: null,
       previousFrontPhoto: null,
     });
+    // The methods a product row may take: the lawn re-service sheet's own list,
+    // the common three first, each with /complete's sqft verdict.
+    expect(ctx.methods).toEqual(require('../services/lawn-reservice-fast-context').lawnMethodChoices());
+    expect(ctx.methods.slice(0, 3)).toEqual([
+      { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
+      { value: 'broadcast_spray', label: 'Broadcast spray', common: true, requiresSqft: true },
+      { value: 'granular_broadcast', label: 'Granular broadcast', common: true, requiresSqft: true },
+    ]);
+    expect(ctx.methods.every((choice) => choice.value !== 'perimeter_spray')).toBe(true);
   });
 
   test('a typed lawn visit hides the height capture the typed form never renders', async () => {

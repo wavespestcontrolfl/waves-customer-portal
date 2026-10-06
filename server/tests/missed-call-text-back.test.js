@@ -64,7 +64,7 @@ describe('one text per number EVER (missed_call_text_claims row)', () => {
 });
 
 describe('textBackCoreEligible', () => {
-  test('an unknown caller who waited 25s+ with no voicemail is eligible', () => {
+  test('an unknown caller who waited 15s+ with no voicemail is eligible', () => {
     expect(textBackCoreEligible(call(), IN_WINDOW)).toBe(true);
   });
 
@@ -72,8 +72,11 @@ describe('textBackCoreEligible', () => {
     expect(textBackCoreEligible(call({ customer_id: 'cust-1' }), IN_WINDOW)).toBe(false);
   });
 
-  test('under the 25s floor is not eligible', () => {
+  test('under the 15s floor is not eligible; 15 to 24 s is (owner ruling 2026-10-05)', () => {
     expect(textBackCoreEligible(call({ duration_seconds: 10 }), IN_WINDOW)).toBe(false);
+    expect(textBackCoreEligible(call({ duration_seconds: 14 }), IN_WINDOW)).toBe(false);
+    expect(textBackCoreEligible(call({ duration_seconds: 15 }), IN_WINDOW)).toBe(true);
+    expect(textBackCoreEligible(call({ duration_seconds: 22 }), IN_WINDOW)).toBe(true);
   });
 
   test('withheld caller ID is not eligible', () => {
@@ -322,9 +325,9 @@ describe('empty voicemail (GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL)', () => {
     expect(textBackCoreEligible(call({ recording_url: 'https://example.invalid/r' }))).toBe(false);
   });
 
-  test('gate on: a 25s+ unknown caller with a rejected recording is eligible', () => {
+  test('gate on: a 15s+ unknown caller with a rejected recording is eligible', () => {
     expect(textBackCoreEligible(emptyVoicemailCall(), OPTS)).toBe(true);
-    expect(textBackCoreEligible(emptyVoicemailCall({ duration_seconds: 25 }), OPTS)).toBe(true);
+    expect(textBackCoreEligible(emptyVoicemailCall({ duration_seconds: 15 }), OPTS)).toBe(true);
   });
 
   test('gate on: a completed transcript of only the dead-air markers is eligible', () => {
@@ -348,7 +351,7 @@ describe('empty voicemail (GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL)', () => {
   });
 
   test('gate on: every other rule still applies', () => {
-    expect(textBackCoreEligible(emptyVoicemailCall({ duration_seconds: 24 }), OPTS)).toBe(false); // 25s floor
+    expect(textBackCoreEligible(emptyVoicemailCall({ duration_seconds: 14 }), OPTS)).toBe(false); // 15s floor
     expect(textBackCoreEligible(emptyVoicemailCall({ customer_id: 'cust-1' }), OPTS)).toBe(false); // unknown callers only
     expect(textBackCoreEligible(emptyVoicemailCall({ from_phone: 'anonymous' }), OPTS)).toBe(false);
     expect(textBackCoreEligible(emptyVoicemailCall({ voicemail_callback_alerted_at: new Date(IN_WINDOW) }), OPTS)).toBe(false);

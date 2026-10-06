@@ -36,13 +36,14 @@ function outcomeUnanswered(row) {
 }
 
 // An unknown number that hung up inside the first seconds (a misdial, a
-// robodialer probing the line) is not a lead. Owner ruling 2026-09-24: an
-// unknown caller who waited 25 seconds or more and left no message counts
-// as a missed call someone should return. Customers on file ring regardless
-// of duration, as before. In the 30 days to 2026-09-24, 41 of 63 unknown
-// voicemail-path callers hung up under 25s; the floor keeps the bell to
-// roughly one ring a day.
-const UNKNOWN_CALLER_MIN_SECONDS = 25;
+// robodialer probing the line) is not a lead. Owner ruling 2026-10-05
+// (replaces the 2026-09-24 25-second rule): an unknown caller who waited 15
+// seconds or more and left no message counts as a missed call someone should
+// return. Customers on file ring regardless of duration, as before. In the 7
+// days to 2026-10-05, nine unknown callers hung up between 20 and 24 s with
+// no recording and got neither the alert nor the text-back. The missed-call
+// text-back lane reads this same constant, so one value sets both.
+const UNKNOWN_CALLER_MIN_SECONDS = 15;
 
 // Unknown prospects share the missed-call lease; withheld IDs, quick
 // hang-ups and Nomorobo spam stay silent.
@@ -303,7 +304,41 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
   return rung;
 }
 
+// How far back an open missed-call bell is still retired when the caller
+// gets through later. Older bells are the office's to close by hand.
+const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Retire open missed-call bells whose caller got through AFTER the bell rang
+ * (owner 2026-10-05): a later answered call, an alerted voicemail, or our
+ * dialed callback — the same CALLED_BACK_SQL that keeps a bell from ringing.
+ * Runs on the 2-minute call-alert cron; idempotent (a done bell is not
+ * selected again). Never re-opens: a retired bell stays done.
+ */
+async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
+  const rows = await db('notifications')
+    .join('call_log', db.raw("call_log.id::text = notifications.metadata->'payload'->>'callLogId'"))
+    .where({ 'notifications.recipient_type': 'admin', 'notifications.category': 'missed_call' })
+    .whereRaw("notifications.metadata->>'triggerKey' = 'customer_missed_call'")
+    .whereNull('notifications.done_at')
+    .where('notifications.created_at', '>', new Date(Date.now() - RETIRE_WINDOW_MS))
+    .whereRaw(`NOT ${CALLED_BACK_SQL}`)
+    .distinct('call_log.id')
+    .limit(limit);
+  if (!rows.length) return 0;
+  const NotificationService = require('./notification-service');
+  let retired = 0;
+  for (const { id } of rows) {
+    retired += Number(await NotificationService.supersedeMissedCallAdmin({
+      callLogId: id,
+      resolution: 'The caller got through on a later call',
+    })) || 0;
+  }
+  return retired;
+}
+
 module.exports = {
+  retireCalledBackMissedCalls,
   missedCallEligible,
   missedCallShapeEligible,
   isEmptyVoicemailRecording,

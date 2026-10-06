@@ -73,14 +73,22 @@ const { dispatchWithFallback } = require('./llm/call');
 // below, a full run stays inside the lane's 1-hour hard timeout.
 const CURATION_RUN_LIMIT = 60;
 const CLASSIFY_BATCH = 12;
-// Owner ruling 2026-09-27: curation scoring moved to Opus 5.5 at effort
-// 'max' (MODELS.TEXT_POLICIES.newsletterWriter). Opus 5+ always thinks and
+// Owner ruling 2026-09-27: curation scoring moved to Opus 5.5 on the
+// newsletterWriter policy. Owner 2026-10-05: curation runs that policy at
+// effort 'high', not 'max' — the first live max-effort run thought for 3.6
+// minutes and hit the 24000-token cap with no JSON, so GPT scored the batch.
+// The newsletter writer itself stays at 'max'. Opus 5+ always thinks and
 // spends that from max_tokens ahead of the JSON reply (anthropic-wire.js
 // THINKING_FLOOR_TOKENS=8192 is only a floor, not a budget for 'max' effort's
 // actual thinking depth), so the old 6000-token cap — sized for a
 // non-thinking Sonnet reply — risked truncating a 12-event structured batch
 // mid-JSON. 24000 gives headroom for max-effort thinking plus the reply.
 const CLASSIFY_MAX_TOKENS = 24000;
+// Same per-call override the admin Compose path uses (routes/admin-newsletter.js).
+const CURATION_POLICY = Object.freeze({
+  ...MODELS.TEXT_POLICIES.newsletterWriter,
+  primary: Object.freeze({ ...MODELS.TEXT_POLICIES.newsletterWriter.primary, effort: 'high' }),
+});
 // Per-batch wall-clock budget. At most CURATION_RUN_LIMIT/CLASSIFY_BATCH = 5
 // sequential batches per run; 10 minutes/batch (≈5 per leg once the fallback
 // reserve is split off — max effort on a 12-event batch needs it);
@@ -397,11 +405,11 @@ async function classifyBatch(events, todayIso) {
   // A miss on both legs throws, exactly like the old SDK path — the run
   // loop's catch leaves the batch un-examined for the next run. Owner
   // ruling 2026-09-27: curation scoring rides the newsletterWriter policy
-  // (Opus 5.5, effort max) — its own laneId ('events_curation', split from
+  // (Opus 5.5; effort 'high' since 2026-10-05, CURATION_POLICY) — its own laneId ('events_curation', split from
   // the old shared 'events_editorial' laneId so ledger/Control-center rows
   // attribute correctly; event-normalizer.js keeps 'events_editorial' on
   // contentDraft).
-  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.newsletterWriter, {
+  const res = await dispatchWithFallback(CURATION_POLICY, {
     laneId: 'events_curation',
     system: 'You are a precise, demanding events editor.',
     text: buildCurationPrompt(events, todayIso),
@@ -605,6 +613,7 @@ module.exports = {
   // Exported for unit tests — pure pieces.
   buildCurationPrompt,
   CURATION_SCHEMA,
+  CURATION_POLICY,
   parseCurationResponse,
   missingAssessmentFallbacks,
   curationEnabled,

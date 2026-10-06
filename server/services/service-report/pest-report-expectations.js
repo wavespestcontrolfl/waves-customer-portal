@@ -285,9 +285,14 @@ const PRODUCT_ACTIVE_INGREDIENT = new Map([
   ['tekko pro igr', 'pyriproxyfen and novaluron'],
 ].map(([name, ai]) => [normalizeProductName(name), ai]));
 
-// Only Tekko Pro's label states a duration on cockroach nymphs (up to 6
-// months); Gentrol's label gives none, so its line drops that sentence.
-const IGR_SIX_MONTH_LABEL = new Set(['tekko pro igr'].map(normalizeProductName));
+// Label durations, by product. Tekko Pro's is for cockroach nymphs (up to 6
+// months), so it needs a roach-tagged application. Gentrol IGR's label
+// (EPA 2724-351) states "CONTINUOUS PROTECTION FOR 4 MONTHS" for every pest
+// it lists (owner 2026-10-05: say it on the report).
+const IGR_LABEL_DURATION = new Map([
+  ['tekko pro igr', { needsRoachTarget: true, sentence: 'It is labeled for up to 6 months of activity on cockroach nymphs.' }],
+  ['gentrol igr', { needsRoachTarget: false, sentence: 'Its label gives up to 4 months of continuous protection.' }],
+].map(([name, entry]) => [normalizeProductName(name), entry]));
 
 function activeIngredientPhrase(products) {
   const names = [...new Set(products
@@ -347,9 +352,9 @@ const EXPECTATION_TEXT = {
     + 'Dust holds up in cracks and voids where sprays can\'t reach'
     + `${labelDuration ? ', and it is labeled for up to 8 months of residual control of crawling insects when left undisturbed' : ''}`
     + '. Results build over the next few weeks.',
-  igr: (ai, { sixMonthLabel = false } = {}) => `We added an insect growth regulator (IGR)${ai ? ` with ${ai}` : ''}. `
+  igr: (ai, { labelDuration = '' } = {}) => `We added an insect growth regulator (IGR)${ai ? ` with ${ai}` : ''}. `
     + 'It stops immature insects from developing into breeding adults and reduces egg hatch, which breaks the '
-    + `breeding cycle.${sixMonthLabel ? ' It is labeled for up to 6 months of activity on cockroach nymphs.' : ''}`,
+    + `breeding cycle.${labelDuration ? ` ${labelDuration}` : ''}`,
 };
 
 // Fixed priority when more than 3 classes triggered — cap to ~3 lines.
@@ -442,12 +447,22 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
         )), { footage: !plain });
       }
       if (cls === 'igr') {
-        // The label's 6-month figure is for cockroach nymphs, so it needs a
-        // Tekko Pro application tagged for roaches (Tekko also covers
-        // fleas, flies and mosquitoes), and never reaches the writer.
-        const sixMonthLabel = !plain && classProducts.some((p) => IGR_SIX_MONTH_LABEL.has(normalizeProductName(p?.name))
-          && Array.isArray(p?.targets) && p.targets.some((t) => /roach/i.test(t)));
-        return EXPECTATION_TEXT.igr(ai, { sixMonthLabel });
+        // A label duration never reaches the writer (plain). Tekko Pro's
+        // figure needs a roach-tagged application (it also covers fleas,
+        // flies and mosquitoes); Gentrol's applies to every listed pest.
+        // Two growth regulators on one visit share one line, so no single
+        // label's duration can speak for it: state a duration only when one
+        // product's applies (Codex P2 #5982).
+        const durations = plain ? [] : [...new Set(classProducts
+          .map((p) => {
+            const entry = IGR_LABEL_DURATION.get(normalizeProductName(p?.name));
+            if (!entry) return null;
+            if (entry.needsRoachTarget && !(Array.isArray(p?.targets) && p.targets.some((t) => /roach/i.test(t)))) return null;
+            return entry.sentence;
+          })
+          .filter(Boolean))];
+        const igrProducts = new Set(classProducts.map((p) => normalizeProductName(p?.name)));
+        return EXPECTATION_TEXT.igr(ai, { labelDuration: durations.length === 1 && igrProducts.size === 1 ? durations[0] : '' });
       }
       return EXPECTATION_TEXT[cls](ai, { aftercare: !plain, labelDuration: !plain });
     })

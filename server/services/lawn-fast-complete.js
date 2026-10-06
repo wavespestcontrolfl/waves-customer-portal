@@ -648,6 +648,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,
+    // The application methods a product row may take, the lawn re-service
+    // sheet's own list ({ value, label, common, requiresSqft }).
+    methods: require('./lawn-reservice-fast-context').lawnMethodChoices(),
     // The assessment must be CONFIRMED before the visit completes; the sheet
     // reads `confirmed` to enable Complete.
     assessment: {

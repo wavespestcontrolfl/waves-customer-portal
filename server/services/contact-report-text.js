@@ -66,15 +66,25 @@ async function loadCustomer(customerId, conn = db, { forUpdate = false } = {}) {
   if (forUpdate) query.forUpdate();
   const row = await query.first();
   if (!row) return null;
-  return require('./customer-contact').withAccountPrimaryContact(row, { db: conn, rethrow: true });
+  // forUpdate holds the account primary too: its contact_role decides who
+  // may get the report link (customer-contact.js slotWithheldFromReports).
+  return require('./customer-contact').withAccountPrimaryContact(row, { db: conn, rethrow: true, forShare: forUpdate });
 }
 
 // The consent-stamped slot contacts of this customer row. The account holder
-// is never in this list.
+// is never in this list, and neither is an occupant the report is withheld
+// from (a tenant, or an on-site contact on a property-manager account).
 function slotContacts(customer) {
-  const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
+  const {
+    getAppointmentContacts, getServiceContactSlots, isServiceContactRole, slotWithheldFromReports,
+  } = require('./customer-contact');
+  // Deny wins: a phone recorded on any withheld slot is withheld, even when
+  // another slot carries it too.
+  const withheldPhones = new Set(getServiceContactSlots(customer)
+    .filter((slot) => slot.phone && slotWithheldFromReports(customer, slot))
+    .map((slot) => phoneKey(slot.phone)));
   return getAppointmentContacts(customer, { appointment_notify_primary: false })
-    .filter((c) => isServiceContactRole(c.role));
+    .filter((c) => isServiceContactRole(c.role) && !withheldPhones.has(phoneKey(c.phone)));
 }
 
 // The contacts who get the report text, by the appointment-text rule. An
@@ -236,7 +246,9 @@ async function recheckContactReportText(meta = {}, { conn = db } = {}) {
     const visit = await visitQuery.first('id');
     if (!visit) return { eligible: false, reason: 'contact-report-summary-revoked' };
   }
-  const customer = await loadCustomer(meta.customer_id, conn);
+  // In the locked handoff the account primary is held FOR SHARE as well:
+  // a role change on it either commits first (seen here) or waits.
+  const customer = await loadCustomer(meta.customer_id, conn, { forUpdate: !!conn.isTransaction });
   if (!customer) return { eligible: false, reason: 'customer-missing' };
   const stillConfirmed = (await confirmedContacts(customer, conn)).some((c) => phoneKey(c.phone) === phoneKey(meta.to_phone));
   if (!stillConfirmed) return { eligible: false, reason: 'contact-removed' };

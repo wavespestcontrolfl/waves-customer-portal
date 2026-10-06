@@ -5,7 +5,7 @@ require('../config/load-env')();
 
 const { parseArgs } = require('node:util');
 const db = require('../models/db');
-const { lawnProtocols } = require('../services/lawn-program');
+const { lawnProtocols, visitForCadence } = require('../services/lawn-program');
 const { LAWN_MATERIAL_BUDGETS, MATERIAL_REFERENCE_SQFT } = require('@waves/lawn-cost-floor');
 const { unitDefinition } = require('../services/inventory-units');
 const { convertToOz, unitPriceBreakdown } = require('../services/product-costing');
@@ -229,8 +229,11 @@ function buildCadenceReport(products, lawn = lawnProtocols(), v13Rows = new Map(
       ['standard', 'bronze', 6], ['enhanced', 'enhanced', 9], ['premium', 'premium', 12],
     ]) {
       const visits = (track.visits || []).filter((visit) => visit.tiers?.[protocolTier]);
+      // A plan of this many applications runs its own step where the recipe has one
+      // (v13 April on 9x: Dimension 18-0-10, not the 24-0-11); the static allowance
+      // below still reads the calendar visit.
       const results = visits.map((visit) => analyzeVisit({
-        trackKey, track, visit, products, lawnSqft: MATERIAL_REFERENCE_SQFT, v13Rows,
+        trackKey, track, visit: visitForCadence(visit, applications).visit, products, lawnSqft: MATERIAL_REFERENCE_SQFT, v13Rows,
         options: { plan: tier, includePremiumOnly: tier === 'premium', isFirstYear: true, weedPressure: 'normal' },
       }));
       const issues = results.flatMap((result) => [

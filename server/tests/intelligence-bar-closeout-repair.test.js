@@ -323,6 +323,36 @@ test('the card names the customer, the visit and the masked recipients, and nobo
   expect(off.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'reportDelivery', fix: expect.stringMatching(/no report email recipient/) })]));
 });
 
+test('a property profile of a manager account: the card never names the occupant as a report recipient', async () => {
+  getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
+  const property = {
+    ...CUSTOMER, account_id: 'acct-1', is_primary_profile: false,
+    service_contact_name: 'Occupant', service_contact_email: 'occupant@example.com',
+  };
+  const managedDb = (primaryRead) => jest.fn((table) => {
+    let primaryLookup = false;
+    const chain = {
+      where: (arg) => { if (arg?.is_primary_profile === true) primaryLookup = true; return chain; },
+      whereNull: () => chain,
+      first: async () => {
+        if (table === 'service_records') return RECORD;
+        if (table !== 'customers') return undefined;
+        if (!primaryLookup) return property;
+        return primaryRead();
+      },
+    };
+    return chain;
+  });
+  db.mockImplementation(managedDb(async () => ({ id: 'primary-1', contact_role: 'property_manager' })));
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.steps.find((s) => s.step === 'queue_report_email').recipients).toEqual(['p***@example.com']);
+
+  // An unreadable account primary: nobody is named, the email is not offered.
+  db.mockImplementation(managedDb(async () => { throw new Error('fixture read failed'); }));
+  const failed = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(failed.steps.map((s) => s.step)).toEqual(['publish_report']);
+});
+
 test('lawn reports never get a repair email — grounding is only verified by completion', async () => {
   getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
   for (const lawn of [{ service_line: 'lawn' }, { service_line: null, service_type: 'Lawn Care Visit' }]) {
