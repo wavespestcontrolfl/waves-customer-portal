@@ -979,7 +979,9 @@ function obligationWords(row, message) {
 // written without spaces (Han, kana, Thai, ...) have no word edges, so an
 // edge whose base letter is from one of them needs no boundary there.
 const LETTER = /[\p{L}\p{N}\p{M}]/u;
-const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+// Script_Extensions, not Script: shared marks such as the kana prolonged-sound
+// mark ー are Common by Script but kana by extension.
+const UNSPACED = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]/u;
 // The edge's base character: the first one, or the last one before any
 // trailing combining marks.
 function needsEdge(chars) {

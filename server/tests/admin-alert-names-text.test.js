@@ -145,6 +145,9 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     const chinese = '好的，我们明天改喷洒时间。我也会寄发票给您';
     await ring({ row: { kind: 'other', description: '寄发票', evidence: [{ quote: chinese }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “寄发票” (Sep 29) — nothing on record shows it done.');
+    // a kana description ending in the prolonged-sound mark matches inside unspaced text
+    await ring({ row: { kind: 'other', description: 'フォロー', evidence: [{ quote: '明日フォローします' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “フォロー” (Sep 29) — nothing on record shows it done.');
     // a description ending in a combining vowel mark still needs a whole word
     await ring({ row: { kind: 'other', description: 'سأرسلُ', evidence: [{ quote: 'سأرسلُها غدا' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “سأرسلُها غدا” (Sep 29) — nothing on record shows it done.');
