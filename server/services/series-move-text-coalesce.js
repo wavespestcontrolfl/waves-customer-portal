@@ -40,6 +40,10 @@ const SERIES_TEXT_HOLD_MS = 3 * 60 * 1000;
 // The surfaces whose text is held (all are authenticated staff actions and
 // all are in the reconciler's surface list, so a held row is always retried).
 const COALESCE_SURFACES = ['dispatch_board', 'edit_modal'];
+// How long a move's text stays in the held-text rule: the release sweep selects
+// a move only while it is younger than this, and an inconclusive supersession
+// lookup holds the text only until the move reaches this age, then sends.
+const SERIES_TEXT_HELD_WINDOW_MS = 30 * 60 * 1000;
 
 function enabled() {
   return require('../config/feature-gates').seriesMoveTextCoalesceLive();
@@ -66,21 +70,49 @@ async function findNewerSeriesMove({ seriesMoveId, markers, conn = db }) {
 
 // What the effects pass does with this move's customer text right now.
 // `markers` is the series_moves row the pass read under its lease.
-async function decideSeriesTextRelease({ seriesMoveId, markers, now = Date.now(), conn = db }) {
+// `holdStartedMs` is when the hold began: the first effects pass AFTER the
+// commit (series_moves.created_at is the transaction START, so a move that
+// waited on locks would reach its hold already expired). Without one, the
+// hold counts from created_at.
+//
+// An inconclusive supersession lookup (the read threw) is not a "no newer
+// move": the text is HELD for the next pass instead of sent with a possibly
+// stale date, until the move is older than SERIES_TEXT_HELD_WINDOW_MS, then
+// it is sent anyway (the customer should hear something). Every pass, live,
+// release sweep or 15-minute reconciler, runs this same rule.
+async function decideSeriesTextRelease({ seriesMoveId, markers, holdStartedMs = NaN, now = Date.now(), conn = db }) {
   if (!seriesMoveId || !markers || !enabled()) return { action: 'send' };
   if (!COALESCE_SURFACES.includes(markers.source_surface)) return { action: 'send' };
   const createdMs = new Date(markers.created_at).getTime();
   if (!Number.isFinite(createdMs)) return { action: 'send' };
+  let newer = null;
+  let lookupFailed = false;
   try {
-    const newer = await findNewerSeriesMove({ seriesMoveId, markers, conn });
-    if (newer) return { action: 'drop', supersededBy: String(newer.id) };
+    newer = await findNewerSeriesMove({ seriesMoveId, markers, conn });
   } catch (err) {
-    // A failed read must not strand the text: fall through to the time rule.
+    lookupFailed = true;
     logger.warn(`[series-text-coalesce] newer-move read failed for ${seriesMoveId}: ${err.message}`);
   }
-  const releaseAt = createdMs + SERIES_TEXT_HOLD_MS;
-  if (now < releaseAt) return { action: 'hold', releaseAt: new Date(releaseAt) };
-  return { action: 'send' };
+  if (newer) return { action: 'drop', supersededBy: String(newer.id) };
+  const releaseAt = (Number.isFinite(holdStartedMs) ? holdStartedMs : createdMs) + SERIES_TEXT_HOLD_MS;
+  const held = lookupFailed ? now - createdMs < SERIES_TEXT_HELD_WINDOW_MS : now < releaseAt;
+  return held ? { action: 'hold', releaseAt: new Date(releaseAt) } : { action: 'send' };
+}
+
+// Records when this move's hold began (its first post-commit effects pass) in
+// the row's own result jsonb: no migration, fenced on the pass's lease by
+// `ownedRow`, and only when still unset. Answers the start (ms), or NaN when
+// the write failed (the hold then counts from created_at).
+async function stampHoldStart({ ownedRow, seriesMoveId, atMs }) {
+  try {
+    await ownedRow(db('series_moves'))
+      .whereRaw("result->>'textHoldStartedAt' IS NULL")
+      .update({ result: db.raw("jsonb_set(COALESCE(result, '{}'::jsonb), '{textHoldStartedAt}', to_jsonb(?::text))", [new Date(atMs).toISOString()]) });
+    return atMs;
+  } catch (err) {
+    logger.warn(`[series-text-coalesce] could not stamp the hold start on ${seriesMoveId}: ${err.message}`);
+    return NaN;
+  }
 }
 
 // What the effects pass does with the customer text, in the two values its
@@ -94,10 +126,13 @@ async function decideSeriesTextRelease({ seriesMoveId, markers, now = Date.now()
 // by `stampMarker`) and names the move that replaced it, so it is never
 // retried and never silently lost. A move whose text already concluded or
 // went out is passed through untouched. Gate off: { send: notify, sent: false }.
-async function resolveSeriesTextRelease({ notify, seriesMoveId, markers, stampMarker, now = Date.now(), conn = db }) {
+async function resolveSeriesTextRelease({ notify, seriesMoveId, markers, stampMarker, ownedRow, now = Date.now(), conn = db }) {
   const passThrough = { send: notify, sent: false };
-  if (!notify || !seriesMoveId || !markers || markers.notified_at || markers.customer_notified === true || !enabled()) return passThrough;
-  const decision = await decideSeriesTextRelease({ seriesMoveId, markers, now, conn });
+  if (!notify || !seriesMoveId || !markers || markers.notified_at || markers.customer_notified === true || !enabled()
+    || !COALESCE_SURFACES.includes(markers.source_surface)) return passThrough;
+  const recorded = Date.parse(markers.result?.textHoldStartedAt || '');
+  const holdStartedMs = Number.isFinite(recorded) ? recorded : await stampHoldStart({ ownedRow, seriesMoveId, atMs: now });
+  const decision = await decideSeriesTextRelease({ seriesMoveId, markers, holdStartedMs, now, conn });
   if (decision.action === 'send') return passThrough;
   if (decision.action === 'drop') {
     logger.info(`[series-text-coalesce] move ${seriesMoveId}: customer text dropped, superseded by newer move ${decision.supersededBy}`);
@@ -111,6 +146,7 @@ async function resolveSeriesTextRelease({ notify, seriesMoveId, markers, stampMa
 
 module.exports = {
   SERIES_TEXT_HOLD_MS,
+  SERIES_TEXT_HELD_WINDOW_MS,
   COALESCE_SURFACES,
   enabled,
   findNewerSeriesMove,

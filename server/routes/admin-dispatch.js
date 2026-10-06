@@ -75,7 +75,7 @@ const ActivityIndicators = require('../services/service-report/activity-indicato
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
-const { resolveSeriesTextRelease, COALESCE_SURFACES: SERIES_TEXT_COALESCE_SURFACES, SERIES_TEXT_HOLD_MS } = require('../services/series-move-text-coalesce');
+const { resolveSeriesTextRelease, COALESCE_SURFACES: SERIES_TEXT_COALESCE_SURFACES, SERIES_TEXT_HOLD_MS, SERIES_TEXT_HELD_WINDOW_MS } = require('../services/series-move-text-coalesce');
 
 // The follow-up override chain (German knockdown windows, two-treatment
 // package rules, species gating) lives in ONE place — the obligation module
@@ -5149,7 +5149,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       if (Number(leased) === 0) {
         return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
       }
-      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface', 'created_at', 'customer_id', 'anchor_service_id')) || markers;
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface', 'created_at', 'customer_id', 'anchor_service_id', 'result')) || markers;
     } catch (err) {
       // Without a held lease no marker write can land (they are fenced on
       // the owner), so effects run here would be unrecorded and repeated by
@@ -5382,7 +5382,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // superseded one is concluded inside the call); `text.sent` is the
     // initial result, null for a text that is pending or superseded so a
     // staff screen shows no "text failed" notice. Gate off: send = notify.
-    const text = await resolveSeriesTextRelease({ notify, seriesMoveId, markers, stampMarker });
+    const text = await resolveSeriesTextRelease({ notify, seriesMoveId, markers, stampMarker, ownedRow });
     let notificationSent = text.sent;
     let notificationError = null;
     // notified_at = the notification attempt CONCLUDED (sent, or a definitive
@@ -5658,7 +5658,7 @@ function scopeReconcileRows(q, { olderThanMs, heldTexts }) {
     .where({ status: 'committed', notify_requested: true })
     .whereNull('notified_at')
     .where('created_at', '<', new Date(Date.now() - SERIES_TEXT_HOLD_MS))
-    .where('created_at', '>', new Date(Date.now() - 30 * 60 * 1000))
+    .where('created_at', '>', new Date(Date.now() - SERIES_TEXT_HELD_WINDOW_MS))
     .where((r) => r.whereNull('effects_attempted_at').orWhere('effects_attempted_at', '<', new Date(Date.now() - 2 * 60 * 1000)));
   return q.where((c) => (heldTexts === 'only' ? held(c) : c.where(normal).orWhere(held)));
 }

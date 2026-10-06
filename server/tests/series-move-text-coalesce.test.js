@@ -126,15 +126,45 @@ describe('decideSeriesTextRelease', () => {
     },
   );
 
-  test('a failed newer-move read does not strand the text: the time rule decides', async () => {
-    process.env[GATE] = 'true';
+  describe('an inconclusive supersession lookup (the read throws)', () => {
     const conn = jest.fn(() => { throw new Error('db down'); });
-    const young = await coalesce.decideSeriesTextRelease({ seriesMoveId: 'm1', markers: marker(), now: NOW, conn });
-    expect(young.action).toBe('hold');
-    const old = await coalesce.decideSeriesTextRelease({
-      seriesMoveId: 'm1', markers: marker({ created_at: new Date(NOW - 10 * MIN) }), now: NOW, conn,
+    beforeEach(() => { process.env[GATE] = 'true'; });
+
+    test('inside the hold: held', async () => {
+      const out = await coalesce.decideSeriesTextRelease({ seriesMoveId: 'm1', markers: marker(), now: NOW, conn });
+      expect(out.action).toBe('hold');
     });
-    expect(old).toEqual({ action: 'send' });
+
+    test('hold over (after 3 minutes) but inside the held-text window: still held, never sent with a possibly stale date', async () => {
+      const out = await coalesce.decideSeriesTextRelease({
+        seriesMoveId: 'm1', markers: marker({ created_at: new Date(NOW - 10 * MIN) }), holdStartedMs: NOW - 10 * MIN, now: NOW, conn,
+      });
+      expect(out.action).toBe('hold');
+    });
+
+    test('past the held-text window: sent anyway, so the customer hears something', async () => {
+      const out = await coalesce.decideSeriesTextRelease({
+        seriesMoveId: 'm1',
+        markers: marker({ created_at: new Date(NOW - coalesce.SERIES_TEXT_HELD_WINDOW_MS - 1) }),
+        holdStartedMs: NOW - coalesce.SERIES_TEXT_HELD_WINDOW_MS, now: NOW, conn,
+      });
+      expect(out).toEqual({ action: 'send' });
+    });
+  });
+
+  test('the hold counts from the post-commit start, not created_at (a move that waited on locks)', async () => {
+    process.env[GATE] = 'true';
+    const conn = jest.fn(() => seriesMovesChain());
+    // created_at (transaction start) is 5 minutes old; the first post-commit pass was 10 seconds ago.
+    const held = await coalesce.decideSeriesTextRelease({
+      seriesMoveId: 'm1', markers: marker({ created_at: new Date(NOW - 5 * MIN) }), holdStartedMs: NOW - 10 * 1000, now: NOW, conn,
+    });
+    expect(held.action).toBe('hold');
+    expect(held.releaseAt.getTime()).toBe(NOW - 10 * 1000 + coalesce.SERIES_TEXT_HOLD_MS);
+    const due = await coalesce.decideSeriesTextRelease({
+      seriesMoveId: 'm1', markers: marker({ created_at: new Date(NOW - 5 * MIN) }), holdStartedMs: NOW - 3 * MIN - 1, now: NOW, conn,
+    });
+    expect(due).toEqual({ action: 'send' });
   });
 });
 
@@ -160,7 +190,7 @@ describe('applySeriesMoveEffects with the gate', () => {
     db.mockImplementation((table) => {
       if (table === 'series_moves') {
         const q = {};
-        for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orderBy']) q[m] = jest.fn(() => q);
+        for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereRaw', 'orWhere', 'orderBy']) q[m] = jest.fn(() => q);
         q.first = jest.fn(async (...cols) => (cols[0] === 'conflict_card_at' ? markers : newerMove));
         q.update = jest.fn(async (values) => { stamps.push(values); return 1; });
         return q;
@@ -200,8 +230,11 @@ describe('applySeriesMoveEffects with the gate', () => {
   const baseMarkers = (over) => ({
     status: 'committed', conflict_card_at: new Date(), reminders_synced_at: new Date(), notified_at: null,
     customer_notified: false, source_surface: 'dispatch_board', customer_id: 'cust-1',
-    anchor_service_id: 'visit-1', created_at: new Date(), ...over,
+    anchor_service_id: 'visit-1', created_at: new Date(), result: {}, ...over,
   });
+  // A move whose first post-commit pass (the hold start) was `ms` ago.
+  const heldFor = (ms) => ({ result: { textHoldStartedAt: new Date(Date.now() - ms).toISOString() } });
+  const holdStartStamp = () => stamps.find((st) => st.result?.sql?.includes('textHoldStartedAt'));
   const notifiedStamps = () => stamps.filter((s) => Object.hasOwn(s, 'notified_at'));
 
   test('gate off: the text goes out at once (today\'s behavior)', async () => {
@@ -241,7 +274,7 @@ describe('applySeriesMoveEffects with the gate', () => {
 
   test('gate on, hold over, send blocked: same re-arm as a gate-off failure', async () => {
     process.env[GATE] = 'true';
-    markers = baseMarkers({ created_at: new Date(Date.now() - 4 * MIN) });
+    markers = baseMarkers({ created_at: new Date(Date.now() - 4 * MIN), ...heldFor(4 * MIN) });
     guardReadFails = true;
     AppointmentReminders.safeSendAppointment.mockImplementation(async () => false);
     const out = await run();
@@ -260,9 +293,37 @@ describe('applySeriesMoveEffects with the gate', () => {
     expect(stamps.some((st) => Object.hasOwn(st, 'notified_at'))).toBe(false);
   });
 
+  test('gate on, first post-commit pass stamps the hold start in the row, fenced on the lease', async () => {
+    process.env[GATE] = 'true';
+    markers = baseMarkers({ created_at: new Date(Date.now() - 10 * 1000) });
+    await run();
+    const stamp = holdStartStamp();
+    expect(stamp).toBeDefined();
+    expect(new Date(stamp.result.bindings[0]).getTime()).toBeGreaterThan(Date.now() - 5000);
+  });
+
+  test('gate on, created_at is 5 minutes old (waited on locks) but the post-commit start is fresh: held, not sent', async () => {
+    process.env[GATE] = 'true';
+    markers = baseMarkers({ created_at: new Date(Date.now() - 5 * MIN), ...heldFor(10 * 1000) });
+    const out = await run();
+    expect(sends).toHaveLength(0);
+    expect(out.notificationSent).toBeNull();
+    expect(holdStartStamp()).toBeUndefined();
+    expect(notifiedStamps()).toHaveLength(0);
+  });
+
+  test('gate on, an old move with no recorded start (live pass died): the reconciler pass stamps it and holds', async () => {
+    process.env[GATE] = 'true';
+    markers = baseMarkers({ created_at: new Date(Date.now() - 20 * MIN) });
+    const out = await run();
+    expect(holdStartStamp()).toBeDefined();
+    expect(sends).toHaveLength(0);
+    expect(out.notificationSent).toBeNull();
+  });
+
   test('gate on, hold over, nothing newer: the text goes out', async () => {
     process.env[GATE] = 'true';
-    markers = baseMarkers({ created_at: new Date(Date.now() - 4 * MIN) });
+    markers = baseMarkers({ created_at: new Date(Date.now() - 4 * MIN), ...heldFor(4 * MIN) });
     const out = await run();
     expect(sends).toHaveLength(1);
     expect(out.notificationSent).toBe(true);
@@ -284,7 +345,7 @@ describe('applySeriesMoveEffects with the gate', () => {
     // move's time would match no row, and an unguarded one would clear flags
     // the newer move owns).
     expect(reminderUpdates).toHaveLength(0);
-    const named = stamps.find((s) => s.result !== undefined);
+    const named = stamps.find((st) => st.result?.bindings?.[0] === 'm2');
     expect(named.result.sql).toContain('textSupersededBy');
     expect(named.result.bindings).toEqual(['m2']);
   });
