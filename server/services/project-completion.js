@@ -1092,6 +1092,24 @@ async function completeProjectBackedService({
     };
   });
 
+  // GATE_COMPLETION_MOVES_DATE: the status flip's deferred dispatch:job_update was
+  // built from the OLD (booked) date before the move. After commit, the shared
+  // dispatch emitter sends the visit's CURRENT row to the board (board_visible,
+  // address and pin included, so an open board can add the moved stop) and
+  // refreshes route quality for BOTH days: the vacated booked day and the work
+  // day. Best-effort; the closeout has already committed.
+  if (result.visitDateMove?.moved && postCommitTrackServiceId) {
+    try {
+      await require('./dispatch-assignment').emitDispatchJobUpdate({
+        jobId: postCommitTrackServiceId,
+        actorId: actorId || null,
+        previousDate: result.visitDateMove.from,
+      });
+    } catch (err) {
+      logger.warn(`[project-completion] dispatch update after visit date move failed for ${postCommitTrackServiceId}: ${err.message}`);
+    }
+  }
+
   // A performed project closeout of a street-level hold's visit confirms its address (the shared
   // transition stamped it); release the hold now. A no-op for every other visit; best-effort.
   if (postCommitTrackServiceId) {

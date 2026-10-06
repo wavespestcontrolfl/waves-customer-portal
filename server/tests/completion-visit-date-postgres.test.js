@@ -58,8 +58,9 @@ const CERT_TYPE = 'pre_treatment_termite_certificate';
 
 // One visit on a certificate service (a project-backed profile), booked
 // `bookedOffset` days from today, with a project dated `projectOffset` days
-// from today and a delivered invoice carrying the BOOKED date.
-async function seed({ bookedOffset, projectOffset, recurring = false, invoiceDate = 'booked' } = {}) {
+// from today and an invoice (delivered 'sent' by default: the closeout billing
+// guard needs one) carrying the BOOKED date.
+async function seed({ bookedOffset, projectOffset, recurring = false, invoiceDate = 'booked', invoiceStatus = 'sent', noInvoice = false } = {}) {
   const f = {
     customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(),
     projectId: randomUUID(), invoiceId: randomUUID(), serviceKey: `fixture_cert_${randomUUID().slice(0, 8)}`,
@@ -83,11 +84,14 @@ async function seed({ bookedOffset, projectOffset, recurring = false, invoiceDat
     id: f.projectId, customer_id: f.customerId, scheduled_service_id: f.serviceId, project_type: CERT_TYPE,
     status: 'sent', sent_at: new Date(), title: 'Fixture certificate', created_by_tech_id: f.techId, project_date: f.work,
   });
-  await mockPg('invoices').insert({
-    id: f.invoiceId, token: randomUUID().replace(/-/g, '').slice(0, 24), invoice_number: `FX-${randomUUID().slice(0, 8)}`,
-    customer_id: f.customerId, scheduled_service_id: f.serviceId, status: 'sent', sent_at: new Date(), total: 350,
-    service_date: invoiceDate === 'booked' ? f.booked : invoiceDate,
-  });
+  if (!noInvoice) {
+    await mockPg('invoices').insert({
+      id: f.invoiceId, token: randomUUID().replace(/-/g, '').slice(0, 24), invoice_number: `FX-${randomUUID().slice(0, 8)}`,
+      customer_id: f.customerId, scheduled_service_id: f.serviceId, status: invoiceStatus, total: 350,
+      ...(invoiceStatus === 'draft' ? {} : { sent_at: new Date() }),
+      service_date: invoiceDate === 'booked' ? f.booked : invoiceDate,
+    });
+  }
   return f;
 }
 
@@ -124,17 +128,32 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
   afterEach(() => { delete process.env.GATE_COMPLETION_MOVES_DATE; });
 
-  test('gate on, closed before the booked day: visit, record and invoice share the work day; booked day kept', async () => {
+  test('gate on, closed before the booked day: visit and record share the work day; booked day kept; the delivered invoice is left alone', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
     const f = await seed({ bookedOffset: 3, projectOffset: -1 });
     try {
       const out = await close(f);
-      expect(out.visitDateMove).toMatchObject({ moved: true, from: f.booked, to: f.work, invoicesDated: 1 });
+      expect(out.visitDateMove).toMatchObject({ moved: true, from: f.booked, to: f.work, invoicesDated: 0 });
       const visit = await visitRow(f);
       expect(visit.status).toBe('completed');
       expect(day(visit.scheduled_date)).toBe(f.work);
       expect(day(visit.original_scheduled_date)).toBe(f.booked);
       expect(day((await recordRow(f)).service_date)).toBe(f.work);
+      // Delivered before closeout: the customer's PDF carries the booked day, so the row keeps it.
+      expect(day((await invoiceRow(f)).service_date)).toBe(f.booked);
+    } finally { await cleanup(f); }
+  });
+
+  test('gate on: an UNDELIVERED draft still carrying the booked day takes the work day with the visit', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceStatus: 'draft' });
+    try {
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'completed' });
+      const { moveCompletedVisitToWorkDay } = require('../services/completion-visit-date');
+      const out = await mockPg.transaction((trx) => moveCompletedVisitToWorkDay(trx, {
+        scheduledServiceId: f.serviceId, serviceRecord: { service_date: f.work }, workDate: f.work, previousStatus: 'confirmed',
+      }));
+      expect(out).toMatchObject({ moved: true, invoicesDated: 1 });
       expect(day((await invoiceRow(f)).service_date)).toBe(f.work);
     } finally { await cleanup(f); }
   });
@@ -178,6 +197,119 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
     } finally { await cleanup(f); }
   });
 
+  test('gate on: a DELIVERED invoice keeps the date on the PDF the customer holds (never re-dated)', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    for (const invoiceStatus of ['sent', 'viewed', 'paid']) {
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceStatus });
+      try {
+        const out = await close(f);
+        expect(out.visitDateMove).toMatchObject({ moved: true, invoicesDated: 0 });
+        expect(day((await invoiceRow(f)).service_date)).toBe(f.booked);
+        expect(day((await visitRow(f)).scheduled_date)).toBe(f.work);
+      } finally { await cleanup(f); }
+    }
+  });
+
+  test('gate on: a draft that was emailed (email_sent_at) counts as delivered and is not re-dated', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceStatus: 'draft' });
+    try {
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ email_sent_at: new Date() });
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'completed' });
+      const { moveCompletedVisitToWorkDay } = require('../services/completion-visit-date');
+      const out = await mockPg.transaction((trx) => moveCompletedVisitToWorkDay(trx, {
+        scheduledServiceId: f.serviceId, serviceRecord: { service_date: f.work }, workDate: f.work, previousStatus: 'confirmed',
+      }));
+      expect(out).toMatchObject({ moved: true, invoicesDated: 0 });
+      expect(day((await invoiceRow(f)).service_date)).toBe(f.booked);
+    } finally { await cleanup(f); }
+  });
+
+  describe('the project invoice is dated before it is delivered', () => {
+    const mint = async (f) => {
+      const { resolveOrCreateProjectInvoice } = require('../routes/admin-projects')._private;
+      const project = await mockPg('projects').where({ id: f.projectId }).first();
+      const customer = await mockPg('customers').where({ id: f.customerId }).first();
+      const { invoice } = await resolveOrCreateProjectInvoice({ project, customer });
+      return mockPg('invoices').where({ id: invoice.id }).first();
+    };
+
+    test('gate on, early work day: the minted draft carries the work day; the later closeout leaves it alone', async () => {
+      process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
+      try {
+        const invoice = await mint(f);
+        expect(day(invoice.service_date)).toBe(f.work);
+        // Delivered before closeout, as the combined-send route does.
+        await mockPg('invoices').where({ id: invoice.id }).update({ status: 'sent', sent_at: new Date() });
+        const out = await close(f);
+        expect(out.visitDateMove).toMatchObject({ moved: true, from: f.booked, to: f.work, invoicesDated: 0 });
+        expect(day((await mockPg('invoices').where({ id: invoice.id }).first()).service_date)).toBe(f.work);
+        expect(day((await visitRow(f)).scheduled_date)).toBe(f.work);
+      } finally { await cleanup(f); }
+    });
+
+    test('gate OFF: the minted draft keeps the booked day (today\'s behavior)', async () => {
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
+      try {
+        expect(day((await mint(f)).service_date)).toBe(f.booked);
+      } finally { await cleanup(f); }
+    });
+
+    test('gate on, late work day: the minted draft keeps the booked day', async () => {
+      process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+      const f = await seed({ bookedOffset: -3, projectOffset: 0, noInvoice: true });
+      try {
+        expect(day((await mint(f)).service_date)).toBe(f.booked);
+      } finally { await cleanup(f); }
+    });
+  });
+
+  test('gate on: a dispatch:job_update with the new date goes out after commit, and BOTH days are refreshed for route quality', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const dispatch = require('../services/dispatch-assignment');
+    const spy = jest.spyOn(dispatch, 'emitDispatchJobUpdate').mockResolvedValue(null);
+    const f = await seed({ bookedOffset: 3, projectOffset: -1 });
+    try {
+      await close(f);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ jobId: f.serviceId, previousDate: f.booked }));
+    } finally { spy.mockRestore(); await cleanup(f); }
+  });
+
+  test('gate on: the board gets the moved stop (board_visible, address) and quality refresh covers the vacated day too', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const emitted = [];
+    require('../sockets').getIo.mockReturnValue({ to: () => ({ emit: (event, payload) => emitted.push({ event, payload }) }) });
+    const quality = require('../services/scheduling/quality-after-change');
+    const refresh = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+    // Work day = today so the moved stop belongs on today's board.
+    const f = await seed({ bookedOffset: 3, projectOffset: 0 });
+    try {
+      await close(f);
+      const update = emitted.filter((e) => e.event === 'dispatch:job_update' && e.payload.job_id === f.serviceId).pop();
+      expect(update.payload).toMatchObject({ scheduled_date: f.work, status: 'completed', board_visible: true });
+      expect(update.payload).toHaveProperty('address');
+      const call = refresh.mock.calls.map(([arg]) => arg).find((arg) => Array.isArray(arg?.dates) && arg.dates.includes(f.booked));
+      expect(call.dates).toEqual(expect.arrayContaining([f.booked, f.work]));
+    } finally {
+      refresh.mockRestore();
+      require('../sockets').getIo.mockReturnValue(null);
+      await cleanup(f);
+    }
+  });
+
+  test('gate on, no move (late closeout): no extra dispatch update', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const dispatch = require('../services/dispatch-assignment');
+    const spy = jest.spyOn(dispatch, 'emitDispatchJobUpdate').mockResolvedValue(null);
+    const f = await seed({ bookedOffset: -3, projectOffset: 0 });
+    try {
+      await close(f);
+      expect(spy).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); await cleanup(f); }
+  });
+
   test('gate on, a RECURRING visit closed early: the series slot is kept and the next visit does not shift', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
     const f = await seed({ bookedOffset: 3, projectOffset: -1, recurring: true });
@@ -209,8 +341,9 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
       expect(moved.date_exception_source).toBe('completion_early');
       expect(day(moved.date_exception_cadence_date)).toBe(f.booked);
       // The root's pattern inputs were frozen from the booked day.
-      expect(moved.recurring_nth).not.toBeNull();
-      expect(moved.recurring_weekday).not.toBeNull();
+      const ord = recurrenceOrdinalOptions(f.booked);
+      expect(moved.recurring_nth).toBe(ord.nth);
+      expect(moved.recurring_weekday).toBe(ord.weekday);
       // The next date the series would extend to is unchanged by the move.
       expect(await extendFrom()).toEqual(before);
 

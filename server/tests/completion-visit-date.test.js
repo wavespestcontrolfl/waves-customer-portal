@@ -3,7 +3,7 @@
 // proven in completion-visit-date-postgres.test.js.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { planCompletionDateMove, moveCompletedVisitToWorkDay } = require('../services/completion-visit-date');
+const { planCompletionDateMove, moveCompletedVisitToWorkDay, earlyCloseoutInvoiceDate } = require('../services/completion-visit-date');
 const { completionMovesDateLive } = require('../config/feature-gates');
 
 afterEach(() => { delete process.env.GATE_COMPLETION_MOVES_DATE; });
@@ -61,7 +61,7 @@ describe('moveCompletedVisitToWorkDay guards', () => {
     const updates = [];
     const trx = (table) => {
       const chain = {
-        where() { return chain; }, whereNot() { return chain; }, whereNotIn() { return chain; }, whereRaw() { return chain; }, forUpdate() { return chain; },
+        where() { return chain; }, whereNot() { return chain; }, whereNotIn() { return chain; }, whereNull() { return chain; }, whereRaw() { return chain; }, forUpdate() { return chain; },
         first: async () => (table === 'scheduled_services' && !chain._partnerQuery ? row : partner),
         update: async (patch) => { updates.push({ table, patch }); return 1; },
       };
@@ -115,5 +115,38 @@ describe('moveCompletedVisitToWorkDay guards', () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
     const trx = trxFor({ ...base });
     expect(await moveCompletedVisitToWorkDay(trx, args({ workDate: null }))).toMatchObject({ moved: true, to: '2026-10-05' });
+  });
+});
+
+describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery)', () => {
+  const explode = () => { throw new Error('unexpected query'); };
+  const runnerFor = (visit, partner = null) => (table) => {
+    const chain = {
+      where() { return chain; }, whereNot() { chain._partner = true; return chain; }, whereNotIn() { return chain; },
+      first: async () => (chain._partner ? partner : visit),
+    };
+    return chain;
+  };
+  const project = { project_date: '2026-10-05' };
+  const visit = { id: 'v', status: 'confirmed', scheduled_date: '2026-10-08', visit_id: null };
+  const today = '2026-10-06';
+
+  test('gate off: no query, no date', async () => {
+    expect(await earlyCloseoutInvoiceDate(explode, { project, scheduledServiceId: 'v', today })).toBeNull();
+  });
+  test('gate on, work day before the booked day: the work day', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: 'v', today })).toBe('2026-10-05');
+  });
+  test('gate on: late, same-day, future, rescheduled and grouped visits keep the default date', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const run = (v, p = project, partner = null) => earlyCloseoutInvoiceDate(runnerFor(v, partner), { project: p, scheduledServiceId: 'v', today });
+    expect(await run({ ...visit, scheduled_date: '2026-10-01' })).toBeNull();
+    expect(await run({ ...visit, scheduled_date: '2026-10-05' })).toBeNull();
+    expect(await run(visit, { project_date: '2026-10-07' })).toBeNull();
+    expect(await run({ ...visit, status: 'rescheduled' })).toBeNull();
+    expect(await run({ ...visit, visit_id: 'stop-1' }, project, { id: 'p' })).toBeNull();
+    expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project: {}, scheduledServiceId: 'v', today })).toBeNull();
+    expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: null, today })).toBeNull();
   });
 });

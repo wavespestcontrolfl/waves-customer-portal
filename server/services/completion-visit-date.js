@@ -21,9 +21,13 @@
  *     that slot, not on the moved date, so the NEXT visit does not shift. A
  *     series root with no stored nth / weekday also gets them frozen from the
  *     booked day, because the extension derives them from the root's date.
- *   - the visit's own non-void invoices whose service_date still equals the
- *     booked day take the work day, so the invoice, the record and the visit
- *     share one service date.
+ *   - the visit's own UNDELIVERED draft invoices whose service_date still equals
+ *     the booked day take the work day, so the invoice, the record and the
+ *     visit share one service date. A delivered, sent or settled invoice is
+ *     never re-dated: the customer already holds a PDF carrying its date. The
+ *     project's own invoice is instead CREATED with the work day
+ *     (earlyCloseoutInvoiceDate, called by resolveOrCreateProjectInvoice), so
+ *     it is right before it is delivered.
  *
  * Never moved: a late completion (work day after the booked day: the visit
  * keeps its booked day on purpose), a completion dated after today, a visit
@@ -62,14 +66,6 @@ function planCompletionDateMove({ bookedDate, workDate, previousStatus, today = 
   return { move: true, from, to };
 }
 
-// The ordinal the series extension would derive from a root's own date
-// (admin-schedule.js recurrenceOrdinalOptions): nth-of-month and weekday.
-function ordinalFromDay(day) {
-  const [y, m, d] = day.split('-').map(Number);
-  const dow = new Date(Date.UTC(y, m - 1, d, 12)).getUTCDay();
-  return { nth: Math.ceil(d / 7), weekday: dow };
-}
-
 // A recurring visit keeps its series slot: same stamp as a "this visit only"
 // move, so the cadence math and the nightly top-up keep their anchor and the
 // next visit does not shift. Empty for a one-time visit.
@@ -84,11 +80,47 @@ function seriesSlotUpdate(locked, bookedDay, cols) {
   // are not stored. Freeze them from the booked day so moving the root cannot
   // change the pattern.
   if (!locked.recurring_parent_id) {
-    const ordinal = ordinalFromDay(bookedDay);
+    // The shared ET ordinal rule every other series path stamps a root with.
+    const { recurrenceOrdinalOptions } = require('./rebooker');
+    const ordinal = recurrenceOrdinalOptions(bookedDay);
     if (cols.recurring_nth && (locked.recurring_nth == null || locked.recurring_nth === '')) out.recurring_nth = ordinal.nth;
     if (cols.recurring_weekday && (locked.recurring_weekday == null || locked.recurring_weekday === '')) out.recurring_weekday = ordinal.weekday;
   }
   return out;
+}
+
+// A grouped partner in a live status shares the stop's date: such a visit never moves.
+async function hasLiveGroupPartner(runner, row) {
+  if (!row.visit_id) return false;
+  const partner = await runner('scheduled_services')
+    .where({ visit_id: row.visit_id })
+    .whereNot({ id: row.id })
+    .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
+    .first('id');
+  return !!partner;
+}
+
+/**
+ * The service date a project's invoice must carry when it is created BEFORE
+ * the visit closes out early: the project's work day, only when the closeout
+ * will then move the visit to that day (same plan, same exclusions). The
+ * invoice is normally delivered before closeout, so it has to be dated right
+ * at creation; the closeout never re-dates a delivered invoice.
+ * Returns the YYYY-MM-DD work day, or null (gate off, no early move, or no visit).
+ */
+async function earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId, today = etDateString() } = {}) {
+  if (!completionMovesDateLive()) return null;
+  if (!scheduledServiceId) return null;
+  const workDate = dayKey(project?.project_date);
+  if (!workDate) return null;
+  const visit = await runner('scheduled_services').where({ id: scheduledServiceId }).first();
+  if (!visit) return null;
+  const plan = planCompletionDateMove({
+    bookedDate: visit.scheduled_date, workDate, previousStatus: visit.status, today,
+  });
+  if (!plan.move) return null;
+  if (await hasLiveGroupPartner(runner, visit)) return null;
+  return plan.to;
 }
 
 /**
@@ -133,14 +165,7 @@ async function moveCompletedVisitToWorkDay(trx, {
   });
   if (!plan.move) return { moved: false, reason: plan.reason };
 
-  if (cols.visit_id && locked.visit_id) {
-    const partner = await trx('scheduled_services')
-      .where({ visit_id: locked.visit_id })
-      .whereNot({ id: locked.id })
-      .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
-      .first('id');
-    if (partner) return { moved: false, reason: 'grouped_visit' };
-  }
+  if (cols.visit_id && await hasLiveGroupPartner(trx, locked)) return { moved: false, reason: 'grouped_visit' };
 
   const update = {
     scheduled_date: plan.to,
@@ -169,14 +194,19 @@ async function moveCompletedVisitToWorkDay(trx, {
   }
 
   // The visit's own invoices: only a service date that still equals the booked
-  // day is a copy of it, so a deliberately different date is never overwritten.
+  // day is a copy of it, so a deliberately different date is never overwritten,
+  // and only a draft nobody has received: a sent, delivered, viewed or settled
+  // invoice keeps the date on the PDF the customer holds.
   const invoiceMatch = (builder) => {
     builder.where({ scheduled_service_id: locked.id });
     if (serviceRecord.id) builder.orWhere({ service_record_id: serviceRecord.id });
   };
   const invoicesDated = await trx('invoices')
     .where(invoiceMatch)
-    .whereNot({ status: 'void' })
+    .where({ status: 'draft' })
+    .whereNull('sent_at')
+    .whereNull('sms_sent_at')
+    .whereNull('email_sent_at')
     .whereRaw('service_date = ?::date', [plan.from])
     .update({ service_date: plan.to, updated_at: trx.fn.now() });
 
@@ -187,5 +217,6 @@ async function moveCompletedVisitToWorkDay(trx, {
 module.exports = {
   MOVE_SOURCE,
   planCompletionDateMove,
+  earlyCloseoutInvoiceDate,
   moveCompletedVisitToWorkDay,
 };

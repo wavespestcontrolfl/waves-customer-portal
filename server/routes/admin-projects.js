@@ -2907,6 +2907,25 @@ async function previewWdoInvoiceTotals(project, customer, fee) {
   });
 }
 
+// GATE_COMPLETION_MOVES_DATE: the service date a NEW project invoice carries
+// when the closeout will move the visit to an earlier work day (null = default).
+// The invoice is delivered before closeout, so it is dated here, not re-dated
+// afterwards. `scheduledServiceId` null = derive it from the project / its
+// service record. Gate off = no query at all.
+async function earlyCloseoutInvoiceDateFor(runner, project, scheduledServiceId) {
+  if (!require('../config/feature-gates').completionMovesDateLive()) return null;
+  let visitId = scheduledServiceId || null;
+  if (!visitId && project.service_record_id) {
+    const link = await runner('service_records')
+      .where({ id: project.service_record_id, customer_id: project.customer_id })
+      .first('scheduled_service_id');
+    visitId = link?.scheduled_service_id || null;
+  }
+  visitId = visitId || project.scheduled_service_id || null;
+  return require('../services/completion-visit-date')
+    .earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId: visitId });
+}
+
 // Find an invoice already linked to this project, else create a draft. Returns
 // { invoice, created }. Used by the combined report+invoice send.
 //
@@ -3068,10 +3087,14 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // Real send — create a draft, carrying the scheduled-service / service-record
       // linkage forward so completion + future lookups can find it, and record it
       // on the project (inside the lock) so the racing/resend POST reuses it.
+      // GATE_COMPLETION_MOVES_DATE: an early closeout moves the visit to the
+      // work day, so the invoice is dated that day NOW, before it is delivered.
+      const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, project, null);
       const created = await InvoiceService.create({
         customerId: project.customer_id,
         serviceRecordId: project.service_record_id || undefined,
         scheduledServiceId: project.scheduled_service_id || undefined,
+        ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
         title: 'WDO Inspection',
         lineItems: [{
           description: WDO_INVOICE_LINE_DESCRIPTION,
@@ -3207,6 +3230,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       err.code = 'invoice_build_failed';
       throw err;
     }
+    // GATE_COMPLETION_MOVES_DATE: same early-closeout date as the WDO draft above.
+    const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, project, scheduledServiceId);
     if (dryRun) {
       // Preview only (ADMIN-BUG-R49): build the draft through the SAME
       // create() call the real send uses below — replaying the discount/tax
@@ -3223,6 +3248,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
           customerId: project.customer_id,
           serviceRecordId: project.service_record_id || undefined,
           scheduledServiceId: scheduledServiceId || undefined,
+          ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
           lineItems: built.lineItems,
           discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
           trustedStoredDiscountSources: ['scheduled_service'],
@@ -3245,6 +3271,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       customerId: project.customer_id,
       serviceRecordId: project.service_record_id || undefined,
       scheduledServiceId: scheduledServiceId || undefined,
+      ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
       lineItems: built.lineItems,
       discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
       // The scheduled-service lines carry stored discount amounts; trust them so
@@ -6055,6 +6082,7 @@ router._private = {
   logProjectActivity,
   evaluateProjectSendReadiness,
   completeProjectBackedService,
+  resolveOrCreateProjectInvoice,
   dropStaleCertTreatmentDate,
   reportHoldBackoffMinutes,
   resolveWdoInspectionFee,
