@@ -240,15 +240,15 @@ function seasonStandaloneDate({ last, overdue, minDate, skipWeekends, dir, black
 // every 2nd date of a 6-week lawn host and every 3rd of a monthly one. The
 // `gated` rows are the second batch (monthly lawn hosts only), open while
 // GATE_RIDER_PAIRS_MONTHLY_LAWN is on. Not chosen, so no row: a 6-week lawn
-// with a bi-monthly rider, and any pair hosted on a pest visit.
-const QUARTERLY_RIDER_FAMILIES = ['pest_control', 'tree_shrub', 'termite_bait'];
+// with a bi-monthly rider, and any pair hosted on a pest visit. Pest group
+// riders (pest, termite bait, mosquito) left the table on 2026-10-05: pest and
+// lawn never share one stop (owner ruling, two stop groups); tree & shrub is
+// in the lawn group and keeps riding.
+const QUARTERLY_RIDER_FAMILIES = ['tree_shrub'];
 const RIDER_PAIRINGS = [
   { host: 'lawn_6wk', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
   { host: 'lawn_monthly', riderFamilies: QUARTERLY_RIDER_FAMILIES, riderPattern: 'quarterly' },
-  { host: 'lawn_monthly', riderFamilies: ['pest_control', 'tree_shrub'], riderPattern: 'bimonthly', gated: true },
-  { host: 'lawn_monthly', riderFamilies: ['pest_control'], riderPattern: 'monthly', gated: true },
-  { host: 'lawn_monthly', riderFamilies: ['pest_control'], riderPattern: 'semiannual', gated: true },
-  { host: 'lawn_monthly', riderFamilies: ['mosquito'], riderPattern: 'seasonal_feb_oct', gated: true },
+  { host: 'lawn_monthly', riderFamilies: ['tree_shrub'], riderPattern: 'bimonthly', gated: true },
 ];
 
 // 'lawn_6wk' | 'lawn_monthly' | null for a series row. Prod stores 6-week lawn

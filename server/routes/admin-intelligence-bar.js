@@ -1297,12 +1297,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (ADMIN-BUG-R12) gets no card. Fail closed on a read error.
       let booking;
       try {
-        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request);
+        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request, params.time_window);
       } catch {
         return { failed: true, modelResult: { error: 'Could not work out this visit\'s price or how this customer is billed — try again in a moment. Nothing was changed.' } };
       }
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
-      if (booking.error) return { failed: true, modelResult: { error: booking.error } };
+      // A refusal may carry a stable code (window_not_on_the_hour, W5-dev-03); the model sees it, and no card is made.
+      if (booking.error) return { failed: true, modelResult: { error: booking.error, ...(booking.code ? { code: booking.code } : {}) } };
       // Server pins, set unconditionally so a model-supplied value can never
       // stand in for them. The discount identity/terms (Codex r2 on #5093,
       // P1) ride alongside the net price and service id: the card shows the

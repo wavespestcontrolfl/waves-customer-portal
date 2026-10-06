@@ -935,6 +935,24 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test('create_appointment with a 2:30 PM start: the window refusal and its code reach the model, no pending action (W5-dev-03)', async () => {
+    mockIbBookingProposal.mockResolvedValueOnce({ error: 'Visits start on the hour. Use 2:00 PM or 3:00 PM.', code: 'window_not_on_the_hour' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', time_window: '2:30 PM' } }],
+      [{ type: 'text', text: 'Visits start on the hour.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it at 2:30', context: 'schedule' });
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Quarterly Pest Control Service', undefined, undefined, '2:30 PM');
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ error: 'Visits start on the hour. Use 2:00 PM or 3:00 PM.', code: 'window_not_on_the_hour' });
+    });
+  });
+
   test('create_appointment ambiguous tech name: no pending action, ambiguity error to the model', async () => {
     mockResolveTechnician.mockResolvedValue({
       error: 'Multiple technicians match that name. Ask the operator which one, then retry with technician_id.',
@@ -968,7 +986,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a termite liquid treatment', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined, undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined, undefined, undefined);
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(body.pendingActions).toEqual([]);
 
@@ -1008,7 +1026,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a re-service, ants back in the kitchen', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Pest Control Re-Service', undefined, '  ants back in the kitchen  ');
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Pest Control Re-Service', undefined, '  ants back in the kitchen  ', undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params.customer_request).toBe('ants back in the kitchen');
       expect(body.pendingActions).toHaveLength(1);
@@ -1068,7 +1086,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book flea control for $180', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180, undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180, undefined, undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_price).toBe(180);
       expect(stored.params._booking_service_id).toBeNull();

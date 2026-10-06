@@ -171,6 +171,26 @@ describe('admin estimate persistence', () => {
     expect(fixture.updates).toHaveLength(0);
   });
 
+  test('an impossible US phone (area code starting 1) refuses the create with 400 INVALID_PHONE and no write', async () => {
+    const fixture = makeDatabase({});
+    await expect(createOrReuseAdminEstimate({ database: fixture.database,
+      body: { ...baseBody, leadId: null, customerPhone: '(103) 555-0123' },
+      technicianId: 'qa-admin', recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    })).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_PHONE', message: expect.stringMatching(/not a valid US phone number/) });
+    expect(fixture.inserts.filter((entry) => entry.table === 'estimates')).toHaveLength(0);
+    expect(fixture.updates).toHaveLength(0);
+  });
+
+  test('a valid phone still creates the draft', async () => {
+    const fixture = makeDatabase({});
+    const { estimate } = await createOrReuseAdminEstimate({ database: fixture.database,
+      body: { ...baseBody, leadId: null, customerPhone: '(203) 555-0123' },
+      technicianId: 'qa-admin', recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    });
+    expect(estimate.customer_phone).toBe('(203) 555-0123');
+    expect(fixture.inserts.filter((entry) => entry.table === 'estimates')).toHaveLength(1);
+  });
+
   test('a retried draft identity cannot overwrite a different form', async () => {
     const fixture = makeDatabase({});
     const body = { ...baseBody, leadId: null, clientDraftId: '01234567-89ab-4cde-8fab-0123456789ab' };

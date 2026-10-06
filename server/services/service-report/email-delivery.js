@@ -15,7 +15,7 @@ const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { dateOnlyStamp, formatReadyTime } = require('./time-format');
-const { getServiceReportEmailRecipients, serviceReportEmailOptedOut, prefsUnavailable, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
+const { getServiceReportEmailRecipients, withAccountPrimaryContactStrict, serviceReportEmailOptedOut, prefsUnavailable, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
 const { inspectionCreditReportNote } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
@@ -498,6 +498,12 @@ async function loadServiceRecord(recordId) {
       'customers.last_name',
       'customers.email as customer_email',
       'customers.phone as customer_phone',
+      // The account's role and profile link: the report rule withholds
+      // findings from occupants of a managed rental (customer-contact.js
+      // slotWithheldFromReports).
+      'customers.contact_role',
+      'customers.account_id',
+      'customers.is_primary_profile',
       ...SERVICE_CONTACT_COLUMNS.map((column) => `customers.${column}`),
       // The email's "completed ... at City, ST" line names the visit's
       // stamped city when present — a rental visit in another town must not
@@ -547,14 +553,29 @@ async function sendServiceReportV1Email(recordId, {
   // the rev of what would be dispatched.
   const preSendReentryRev = reentryRevFromNotes(service.structured_notes);
   const prefs = await db('notification_prefs').where({ customer_id: service.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
-  const recipients = getServiceReportEmailRecipients({
-    id: service.customer_id,
-    first_name: service.first_name,
-    last_name: service.last_name,
-    email: service.customer_email,
-    phone: service.customer_phone,
-    ...Object.fromEntries(SERVICE_CONTACT_COLUMNS.map((column) => [column, service[column]])),
-  }, prefs || {});
+  let reportCustomer;
+  try {
+    const baseCustomer = {
+      id: service.customer_id,
+      first_name: service.first_name,
+      last_name: service.last_name,
+      email: service.customer_email,
+      phone: service.customer_phone,
+      contact_role: service.contact_role,
+      account_id: service.account_id,
+      is_primary_profile: service.is_primary_profile,
+      ...Object.fromEntries(SERVICE_CONTACT_COLUMNS.map((column) => [column, service[column]])),
+    };
+    // An explicit opt-out (or unreadable prefs) already decides the send:
+    // the account role is read only when someone may still get the report.
+    reportCustomer = prefsUnavailable(prefs) || serviceReportEmailOptedOut(prefs)
+      ? baseCustomer
+      : await withAccountPrimaryContactStrict(baseCustomer);
+  } catch (err) {
+    // The account's role decides who may read the findings: retry, never guess.
+    return { ok: false, transient: true, reason: 'account_role_unavailable', error: `Account role unavailable: ${err.message}` };
+  }
+  const recipients = getServiceReportEmailRecipients(reportCustomer, prefs || {});
   if (!recipients.length) {
     // A transient notification_prefs lookup failure (PREFS_UNAVAILABLE) is
     // not a decision at all — it must NOT be reported the same way as a

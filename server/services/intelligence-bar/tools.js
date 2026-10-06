@@ -34,6 +34,7 @@ const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require(
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactStreet,
   normalizeContactCity,
@@ -1193,6 +1194,8 @@ async function createCustomer(input) {
   const lastName = normalizeContactName(String(input.last_name || '').trim()) || null;
   const phone = normalizeContactPhone(String(input.phone || '').trim());
   if (!firstName || !phone) return { error: 'first_name and phone are required' };
+  const phoneProblem = contactPhoneProblem(input.phone);
+  if (phoneProblem) return { error: phoneProblem };
 
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (phoneDigits.length < 10) return { error: 'phone must include at least 10 digits' };
@@ -1314,6 +1317,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // live check before this (GH r9 P1).
   if (before.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+  }
+
+  // A phone being entered now must be a number that can exist; an unchanged
+  // stored number echoed back is not a new write.
+  if (clean.phone && clean.phone !== before.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
   }
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
@@ -1647,6 +1657,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+  // A bulk write stamps one number onto every selected row, so an impossible
+  // US phone is refused here, before either execution path (codex #6028 P2).
+  if (clean.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
 
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
@@ -2495,7 +2511,41 @@ const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
 // window start. Returns { start } (null start when no time was given) or
 // { error } for garbage input, so callers return a clear tool error instead
 // of a Postgres time-cast error.
-function parseTimeWindowStart(timeWindow) {
+// The refusal for a start that is not on the hour (owner rule — every creator
+// enforces it; Codex #3109 r33 flagged this tool as the bypass). Rejects
+// rather than rounding, and names the nearest valid starts ("Visits start on
+// the hour. Use 2:00 PM or 3:00 PM.") so the model can re-ask. Each candidate
+// (the hour before and the hour after) is checked against the shared admin
+// window rule with the flat-60 duration, so a 7:30 PM request names only
+// 7:00 PM (8:00 PM would end past the day end) and an 8:30 PM request, with
+// no valid neighbor, gets the rule's own refusal as invalid_appointment_window
+// (Codex r1 on #6023, P2). A reschedule passes the visit's preserved
+// duration, so a 90-minute visit asked for 6:30 PM is offered 6:00 PM only
+// (7:00–8:30 ends past the day end; Codex r2 on #6023, P2). The codes are stable: the proposal returns them
+// with no card (W5-dev-03), and the executor refuses the same start the same
+// way if no card was ever made.
+function offHourRefusal(hour, durationMinutes = 60) {
+  const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
+  const candidates = hour + 1 > 23 ? [hour] : [hour, hour + 1];
+  const valid = [];
+  let firstRefusal = null;
+  for (const h of candidates) {
+    const start = `${String(h).padStart(2, '0')}:00`;
+    const windowEnd = deriveWindowEnd(start, durationMinutes);
+    try {
+      if (!windowEnd) throw Object.assign(new Error('That window would cross midnight — pick an earlier start.'), { status: 422 });
+      assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes });
+      valid.push(hour12(h));
+    } catch (err) {
+      if (err?.status !== 422) throw err;
+      if (!firstRefusal) firstRefusal = err.message;
+    }
+  }
+  if (!valid.length) return { error: firstRefusal, code: 'invalid_appointment_window' };
+  return { error: `Visits start on the hour. Use ${valid.join(' or ')}.`, code: 'window_not_on_the_hour' };
+}
+
+function parseTimeWindowStart(timeWindow, durationMinutes = 60) {
   if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
   const raw = String(timeWindow).trim().toLowerCase();
   if (raw === 'morning') return { start: '08:00' };
@@ -2511,13 +2561,8 @@ function parseTimeWindowStart(timeWindow) {
   if (hour > 23 || minute > 59) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
   }
-  // Appointment windows start ON THE HOUR (owner rule — every creator
-  // enforces it; Codex #3109 r33 flagged this tool as the bypass). Reject
-  // rather than silently rounding: the operator asked for a specific time
-  // and the model can re-ask with the corrected value.
-  if (minute !== 0) {
-    return { error: `Appointment windows start on the hour — got "${timeWindow}"; use e.g. "${hour > 12 ? hour - 12 : hour || 12}:00 ${hour >= 12 ? 'PM' : 'AM'}"` };
-  }
+  // Appointment windows start ON THE HOUR; see offHourRefusal.
+  if (minute !== 0) return offHourRefusal(hour, durationMinutes);
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 
@@ -3002,7 +3047,11 @@ function ibBookingCustomerRequest(rawRequest, catalogRow) {
 // booking will carry and a booking that would be refused never reaches a
 // card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest) {
+async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest, timeWindow) {
+  // The window verdict comes first and reads nothing (W5-dev-03): a start the
+  // executor would refuse gets a coded refusal here, never a card.
+  const windowRefusal = ibBookingWindowRefusal(timeWindow);
+  if (windowRefusal) return windowRefusal;
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
@@ -3067,6 +3116,27 @@ async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
   return overlap.length > 0;
 }
 
+// Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
+// parse (parseTimeWindowStart) and the SAME shared admin window rule
+// (assertAdminAppointmentWindow) the executor runs, asked before a card
+// exists so a start the executor would refuse (a :30 start) is a refusal
+// with a code, not a card whose Confirm saves nothing. Returns null when the
+// window is acceptable or absent, else { error, code }.
+function ibBookingWindowRefusal(timeWindow) {
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error) return { error: win.error, code: win.code || 'invalid_appointment_window' };
+  if (!win.start) return null;
+  const windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return { error: 'That window would cross midnight — pick an earlier start.', code: 'invalid_appointment_window' };
+  try {
+    assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 });
+  } catch (err) {
+    if (err?.status === 422) return { error: err.message, code: 'invalid_appointment_window' };
+    throw err;
+  }
+  return null;
+}
+
 async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
@@ -3075,7 +3145,7 @@ async function createAppointment(input, actionContext = {}) {
     return { error: `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${scheduled_date}")` };
   }
   const win = parseTimeWindowStart(time_window);
-  if (win.error) return { error: win.error };
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   // Flat-60 convention (admin-schedule: every service call defaults to 60
   // minutes) so overlap checks see a real block, not an open-ended start.
@@ -3578,8 +3648,11 @@ async function rescheduleAppointment(input, actionContext = {}) {
   if (!dateStr) {
     return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${new_date}")` };
   }
-  const win = parseTimeWindowStart(new_time_window);
-  if (win.error) return { error: win.error };
+  // The visit's own window length, judged before the new start is parsed so
+  // an off-hour refusal names only starts this visit can actually take.
+  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
+  const win = parseTimeWindowStart(new_time_window, apptDuration);
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   const oldDate = appt.scheduled_date;
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this tool moves ONE
@@ -3605,7 +3678,6 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // and the audit log both read window_end, so both would break. The shared
   // deriveWindowEnd returns null when the preserved duration would carry the
   // end past midnight — reject rather than persist a wrapped, inverted block.
-  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
   const newStart = win.start || appt.window_start;
   let newWindowEnd = win.start
     ? deriveWindowEnd(win.start, apptDuration)

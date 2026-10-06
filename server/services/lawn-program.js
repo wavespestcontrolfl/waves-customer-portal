@@ -28,6 +28,17 @@ function lawnProtocols() {
   return featureGates.lawnV13Live?.() ? v13 : protocols.lawn;
 }
 
+// v13 is one program for every grass, still filed under the four track keys.
+// A lawn whose recorded grass names none of them (mixed, unknown, free text)
+// plans from this key while GATE_LAWN_V13 is live: the four copies are the same
+// steps and the same safety rules, so the key changes nothing but the lookup.
+// Gate off: null, and such a lawn has no track, as before. Planning only (the
+// plan engine): historical readers never synthesize a track for a past visit.
+const LAWN_V13_ANY_GRASS_TRACK = 'st_augustine';
+function lawnV13AnyGrassTrack() {
+  return featureGates.lawnV13Live?.() === true ? LAWN_V13_ANY_GRASS_TRACK : null;
+}
+
 // A protocol version that can serve a visit: the published one, or the staged
 // v13 version (loaded by the migration, never active until the follow-up PR
 // retires the old program) ONLY while GATE_LAWN_V13 is live. Unsetting the gate
@@ -55,4 +66,33 @@ function visitProtocolQuery({ serviceDate, grassTrack, scheduledService }) {
   };
 }
 
-module.exports = { lawnProtocols, LAWN_V13_VERSION, isServingProtocol, visitProtocolQuery };
+// A recipe visit can carry `cadenceVariants`: { "<applications a year>": { primary } },
+// the whole-lawn step a plan of that many applications runs INSTEAD of the visit's
+// own step (the 12x one, also the default). v13 has one: April on the 9x plan
+// (LESCO Dimension 0.21% 18-0-10 in place of the 24-0-11). This is the one
+// decision of which step a visit runs; the plan, the tank sheet and the
+// completion defaults all read it. `visitsPerYear` is the plan's count, or null
+// when unknown: the visit keeps its own step and `unknownCadence` names the
+// variant products a known plan would have used (the caller warns).
+function visitForCadence(visit, visitsPerYear) {
+  const variants = visit?.cadenceVariants;
+  if (!variants || typeof variants !== 'object') return { visit, branch: null, unknownCadence: null };
+  const variant = variants[String(Number(visitsPerYear))];
+  if (visitsPerYear != null && variant) {
+    return { visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}) }, branch: String(Number(visitsPerYear)), unknownCadence: null };
+  }
+  if (visitsPerYear != null) return { visit, branch: null, unknownCadence: null };
+  const names = Object.values(variants).flatMap((entry) => String(entry.primary || '').split('\n').map((line) => line.split(' \u2014 ')[0].trim()).filter(Boolean));
+  return { visit, branch: null, unknownCadence: { variantProducts: [...new Set(names)], cadences: Object.keys(variants) } };
+}
+
+// The warning for a visit whose plan cadence is unknown (visitForCadence's
+// unknownCadence): it kept the 12x step and says what a known plan would have used.
+function unknownCadenceWarning(unknownCadence) {
+  return {
+    code: 'lawn_v13_plan_cadence_unknown', severity: 'warning',
+    message: `This visit's lawn plan (applications a year) is not on file, so the plan keeps the 12x step. On a ${unknownCadence.cadences.join('x or ')}x plan, use ${unknownCadence.variantProducts.join(' or ')} instead.`,
+  };
+}
+
+module.exports = { lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };

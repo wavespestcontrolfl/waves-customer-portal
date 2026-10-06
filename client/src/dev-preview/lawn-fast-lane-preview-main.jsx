@@ -51,6 +51,14 @@ const CATALOG = [
   { id: IDS.primo, name: 'Primo Maxx', category: 'pgr', formulation: 'SC', inventory_on_hand: '90.0000', inventory_unit: 'fl_oz' },
   { id: IDS.prodiamine, name: 'Prodiamine 65 WDG', category: 'pre-emergent', formulation: 'WDG', inventory_on_hand: '200.0000', inventory_unit: 'oz' },
   { id: IDS.dismiss, name: 'Dismiss NXT', category: 'herbicide', formulation: 'SC', inventory_on_hand: '60.0000', inventory_unit: 'fl_oz' },
+  // Tagged rows: the lawn sheet lists the lawn-tagged insecticide and not the roach bait.
+  { id: '77777777-7777-4777-8777-000000000001', name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.46, default_unit: 'oz/1000sf', inventory_on_hand: '40.0000', inventory_unit: 'oz' },
+  { id: '77777777-7777-4777-8777-000000000003', name: 'Artavia 2 SC (Azoxy)', category: 'fungicide', formulation: 'SC', service_lines: ['lawn'], inventory_on_hand: '64.0000', inventory_unit: 'fl_oz' },
+  { id: '77777777-7777-4777-8777-000000000004', name: 'Velista', category: 'fungicide', formulation: 'WDG', service_lines: ['lawn'], inventory_on_hand: '20.0000', inventory_unit: 'oz' },
+  { id: '77777777-7777-4777-8777-000000000005', name: 'Dylox 6.2 G Granular Insecticide', category: 'insecticide', formulation: 'granular', service_lines: ['lawn'], inventory_on_hand: '30.0000', inventory_unit: 'lb' },
+  { id: '77777777-7777-4777-8777-000000000006', name: 'Certainty Turf Herbicide', category: 'herbicide', formulation: 'WG', service_lines: ['lawn'], inventory_on_hand: '1.2500', inventory_unit: 'oz' },
+  { id: '77777777-7777-4777-8777-000000000007', name: 'LESCO 90/10 Nonionic Surfactant', category: 'surfactant', formulation: 'liquid', service_lines: ['lawn'], inventory_on_hand: '128.0000', inventory_unit: 'fl_oz' },
+  { id: '77777777-7777-4777-8777-000000000002', name: 'Advion WDG Granular', category: 'insecticide', formulation: 'WDG', service_lines: ['pest'], inventory_on_hand: '10.0000', inventory_unit: 'oz' },
 ];
 const LAWN_SQFT = 5750;
 const PLANNED = [
@@ -121,6 +129,13 @@ const context = () => ({
   turfHeightCapture: false,
   plannedProducts: { source: 'plan', items: STATE === 'empty-products' ? [] : PLANNED },
   plannedProductsUnavailable: null,
+  methods: [
+    { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
+    { value: 'broadcast_spray', label: 'Broadcast spray', common: true, requiresSqft: true },
+    { value: 'granular_broadcast', label: 'Granular broadcast', common: true, requiresSqft: true },
+    { value: 'soil_drench', label: 'Soil drench', common: false, requiresSqft: false },
+    { value: 'foliar_spray', label: 'Foliar spray', common: false, requiresSqft: false },
+  ],
   assessment: STATE === 'confirmed'
     ? { exists: true, id: ASSESSMENT.id, confirmed: true, unusableReason: null }
     : { exists: STATE === 'analyzed', id: STATE === 'analyzed' ? ASSESSMENT.id : null, confirmed: false },
