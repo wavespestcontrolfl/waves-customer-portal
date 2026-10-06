@@ -90,6 +90,8 @@ import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPos
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
+import CallBridgeLink from '../admin/CallBridgeLink';
+import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import { Button, ActionFeedback } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -707,7 +709,12 @@ function LawnSheetHeader({ titleId, title, showDetails, detailsDisabled, onDetai
 // customer, then address (directions), phone (call) and email (mail), each an
 // underlined link as there. The schedule row carries name, address and phone; the
 // email is read from the customer, as the full form does.
+// The phone goes through the Waves call bridge for a login that may place
+// customer calls (owner 2026-10-06): the server rings the caller's phone, then
+// the customer sees the Waves number, never the caller's own cell. Any other
+// login keeps the plain tel: link it had.
 function CustomerContact({ service, visit, request }) {
+  const canCall = useCanAccessCalls();
   const customerId = service?.customerId || service?.routedCustomerId || null;
   const [email, setEmail] = useState('');
   useEffect(() => {
@@ -727,7 +734,11 @@ function CustomerContact({ service, visit, request }) {
         ? <a className="tech-lawn-name" href={`/admin/customers?customerId=${encodeURIComponent(customerId)}`}>{name}</a>
         : <div className="tech-lawn-name">{name}</div>}
       {address ? <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer">{address}</a> : null}
-      {service?.customerPhone ? <a href={`tel:${service.customerPhone}`}>{service.customerPhone}</a> : null}
+      {service?.customerPhone
+        ? (canCall
+          ? <CallBridgeLink className="tech-lawn-call" phone={service.customerPhone} customerName={name === 'Customer' ? '' : name} customerIdHint={customerId}>{service.customerPhone}</CallBridgeLink>
+          : <a href={`tel:${service.customerPhone}`}>{service.customerPhone}</a>)
+        : null}
       {email ? <a href={`mailto:${email}`} style={{ wordBreak: 'break-word' }}>{email}</a> : null}
     </div>
   );
