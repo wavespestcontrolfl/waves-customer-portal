@@ -297,11 +297,15 @@ function productsNamedIn(question, products) {
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 
 const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'trace', 'mews', 'landing', 'hollow', 'vista'];
+// "is" (ISLE) is an everyday word, not a street type in prose.
+const NOT_STREET_SUFFIXES = new Set(['is']);
 const STREET_SUFFIX = `(?:${[...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
+  .filter((suffix) => !NOT_STREET_SUFFIXES.has(suffix))
   .sort((x, y) => y.length - x.length)
   .join('|')})`;
-// Greedy: "21 Harbor Crossing" takes both words, not the first suffix only.
-const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}${STREET_SUFFIX}\\b\\.?`, 'gi');
+// At least one street-name word, so a bare "2 is" or "3 way" is prose. Greedy:
+// "21 Harbor Crossing" takes both words, not the first suffix only.
+const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){1,4}${STREET_SUFFIX}\\b\\.?`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -518,7 +522,9 @@ function leaksTargetList(text, { question, data, facts }) {
 // mistyped appointment can never reach the customer (Codex P1s on #6020).
 // Next-visit questions keep the rule answer, which states the schedule.
 const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
-const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\\b`, 'i');
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
+// Abbreviated weekdays only capitalized: a lowercase "sun" or "sat" is a word.
+const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 // The output screen, in order: the first check that fails names the rejection.
 // Each entry is [reason, (text, context) => failed]. A rejection is never an
@@ -535,7 +541,7 @@ const ASK_CHECKS = [
   ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
-  ['states_a_date', (text) => DATE_TOKEN.test(text)],
+  ['states_a_date', (text) => DATE_TOKEN.test(text) || WEEKDAY_ABBR.test(text)],
 ];
 
 /**
@@ -595,7 +601,7 @@ const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, ca
 const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
 const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
 // "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
-const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|animals?|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|(?:\\bi|\\bwe)\\s+(?:\\w+\\s+)?(?:got|get|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b`, 'i');
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|animals?|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you)\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else

@@ -435,6 +435,9 @@ describe('screenAskAnswer', () => {
     expect(screen('Your next visit is Tuesday, January 5, 2027.')).toBe('states_a_date');
     expect(screen('The technician arrives at 2 PM.')).toBe('states_a_date');
     expect(screen('We come back on 1/8.')).toBe('states_a_date');
+    expect(screen('The technician arrives Wed at 14:00.')).toBe('states_a_date');
+    expect(screen('The technician arrives on 2027-01-05.')).toBe('states_a_date');
+    expect(screen('Activity often settles after the sun comes out.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
 
@@ -617,6 +620,9 @@ describe('symptoms and exposure never reach the model', () => {
     'You sprayed my arm and hand',
     'What was sprayed on the arm chair?',
     'Can my dog go out after the spray?',
+    'The technician sprayed her',
+    'She was sprayed',
+    'You got sprayed',
   ])('a safety line before the answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
     expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
@@ -951,5 +957,16 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
       const { body } = await ask(baseUrl, QUESTION);
       expect(body).toEqual({ answer: rulesAnswer });
     });
+  });
+});
+
+describe('street-address scrub keeps prose', () => {
+  const { buildReportAskFacts } = require('../services/service-report/report-ask-ai');
+  test.each([
+    ['Pressure index 2 is improving.', 'Pressure index 2 is improving.'],
+    ['Ants at 18 Bay Pass by the lanai.', 'Ants at [address] by the lanai.'],
+    ['Ants at 21 Harbor Crossing.', 'Ants at [address]'],
+  ])('%s', (concern, expected) => {
+    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: concern } }).customer_concern).toBe(expected);
   });
 });
