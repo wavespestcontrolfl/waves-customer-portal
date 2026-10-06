@@ -942,12 +942,16 @@ const YEAR = /\b(?:19|20)\d{2}\b/;
 // and a compact 24-hour time (Codex P1 #6016 r23).
 const VISIT_TIME_NUMBER = /\b(?:window|arriv\w*|be\s+(?:there|here)|(?:come|stop|swing|drop)\s+by|show\s+up|get\s+there)\b[^.?!]{0,20}\d/i;
 const COMPACT_24H = /\b(?:at|around|about|by|after|before|until)\s+(?:[01]\d|2[0-3])[0-5]\d\b/i;
+// A promised visit with no date ("We will be back soon", "the technician will
+// come back in the spring"): the model has no appointment to promise (Codex
+// P1 #5964 r25).
+const VISIT_PROMISE = /\b(?:we|we['’]ll|the\s+(?:tech|technician|team)|waves|someone|our\s+(?:team|technician|tech))\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to|can)?\s*(?:\w+\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\bin\s+a\s+fortnight\b/i;
 const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
   const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
-  return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY, YEAR, VISIT_TIME_NUMBER, COMPACT_24H].some((re) => re.test(own));
+  return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY, YEAR, VISIT_TIME_NUMBER, COMPACT_24H, VISIT_PROMISE].some((re) => re.test(own));
 }
 
 // Every number the model writes itself must be a number the fact sheet holds,
@@ -1280,7 +1284,7 @@ const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${P
 const LISTED_PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
-  /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
+  /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|cough\w*|shak(?:e|es|ing|y)|trembl\w*|shiver\w*|twitch\w*|sneez\w*|(?:in|has|have|got|getting)\s+hives|itch(?:y|ing)|sore\s+throat|watery\s+eyes|red\s+eyes|foaming|panting|limp|collapsed?|unresponsive|confused|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
   /\b(?:can['’]?t|cannot|can\s+not|couldn['’]?t|unable\s+to|trouble|difficulty|hard\s+to|struggling\s+to)\s+(?:to\s+)?breath\w*/i,
   /\b(?:allergic\s+reaction|reaction\s+to\s+(?:the|today['’]?s|your)\s+(?:spray|treatment|product|bait))\b/i,
   /\bburn(?:s|ed|ing)\b[^.?!]{0,30}\b(?:eyes?|skin|throat|lungs?|nose|mouth|hands?|face)\b|\b(?:eyes?|skin|throat|lungs?|nose|mouth|hands?|face)\b[^.?!]{0,30}\b(?:burn(?:s|ed|ing)|sting(?:s|ing)|itch\w*|irritat\w*|red\b)/i,
@@ -1296,7 +1300,8 @@ const MEDICAL_CUES = [
   // Passive: "the bait was eaten by my dog" (Codex P1 #5964 r19).
   new RegExp(`\\b(?:was|were|got|been|has\\s+been|have\\s+been)\\s+(?:\\w+\\s+)?(?:eaten|swallowed|ingested|consumed|licked|chewed|drunk|sucked|lapped(?:\\s+up)?|mouthed|nibbled|gnawed)\\s+(?:on\\s+)?by\\s+(?:${PATIENT}|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})\\b`, 'i'),
   // A sentence that opens on the verb has an understood "I": "Accidentally
-  // swallowed some bait" (Codex P1 #6016 r21).
+  // swallowed some bait" (Codex P1 #6016 r21), when the sentence names an
+  // exposure: "Ate breakfast" is not one (Codex P1 #6016 r31).
   /(?:^|[.!?]\s+)(?:(?:accidentally|just|i\s+think\s+(?:i\s+)?|i\s+)\s*)*(?:swallow(?:ed)?|ingest(?:ed)?|consumed|ate|drank|inhaled|licked)\b(?=[^.?!]*\b(?:bait|spray\w*|pesticide|chemical|product|granules?|poison|insecticide|herbicide|treatment|gel|powder|dust|pellets?|some|it)\b)/i,
   // Swallowing, eating and poisoning need a person or pet as the one: "were
   // the ants poisoned by the bait?" is a report question (Codex P1 #5964 r15).
@@ -1323,16 +1328,41 @@ const MEDICAL_CUES = [
 const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, call Poison Control at ${POISON_CONTROL_PHONE_DISPLAY} (free, confidential, 24/7). In an emergency, call 911.`;
 const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
 const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
-// "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
-const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you|they)(?:['’](?:ve|s|re|m|d))?\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b|\\b(?:i|we)\\s+(?:\\w+\\s+){0,2}?(?:go|going|went|be|been|walk\\w*|play\\w*|step\\w*|touch\\w*|smell\\w*|breath\\w*|sit|sat|stay\\w*|let\\s+(?:the|my|our))\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
+// "Me" and "us" count only as the object of a spray or contact verb
+// ("sprayed me", "got on us"); "explain to me" names no one exposed (Codex P2
+// #6016 r33).
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you|they)(?:['’](?:ve|s|re|m|d))?\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|\\b(?:spray\\w*|got|get|gets|landed|splash\\w*|drift\\w*|blew|dripp?\\w*)\\s+(?:\\w+\\s+){0,2}?(?:on\\s+|onto\\s+|at\\s+|in\\s+)?(?:me|us)\\b|\\b(?:i|we)\\s+(?:\\w+\\s+){0,2}?(?:go|going|went|be|been|walk\\w*|play\\w*|step\\w*|touch\\w*|smell\\w*|breath\\w*|sit|sat|stay\\w*|let\\s+(?:the|my|our))\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
  * null. Pure and deterministic; the question is never logged.
  */
+// Ingestion of a product by anyone, named or not ("John swallowed some
+// bait", "the bait was swallowed by John"): an eating verb and an exposure
+// word in one sentence, unless a pest is the one eating ("the ants ate the
+// bait") (Codex P1 #6016 r32). No subject list can name every person.
+const INGESTION_VERB = /\b(?:swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
+const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
+// The pest is the eater only as the subject of the eating verb ("the ants ate
+// the bait", "eaten by the roaches"); a pest word right before a product word
+// names the product ("ant bait") (Codex P1 #6016 r33-r34).
+const PEST_WORDS = '(?:ants?|roach(?:es)?|cockroach(?:es)?|rats?|mice|mouse|rodents?|pests?|bugs?|insects?|termites?|squirrels?|raccoons?|fleas?|ticks?|spiders?|snails?|slugs?|wildlife|colony|colonies)';
+const PRODUCT_AFTER_PEST = '(?!\\s+(?:bait\\w*|poison\\w*|gel|killer|spray\\w*|traps?|stations?|granules?|control|treatment|products?|pellets?|blocks?|dust|powder))';
+const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\\w+\\s+)?(?:ate|eats|eating|swallow\\w*|consum\\w*|lick\\w*|chew\\w*|nibbl\\w*|took|takes|taking|feed\\w*|carr\\w*)\\b|\\b(?:eaten|consumed|taken)\\s+by\\s+(?:the\\s+)?${PEST_WORDS}\\b`, 'i');
+// Someone must be the eater: a name, a pronoun, a possessive person or a
+// listed person or pet, before the verb or after "by". "Was the bait
+// eaten?" names no one (Codex P1 #6016 r34).
+const QUESTION_WORDS = '(?!(?:Was|Were|Is|Are|Did|Does|Do|Has|Have|What|Why|How|When|Where|Which|Who|Will|Can|Could|Should|The|This|That|Some|Any)\\b)';
+const EATER = `(?:${QUESTION_WORDS}[A-Z][a-z]+|i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
+const EATER_ACTS = new RegExp(`(?:^|[^\\w])${EATER}\\s+(?:\\w+\\s+){0,2}?(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\\b|\\bby\\s+${EATER}`);
+function ingestsProduct(text) {
+  return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
+    && EATER_ACTS.test(sentence) && !PEST_EATING.test(sentence));
+}
+
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
-  return MEDICAL_CUES.some((cue) => cue.test(text)) ? MEDICAL_EXPOSURE_ANSWER : null;
+  return MEDICAL_CUES.some((cue) => cue.test(text)) || ingestsProduct(text) ? MEDICAL_EXPOSURE_ANSWER : null;
 }
 
 /**
