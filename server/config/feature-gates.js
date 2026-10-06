@@ -5656,6 +5656,14 @@ function lawnV13Live() {
   return process.env.GATE_LAWN_V13 === 'true';
 }
 
+// GATE_AIO_GAP_SWEEP_MONTHLY read at CALL time — strict 'true' only, so an
+// unset variable is off. Lets the scheduler start the monthly AI Overview gap
+// sweep (services/seo/aio-gap-sweep.js) on the 2nd. A manual sweep started
+// from the admin route needs no gate.
+function aioGapSweepMonthlyLive() {
+  return process.env.GATE_AIO_GAP_SWEEP_MONTHLY === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -5861,3 +5869,5 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_AIO_GAP_SWEEP_MONTHLY reader, on its own line so gate PRs never conflict.
+module.exports.aioGapSweepMonthlyLive = aioGapSweepMonthlyLive;

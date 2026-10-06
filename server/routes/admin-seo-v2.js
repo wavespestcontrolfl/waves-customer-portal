@@ -791,6 +791,71 @@ router.get('/llm-mentions/captures', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// AI Overview gap sweep (services/seo/aio-gap-sweep.js): one mobile SERP check
+// per candidate search; the 10-minute scheduler job works the open run.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const AIO_SWEEP_MAX_COST_USD = 25;
+const AIO_SWEEP_MAX_CANDIDATES = 5000;
+
+// POST /api/admin/seo/aio-sweep { maxCostUsd (<=25, default 10), minImpressions (default 20), max (<=5000, default 2500) }
+router.post('/aio-sweep', requireAdmin, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const opts = {};
+    if (body.maxCostUsd !== undefined) {
+      const n = Number(body.maxCostUsd);
+      if (typeof body.maxCostUsd === 'boolean' || !Number.isFinite(n) || n <= 0 || n > AIO_SWEEP_MAX_COST_USD) return res.status(400).json({ error: `maxCostUsd must be a number above 0 and at most ${AIO_SWEEP_MAX_COST_USD}` });
+      opts.maxCostUsd = n;
+    }
+    if (body.minImpressions !== undefined) {
+      const n = Number(body.minImpressions);
+      if (typeof body.minImpressions === 'boolean' || !Number.isInteger(n) || n < 0 || n > 1000000) return res.status(400).json({ error: 'minImpressions must be a whole number, 0 or more' });
+      opts.minImpressions = n;
+    }
+    if (body.max !== undefined) {
+      const n = Number(body.max);
+      if (typeof body.max === 'boolean' || !Number.isInteger(n) || n < 1 || n > AIO_SWEEP_MAX_CANDIDATES) return res.status(400).json({ error: `max must be a whole number from 1 to ${AIO_SWEEP_MAX_CANDIDATES}` });
+      opts.max = n;
+    }
+    const { startSweep } = require('../services/seo/aio-gap-sweep');
+    try {
+      res.status(201).json(await startSweep({ ...opts, trigger: 'manual' }));
+    } catch (err) {
+      if (err.code === 'AIO_SWEEP_OPEN') return res.status(409).json({ error: err.message });
+      throw err;
+    }
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/seo/aio-sweep/runs — last 20 runs with row counts by status.
+router.get('/aio-sweep/runs', async (req, res, next) => {
+  try {
+    const { listRuns } = require('../services/seo/aio-gap-sweep');
+    res.json({ runs: await listRuns({ limit: 20 }) });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/seo/aio-sweep/:runId/gaps?limit= — shown overviews that do not cite Waves.
+router.get('/aio-sweep/:runId/gaps', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.runId)) return res.status(400).json({ error: 'runId must be a uuid' });
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 1000);
+    const { rankGaps } = require('../services/seo/aio-gap-sweep');
+    res.json(await rankGaps(req.params.runId, { limit }));
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/seo/aio-sweep/:runId/cancel — stops an open run; rows already checked stay.
+router.post('/aio-sweep/:runId/cancel', requireAdmin, async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.runId)) return res.status(400).json({ error: 'runId must be a uuid' });
+    const { cancelSweep } = require('../services/seo/aio-gap-sweep');
+    const run = await cancelSweep(req.params.runId);
+    if (!run) return res.status(404).json({ error: 'No open run with that id' });
+    res.json({ run });
+  } catch (err) { next(err); }
+});
+
 // AI Overview
 router.get('/ai-overview', async (req, res, next) => {
   try {
