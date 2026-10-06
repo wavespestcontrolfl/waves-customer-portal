@@ -68,7 +68,7 @@ postgres('series extension keeps riding the lawn', () => {
     Admin = require('../routes/admin-schedule');
     Reminders = require('../services/appointment-reminders');
     Renewals = require('../services/annual-prepay-renewals');
-    const catalog = await mockPg('services').whereIn('service_key', ['lawn_care_6week', 'tree_shrub_quarterly']).select('id', 'service_key');
+    const catalog = await mockPg('services').whereIn('service_key', ['lawn_care_6week', 'tree_shrub_quarterly', 'pest_general_quarterly']).select('id', 'service_key');
     ids = Object.fromEntries(catalog.map((r) => [r.service_key, r.id]));
   });
 
@@ -600,6 +600,25 @@ postgres('series extension keeps riding the lawn', () => {
         const host = await trx('scheduled_services').where({ id: lawn.id }).first();
         expect(row.visit_id).not.toBeNull();
         expect(row.visit_id).toBe(host.visit_id);
+      } finally { await trx.rollback(); }
+    });
+
+    test('a PEST series meeting its own lawn stop books right after it, same day and technician (two stop groups)', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await alignedPest(trx, { pestExtra: {
+          service_id: ids.pest_general_quarterly, service_key_snapshot: 'pest_general_quarterly',
+          service_type: 'Quarterly Pest Control Service',
+        } });
+        const [lawn] = await lawnVisit(trx, w, date);
+        const spawned = await extend(trx, w.riderParent.id);
+        expect(spawned && spawned.scheduledDate).toBe(date);
+        const [row] = await extensionRows(trx, w.riderParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(date);
+        expect(String(row.window_start).slice(0, 5)).toBe('10:00');
+        expect(String(row.technician_id)).toBe(String(lawn.technician_id));
+        const host = await trx('scheduled_services').where({ id: lawn.id }).first();
+        expect(row.visit_id && String(row.visit_id) === String(host.visit_id)).toBeFalsy();
       } finally { await trx.rollback(); }
     });
 

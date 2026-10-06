@@ -19936,7 +19936,53 @@ async function joinOwnStopExtension(ctx, candidate, clashRows) {
   const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(ctx.parent.customer_id));
   const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
   if (!ownOnly || stopTechs.length !== 1) return null;
-  return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
+  const joined = await placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
+  if (joined) return joined;
+  return placeAfterOtherGroupStop(ctx, candidate, clashRows, stopTechs[0]);
+}
+
+// Two stop groups (owner ruling 2026-10-05): pest and lawn never share a stop.
+// The customer's own stop of the OTHER group on the cadence date is not a reason
+// to skip a whole cadence step: the extension books right after it, on the
+// first whole hour after its work, same day and technician. Anything else
+// overlapping that hour still makes the date taken.
+async function placeAfterOtherGroupStop(ctx, candidate, clashRows, technicianId) {
+  const { conn, parent, parentId, cols, svcLike, opts } = ctx;
+  const rows = await conn('scheduled_services').whereIn('id', clashRows.map((r) => r.id))
+    .select('service_id', 'window_start', 'window_end', 'estimated_duration_minutes');
+  const ids = [parent.service_id, ...rows.map((r) => r.service_id)];
+  if (rows.length !== clashRows.length || ids.some((id) => !id)) return null;
+  const families = new Map((await conn('services').whereIn('id', ids).select('id', 'group_family'))
+    .map((r) => [String(r.id), r.group_family || null]));
+  const own = families.get(String(parent.service_id));
+  const stopFamilies = new Set(rows.map((r) => families.get(String(r.service_id))));
+  if (!own || stopFamilies.has(own) || stopFamilies.has(null) || stopFamilies.size !== 1) return null;
+  const ends = rows.map((r) => parseHHMM(r.window_end)
+    ?? (parseHHMM(r.window_start) == null ? null : parseHHMM(r.window_start) + (Number(r.estimated_duration_minutes) || 60)));
+  if (ends.some((end) => end == null)) return null;
+  const start = Math.ceil(Math.max(...ends) / 60) * 60;
+  const minutes = Number(parent.estimated_duration_minutes) || 60;
+  if (start + minutes > 24 * 60 - 1) return null;
+  const window = { window_start: minutesToHHMM(start), window_end: minutesToHHMM(start + minutes) };
+  const scope = deferredCommitScope(conn);
+  try {
+    const placed = await conn.transaction(async (sp) => {
+      const tech = await assignablePlacementTechnicianId(sp, parent, technicianId, candidate);
+      const template = { ...parent, ...window, recurring_technician_override: true, recurring_technician_id: tech };
+      const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
+        ...opts, onSkip: undefined, forceDate: candidate, commitScope: scope,
+      });
+      if (!visit) throw new Error('nothing placed');
+      if (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId)) throw new Error('the next hour is taken');
+      return visit;
+    });
+    scope.keep();
+    return placed;
+  } catch (err) {
+    scope.drop(err);
+    logger.info(`[recurring] parent=${parentId} ${candidate} cannot follow the other group's stop (${err.message}) — treated as taken`);
+    return null;
+  }
 }
 
 // The next-date search of extendSeriesOnceLocked: a ride on the lawn first

@@ -1,8 +1,10 @@
-// Version-2 allocations share an arrival anchor even when visit grouping is
-// disabled. Their work still occupies the sum of the members after a rollback.
+// Version-2 allocations, and stop-group allocations of either version (owner
+// ruling 2026-10-05: one arrival hour per stop group), share an arrival anchor
+// even when visit grouping is disabled. Their work still occupies the sum of
+// the members at that anchor after a rollback.
 function allocationKey(row) {
   const mix = row.reservation_service_mix;
-  if (mix?.version !== 2 || !Array.isArray(mix.allocatedServiceIds)
+  if ((mix?.version !== 2 && mix?.stopGroups !== true) || !Array.isArray(mix.allocatedServiceIds)
     || !mix.allocatedServiceIds.includes(row.id)) return null;
   const date = row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10)
     : String(row.scheduled_date || '').slice(0, 10);

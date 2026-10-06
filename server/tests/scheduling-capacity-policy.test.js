@@ -113,3 +113,14 @@ test('allocated members are ordered anchor group first, each group contiguous', 
   // A hold stamped before the stop groups keeps its member order.
   expect(orderMembersByStopGroup(anchor, members, {}).map((r) => r.id)).toEqual(['a', 'm', 't']);
 });
+
+test('a version-1 stop-group allocation occupies the sum of its same-hour members', () => {
+  const { occupiedRows } = require('../services/scheduling/visit-capacity');
+  const mix = { ...capacityForServices([{ service: 'lawn_care' }, { service: 'tree_shrub' }]), allocatedServiceIds: ['l', 't'] };
+  const row = (id) => ({ id, customer_id: 'c', technician_id: 'x', scheduled_date: '2026-10-07',
+    window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, reservation_service_mix: mix });
+  expect(occupiedRows([row('l'), row('t')]).map((r) => [r.startMin, r.endMin])).toEqual([[540, 660], [540, 660]]);
+  // A version-1 hold stamped before the stop groups keeps its own sequential windows.
+  const { stopGroups: _marker, ...legacy } = mix;
+  expect(occupiedRows([{ ...row('l'), reservation_service_mix: legacy }])[0].endMin).toBe(600);
+});
