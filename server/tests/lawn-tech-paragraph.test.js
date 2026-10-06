@@ -185,6 +185,16 @@ describe('deterministic lines', () => {
     expect(tech.readFrozenTechParagraph({ lawnTechParagraph: { 77: { v: tech.FREEZE_VERSION, assessmentId: '77', text, slots } } }, 77)).toBe(text);
   });
 
+  test('a catalog name is still screened in full: only its credential nouns are neutralized (Codex r3)', () => {
+    expect(textFor({ technicianNote: '', products: [{ name: 'Pet-safe Lawn Treatment' }] }, [])).toBe('');
+    expect(textFor({ technicianNote: '', products: [{ name: 'Gate Code 4545 Blend' }] }, [])).toBe('');
+    expect(textFor({ technicianNote: '', products: [{ name: 'Gate Combo 4545 Blend' }] }, [])).toBe('');
+    const slots = { observed: [], maybe: [], products: ['Pet-safe Lawn Treatment'] };
+    expect(tech.readFrozenTechParagraph({ lawnTechParagraph: { 77: { v: tech.FREEZE_VERSION, assessmentId: '77', text: 'Today we applied Pet-safe Lawn Treatment.', slots } } }, 77)).toBeNull();
+    // The other sentences survive a bad name.
+    expect(textFor({ technicianNote: 'Found grubs.', products: [{ name: 'Pet-safe Lawn Treatment' }] }, [obs('grubs', 'none', true, 'found grubs')])).toBe('Our technician saw grubs.');
+  });
+
   test('the text is fitted to the lead\'s own word cap: extra product names drop from the end, never a cut word', () => {
     const { FIELD_WORD_CAPS } = require('../services/service-report/lawn-report-lead');
     expect(tech.MAX_WORDS).toBe(FIELD_WORD_CAPS.techParagraph);

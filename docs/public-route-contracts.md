@@ -2653,7 +2653,7 @@ stress, lawn stress) and "Today we applied {products}." (applied product display
 names only, printed whole). The text is fitted to the lead's own 70-word field cap
 (product names drop from the end first, then the "may be" labels), so a frozen
 paragraph is never one the lead hides; the copy screen reads it with the catalog
-product names masked (a real name such as "Combo AM 1%" is not an access code).
+product names masked (only "combo" in a name with no access word is neutralized for the access-code check; every other banned shape in a name still fails it).
 There is no all-clear, confirmed, progress, comparison or color line.
 No model text is ever printed. It is written ONCE, at completion
 (`finalizeLawnReportSynthesis`, `lawn-report-write-gate.js`), with at most one model

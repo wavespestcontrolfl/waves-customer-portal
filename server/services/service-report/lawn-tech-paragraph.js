@@ -254,11 +254,22 @@ function fitted(slots) {
   return s;
 }
 
-// The copy screen reads the template text with the catalog product names masked:
-// a name is a store record, never model text, and a real one ("Combo AM 1%") can
-// look like an access code to the screen (Codex r2). Everything else is screened.
+// The copy screen, with one narrow exception for catalog product names. A real
+// name ("LESCO High Manganese Combo AM 1% ...") can look like an access code to
+// it, because "combo" is also a credential noun. So: the sentence is screened in
+// full with the names masked, and each name in it is screened in full on its own
+// with ONLY "combo" / "combination" neutralized, and only in a name that carries
+// no access word (gate, door, keypad ...). Every other banned shape still fails
+// a name: "Pet-safe ...", "Gate Code 4545 ..." (Codex r2, r3).
+const FERTILIZER_COMBO_RE = /\bcombo(?:nation)?\b|\bcombination\b/gi;
+const ACCESS_WORD_RE = /\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access|code|pin|passcode|password|passphrase)\b/i;
+const screenedName = (name) => (ACCESS_WORD_RE.test(name) ? name : name.replace(FERTILIZER_COMBO_RE, 'blend'));
 const maskProducts = (text, products) => products.reduce((t, name) => t.split(name).join('the product'), text);
-const screenProblem = (text, products) => customerCopyViolations(maskProducts(text, products)).length > 0;
+function screenProblem(text, products) {
+  const named = products.filter((name) => text.includes(name));
+  return customerCopyViolations(maskProducts(text, named)).length > 0
+    || named.some((name) => customerCopyViolations(screenedName(name)).length > 0);
+}
 
 /** Slots -> the paragraph text, or '' when none. A sentence that fails the
  * customer-copy screen drops on its own. Pure. */
