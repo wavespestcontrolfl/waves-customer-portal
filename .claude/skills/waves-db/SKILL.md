@@ -44,35 +44,6 @@ Rules:
   `AT TIME ZONE` — reviewers have falsely flagged correct timestamptz SQL
   as naive. Verify the column's `udt_name` in the target environment before
   accepting the finding; production access still requires §3 authorization.
-- **Deriving a calendar DAY is its own trap**, and the commonest one:
-  `to_char(ts, 'YYYY-MM-DD')` or a `::date` cast with no conversion
-  reports Railway's UTC session day, so a row between 00:00 UTC and ET
-  midnight lands one day late (retention and KPI cohorts miscount at the
-  boundary). A `timestamp without time zone` value needs the conversion
-  that matches what its clock MEANS, and the SQL type alone does not say:
-  a UTC-naive instant needs BOTH casts —
-  `AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` — while an Eastern
-  wall clock (e.g. `scheduled_date + window_start`) needs only the single
-  `AT TIME ZONE 'America/New_York'`. The wrong one shifts the day either
-  way, so establish the stored meaning from the writer before you flag or
-  prescribe a cast.
-  In JS the same bug reads `toISOString().slice(0, 10)` on an instant, or
-  browser-local `getFullYear/getMonth/getDate` in React. Derive the day
-  from the ET helper on the side you are on — `server/utils/datetime-et.js`
-  (`etParts`, `formatET*`) on the server, `etDateString()`
-  (`client/src/lib/timezone.js`) in React, which takes a `Date` — an API
-  instant arrives as an ISO string, so wrap it in `new Date(...)` first —
-  and never import the server module into the Vite bundle. ET conversion is for real instants ONLY. A
-  `date` column is a calendar day, not an instant: it deserializes as
-  `'YYYY-MM-DD'` or a UTC-midnight `Date`, and an ET conversion of that
-  Date lands on the PREVIOUS Eastern day (UTC midnight is 7–8 PM ET the
-  night before). So the caller must know which one it holds — from the
-  column type or the API contract — before it picks a path. Never infer it
-  from the value: a real instant can sit exactly on UTC midnight too. The
-  date-only helpers and their exact semantics live in
-  `server/utils/date-only.js` and `server/utils/datetime-et.js` (server)
-  and `client/src/lib/timezone.js` (React); read the helper's own docblock
-  before you call it, because this rule does not pick one for you.
 
 ## 3. Local DB access — Codex uses dev/preview only
 
