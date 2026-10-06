@@ -202,12 +202,15 @@ describe('property-lookup callers declare their scope decision', () => {
     // the only two ids that may opt in, and the files that are customer- or
     // public-facing no matter how their entry is labelled. Reclassifying a
     // public route as staff, or adding a third opt-in, fails here.
-    const MAY_OPT_IN = ['admin_estimate_tool', 'estimator_engine'];
+    const MAY_OPT_IN = { admin_estimate_tool: 'routes/property-lookup-v2.js', estimator_engine: 'services/estimator-engine/index.js' };
     const PROTECTED_FILES = [
       'routes/public-property-lookup.js', 'routes/public-quote.js',
       'services/customer-pricing-ai.js', 'services/service-report/cross-sell.js',
     ];
-    expect(Object.entries(CALLERS).filter(([, c]) => c.suiteSizing).map(([id]) => id).sort()).toEqual(MAY_OPT_IN);
+    // The opt-in ids AND the one file each is bound to are pinned here, so
+    // moving the privilege to another module (or borrowing the id there)
+    // needs an explicit edit to this guard, not only to the registry.
+    expect(Object.fromEntries(Object.entries(CALLERS).filter(([, c]) => c.suiteSizing).map(([id, c]) => [id, c.file]))).toEqual(MAY_OPT_IN);
     for (const f of PROTECTED_FILES) {
       const entry = Object.values(CALLERS).find((c) => c.file === f);
       expect(entry && ['public', 'customer'].includes(entry.surface) && entry.suiteSizing === false).toBe(true);
