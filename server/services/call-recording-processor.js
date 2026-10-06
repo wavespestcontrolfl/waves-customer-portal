@@ -115,7 +115,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1247,6 +1247,23 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
   // is "00:00" for the elapsed comparison (codex #4890 r8 P2).
   const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
   return sameDayWindowElapsed(scheduledDate, start);
+}
+
+// Spelled-email trust (owner ruling 2026-10-05) applies only to an address no
+// customer record already holds — the ownership gate the decoder adopt and
+// the domain-typo adopt use, with no customer exempted. An address the primary extractor captured
+// itself never went through those adopt paths, so it is checked here before
+// the read-back card (and with it the first-touch hold) is dropped. Fails
+// closed: a failed lookup keeps the card.
+async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail }) {
+  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
+  // No customer is exempt: the canonical customer is not known yet (Step 3
+  // can still reassign a shared-phone call), so ANY record already holding
+  // the address keeps the read-back card.
+  const ownedByAnyone = await require('./email-bounce-recovery')
+    .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
+    .catch(() => true);
+  return !ownedByAnyone;
 }
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
@@ -11317,6 +11334,17 @@ const CallRecordingProcessor = {
           if (onFileSatisfied.length) {
             logger.info(`[call-proc] Address flags satisfied by the on-file address for ${maskSid(callSid)}: ${onFileSatisfied.join(', ')} (no card)`);
           }
+          // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
+          // cards only; finalFlags, the route decision and the routing
+          // verdict keep every flag.
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          if (unneededCards.size) {
+            logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
+            // Only cards this pass would file are skipped. Cards an earlier
+            // pass filed keep their filing-time snapshot of the ask and are
+            // left to the evidence sweep — the rolling extraction can change
+            // under them.
+          }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -11392,7 +11420,7 @@ const CallRecordingProcessor = {
           // don't block. Without this, promoting DRIVES_ROUTING would silence the
           // identity signals the shadow bridge used to surface. onConflict dedups
           // against the blocked-branch inserts below.
-          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f) && !unneededCards.has(f)).slice(0, 10)) {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({
@@ -11503,13 +11531,13 @@ const CallRecordingProcessor = {
             const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
               ? routingResult.appointmentBlockingFlags
               : (noSchedulingAsk ? [] : [routingResult.reason || 'routing_rejected']);
-            const triageReasons = blockingReasons;
+            const triageReasons = blockingReasons.filter((f) => !unneededCards.has(f));
             // A held scheduling CHANGE (cancel / reschedule / coordination on
             // an existing visit) is owed work. The card files below, but
             // review_status is driven by bridgeNeedsConfirmation alone, so the
             // call itself looked fully processed (2026-09-02..08 audit: a
             // cancellation, two reschedules and a re-treat with no owner).
-            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
+            if (triageReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({
                 callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
@@ -11524,7 +11552,7 @@ const CallRecordingProcessor = {
             // set, so without this loop it would appear on no card at all.
             // Mirrors the allowed branch's fail-open advisory loop; onConflict
             // dedups against any same-reason row.
-            for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
+            for (const f of (routingResult.failedOpenFlags || []).filter((x) => !unneededCards.has(x)).slice(0, 10)) {
               try {
                 await db('triage_items')
                   .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11552,7 +11580,7 @@ const CallRecordingProcessor = {
             // (phone via ANI, garbled email, on-file address, low confidence) —
             // book-and-flag, never book-and-hide (owner directive).
             if (routingResult.failedOpenFlags?.length) {
-              for (const f of routingResult.failedOpenFlags) {
+              for (const f of routingResult.failedOpenFlags.filter((x) => !unneededCards.has(x))) {
                 try {
                   await db('triage_items')
                     .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11746,6 +11774,12 @@ const CallRecordingProcessor = {
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
+        // and it is the address being saved — no read-back card, no hold.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
+          const at = needsConfirmation.indexOf('email_unverified');
+          if (at !== -1) needsConfirmation.splice(at, 1);
         }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
@@ -11955,6 +11989,12 @@ const CallRecordingProcessor = {
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
+        // shadow branch.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
+          const at = emailReasons.indexOf('email_unverified');
+          if (at !== -1) emailReasons.splice(at, 1);
         }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
