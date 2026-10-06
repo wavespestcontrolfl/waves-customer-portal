@@ -21,6 +21,7 @@ const { buildLawnCompletionDefaults } = require('../services/lawn-completion-def
 const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-layer');
 const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
+const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_october_dimension');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -180,7 +181,10 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
 // ── Every line resolves to the intended catalog row ──────────────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE];
+// October's whole-lawn bag is the Dimension 0.21% 18-0-10 row (20261007120000 swaps it in for
+// the staged Stonewall 15-0-15 line).
+const DIMENSION_18 = octoberMigration.NEW_NAME;
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -343,7 +347,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     7: [],
     8: [migration.NAMES.NT],
     9: [migration.NAMES.NT],
-    10: [migration.NAMES.STW15],
+    10: [DIMENSION_18],
     11: [migration.NAMES.F24],
     12: [migration.NAMES.F24],
   };
@@ -357,7 +361,11 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const parsed = [...engine.parseProtocolLines(visit.primary, 'base', { exactName }), ...engine.parseProtocolLines(visit.secondary, 'conditional', { exactName })];
     const resolved = engine.resolveProtocolItems(parsed, catalog, {}, {});
     const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
-    const products = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => ({
+    // The staged rows as 20261007120000 leaves them: October's bag is Dimension 18-0-10 at 4.0 lb.
+    const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
+      ? [DIMENSION_18, spec[1], spec[2], octoberMigration.NEW_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
+      : spec);
+    const products = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => swapped(s)).map((s) => ({
       productId: idOf(s[0]), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
     const items = resolved.filter((i) => i.product).map((i) => ({ ...i, product: { id: i.product.id, name: i.product.name, active: true }, mix: { amount: 1, amountUnit: 'fl oz', treatedSqft: 4000 } }));
@@ -478,7 +486,7 @@ describe('plan engine reads the matched v13 protocol row', () => {
   describe('which v13 rows compute a quantity (v13RowCalculates)', () => {
     test('only a whole-lawn row that states a rate or a nutrient target', () => {
       const calc = (row) => engine.v13RowCalculates(row);
-      expect(calc({ applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz' })).toBe(true); // Stonewall 4FL, Nutra-TECH, Tetrino, Stonewall 15-0-15
+      expect(calc({ applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz' })).toBe(true); // Stonewall 4FL, Nutra-TECH, Tetrino, Dimension 18-0-10
       expect(calc({ applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n' })).toBe(true); // 24-0-11
       expect(calc({ applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz' })).toBe(false); // Celsius: stated rate, but spot
       expect(calc({ applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate' })).toBe(false); // Arena, Artavia, the surfactant ...
@@ -603,15 +611,15 @@ describe('the material-cost audit reads the gate-aware program', () => {
     const DIM = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
     const catalog = [
       { id: 'f24', name: migration.NAMES.F24, aliases: [], default_rate_per_1000: 4.2, rate_unit: 'lb', analysis_n: 24, analysis_k: 11, cost_per_unit: 1, cost_unit: 'lb', needs_pricing: false },
-      { id: 'dim', name: DIM, aliases: [], default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_k: 10, cost_per_unit: 2, cost_unit: 'lb', needs_pricing: false },
+      { id: 'dim', name: DIM, aliases: [], default_rate_per_1000: 2.73, rate_unit: 'lb', analysis_n: 18, analysis_k: 10, cost_per_unit: 2, cost_unit: 'lb', needs_pricing: false },
     ];
-    const aprilRows = new Map([['f24', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }], ['dim', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }]]);
+    const aprilRows = new Map([['f24', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }], ['dim', { ratePer1000: 2.73, rateUnit: 'lb', gates: {} }]]);
     const v13Rows = new Map([['st_augustine|Apr', aprilRows]]);
     const report = withGate('true', () => auditScript.buildCadenceReport(catalog, lawnProtocols(), v13Rows));
     const april = (tier) => report.rows.find((r) => r.track === 'st_augustine' && r.tier === tier).visits.find((v) => v.month === 'Apr');
     const selected = (result) => result.items.filter((i) => i.selected && i.product).map((i) => i.product.name);
     expect(selected(april('enhanced'))).toEqual([DIM]);
-    expect(april('enhanced').items.find((i) => i.product?.name === DIM).mix.ratePer1000).toBeCloseTo(2.7778, 3);
+    expect(april('enhanced').items.find((i) => i.product?.name === DIM).mix.ratePer1000).toBeCloseTo(2.73, 3);
     expect(selected(april('premium'))).toEqual([migration.NAMES.F24]);
     expect(selected(april('standard'))).toEqual([migration.NAMES.F24]);
   });
@@ -678,7 +686,7 @@ describe('the material-cost audit reads the gate-aware program', () => {
 
 describe('lb_n nutrition rows derive from the visit target (v13)', () => {
   const f24 = { id: 'f24', name: migration.NAMES.F24, analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
-  const stw15 = { id: 's15', name: migration.NAMES.STW15, analysis_n: 15, analysis_k: 15, default_rate_per_1000: 4.02, rate_unit: 'lb' };
+  const dim18 = { id: 'd18', name: DIMENSION_18, analysis_n: 18, analysis_k: 10, default_rate_per_1000: 2.73, rate_unit: 'lb' };
   const rowFor = (windowMonth, name) => {
     const [, windowKey] = migration.WINDOWS.find((w) => w[0] === windowMonth);
     const [, spec] = migration.PRODUCTS.find(([key, s]) => key === windowKey && s[0] === name);
@@ -694,9 +702,18 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
     expect(result.amount).toBeCloseTo(lb, 3);
   });
 
-  test('October Stonewall 15-0-15 is its stated 4.02 lb', () => {
-    const result = amountFor(stw15, 10, rowFor(10, migration.NAMES.STW15));
-    expect(result).toMatchObject({ rateSource: 'protocol_rate', amount: 4.02 });
+  test('October Dimension 18-0-10 is its stated 2.73 lb (0.49 lb N, 0.27 lb K2O, the per-application label maximum)', () => {
+    const row = { ratePer1000: octoberMigration.NEW_RATE, rateUnit: 'lb' };
+    const result = amountFor(dim18, 10, row);
+    expect(result).toMatchObject({ rateSource: 'protocol_rate', amount: 2.73 });
+    expect(result.amount * 0.18).toBeCloseTo(0.4914, 4);
+    expect(result.amount * 0.10).toBeCloseTo(0.273, 4);
+    // 2.73 lb x 0.21% = 0.0057 lb ai per 1,000 sq ft = 0.25 lb ai per acre.
+    expect((result.amount * 0.0021) * 43.56).toBeCloseTo(0.25, 2);
+    // The recipe's own October notes and primary line state the same figures.
+    const targets = engine.parseVisitNutrientTargets(visitFor(10).notes);
+    expect(targets).toMatchObject({ targetNPer1000: 0.49, targetKPer1000: 0.27 });
+    expect(visitFor(10).primary).toContain('2.73 lb per 1,000 sq ft (0.49 lb N, 0.27 lb K2O)');
   });
 
   test('without a v13 row (gate off or no match) the catalog default still applies, unchanged', () => {

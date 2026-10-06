@@ -17,6 +17,7 @@ const fixMigration = require('../models/migrations/20261005130000_lawn_v13_catal
 const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixes');
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
+const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_october_dimension');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
@@ -72,9 +73,10 @@ describe('the v13 recipe', () => {
 
   test('N targets parse from the visit notes and total the program', () => {
     const n = MONTHS.map((m) => engine.parseVisitNutrientTargets(visitFor(m).notes).targetNPer1000);
-    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.6, 0.75, 0.5]);
-    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.1);
-    expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.6);
+    // October is Dimension 18-0-10 at 2.73 lb per 1,000 sq ft (the label's per-application maximum): 0.49 lb N, 0.27 lb K2O.
+    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.49, 0.75, 0.5]);
+    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(2.99);
+    expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.27);
     // No N or P in Jun-Sep.
     for (const m of [6, 7, 8, 9]) expect(n[m - 1]).toBe(0);
   });
@@ -83,7 +85,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [N.STW15], [N.F24], [N.F24],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
     ]);
   });
 });
@@ -101,7 +103,7 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
       const [line, ...rest] = lines(variants[0].cadenceVariants['9'].primary);
       expect(rest).toEqual([]);
       expect(nameOfLine(line)).toBe(april.DIMENSION);
-      expect(line).toMatch(/2\.78 lb per 1,000 sq ft \(0\.5 lb N\), spreader$/);
+      expect(line).toMatch(/2\.73 lb per 1,000 sq ft \(0\.49 lb N\), spreader$/);
     }
     expect(fixMigration.PRODUCTS.map((p) => p.name)).toContain(april.DIMENSION);
   });
@@ -127,7 +129,7 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -257,7 +259,8 @@ describe('staged migration 20261005120000', () => {
     for (const month of MONTHS) {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
-      const whole = rowsForWindow.filter((s) => s[6]).map((s) => s[0]);
+      // The staged October row names Stonewall 15-0-15; 20261007120000 swaps it for Dimension 18-0-10.
+      const whole = rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0]));
       const spots = rowsForWindow.filter((s) => !s[6]).map((s) => s[0]);
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
@@ -626,5 +629,209 @@ describe('migration 20261005160000: safety gate keys and combination pre-emergen
     tet.gates = JSON.stringify({ ...gatesOf(tet), minDistanceFromWaterFt: 50 });
     await round3.down(knex);
     expect(gatesOf(tet)).toEqual({ sunnyTurfOnly: true, minDistanceFromWaterFt: 50 });
+  });
+});
+
+// ── October: Dimension 18-0-10 replaces the discontinued Stonewall 15-0-15 ───
+describe('migration 20261007120000: October Dimension 18-0-10 and the dithiopyr yearly cap', () => {
+  const OLD = octoberMigration.OLD_NAME;
+  const NEW = octoberMigration.NEW_NAME;
+  const DIM_2EW = migration.NAMES.DIM;
+  // The strength-less fixture row warns by design; the warning itself is asserted once below.
+  let warn;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => warn.mockRestore());
+  const gatesOf = (row) => (typeof row.gates === 'string' ? JSON.parse(row.gates) : row.gates);
+  const v13Windows = (db, key) => db.lawn_protocol_windows.filter((w) => w.window_key === key);
+  const octoberRows = (db) => {
+    const ids = new Set(v13Windows(db, 'oct_v13_spreader_fall').map((w) => w.id));
+    return db.lawn_protocol_products.filter((r) => ids.has(r.lawn_protocol_window_id));
+  };
+
+  async function build() {
+    const db = seedDb();
+    // The Dimension 0.21% row 20261005130000 inserts, the catalog rows the cap reads, and the prodiamine rows.
+    db.products_catalog.push(
+      { id: 'cat-dim18', name: NEW, active: true, active_ingredient: 'Dithiopyr', rate_unit: 'lb', default_rate_per_1000: 2.78, max_label_rate_per_1000: 5.48 },
+      { id: 'cat-stw4fl', name: migration.NAMES.STW, active: true, active_ingredient: 'Prodiamine', rate_unit: 'fl oz' },
+      { id: 'cat-mystery', name: 'Dithiopyr Mystery Bag', active: true, active_ingredient: 'Dithiopyr', rate_unit: 'lb' },
+    );
+    Object.assign(db.products_catalog.find((c) => c.name === DIM_2EW), { active_ingredient: 'Dithiopyr', rate_unit: 'fl oz' });
+    Object.assign(db.products_catalog.find((c) => c.name === OLD), { active_ingredient: 'Prodiamine', rate_unit: 'lb' });
+    db.product_limits = [];
+    const knex = makeKnex(db);
+    await migration.up(knex);
+    // The 9x April row 20261006150000 inserted per protocol: a copy of the 24-0-11 row, rate derived from the N target.
+    for (const window of v13Windows(db, 'apr_v13_spreader_feeding')) {
+      await knex('lawn_protocol_products').insert({
+        lawn_protocol_window_id: window.id, product_id: 'cat-dim18', product_name: NEW, role: 'nutrition', application_mode: 'broadcast',
+        rate_per_1000: null, rate_unit: 'lb_n', default_in_plan: true, sort_order: 99,
+        gates: JSON.stringify({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true, planVisitsPerYear: 9 }), annual_counter: '{}',
+      });
+    }
+    return { db, knex };
+  }
+  // updated_at is the one column a revert legitimately touches.
+  const snapshot = (db) => JSON.stringify({
+    products: db.lawn_protocol_products, windows: db.lawn_protocol_windows, audit: db.lawn_protocol_audit_log, limits: db.product_limits,
+  }, (key, value) => (key === 'updated_at' ? undefined : value));
+
+  test('every staged October row is Dimension 18-0-10 at 2.73 lb; nothing in any v13 window still names Stonewall 15-0-15', async () => {
+    const { db, knex } = await build();
+    const before = db.lawn_protocol_products.map((r) => [r.lawn_protocol_window_id, r.product_name]);
+    await octoberMigration.up(knex);
+    const rows = octoberRows(db).filter((r) => r.product_name === NEW);
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row).toMatchObject({ product_id: 'cat-dim18', rate_per_1000: 2.73, rate_unit: 'lb', role: 'fall_pre_emergent_nutrition', application_mode: 'broadcast', default_in_plan: true });
+      // 2.73 lb x 18% = 0.49 lb N; x 10% = 0.27 lb K2O. blackoutSensitive stays; the counter is dithiopyr now.
+      expect(gatesOf(row)).toEqual({ targetN: '0.49 lb N/1000', targetK2O: '0.27 lb K2O/1000', blackoutSensitive: true, annualCounter: 'dithiopyr_lb_per_1000' });
+      expect(JSON.parse(row.annual_counter)).toEqual({ counter: 'dithiopyr_lb_per_1000' });
+    }
+    expect(db.lawn_protocol_products.some((r) => r.product_name === OLD)).toBe(false);
+    // No other row moved.
+    const after = db.lawn_protocol_products.map((r) => [r.lawn_protocol_window_id, r.product_name]);
+    expect(after.filter((pair, i) => pair[1] !== before[i][1])).toHaveLength(4);
+    for (const w of v13Windows(db, 'oct_v13_spreader_fall')) expect(w.goal).toBe(octoberMigration.NEW_GOAL);
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === octoberMigration.ACTION)).toHaveLength(4);
+  });
+
+  test('the staged row agrees with the recipe file: same name, same rate, same N and K targets', async () => {
+    const { db, knex } = await build();
+    await octoberMigration.up(knex);
+    const [line] = lines(visitFor(10).primary);
+    expect(nameOfLine(line)).toBe(NEW);
+    const row = octoberRows(db)[0];
+    expect(line).toContain(`${Number(row.rate_per_1000).toFixed(2)} lb per 1,000 sq ft`);
+    const targets = engine.parseVisitNutrientTargets(visitFor(10).notes);
+    expect(`${targets.targetNPer1000} lb N/1000`).toBe(gatesOf(row).targetN);
+    expect(`${targets.targetKPer1000} lb K2O/1000`).toBe(gatesOf(row).targetK2O);
+    // The recipe's October note states the dithiopyr cap, not the prodiamine one.
+    for (const grass of GRASSES) {
+      const notes = v13[grass].visits.find((v) => v.month === 'Oct').notes;
+      expect(notes).toMatch(/Dithiopyr this year stays under the label yearly cap/);
+      expect(notes).toMatch(/0\.25 lb ai per acre, at the label's per-application maximum of 2\.73 lb of product per 1,000 sq ft/);
+      expect(notes).not.toMatch(/prodiamine|1\.5 lb ai per acre cap/i);
+    }
+  });
+
+  test('idempotent: a second run changes nothing', async () => {
+    const { db, knex } = await build();
+    await octoberMigration.up(knex);
+    const once = snapshot(db);
+    await octoberMigration.up(knex);
+    expect(snapshot(db)).toBe(once);
+  });
+
+  test('a catalog with no Dimension 0.21% row or alias fails loudly instead of leaving a half swap', async () => {
+    const { db, knex } = await build();
+    db.products_catalog = db.products_catalog.filter((c) => c.name !== NEW);
+    await expect(octoberMigration.up(knex)).rejects.toThrow(/no products_catalog row or alias/);
+    expect(db.lawn_protocol_products.some((r) => r.product_name === OLD)).toBe(true);
+  });
+
+  test('down puts the staged rows, goals and limits back exactly as they were before up', async () => {
+    const { db, knex } = await build();
+    const before = snapshot(db);
+    await octoberMigration.up(knex);
+    expect(snapshot(db)).not.toBe(before);
+    await octoberMigration.down(knex);
+    expect(snapshot(db)).toBe(before);
+    const feeding = octoberRows(db).filter((r) => r.role === 'fall_pre_emergent_nutrition');
+    expect(feeding).toHaveLength(4);
+    expect(feeding.every((r) => r.product_name === OLD && r.product_id !== 'cat-dim18' && Number(r.rate_per_1000) === 4.02)).toBe(true);
+  });
+
+  test('down puts back only what it still owns: a rate or gate someone edited since stays, the name still reverts', async () => {
+    const { db, knex } = await build();
+    await octoberMigration.up(knex);
+    const [row, other] = octoberRows(db);
+    row.rate_per_1000 = 3.5;
+    row.gates = JSON.stringify({ ...gatesOf(row), targetN: '0.5 lb N/1000' });
+    const [window] = v13Windows(db, 'oct_v13_spreader_fall');
+    window.goal = 'Edited by the office.';
+    // A row someone renamed since is not this migration's to touch.
+    other.product_name = 'Something else';
+    await octoberMigration.down(knex);
+    expect(row).toMatchObject({ product_name: OLD, rate_per_1000: 3.5 });
+    expect(gatesOf(row)).toMatchObject({ targetN: '0.5 lb N/1000', targetK2O: '0.6 lb K2O/1000', annualCounter: 'prodiamine_oz_per_1000' });
+    expect(window.goal).toBe('Edited by the office.');
+    expect(other.product_name).toBe('Something else');
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === octoberMigration.ACTION)).toHaveLength(0);
+  });
+
+  test('the 9x April Dimension row states 2.73 lb (0.49 lb N) instead of deriving 2.78 lb from the 0.5 lb N target; its 9x condition and gates stay', async () => {
+    const { db, knex } = await build();
+    await octoberMigration.up(knex);
+    const april = db.lawn_protocol_products.filter((r) => r.product_name === NEW && r.role === 'nutrition');
+    expect(april).toHaveLength(4);
+    for (const row of april) {
+      expect(row).toMatchObject({ rate_per_1000: 2.73, rate_unit: 'lb' });
+      expect(gatesOf(row)).toEqual({ targetN: '0.49 lb N/1000', blackoutSensitive: true, northPortBlocked: true, planVisitsPerYear: 9 });
+    }
+    // The recipe's 9x line states the same rate.
+    expect(lines(visitFor(4).cadenceVariants['9'].primary)[0]).toContain('2.73 lb per 1,000 sq ft (0.49 lb N)');
+    // An April row whose rate someone already set is not touched.
+    const { db: db2, knex: knex2 } = await build();
+    const edited = db2.lawn_protocol_products.find((r) => r.product_name === NEW && r.role === 'nutrition');
+    edited.rate_per_1000 = 2.5;
+    await octoberMigration.up(knex2);
+    expect(edited.rate_per_1000).toBe(2.5);
+  });
+
+  test('the catalog row: label max 5.48 -> 2.73 and default 2.78 -> 2.73 (only from the old values), with the 3-a-year and 60-day label limits; down puts all of it back', async () => {
+    const { db, knex } = await build();
+    const catalogRow = () => db.products_catalog.find((c) => c.name === NEW);
+    await octoberMigration.up(knex);
+    expect(catalogRow()).toMatchObject({ max_label_rate_per_1000: 2.73, default_rate_per_1000: 2.73 });
+    const limits = db.product_limits.filter((r) => r.product_id === 'cat-dim18' && r.match_type === 'product');
+    expect(limits.map((r) => [r.limit_type, r.limit_value, r.limit_unit, r.severity]).sort()).toEqual([
+      ['annual_max_apps', 3, 'applications', 'hard_block'],
+      ['min_interval_days', 60, 'days', 'warning'],
+    ]);
+    await octoberMigration.up(knex);
+    expect(db.product_limits.filter((r) => r.match_type === 'product')).toHaveLength(2);
+    await octoberMigration.down(knex);
+    expect(catalogRow()).toMatchObject({ max_label_rate_per_1000: 5.48, default_rate_per_1000: 2.78 });
+    expect(db.product_limits).toEqual([]);
+    // A figure someone set since stays.
+    await octoberMigration.up(knex);
+    catalogRow().max_label_rate_per_1000 = 3.1;
+    await octoberMigration.down(knex);
+    expect(catalogRow()).toMatchObject({ max_label_rate_per_1000: 3.1, default_rate_per_1000: 2.78 });
+  });
+
+  test('the dithiopyr cap: one row per dithiopyr product in its own unit, none for prodiamine or a row with no strength', async () => {
+    const { db, knex } = await build();
+    await octoberMigration.up(knex);
+    const rows = db.product_limits.filter((r) => r.match_value === 'dithiopyr');
+    const byProduct = Object.fromEntries(rows.map((r) => [db.products_catalog.find((c) => c.id === r.product_id).name, [Number(r.limit_value), r.limit_unit, r.limit_type, r.severity, r.match_type]]));
+    expect(byProduct).toEqual({
+      // 1.5 lb ai/acre = 0.034435 lb ai per 1,000 sq ft; 2EW holds 2 lb ai/gal, the granular 0.21%.
+      [DIM_2EW]: [2.2039, 'fl oz/1000sf/year', 'annual_max_rate', 'hard_block', 'active_ingredient'],
+      [NEW]: [16.3977, 'lb/1000sf/year', 'annual_max_rate', 'hard_block', 'active_ingredient'],
+    });
+    expect(db.product_limits.filter((r) => r.match_value !== 'dithiopyr' && r.match_type !== 'product')).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no strength for "Dithiopyr Mystery Bag"'));
+    for (const row of rows) expect(row.description).toMatch(/^Dithiopyr yearly cap, all products:.*confirm on the label/);
+    // A second run adds nothing.
+    await octoberMigration.up(knex);
+    expect(db.product_limits.filter((r) => r.match_value === 'dithiopyr')).toHaveLength(2);
+  });
+
+  test('down deletes only the dithiopyr cap rows it wrote', async () => {
+    const { db, knex } = await build();
+    await octoberMigration.up(knex);
+    db.product_limits.push({ id: 'hand-added', product_id: 'cat-dim18', match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', description: 'Added by the office' });
+    db.product_limits.push({ id: 'prodiamine-row', product_id: 'cat-stw4fl', match_type: 'active_ingredient', match_value: 'prodiamine', limit_type: 'annual_max_rate', description: 'Prodiamine yearly cap, all products: x' });
+    await octoberMigration.down(knex);
+    expect(db.product_limits.map((r) => r.id).sort()).toEqual(['hand-added', 'prodiamine-row']);
+  });
+
+  test('a dithiopyr product that already has its cap row is skipped', async () => {
+    const { db, knex } = await build();
+    db.product_limits.push({ id: 'old', product_id: 'cat-dim18', match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', description: 'Earlier row' });
+    await octoberMigration.up(knex);
+    expect(db.product_limits.filter((r) => r.product_id === 'cat-dim18' && r.match_value === 'dithiopyr')).toHaveLength(1);
   });
 });

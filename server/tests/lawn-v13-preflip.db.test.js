@@ -4,6 +4,8 @@
 //
 // 1. One yearly prodiamine cap across formulations (20261006140000): earlier
 //    applications of any prodiamine product count toward the next one.
+// 3. October is Dimension 18-0-10 at 4.0 lb (20261007120000): the staged October row
+//    swaps in, and one yearly dithiopyr cap covers Dimension 2EW and the granular.
 // 2. The 9x plan April step (20261006150000 + the recipe's cadenceVariants): the
 //    visit's plan picks Dimension 0.21% 18-0-10 (9x) or the 24-0-11 (12x), the
 //    same way in the plan, the completion defaults and the tank sheet.
@@ -15,6 +17,8 @@ const aprilMigration = require('../models/migrations/20261006150000_lawn_v13_apr
 const reconcileMigration = require('../models/migrations/20261006160000_lawn_v13_april_9x_reconcile');
 const labelMaxMigration = require('../models/migrations/20261006170000_lawn_v13_prodiamine_cap_label_max');
 const ownershipMigration = require('../models/migrations/20261006180000_lawn_v13_april_9x_ownership');
+const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_october_dimension');
+const v13Recipe = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { randomUUID } = require('crypto');
 
@@ -23,6 +27,7 @@ const STW_15 = 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent P
 const WDG = 'Prodiamine 65 WDG';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const DIMENSION = aprilMigration.DIMENSION;
+const DIM_2EW = 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide';
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
 const KEY = 'fixture_v13_preflip';
 
@@ -43,8 +48,62 @@ describe('prodiamine cap derivation (no database)', () => {
     expect(aiPerRateUnit({ name: 'Prodiamine 4L', active_ingredient: 'Prodiamine', rate_unit: 'gal' })).toBeNull();
   });
 
-  test('the v13 season (January 4FL, October granular) is under the cap by design', () => {
-    expect((0.5 / 1.1019) + (4.02 / 8.0082)).toBeLessThan(1);
+  test('the v13 prodiamine season is January 4FL alone (October is dithiopyr now): 45% of the cap', () => {
+    expect(0.5 / 1.1019).toBeLessThan(0.5);
+  });
+});
+
+describe('dithiopyr cap derivation and the v13 season against it (no database)', () => {
+  const { aiPerRateUnit: dithiopyrAi, CAP_LB_AI_PER_1000: dithiopyrCap } = octoberMigration;
+  const cap = (row) => { const ai = dithiopyrAi(row); return ai && { unit: ai.unit, value: Math.round((dithiopyrCap / ai.aiPerUnit) * 10000) / 10000 }; };
+  const CAP_2EW = cap({ name: DIM_2EW, active_ingredient: 'Dithiopyr', rate_unit: 'fl oz' }).value;
+  const CAP_GRANULAR = cap({ name: DIMENSION, active_ingredient: 'Dithiopyr', rate_unit: 'lb' }).value;
+
+  test('the label cap (1.5 lb ai/acre) written in each product\'s own unit; the owner\'s read of 2.2 fl oz of 2EW matches', () => {
+    expect(cap({ name: DIM_2EW, active_ingredient: 'Dithiopyr 24%', rate_unit: 'fl_oz' })).toEqual({ unit: 'fl oz', value: 2.2039 });
+    expect(cap({ name: DIMENSION, active_ingredient: 'Dithiopyr', rate_unit: 'lb' })).toEqual({ unit: 'lb', value: 16.3977 });
+    expect(cap({ name: 'Bag', active_ingredient: 'Dithiopyr 0.21% + 18-0-10', rate_unit: 'lb' })).toEqual({ unit: 'lb', value: 16.3977 });
+    expect(CAP_2EW).toBeCloseTo(2.2, 1);
+  });
+
+  test('a row with no stated strength or an unusable unit gets no cap row', () => {
+    expect(dithiopyrAi({ name: 'Dithiopyr Mystery', active_ingredient: 'Dithiopyr', rate_unit: 'lb' })).toBeNull();
+    expect(dithiopyrAi({ name: DIM_2EW, active_ingredient: 'Dithiopyr', rate_unit: null })).toBeNull();
+    expect(dithiopyrAi({ name: 'Dithiopyr 40 WP', active_ingredient: 'Dithiopyr', rate_unit: 'fl oz' })).toBeNull();
+  });
+
+  // Every dithiopyr / prodiamine line the recipe states, per visit: [share of that product's own cap].
+  const share = (line) => {
+    const [name, rest = ''] = line.split(' — ');
+    if (name !== DIM_2EW && name !== DIMENSION && !name.startsWith('LESCO Stonewall 4FL')) return null;
+    const rate = Number(/^([\d.]+) (fl oz|lb)\b/.exec(rest)[1]);
+    if (name === DIM_2EW) return { ai: 'dithiopyr', share: rate / CAP_2EW };
+    if (name === DIMENSION) return { ai: 'dithiopyr', share: rate / CAP_GRANULAR };
+    if (name.startsWith('LESCO Stonewall 4FL')) return { ai: 'prodiamine', share: rate / 1.1019 };
+    return null;
+  };
+  const season = (visitsPerYear) => {
+    const totals = { dithiopyr: 0, prodiamine: 0 };
+    for (const visit of v13Recipe.st_augustine.visits) {
+      const step = visit.cadenceVariants?.[String(visitsPerYear)] || visit;
+      for (const line of String(step.primary).split('\n')) {
+        const found = share(line);
+        if (found) totals[found.ai] += found.share;
+      }
+    }
+    return totals;
+  };
+
+  test('12x and 9x v13 seasons: dithiopyr stays under its cap (62.0% and 78.7%); prodiamine is January alone', () => {
+    const twelve = season(12);
+    const nine = season(9);
+    expect(Math.round(twelve.dithiopyr * 1000) / 10).toBe(62);
+    expect(Math.round(nine.dithiopyr * 1000) / 10).toBe(78.7);
+    expect(twelve.dithiopyr).toBeLessThan(1);
+    expect(nine.dithiopyr).toBeLessThan(1);
+    for (const totals of [twelve, nine]) expect(Math.round(totals.prodiamine * 1000) / 10).toBe(45.4);
+    // The October line adds only the 2.73 lb granular share (16.6%) to the March and June 2EW passes (45.4%).
+    expect(octoberMigration.NEW_RATE / CAP_GRANULAR).toBeCloseTo(0.1665, 4);
   });
 });
 
@@ -114,7 +173,8 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     await product(STW_15, { active_ingredient: 'Prodiamine', formulation: 'granular', default_rate_per_1000: 4.02, rate_unit: 'lb', analysis_n: 15, analysis_p: 0, analysis_k: 15, max_label_rate_per_1000: 5.34 });
     await product(WDG, { active_ingredient: 'Prodiamine 65.0%', formulation: 'WDG', default_rate_per_1000: 0.37, rate_unit: 'oz', min_label_rate_per_1000: 0.185, max_label_rate_per_1000: 0.83 });
     await product(F24, { category: 'fertilizer', formulation: 'granular', default_rate_per_1000: 4.2, rate_unit: 'lb', analysis_n: 24, analysis_p: 0, analysis_k: 11 });
-    await product(DIMENSION, { active_ingredient: 'Dithiopyr', formulation: 'granular', default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10 });
+    await product(DIMENSION, { active_ingredient: 'Dithiopyr', formulation: 'granular', default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10, max_label_rate_per_1000: 5.48 });
+    await product(DIM_2EW, { active_ingredient: 'Dithiopyr', formulation: 'liquid', default_rate_per_1000: 0.5, rate_unit: 'fl oz', min_label_rate_per_1000: 0.37, max_label_rate_per_1000: 0.73 });
 
     await knex('lawn_protocols').insert({ protocol_key: KEY, version: '2026.06', name: 'Fixture old', status: 'active', grass_track: 'bermuda', region: 'swfl' });
     const [staged] = await knex('lawn_protocols').insert({ protocol_key: KEY, version: LAWN_V13_VERSION, name: 'Fixture v13', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
@@ -122,13 +182,14 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     for (const [month, windowKey, mode, carrier] of [[1, 'jan_v13_pre_m_hose', 'main_reel_plus_spot_backpack', 1], [4, aprilMigration.APRIL_WINDOW, 'spreader_plus_spot_backpack', null], [10, 'oct_v13_spreader_fall', 'spreader_plus_spot_backpack', null]]) {
       [windows[month]] = await knex('lawn_protocol_windows').insert({
         lawn_protocol_id: staged.id, month, window_key: windowKey, title: windowKey, visit_type: 'fixture', production_mode: mode, default_carrier_gal_per_1000: carrier,
+        goal: month === 10 ? octoberMigration.OLD_GOAL : null,
       }).returning('*');
     }
     const row = (window, name, fields) => knex('lawn_protocol_products').insert({
       lawn_protocol_window_id: windows[window].id, product_id: catalog[name].id, product_name: name, application_mode: 'broadcast', default_in_plan: true, ...fields,
     });
     await row(1, STW_4FL, { role: 'pre_emergent', rate_per_1000: 0.5, rate_unit: 'fl oz', carrier_gal_per_1000: 1, gates: JSON.stringify({ annualCounter: 'prodiamine_oz_per_1000' }) });
-    await row(10, STW_15, { role: 'fall_pre_emergent_nutrition', rate_per_1000: 4.02, rate_unit: 'lb', gates: JSON.stringify({ targetN: '0.6 lb N/1000', annualCounter: 'prodiamine_oz_per_1000' }) });
+    await row(10, STW_15, { role: 'fall_pre_emergent_nutrition', rate_per_1000: 4.02, rate_unit: 'lb', gates: JSON.stringify({ targetN: '0.6 lb N/1000', annualCounter: 'prodiamine_oz_per_1000' }), annual_counter: JSON.stringify({ counter: 'prodiamine_oz_per_1000' }) });
     await row(4, F24, { role: 'nutrition', rate_unit: 'lb_n', sort_order: 1, gates: JSON.stringify({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true }) });
     await knex.raw('ALTER TABLE ??.lawn_protocol_audit_log ALTER COLUMN lawn_protocol_id DROP NOT NULL', [owned.schema]).catch(() => {});
 
@@ -138,6 +199,8 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     await reconcileMigration.up(knex);
     await labelMaxMigration.up(knex);
     await ownershipMigration.up(knex);
+    // The staged October row above is the pushed Stonewall 15-0-15 one; this swaps it for Dimension 18-0-10 and writes the dithiopyr caps.
+    await octoberMigration.up(knex);
 
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
@@ -176,7 +239,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
 
   describe('the migrations', () => {
     test('one cap row per prodiamine product in its own unit, none for another ingredient', async () => {
-      const rows = await knex('product_limits').where({ match_type: 'active_ingredient' }).orderBy('limit_value');
+      const rows = await knex('product_limits').where({ match_type: 'active_ingredient', match_value: 'prodiamine' }).orderBy('limit_value');
       expect(rows.map((r) => [r.product_id, Number(r.limit_value), r.limit_unit, r.limit_type, r.severity, r.match_value])).toEqual([
         // 65 WDG and 4FL sit at the catalog's verified annual label maxima (0.83 oz, 1.1 fl oz), under the derived 0.8476 / 1.1019.
         [catalog[WDG].id, 0.83, 'oz/1000sf/year', 'annual_max_rate', 'hard_block', 'prodiamine'],
@@ -193,17 +256,69 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(uncapped).toEqual([]);
     });
 
+    test('one dithiopyr cap row per dithiopyr product in its own unit; every dithiopyr catalog row carries one', async () => {
+      const rows = await knex('product_limits').where({ match_type: 'active_ingredient', match_value: 'dithiopyr' }).orderBy('limit_value');
+      expect(rows.map((r) => [r.product_id, Number(r.limit_value), r.limit_unit, r.limit_type, r.severity])).toEqual([
+        [catalog[DIM_2EW].id, 2.2039, 'fl oz/1000sf/year', 'annual_max_rate', 'hard_block'],
+        [catalog[DIMENSION].id, 16.3977, 'lb/1000sf/year', 'annual_max_rate', 'hard_block'],
+      ]);
+      const uncapped = await knex('products_catalog as pc')
+        .whereRaw("pc.active_ingredient ILIKE 'dithiopyr%'")
+        .whereNotExists(knex('product_limits as pl').whereRaw('pl.product_id = pc.id').where({ match_type: 'active_ingredient', match_value: 'dithiopyr' }))
+        .select('pc.name');
+      expect(uncapped).toEqual([]);
+    });
+
+    test('the staged October row is Dimension 18-0-10 at 2.73 lb (0.49 lb N, 0.27 lb K2O) linked to its catalog row, the April 9x row states 2.73 lb, and the catalog max is 2.73; down restores all of it and up swaps it again', async () => {
+      const feeding = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+        .where({ 'w.window_key': 'oct_v13_spreader_fall' }).select('p.product_name', 'p.product_id', 'p.rate_per_1000', 'p.gates', 'p.annual_counter', 'w.goal');
+      const [swapped] = await feeding();
+      expect(swapped).toMatchObject({ product_name: DIMENSION, product_id: catalog[DIMENSION].id, gates: { targetN: '0.49 lb N/1000', targetK2O: '0.27 lb K2O/1000', annualCounter: 'dithiopyr_lb_per_1000' }, annual_counter: { counter: 'dithiopyr_lb_per_1000' }, goal: octoberMigration.NEW_GOAL });
+      expect(Number(swapped.rate_per_1000)).toBe(2.73);
+      const aprilDimension = () => knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+        .where({ 'w.window_key': aprilMigration.APRIL_WINDOW, 'p.product_name': DIMENSION }).select('p.rate_per_1000', 'p.rate_unit', 'p.gates').first();
+      const dimensionCatalog = () => knex('products_catalog').where({ name: DIMENSION }).first('max_label_rate_per_1000', 'default_rate_per_1000');
+      const april9x = await aprilDimension();
+      expect([Number(april9x.rate_per_1000), april9x.rate_unit, april9x.gates.targetN, april9x.gates.planVisitsPerYear]).toEqual([2.73, 'lb', '0.49 lb N/1000', 9]);
+      expect([Number((await dimensionCatalog()).max_label_rate_per_1000), Number((await dimensionCatalog()).default_rate_per_1000)]).toEqual([2.73, 2.73]);
+      expect((await knex('product_limits').where({ product_id: catalog[DIMENSION].id, match_type: 'product' })).map((r) => [r.limit_type, Number(r.limit_value)]).sort())
+        .toEqual([['annual_max_apps', 3], ['min_interval_days', 60]]);
+      await octoberMigration.down(knex);
+      try {
+        const [restored] = await feeding();
+        expect(restored).toMatchObject({ product_name: STW_15, product_id: catalog[STW_15].id, gates: { targetN: '0.6 lb N/1000', annualCounter: 'prodiamine_oz_per_1000' }, annual_counter: { counter: 'prodiamine_oz_per_1000' }, goal: octoberMigration.OLD_GOAL });
+        expect(restored.gates.targetK2O).toBeUndefined();
+        expect(Number(restored.rate_per_1000)).toBe(4.02);
+        const restoredApril = await aprilDimension();
+        expect([restoredApril.rate_per_1000, restoredApril.rate_unit, restoredApril.gates.targetN]).toEqual([null, 'lb_n', '0.5 lb N/1000']);
+        expect([Number((await dimensionCatalog()).max_label_rate_per_1000), Number((await dimensionCatalog()).default_rate_per_1000)]).toEqual([5.48, 2.78]);
+        expect(await knex('product_limits').where({ product_id: catalog[DIMENSION].id, match_type: 'product' })).toHaveLength(0);
+        expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(0);
+        expect(await knex('lawn_protocol_audit_log').where({ action: octoberMigration.ACTION })).toHaveLength(0);
+      } finally {
+        await octoberMigration.up(knex);
+      }
+      const [again] = await feeding();
+      expect(again.product_name).toBe(DIMENSION);
+      expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(2);
+      await octoberMigration.up(knex);
+      expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(2);
+      expect(await knex('lawn_protocol_audit_log').where({ action: octoberMigration.ACTION })).toHaveLength(1);
+    });
+
     // The whole stack, in deployment order and in rollback order.
     const upAll = async () => { for (const m of [capMigration, aprilMigration, reconcileMigration, labelMaxMigration, ownershipMigration]) await m.up(knex); };
     const downAll = async () => { for (const m of [ownershipMigration, labelMaxMigration, reconcileMigration, aprilMigration, capMigration]) await m.down(knex); };
     const ownGates = { targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true };
-    const rowOf = (name) => knex('lawn_protocol_products').where({ product_name: name });
+    // The April window's rows: the October window also names the Dimension bag now.
+    const rowOf = (name) => knex('lawn_protocol_products').where({ product_name: name })
+      .whereIn('lawn_protocol_window_id', knex('lawn_protocol_windows').where({ window_key: aprilMigration.APRIL_WINDOW }).select('id'));
     const audits = () => knex('lawn_protocol_audit_log').where({ action: 'v13_april_9x' });
     const capValues = async () => Object.fromEntries((await knex('product_limits as pl').join('products_catalog as pc', 'pl.product_id', 'pc.id')
-      .where({ 'pl.match_type': 'active_ingredient' }).select('pc.name', 'pl.limit_value')).map((r) => [r.name, Number(r.limit_value)]));
+      .where({ 'pl.match_type': 'active_ingredient', 'pl.match_value': 'prodiamine' }).select('pc.name', 'pl.limit_value')).map((r) => [r.name, Number(r.limit_value)]));
 
     test('a second up changes nothing; the full rollback removes only its rows; up again restores them', async () => {
-      const count = async () => Number((await knex('product_limits').where({ match_type: 'active_ingredient' }).count('* as n'))[0].n);
+      const count = async () => Number((await knex('product_limits').where({ match_type: 'active_ingredient', match_value: 'prodiamine' }).count('* as n'))[0].n);
       const aprilRows = async () => Number((await rowOf(DIMENSION).count('* as n'))[0].n);
       await upAll();
       expect([await count(), await aprilRows()]).toEqual([3, 1]);
@@ -355,27 +470,41 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(result.mixingOrder.map((step) => step.productName)).not.toContain(STW_4FL);
     });
 
-    test('January 4FL plus October granular at the v13 rates stays under: the October plan computes 40.2 lb, with a warning at 95.7% of the cap and no block', async () => {
+    test('the October plan is Dimension 18-0-10: 27.3 lb on 10,000 sq ft; a 12x dithiopyr season (March and June 2EW) is 62.0% with it, no warning and no block, and January prodiamine does not count', async () => {
       setGates();
       const { scheduled, customerId } = await visit('2026-10-12');
       await applied(customerId, STW_4FL, '2026-01-12', 0.5, 'fl oz');
+      await applied(customerId, DIM_2EW, '2026-03-10', 0.5, 'fl oz');
+      await applied(customerId, DIM_2EW, '2026-06-09', 0.5, 'fl oz');
+      const result = await plan(scheduled);
+      expect(codes(result)).not.toContain('lawn_v13_annual_limit');
+      expect(result.propertyGate.warnings.filter((w) => w.code === 'lawn_v13_limit_warning' && /yearly label cap/.test(w.message))).toEqual([]);
+      expect(item(result, DIMENSION).mix).toMatchObject({ amount: 27.3 });
+      expect(item(result, STW_15)).toBeUndefined();
+    });
+
+    test('a 9x season (2EW in March and June, the 2.73 lb April granular) brings the October application to 78.7% of the dithiopyr cap: a warning, no block', async () => {
+      setGates();
+      const { scheduled, customerId } = await visit('2026-10-12');
+      await applied(customerId, DIM_2EW, '2026-03-10', 0.5, 'fl oz');
+      await applied(customerId, DIM_2EW, '2026-06-09', 0.5, 'fl oz');
+      await applied(customerId, DIMENSION, '2026-04-14', 2.73, 'lb');
       const result = await plan(scheduled);
       expect(codes(result)).not.toContain('lawn_v13_annual_limit');
       const warning = result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning' && /yearly label cap/.test(w.message));
-      expect(warning.message).toMatch(/is 45\.5% of the yearly label cap; this application brings it to 95\.7%/);
-      expect(warning.limitType).toBe('annual_max_rate');
-      expect(item(result, STW_15).mix).toMatchObject({ amount: 40.2 });
+      expect(warning.message).toMatch(/dithiopyr across all products this year is 62% of the yearly label cap; this application brings it to 78\.7%/);
+      expect(item(result, DIMENSION).mix).toMatchObject({ amount: 27.3 });
     });
 
-    test('two formulations add up: 69.6% already used plus the October granular is 119.7%, a block', async () => {
+    test('two formulations add up: 84.7% of the dithiopyr cap already used (2EW and the April granular) plus the October granular is 101.4%, a block', async () => {
       setGates();
       const { scheduled, customerId } = await visit('2026-10-12');
-      await applied(customerId, WDG, '2026-03-02', 0.2, 'oz'); // 24.1%
-      await applied(customerId, STW_4FL, '2026-01-12', 0.5, 'fl oz'); // 45.5%
+      await applied(customerId, DIM_2EW, '2026-03-10', 1.5, 'fl oz'); // 68.1%
+      await applied(customerId, DIMENSION, '2026-04-14', 2.73, 'lb'); // 16.6%
       const result = await plan(scheduled);
       expect(codes(result)).toContain('lawn_v13_annual_limit');
-      expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/is 69\.6% of the yearly label cap; this application brings it to 119\.7%/);
-      expect(item(result, STW_15).mix).toBeNull();
+      expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/is 84\.7% of the yearly label cap; this application brings it to 101\.4%/);
+      expect(item(result, DIMENSION).mix).toBeNull();
     });
 
     test('a season already at 84.3% of the cap warns (no application being planned) and does not block', async () => {
@@ -495,7 +624,9 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
   });
 
   describe('the April step by the visit\'s plan', () => {
-    test.each([['Every 6 Weeks Lawn Care Service', DIMENSION, 27.778, F24], ['Monthly Lawn Care Service', F24, 20.833, DIMENSION]])(
+    // The rollback tests above leave the 150000-shaped April row (derived 2.778 lb); the October migration restates it at the label's 2.73 lb. Idempotent.
+    beforeAll(async () => { await octoberMigration.up(knex); });
+    test.each([['Every 6 Weeks Lawn Care Service', DIMENSION, 27.3, F24], ['Monthly Lawn Care Service', F24, 20.833, DIMENSION]])(
       '%s: plans %s (%s lb on 10,000 sq ft) and not %s',
       async (serviceType, expected, amount, other) => {
         setGates();
