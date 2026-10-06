@@ -433,17 +433,18 @@ function openTimesDayLabel(d) {
 // no picker to commit through (no id, another customer's estimate, no funnel
 // service for the text, no resolvable location) gets NO OPEN TIMES — the zone
 // finder is never a fallback with the gate on.
-const SCHEDULER_OFFER_SOURCE = 'scheduler';
-const ESTIMATE_OFFER_SOURCE = 'estimate';
-const BOOK_OFFER_SOURCE = 'book';
-// GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): the city-based fallback
+// The offer sources live in sms-offer-sources.js (the suggest-mode classifier
+// and the offer ledger switch on them too). WEBSITE_OFFER_SOURCE
+// (GATE_MULTI_TECH_TEXT_TIMES, multi-tech booking PR 4): the city-based fallback
 // (no scheduler picker for the text) asks the website booking engine — per
 // technician, route-aware — instead of the old by-city zone finder. It rides the
 // scheduler plumbing as one more offer source, so the snapshot a draft persists
 // STAMPS the engine that built it (lookup.source) and the send-time recheck asks
 // that same engine whatever the gate says by then. A snapshot with no source is
 // the old finder's, and is rechecked there.
-const WEBSITE_OFFER_SOURCE = 'website_engine';
+const {
+  SCHEDULER_OFFER_SOURCE, ESTIMATE_OFFER_SOURCE, BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE,
+} = require('./sms-offer-sources');
 const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
 // service's availability build with a possible geocode and the find-time

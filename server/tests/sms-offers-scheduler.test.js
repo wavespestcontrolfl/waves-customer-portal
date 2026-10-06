@@ -893,6 +893,8 @@ describe('GATE_MULTI_TECH_TEXT_TIMES — the city fallback asks the website engi
       lookup: { city: 'Venice', customerId: 'cust-9', estimateId: null, serviceType: 'General Pest Control (Quarterly)', source: 'website_engine', serviceKey: 'pest_control' },
       quotedWindows: [{ date: 'Wednesday, September 30', window: '8:00 AM - 10:00 AM' }],
     });
+    // Codex r3 P1 on #6073: a snapshot the drafter really stamped classifies as a picker offer.
+    expect(require('../services/sms-suggest-mode').isPickerOfferSnapshot(r.openTimesSnapshot)).toBe(true);
   });
 
   // Codex r2 P1-1: the customer's visit history (pest) must not size an estimate's offer.

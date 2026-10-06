@@ -193,40 +193,48 @@ async function funnelKeyForEstimateId(estimateId, database = db) {
  */
 async function pickFirstServiceDate(customer, estimateId, { serviceKey = '' } = {}) {
   try {
-    if (multiTechTextTimesLive() && serviceKey) {
-      // GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): the first day the
-      // website booking engine (per technician, route-aware) has a feasible
-      // start for THIS estimate's funnel service at the customer's pin, else the
-      // middle of their city. `internal`: staff-side scheduling never depends on
-      // the public funnel's kill switch (GATE_SELF_BOOKING) or on the account
-      // being signed in. No usable pin or no open day falls to the + 7 days rule
-      // below, as an empty by-city lookup does. An estimate the website engine
-      // cannot represent (serviceKey '') keeps the old engine below.
-      const offered = (customer.id || customer.city)
-        ? await require('./scheduling/text-offer-times').textOfferDays({
-          customerId: customer.id || null, estimateId, city: customer.city || null, serviceKey, internal: true,
-        })
-        : null;
-      const first = (offered?.days || []).find((d) => d.slots?.length)?.date;
-      if (first) {
-        logger.info(`[estimate-converter] Snapped first service to route day ${first} (website engine, ${serviceKey}, pin: ${offered.pinSource})`);
-        return first;
-      }
-    } else if (customer.city) {
-      const avail = await AvailabilityEngine.getAvailableSlots(customer.city, estimateId);
-      const first = avail?.days?.[0]?.date;
-      if (first) {
-        logger.info(`[estimate-converter] Snapped first service to route day ${first} (zone: ${avail.zone})`);
-        return first;
-      }
+    // GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): an estimate the
+    // website engine can represent (serviceKey) is placed by it; any other keeps
+    // the by-city engine. No usable pin or no open day falls to the + 7 days rule.
+    const found = multiTechTextTimesLive() && serviceKey
+      ? await websiteEngineFirstDay(customer, estimateId, serviceKey)
+      : await byCityFirstDay(customer, estimateId);
+    if (found) {
+      logger.info(`[estimate-converter] Snapped first service to route day ${found.date} (${found.via})`);
+      return found.date;
     }
   } catch (e) {
     logger.error(`[estimate-converter] Availability lookup failed, falling back: ${e.message}`);
   }
+  return fallbackFirstServiceDate(customer);
+}
 
-  // Fallback — today + 7, nudged off closed days (weekly days off + one-off
-  // blackouts) via the shared helper; was a Sunday-only snap before the
-  // weekly-days-off setting existed. Bounded walk, fail-open like the helper.
+// The first day the website booking engine (per technician, route-aware) has a
+// feasible start for THIS estimate's funnel service at the customer's pin, else
+// the middle of their city. `internal`: staff-side scheduling never depends on
+// the public funnel's kill switch (GATE_SELF_BOOKING) or on the account being
+// signed in. { date, via } or null.
+async function websiteEngineFirstDay(customer, estimateId, serviceKey) {
+  if (!customer.id && !customer.city) return null;
+  const offered = await require('./scheduling/text-offer-times').textOfferDays({
+    customerId: customer.id || null, estimateId, city: customer.city || null, serviceKey, internal: true,
+  });
+  const date = (offered?.days || []).find((d) => d.slots?.length)?.date;
+  return date ? { date, via: `website engine, ${serviceKey}, pin: ${offered.pinSource}` } : null;
+}
+
+// The old by-city engine's first day. { date, via } or null.
+async function byCityFirstDay(customer, estimateId) {
+  if (!customer.city) return null;
+  const avail = await AvailabilityEngine.getAvailableSlots(customer.city, estimateId);
+  const date = avail?.days?.[0]?.date;
+  return date ? { date, via: `zone: ${avail.zone}` } : null;
+}
+
+// Fallback — today + 7, nudged off closed days (weekly days off + one-off
+// blackouts) via the shared helper; was a Sunday-only snap before the
+// weekly-days-off setting existed. Bounded walk, fail-open like the helper.
+async function fallbackFirstServiceDate(customer) {
   const fallback = new Date(Date.now() + 7 * 86400000);
   let dateStr = fallback.toISOString().split('T')[0];
   try {
