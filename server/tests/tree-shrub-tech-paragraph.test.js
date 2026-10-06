@@ -44,7 +44,7 @@ describe('TS_SENTENCES is the only source of words', () => {
     expect(Object.isFrozen(TS_SENTENCES)).toBe(true);
     expect(TS_SENTENCES).toEqual({
       observed: 'Our technician saw {items}.',
-      observedItemWithPlant: '{condition} on the {plant}',
+      observedItemWithPlant: '{condition} {prep} the {plant}',
       observedItem: '{condition}',
       maybe: 'There may be early signs of {labels}; we will keep an eye on it.',
       confirmed: 'Our technician confirmed signs of {labels}.',
@@ -237,6 +237,26 @@ describe('deterministic lines', () => {
   test('nothing applies: no sentence, no paragraph', () => {
     expect(textFor({ technicianNote: '', products: [], landscapeCondition: null }, [])).toBe('');
     expect(textFor({ technicianNote: 'Visited.', products: [], landscapeCondition: 'Fair' }, [])).toBe('');
+  });
+});
+
+describe('trial wording fixes (owner 2026-10-05)', () => {
+  test('garden beds read "in the garden beds"; everything else stays "on the"', () => {
+    expect(textFor({ technicianNote: 'Weeds in the beds.', products: [] }, [obs('weeds', 'beds', true, 'weeds in the beds')])).toBe('Our technician saw weeds in the garden beds.');
+    expect(textFor({ technicianNote: 'Found scale on the hedges.', products: [] }, [obs('scale', 'hedges')])).toBe('Our technician saw scale on the hedges.');
+    for (const { prep } of Object.values(PLANTS)) expect(['on', 'in']).toContain(prep);
+  });
+
+  test('a confirmed category the "saw" line already names is not said twice', () => {
+    const findings = [{ key: 'pest_activity', kind: 'confirmed' }, { key: 'foliage_fullness', kind: 'confirmed' }];
+    expect(textFor({ technicianNote: 'Aphids.', products: [], findings }, [obs('aphids', 'none', true, 'aphids')]))
+      .toBe('Our technician saw aphids. Our technician confirmed signs of thin foliage.');
+    // Without a "saw" item the confirmed line keeps every category.
+    expect(textFor({ technicianNote: '', products: [], findings }, [])).toBe('Our technician confirmed signs of pest activity and thin foliage.');
+  });
+
+  test('every condition names its photo category (or none), from the five finding keys', () => {
+    for (const { category } of Object.values(CONDITIONS)) expect([null, ...Object.keys(FINDING_LABELS)]).toContain(category);
   });
 });
 

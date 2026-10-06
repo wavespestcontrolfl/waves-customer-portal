@@ -349,7 +349,7 @@ key, with no model call and no read): on the tree/shrub service-report payload
 (`/api/reports/:token/data` and the PDF) the one new optional key is
 `reportV2.techParagraph`, a string made ONLY of the sentences in the code constant
 `TS_SENTENCES` (`tree-shrub-tech-paragraph.js`), in this fixed order: "Our technician
-saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}"),
+saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}", or "in the garden beds"; a confirmed photo category the "saw" line already names is not repeated),
 "There may be early signs of {labels}; we will keep an eye on it." (low-confidence
 kept photo findings the note does not cover, at most 2), "Our technician confirmed
 signs of {labels}." (findings the technician confirmed), "Today we applied
