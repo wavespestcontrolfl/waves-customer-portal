@@ -686,9 +686,14 @@ const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\
 // Someone must be the eater: a name, a pronoun, a possessive person or a
 // listed person or pet, before the verb or after "by". "Was the bait
 // eaten?" names no one (Codex P1 #6016 r34).
-const QUESTION_WORDS = '(?!(?:Was|Were|Is|Are|Did|Does|Do|Has|Have|What|Why|How|When|Where|Which|Who|Will|Can|Could|Should|The|This|That|Some|Any)\\b)';
-const EATER = `(?:${QUESTION_WORDS}[A-Z][a-z]+|i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
-const EATER_ACTS = new RegExp(`(?:^|[^\\w])${EATER}\\s+(?:\\w+\\s+){0,2}?(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\\b|\\bby\\s+${EATER}`);
+// A name in any case ("john", "JOHN"), right before the verb or after "by":
+// any word that is not a question word, article, pronoun, product or pest
+// word (Codex P1 #6016 r35).
+const NOT_A_NAME = '(?:was|were|is|are|did|does|do|has|have|had|be|been|got|what|why|how|when|where|which|who|will|can|could|should|the|this|that|these|those|some|any|it|its|a|an|and|or|but|then|also|just|bait\\w*|spray\\w*|products?|pesticides?|chemicals?|granules?|poison\\w*|gel|pellets?|powder|dust|treatment|insecticides?|herbicides?|fertilizer|nothing|everything|something|anything|ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)';
+const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
+const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
+const INGEST = '(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
+const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
     && EATER_ACTS.test(sentence) && !PEST_EATING.test(sentence));
