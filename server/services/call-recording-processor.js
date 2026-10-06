@@ -115,7 +115,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1568,6 +1568,9 @@ function summarizeKnownCaller(customer) {
   const hasAddress = !!String(customer.address_line1 || '').trim();
   return {
     name: name || null,
+    // The record's own surname: a missing_last_name card for a caller whose
+    // record already carries one is noise (dropUnneededCallCards).
+    lastName: String(customer.last_name || '').trim() || null,
     // The matched row's identity — carried alongside the on-file address so a
     // fail-open proof computed against THIS customer can be checked against
     // whichever customer Step 3's canonical resolution retains before the
@@ -11304,6 +11307,13 @@ const CallRecordingProcessor = {
           if (onFileSatisfied.length) {
             logger.info(`[call-proc] Address flags satisfied by the on-file address for ${maskSid(callSid)}: ${onFileSatisfied.join(', ')} (no card)`);
           }
+          // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
+          // cards only; finalFlags, the route decision and the routing
+          // verdict keep every flag.
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { knownLastName: knownCaller?.lastName }).dropped);
+          if (unneededCards.size) {
+            logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
+          }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -11379,7 +11389,7 @@ const CallRecordingProcessor = {
           // don't block. Without this, promoting DRIVES_ROUTING would silence the
           // identity signals the shadow bridge used to surface. onConflict dedups
           // against the blocked-branch inserts below.
-          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f) && !unneededCards.has(f)).slice(0, 10)) {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({
@@ -11490,13 +11500,13 @@ const CallRecordingProcessor = {
             const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
               ? routingResult.appointmentBlockingFlags
               : (noSchedulingAsk ? [] : [routingResult.reason || 'routing_rejected']);
-            const triageReasons = blockingReasons;
+            const triageReasons = blockingReasons.filter((f) => !unneededCards.has(f));
             // A held scheduling CHANGE (cancel / reschedule / coordination on
             // an existing visit) is owed work. The card files below, but
             // review_status is driven by bridgeNeedsConfirmation alone, so the
             // call itself looked fully processed (2026-09-02..08 audit: a
             // cancellation, two reschedules and a re-treat with no owner).
-            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
+            if (triageReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({
                 callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
@@ -11734,6 +11744,12 @@ const CallRecordingProcessor = {
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
         }
+        // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
+        // and it is the address being saved — no read-back card, no hold.
+        if (spelledEmailSettled(dictationEmailPayload, extracted.email, normalizedEmail)) {
+          const at = needsConfirmation.indexOf('email_unverified');
+          if (at !== -1) needsConfirmation.splice(at, 1);
+        }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
           // reads extracted.* below, so both records get the corrected address.
@@ -11942,6 +11958,12 @@ const CallRecordingProcessor = {
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
+        // shadow branch.
+        if (spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) {
+          const at = emailReasons.indexOf('email_unverified');
+          if (at !== -1) emailReasons.splice(at, 1);
         }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),

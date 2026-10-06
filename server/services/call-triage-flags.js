@@ -695,6 +695,70 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
   'do_not_contact_requested',
 ]);
 
+// Cards nobody needs (2026-10-05 call-agent audit: 136 cards on 49 calls in a
+// week, 4 worked by a person). The routing verdict is NOT changed — a call
+// these rules quiet is still held from auto-booking exactly as before; only
+// the Needs Review cards it would file are trimmed. Each rule is a shape the
+// audit found filed with nothing for the office to do:
+//   1. One scheduling change, one card. A cancellation files
+//      cancellation_request; a reschedule files reschedule_or_cancel. The
+//      catch-all existing_appointment_coordination (and, on a cancel, the
+//      generic reschedule_or_cancel) said the same thing a second and third
+//      time.
+//   2. existing_appointment_coordination on a call that asked for no change
+//      (scheduling.status none): "I'm out front", "running ten minutes
+//      late", "what should I move before the treatment". The tech settled it
+//      live. Promises made on such a call ("Adam will let you know when")
+//      are tracked by call_commitments, which owns that follow-through.
+//   3. Address cards on a call that asks for no visit and no quote: a
+//      status check, a cancellation, a support question. An unverifiable or
+//      missing address there blocks nothing and is nobody's work. A new
+//      service ask (any other service_intent), a quote, or any time asked,
+//      offered or confirmed keeps them. out_of_service_area is never touched.
+//   4. caller_not_authorized for callers the owner treats as authorized: a
+//      family member (owner ruling 2026-09-28 — any service, with or without
+//      a time agreed), a client's own employee (commercial jobs keep their own
+//      commercial_requires_quote hold), and a realtor / lender / buyer
+//      arranging a WDO inspection (owner ruling 2026-09-26). Tenants,
+//      property managers, HOA members and "other" keep the card.
+//   5. missing_last_name when the linked customer record already has one.
+const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
+const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
+const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address', 'address_unverified', 'low_confidence_address']);
+const AUTHORIZED_THIRD_PARTY_RELATIONSHIPS = new Set(['family_member', 'employee']);
+
+function callMakesNoServiceAsk(extraction) {
+  const status = String(extraction?.scheduling?.status || 'none');
+  if (!SCHEDULING_NO_ASK_STATUSES.has(status)) return false;
+  const sr = extraction?.service_request || {};
+  if (sr.quote_requested === true || sr.quote_promised === true) return false;
+  return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
+}
+
+function dropUnneededCallCards(flags, extraction, { knownLastName = null } = {}) {
+  const list = Array.isArray(flags) ? flags : [];
+  const dropped = new Set();
+  const has = (f) => list.includes(f);
+  if (has('cancellation_request')) {
+    dropped.add('reschedule_or_cancel');
+    dropped.add('existing_appointment_coordination');
+  } else if (has('reschedule_or_cancel')) {
+    dropped.add('existing_appointment_coordination');
+  }
+  if (String(extraction?.scheduling?.status || 'none') === 'none') dropped.add('existing_appointment_coordination');
+  if (callMakesNoServiceAsk(extraction)) {
+    for (const f of NO_ASK_ADDRESS_CARDS) dropped.add(f);
+  }
+  const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
+  if (AUTHORIZED_THIRD_PARTY_RELATIONSHIPS.has(relationship)
+      || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {}))) {
+    dropped.add('caller_not_authorized');
+  }
+  if (String(knownLastName || '').trim()) dropped.add('missing_last_name');
+  const kept = list.filter((f) => !dropped.has(f));
+  return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
+}
+
 function hasCanonicalWriteBlock(flags) {
   return (flags || []).some((f) => CANONICAL_WRITE_BLOCKING_FLAGS.has(f));
 }
@@ -2522,6 +2586,35 @@ const BASIC_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
  * normalizer nulls non-regex emails before this runs) so invalid captures
  * still get their reason — and a missing-dot typo its fix.
  */
+/**
+ * Spelled-email trust (owner ruling 2026-10-05). An email the caller spelled
+ * out letter by letter is trusted when the transcript decoder heard exactly
+ * ONE spelling and that spelling is the address being saved: no read-back
+ * card, so no first-touch hold either. The card stays when there is any
+ * doubt the letters themselves carry — two spellings heard (decoder
+ * candidates, or the V1/V2 disagreement payload), an arbiter that sent the
+ * address to review or rejected it, a domain-typo correction that would
+ * change the saved value, or a value that is not email-shaped. A bounce
+ * later still files its own card through the bounce-recovery lane.
+ *
+ * Pure. `dictationEmailPayload` is the processor's decoder/arbiter payload;
+ * `savedEmail` is extracted.email at card-decision time; `correctedEmail` is
+ * deriveEmailReview's normalizedEmail (null when no correction is proposed).
+ */
+function spelledEmailSettled(dictationEmailPayload, savedEmail, correctedEmail = null) {
+  const p = dictationEmailPayload;
+  if (!p || p.email_disagreement) return false;
+  const candidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
+  if (candidates.length !== 1) return false;
+  const verdict = p.arbiter?.verdict;
+  if (verdict && verdict !== 'adopt' && verdict !== 'adopt_with_confirmation') return false;
+  const saved = String(savedEmail || '').trim().toLowerCase();
+  if (!saved || !BASIC_EMAIL_SHAPE.test(saved)) return false;
+  if (String(candidates[0]?.value || '').trim().toLowerCase() !== saved) return false;
+  if (correctedEmail && String(correctedEmail).trim().toLowerCase() !== saved) return false;
+  return true;
+}
+
 function deriveEmailReview(extracted = {}) {
   const needsConfirmation = [];
   let normalizedEmail = null;
@@ -2978,6 +3071,9 @@ module.exports = {
   recordCarriesUnit,
   deriveCallReviewBridge,
   deriveEmailReview,
+  spelledEmailSettled,
+  dropUnneededCallCards,
+  callMakesNoServiceAsk,
   applyEmailDisagreementHold,
   mergeNeedsConfirmation,
   detectRentalSignal,
