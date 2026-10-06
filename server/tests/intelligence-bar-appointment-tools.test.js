@@ -1504,6 +1504,20 @@ describe('reschedule_appointment', () => {
     expect(updateChain.update).not.toHaveBeenCalled();
   });
 
+  test('an off-hour reschedule names only starts the visit\'s own duration allows (6:30 PM on a 90-minute visit offers 6:00 PM only)', async () => {
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, window_start: '09:00', window_end: '10:30' }) }), chain(), updateChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '6:30 PM', reason: 'customer asked',
+    });
+    // 7:00–8:30 PM would end past the 8:00 PM day end, so 7:00 PM is not offered.
+    expect(result).toEqual({ error: 'Visits start on the hour. Use 6:00 PM.', code: 'window_not_on_the_hour' });
+    expect(updateChain.update).not.toHaveBeenCalled();
+  });
+
   test('moves the visit, refreshes the track-token expiry, and writes an admin_ib reschedule_log row', async () => {
     const updateChain = chain();
     const logChain = chain({ insert: jest.fn().mockResolvedValue() });

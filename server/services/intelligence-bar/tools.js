@@ -2370,20 +2370,22 @@ const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
 // window rule with the flat-60 duration, so a 7:30 PM request names only
 // 7:00 PM (8:00 PM would end past the day end) and an 8:30 PM request, with
 // no valid neighbor, gets the rule's own refusal as invalid_appointment_window
-// (Codex r1 on #6023, P2). The codes are stable: the proposal returns them
+// (Codex r1 on #6023, P2). A reschedule passes the visit's preserved
+// duration, so a 90-minute visit asked for 6:30 PM is offered 6:00 PM only
+// (7:00–8:30 ends past the day end; Codex r2 on #6023, P2). The codes are stable: the proposal returns them
 // with no card (W5-dev-03), and the executor refuses the same start the same
 // way if no card was ever made.
-function offHourRefusal(hour) {
+function offHourRefusal(hour, durationMinutes = 60) {
   const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
   const candidates = hour + 1 > 23 ? [hour] : [hour, hour + 1];
   const valid = [];
   let firstRefusal = null;
   for (const h of candidates) {
     const start = `${String(h).padStart(2, '0')}:00`;
-    const windowEnd = deriveWindowEnd(start, 60);
+    const windowEnd = deriveWindowEnd(start, durationMinutes);
     try {
       if (!windowEnd) throw Object.assign(new Error('That window would cross midnight — pick an earlier start.'), { status: 422 });
-      assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes: 60 });
+      assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes });
       valid.push(hour12(h));
     } catch (err) {
       if (err?.status !== 422) throw err;
@@ -2394,7 +2396,7 @@ function offHourRefusal(hour) {
   return { error: `Visits start on the hour. Use ${valid.join(' or ')}.`, code: 'window_not_on_the_hour' };
 }
 
-function parseTimeWindowStart(timeWindow) {
+function parseTimeWindowStart(timeWindow, durationMinutes = 60) {
   if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
   const raw = String(timeWindow).trim().toLowerCase();
   if (raw === 'morning') return { start: '08:00' };
@@ -2411,7 +2413,7 @@ function parseTimeWindowStart(timeWindow) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
   }
   // Appointment windows start ON THE HOUR; see offHourRefusal.
-  if (minute !== 0) return offHourRefusal(hour);
+  if (minute !== 0) return offHourRefusal(hour, durationMinutes);
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 
@@ -3497,8 +3499,11 @@ async function rescheduleAppointment(input, actionContext = {}) {
   if (!dateStr) {
     return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${new_date}")` };
   }
-  const win = parseTimeWindowStart(new_time_window);
-  if (win.error) return { error: win.error };
+  // The visit's own window length, judged before the new start is parsed so
+  // an off-hour refusal names only starts this visit can actually take.
+  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
+  const win = parseTimeWindowStart(new_time_window, apptDuration);
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   const oldDate = appt.scheduled_date;
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this tool moves ONE
@@ -3524,7 +3529,6 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // and the audit log both read window_end, so both would break. The shared
   // deriveWindowEnd returns null when the preserved duration would carry the
   // end past midnight — reject rather than persist a wrapped, inverted block.
-  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
   const newStart = win.start || appt.window_start;
   let newWindowEnd = win.start
     ? deriveWindowEnd(win.start, apptDuration)
