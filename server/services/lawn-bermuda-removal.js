@@ -229,7 +229,8 @@ async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
 // (effective_property_id; null when none resolves).
 async function resolvedVisitOf(knex, serviceId, { strict = false } = {}) {
   if (!UUID_RE.test(String(serviceId || ''))) return null;
-  const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_type', 'lawn_protocol_version');
+  const { savepointRead } = require('../utils/savepoint-read');
+  const visit = await savepointRead(knex, (k) => k('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_type', 'lawn_protocol_version'));
   if (!visit?.customer_id || !visit.scheduled_date) return null;
   const scope = await profilePropertyScope(knex, visit.customer_id, visit.property_id, strict);
   return { ...visit, effective_property_id: scope.effective || null };
@@ -379,16 +380,19 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
 // recorded, an unreadable account or no warning all give none.
 async function rateAdvisories(knex, serviceId, productIds = []) {
   if (!bermudaRemovalLive()) return [];
+  const { savepointRead } = require('../utils/savepoint-read');
   try {
-    // The reads below isolate themselves (savepoints inside a transaction), so a failed one
-    // leaves the caller's transaction usable; a nested savepoint here would deadlock them.
-    const ids = await stepProductIds(knex);
+    // Each read that does not isolate itself runs in its own savepoint, one after another (a
+    // savepoint nested inside another on one transaction would wait on itself), so a failed
+    // statement rolls back to its savepoint before the error is swallowed below and the
+    // caller's transaction stays usable. resolvedVisitOf isolates its own reads.
+    const ids = await savepointRead(knex, (k) => stepProductIds(k));
     if (!ids.tagged || !productIds.map(String).includes(String(ids.recognition))) return [];
     const visit = await resolvedVisitOf(knex, serviceId, { strict: true });
     if (!visit) return [];
-    const result = await require('./application-limits').checkLimits(visit.customer_id, ids.recognition, visit.scheduled_date, knex, {
+    const result = await savepointRead(knex, (k) => require('./application-limits').checkLimits(visit.customer_id, ids.recognition, visit.scheduled_date, k, {
       program: BERMUDA_GROUP, propertyId: visit.effective_property_id || null,
-    });
+    }));
     return result.warnings.filter((warning) => warning.type === 'annual_max_rate').map((warning) => warning.message);
   } catch (err) {
     return [];

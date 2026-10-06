@@ -14,7 +14,7 @@ const rowsMigration = require('../models/migrations/20261006190100_lawn_bermuda_
 const programMigration = require('../models/migrations/20261006190300_lawn_bermuda_removal_limit_program');
 const catalogMigration = require('../models/migrations/20261006190400_lawn_bermuda_removal_catalog');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
-const { bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
+const { rateAdvisories, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 
 // An accepted estimate whose current priced result still carries the add-on on its lawn line.
 const BERMUDA_ESTIMATE = { engineRequest: { options: { bermudaSuppression: true } }, result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } };
@@ -1017,6 +1017,30 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       }).catch((err) => { if (err !== ROLLBACK) throw err; });
       // The fixture's own rows are back after the rollback.
       expect(await knex('products_catalog').whereIn('id', [rec.id, fus.id])).toHaveLength(2);
+    });
+
+    test('rateAdvisories: a failed read inside a transaction gives [] and leaves the transaction usable; healthy, it gives the warning', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await knex('property_application_history').insert(['2026-03-01', '2026-04-20'].map((application_date) => ({
+        customer_id: f.customerId, product_id: rec.id, application_date, application_rate: 0.06, rate_unit: 'oz',
+      })));
+      // Healthy: the history (0.12 oz) plus nothing proposed is under the warning threshold; add one more recorded spray.
+      await knex('property_application_history').insert({ customer_id: f.customerId, product_id: rec.id, application_date: '2026-06-20', application_rate: 0.03, rate_unit: 'oz' });
+      const ROLLBACK = new Error('rollback');
+      // Each table rename makes the read that needs it fail (inside the transaction, rolled back after).
+      for (const table of ['product_limits', 'scheduled_services', 'property_application_history']) {
+        await knex.transaction(async (trx) => {
+          expect(await rateAdvisories(trx, f.visit.id, [rec.id])).toEqual([expect.stringMatching(/cumulative 0\.150/)]);
+          await trx.raw(`ALTER TABLE ${table} RENAME TO ${table}_broken`);
+          expect(await rateAdvisories(trx, f.visit.id, [rec.id])).toEqual([]);
+          // The transaction is still usable: the next statement succeeds (it would be refused as aborted otherwise).
+          await trx.raw(`ALTER TABLE ${table}_broken RENAME TO ${table}`);
+          expect((await trx.raw('SELECT 1 AS ok')).rows[0].ok).toBe(1);
+          expect(await rateAdvisories(trx, f.visit.id, [rec.id])).toEqual([expect.stringMatching(/cumulative 0\.150/)]);
+          throw ROLLBACK;
+        }).catch((err) => { if (err !== ROLLBACK) throw err; });
+      }
     });
 
     test('a recorded rate is converted from its own unit into the cap\'s: 0.01 lb counts as 0.16 oz; an unconvertible rate counts for nothing', async () => {

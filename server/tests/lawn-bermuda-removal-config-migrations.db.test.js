@@ -11,6 +11,7 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
   const db = require('../models/db');
   const wateringBackfill = require('../models/migrations/20261006220000_watering_rule_bermuda_removal_backfill');
   const watering = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
+  const surfactantToken = require('../models/migrations/20261006220300_bermuda_surfactant_unit_token');
   const unitToken = require('../models/migrations/20261006220200_bermuda_fusilade_unit_token');
   const RATE_UNITS = require('../../shared/rate-units.json');
   const pricingSeed = require('../models/migrations/20261006220100_lawn_pricing_bermuda_cost_seed');
@@ -91,6 +92,67 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
         await trx('products_catalog').where({ name: FUS }).update({ rate_unit: 'fl oz' });
         await unitToken.up(trx);
         expect(await unit()).toBe('fl oz');
+      });
+    });
+  });
+
+  describe('20261006220300 surfactant unit token', () => {
+    const NIS = 'LESCO 90/10 Nonionic Surfactant';
+    const SEEDED = 'migration:20261006220300_bermuda_surfactant_unit_token:seeded';
+    const REVERTED = 'migration:20261006220300_bermuda_surfactant_unit_token:reverted';
+    const NAMES = ['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide', NIS];
+
+    test('on a database built from migrations alone, all three products of the mix carry unit tokens every completion accepts, so the mix records with no unit edit', async () => {
+      const rows = await db('products_catalog').whereIn('name', NAMES).select('name', 'rate_unit', 'cost_unit', 'inventory_unit');
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        for (const unit of [row.rate_unit, row.cost_unit, row.inventory_unit].filter(Boolean)) expect(RATE_UNITS).toContain(unit);
+      }
+      expect(rows.find((row) => row.name === NIS).rate_unit).toBe('fl_oz');
+    });
+
+    test('changes only the row 20261005130000 created and nobody touched; audit is append-only; down appends a rollback event per original and restores only what still holds fl_oz', async () => {
+      await rolledBack(async (trx) => {
+        const row = () => trx('products_catalog').where({ name: NIS }).first('rate_unit', 'label_source_note');
+        const events = (action) => trx('audit_log').where({ action });
+        // The state 20261005130000 left.
+        await trx('products_catalog').where({ name: NIS }).update({ rate_unit: 'fl oz' });
+        const seededBefore = (await events(SEEDED)).length;
+        const original = (await events(SEEDED)).map((event) => event.id);
+        await surfactantToken.up(trx);
+        expect((await row()).rate_unit).toBe('fl_oz');
+        const seeded = await events(SEEDED);
+        expect(seeded).toHaveLength(seededBefore + 1);
+        const mine = seeded.find((event) => !original.includes(event.id));
+        // Idempotent.
+        await surfactantToken.up(trx);
+        expect(await events(SEEDED)).toHaveLength(seededBefore + 1);
+        // Down: a rollback event is appended and the original event is left exactly as it was.
+        const revertedBefore = (await events(REVERTED)).length;
+        await surfactantToken.down(trx);
+        expect((await row()).rate_unit).toBe('fl oz');
+        const reverted = await events(REVERTED);
+        // One rollback event per original event (this run's, and the one the real migration run wrote).
+        expect(reverted).toHaveLength(revertedBefore + original.length + 1);
+        // The column is restored once; the other original finds it already restored and says so.
+        expect(reverted.find((event) => event.metadata.originalAuditId === mine.id).metadata).toMatchObject({ column: 'rate_unit' });
+        expect(reverted.filter((event) => [mine.id, ...original].includes(event.metadata.originalAuditId)).filter((event) => event.metadata.restored === true)).toHaveLength(1);
+        expect((await trx('audit_log').where({ id: mine.id }).first('action')).action).toBe(SEEDED);
+        // A second down adds nothing.
+        await surfactantToken.down(trx);
+        expect(await events(REVERTED)).toHaveLength(revertedBefore + original.length + 1);
+        // A new up writes a new event; an admin change in between is not restored by the next down.
+        await surfactantToken.up(trx);
+        await trx('products_catalog').where({ name: NIS }).update({ rate_unit: 'ml' });
+        await surfactantToken.down(trx);
+        expect((await row()).rate_unit).toBe('ml');
+        expect((await events(REVERTED)).find((event) => event.metadata.column === 'rate_unit' && event.metadata.restored === false)).toBeTruthy();
+        // Rows without the migration's provenance are never touched: an edited note, an edited unit.
+        await trx('products_catalog').where({ name: NIS }).update({ rate_unit: 'fl oz', label_source_note: 'Verified from the label by the office.' });
+        const count = (await events(SEEDED)).length;
+        await surfactantToken.up(trx);
+        expect((await row()).rate_unit).toBe('fl oz');
+        expect(await events(SEEDED)).toHaveLength(count);
       });
     });
   });
