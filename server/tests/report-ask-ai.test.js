@@ -60,6 +60,8 @@ const {
   screenAskAnswer,
   medicalExposureAnswer,
   MEDICAL_EXPOSURE_ANSWER,
+  exposureSafetyLine,
+  EXPOSURE_SAFETY_LINE,
   placeOfApplication,
   answerReportQuestionWithAI,
 } = require('../services/service-report/report-ask-ai');
@@ -154,10 +156,14 @@ describe('buildReportAskFacts', () => {
     expect(facts.customer_concern).toMatch(/roaches in kitchen/);
   });
 
-  test('a report with no findings rows still carries its recommendations', () => {
-    const out = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], recommendations: ['Trim the shrubs back from the wall.', 'Keep the pantry sealed.'] } });
-    expect(out.recommendations).toEqual(['Trim the shrubs back from the wall.', 'Keep the pantry sealed.']);
-    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [] } }).recommendations).toBeUndefined();
+  test('technician recommendations never reach the model (they can hold a customer name)', () => {
+    const data = {
+      serviceLine: 'pest', applications: [], recommendations: ['Ask Mrs. Example to trim the shrubs.'],
+      findings: [{ title: 'Ants by the door', detail: 'Light trail.', recommendation: 'Tell Mrs. Example to seal the door.' }],
+    };
+    const out = buildReportAskFacts({ data });
+    expect(out.recommendations).toBeUndefined();
+    expect(JSON.stringify(out)).not.toMatch(/Mrs\. Example/);
   });
 
   test('the Waves summary headline and body are carried when the report has no summary text', () => {
@@ -225,7 +231,8 @@ describe('buildReportAskFacts', () => {
     expect(facts.report_sections).toHaveLength(2);
     expect(facts.weather_during_visit).toBe('about 86°F, wind about 6 mph, no rain in the last 24 hours');
     expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving', score_out_of_5: null, what_it_means: null, trend_summary: null });
-    expect(facts.next_visit).toEqual({ service: 'Quarterly Pest Control', date: 'Tuesday, January 5, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' });
+    // No appointment reaches the model: next-visit questions keep the rule answer.
+    expect(facts.next_visit).toBeUndefined();
     expect(facts.reentry).toEqual([{ area: 'outside', status: 'dry time has passed' }]);
   });
 
@@ -313,14 +320,15 @@ describe('buildReportAskPrompt', () => {
       dynamicContext: { aiSummary: { headline: 'Visit at 900 Example Trail', body: 'Reach us at pat@example.com' } },
     });
     const { user } = buildReportAskPrompt({ question: 'I live at 12 Example Lane. What did you find?', data, nextAppointment, now: NOW });
-    expect(user).not.toMatch(/555|example\.com|Example Lane|Sample Court|Test Avenue|Example Trail|A1B2|4821|\b900\b/);
-    expect(user).toMatch(/\[address\]/);
+    // House numbers are masked; a street name without its number may stay.
+    expect(user).not.toMatch(/555|example\.com|A1B2|4821|\b900\b|\b12 Example|\b77 Test/);
+    expect(user).toMatch(/\[number\] Example Lane/);
     expect(user).toMatch(/What did you find\?/);
     // The fixed lines and the calendar date are left as built.
     expect(user).toContain('Waves Pest Control');
     expect(user).toContain(WAVES_SUPPORT_PHONE_DISPLAY);
     expect(user).toContain('Friday, October 2, 2026');
-    expect(user).toContain('Tuesday, January 5, 2027');
+    expect(user).not.toContain('January 5, 2027');
     expect(user).toContain('Alpine WSG');
   });
 
@@ -384,7 +392,9 @@ describe('screenAskAnswer', () => {
   });
 
   test('normal phrasing with number words passes', () => {
-    expect(screen('We will be back in two weeks, and a few days after that you may still see one roach or two.')).toBeNull();
+    expect(screen('A few days after this you may still see one roach or two.')).toBeNull();
+    // A relative schedule is never the model's to state (Codex P1 #6016 r19).
+    expect(screen('We will be back in two weeks.')).toBe('states_a_date');
     expect(screen('Expect it to take two or three days, and half the kitchen was done first.')).toBeNull();
   });
 
@@ -428,7 +438,55 @@ describe('screenAskAnswer', () => {
   test('shared screen: a local absence, recorded re-entry words, a timeframe, a date and a product name pass', () => {
     expect(screen('None were seen at the dishwasher today.')).toBeNull();
     expect(screen('Keep pets off the treated areas until they are dry.', 'Can my dog go out?')).toBeNull();
-    expect(screen('Activity can stay up for a few days, and your next visit is Tuesday, January 5, 2027.')).toBeNull();
+    expect(screen('Activity can stay up for a few days, and we check again at your next visit.')).toBeNull();
+    // A date, a weekday or a clock time is never stated by the AI (#6020).
+    expect(screen('Your next visit is Tuesday, January 5, 2027.')).toBe('states_a_date');
+    expect(screen('The technician arrives at 2 PM.')).toBe('states_a_date');
+    expect(screen('We come back on 1/8.')).toBe('states_a_date');
+    expect(screen('The technician arrives Wed at 14:00.')).toBe('states_a_date');
+    expect(screen('The technician arrives on 2027-01-05.')).toBe('states_a_date');
+    expect(screen('Your next visit is 5 January.')).toBe('states_a_date');
+    expect(screen('Your next visit is the 5th of January.')).toBe('states_a_date');
+    expect(screen("The technician arrives at 2 o'clock.")).toBe('states_a_date');
+    expect(screen('The technician arrives January the 5th.')).toBe('states_a_date');
+    expect(screen('The technician arrives January fifth.')).toBe('states_a_date');
+    expect(screen('The technician arrives 1-5-2027.')).toBe('states_a_date');
+    expect(screen('The technician arrives at two PM.')).toBe('states_a_date');
+    expect(screen('The technician arrives tomorrow.')).toBe('states_a_date');
+    expect(screen('Your next visit is in May.')).toBe('states_a_date');
+    expect(screen('Your appointment is on the 5th.')).toBe('states_a_date');
+    expect(screen('Your visit is next weekend.')).toBe('states_a_date');
+    expect(screen('We treated the outside today.')).toBeNull();
+    expect(screen('The ants may move after the treatment.')).toBeNull();
+    expect(screen('We will be there at 2.')).toBe('states_a_date');
+    expect(screen('Your visit is at five.')).toBe('states_a_date');
+    expect(screen('We will arrive around 2.')).toBe('states_a_date');
+    expect(screen('We will be there between 2 and 4.')).toBe('states_a_date');
+    expect(screen('Your window is from two to four.')).toBe('states_a_date');
+    expect(screen('Your next visit is in two days.')).toBe('states_a_date');
+    expect(screen('We will return later this month.')).toBe('states_a_date');
+    expect(screen('We will return in Sept.')).toBe('states_a_date');
+    expect(screen('We will return in 2027.')).toBe('states_a_date');
+    expect(screen('We will return in a fortnight.')).toBe('states_a_date');
+    expect(screen('The technician will come back in the spring.')).toBe('states_a_date');
+    expect(screen('We will be back soon.')).toBe('states_a_date');
+    expect(screen('We will return two days from now.')).toBe('states_a_date');
+    expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
+    expect(screen('Your window is 2-4.')).toBe('states_a_date');
+    expect(screen('We will arrive at 1400.')).toBe('states_a_date');
+    expect(screen('We treated the window frames and door sweeps.')).toBeNull();
+    expect(screen('Your next service is in 2027.')).toBe('states_a_date');
+    expect(screen('Your next visit is in Jan.')).toBe('states_a_date');
+    expect(screen('We will come in Oct')).toBe('states_a_date');
+    expect(screen('Activity often drops between 2 and 4 weeks after treatment.')).toBeNull();
+    expect(screen('This may take a few days.')).toBeNull();
+    expect(screen('This may help with the ants.')).toBeNull();
+    expect(screen('Activity often settles after 2 weeks.')).toBeNull();
+    expect(screen('The technician arrives on the fifth.')).toBe('states_a_date');
+    expect(screen('The technician arrives the fifth of January.')).toBe('states_a_date');
+    expect(screen('The first application went around the exterior.')).toBeNull();
+    expect(screen('The technician arrives at half past two.')).toBe('states_a_date');
+    expect(screen('Activity often settles after the sun comes out.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
 
@@ -565,6 +623,21 @@ describe('GATE_REPORT_ASK_AI', () => {
   });
 });
 
+describe('schedule questions keep the rule answer', () => {
+  const { asksAboutSchedule } = require('../services/service-report/report-ask-ai');
+  test.each([
+    'When are you returning?', 'When will the technician return?', 'When are you coming again?',
+    'Can I reschedule?', 'When is my next appointment?',
+    'What time will you be here?', 'What day are you coming?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Can you tell me when my visit is?', 'What is my service date?', 'Am I booked for tomorrow?', 'Is somebody coming tomorrow?', 'Is anyone coming tomorrow?', 'Will somebody be here tomorrow?', 'Can you make it tomorrow?', 'Will you make it tomorrow?', 'When is the follow-up?', 'Are we booked for tomorrow?', 'Are we confirmed for tomorrow?', 'Are we set for tomorrow?', 'Am I booked tomorrow?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+  ])('schedule: %s', (question) => {
+    expect(asksAboutSchedule(question)).toBe(true);
+  });
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'What did you see when you visited?', 'Where did you visit?', 'Did you come into the house?', 'What time of year are ants most active?', 'I booked this service for ants. What was applied?', 'Could ants be here because of the rain?', 'Why would roaches be here?', 'Could the pests be back next week?', 'Why are you treating the lawn?', 'The service was completed as scheduled. What was applied?', 'What was applied during the scheduled service?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+    expect(asksAboutSchedule(question)).toBe(false);
+  });
+});
+
 describe('symptoms and exposure never reach the model', () => {
   test.each([
     'The spray made me dizzy',
@@ -581,18 +654,172 @@ describe('symptoms and exposure never reach the model', () => {
     'I am having trouble breathing',
     'I feel lightheaded since this morning',
     'He passed out in the kitchen',
+    'My child is coughing after the pesticide treatment',
+    'My dog is shaking after the treatment',
+    'It sprayed on my face',
+    'I was sprayed in the eyes',
+    'He was sprayed on the skin',
+    'The technician sprayed me in the face',
+    'The technician sprayed my eyes',
+    'You sprayed my skin',
+    'The pesticide splashed my eyes',
+    'The pesticide splashed me in the eyes',
+    'The chemical hit me in the eye',
+    'The pesticide hit me in both eyes',
+    'The chemical got into my left eye',
+    'It splashed into her right eye',
+    'My dog consumed the bait',
+    'My partner swallowed some bait',
+    'John swallowed some bait',
+    'The bait was swallowed by John',
+    'john swallowed some bait',
+    'JOHN swallowed some bait',
+    'the bait was swallowed by john',
+    'The ant bait was swallowed by John',
+    'The rat poison was eaten by John',
+    'Ants were nearby when John ate the bait',
+    'Roaches were there and John swallowed the bait',
+    'My partner is sick after the spray',
+    'My cousin ate some granules',
+    'My coworker drank pesticide',
+    'The bait was eaten by my dog',
+    'The bait was swallowed by my partner',
+    'The granules were eaten by my cousin',
+    'The baby sucked on the bait',
+    'My dog lapped up the pesticide',
+    'Accidentally swallowed some bait',
+    'Ingested some spray',
+    'The product touched my skin',
+    'My eyes were sprayed',
+    'My skin was sprayed',
+    "The dog's eyes were sprayed",
+    "You sprayed my dog's face",
+    "The spray got in the baby's eyes",
+    "The product got on the cat's skin",
   ])('a fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
+  });
+
+  // Spray plus a person, pet or body part: the safety line goes before the
+  // normal answer (owner 2026-10-05, option A); the answer is not replaced.
+  test.each([
+    'You sprayed my dog by accident',
+    'The tech sprayed me',
+    'My cat got sprayed',
+    'The tech sprayed my neck',
+    'Some got sprayed on my ear',
+    'You sprayed my back by the door',
+    'The tech sprayed my partner',
+    'You sprayed my roommate',
+    'The tech sprayed my hamster',
+    'My roommate got sprayed',
+    'I got sprayed in the yard',
+    'The tech sprayed my hamster inside',
+    'You sprayed my partner yesterday',
+    'My kids ran outside and the tech sprayed them',
+    'My dogs were in the yard and he sprayed them',
+    'I was accidentally sprayed',
+    'The tech sprayed my neck area',
+    'The tech sprayed my left side',
+    'You sprayed my arm and hand',
+    'What was sprayed on the arm chair?',
+    'Can my dog go out after the spray?',
+    'Can I go out after the spray?',
+    'Can we go outside after you spray?',
+    'The technician sprayed her',
+    'She was sprayed',
+    'You got sprayed',
+    'The technician sprayed you',
+    'The technician sprayed my cousin',
+    'You sprayed my coworker',
+    'My snake was sprayed',
+    "I've been sprayed",
+    "We've been sprayed",
+    "She's been sprayed",
+    'They were sprayed',
+    'They got sprayed',
+  ])('a safety line before the answer for: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+    expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
+  });
+
+  test.each([
+    'What was sprayed on my lawn?',
+    'What was sprayed on the fence?',
+    'Which product was sprayed on my garage?',
+    'What was sprayed on the outside of the house?',
+    'Can you tell me what was sprayed?',
+    'I want to know what you sprayed',
+    'We need to know what product you sprayed',
+    'Can I ask what you sprayed?',
+    'Can you explain to me what was sprayed?',
+    'Please reply to me with what you sprayed',
+    'Could you message me the product you sprayed?',
+    'Text us what you sprayed',
+    'When can my dog go back outside?',
+    'Why was Alpine WSG used?',
+    '',
+  ])('no safety line for: %s', (question) => {
+    expect(exposureSafetyLine(question)).toBeNull();
+  });
+
+  test('the safety line: Poison Control and 911, nothing about safety', () => {
+    expect(EXPOSURE_SAFETY_LINE).toBe('If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911.');
+    expect(EXPOSURE_SAFETY_LINE).not.toMatch(/\bsaf/i);
   });
 
   test.each([
     'Why was Alpine WSG used?',
     'What did you do about the cockroach?',
     'Is my lawn looking sick this year?',
+    'My lawn is sick',
+    'My grass is looking sick',
+    'My palm is looking ill',
+    'My azalea is sick',
+    'My orchid is sick',
+    'My fern is looking ill',
     'The ants ate the bait. Is that normal?',
     'When can my dog go back outside?',
     'Are there bee hives near my shed?',
     'How many numbers are on the pressure scale?',
+    'What was sprayed on the face of the house?',
+    'Ate breakfast before the service. What did you spray?',
+    'Just drank water. What was applied?',
+    'Were the ants poisoned by the bait?',
+    'The ants ate the bait. Is that good?',
+    'Was the bait eaten by the roaches?',
+    'Was the bait eaten?',
+    'Was the rodent bait eaten?',
+    'Was any bait consumed?',
+    'Was the rat poisoned?',
+    'What was sprayed on my lawn?',
+    'What was sprayed on the fence?',
+    'Was anything sprayed on my patio?',
+    'Which product was sprayed on my garage?',
+    'What was sprayed on the dog bed?',
+    'Was the bird cage sprayed?',
+    "What was sprayed on the kids' playset?",
+    'The weeds were brown after they were sprayed. What product did you use?',
+    'The ants disappeared after they were sprayed',
+    'The bushes were sprayed on Monday, right?',
+    "Was my dog's bowl sprayed?",
+    'The dog bed was sprayed',
+    'The bird cage was sprayed',
+    'My front lawn was sprayed',
+    'I got it sprayed last week',
+    'We got outside sprayed',
+    'I got everything sprayed',
+    'You sprayed my front lawn today',
+    'What was sprayed on the outside of the house?',
+    'What was sprayed on the inside?',
+    'The product was sprayed outside; what was it?',
+    'The chemical was sprayed near the door',
+    'Was the treatment sprayed on the front?',
+    'What was sprayed on my back yard?',
+    'You sprayed the back door',
+    'What was sprayed on the side of the house?',
+    'Was the front door sprayed?',
+    'You sprayed my left side of the yard',
     '',
   ])('no fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
@@ -648,7 +875,8 @@ describe('prompt and facts, review round 5', () => {
     ['18 Test St.', '18 Test St'],
   ])('masks the street address %s', (address) => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `Ants at ${address}, near the lanai` } });
-    expect(facts.customer_concern).toBe('Ants at [address], near the lanai');
+    // The house number is masked; the street name alone is not an address.
+    expect(facts.customer_concern).toBe(`Ants at ${address.replace(/^\d+/, '[number]')}, near the lanai`);
   });
 });
 
@@ -668,16 +896,11 @@ describe('scripts/dev/report-ask-prompt.js', () => {
   };
   const camel = { serviceType: 'Quarterly Pest Control', scheduledDate: '2027-01-05', windowStart: '09:00:00' };
 
-  test('a bare report and a wrapped one read the same camelCase nextAppointment', () => {
+  test('a bare report and a wrapped one give the same prompt, with no appointment', () => {
     const bare = run({ serviceLine: 'pest', applications: [], nextAppointment: camel });
     const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: camel });
-    expect(bare.user).toContain('Tuesday, January 5, 2027');
+    expect(bare.user).not.toContain('January 5, 2027');
     expect(wrapped.user).toBe(bare.user);
-  });
-
-  test('a wrapped route-shaped (snake_case) appointment still works', () => {
-    const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: { service_type: 'Quarterly Pest Control', scheduled_date: '2027-01-05', window_start: '09:00:00' } });
-    expect(wrapped.user).toContain('Tuesday, January 5, 2027');
   });
 });
 
@@ -837,6 +1060,20 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'applied' });
   });
 
+  test.each(['on', 'off'])('gate %s, a spray question naming a person: the safety line, then the normal answer', async (gate) => {
+    if (gate === 'on') process.env.GATE_REPORT_ASK_AI = 'true'; else delete process.env.GATE_REPORT_ASK_AI;
+    // Queue a model result only when the route will call the model, so no
+    // stale result reaches a later test.
+    if (gate === 'on') dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, 'The tech sprayed my arm, what was it?');
+      expect(status).toBe(200);
+      expect(body.answer.startsWith(`${EXPOSURE_SAFETY_LINE} `)).toBe(true);
+      expect(body.answer.length).toBeGreaterThan(EXPOSURE_SAFETY_LINE.length + 1);
+    });
+  });
+
   test('a symptom question on a lawn report gets the fixed answer too', async () => {
     delete process.env.GATE_REPORT_ASK_AI;
     buildReportV1Data.mockResolvedValue({ serviceLine: 'lawn', applications: [] });
@@ -855,5 +1092,39 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
       const { body } = await ask(baseUrl, QUESTION);
       expect(body).toEqual({ answer: rulesAnswer });
     });
+  });
+});
+
+describe('street-address scrub keeps prose', () => {
+  const { buildReportAskFacts } = require('../services/service-report/report-ask-ai');
+  test.each([
+    ['Pressure index 2 is improving.', 'Pressure index 2 is improving.'],
+    ['Ants at 18 Bay Pass by the lanai.', 'Ants at [number] Bay Pass by the lanai.'],
+    ['Ants at 21 Harbor Crossing.', 'Ants at [number] Harbor Crossing.'],
+    ['Ants at 21 heron bluff.', 'Ants at [number] heron bluff.'],
+    ['Ants at 21 HERON BLUFF.', 'Ants at [number] HERON BLUFF.'],
+    ['Ants at 21 Palm Is.', 'Ants at [number] Palm Is.'],
+    ['Ants at 12 1/2 Example Street.', 'Ants at [number] Example Street.'],
+    ['Ants at 88B Example Street.', 'Ants at [number] Example Street.'],
+    ['Ants at 12-14 Main Street.', 'Ants at [number] Main Street.'],
+    ['Ants at 12 SR 70.', 'Ants at [number] SR 70.'],
+    ['Ants at 12 FL-70.', 'Ants at [number] FL-70.'],
+    ['Ants at 12 US 41.', 'Ants at [number] US 41.'],
+    ['Ants at 12-14 US 41.', 'Ants at [number] US 41.'],
+    ['Ants at 12 N US 41.', 'Ants at [number] N US 41.'],
+    ['Ants at 12 U.S. 41.', 'Ants at [number] U.S. 41.'],
+    ['Ants at 12 U S 41.', 'Ants at [number] U S 41.'],
+    ['Ants at Twelve Main Street.', 'Ants at [number] Main Street.'],
+    ['Ants at One Hundred Bay Drive.', 'Ants at [number] Bay Drive.'],
+    ['Ants at 12 S.R. 70.', 'Ants at [number] S.R. 70.'],
+    ['Ants at 12/14 SR 70.', 'Ants at [number] SR 70.'],
+    ['Ants at 12 1/2 FL-70.', 'Ants at [number] FL-70.'],
+    ['Ants at 12 José Lane.', 'Ants at [number] José Lane.'],
+    ['Ants at 12 O’Neil Street.', 'Ants at [number] O’Neil Street.'],
+    ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [number] North Martin Luther King Boulevard.'],
+    // Everyday nouns in the USPS table lose only the count.
+    ['We saw 2 rats by the lake.', 'We saw [number] rats by the lake.'],
+  ])('%s', (concern, expected) => {
+    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: concern } }).customer_concern).toBe(expected);
   });
 });
