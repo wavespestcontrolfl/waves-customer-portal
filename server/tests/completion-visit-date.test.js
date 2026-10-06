@@ -3,7 +3,7 @@
 // proven in completion-visit-date-postgres.test.js.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { planCompletionDateMove, moveCompletedVisitToWorkDay, earlyCloseoutInvoiceDate } = require('../services/completion-visit-date');
+const { planCompletionDateMove, moveCompletedVisitToWorkDay, moveCompletedVisitToWorkDaySafe, publishVisitDateMove, earlyCloseoutInvoiceDate } = require('../services/completion-visit-date');
 const { completionMovesDateLive } = require('../config/feature-gates');
 
 afterEach(() => { delete process.env.GATE_COMPLETION_MOVES_DATE; });
@@ -57,12 +57,12 @@ describe('moveCompletedVisitToWorkDay guards', () => {
   });
 
   // A trx whose scheduled_services row is `row` and whose update/partner calls are recorded.
-  function trxFor(row, { partner = null } = {}) {
+  function trxFor(row, { partner = null, stray = null } = {}) {
     const updates = [];
     const trx = (table) => {
       const chain = {
-        where() { return chain; }, whereNot() { return chain; }, whereNotIn() { return chain; }, whereNull() { return chain; }, whereRaw() { return chain; }, forUpdate() { return chain; },
-        first: async () => (table === 'scheduled_services' && !chain._partnerQuery ? row : partner),
+        where() { return chain; }, whereNot() { return chain; }, whereNotIn() { return chain; }, whereNull() { return chain; }, whereNotNull() { return chain; }, whereRaw() { return chain; }, forUpdate() { return chain; },
+        first: async () => (table === 'invoices' ? stray : (table === 'scheduled_services' && !chain._partnerQuery ? row : partner)),
         update: async (patch) => { updates.push({ table, patch }); return 1; },
       };
       const origWhereNot = chain.whereNot;
@@ -82,6 +82,20 @@ describe('moveCompletedVisitToWorkDay guards', () => {
     const trx = trxFor({ ...base, status: 'confirmed' });
     expect(await moveCompletedVisitToWorkDay(trx, args())).toEqual({ moved: false, reason: 'not_completed' });
     expect(trx.updates).toEqual([]);
+  });
+
+  test('an invoice on any date other than the work day keeps the visit where it is; the record is not touched either', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const trx = trxFor({ ...base }, { stray: { id: 'inv' } });
+    expect(await moveCompletedVisitToWorkDay(trx, args())).toEqual({ moved: false, reason: 'invoice_date_mismatch' });
+    expect(trx.updates).toEqual([]);
+  });
+
+  test('the closeout never writes to invoices', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const trx = trxFor({ ...base });
+    expect(await moveCompletedVisitToWorkDay(trx, args())).toMatchObject({ moved: true });
+    expect(trx.updates.map((u) => u.table)).not.toContain('invoices');
   });
 
   test('a visit grouped with a live partner keeps its date', async () => {
@@ -136,10 +150,10 @@ describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery
   test('gate off: no query, no date', async () => {
     expect(await earlyCloseoutInvoiceDate(explode, { project, scheduledServiceId: 'v', today })).toBeNull();
   });
-  test('gate on, work day before the booked day: the booked and work days', async () => {
+  test('gate on, work day before the booked day: the work day', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: 'v', today }))
-      .toMatchObject({ from: '2026-10-08', to: '2026-10-05' });
+      .toBe('2026-10-05');
   });
   test('gate on: late, same-day, future, rescheduled and grouped visits keep the default date', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
@@ -148,6 +162,8 @@ describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery
     expect(await run({ ...visit, scheduled_date: '2026-10-05' })).toBeNull();
     expect(await run(visit, { project_date: '2026-10-07' })).toBeNull();
     expect(await run({ ...visit, status: 'rescheduled' })).toBeNull();
+    // The closeout's own status rule: a visit already finished or closed gets no early date.
+    for (const status of ['completed', 'cancelled', 'skipped', 'no_show']) expect(await run({ ...visit, status })).toBeNull();
     expect(await run({ ...visit, visit_id: 'stop-1' }, project, { id: 'p' })).toBeNull();
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project: {}, scheduledServiceId: 'v', today })).toBeNull();
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: null, today })).toBeNull();
@@ -165,28 +181,33 @@ describe('date reading', () => {
   });
 });
 
-describe('redateUndeliveredDraft scope', () => {
-  const { redateUndeliveredDraft } = require('../services/completion-visit-date');
-  test('only this visit\'s own invoice: same customer, and no other visit linked', async () => {
-    const wheres = [];
-    const nested = [];
-    const chain = {
-      where(arg) {
-        if (typeof arg === 'function') {
-          const b = { whereNull: (c) => { nested.push(['null', c]); return b; }, orWhere: (o) => { nested.push(['or', o]); return b; } };
-          arg(b);
-        } else wheres.push(arg);
-        return chain;
-      },
-      whereNull() { return chain; },
-      whereRaw() { return chain; },
-      update: async () => 1,
-    };
-    const runner = () => chain;
-    runner.fn = { now: () => 'now()' };
-    const out = await redateUndeliveredDraft(runner, { id: 'inv-1', service_date: '2026-10-08' }, { from: '2026-10-08', to: '2026-10-05', scheduledServiceId: 'v-1', customerId: 'c-1' });
-    expect(out.service_date).toBe('2026-10-05');
-    expect(wheres).toEqual(expect.arrayContaining([{ id: 'inv-1' }, { customer_id: 'c-1' }, { status: 'draft' }]));
-    expect(nested).toEqual([['null', 'scheduled_service_id'], ['or', { scheduled_service_id: 'v-1' }]]);
+describe('moveCompletedVisitToWorkDaySafe', () => {
+  test('gate off: returns before any statement', async () => {
+    const trx = () => { throw new Error('unexpected query'); };
+    trx.transaction = () => { throw new Error('unexpected savepoint'); };
+    expect(await moveCompletedVisitToWorkDaySafe(trx, { scheduledServiceId: 'v' })).toEqual({ moved: false, reason: 'gate_off' });
+  });
+  test('a failure inside the savepoint is logged and never thrown', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const trx = { transaction: async () => { throw new Error('boom'); } };
+    expect(await moveCompletedVisitToWorkDaySafe(trx, { scheduledServiceId: 'v' })).toEqual({ moved: false, reason: 'error' });
+  });
+});
+
+describe('publishVisitDateMove', () => {
+  const dispatch = require('../services/dispatch-assignment');
+  afterEach(() => jest.restoreAllMocks());
+  test('no move, no job: nothing is emitted', async () => {
+    const spy = jest.spyOn(dispatch, 'emitDispatchJobUpdate').mockResolvedValue(null);
+    expect(await publishVisitDateMove(null, { jobId: 'v' })).toBeNull();
+    expect(await publishVisitDateMove({ moved: false, reason: 'late_completion' }, { jobId: 'v' })).toBeNull();
+    expect(await publishVisitDateMove({ moved: true, from: '2026-10-08' }, {})).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+  });
+  test('a move sends the board update with the vacated day; a failure never throws', async () => {
+    const spy = jest.spyOn(dispatch, 'emitDispatchJobUpdate').mockResolvedValueOnce({ ok: 1 }).mockRejectedValueOnce(new Error('io down'));
+    expect(await publishVisitDateMove({ moved: true, from: '2026-10-08' }, { jobId: 'v', actorId: 'a' })).toEqual({ ok: 1 });
+    expect(spy).toHaveBeenCalledWith({ jobId: 'v', actorId: 'a', previousDate: '2026-10-08' });
+    expect(await publishVisitDateMove({ moved: true, from: '2026-10-08' }, { jobId: 'v' })).toBeNull();
   });
 });

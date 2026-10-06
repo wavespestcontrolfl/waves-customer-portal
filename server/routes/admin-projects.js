@@ -2907,11 +2907,10 @@ async function previewWdoInvoiceTotals(project, customer, fee) {
   });
 }
 
-// GATE_COMPLETION_MOVES_DATE: { from: booked day, to: work day } when the
-// closeout will move the visit to an earlier work day, else null. A NEW project
-// invoice is created with `to`; a REUSED undelivered draft still on `from` is
-// re-dated to it before delivery (resolveProjectInvoiceForSend). The invoice is
-// delivered before closeout, so it is dated here, not afterwards.
+// GATE_COMPLETION_MOVES_DATE: the service date a NEWLY minted project invoice
+// carries when the closeout will move the visit to an earlier work day (the
+// project's project_date), else null. The invoice is delivered before closeout,
+// so it is dated here at creation; it is never re-dated afterwards.
 // `scheduledServiceId` null = derive it from the project / its service record.
 // Gate off = no query at all.
 async function earlyCloseoutInvoiceDateFor(runner, project, scheduledServiceId) {
@@ -3091,12 +3090,12 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // on the project (inside the lock) so the racing/resend POST reuses it.
       // GATE_COMPLETION_MOVES_DATE: an early closeout moves the visit to the
       // work day, so the invoice is dated that day NOW, before it is delivered.
-      const earlyWork = await earlyCloseoutInvoiceDateFor(trx, project, null);
+      const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, project, null);
       const created = await InvoiceService.create({
         customerId: project.customer_id,
         serviceRecordId: project.service_record_id || undefined,
         scheduledServiceId: project.scheduled_service_id || undefined,
-        ...(earlyWork ? { serviceDate: earlyWork.to } : {}),
+        ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
         title: 'WDO Inspection',
         lineItems: [{
           description: WDO_INVOICE_LINE_DESCRIPTION,
@@ -3233,7 +3232,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       throw err;
     }
     // GATE_COMPLETION_MOVES_DATE: same early-closeout date as the WDO draft above.
-    const earlyWork = await earlyCloseoutInvoiceDateFor(trx, project, scheduledServiceId);
+    const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, project, scheduledServiceId);
     if (dryRun) {
       // Preview only (ADMIN-BUG-R49): build the draft through the SAME
       // create() call the real send uses below — replaying the discount/tax
@@ -3250,7 +3249,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
           customerId: project.customer_id,
           serviceRecordId: project.service_record_id || undefined,
           scheduledServiceId: scheduledServiceId || undefined,
-          ...(earlyWork ? { serviceDate: earlyWork.to } : {}),
+          ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
           lineItems: built.lineItems,
           discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
           trustedStoredDiscountSources: ['scheduled_service'],
@@ -3273,7 +3272,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       customerId: project.customer_id,
       serviceRecordId: project.service_record_id || undefined,
       scheduledServiceId: scheduledServiceId || undefined,
-      ...(earlyWork ? { serviceDate: earlyWork.to } : {}),
+      ...(earlyWorkDay ? { serviceDate: earlyWorkDay } : {}),
       lineItems: built.lineItems,
       discountIds: built.discountIds && built.discountIds.length ? built.discountIds : undefined,
       // The scheduled-service lines carry stored discount amounts; trust them so
@@ -3292,20 +3291,6 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     await persistProjectInvoiceLink(project, builtInvoice.id, trx);
     return { invoice: builtInvoice, created: true };
   });
-}
-
-// The send route's entry point: resolveOrCreateProjectInvoice, then, with
-// GATE_COMPLETION_MOVES_DATE on and an early work day, a REUSED invoice (an
-// existing auto-created draft, or the caller-supplied invoice_id) that is still
-// an undelivered draft on the booked day takes the work day BEFORE its PDF is
-// rendered. A new invoice was already created with it; a preview writes nothing.
-async function resolveProjectInvoiceForSend(args) {
-  const resolved = await resolveOrCreateProjectInvoice(args);
-  if (resolved.created || resolved.preview || args.dryRun || !resolved.invoice?.id) return resolved;
-  const dates = await earlyCloseoutInvoiceDateFor(db, args.project, null);
-  if (!dates) return resolved;
-  const invoice = await require('../services/completion-visit-date').redateUndeliveredDraft(db, resolved.invoice, dates);
-  return { ...resolved, invoice };
 }
 
 // Normalize an invoice's line_items into an array for PDF rendering — the
@@ -4742,7 +4727,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       }
     }
 
-    const { invoice, created } = await resolveProjectInvoiceForSend({
+    const { invoice, created } = await resolveOrCreateProjectInvoice({
       project,
       customer,
       invoiceId: req.body?.invoice_id,
@@ -6099,7 +6084,6 @@ router._private = {
   evaluateProjectSendReadiness,
   completeProjectBackedService,
   resolveOrCreateProjectInvoice,
-  resolveProjectInvoiceForSend,
   dropStaleCertTreatmentDate,
   reportHoldBackoffMinutes,
   resolveWdoInspectionFee,

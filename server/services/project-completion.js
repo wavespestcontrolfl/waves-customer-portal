@@ -1027,24 +1027,16 @@ async function completeProjectBackedService({
       });
       postCommitTrackServiceId = scheduledService.id;
       // GATE_COMPLETION_MOVES_DATE: a visit closed out BEFORE its booked day
-      // moves to the day the work was done (the record's service_date), so the
-      // visit, its record and its invoice share one date. After the status
-      // flip on purpose (a date edit on a terminal row wakes no reminder).
-      // Savepoint-wrapped and non-blocking: a failure here never fails the
-      // closeout. Gate off = writes nothing. See services/completion-visit-date.js.
-      if (require('../config/feature-gates').completionMovesDateLive()) {
-        try {
-          visitDateMove = await trx.transaction(async (sp) => require('./completion-visit-date').moveCompletedVisitToWorkDay(sp, {
-            scheduledServiceId: scheduledService.id,
-            serviceRecord,
-            workDate: normalizeDateOnly(project.project_date),
-            previousStatus: scheduledService.status,
-            scheduledServiceCols,
-          }));
-        } catch (err) {
-          logger.warn(`[project-completion] visit date move failed for ${scheduledService.id}: ${err.message}`);
-        }
-      }
+      // moves to the work day, after the status flip (a date edit on a terminal
+      // row wakes no reminder). One call that gates itself, runs in a savepoint
+      // and never throws; see services/completion-visit-date.js.
+      visitDateMove = await require('./completion-visit-date').moveCompletedVisitToWorkDaySafe(trx, {
+        scheduledServiceId: scheduledService.id,
+        serviceRecord,
+        workDate: normalizeDateOnly(project.project_date),
+        previousStatus: scheduledService.status,
+        scheduledServiceCols,
+      });
       // This transition owes the kit: the same durable service_records
       // marker the recap flow writes (pest-recap.js), so a process death
       // between this commit and the post-commit hook is retried by the next
@@ -1092,23 +1084,12 @@ async function completeProjectBackedService({
     };
   });
 
-  // GATE_COMPLETION_MOVES_DATE: the status flip's deferred dispatch:job_update was
-  // built from the OLD (booked) date before the move. After commit, the shared
-  // dispatch emitter sends the visit's CURRENT row to the board (board_visible,
-  // address and pin included, so an open board can add the moved stop) and
-  // refreshes route quality for BOTH days: the vacated booked day and the work
-  // day. Best-effort; the closeout has already committed.
-  if (result.visitDateMove?.moved && postCommitTrackServiceId) {
-    try {
-      await require('./dispatch-assignment').emitDispatchJobUpdate({
-        jobId: postCommitTrackServiceId,
-        actorId: actorId || null,
-        previousDate: result.visitDateMove.from,
-      });
-    } catch (err) {
-      logger.warn(`[project-completion] dispatch update after visit date move failed for ${postCommitTrackServiceId}: ${err.message}`);
-    }
-  }
+  // GATE_COMPLETION_MOVES_DATE: after commit, tell the dispatch board about a
+  // moved visit (a no-op when nothing moved; never throws).
+  await require('./completion-visit-date').publishVisitDateMove(result.visitDateMove, {
+    jobId: postCommitTrackServiceId,
+    actorId,
+  });
 
   // A performed project closeout of a street-level hold's visit confirms its address (the shared
   // transition stamped it); release the hold now. A no-op for every other visit; best-effort.
