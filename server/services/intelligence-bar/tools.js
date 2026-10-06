@@ -2188,6 +2188,28 @@ function noteHas(had, add) {
 // depends on the visit (its home, its address, the directory gate).
 const communityCodeShown = (neighborhoodCode, code) => !!code && !!neighborhoodCode && sameCode(neighborhoodCode, code);
 
+// The gate code part of the plan (changes `updates` and `kept` in place): a
+// property code that is the community code is not saved, and one on file is
+// cleared.
+function planGateCodes(updates, current, kept) {
+  const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
+  if (updates.property_gate_code !== undefined && communityCodeShown(neighborhoodCode, updates.property_gate_code)) {
+    delete updates.property_gate_code;
+    kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
+  }
+  // A property code on file that is the community code shows twice on the
+  // stop card (as the gate and as the yard gate): clear it.
+  // The old community code counts only when this call REPLACES it with
+  // another code (A to B leaves no A behind as a yard gate). Clearing the
+  // community code alone keeps the property code: then it is the only code.
+  if (updates.property_gate_code === undefined && current.property_gate_code
+    && (communityCodeShown(neighborhoodCode, current.property_gate_code)
+      || (updates.neighborhood_gate_code && communityCodeShown(current.neighborhood_gate_code, current.property_gate_code)))) {
+    updates.property_gate_code = null;
+    kept.push('property_gate_code: cleared; the code on file there is the community gate code');
+  }
+}
+
 // What the write will actually do against the row as it is now: notes are
 // added as a new first line (or skipped when the same line is there), and a
 // "property gate" code that is the community gate code stays off the property
@@ -2221,22 +2243,7 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
     updates[field] = joined;
     kept.push(`${field}: added as a new first line; the earlier notes stay below`);
   }
-  const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
-  if (updates.property_gate_code !== undefined && communityCodeShown(neighborhoodCode, updates.property_gate_code)) {
-    delete updates.property_gate_code;
-    kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
-  }
-  // A property code on file that is the community code shows twice on the
-  // stop card (as the gate and as the yard gate): clear it.
-  // The old community code counts only when this call REPLACES it with
-  // another code (A to B leaves no A behind as a yard gate). Clearing the
-  // community code alone keeps the property code: then it is the only code.
-  if (updates.property_gate_code === undefined && current.property_gate_code
-    && (communityCodeShown(neighborhoodCode, current.property_gate_code)
-      || (updates.neighborhood_gate_code && communityCodeShown(current.neighborhood_gate_code, current.property_gate_code)))) {
-    updates.property_gate_code = null;
-    kept.push('property_gate_code: cleared; the code on file there is the community gate code');
-  }
+  planGateCodes(updates, current, kept);
   return { updates, kept, current };
 }
 
