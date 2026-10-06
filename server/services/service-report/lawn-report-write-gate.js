@@ -56,6 +56,31 @@ async function freezeTechParagraphFor({ record, data, instruction, service, knex
   }
 }
 
+// The Visit Summary step (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY): never
+// throws, returns { [assessmentId]: entry } for the caller's in-memory
+// structured_notes, or null. Same posture as the tech paragraph above.
+async function freezeVisitSummaryFor({ record, data, instruction, service, knex }) {
+  try {
+    const summary = require('./lawn-visit-summary');
+    const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
+    if (assessmentId == null) return null;
+    const outcome = await summary.createAndFreezeVisitSummary({
+      serviceRecordId: service.id,
+      assessmentId,
+      getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
+      gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, instruction, knex }),
+      knex,
+    });
+    if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
+      logger.info(`[lawn-visit-summary] none for service_record ${service.id}: ${outcome.status}${outcome.problems && outcome.problems.length ? ` (${outcome.problems.join(', ')})` : ''}`);
+    }
+    return outcome.entry ? { [String(assessmentId)]: outcome.entry } : null;
+  } catch (err) {
+    logger.warn(`[lawn-visit-summary] step failed for service_record ${service && service.id}: ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * @param {object} input
  * @param {object} input.service  the service_records row (needs id, service_line/type, customer_id)
@@ -176,9 +201,19 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       techParagraphFreeze = await freezeTechParagraphFor({ record, data, instruction: instructionOut.instruction, service, knex });
     }
 
+    // Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY): same shape as the
+    // paragraph above, under its own key. The report swaps it in for the generic
+    // recap; the completion SMS keeps the short customerRecap. Gate off: no read
+    // and no call.
+    let visitSummaryFreeze = null;
+    if (featureGates.lawnVisitSummaryV2Live()) {
+      visitSummaryFreeze = await freezeVisitSummaryFor({ record, data, instruction: instructionOut.instruction, service, knex });
+    }
+
     return {
       smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,
       ...(techParagraphFreeze ? { techParagraphFreeze } : {}),
+      ...(visitSummaryFreeze ? { visitSummaryFreeze } : {}),
     };
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);

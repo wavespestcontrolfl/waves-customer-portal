@@ -2841,6 +2841,16 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
       irrigationStamp += `:tp=err${crypto.randomBytes(4).toString('hex')}`;
     }
   }
+  // The Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY) replaces the
+  // recap text the PDF prints, so it keys the PDF the same way.
+  if (featureGates.lawnVisitSummaryV2Live() && assessment?.id) {
+    try {
+      const row = await knex('service_records').where({ id: service.id }).first('structured_notes');
+      irrigationStamp += require('./lawn-visit-summary').visitSummarySignature(row?.structured_notes, assessment.id).replace(':tp=', ':vs=');
+    } catch {
+      irrigationStamp += `:vs=err${crypto.randomBytes(4).toString('hex')}`;
+    }
+  }
   // "What the photos showed" (P23b) is built from this assessment's reviewed run,
   // so the key follows the run's reviewed state, and only for a visit that would
   // print the block (no block = no stamp, so such a visit keeps its key). The
@@ -6762,6 +6772,20 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
+  // GATE_LAWN_VISIT_SUMMARY_V2 (PROTOTYPE ONLY): a lawn visit with a frozen,
+  // validated Visit Summary prints it in place of the generic completion recap
+  // (which the completion text keeps using). A render only READS the frozen text:
+  // no model call. No frozen entry, a failed read-time screen or any error leaves
+  // the recap exactly as it was. The tech-reviewed AI report below still wins.
+  if (serviceLine === 'lawn' && lawnAssessment?.assessmentId && featureGates.lawnVisitSummaryV2Live()) {
+    try {
+      const frozenSummary = require('./lawn-visit-summary').readFrozenVisitSummary(service.structured_notes, lawnAssessment.assessmentId);
+      if (frozenSummary) {
+        visitSummary = frozenSummary;
+        visitSummarySource = 'lawn_visit_summary';
+      }
+    } catch { /* the recap stays */ }
+  }
   // The four-section report's screened sections (GATE_REPORT_WRITER_RULES),
   // set only when that report is the summary; surfaces render them where
   // they would print exactly that text.
