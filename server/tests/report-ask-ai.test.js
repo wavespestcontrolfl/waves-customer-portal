@@ -602,7 +602,7 @@ describe('schedule questions keep the rule answer', () => {
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -698,6 +698,7 @@ describe('symptoms and exposure never reach the model', () => {
     'When can my dog go back outside?',
     'Are there bee hives near my shed?',
     'How many numbers are on the pressure scale?',
+    'What was sprayed on the face of the house?',
     'What was sprayed on my lawn?',
     'What was sprayed on the fence?',
     'Was anything sprayed on my patio?',
@@ -1018,6 +1019,8 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 21 Palm Is.', 'Ants at [number] Palm Is.'],
     ['Ants at 12 1/2 Example Street.', 'Ants at [number] Example Street.'],
     ['Ants at 88B Example Street.', 'Ants at [number] Example Street.'],
+    ['Ants at 12 José Lane.', 'Ants at [number] José Lane.'],
+    ['Ants at 12 O’Neil Street.', 'Ants at [number] O’Neil Street.'],
     ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [number] North Martin Luther King Boulevard.'],
     // Everyday nouns in the USPS table lose only the count.
     ['We saw 2 rats by the lake.', 'We saw [number] rats by the lake.'],
