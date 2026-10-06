@@ -675,6 +675,30 @@ describe('create_appointment — an overlap that is NEW since the card gets a fr
     expect(insertChain.insert).toHaveBeenCalled();
   });
 
+  test('the card named visit A and A is still the only overlap: books with the warning', async () => {
+    const insertChain = wireClash();
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_ids: ['other'] });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(insertChain.insert).toHaveBeenCalled();
+  });
+
+  test('the card named visit A but a DIFFERENT visit holds the slot now: preview_changed, nothing inserted', async () => {
+    const insertChain = wireClash();
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_ids: ['visit-a-cancelled'] });
+    expect(result).toMatchObject({ preview_changed: true, error: expect.stringMatching(/^Another visit now overlaps this time\./) });
+    expect(insertChain.insert).not.toHaveBeenCalled();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
+  });
+
+  test('the visit the card named is gone and nothing overlaps now: books with no warning', async () => {
+    const insertChain = chain();
+    wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [chain(), insertChain] });
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_ids: ['visit-a-cancelled'] });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toBeUndefined();
+  });
+
   test('no pin (never proposed through a card): books with the warning, as before', async () => {
     const insertChain = wireClash();
     const result = await bookAt();
@@ -713,7 +737,7 @@ describe('create_appointment — an overlap that is NEW since the card gets a fr
       ],
     });
     await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([
-      { customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' },
+      { id: 'other', customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' },
     ]);
     await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([]);
     await expect(ibBookingOverlapWho('2099-01-15', undefined)).resolves.toEqual([]);

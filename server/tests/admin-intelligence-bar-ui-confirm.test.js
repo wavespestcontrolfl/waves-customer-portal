@@ -1195,9 +1195,9 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
   test('create_appointment on a taken time names the visit that holds it; the _booking_overlap pin stays a plain boolean', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
     mockIbBookingOverlapProposal.mockResolvedValueOnce(true);
-    mockIbBookingOverlapWho.mockResolvedValueOnce([{ customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' }]);
+    mockIbBookingOverlapWho.mockResolvedValueOnce([{ id: 'visit-beta', customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' }]);
     scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM' } }],
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM', _booking_overlap_ids: ['forged'] } }],
       [{ type: 'text', text: 'Proposed.' }],
     ]);
 
@@ -1205,42 +1205,109 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_overlap).toBe(true);
+      // The visit the card names is pinned by id; a model-supplied pin never survives.
+      expect(stored.params._booking_overlap_ids).toEqual(['visit-beta']);
+      expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
       expect(labels).toContain('Another visit is at this time: Testa Beta, Lawn Care, 10:00 AM-11:00 AM. Both stay on the calendar.');
     });
   });
 
-  test('create_appointment with a stated price that differs from the catalog is read back once: refused with price_read_back until price_confirmed, then the card shows both prices (owner 2026-10-06)', async () => {
+  describe('create_appointment price read-back (owner 2026-10-06): price_confirmed is verified by the server', () => {
+    const READ_BACK_TEXT = 'You gave $60.33, but the catalog price is $61.33. Ask the user which price to use. If they confirm $60.33, propose again with price_confirmed: true. Nothing was booked.';
+    const proposal = (price) => ({ price, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service', catalogPrice: 61.33 });
+    const call = (id, extra = {}) => ({ type: 'tool_use', id, name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', price: 60.33, ...extra } });
+    const toolResultAt = (n) => JSON.parse(mockMessagesCreate.mock.calls[n][0].messages.slice(-1)[0].content[0].content);
+    const nextRequest = () => new Promise((resolve) => setTimeout(resolve, 5));
+    beforeEach(() => {
+      require('../services/intelligence-bar/price-read-back')._resetForTests();
+      mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+      mockIbBookingProposal.mockImplementation(async (_c, _s, stated) => proposal(stated ?? 60.33));
+    });
+    afterEach(() => {
+      mockIbBookingProposal.mockReset();
+      mockIbBookingProposal.mockImplementation(async () => ({ price: null, source: null, serviceId: null, serviceName: null }));
+    });
+
+    test('a first call with price_confirmed is still refused: the model cannot skip the question', async () => {
+      scriptModelTurns([[call('tu_1', { price_confirmed: true })], [{ type: 'text', text: 'Which price?' }]]);
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' });
+        expect(body.pendingActions).toEqual([]);
+        expect(mockCreatePendingAction).not.toHaveBeenCalled();
+        expect(toolResultAt(1)).toEqual({ error: READ_BACK_TEXT, code: 'price_read_back' });
+      });
+    });
+
+    test('a retry with price_confirmed in the SAME request is still refused', async () => {
+      scriptModelTurns([[call('tu_1')], [call('tu_2', { price_confirmed: true })], [{ type: 'text', text: 'Which price?' }]]);
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' });
+        expect(body.pendingActions).toEqual([]);
+        expect(mockCreatePendingAction).not.toHaveBeenCalled();
+        expect(toolResultAt(1).code).toBe('price_read_back');
+        expect(toolResultAt(2).code).toBe('price_read_back');
+      });
+    });
+
+    test('the NEXT request confirms: the card shows both prices; the flag is never stored, shown or pinned', async () => {
+      scriptModelTurns([[call('tu_1')], [{ type: 'text', text: 'Which price?' }]]);
+      await withServer(async (baseUrl) => {
+        await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' });
+        expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      });
+      await nextRequest();
+      scriptModelTurns([[call('tu_2', { price_confirmed: true })], [{ type: 'text', text: 'Proposed.' }]]);
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'yes, 60.33', context: 'schedule' });
+        expect(body.pendingActions[0].params.price).toBe('$60.33 (price you gave) — catalog price is $61.33. Invoiced when the visit is completed');
+        const stored = mockCreatePendingAction.mock.calls[0][0];
+        expect(stored.params._booking_price).toBe(60.33);
+        expect(stored.params.price_confirmed).toBeUndefined();
+        expect(body.pendingActions[0].params.price_confirmed).toBeUndefined();
+        expect(JSON.stringify(body.pendingActions[0].contract)).not.toMatch(/price confirmed/i);
+      });
+    });
+
+    test('a confirmation for a DIFFERENT price is refused and asks again', async () => {
+      scriptModelTurns([[call('tu_1')], [{ type: 'text', text: 'Which price?' }]]);
+      await withServer(async (baseUrl) => { await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' }); });
+      await nextRequest();
+      mockMessagesCreate.mockClear();
+      scriptModelTurns([[call('tu_2', { price: 55, price_confirmed: true })], [{ type: 'text', text: 'Which price?' }]]);
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'make it 55', context: 'schedule' });
+        expect(body.pendingActions).toEqual([]);
+        expect(mockCreatePendingAction).not.toHaveBeenCalled();
+        expect(toolResultAt(1).code).toBe('price_read_back');
+        expect(toolResultAt(1).error).toMatch(/^You gave \$55\.00, but the catalog price is \$61\.33\./);
+      });
+    });
+  });
+
+  test('model-supplied when/service/technician/price fields cannot change the booking card (any case)', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
-    mockIbBookingProposal.mockResolvedValueOnce({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service', catalogPrice: 61.33 });
-    mockIbBookingProposal.mockResolvedValueOnce({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service', catalogPrice: 61.33 });
+    mockResolveTechnician.mockResolvedValue({ id: 'tech-1', name: 'Testa Tech' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: 90, source: 'catalog', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service' });
     scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', price: 60.33 } }],
-      [{ type: 'text', text: 'Which price?' }],
-      [{ type: 'tool_use', id: 'tu_2', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', price: 60.33, price_confirmed: true } }],
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: {
+        customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', technician_name: 'Testa Tech',
+        when: 'Friday, never', Service: 'Free Service', technician: 'Someone Else', Technician: 'Another', PRICE: '$1.00',
+      } }],
       [{ type: 'text', text: 'Proposed.' }],
     ]);
-
     await withServer(async (baseUrl) => {
-      await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' });
-      // First proposal: no card, a coded read-back question naming both prices.
-      expect(mockCreatePendingAction).not.toHaveBeenCalled();
-      const firstResult = JSON.parse(mockMessagesCreate.mock.calls[1][0].messages.slice(-1)[0].content[0].content);
-      expect(firstResult.code).toBe('price_read_back');
-      expect(firstResult.error).toBe('You gave $60.33, but the catalog price is $61.33. Ask the user which price to use. If they confirm $60.33, propose again with price_confirmed: true. Nothing was booked.');
-    });
-    // Confirmed: the card shows both prices; the flag is never stored, shown or pinned.
-    mockCreatePendingAction.mockClear();
-    mockMessagesCreate.mockClear();
-    await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'yes, 60.33', context: 'schedule' });
-      expect(body.pendingActions[0].params.price).toBe('$60.33 (price you gave) — catalog price is $61.33. Invoiced when the visit is completed');
-      const stored = mockCreatePendingAction.mock.calls[0][0];
-      // The pinned price is still the stated one; price_confirmed is not stored or shown.
-      expect(stored.params._booking_price).toBe(60.33);
-      expect(stored.params.price_confirmed).toBeUndefined();
-      expect(body.pendingActions[0].params.price_confirmed).toBeUndefined();
-      expect(JSON.stringify(body.pendingActions[0].contract)).not.toMatch(/price confirmed/i);
+      const { body } = await postQuery(baseUrl, { prompt: 'book lawn', context: 'schedule' });
+      const card = body.pendingActions[0].params;
+      expect(card.when).toBe('Monday, Jan 5');
+      expect(card.service).toBe('Monthly Lawn Care Service');
+      expect(card.technician).toBe('Testa Tech');
+      expect(card.price).toBe('$90.00 (catalog price, Monthly Lawn Care Service) — invoiced when the visit is completed');
+      expect(card.Service).toBeUndefined();
+      expect(card.PRICE).toBeUndefined();
+      expect(card.Technician).toBeUndefined();
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels.some((l) => /never|Free Service|Someone Else|Another|\$1\.00/.test(l))).toBe(false);
     });
   });
 

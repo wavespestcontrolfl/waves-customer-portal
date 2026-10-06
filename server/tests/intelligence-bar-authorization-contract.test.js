@@ -310,7 +310,7 @@ test('create_appointment: a card booking is credit-free by construction and says
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
   expect(labels.some((l) => /inspection credit|credit lock/i.test(l))).toBe(false);
-  expect(labels).toContain('No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) start once a time is set.');
+  expect(labels).toContain('No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) are set once a time is added. They skip if the customer turned reminders off.');
   expect(c.notifies_customer).toBe(false);
 });
 
@@ -319,8 +319,9 @@ test('create_appointment with a time texts the booking confirmation, as on the S
   const labels = c.effects.map((e) => e.label);
   expect(labels).toContain('Booking confirmation goes out by text or email, per their settings.');
   expect(labels).toContain('No confirmation if they turned it off or were already confirmed for another visit at this time.');
-  expect(labels).toContain('Reminders go out 3 days and 1 day before.');
-  expect(labels.filter((l) => l.length > 100)).toEqual([]);
+  expect(labels).toContain('Reminders are set for 3 days and 1 day before. They skip if the customer turned reminders off, and the 3-day one skips when the visit is sooner.');
+  expect(labels.filter((l) => /confirmation/i.test(l) && l.length > 100)).toEqual([]);
+  expect(labels.some((l) => /go out 3 days/.test(l))).toBe(false);
   expect(c.notifies_customer).toBe(true);
 });
 

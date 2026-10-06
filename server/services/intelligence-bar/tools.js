@@ -3010,9 +3010,10 @@ function clockLabel(hhmmss) {
 }
 
 // Who the overlapping visit(s) are, for the booking card's one line: customer
-// name, service and window. Card text only — the boolean pin above is what the
-// executor compares. Up to three visits; [] when there is no overlap or no
-// timed window.
+// name, service and window, plus the visit id so the route can pin exactly the
+// visits the card names (the executor refuses a NEW overlapping visit that is
+// not in that set). Every overlapping visit is returned; [] when there is no
+// overlap or no timed window.
 async function ibBookingOverlapWho(scheduledDate, timeWindow) {
   const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
   if (!rows || !rows.length) return [];
@@ -3024,10 +3025,11 @@ async function ibBookingOverlapWho(scheduledDate, timeWindow) {
       .select('scheduled_services.id', 'customers.first_name', 'customers.last_name')
     : [];
   const nameById = new Map((Array.isArray(names) ? names : []).map((n) => [String(n.id), `${n.first_name || ''} ${n.last_name || ''}`.trim()]));
-  return rows.slice(0, 3).map((r) => {
+  return rows.map((r) => {
     const start = clockLabel(r.window_start);
     const end = clockLabel(r.window_end);
     return {
+      id: r.id ? String(r.id) : null,
       customer: nameById.get(String(r.id)) || null,
       service: r.service_type || null,
       window: start && end ? `${start}-${end}` : (start || null),
@@ -3202,7 +3204,15 @@ async function createAppointment(input, actionContext = {}) {
       // rolls the transaction back before the insert, so nothing is booked
       // and the post-commit confirmation text below never runs. A pinned
       // "overlap existed", or no pin at all, keeps the advisory warning.
-      if (overlap.length && input._booking_overlap === false) {
+      // A card that named the overlapping visits pinned their ids: a visit
+      // outside that set (A cancelled, B took its place) is NEW too. An
+      // overlap that disappeared is fine; a card with no ids pinned (older
+      // cards, or a name lookup that failed) keeps the boolean rule only.
+      const pinnedOverlapIds = Array.isArray(input._booking_overlap_ids) && input._booking_overlap_ids.length
+        ? new Set(input._booking_overlap_ids.map(String)) : null;
+      const unseenOverlap = input._booking_overlap === true && pinnedOverlapIds
+        && overlap.some((row) => !pinnedOverlapIds.has(String(row.id)));
+      if (overlap.length && (input._booking_overlap === false || unseenOverlap)) {
         const err = new Error('booking_overlap_new');
         err.bookingOverlapNew = true;
         throw err;

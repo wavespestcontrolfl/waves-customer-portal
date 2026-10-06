@@ -22,6 +22,7 @@ const {
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
+const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
 const { gateEnvValue, ibCancelAppointmentLive } = require('../config/feature-gates');
@@ -1025,7 +1026,13 @@ function confirmationDisplayParams(toolName, params, preview) {
       if (technicianName !== undefined && technicianName !== null) shown.technician_name = technicianName;
     }
     if (!preview?.pinned_customer && customerId !== undefined && customerId !== null) shown.customer_id = customerId;
-    return { ...shown, ...others };
+    // Model-supplied extras can never overwrite or imitate a server-derived
+    // card fact (GATE_IB_PLATFORM off lets extra fields through): the display
+    // alias keys are dropped in any case, and the curated fields spread last.
+    const CARD_ALIAS_KEYS = new Set(['when', 'service', 'technician', 'price']);
+    const extras = Object.fromEntries(Object.entries(others)
+      .filter(([k]) => !CARD_ALIAS_KEYS.has(String(k).toLowerCase().replace(/[\s_-]+/g, ''))));
+    return { ...extras, ...shown };
   }
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
@@ -1333,20 +1340,31 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // One-time price read-back: a STATED price that differs from the
       // catalog price for this customer is asked about once before a card.
       // Not a hard refusal (custom quotes and owner rulings differ on
-      // purpose): the model sets price_confirmed after the user confirms.
-      // Display-only input, never stored or pinned; the execution pins
+      // purpose). price_confirmed is model-supplied, so it counts only when
+      // the server recorded a read-back for this operator, customer and
+      // stated price in an EARLIER request (price-read-back.js): the model
+      // cannot skip the question on its first call or by retrying in the same
+      // loop. The flag is never stored or pinned; the execution pins
       // (_booking_price etc.) are unchanged. No catalog price: no guard.
-      const priceConfirmed = params.price_confirmed === true;
+      const priceConfirmedClaim = params.price_confirmed === true;
       delete params.price_confirmed;
-      if (booking.source === 'stated' && booking.catalogPrice != null && !priceConfirmed) {
-        const money = (n) => `$${Number(n).toFixed(2)}`;
-        return {
-          failed: true,
-          modelResult: {
-            error: `You gave ${money(booking.price)}, but the catalog price is ${money(booking.catalogPrice)}. Ask the user which price to use. If they confirm ${money(booking.price)}, propose again with price_confirmed: true. Nothing was booked.`,
-            code: 'price_read_back',
-          },
+      if (booking.source === 'stated' && booking.catalogPrice != null) {
+        const readBackKey = {
+          actorId: getAdminActorId(req), customerId: String(params.customer_id), statedPrice: booking.price,
         };
+        if (priceConfirmedClaim && PriceReadBack.isConfirmed({ ...readBackKey, catalogPrice: booking.catalogPrice, requestStartedAt })) {
+          PriceReadBack.clear(readBackKey);
+        } else {
+          PriceReadBack.recordReadBack({ ...readBackKey, catalogPrice: booking.catalogPrice, requestStartedAt });
+          const money = (n) => `$${Number(n).toFixed(2)}`;
+          return {
+            failed: true,
+            modelResult: {
+              error: `You gave ${money(booking.price)}, but the catalog price is ${money(booking.catalogPrice)}. Ask the user which price to use. If they confirm ${money(booking.price)}, propose again with price_confirmed: true. Nothing was booked.`,
+              code: 'price_read_back',
+            },
+          };
+        }
       }
       // Server pins, set unconditionally so a model-supplied value can never
       // stand in for them. The discount identity/terms (Codex r2 on #5093,
@@ -1386,6 +1404,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       if (overlapNow == null) delete params._booking_overlap;
       else params._booking_overlap = overlapNow;
+      // The visits the card names are pinned by id (set below); a
+      // model-supplied value can never stand in for it.
+      delete params._booking_overlap_ids;
       // Who the overlapping visit is, for the card line only. Best effort:
       // a lookup that fails leaves the plain line; the _booking_overlap pin
       // above is the boolean the executor compares and is never changed here.
@@ -1393,6 +1414,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (overlapNow) {
         try {
           overlapWith = await ibBookingOverlapWho(params.scheduled_date, params.time_window);
+          // Pin the ids the card names: the executor refuses an overlapping
+          // visit outside this set as a new overlap (fresh card). No ids (a
+          // failed lookup or an overlap gone by now) keeps the boolean pin.
+          const overlapIds = overlapWith.map((v) => v.id).filter(Boolean).sort();
+          if (overlapIds.length) params._booking_overlap_ids = overlapIds;
+          overlapWith = overlapWith.map(({ id: _id, ...shownVisit }) => shownVisit);
         } catch (err) {
           logger.warn(`[intelligence-bar] booking overlap names unavailable: ${err.message}`);
           overlapWith = [];
