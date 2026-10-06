@@ -6,6 +6,7 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import FastCompleteTreeShrubSheet from './FastCompleteTreeShrubSheet';
+import { DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
 import serverSlots from '../../../../server/config/tree-shrub-photo-slots.js';
 
 // The canvas downscale needs a browser; the slot only needs what it returns.
@@ -684,20 +685,20 @@ describe('blocked states', () => {
 
 // The lawn sheet's 2026-10-05 screen rulings (#5951), applied here.
 describe('the lawn screen rulings', () => {
-  test('Customer is preset to not home, full access, and rides /complete as customerInteraction', async () => {
+  test('Customer is preset to the shared default (home, spoke with them: owner 2026-10-04, #5889) and rides /complete as customerInteraction', async () => {
     const request = makeRequest();
     await readyVisit(request);
-    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
-    const body = await completeBody(request);
-    expect(body.customerInteraction).toBe('tech_home_spoke_with_them');
-  });
-
-  test('a visit with no tap on Customer sends the preset', async () => {
-    const request = makeRequest();
-    await readyVisit(request);
+    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — full access' }));
     const body = await completeBody(request);
     expect(body.customerInteraction).toBe('not_home_full_access');
+  });
+
+  test('a visit with no tap on Customer sends the shared preset', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    const body = await completeBody(request);
+    expect(body.customerInteraction).toBe(DEFAULT_CUSTOMER_HOME);
   });
 
   test('the mic sits inside the note box and the hint text is gone', async () => {

@@ -16,8 +16,8 @@
 // as an N/P fertilizer in the summer blackout cannot be turned on.
 //
 // Since 2026-10-05 the screen follows the lawn sheet's rulings (#5951): the
-// mic sits inside the note box, a Customer row (who was home, preset not home,
-// full access) is sent as customerInteraction, and no hint text ("Optional",
+// mic sits inside the note box, a Customer row (who was home, the shared
+// preset) is sent as customerInteraction, and no hint text ("Optional",
 // "Tap what you applied", the tip search label). Each photo slot keeps one
 // short line.
 //
