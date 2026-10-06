@@ -66,9 +66,16 @@ function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 }
 
-function clip(value, max) {
+function clipText(value, max) {
   const text = cleanText(value);
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
+// Every fact-sheet string is scrubbed before it is cut: a cut can split the
+// street suffix or the credential noun the redactors need ("12 Secret Mai…")
+// (Codex P1 #5964 r14). scrubFacts scrubs the finished sheet again.
+function clip(value, max) {
+  return clipText(scrubFreeText(value), max);
 }
 
 const asArray = (value) => (Array.isArray(value) ? value : []);
@@ -313,9 +320,9 @@ const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suf
 // "12 1/2 Example Street", "88B Example Street" and "12-14 Main Street" mask whole; street-name
 // words may hold accents and curly apostrophes ("12 José Lane", "12 O’Neil St").
 const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:[-/]\\d{1,6}[a-z]?)?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
-// A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 US 41",
+// A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 N US 41",
 // "12 State Road 64" (Codex P1 #6016 r15).
-const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?=\s+(?:fl|sr|us|cr|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
+const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:fl|sr|us|cr|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value is a credential even with no "code" or "pin"
@@ -334,7 +341,7 @@ function scrubFreeText(value, max = Infinity) {
   const { redactAccessCodes } = require('../context-aggregator');
   const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, (match, box, gap, value) => (LOCKBOX_PROSE_WORDS.has(value.toLowerCase()) ? match : `${box}${gap}[redacted]`)))
     .replace(/\d{3,}/g, '[number]');
-  return clip(masked, max);
+  return clipText(masked, max);
 }
 
 // The chokepoint (Codex P1 r1-r3 #5957: the question, the concern, then report
@@ -907,20 +914,29 @@ const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]first)';
 // A spelled ordinal is a date only with time context ("on the fifth", "the
 // fifth of January"); "the first application" is report content.
-const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|(?:this|next|the)\\s+weekend|(?:in|on|by|until|since|this|next|early|late|mid)[\\s-]+may|may\\s+\\d|the\\s+\\d{1,2}(?:st|nd|rd|th)|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
+const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|(?:this|next|the)\\s+weekend|the\\s+\\d{1,2}(?:st|nd|rd|th)|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
+// A bare hour after a time word: "at 2", "around five", "by 3" (Codex P1
+// #6016 r17); "at 2 spots", "after 2 hours" are counts and waits.
+const BARE_HOUR = /\b(?:at|around|about|by|after|before|until)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b(?![.,]?\d|\s*(?:%|inch|in\b|out\s+of|points?|days?|weeks?|months?|hours?|hrs?|minutes?|mins?|products?|areas?|spots?|stations?|times?|feet|ft|yards?|of|or|to|and|-))/i;
+// The month May, capitalized and with a date word ("in May", "May 5"); a
+// lowercase "may" or "This may take" is the verb (Codex P2 #6016 r17).
+// A clock range: "between 2 and 4", "from two to four" (Codex P1 #6016 r18).
+const HOUR_WORDS = '(?:\\d{1,2}(?::\\d{2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
+const HOUR_RANGE = new RegExp(`\\b(?:between|from)\\s+${HOUR_WORDS}\\s+(?:and|to|-|–)\\s+${HOUR_WORDS}\\b(?!\\s*(?:%|inch|in\\b|out\\s+of|points?|days?|weeks?|months?|hours?|hrs?|minutes?|mins?|products?|areas?|spots?|stations?|times?|feet|ft|yards?))`, 'i');
+const MONTH_MAY = /\b(?:in|on|by|until|since|next|early|late|mid)[\s-]+May\b|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
   const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
-  return DATE_TOKEN.test(own) || WEEKDAY_ABBR.test(own) || RELATIVE_DATE.test(own);
+  return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, MONTH_MAY].some((re) => re.test(own));
 }
 
 // Every number the model writes itself must be a number the fact sheet holds,
 // of the same kind and for the same measurement: a score ("out of 100") must
 // be a score fact, an inch figure an inch fact, and a sentence that names
 // rain, irrigation, mowing or a score area must match that fact ("3.5 inches
-// of rain" fails when 3.5 is the mowing height). A number word before a unit
-// or the score scale counts too ("ninety-five out of 100"); "one product" is prose (Codex P1 #5964 r7-r9). Required lines
+// of rain" fails when 3.5 is the mowing height). Number words count too
+// ("ninety-five out of 100", "ninety days") (Codex P1 #5964 r7-r9). Required lines
 // keep their own numbers.
 // A minus sign belongs to the number ("-5 out of 100"), not a range dash ("10-14").
 const NUMBER_RE = /(?:(?<=^|[\s(])[-−])?\d+(?:\.\d+)?/g;
@@ -943,14 +959,20 @@ const MEASUREMENTS = [
   [/\bstress\b|\bdamage\b/i, /stress|damage/],
   [/\bpests?\b|\binsects?\b/i, /pest/],
   [/\boverall\b|\bhealth\b/i, /overall|plant_health/],
-  [/\bscores?\b/i, /out_of_100|score/],
 ];
+const GENERIC_SCORE = [/\bscores?\b/i, /out_of_100|score/];
+MEASUREMENTS.push(GENERIC_SCORE);
 const SMALL_NUMBERS = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(' ');
 const TENS = 'twenty thirty forty fifty sixty seventy eighty ninety'.split(' ');
-const NUMBER_WORD_RE = new RegExp(`\\b(?:(${TENS.join('|')})(?:[\\s-](${SMALL_NUMBERS.slice(1, 10).join('|')}))?|(${SMALL_NUMBERS.join('|')})|(a\\s+hundred|one\\s+hundred))\\b(?=\\s*(?:inch|in\\.|["”]|out\\s+of\\s+100|points?\\b|\\/\\s*100))`, 'gi');
+const NUMBER_WORD_RE = new RegExp(`\\b(?:(${TENS.join('|')})(?:[\\s-](${SMALL_NUMBERS.slice(1, 10).join('|')}))?|(${SMALL_NUMBERS.join('|')})|(a\\s+hundred|one\\s+hundred))\\b`, 'gi');
+// Number words count wherever digits would ("ninety days", "twelve palms")
+// (Codex P1 #5964 r14); "zero" and "one" only before a unit or the score
+// scale, since "one product" and "no one" are prose.
+const UNIT_AHEAD_RE = /^\s*(?:inch|in\.|["”]|out\s+of\s+100|points?\b|\/\s*100)/i;
 function digitsForWords(text) {
-  return text.replace(NUMBER_WORD_RE, (_m, tens, unit, small, hundred) => {
+  return text.replace(NUMBER_WORD_RE, (match, tens, unit, small, hundred, offset, whole) => {
     if (hundred) return '100';
+    if (small && /^(?:zero|one)$/i.test(small) && !UNIT_AHEAD_RE.test(whole.slice(offset + match.length))) return match;
     if (small) return String(SMALL_NUMBERS.indexOf(small.toLowerCase()));
     return String((TENS.indexOf(tens.toLowerCase()) + 2) * 10 + (unit ? SMALL_NUMBERS.indexOf(unit.toLowerCase()) : 0));
   });
@@ -971,7 +993,11 @@ const RANGE_TAIL_RE = /^\s*(?:to|-|–|and)\s*\d+(?:\.\d+)?/i;
 function numberIsKnown(value, after, sentence, known) {
   const unitText = after.replace(RANGE_TAIL_RE, '');
   const kind = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(unitText));
-  const named = MEASUREMENTS.filter(([wordRe]) => wordRe.test(sentence)).map(([, keyRe]) => keyRe);
+  const matched = MEASUREMENTS.filter(([wordRe]) => wordRe.test(sentence));
+  // "density score" names density: the generic score words apply only when
+  // no category is named (Codex P1 #5964 r14).
+  const specific = matched.filter((entry) => entry !== GENERIC_SCORE);
+  const named = (specific.length ? specific : matched).map(([, keyRe]) => keyRe);
   // A number with no score or inch unit must match the measurement its clause
   // names ("the score went from 70 to 100"); with none named ("82 days") it
   // may only repeat a number the report's own text states (Codex P1 r12).
@@ -1206,7 +1232,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }

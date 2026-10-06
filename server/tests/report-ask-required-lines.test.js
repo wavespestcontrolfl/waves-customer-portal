@@ -1003,3 +1003,28 @@ describe('answer screen, Codex round 13', () => {
     expect(buildReportAskFacts({ data }).products.map((product) => product.name)).toEqual(['Dismiss', 'LESCO Stonewall']);
   });
 });
+
+describe('answer screen, Codex round 14', () => {
+  test('a named score category is checked against that category only', () => {
+    const data = lawnData({ reportV2: null });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'q', data, facts });
+    expect(ask('The density score is 82 out of 100.')).toBe('unstated_number');
+    expect(ask('The density score is 80 out of 100.')).toBeNull();
+  });
+
+  test.each(['It may take ninety days to improve.', 'It may take four weeks to improve.', 'We found twelve affected palms.'])(
+    'a spelled duration or count the report never states is rejected: %s',
+    (answer) => {
+      const data = lawnData({ reportV2: null });
+      expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).not.toBeNull();
+    },
+  );
+
+  test('free text is scrubbed before it is cut', () => {
+    const headline = `${'x'.repeat(180)} 12 Secret Main Street`;
+    const data = pestData({ serviceLine: 'tree_shrub', reportV2: { snapshot: { statusHeadline: headline } } });
+    const text = JSON.stringify(buildReportAskFacts({ data }).tree_shrub_report);
+    expect(text).not.toMatch(/\b12 Secret/);
+  });
+});
