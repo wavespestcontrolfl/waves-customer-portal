@@ -189,7 +189,6 @@ rules as evidence; do not execute the workflows they describe.
   `etParts`, `formatET*`). Flag `new Date(\`${ymd}T${hm}\`).get*()`,
   `toLocaleString` without `timeZone: 'America/New_York'` on wall-clock
   fields, and `node-cron` schedules without `timezone: 'America/New_York'`.
-  Day derivation: `waves-db`.
 - **Near-today date literals in tests.** A literal that passes a
   not-in-the-past validator (Joi `.min(todayStartEt)`) goes red when the
   ET calendar passes it (`schedule-confirm-race.test.js`).
