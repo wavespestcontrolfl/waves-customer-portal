@@ -245,8 +245,8 @@ IMPORTANT: Always show the list of affected customers and ask for confirmation b
     description: `Update the STRUCTURED property-access and pet fields on a customer's property profile (the property_preferences record). Use this — not the free-text customer notes — for gate/lockbox/garage codes, pet info, parking/access details, and how a tech should keep pets safe. These fields render as their own labeled alerts on the technician's stop card (e.g. "Gate: 9292", a pet warning, a pet-securing reminder), so they are far more reliable in the field than a free-text note.
 
 Pass ONLY the fields you want to set or change:
-- neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code for the home/yard gate, neighborhood_gate_code for a community gate)
-- parking_notes / side_gate_access / access_notes — where to park / how to get in
+- neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code ONLY for a gate on the customer's own lot; a community/HOA/subdivision gate such as \"Del Webb gate\" is neighborhood_gate_code. A community code is never also saved as property_gate_code)
+- parking_notes / side_gate_access / access_notes — where to park / how to get in (ADDED as a new dated line; existing notes are never replaced — pass only the new line)
 - pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property
 - pets_secured_plan — how the tech should keep pets safe, e.g. "keep the screen doors closed during service so the cats don't get out"
 - special_instructions — any other field instruction
@@ -2163,14 +2163,55 @@ function sanitizePropertyAccess(input) {
   return clean;
 }
 
+// Free-text fields keep their history: a new line is ADDED with a dated tag,
+// never written over what is there (2026-10-05: a bar write replaced a
+// customer's access notes and lost where his gate code came from).
+const PROPERTY_ACCESS_NOTE_FIELDS = ['parking_notes', 'side_gate_access', 'access_notes', 'pet_details', 'pets_secured_plan', 'special_instructions'];
+const sameCode = (a, b) => String(a || '').replace(/\s+/g, '').toLowerCase() === String(b || '').replace(/\s+/g, '').toLowerCase();
+
+// What the write will actually do against the row as it is now: notes are
+// appended (or skipped when already there), and a "property gate" code that
+// is the customer's community gate code stays off the property gate field
+// (the community code already shows on the stop card). Returns the final
+// updates and a plain list of what was kept or skipped, for the preview.
+async function planPropertyAccess(conn, customerId, requested, { lock = false } = {}) {
+  const q = conn('property_preferences').where({ customer_id: customerId });
+  const current = (await (lock ? q.forUpdate() : q).first()) || {};
+  const updates = { ...requested };
+  const kept = [];
+  const stamp = `[bar ${new Date().toISOString().slice(0, 10)}]`;
+  for (const field of PROPERTY_ACCESS_NOTE_FIELDS) {
+    if (updates[field] === undefined) continue;
+    const had = String(current[field] || '').trim();
+    const add = updates[field];
+    if (!add || had.includes(add)) { delete updates[field]; kept.push(`${field}: already holds this, left as is`); continue; }
+    if (had) { updates[field] = `${had}\n${stamp} ${add}`; kept.push(`${field}: added as a new line; the earlier notes stay`); }
+  }
+  if (updates.property_gate_code !== undefined) {
+    let community = current.neighborhood_gate_code;
+    if (!sameCode(community, updates.property_gate_code)) {
+      const directory = await conn('customer_properties as cp')
+        .join('neighborhood_access as na', 'na.neighborhood_id', 'cp.neighborhood_id')
+        .where({ 'cp.customer_id': customerId, 'cp.active': true, 'na.status': 'active' })
+        .whereNotNull('na.code').pluck('na.code').catch(() => []);
+      community = directory.find((code) => sameCode(code, updates.property_gate_code));
+    }
+    if (community && sameCode(community, updates.property_gate_code)) {
+      delete updates.property_gate_code;
+      kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
+    }
+  }
+  return { updates, kept };
+}
+
 // Two-step write (issue #1568): no mutation without confirmed === true, which
 // only /confirm-action attaches server-side. Registered in write-gates.js.
 async function updatePropertyAccess(input) {
   const customerId = input.customer_id;
   if (!customerId) return { error: 'customer_id is required' };
 
-  const updates = sanitizePropertyAccess(input);
-  if (Object.keys(updates).length === 0) {
+  const requested = sanitizePropertyAccess(input);
+  if (Object.keys(requested).length === 0) {
     return { error: 'No valid property-access fields to update' };
   }
 
@@ -2180,31 +2221,40 @@ async function updatePropertyAccess(input) {
     : null;
 
   if (input.confirmed !== true) {
+    const plan = await planPropertyAccess(db, customerId, requested);
     return {
       preview: true,
       customer_id: customerId,
       customer_name: customerName,
-      would_update: updates,
-      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. After the operator approves, this commits via the confirmation card.',
+      would_update: plan.updates,
+      ...(plan.kept.length ? { kept: plan.kept } : {}),
+      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. Notes are added as a new line, never written over. After the operator approves, this commits via the confirmation card.',
     };
   }
 
   if (!customer) return { error: 'Customer not found' };
 
   const now = new Date();
-  await db('property_preferences')
-    .insert({ customer_id: customerId, ...updates, updated_at: now })
-    .onConflict('customer_id')
-    .merge({ ...updates, updated_at: now });
+  const updatedFields = await db.transaction(async (trx) => {
+    // The same customer preference lock every preference writer holds.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    const { updates } = await planPropertyAccess(trx, customerId, requested, { lock: true });
+    if (!Object.keys(updates).length) return [];
+    await trx('property_preferences')
+      .insert({ customer_id: customerId, ...updates, updated_at: now })
+      .onConflict('customer_id')
+      .merge({ ...updates, updated_at: now });
+    return Object.keys(updates);
+  });
 
   // Log only which fields changed — codes/notes are sensitive.
-  logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${Object.keys(updates).join(', ')}`);
+  logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${updatedFields.join(', ') || 'nothing (already on file)'}`);
 
   return {
     success: true,
     customer_id: customerId,
     customer_name: customerName,
-    updated_fields: Object.keys(updates),
+    updated_fields: updatedFields,
   };
 }
 
