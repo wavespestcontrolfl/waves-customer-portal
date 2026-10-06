@@ -168,7 +168,7 @@ describe('applySeriesMoveEffects with the gate', () => {
     const out = await run();
     expect(sends).toHaveLength(1);
     expect(out.notificationSent).toBe(true);
-    expect(out.notificationHeld).toBeUndefined();
+    expect(out.notificationSent).toBe(true);
   });
 
   test('gate on, young move: text held, notified_at left NULL, no failure reported', async () => {
@@ -176,9 +176,20 @@ describe('applySeriesMoveEffects with the gate', () => {
     markers = baseMarkers({ created_at: new Date(Date.now() - 10 * 1000) });
     const out = await run();
     expect(sends).toHaveLength(0);
-    expect(out).toMatchObject({ notificationSent: null, notificationError: null, notificationHeld: true });
-    expect(new Date(out.notificationSendAfter).getTime()).toBeGreaterThan(Date.now() + 2 * MIN);
+    // null, not false: a staff screen shows "text failed" only for false.
+    expect(out).toMatchObject({ notificationSent: null, notificationError: null });
     expect(notifiedStamps()).toHaveLength(0);
+  });
+
+  test('gate on, reminder sync incomplete (reminders_synced_at NULL): still held, and the sync is left for the retry', async () => {
+    process.env[GATE] = 'true';
+    markers = baseMarkers({ reminders_synced_at: null, created_at: new Date(Date.now() - 10 * 1000) });
+    const out = await run();
+    expect(sends).toHaveLength(0);
+    expect(out.notificationSent).toBeNull();
+    // Neither the sync marker nor the text marker is stamped by a pass whose
+    // sync did not finish: the reconcile selection retries both.
+    expect(stamps.some((st) => Object.hasOwn(st, 'notified_at'))).toBe(false);
   });
 
   test('gate on, hold over, nothing newer: the text goes out', async () => {
@@ -195,8 +206,7 @@ describe('applySeriesMoveEffects with the gate', () => {
     newerMove = { id: 'm2' };
     const out = await run();
     expect(sends).toHaveLength(0);
-    expect(out.notificationSent).toBe(false);
-    expect(out.notificationError).toBe('superseded_by_newer_move');
+    expect(out.notificationSent).toBeNull();
     // Concluded (never retried) and said so: customer_notified stays false.
     expect(stamps).toContainEqual(expect.objectContaining({ notified_at: 'now()', customer_notified: false }));
     // The row names the move that replaced it.
@@ -206,43 +216,53 @@ describe('applySeriesMoveEffects with the gate', () => {
   });
 });
 
-describe('reconcileSeriesMoveEffects heldTextsOnly', () => {
-  test('selects only staff-surface committed rows with a waiting text, a few minutes old', async () => {
+describe('reconcileSeriesMoveEffects selection', () => {
+  // A knex-shaped chain that records every call and runs nested where groups.
+  async function selectionCalls(options) {
     const calls = [];
     const q = {};
-    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotNull', 'orWhere', 'orderByRaw', 'limit', 'modify']) {
+    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotNull', 'orWhere', 'whereRaw', 'orderByRaw', 'limit', 'modify']) {
       q[m] = jest.fn((...args) => {
         calls.push([m, ...args]);
         if (m === 'modify') args[0](q, ...args.slice(1));
+        else if (typeof args[0] === 'function') args[0](q);
         return q;
       });
     }
     q.select = jest.fn(async () => []);
     q.update = jest.fn(async () => 0);
     db.mockImplementation(() => q);
-    const out = await reconcileSeriesMoveEffects({ olderThanMs: coalesce.SERIES_TEXT_HOLD_MS, heldTextsOnly: true });
+    const out = await reconcileSeriesMoveEffects(options);
     expect(out).toEqual({ candidates: 0, finished: 0 });
-    expect(calls).toContainEqual(['whereIn', 'source_surface', coalesce.COALESCE_SURFACES]);
-    expect(calls).toContainEqual(['where', { status: 'committed', notify_requested: true }]);
-    expect(calls).toContainEqual(['whereNull', 'notified_at']);
-    expect(calls).toContainEqual(['whereNotNull', 'reminders_synced_at']);
+    return calls;
+  }
+  const heldWhere = ['where', { status: 'committed', notify_requested: true }];
+  const surfaceCalls = (calls) => calls.filter((c) => c[0] === 'whereIn' && c[1] === 'source_surface').map((c) => c[2]);
+
+  test('gate off: exactly the old selection (every reconcile surface, normal age rule, no held-text rows)', async () => {
+    const calls = await selectionCalls(undefined);
+    expect(surfaceCalls(calls)).toHaveLength(1);
+    expect(surfaceCalls(calls)[0]).toEqual(expect.arrayContaining(['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule']));
+    expect(calls).not.toContainEqual(heldWhere);
   });
 
-  test('the default sweep still covers every reconcile surface', async () => {
-    const calls = [];
-    const q = {};
-    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotNull', 'orWhere', 'orderByRaw', 'limit', 'modify']) {
-      q[m] = jest.fn((...args) => {
-        calls.push([m, ...args]);
-        if (m === 'modify') args[0](q, ...args.slice(1));
-        return q;
-      });
-    }
-    q.select = jest.fn(async () => []);
-    db.mockImplementation(() => q);
-    await reconcileSeriesMoveEffects();
-    const surfaces = calls.find((c) => c[0] === 'whereIn' && c[1] === 'source_surface')[2];
-    expect(surfaces).toEqual(expect.arrayContaining(['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule']));
+  test("'only' (ticks between quarter hours): just held staff texts, with no reminder-sync requirement", async () => {
+    const calls = await selectionCalls({ heldTexts: 'only' });
+    expect(surfaceCalls(calls)).toEqual([coalesce.COALESCE_SURFACES]);
+    expect(calls).toContainEqual(heldWhere);
+    expect(calls).toContainEqual(['whereNull', 'notified_at']);
+    // A pass that failed to stamp reminders_synced_at still has its text
+    // released at the end of the hold; the effects pass retries the sync.
+    expect(calls.some((c) => c[0] === 'whereNotNull' && c[1] === 'reminders_synced_at')).toBe(false);
+  });
+
+  test("'with' (quarter hour): the normal rule OR held staff texts", async () => {
+    const calls = await selectionCalls({ heldTexts: 'with' });
+    const surfaces = surfaceCalls(calls);
+    expect(surfaces).toHaveLength(2);
+    expect(surfaces[0]).toEqual(expect.arrayContaining(['sms_reply', 'customer_web']));
+    expect(surfaces[1]).toEqual(coalesce.COALESCE_SURFACES);
+    expect(calls).toContainEqual(heldWhere);
     expect(calls.some((c) => c[0] === 'whereNotNull' && c[1] === 'reminders_synced_at')).toBe(false);
   });
 });

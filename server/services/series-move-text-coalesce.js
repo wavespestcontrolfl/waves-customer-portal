@@ -21,6 +21,8 @@
 //           effect (reminders, cards, broadcasts), skips the text, leaves
 //           notified_at NULL and does not re-arm the reminder windows it
 //           covered: the text, or the newer move's text, still owns them.
+//           The existing series-move reconcile job (one scheduler, one lock)
+//           releases it when the hold ends.
 //   send  - the hold has run out and nothing newer exists: send as before.
 //
 // Each move holds from ITS OWN commit time, so a chain of moves less than
@@ -80,17 +82,30 @@ async function decideSeriesTextRelease({ seriesMoveId, markers, now = Date.now()
   return { action: 'send' };
 }
 
-// Records, on the move's own row, which move replaced its text. `ownedQuery`
-// returns the caller's lease-fenced query on the row; never throws.
-async function recordSupersededText(ownedQuery, supersededBy, seriesMoveId) {
-  logger.info(`[series-text-coalesce] move ${seriesMoveId}: customer text dropped, superseded by newer move ${supersededBy}`);
-  try {
-    await ownedQuery().update({
-      result: db.raw("jsonb_set(COALESCE(result, '{}'::jsonb), '{textSupersededBy}', to_jsonb(?::text))", [supersededBy]),
+// What the effects pass does with the customer text, in the two values its
+// existing text branching already consumes: `send` (may this pass text now)
+// and `sent` (the pass's starting result). `notify` is the move's recorded
+// intent. Held and superseded texts answer send:false with sent:null, not
+// false: a staff screen shows a "text failed" notice only for false, and
+// neither is a failure. A held text leaves notified_at NULL for the
+// reconciler. A superseded text concludes here as a definitive non-send
+// (notified_at stamped, customer_notified false, fenced on the pass's lease
+// by `stampMarker`) and names the move that replaced it, so it is never
+// retried and never silently lost. A move whose text already concluded or
+// went out is passed through untouched. Gate off: { send: notify, sent: false }.
+async function resolveSeriesTextRelease({ notify, seriesMoveId, markers, stampMarker, now = Date.now(), conn = db }) {
+  const passThrough = { send: notify, sent: false };
+  if (!notify || !seriesMoveId || !markers || markers.notified_at || markers.customer_notified === true || !enabled()) return passThrough;
+  const decision = await decideSeriesTextRelease({ seriesMoveId, markers, now, conn });
+  if (decision.action === 'send') return passThrough;
+  if (decision.action === 'drop') {
+    logger.info(`[series-text-coalesce] move ${seriesMoveId}: customer text dropped, superseded by newer move ${decision.supersededBy}`);
+    await stampMarker('notified_at', {
+      customer_notified: false,
+      result: db.raw("jsonb_set(COALESCE(result, '{}'::jsonb), '{textSupersededBy}', to_jsonb(?::text))", [decision.supersededBy]),
     });
-  } catch (err) {
-    logger.warn(`[series-text-coalesce] could not record supersession on ${seriesMoveId}: ${err.message}`);
   }
+  return { send: false, sent: null };
 }
 
 module.exports = {
@@ -99,5 +114,5 @@ module.exports = {
   enabled,
   findNewerSeriesMove,
   decideSeriesTextRelease,
-  recordSupersededText,
+  resolveSeriesTextRelease,
 };
