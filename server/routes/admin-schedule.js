@@ -19989,7 +19989,12 @@ async function otherGroupStopRows(conn, parent, parentId, candidate, clashRows) 
     .where({ 'ss.customer_id': parent.customer_id, 'ss.scheduled_date': candidate, 'ss.technician_id': [...techs][0] })
     .whereNot('ss.id', parentId)
     .whereNotNull('svc.group_family')
-    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ADMIN_OCCUPANCY_EXCLUDE_STATUSES))
+    // A rescheduled row's date and window are stale while it awaits its
+    // replacement (JOIN_INELIGIBLE_STATUSES): not a stop to follow, and a
+    // clash with one leaves this path (the clash rows must all be in the stop).
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status',
+      [...new Set([...ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+        ...require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES])]))
     .select('ss.*', 'svc.group_family as stop_group_family');
   const stop = rows.filter((r) => r.stop_group_family !== ownFamily);
   const ok = ownFamily && new Set(stop.map((r) => r.stop_group_family)).size === 1

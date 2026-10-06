@@ -652,6 +652,17 @@ postgres('series extension keeps riding the lawn', () => {
       } finally { await trx.rollback(); }
     });
 
+    test('a rescheduled lawn placeholder on the date is not a stop to follow', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await pestWorld(trx);
+        await lawnVisit(trx, w, date, { status: 'rescheduled' });
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
+        expect(rows.some((r) => dateOf(r.scheduled_date) === date && String(r.window_start).slice(0, 5) === '10:00')).toBe(false);
+      } finally { await trx.rollback(); }
+    });
+
     test('top-up: a pest series meeting its own lawn stop books right after it, not overlapping', async () => {
       const trx = await mockPg.transaction();
       try {
