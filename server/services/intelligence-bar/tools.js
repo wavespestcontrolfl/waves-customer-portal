@@ -2182,15 +2182,18 @@ function noteHas(had, add) {
 // Is this code the community gate code the stop card already shows? The stop
 // card shows the saved neighborhood code when there is one (this call's, else
 // the one on file); only with none saved does it show the directory codes of
-// the customer's homes in switched-on neighborhoods (active, or needing
-// confirmation).
+// the home's switched-on neighborhood (active, or needing confirmation). These
+// fields are one per customer, so the directory counts only for a customer
+// with exactly one active home: with more, which home's stop card shows which
+// code depends on the visit.
 async function communityCodeShown(conn, customerId, neighborhoodCode, code) {
   if (!code) return false;
   if (neighborhoodCode) return sameCode(neighborhoodCode, code);
-  const directory = await conn('customer_properties')
-    .join('neighborhood_access', 'neighborhood_access.neighborhood_id', 'customer_properties.neighborhood_id')
-    .join('neighborhoods', 'neighborhoods.id', 'customer_properties.neighborhood_id')
-    .where({ 'customer_properties.customer_id': customerId, 'customer_properties.active': true, 'neighborhoods.active': true })
+  const homes = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('neighborhood_id');
+  if (homes.length !== 1 || !homes[0].neighborhood_id) return false;
+  const directory = await conn('neighborhood_access')
+    .join('neighborhoods', 'neighborhoods.id', 'neighborhood_access.neighborhood_id')
+    .where({ 'neighborhood_access.neighborhood_id': homes[0].neighborhood_id, 'neighborhoods.active': true })
     .whereIn('neighborhood_access.status', ['active', 'needs_confirm'])
     .whereNotNull('neighborhood_access.code').pluck('neighborhood_access.code');
   return directory.some((c) => sameCode(c, code));
@@ -2278,12 +2281,14 @@ async function updatePropertyAccess(input) {
 
   if (!customer) return { error: 'Customer not found' };
 
-  const now = new Date();
   let result;
   try {
     result = await db.transaction(async (trx) => {
       // The same customer preference lock every preference writer holds.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      // Stamped after the lock wait: readers compare it with their own
+      // snapshot time, so it must not predate changes made while waiting.
+      const now = new Date();
       const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
       // The card the operator approved pinned its plan; a different plan under
       // the lock (another writer got in between) is refused, not done.

@@ -154,6 +154,20 @@ postgres('update_property_access keeps history and keeps community codes off the
     expect((await prefs()).access_notes).toBe('Ring twice');
   });
 
+  test('with two homes, a directory code is not taken as shown (the stop card picks by visit)', async () => {
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ neighborhood_gate_code: null });
+    const hoodId = randomUUID();
+    await mockDb('neighborhoods').insert({ id: hoodId, name: 'Example Glen', match_key: `example-glen-${hoodId}`, source: 'office' });
+    await mockDb('neighborhood_access').insert({ neighborhood_id: hoodId, access_type: 'keypad', code: '#6060', status: 'active', source: 'office' });
+    const home = (line1, hood) => ({
+      id: randomUUID(), customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: !hood,
+      address_line1: line1, city: 'Lakewood Ranch', zip: '34202', active: true, neighborhood_id: hood,
+    });
+    await mockDb('customer_properties').insert([home('4455 Example Lane', null), home('710 Other Court', hoodId)]);
+    await run({ property_gate_code: '#6060' });
+    expect((await prefs()).property_gate_code).toBe('#6060');
+  });
+
   test('an empty field is simply filled', async () => {
     await run({ parking_notes: 'Park on the street' });
     expect((await prefs()).parking_notes).toBe('Park on the street');
