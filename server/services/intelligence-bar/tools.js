@@ -2171,18 +2171,37 @@ const sameCode = (a, b) => String(a || '').replace(/\s+/g, '').toLowerCase() ===
 // side_gate_access is varchar(200); the other note fields are text.
 const PROPERTY_ACCESS_NOTE_LIMITS = { side_gate_access: 200 };
 const noteWords = (text) => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
-// A note is already there only as a whole phrase: "Gate code 555" is new
-// next to "Gate code 5550".
+// A note is already there only as a whole line ("[bar]"-style tags aside):
+// "Park on street" is new next to "Do not park on street".
 function noteHas(had, add) {
-  const phrase = noteWords(add).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${phrase}($|[^\\p{L}\\p{N}])`, 'u').test(noteWords(had));
+  const want = noteWords(add).replace(/[.\s]+$/, '');
+  return String(had || '').split('\n')
+    .some((line) => noteWords(line.replace(/^\s*\[[^\]]*\]\s*/, '')).replace(/[.\s]+$/, '') === want);
+}
+
+// Is this code the community gate code the stop card already shows? The stop
+// card shows the saved neighborhood code when there is one (this call's, else
+// the one on file); only with none saved does it show the directory codes of
+// the customer's homes in switched-on neighborhoods (active, or needing
+// confirmation).
+async function communityCodeShown(conn, customerId, neighborhoodCode, code) {
+  if (!code) return false;
+  if (neighborhoodCode) return sameCode(neighborhoodCode, code);
+  const directory = await conn('customer_properties')
+    .join('neighborhood_access', 'neighborhood_access.neighborhood_id', 'customer_properties.neighborhood_id')
+    .join('neighborhoods', 'neighborhoods.id', 'customer_properties.neighborhood_id')
+    .where({ 'customer_properties.customer_id': customerId, 'customer_properties.active': true, 'neighborhoods.active': true })
+    .whereIn('neighborhood_access.status', ['active', 'needs_confirm'])
+    .whereNotNull('neighborhood_access.code').pluck('neighborhood_access.code');
+  return directory.some((c) => sameCode(c, code));
 }
 
 // What the write will actually do against the row as it is now: notes are
-// appended (or skipped when already there), and a "property gate" code that
-// is the customer's community gate code stays off the property gate field
-// (the community code already shows on the stop card). Returns the final
-// updates and a plain list of what was kept or skipped, for the preview.
+// added as a new first line (or skipped when the same line is there), and a
+// "property gate" code that is the community gate code stays off the property
+// gate field; a property code already saved that is the community code is
+// cleared. Returns the final updates and a plain list of what was kept,
+// skipped or cleared, for the preview and the result.
 async function planPropertyAccess(conn, customerId, requested, { lock = false } = {}) {
   const q = conn('property_preferences').where({ customer_id: customerId });
   const current = (await (lock ? q.forUpdate() : q).first()) || {};
@@ -2208,30 +2227,26 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
     updates[field] = joined;
     kept.push(`${field}: added as a new first line; the earlier notes stay below`);
   }
-  if (updates.property_gate_code !== undefined) {
-    // The community code this same call sets counts, else the one on file;
-    // then the directory codes of the customer's homes that the stop card
-    // shows (active, and the ones that need confirming).
-    const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
-    let isCommunity = sameCode(neighborhoodCode, updates.property_gate_code) && !!neighborhoodCode;
-    if (!isCommunity) {
-      // A switched-off neighborhood shows no code on the stop card, so it
-      // does not count (the stop card reader's rule).
-      const directory = await conn('customer_properties')
-        .join('neighborhood_access', 'neighborhood_access.neighborhood_id', 'customer_properties.neighborhood_id')
-        .join('neighborhoods', 'neighborhoods.id', 'customer_properties.neighborhood_id')
-        .where({ 'customer_properties.customer_id': customerId, 'customer_properties.active': true, 'neighborhoods.active': true })
-        .whereIn('neighborhood_access.status', ['active', 'needs_confirm'])
-        .whereNotNull('neighborhood_access.code').pluck('neighborhood_access.code');
-      isCommunity = directory.some((code) => sameCode(code, updates.property_gate_code));
-    }
-    if (isCommunity) {
-      delete updates.property_gate_code;
-      kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
-    }
+  const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
+  if (updates.property_gate_code !== undefined && await communityCodeShown(conn, customerId, neighborhoodCode, updates.property_gate_code)) {
+    delete updates.property_gate_code;
+    kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
+  }
+  // A property code on file that is the community code shows twice on the
+  // stop card (as the gate and as the yard gate): clear it.
+  if (updates.property_gate_code === undefined && current.property_gate_code
+    && await communityCodeShown(conn, customerId, neighborhoodCode, current.property_gate_code)) {
+    updates.property_gate_code = null;
+    kept.push('property_gate_code: cleared; the code on file there is the community gate code');
   }
   return { updates, kept };
 }
+
+// Same keys and values, in any key order.
+const samePlan = (a, b) => {
+  const norm = (o) => JSON.stringify(Object.keys(o || {}).sort().map((k) => [k, o[k] ?? null]));
+  return norm(a) === norm(b);
+};
 
 // Two-step write (issue #1568): no mutation without confirmed === true, which
 // only /confirm-action attaches server-side. Registered in write-gates.js.
@@ -2264,18 +2279,32 @@ async function updatePropertyAccess(input) {
   if (!customer) return { error: 'Customer not found' };
 
   const now = new Date();
-  const { updatedFields, kept } = await db.transaction(async (trx) => {
-    // The same customer preference lock every preference writer holds.
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
-    const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
-    if (Object.keys(plan.updates).length) {
-      await trx('property_preferences')
-        .insert({ customer_id: customerId, ...plan.updates, updated_at: now })
-        .onConflict('customer_id')
-        .merge({ ...plan.updates, updated_at: now });
-    }
-    return { updatedFields: Object.keys(plan.updates), kept: plan.kept };
-  });
+  let result;
+  try {
+    result = await db.transaction(async (trx) => {
+      // The same customer preference lock every preference writer holds.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
+      // The card the operator approved pinned its plan; a different plan under
+      // the lock (another writer got in between) is refused, not done.
+      if (input._ib_property_plan && !samePlan(input._ib_property_plan, plan.updates)) {
+        const err = new Error('Property access changed since this action was prepared. Review a fresh proposal.');
+        err.previewChanged = true;
+        throw err;
+      }
+      if (Object.keys(plan.updates).length) {
+        await trx('property_preferences')
+          .insert({ customer_id: customerId, ...plan.updates, updated_at: now })
+          .onConflict('customer_id')
+          .merge({ ...plan.updates, updated_at: now });
+      }
+      return { updatedFields: Object.keys(plan.updates), kept: plan.kept };
+    });
+  } catch (e) {
+    if (e?.previewChanged) return { error: e.message, preview_changed: true };
+    throw e;
+  }
+  const { updatedFields, kept } = result;
 
   // Log only which fields changed — codes/notes are sensitive.
   logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${updatedFields.join(', ') || 'nothing (already on file)'}`);

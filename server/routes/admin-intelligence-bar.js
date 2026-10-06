@@ -1766,6 +1766,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   if (toolUse.name === 'remove_saved_payment_method' && preview?.method?.id) {
     params.payment_method_id = String(preview.method.id);
   }
+  // The property access write pins the plan the card showed; the confirmed
+  // run refuses when its plan under the lock differs.
+  if (toolUse.name === 'update_property_access' && preview?.would_update) {
+    params._ib_property_plan = preview.would_update;
+  }
   if (toolUse.name === 'correct_invoice_address' && preview?.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
