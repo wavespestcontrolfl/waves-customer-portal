@@ -437,6 +437,8 @@ describe('screenAskAnswer', () => {
     expect(screen('We come back on 1/8.')).toBe('states_a_date');
     expect(screen('The technician arrives Wed at 14:00.')).toBe('states_a_date');
     expect(screen('The technician arrives on 2027-01-05.')).toBe('states_a_date');
+    expect(screen('Your next visit is 5 January.')).toBe('states_a_date');
+    expect(screen('Your next visit is the 5th of January.')).toBe('states_a_date');
     expect(screen('Activity often settles after the sun comes out.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
@@ -623,6 +625,7 @@ describe('symptoms and exposure never reach the model', () => {
     'The technician sprayed her',
     'She was sprayed',
     'You got sprayed',
+    'The technician sprayed you',
   ])('a safety line before the answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
     expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
@@ -929,7 +932,9 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
 
   test.each(['on', 'off'])('gate %s, a spray question naming a person: the safety line, then the normal answer', async (gate) => {
     if (gate === 'on') process.env.GATE_REPORT_ASK_AI = 'true'; else delete process.env.GATE_REPORT_ASK_AI;
-    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
+    // Queue a model result only when the route will call the model, so no
+    // stale result reaches a later test.
+    if (gate === 'on') dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
     mockDb();
     await withServer(async (baseUrl) => {
       const { status, body } = await ask(baseUrl, 'The tech sprayed my arm, what was it?');
@@ -966,6 +971,11 @@ describe('street-address scrub keeps prose', () => {
     ['Pressure index 2 is improving.', 'Pressure index 2 is improving.'],
     ['Ants at 18 Bay Pass by the lanai.', 'Ants at [address] by the lanai.'],
     ['Ants at 21 Harbor Crossing.', 'Ants at [address]'],
+    ['Ants at 7 Heron Bluff.', 'Ants at [address]'],
+    ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [address]'],
+    ['Ants at 18 bay pass.', 'Ants at [address]'],
+    ['We found 2 ant hills by the drive.', 'We found 2 ant hills by the drive.'],
+    ['We saw 2 termite tunnels and 2 ant trails.', 'We saw 2 termite tunnels and 2 ant trails.'],
   ])('%s', (concern, expected) => {
     expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: concern } }).customer_concern).toBe(expected);
   });
