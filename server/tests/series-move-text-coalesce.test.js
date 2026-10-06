@@ -391,8 +391,13 @@ describe('reconcileSeriesMoveEffects selection', () => {
     expect(calls.some((c) => c[0] === 'whereNotNull' && c[1] === 'reminders_synced_at')).toBe(false);
     // A text the last pre-cap attempt held is still selected after the
     // 30-minute cap, so its capped send comes from this sweep.
-    const lower = calls.find((c) => c[0] === 'where' && c[1] === 'created_at' && c[2] === '>');
-    expect(Date.now() - lower[3].getTime()).toBeGreaterThan(coalesce.SERIES_TEXT_HELD_WINDOW_MS + 2 * 60 * 1000);
+    const lower = calls.find((c) => c[0] === 'whereRaw' && /> \?$/.test(c[1]));
+    expect(Date.now() - lower[2][0].getTime()).toBeGreaterThan(coalesce.SERIES_TEXT_HELD_WINDOW_MS + 2 * 60 * 1000);
+    // Both bounds age the row from the post-commit hold start, not the
+    // transaction-start created_at (a move blocked on locks before commit).
+    const bounds = calls.filter((c) => c[0] === 'whereRaw' && /textHoldStartedAt/.test(c[1]));
+    expect(bounds).toHaveLength(2);
+    expect(bounds.every((c) => /COALESCE\(\(result->>'textHoldStartedAt'\)::timestamptz, created_at\)/.test(c[1]))).toBe(true);
   });
 
   test("'with' (quarter hour): the normal rule OR held staff texts", async () => {

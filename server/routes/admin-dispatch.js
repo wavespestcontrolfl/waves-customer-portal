@@ -5652,6 +5652,7 @@ const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_mo
 // belong to the normal rule) and retried at most every 2 minutes.
 const HELD_TEXT_RETRY_MS = 2 * 60 * 1000;
 const HELD_TEXT_CAP_GRACE_MS = 5 * 60 * 1000;
+const HELD_TEXT_START_SQL = "COALESCE((result->>'textHoldStartedAt')::timestamptz, created_at)";
 function scopeReconcileRows(q, { olderThanMs, heldTexts }) {
   const normal = (c) => c.whereIn('source_surface', RECONCILE_SURFACES)
     .where('created_at', '<', new Date(Date.now() - olderThanMs));
@@ -5659,11 +5660,13 @@ function scopeReconcileRows(q, { olderThanMs, heldTexts }) {
   const held = (c) => c.whereIn('source_surface', SERIES_TEXT_COALESCE_SURFACES)
     .where({ status: 'committed', notify_requested: true })
     .whereNull('notified_at')
-    .where('created_at', '<', new Date(Date.now() - SERIES_TEXT_HOLD_MS))
+    // Aged from the post-commit hold start the resolver records, falling
+    // back to created_at (transaction start) for a row not stamped yet.
+    .whereRaw(`${HELD_TEXT_START_SQL} < ?`, [new Date(Date.now() - SERIES_TEXT_HOLD_MS)])
     // The window runs 5 minutes past the 30-minute cap so a text held by
     // the last pre-cap attempt gets its capped send from this sweep (next
     // retry is 2 minutes later) instead of waiting for the quarter hour.
-    .where('created_at', '>', new Date(Date.now() - SERIES_TEXT_HELD_WINDOW_MS - HELD_TEXT_CAP_GRACE_MS))
+    .whereRaw(`${HELD_TEXT_START_SQL} > ?`, [new Date(Date.now() - SERIES_TEXT_HELD_WINDOW_MS - HELD_TEXT_CAP_GRACE_MS)])
     .where((r) => r.whereNull('effects_attempted_at').orWhere('effects_attempted_at', '<', new Date(Date.now() - HELD_TEXT_RETRY_MS)));
   return q.where((c) => (heldTexts === 'only' ? held(c) : c.where(normal).orWhere(held)));
 }
