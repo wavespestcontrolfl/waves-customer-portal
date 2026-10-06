@@ -21,3 +21,24 @@ describe("admin session return target", () => {
     expect(location.href).toBe("/admin/login?next=%2Fadmin%2Fagents");
   });
 });
+
+describe("non-JSON error bodies", () => {
+  const response = (status, body, type) => ({
+    ok: false, status, statusText: "",
+    headers: { get: (name) => (name.toLowerCase() === "content-type" ? type : null) },
+    clone() { return this; },
+    json: async () => { throw new Error("not json"); },
+    text: async () => body,
+  });
+
+  it("reads a Cloudflare 524 HTML page as the status, not its markup", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(524, "<!DOCTYPE html><html><title>524: A timeout occurred</title></html>", "text/html; charset=UTF-8")));
+    await expect(adminFetch("/admin/lawn-assessment/assess", { method: "POST" }))
+      .rejects.toMatchObject({ status: 524, message: "Request failed (524)" });
+  });
+
+  it("still surfaces a plain-text server message (Express labels res.send strings text/html)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(400, "Missing ?location= parameter", "text/html; charset=utf-8")));
+    await expect(adminFetch("/admin/settings/x")).rejects.toMatchObject({ status: 400, message: "Missing ?location= parameter" });
+  });
+});

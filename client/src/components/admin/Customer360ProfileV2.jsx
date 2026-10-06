@@ -76,6 +76,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
+import { ActiveCodeRow, AddCodeForm, FoundCodeCard } from "./AccessCodePanels";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
 import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
@@ -7485,6 +7486,115 @@ export function CustomerNeighborhoodBlock({ customerId }) {
   );
 }
 
+// ─── Access codes (every code a client gives, staff only) ────────
+// Active codes, the ones found in texts that wait for a one-tap office save,
+// and an add form. Admin-only; renders nothing at all when the section is off
+// (404) or the viewer is not a full admin (403). The visit picker uses the
+// visits the access-codes API returns with their homes.
+export function CustomerAccessCodesBlock({ customerId }) {
+  const [codes, setCodes] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const seq = useRef(0);
+
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    try {
+      const data = await adminFetch(`/admin/access-codes?customerId=${encodeURIComponent(customerId)}`);
+      if (mine !== seq.current) return;
+      setLoadError("");
+      setCodes({
+        active: Array.isArray(data?.active) ? data.active : [],
+        found: Array.isArray(data?.found) ? data.found : [],
+        properties: Array.isArray(data?.properties) ? data.properties : [],
+        visits: Array.isArray(data?.visits) ? data.visits : null,
+      });
+    } catch (err) {
+      if (mine !== seq.current || err?.status === 404 || err?.status === 403) return;
+      setLoadError(apiErrorMessage(err, "Could not load access codes"));
+    }
+  }, [customerId]);
+
+  useEffect(() => {
+    setCodes(null);
+    setLoadError("");
+    setAdding(false);
+    load();
+    return () => { seq.current += 1; };
+  }, [load]);
+
+  const post = async (path, body) => {
+    await adminFetch(`/admin/access-codes${path}`, { method: "POST", body: JSON.stringify(body || {}) });
+    await load();
+  };
+
+  if (loadError) {
+    return (
+      <div className="mt-3">
+        <AccessPrefsSubheading>Access codes</AccessPrefsSubheading>
+        <div className="flex flex-wrap items-center gap-2 text-ui-label text-ink-secondary">
+          {loadError}
+          <Button size="sm" variant="ghost" onClick={() => load()}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
+  if (!codes) return null;
+  return (
+    <div className="mt-3" data-testid="access-codes-block">
+      <div className="flex items-center justify-between gap-2">
+        <AccessPrefsSubheading>Access codes</AccessPrefsSubheading>
+        {!adding && (
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+          >
+            Add a code
+          </button>
+        )}
+      </div>
+      {adding && (
+        <div className="mb-2">
+          <AddCodeForm
+            visits={codes?.visits || []}
+            homes={codes?.properties || []}
+            onSubmit={(body) => post("", { customerId, ...body })}
+            onCancel={() => setAdding(false)}
+          />
+        </div>
+      )}
+      <div className="text-ui-caption font-medium text-ink-secondary mb-1">Active</div>
+      {codes.active.length === 0 ? (
+        <div className="text-ui-label text-ink-tertiary italic">No access codes on file.</div>
+      ) : (
+        <div className="grid gap-2">
+          {codes.active.map((row) => (
+            <ActiveCodeRow homes={codes?.properties || []} key={row.id} row={row} onRetire={(r) => post(`/${r.id}/retire`)} />
+          ))}
+        </div>
+      )}
+      {codes.found.length > 0 && (
+        <>
+          <div className="text-ui-caption font-medium text-ink-secondary mt-3 mb-1">Found in messages</div>
+          <div className="grid gap-2">
+            {codes.found.map((row) => (
+              <FoundCodeCard
+                key={`${row.id}:${row.updatedAt || ""}`}
+                row={row}
+                visits={codes?.visits || []}
+                homes={codes?.properties || []}
+                onSave={(r, body) => post(`/${r.id}/accept`, body)}
+                onDismiss={(r) => post(`/${r.id}/dismiss`)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -7565,6 +7675,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
       <>
         <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
+        {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>
     );
   }

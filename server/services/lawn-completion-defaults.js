@@ -8,6 +8,7 @@ const { etCalendarDayOf } = require('../utils/datetime-et');
 const { calculateLawnOverallScore, resolveStressDamage } = require('../../shared/lawn-scores.cjs');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { normalizeInventoryUnit } = require('./inventory-units');
+const { isServingProtocol } = require('./lawn-program');
 
 function lawnCompletionDefaultsEnabled() {
   return gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS') && gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
@@ -95,7 +96,7 @@ function completionMethod(item, protocolProduct) {
 function matchesLawnCompletionProtocol(protocol, assigned, trackKey) {
   const exactAssignment = !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
   return !!(protocol?.window && protocol.grassTrack === trackKey
-    && (protocol.status === 'active' || (protocol.status === 'archived' && exactAssignment))
+    && (isServingProtocol(protocol) || (protocol.status === 'archived' && exactAssignment))
     && [[protocol.protocolKey, assigned.protocolKey], [protocol.version, assigned.protocolVersion], [protocol.window.key, assigned.windowKey]]
       .every(([resolved, expected]) => !expected || expected === resolved));
 }

@@ -1855,7 +1855,8 @@ describe('startPrecedesCall\'s call site is exempted by an existing call appoint
 // EXCEPTION text and had the same "Tuesday, 2 to 4" ambiguous-period gap the
 // sibling v1 prompt was just fixed for. Fixed here with the identical rule.
 describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION states or business-hours-reads the period, same as the sibling v1 prompt (codex #4919 round-8 P1; owner decision 2026-09-29)', () => {
-  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  // extractCallData renders its appointment rules from the shared module (#5994).
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/prompts/appointment-confirmed-rules'), 'utf8');
 
   test('the rule requires UNAMBIGUOUS period and gives "Tuesday, 2 to 4 PM" as the qualifying example, not the bare "Tuesday, 2 to 4"', () => {
     const ruleAt = processorSrc.indexOf('ARRIVAL WINDOW EXCEPTION:');

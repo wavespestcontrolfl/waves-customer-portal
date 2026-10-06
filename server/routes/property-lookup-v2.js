@@ -1265,7 +1265,7 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
   // much as a synchronous DBPR match — see applyCommercialSuiteSize.
   // The FRESH lookup path (performPropertyLookupCore) runs the full leg
   // with none of these restrictions.
-  const listingRefresh = listingStampNeedsRefresh(record);
+  const listingRefresh = listingStampNeedsRefresh(record, suiteUnitKeyForProfile(address, enriched));
   await applyCommercialSuiteSize(enriched, {
     skipWebSearch: true,
     requireWarmCache: true,
@@ -3406,9 +3406,12 @@ const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats', 'listing_verified
 // A cached row whose listing-size stamp aged out and has not been re-read in
 // the last 30 days: the next cache hit re-reads the listing once.
 const LISTING_REFRESH_RETRY_MS = 30 * DAY_MS;
-function listingStampNeedsRefresh(record, now = Date.now()) {
+function listingStampNeedsRefresh(record, unitKey, now = Date.now()) {
   const stamp = record?._commercialSuiteSize;
   if (!lookupListingSizeLive() || !stamp || stamp.source !== 'listing_verified_text') return false;
+  // The stamp is for THIS unit only: an aggregate row served for another
+  // unit neither refreshes nor marks it.
+  if (!stamp.unitKey || stamp.unitKey !== unitKey) return false;
   if (commercialSuiteSizeStampIsFresh(stamp, now)) return false;
   const checkedAt = Date.parse(stamp.refreshCheckedAt);
   return !(Number.isFinite(checkedAt) && now - checkedAt < LISTING_REFRESH_RETRY_MS);

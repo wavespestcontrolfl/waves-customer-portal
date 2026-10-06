@@ -1,0 +1,685 @@
+/**
+ * On-site follow-up after the recipient's YES (owner 2026-10-02): the caller's
+ * appointment texts switch off once, and the recipient gets the booking
+ * confirmation they missed, driven by the confirmed recipient_optin row's
+ * visit_id (call-pipeline on-site asks only). One atomic claim per row, retries
+ * from the sweep, never a double send or a second demotion.
+ */
+const KEY = '5550100123';
+const OTHER = '5550100456';
+
+// A small stateful stand-in for the three tables the follow-up touches. Queries
+// are evaluated by the shape the service builds (claim / finish / demote marker).
+function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn = true, demoteGateOn = true } = {}) {
+  jest.resetModules();
+  const state = {
+    optin: rows.map((r) => ({ followup_claimed_at: null, followup_done_at: null, followup_armed_at: null, caller_demoted_at: null, caller_choice_at: null, fanout_confirmed_at: null, ...r })),
+    customer: { id: 'c1', service_contacts_consent_at: new Date('2026-10-01T00:00:00Z'), service_preferences: {}, ...customer },
+    prefs: [],
+    visitState,
+  };
+  const make = (table) => {
+    const ctx = { filter: {}, not: {}, nulls: [], notNulls: [], groupBy: null };
+    const matches = (r) => Object.entries(ctx.filter).every(([k, v]) => r[k] === v)
+      && Object.entries(ctx.not).every(([k, v]) => r[k] !== v)
+      && ctx.nulls.every((c) => r[c] == null) && ctx.notNulls.every((c) => r[c] != null);
+    const q = {
+      where: jest.fn((f) => { if (typeof f === 'function') f({ whereNull: () => ({ orWhere: () => {} }) }); else Object.assign(ctx.filter, f); return q; }),
+      whereNot: jest.fn((f) => { Object.assign(ctx.not, f); return q; }),
+      whereNull: jest.fn((c) => { ctx.nulls.push(c); return q; }),
+      whereNotNull: jest.fn((c) => { ctx.notNulls.push(c); return q; }),
+      select: jest.fn(() => q),
+      forUpdate: jest.fn(() => q),
+      whereRaw: jest.fn(() => q),
+      whereIn: jest.fn(() => q),
+      groupBy: jest.fn(() => q),
+      orderByRaw: jest.fn(() => q),
+      limit: jest.fn(async () => [...new Set(state.optin.filter((r) => r.status === 'confirmed' && r.visit_id && !r.followup_done_at).map((r) => r.customer_id))].map((customer_id) => ({ customer_id }))),
+      first: jest.fn(async () => {
+        if (table === 'customers') return { ...state.customer };
+        if (table === 'recipient_optin') { const r = state.optin.find(matches); return r ? { ...r } : undefined; }
+        if (table === 'notification_prefs') { const r = state.prefs.find((x) => x.customer_id === ctx.filter.customer_id); return r ? { ...r } : undefined; }
+        return null;
+      }),
+      insert: jest.fn((row) => {
+        if (table !== 'notification_prefs') return q;
+        const i = { onConflict: () => ({ merge: async (patch) => { state.prefs.push({ ...row, ...patch }); return 1; } }) };
+        if (prefsInsert) prefsInsert(row);
+        return i;
+      }),
+      update: jest.fn((patch) => {
+        let touched = [];
+        if (table === 'recipient_optin') {
+          const isClaim = Object.keys(patch).join() === 'followup_claimed_at' && patch.followup_claimed_at instanceof Date;
+          touched = state.optin.filter((r) => matches(r)
+            && (!isClaim || (r.status === 'confirmed' && !r.followup_claimed_at)));
+          touched.forEach((r) => Object.assign(r, patch));
+        }
+        if (table === 'customers' && patch.service_contacts_consent_at) { Object.assign(state.customer, patch); touched = [state.customer]; }
+        if (table === 'notification_prefs') { const { updated_at: _ignored, ...rest } = patch; touched = state.prefs.filter((r) => r.customer_id === ctx.filter.customer_id); touched.forEach((r) => Object.assign(r, rest)); }
+        const done = Promise.resolve(touched.length);
+        done.returning = async () => touched.map((r) => ({ ...r }));
+        return done;
+      }),
+    };
+    // Awaiting a select on recipient_optin answers the matching customers.
+    q.then = (resolve, reject) => Promise.resolve(table === 'recipient_optin'
+      ? state.optin.filter(matches).map((r) => ({ customer_id: r.customer_id, phone_key: r.phone_key }))
+      : []).then(resolve, reject);
+    return q;
+  };
+  const dbMock = jest.fn(make);
+  dbMock.transaction = jest.fn(async (fn) => fn(dbMock));
+  dbMock.raw = (sql, binds) => (binds ? { sql, binds } : sql);
+  jest.doMock('../models/db', () => dbMock);
+  // The canonical default-row helper: seeds the prefs row when absent (never a bare insert).
+  jest.doMock('../services/customer-default-rows', () => ({
+    createDefaultCustomerRows: jest.fn(async (_h, customerId) => {
+      if (prefsInsert) prefsInsert({ customer_id: customerId });
+      if (!state.prefs.some((r) => r.customer_id === customerId)) state.prefs.push({ customer_id: customerId });
+    }),
+  }));
+  jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+  jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => gateOn), onSiteCallerDemoteLive: jest.fn(() => demoteGateOn) }));
+  jest.doMock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => state.visitState === 'wait') }));
+  const sendReplay = replay || jest.fn(async () => ({ sent: true }));
+  jest.doMock('../services/appointment-reminders', () => ({
+    scheduledServiceApptTime: jest.fn(async () => new Date(Date.now() + (state.visitState === 'dead' ? -3600000 : 3600000))),
+    sendConfirmationToServiceContact: sendReplay,
+  }));
+  // visitAskState reads the visit's status through the same db handle.
+  const origImpl = dbMock.getMockImplementation();
+  dbMock.mockImplementation((table) => {
+    if (table === 'scheduled_services') {
+      const q = { where: () => q, first: async () => (state.visitState === 'dead' ? undefined : { id: 'v1' }) };
+      return q;
+    }
+    return origImpl(table);
+  });
+  const optin = require('../services/recipient-optin');
+  return { optin, state, sendReplay, dbMock };
+}
+const row = (extra = {}) => ({ customer_id: 'c1', phone_key: KEY, status: 'confirmed', visit_id: 'v1', confirmed_at: new Date(), ...extra });
+const spouse = (extra = {}) => ({
+  service_contact_name: 'Sample Spouse', service_contact_phone: '+15550100123', service_contact_email: null, service_contact_role: 'spouse_partner',
+  service_contact2_phone: null, service_contact3_phone: null, ...extra,
+});
+
+describe('on-site follow-up: caller demotion + confirmation replay', () => {
+  test('a YES on a live visit demotes the caller once and replays the confirmation, answering the YES', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(1);
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+    expect(state.optin[0].caller_demoted_at).toBeInstanceOf(Date);
+    expect(sendReplay).toHaveBeenCalledWith({ customerId: 'c1', scheduledServiceId: 'v1', phone: '+15550100123', inReplyToYes: true });
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+  });
+
+  test('a repeated / duplicate YES never sends twice or demotes again (a holder who turned texts back on stays on)', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    await optin.sweepOnSiteFollowUps();
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(state.prefs).toHaveLength(1);
+  });
+
+  test('a replay that is held / not sent releases its claim; the sweep retries (not as a reply) without demoting again', async () => {
+    const replay = jest.fn()
+      .mockResolvedValueOnce({ sent: false, reason: 'not_sent' })
+      .mockResolvedValueOnce({ sent: true });
+    const { optin, state } = load({ rows: [row()], customer: spouse(), replay });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+    expect(state.optin[0].caller_demoted_at).toBeInstanceOf(Date);
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(replay).toHaveBeenCalledTimes(2);
+    expect(replay.mock.calls[1][0].inReplyToYes).toBe(false);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    expect(state.prefs).toHaveLength(1);
+  });
+
+  test('retryable vs final replay reasons', async () => {
+    for (const [result, done] of [
+      [{ sent: false, reason: 'primary_confirmation_pending' }, false],
+      [{ sent: false, reason: 'callback_number_hold' }, false],
+      [{ sent: false, reason: 'error' }, false],
+      [{ sent: false, reason: 'template_unavailable' }, false],
+      [{ sent: false, reason: 'already_sent' }, true],
+      [{ sent: false, reason: 'visit_not_live' }, true],
+      [{ sent: false, reason: 'sms_not_chosen' }, true],
+      [{ sent: false, reason: 'delivery_uncertain' }, true],
+    ]) {
+      const { optin, state } = load({ rows: [row()], customer: spouse(), replay: jest.fn(async () => result) });
+      await optin.settleOnSiteFollowUps(['c1']);
+      expect(!!state.optin[0].followup_done_at).toBe(done);
+    }
+  });
+
+  test('a visit that is gone (cancelled / under way / past) ends it: no demotion, no send', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse(), visitState: 'dead' });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+  });
+
+  test('an office-review hold waits (claim released, nothing demoted or sent)', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse(), visitState: 'wait' });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+  });
+
+  test('another slot phone on the account: the caller stays, the recipient still gets the replay', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ service_contact2_phone: '+15550100456' }) });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+  });
+
+  test('the account\'s consent not covering the phone yet (no stamp): no demotion, no send; waits for the sweep', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ service_contacts_consent_at: null }) });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+  });
+
+  test('two new slot phones: the first YES waits (consent not stamped yet) and is not closed; it goes out once the account is covered', async () => {
+    const { optin, state, sendReplay } = load({
+      rows: [row()],
+      customer: spouse({ service_contact2_phone: '+15550100456', service_contacts_consent_at: null }),
+    });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+    state.customer.service_contacts_consent_at = new Date();
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(state.prefs).toEqual([]);
+  });
+
+  test('a phone on the unconsented hold is not a recipient: nobody is demoted', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ service_preferences: { unconsented_slot_phone_keys: [KEY] } }) });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+  });
+
+  test('the account primary phone IS the confirmed slot phone: nobody is demoted (it would leave no recipient)', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ phone: '+15550100123' }) });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0].followup_done_at).toBeNull();
+  });
+
+  test('a contact removed from the slots ends it', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ service_contact_phone: '+15550100999' }) });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+  });
+
+  test('portal / explicit-consent asks (no visit_id) never trigger it', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row({ visit_id: null })], customer: spouse() });
+    expect(await optin.settleOnSiteFollowUps(['c1'])).toBe(0);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+  });
+
+  test('a claim another process holds (fresh lease) is left alone; a pending / declined row never runs', async () => {
+    const held = load({ rows: [row({ followup_claimed_at: new Date() })], customer: spouse() });
+    expect(await held.optin.settleOnSiteFollowUps(['c1'])).toBe(0);
+    expect(held.sendReplay).not.toHaveBeenCalled();
+    const pending = load({ rows: [row({ status: 'pending' }), row({ phone_key: OTHER, status: 'declined' })], customer: spouse() });
+    expect(await pending.optin.settleOnSiteFollowUps(['c1'])).toBe(0);
+  });
+
+  test('a follow-up older than the cap is dropped, not retried forever', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row({ confirmed_at: new Date(Date.now() - 15 * 24 * 3600000) })], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+  });
+
+  test('a replay that throws never throws out of the follow-up, and the claim is released for the sweep', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse(), replay: jest.fn(async () => { throw new Error('boom'); }) });
+    await expect(optin.settleOnSiteFollowUps(['c1'])).resolves.toBe(0);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+  });
+
+  test('a demotion write that fails retries (not done) but the replay still goes out', async () => {
+    const { optin, state, sendReplay } = load({
+      rows: [row()], customer: spouse(), prefsInsert: () => { throw new Error('prefs down'); },
+    });
+    await optin.settleOnSiteFollowUps(['c1']);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(state.optin[0].followup_done_at).toBeNull();
+  });
+
+  test('gate off: nothing runs', async () => {
+    const { optin, sendReplay } = load({ rows: [row()], customer: spouse(), gateOn: false });
+    expect(await optin.settleOnSiteFollowUps(['c1'])).toBe(0);
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 0 });
+    expect(sendReplay).not.toHaveBeenCalled();
+  });
+
+  test('only the phone that said YES answers as a reply; another contact\'s unfinished row on the same run honors the send window', async () => {
+    const { optin, sendReplay } = load({
+      rows: [row(), row({ phone_key: OTHER })],
+      customer: spouse({ service_contact2_phone: '+15550100456' }),
+    });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(2);
+    const byPhone = Object.fromEntries(sendReplay.mock.calls.map(([a]) => [a.phone, a.inReplyToYes]));
+    expect(byPhone).toEqual({ '+15550100123': true, '+15550100456': false });
+  });
+
+  test('dark: the YES itself closes its visit-bound row, so a flip before the next sweep acts on nothing', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row(), row({ phone_key: OTHER })], customer: spouse(), demoteGateOn: false });
+    await optin.onRecipientConfirmed(KEY);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    // Another phone's row is not this YES's to close.
+    expect(state.optin[1].followup_done_at).toBeNull();
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+  });
+
+  test('GATE_ONSITE_CALLER_DEMOTE off (dark): a YES demotes nobody and replays nothing; the sweep closes the row so a later flip never acts on it', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row(), row({ phone_key: OTHER, visit_id: null })], customer: spouse(), demoteGateOn: false });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
+    expect(await optin.rearmOnSiteFollowUp('c1', KEY, 'v1')).toBe('skipped');
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 0 });
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    // Closed: the visit-bound row only (a portal ask carries no visit and no obligation).
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    expect(state.optin[1].followup_done_at).toBeNull();
+  });
+
+  test('the gate reader is strict: only GATE_ONSITE_CALLER_DEMOTE=true turns it on', () => {
+    jest.resetModules();
+    jest.dontMock('../config/feature-gates');
+    const { onSiteCallerDemoteLive } = require('../config/feature-gates');
+    const prior = process.env.GATE_ONSITE_CALLER_DEMOTE;
+    try {
+      delete process.env.GATE_ONSITE_CALLER_DEMOTE;
+      expect(onSiteCallerDemoteLive()).toBe(false);
+      process.env.GATE_ONSITE_CALLER_DEMOTE = '1';
+      expect(onSiteCallerDemoteLive()).toBe(false);
+      process.env.GATE_ONSITE_CALLER_DEMOTE = 'true';
+      expect(onSiteCallerDemoteLive()).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_ONSITE_CALLER_DEMOTE; else process.env.GATE_ONSITE_CALLER_DEMOTE = prior;
+    }
+  });
+});
+
+describe('the YES drives the follow-up only AFTER it commits', () => {
+  // The webhook's transaction handle: the YES's own reads go through it; its
+  // executionPromise settles at commit (or rejects on rollback).
+  function trxOf(dbMock, executionPromise) {
+    const trx = jest.fn((table) => {
+      const q = dbMock(table);
+      return q;
+    });
+    trx.raw = dbMock.raw;
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.isTransaction = true;
+    trx.executionPromise = executionPromise;
+    return trx;
+  }
+  const tick = () => new Promise((r) => setImmediate(r));
+
+  test('the follow-up waits for the commit, then answers the YES', async () => {
+    const { optin, sendReplay, state, dbMock } = load({ rows: [row()], customer: spouse() });
+    let commit;
+    const trx = trxOf(dbMock, new Promise((resolve) => { commit = resolve; }));
+    await optin.onRecipientConfirmed(KEY, { dbh: trx });
+    await tick();
+    expect(sendReplay).not.toHaveBeenCalled();
+    commit();
+    await tick();
+    await tick();
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(sendReplay.mock.calls[0][0].inReplyToYes).toBe(true);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+  });
+
+  test('a rolled-back YES runs nothing', async () => {
+    const { optin, sendReplay, state, dbMock } = load({ rows: [row()], customer: spouse() });
+    const rolledBack = Promise.reject(new Error('rolled back'));
+    rolledBack.catch(() => {});
+    await optin.onRecipientConfirmed(KEY, { dbh: trxOf(dbMock, rolledBack) });
+    await tick();
+    await tick();
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+  });
+
+  test('a replay failure on a fire-and-forget YES never undoes or blocks the consent already recorded', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse({ service_contacts_consent_at: null }), replay: jest.fn(async () => { throw new Error('boom'); }) });
+    await expect(optin.onRecipientConfirmed(KEY)).resolves.toBeUndefined();
+    expect(state.customer.service_contacts_consent_source).toBe('recipient_optin_confirmed');
+  });
+});
+
+describe('rearmOnSiteFollowUp: a phone that already said YES gets no new ask at a later booking', () => {
+  const settledLongAgo = () => row({ confirmed_at: new Date(Date.now() - 60 * 24 * 3600 * 1000), followup_done_at: new Date(Date.now() - 59 * 24 * 3600 * 1000) });
+
+  test('re-arms the confirmed row on the new visit; the sweep then demotes the caller once and replays the confirmation for that visit', async () => {
+    const { optin, state, sendReplay } = load({ rows: [settledLongAgo()], customer: spouse() });
+    expect(await optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('armed');
+    // Nothing runs inline: the caller still gets this call's own confirmation first.
+    expect(state.prefs).toEqual([]);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0]).toMatchObject({ visit_id: 'v2', followup_done_at: null });
+    // The 14-day cap runs from the re-arm, not from the 60-day-old YES. While the
+    // booking call is still settling (its own confirmation to the caller), the
+    // contact gets the confirmation but the caller is NOT demoted yet.
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(sendReplay).toHaveBeenCalledWith({ customerId: 'c1', scheduledServiceId: 'v2', phone: '+15550100123', inReplyToYes: false });
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    // Past the settle window: the caller is demoted, the confirmation is not sent again.
+    state.optin[0].followup_armed_at = new Date(Date.now() - 11 * 60 * 1000);
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+  });
+
+  test('a visit on an office-review hold at booking is retried by the sweep, not dropped', async () => {
+    const { optin, state, sendReplay } = load({ rows: [settledLongAgo()], customer: spouse(), visitState: 'wait' });
+    expect(await optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('armed');
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    state.visitState = 'live';
+    state.optin[0].followup_armed_at = new Date(Date.now() - 11 * 60 * 1000);
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs).toHaveLength(1);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+  });
+
+  test('a caller already demoted for this phone is not demoted again; a pending phone is not armed', async () => {
+    const again = load({ rows: [{ ...settledLongAgo(), caller_demoted_at: new Date() }], customer: spouse() });
+    expect(await again.optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('armed');
+    await again.optin.sweepOnSiteFollowUps();
+    expect(again.state.prefs).toEqual([]);
+    expect(again.sendReplay).toHaveBeenCalledTimes(1);
+
+    const pending = load({ rows: [row({ status: 'pending' })], customer: spouse() });
+    expect(await pending.optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('skipped');
+  });
+});
+
+describe('one sender at a time: the call fan-out takes the replay\'s row claim', () => {
+  test('the fan-out claims an unfinished row for its visit; the replay then finds nothing to run until it is released', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    expect(await optin.claimFollowUpForFanOut('c1', '+1 (555) 010-0123', 'v1')).toBe('claimed');
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
+    expect(sendReplay).not.toHaveBeenCalled();
+    await optin.releaseFanOutFollowUpClaim('c1', '+15550100123', 'v1');
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+    expect(await optin.settleOnSiteFollowUps(['c1'])).toBe(1);
+  });
+
+  test('a replay in flight owns the text (busy); no unfinished row, another visit, or dark = nothing to coordinate (none)', async () => {
+    const busy = load({ rows: [row({ followup_claimed_at: new Date() })], customer: spouse() });
+    expect(await busy.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('busy');
+    const done = load({ rows: [row({ followup_done_at: new Date() })], customer: spouse() });
+    expect(await done.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('none');
+    const other = load({ rows: [row()], customer: spouse() });
+    expect(await other.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v9')).toBe('none');
+    expect(await other.optin.claimFollowUpForFanOut('c1', '+15550100999', 'v1')).toBe('none');
+    const dark = load({ rows: [row()], customer: spouse(), demoteGateOn: false });
+    expect(await dark.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('none');
+    expect(dark.state.optin[0].followup_claimed_at).toBeNull();
+  });
+
+  test('wiring: the fan-out skips a busy contact, holds the claim across its send and releases it', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    expect(src).toContain("claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);\n                        if (followUpClaim === 'busy' || followUpClaim === 'sent') continue;");
+    // The replay check runs AFTER the claim settles (a replay that finished in between is seen).
+    expect(src).toContain("require('./recipient-optin').isOnSiteFollowUpLive() && await require('./appointment-reminders').confirmationLoggedForVisitPhone({\n                          scheduledServiceId, phone: contact.phone,\n                        })");
+    expect(src.indexOf('confirmationLoggedForVisitPhone({')).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
+    // Re-arming is idempotent per visit and never clears an in-flight claim.
+    const optinSrc = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
+    expect(optinSrc).toContain(".whereRaw('visit_id IS DISTINCT FROM ?', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null, fanout_confirmed_at: null });");
+    expect(src).toContain('async (result) => { await releaseFollowUpClaim(result); return result; },');
+    expect(src).toContain('async (sendErr) => { await releaseFollowUpClaim(sendErr && sendErr.providerOutcome); throw sendErr; },');
+    expect(src).toContain("|| (certainty === 'unknown' && (result.sent === true || result.deliveryOutcome === 'uncertain'));");
+    // The visit reaches sms_log through the send's appointmentId (twilio.js noticeScope), which the dedupe reads.
+    const twilio = require('fs').readFileSync(require.resolve('../services/twilio.js'), 'utf8');
+    expect(twilio).toContain("noticeScope(options.appointmentId)");
+    expect(require('fs').readFileSync(require.resolve('../services/messaging/notice-scope.js'), 'utf8')).toContain('scheduled_service_id: String(appointmentId)');
+  });
+});
+
+describe('the demoted contact stops being confirmed: the caller gets appointment texts back', () => {
+  test('a STOP after the demotion restores the caller and clears the marker; the sweep is the backstop', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: true }]);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+
+    const swept = load({ rows: [row({ status: 'declined', caller_demoted_at: new Date() })], customer: spouse(), demoteGateOn: false });
+    swept.state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await swept.optin.sweepOnSiteFollowUps();
+    expect(swept.state.prefs[0].appointment_notify_primary).toBe(true);
+    expect(swept.state.optin[0].caller_demoted_at).toBeNull();
+  });
+
+  test('a holder who had already switched their own texts off is not marked, so a STOP never switches them back on', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+  });
+
+  test('the contact is removed from the account (or its consent is cleared) while still confirmed: the sweep restores the caller', async () => {
+    const removed = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse({ service_contact_phone: null }) });
+    removed.state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await removed.optin.sweepOnSiteFollowUps();
+    expect(removed.state.prefs[0].appointment_notify_primary).toBe(true);
+    expect(removed.state.optin[0].caller_demoted_at).toBeNull();
+
+    const unconsented = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse({ service_contacts_consent_at: null }) });
+    unconsented.state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await unconsented.optin.sweepOnSiteFollowUps();
+    expect(unconsented.state.prefs[0].appointment_notify_primary).toBe(true);
+  });
+
+  test('a confirmed contact who is still textable is never restored by the sweep', async () => {
+    const { optin, state } = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse() });
+    state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+  });
+});
+
+describe('round-3 rules', () => {
+  test('the holder set the preference after the demotion: it is theirs, a later STOP never switches it back on', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    // The holder turns texts on, then off again, through a settings save.
+    await optin.noteHolderSetNotifyPrimary(null, 'c1');
+    expect(state.optin[0].caller_choice_at).toBeInstanceOf(Date);
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+  });
+
+  test('a STOP then a renewed YES while the visit is ahead: the follow-up is owed again and the caller is demoted again', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    expect(state.prefs[0].appointment_notify_primary).toBe(true);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    state.optin[0].status = 'confirmed';
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(1);
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    // The visit's confirmation already reached this phone: it is not sent again.
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+  });
+
+  test('the fan-out stamps an accepted send with its release: the replay is not sent on top, the demotion still runs', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    expect(await optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('claimed');
+    await optin.releaseFanOutFollowUpClaim('c1', '+15550100123', 'v1', { confirmed: true });
+    expect(state.optin[0].fanout_confirmed_at).toBeInstanceOf(Date);
+    expect(await optin.settleOnSiteFollowUps(['c1'])).toBe(1);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    // A later booking re-arms the row and owes that visit's own confirmation.
+    await optin.rearmOnSiteFollowUp('c1', KEY, 'v2');
+    expect(state.optin[0].fanout_confirmed_at).toBeNull();
+  });
+
+  test('the demotion seeds the canonical prefs row and updates it (no bare insert); the three settings writers mark the holder\'s choice', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
+    expect(src).toContain("await require('./customer-default-rows').createDefaultCustomerRows(trx, customer.id);");
+    expect(src).not.toContain(".insert({ customer_id: customer.id, appointment_notify_primary: false })");
+    const portal = fs.readFileSync(require.resolve('../routes/notifications.js'), 'utf8');
+    expect(portal.split('noteHolderSetNotifyPrimary(trx,').length - 1).toBe(2);
+    expect(fs.readFileSync(require.resolve('../routes/admin-customers.js'), 'utf8')).toContain('noteHolderSetNotifyPrimary(trx, req.params.id)');
+  });
+});
+
+describe('ordering with the caller\'s own confirmation and the fan-out', () => {
+  test('the caller\'s booking confirmation is still pending: no demotion and no replay yet; both run once it has gone out', async () => {
+    const { optin, state, sendReplay, dbMock } = load({ rows: [row()], customer: spouse() });
+    const base = dbMock.getMockImplementation();
+    let pending = true;
+    dbMock.mockImplementation((table) => (table === 'appointment_reminders'
+      ? { where() { return this; }, first: async () => ({ confirmation_sent: !pending }) }
+      : base(table)));
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
+    expect(state.prefs).toEqual([]);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0].followup_done_at).toBeNull();
+    pending = false;
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+  });
+
+  test('a replay that was sent (or may have been) is stamped on the row: the fan-out then reads "sent" and skips', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].fanout_confirmed_at).toBeInstanceOf(Date);
+    expect(await optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('sent');
+
+    const uncertain = load({ rows: [row()], customer: spouse(), replay: jest.fn(async () => ({ sent: false, reason: 'delivery_uncertain' })) });
+    await uncertain.optin.settleOnSiteFollowUps(['c1']);
+    expect(await uncertain.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('sent');
+
+    const held = load({ rows: [row()], customer: spouse(), replay: jest.fn(async () => ({ sent: false, reason: 'not_sent' })) });
+    await held.optin.settleOnSiteFollowUps(['c1']);
+    expect(held.state.optin[0].fanout_confirmed_at).toBeNull();
+  });
+});
+
+describe('a stale worker never closes a row it no longer holds', () => {
+  test('a STOP that restored the caller during the replay: the old run does not mark the follow-up done again', async () => {
+    let state;
+    const replay = jest.fn(async () => {
+      // The STOP lands while the replay is in flight: the restore clears the claim and re-opens the row.
+      state.optin[0].status = 'declined';
+      state.optin[0].followup_claimed_at = null;
+      return { sent: false, reason: 'not_a_recipient' };
+    });
+    const loaded = load({ rows: [row()], customer: spouse(), replay });
+    state = loaded.state;
+    await loaded.optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].followup_done_at).toBeNull();
+  });
+});
+
+describe('round-4 rules', () => {
+  test('a YES minutes after the ask (the booking call is still sending the caller\'s own confirmation): replay now, demotion only after the settle window', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row({ dispatched_at: new Date(Date.now() - 60 * 1000) })], customer: spouse() });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(1);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(state.optin[0].fanout_confirmed_at).toBeInstanceOf(Date);
+    state.optin[0].dispatched_at = new Date(Date.now() - 11 * 60 * 1000);
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+  });
+
+  test('contact A (demotion owned by the flow) is replaced by contact B: the ownership moves to B, and the sweep does not switch the caller back on for A', async () => {
+    const { optin, state } = load({
+      rows: [row({ phone_key: OTHER, caller_demoted_at: new Date(), followup_done_at: new Date() }), row()],
+      customer: spouse(),
+    });
+    state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    expect(state.optin[1].caller_demoted_at).toBeInstanceOf(Date);
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+  });
+
+  test('the demoted contact\'s phone is suppressed another way (spoken opt-out, wrong number, do-not-contact): the sweep restores the caller', async () => {
+    const { optin, state, dbMock } = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse() });
+    state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    const base = dbMock.getMockImplementation();
+    dbMock.mockImplementation((table) => (table === 'messaging_suppression'
+      ? { whereRaw() { return this; }, where() { return this; }, first: async () => ({ phone: '+15550100123' }) }
+      : base(table)));
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs[0].appointment_notify_primary).toBe(true);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+  });
+});
+
+describe('account-wide demotion', () => {
+  test('a saved property\'s own "send these to me too" choice is cleared with the demotion', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
+    expect(src).toContain(".where({ customer_id: customer.id, appointment_notify_primary: true })\n      .update({ appointment_notify_primary: null, updated_at: new Date() });");
+  });
+});
+
+describe('wiring', () => {
+  const fs = require('fs');
+  const read = (p) => fs.readFileSync(require.resolve(p), 'utf8');
+  test('the 15-minute sweep retries unfinished follow-ups; the booking site reconciles an already-confirmed phone', () => {
+    expect(read('../index.js')).toContain('await sweepOnSiteFollowUps();');
+    expect(read('../services/call-recording-processor.js')).toContain('rearmOnSiteFollowUp(customerId, phoneKey, svc.id)');
+  });
+  test('the replay claim is atomic on the row (one UPDATE ... RETURNING), never a read-then-write', () => {
+    const src = read('../services/recipient-optin.js');
+    expect(src).toContain(".update({ followup_claimed_at: claimedAt })\n    .returning(['phone_key', 'visit_id', 'confirmed_at', 'dispatched_at', 'followup_armed_at', 'caller_demoted_at', 'fanout_confirmed_at']);");
+    expect(src).toContain(".whereNull('caller_demoted_at')");
+  });
+});

@@ -30,6 +30,7 @@ const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
 const { treatmentNarrativePdfSignature } = require('./treatment-narrative');
+const { treeShrubTechParagraphPdfSignature } = require('./tree-shrub-tech-paragraph-gate');
 const { detectServiceLine } = require('./service-line-configs');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { publicOriginPdfSignature } = require('../../utils/portal-url');
@@ -185,6 +186,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
   const smSignature = await stationMapPdfSignature(service, knex);
+  // T&S "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH): '' unless the gate is live and a whole frozen entry exists.
+  const tsParagraphSignature = await treeShrubTechParagraphPdfSignature(service, knex);
   // Assessment identity + copy version in the key, so a stale in-flight render
   // cannot republish over a newer one (#3168).
   // ONE canonical lookup feeds BOTH the pin and the storage-key component
@@ -457,7 +460,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + photoSetBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + applicatorRenderedPdfSignature(renderedData) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + photoSetBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + applicatorRenderedPdfSignature(renderedData) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -619,7 +622,7 @@ async function getOrRenderServiceReportPdf(recordId, {
       // second service_records read, and threads the same
       // propertyHistoryEnabled lawnAssessmentPdfSignature is already given
       // just below (Sonnet fallback-audit P1s, 2026-09-28).
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled }) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex, { serviceLine: service.service_line || detectServiceLine(service.service_type) }) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled }) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex, { serviceLine: service.service_line || detectServiceLine(service.service_type) }) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await treeShrubTechParagraphPdfSignature(service, knex) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

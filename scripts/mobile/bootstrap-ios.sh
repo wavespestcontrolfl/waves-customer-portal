@@ -127,6 +127,11 @@ if ! grep -q 'waves: iOS floor' ios/App/Podfile; then
   '
 fi
 echo "==> iOS deployment target set to ${IOS_MIN} (Xcode 27 minimum) ✓"
+# The template turns on Xcode's user-script sandbox, which blocks CocoaPods'
+# "Embed Pods Frameworks" script from reading its own file list
+# (Pods-App-frameworks.sh: "Sandbox: bash deny file-read-data"), so archive
+# fails. CocoaPods does not support that sandbox; turn it off for the App.
+sed -i '' 's/ENABLE_USER_SCRIPT_SANDBOXING = YES;/ENABLE_USER_SCRIPT_SANDBOXING = NO;/g' ios/App/App.xcodeproj/project.pbxproj
 
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
@@ -222,12 +227,29 @@ fi
 
 # The privacy manifest only counts when it is in the App target's resources;
 # App Review rejects a build without it. Attach it with the xcodeproj gem that
-# Homebrew's CocoaPods ships (idempotent). Without that gem, say so and leave
-# the manual Xcode step below.
-# `|| true`: a CocoaPods installed with `gem install` has no Homebrew wrapper,
-# and under `set -o pipefail` a grep with no match would end the bootstrap.
-POD_GEM_HOME="$(grep -o 'GEM_HOME="[^"]*"' "$(readlink -f "$(command -v pod)")" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
-if [ -n "$POD_GEM_HOME" ] && (cd ios/App && GEM_HOME="$POD_GEM_HOME" ruby -e '
+# CocoaPods ships (idempotent). Without that gem, say so and leave the manual
+# Xcode step below.
+# Run Ruby with the xcodeproj gem, through the same Ruby CocoaPods runs on.
+# Homebrew's `pod` is a wrapper that sets GEM_HOME and execs libexec/bin/pod,
+# whose shebang names Homebrew's Ruby; a `gem install cocoapods` pod is itself
+# a Ruby script. `realpath` (not `readlink -f`, missing on older macOS)
+# resolves the symlink. Every probe tolerates no match: under pipefail a
+# failed grep would end the bootstrap.
+POD_BIN="$(command -v pod || true)"
+POD_REAL="$POD_BIN"
+if [ -n "$POD_BIN" ]; then
+  POD_REAL="$(realpath "$POD_BIN" 2>/dev/null || readlink -f "$POD_BIN" 2>/dev/null || echo "$POD_BIN")"
+fi
+POD_GEM_HOME="$( { [ -n "$POD_REAL" ] && grep -o 'GEM_HOME="[^"]*"' "$POD_REAL" 2>/dev/null | head -1 | cut -d'"' -f2; } || true)"
+POD_SCRIPT="$POD_REAL"
+if [ -n "$POD_GEM_HOME" ] && [ -f "$POD_GEM_HOME/bin/pod" ]; then POD_SCRIPT="$POD_GEM_HOME/bin/pod"; fi
+POD_RUBY="ruby"
+POD_SHEBANG="$( { [ -n "$POD_SCRIPT" ] && head -1 "$POD_SCRIPT" 2>/dev/null | sed -n 's/^#![[:space:]]*//p' | cut -d' ' -f1; } || true)"
+if [ -n "$POD_SHEBANG" ] && [ -x "$POD_SHEBANG" ] && [ "$(basename "$POD_SHEBANG")" != "env" ]; then POD_RUBY="$POD_SHEBANG"; fi
+xcodeproj_ruby() {
+  if [ -n "$POD_GEM_HOME" ]; then GEM_HOME="$POD_GEM_HOME" "$POD_RUBY" "$@"; else "$POD_RUBY" "$@"; fi
+}
+if (cd ios/App && xcodeproj_ruby -e '
   require "xcodeproj"
   project = Xcodeproj::Project.open("App.xcodeproj")
   target = project.targets.find { |t| t.name == "App" } or abort("no App target")
@@ -243,6 +265,110 @@ if [ -n "$POD_GEM_HOME" ] && (cd ios/App && GEM_HOME="$POD_GEM_HOME" ruby -e '
   echo "==> PrivacyInfo.xcprivacy is in the App target ✓"
 else
   echo "==> WARN: could not attach PrivacyInfo.xcprivacy automatically — add it to the App target in Xcode (step below)."
+fi
+
+# UIScene life cycle. Apps built with the iOS 27 SDK (Xcode 27) quit at
+# launch without it: "UIScene life cycle is required for apps built with this
+# SDK" (found 2026-10-05 in the simulator; 1.7 build 2026100501 has this
+# bug). The Capacitor 7 template has no scene. Add a SceneDelegate that only
+# forwards links to Capacitor (UIKit now delivers them to the scene, not the
+# AppDelegate) and a scene manifest that keeps the Main storyboard. The
+# manifest is written only after the delegate is in the App target, so a
+# build never names a class it does not contain.
+SCENE_SWIFT="ios/App/App/SceneDelegate.swift"
+if [ ! -f "$SCENE_SWIFT" ]; then
+  cat > "$SCENE_SWIFT" <<'SWIFT'
+import UIKit
+import UserNotifications
+import Capacitor
+
+// Written by scripts/mobile/bootstrap-ios.sh. Apps built with the iOS 27 SDK
+// must use the UIScene life cycle or they quit at launch. The Main storyboard
+// (UISceneStoryboardFile in Info.plist) still creates the window and
+// Capacitor's bridge view controller; this delegate only forwards links to
+// Capacitor, which UIKit now delivers to the scene instead of the AppDelegate.
+class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        if let context = connectionOptions.urlContexts.first {
+            _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url, options: [:])
+        }
+        if let activity = connectionOptions.userActivities.first {
+            _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, continue: activity, restorationHandler: { _ in })
+        }
+        // A push tapped while the app was closed. With scenes, Capacitor's
+        // NotificationRouter becomes the notification-center delegate only
+        // when its bridge loads, after launch, so UIKit hands this tap only to
+        // the scene. Pass it on once the push plugin's handler exists; the
+        // plugin retains pushNotificationActionPerformed until JS listens.
+        if let response = connectionOptions.notificationResponse {
+            pendingNotificationResponse = response
+            deliverPendingNotificationResponse(delay: 0.1)
+        }
+    }
+
+    // Kept until Capacitor's push handler exists, however long the bridge
+    // takes to load; dropped only if the scene goes away.
+    private var pendingNotificationResponse: UNNotificationResponse?
+
+    private func deliverPendingNotificationResponse(delay: TimeInterval) {
+        guard let response = pendingNotificationResponse else { return }
+        let center = UNUserNotificationCenter.current()
+        if let router = center.delegate as? NotificationRouter, router.pushNotificationHandler != nil {
+            pendingNotificationResponse = nil
+            router.userNotificationCenter(center, didReceive: response, withCompletionHandler: {})
+            return
+        }
+        // Check often at first, then once a second.
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.deliverPendingNotificationResponse(delay: min(delay * 2, 1.0))
+        }
+    }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        pendingNotificationResponse = nil
+    }
+
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        for context in URLContexts {
+            _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url, options: [:])
+        }
+    }
+
+    func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, continue: userActivity, restorationHandler: { _ in })
+    }
+}
+SWIFT
+fi
+if (cd ios/App && xcodeproj_ruby -e '
+  require "xcodeproj"
+  project = Xcodeproj::Project.open("App.xcodeproj")
+  target = project.targets.find { |t| t.name == "App" } or abort("no App target")
+  group = project.main_group.find_subpath("App", false) or abort("no App group")
+  ref = group.files.find { |f| f.path == "SceneDelegate.swift" } || group.new_reference("SceneDelegate.swift")
+  phase = target.source_build_phase
+  phase.add_file_reference(ref, true) unless phase.files_references.include?(ref)
+  project.save
+'); then
+  SCENE_KEY=":UIApplicationSceneManifest"
+  SCENE_CFG="$SCENE_KEY:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0"
+  /usr/libexec/PlistBuddy -c "Delete $SCENE_KEY" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy \
+    -c "Add $SCENE_KEY dict" \
+    -c "Add $SCENE_KEY:UIApplicationSupportsMultipleScenes bool false" \
+    -c "Add $SCENE_KEY:UISceneConfigurations dict" \
+    -c "Add $SCENE_KEY:UISceneConfigurations:UIWindowSceneSessionRoleApplication array" \
+    -c "Add $SCENE_CFG dict" \
+    -c "Add $SCENE_CFG:UISceneConfigurationName string Default Configuration" \
+    -c "Add $SCENE_CFG:UISceneDelegateClassName string \$(PRODUCT_MODULE_NAME).SceneDelegate" \
+    -c "Add $SCENE_CFG:UISceneStoryboardFile string Main" \
+    "$PLIST"
+  echo "==> UIScene life cycle: SceneDelegate in the App target, scene manifest in Info.plist ✓"
+else
+  echo "ERROR: could not add SceneDelegate.swift to the App target; an iOS 27 SDK build would quit at launch." >&2
+  exit 1
 fi
 
 # Universal links: portal.wavespestcontrol.com URLs open the installed app

@@ -456,6 +456,16 @@ export function RecoveredCompletion({ submission }) {
       </div>
     );
   }
+  if (submission.failure === 'unreadable') {
+    return (
+      <div className="tech-visit-body">
+        <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={submission.recheck}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
   const canRetry = submission.hasPendingBody() && submission.retryPending;
   // A request refused for good whose saved copy would not clear keeps it here
   // to discard, never to retry.
@@ -616,7 +626,7 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, quiet = false }) {
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false }) {
   const [query, setQuery] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [writing, setWriting] = useState(false);
@@ -628,8 +638,11 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
   const priority = useMemo(() => {
     if (!priorityTipIds?.length) return [];
     const ids = new Set(priorityTipIds);
-    return allTips.filter((tip) => ids.has(tip.id));
-  }, [allTips, priorityTipIds]);
+    const lifted = allTips.filter((tip) => ids.has(tip.id));
+    // Library order by default (the tree & shrub Seen list); `priorityOrdered`
+    // keeps the caller's own ranking (the lawn sheet's note matches, best first).
+    return priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted;
+  }, [allTips, priorityTipIds, priorityOrdered]);
   const lifted = !q && priority.length > 0;
   const rest = lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips;
   const { tips: visible, noMatch } = visibleTips(rest, { query: q, showAll, tipId });

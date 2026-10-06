@@ -8,9 +8,14 @@
  * strict profile rule (sms-operational-actions) saves a code only from a
  * one-line text and only for four profile fields; this net reads every inbound
  * text that mentions a way in, files what it states as `found`, and the office
- * accepts, dismisses or retires it. An accepted standing code also fills an
- * EMPTY matching profile field, so the neighborhood directory sweep files it;
- * a filled field is never overwritten.
+ * accepts, dismisses or retires it. An accepted standing code on a one-home
+ * account is also written to the matching profile field (the office's decision
+ * replaces an older value), so the neighborhood directory sweep files it.
+ *
+ * One list (owner ruling 2026-10-05): the profile's gate, garage and lockbox
+ * codes and this table must never disagree on a one-home account. Each tick
+ * mirrors the profile fields into `profile` rows (mirrorProfileCodes), and the
+ * visit read leaves those kinds to the profile fields the card already shows.
  *
  * Dark behind GATE_ACCESS_CODES_SECTION (read at call time); the sweep also
  * needs GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) so turning the
@@ -382,6 +387,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
     let toInsert = [];
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};
+      const multiHome = liveProperties.length > 1;
       // A retired or dismissed value the customer sends again is news, and so is
       // a visit code whose visit has ended (the live list no longer shows it):
       // only a row still waiting or still live makes a new one redundant.
@@ -389,7 +395,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
         .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
         .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active']).whereRaw(OWNED_SOURCE_SQL)
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
-        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
+        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.property_id', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
         .filter((r) => isLive(r));
       // Only a live STANDING row makes a new item redundant. A visit row never
       // does: the same door code sent for a second appointment is evidence for
@@ -398,7 +404,10 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       // too. One text still yields one row per kind and value (unique index).
       // Only a DECIDED (active) row covers: a waiting row from another text may
       // still be corrected away, and each text must keep its own evidence.
-      const covered = (item) => existing.some((r) => r.status === 'active' && r.kind === item.kind
+      // On a multi-home account a found code may be for another home: nothing
+      // already on file covers it, and the office picks its home.
+      const covered = (item) => !multiHome && existing.some((r) => r.status === 'active' && r.kind === item.kind
+        && !!r.property_id && r.property_id === liveProperties[0]?.id
         && r.value_hash === item.value_hash && r.life === 'standing' && item.life === 'standing'
         && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
@@ -407,7 +416,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
         const field = PROFILE_FIELD[item.kind];
         // Only a standing item is covered by the profile value; a visit-only code
         // for this visit still reaches the office.
-        return !(field && item.code && item.life === 'standing' && !item.instructions
+        return multiHome || !(field && item.code && item.life === 'standing' && !item.instructions
           && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
@@ -433,9 +442,18 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
   // moved code and its profile copy off the wrong account.
   if (!enabled()) return runExclusive('access-code-net', async () => ({ skipped: 'gate_off', movedRetired: await retireMovedSources(conn) }));
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
-  if (!since) return runExclusive('access-code-net', async () => ({ skipped: 'activation_time_required', movedRetired: await retireMovedSources(conn) }));
+  // The profile mirror reads no text, so it needs the gate and nothing else.
+  if (!since) {
+    return runExclusive('access-code-net', async () => {
+      const tally = { skipped: 'activation_time_required', movedRetired: await retireMovedSources(conn), mirror: await mirrorProfileCodes(conn) };
+      // The same failure rule as the full sweep: a failed mirror fails job health.
+      if (tally.mirror.failed) throw Object.assign(new Error('access_code_net_failures'), { code: 'ACCESS_NET_FAILURES', tally });
+      return tally;
+    });
+  }
   return runExclusive('access-code-net', async () => {
     const movedRetired = await retireMovedSources(conn);
+    const mirror = await mirrorProfileCodes(conn);
     const candidates = await conn('sms_log as s')
       .where('s.direction', 'inbound').whereNotNull('s.customer_id')
       // A blank text is still selected when it filed something earlier, so the
@@ -466,7 +484,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       })
       .orderBy('s.created_at').orderBy('s.id').limit(BATCH)
       .select(...SOURCE_COLUMNS.map((column) => `s.${column}`));
-    const tally = { scanned: candidates.length, read: 0, found: 0, failed: 0, skipped: 0, movedRetired };
+    const tally = { scanned: candidates.length, read: 0, found: 0, failed: 0, skipped: 0, movedRetired, mirror };
     for (const message of candidates) {
       if (!enabled()) break;
       const receipt = { source_type: 'message', source_id: message.id, extractor_version: VERSION,
@@ -512,9 +530,184 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
     }
     // A pass with failures is a degraded job: the cron lock records the throw
     // in job health, and the tally rides on the error for the log line.
-    if (tally.failed) throw Object.assign(new Error('access_code_net_failures'), { code: 'ACCESS_NET_FAILURES', tally });
+    if (tally.failed || mirror.failed) throw Object.assign(new Error('access_code_net_failures'), { code: 'ACCESS_NET_FAILURES', tally });
     return tally;
   });
+}
+
+// ---- the profile mirror (one list) -----------------------------------------------------
+
+const MIRROR_BATCH = 50;
+// A customer is looked at again after a day whatever else changed, in case a
+// profile writer left updated_at alone.
+const MIRROR_RECHECK_HOURS = 24;
+const PROFILE_KINDS = Object.keys(PROFILE_FIELD);
+const PROFILE_NONEMPTY_SQL = PROFILE_KINDS.map((k) => `btrim(coalesce(p.${PROFILE_FIELD[k]}, '')) <> ''`).join(' OR ');
+// A profile value the table can hold: the code column's shape (length, no control characters).
+const mirrorable = (v) => v.length > 0 && v.length <= MAX_CODE && !/[\u0000-\u001f\u007f]/.test(v);
+
+// One customer's profile fields against their standing codes, under the same
+// two locks accept and retire take. Only an account with exactly one active
+// home is mirrored: its profile fields ARE that home's codes. A filled field
+// puts one active `profile` row for that home, with the code's canonical
+// value, and retires every other active code of the kind there (the office's
+// accept already wrote its code to the field, so nothing newer is lost). An
+// emptied field retires the home's codes of that kind when the sweep had
+// mirrored a value there; a field that never held one leaves older table rows
+// alone. Never touches the field itself; directions-only rows stay.
+async function mirrorCustomer(conn, customerId) {
+  return conn.transaction(async (trx) => {
+    const out = { created: 0, retired: 0 };
+    if (!(await lockCustomer(trx, customerId))) return out;
+    // The kill switch holds under the locks too: off now means no write.
+    if (!enabled()) return out;
+    const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+    const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
+      .first(...PROFILE_KINDS.map((k) => PROFILE_FIELD[k]));
+    const state = await trx('access_code_profile_mirror').where({ subject_id: customerId }).forUpdate().first();
+    const hashes = { ...state?.hashes };
+    const oneHome = homes.length === 1;
+    if (oneHome && prefs) {
+      const home = homes[0];
+      // A mirrored row bound to a home this customer no longer has as its only
+      // one (deactivated, or another home now stands alone) goes; the codes of
+      // the home that remains are mirrored below.
+      // Adopted rows (an office or text row the mirror matched by value) count
+      // as mirrored too: they are found by the hashes the receipt recorded.
+      const recorded = Object.entries(hashes).filter(([k, h]) => k !== '_home' && h);
+      const former = await trx('customer_access_codes')
+        .where({ customer_id: customerId, status: 'active', life: 'standing' })
+        .where(function mirrored() {
+          this.where('source_type', 'profile');
+          // each saved hash only for the kind it was saved for
+          for (const [kind, h] of recorded) this.orWhere({ kind, value_hash: h });
+        })
+        .whereNotNull('property_id').whereNot('property_id', home).forUpdate();
+      for (const row of former) {
+        await retireLocked(trx, row, { action: 'access_code.profile_superseded', keepProfile: true });
+        out.retired += 1;
+      }
+      for (const kind of PROFILE_KINDS) {
+        const value = String(prefs[PROFILE_FIELD[kind]] || '').trim();
+        const live = () => trx('customer_access_codes')
+          .where({ customer_id: customerId, kind, status: 'active', life: 'standing' }).whereNotNull('code')
+          .where(function atHome() { this.where('property_id', home).orWhereNull('property_id'); })
+          .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
+        const retireAll = async (rows) => {
+          for (const row of rows) {
+            await retireLocked(trx, row, { action: 'access_code.profile_superseded', keepProfile: true });
+            out.retired += 1;
+          }
+        };
+        if (!value) {
+          // Emptied: a profile row always goes; when the sweep had mirrored a
+          // value there, every code of the kind at this home goes with it.
+          const rows = await (hashes[kind] ? live() : live().where('source_type', 'profile')).forUpdate();
+          await retireAll(rows);
+          delete hashes[kind];
+          continue;
+        }
+        if (!mirrorable(value)) {
+          // A value the table cannot hold: what the sweep mirrored or adopted
+          // for the field goes, so no stale "From the profile" row stays live.
+          const stale = await live().where(function mirrored() {
+            this.where('source_type', 'profile');
+            if (hashes[kind]) this.orWhere('value_hash', hashes[kind]);
+          }).forUpdate();
+          await retireAll(stale);
+          delete hashes[kind];
+          continue;
+        }
+        const hash = valueHash(value, null);
+        // The same code as the profile's in any letter case or spacing is the
+        // same credential (as syncProfileField reads it): adopted, never replaced.
+        const SAME_CODE = "lower(regexp_replace(code, '\\s', '', 'g')) = ?";
+        const canon = canonicalLower(value);
+        const others = await live().whereRaw(`NOT (${SAME_CODE})`, [canon]).forUpdate();
+        await retireAll(others);
+        // Every row with the profile's code: the first is kept, the others are
+        // duplicates of the same credential and go.
+        const matches = await live().whereRaw(SAME_CODE, [canon]).orderBy('created_at').orderBy('id').forUpdate()
+          .select('id', 'property_id', 'value_hash', 'customer_id', 'kind', 'life', 'code', 'status', 'source_type', 'source_id', 'instructions');
+        const same = matches[0] || null;
+        if (matches.length > 1) {
+          const extra = await trx('customer_access_codes').whereIn('id', matches.slice(1).map((r) => r.id)).forUpdate();
+          await retireAll(extra);
+        }
+        // An adopted older row with no home is bound to the sole home, so the
+        // visit read (which needs an exact home) can still return it.
+        if (same && !same.property_id) await trx('customer_access_codes').where({ id: same.id }).update({ property_id: home, updated_at: trx.fn.now() });
+        if (!same) {
+          const [row] = await trx('customer_access_codes').insert({
+            customer_id: customerId, property_id: home, kind, code: value, instructions: null, life: 'standing',
+            status: 'active', source_type: 'profile', source_at: trx.fn.now(), value_hash: hash, decided_at: trx.fn.now(),
+          }).returning('id');
+          await audit(trx, null, 'access_code.profile_mirrored', row.id, { customer_id: customerId, kind, life: 'standing' });
+          out.created += 1;
+        }
+        // The adopted row's own hash (its spelling may differ in case), so a
+        // later home swap recognises the row the mirror stands for.
+        hashes[kind] = same ? same.value_hash : hash;
+      }
+    }
+    // The sole home rides in the receipt, so a change of it is noticed at once.
+    // While the customer has several homes nothing is mirrored, so the per-kind
+    // hashes no longer describe any home and are forgotten: a later return to
+    // one home starts fresh instead of reading an old field as "emptied".
+    if (oneHome) hashes._home = homes[0];
+    else for (const key of Object.keys(hashes)) delete hashes[key];
+    // The receipt, whatever happened: the customer is not looked at again
+    // until their profile, their home count or the day changes.
+    // (the edit time is copied in SQL: a JavaScript date drops the microseconds
+    // and would never compare equal again)
+    await trx.raw(`
+      INSERT INTO access_code_profile_mirror (subject_id, profile_updated_at, one_home, hashes, mirrored_at)
+      VALUES (?, (SELECT updated_at FROM property_preferences WHERE customer_id = ?), ?, ?::jsonb, now())
+      ON CONFLICT (subject_id) DO UPDATE SET profile_updated_at = EXCLUDED.profile_updated_at,
+        one_home = EXCLUDED.one_home, hashes = EXCLUDED.hashes, mirrored_at = EXCLUDED.mirrored_at`,
+    [customerId, customerId, oneHome, JSON.stringify(hashes)]);
+    return out;
+  });
+}
+
+// The customers whose profile codes need a look: a profile edit the sweep has
+// not seen, a change in how many homes the customer has, a day since the last
+// look, or never looked at. Only customers with a code in a field (or one the
+// sweep mirrored earlier) are of interest.
+async function mirrorProfileCodes(conn = db, { limit = MIRROR_BATCH } = {}) {
+  const tally = { checked: 0, created: 0, retired: 0, failed: 0 };
+  const candidates = await conn('property_preferences as p')
+    .join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
+    .leftJoin('access_code_profile_mirror as m', 'm.subject_id', 'p.customer_id')
+    .where(function hasCode() {
+      this.whereRaw(`(${PROFILE_NONEMPTY_SQL})`).orWhereRaw("(m.hashes - '_home') <> '{}'::jsonb")
+        // a live mirrored row always keeps its customer in view, so an emptied
+        // field can retire it even after the hashes were cleared
+        .orWhereRaw("EXISTS (SELECT 1 FROM customer_access_codes x WHERE x.customer_id = p.customer_id AND x.source_type = 'profile' AND x.status = 'active')");
+    })
+    .where(function due() {
+      this.whereNull('m.subject_id')
+        .orWhereRaw('m.profile_updated_at IS DISTINCT FROM p.updated_at')
+        .orWhereRaw(`m.mirrored_at < now() - interval '${MIRROR_RECHECK_HOURS} hours'`)
+        .orWhereRaw('m.one_home IS DISTINCT FROM ((SELECT count(*) FROM customer_properties cp WHERE cp.customer_id = p.customer_id AND cp.active = true) = 1)')
+        // the sole home itself changed (one home swapped for another)
+        .orWhereRaw(`m.hashes->>'_home' IS DISTINCT FROM (SELECT CASE WHEN count(*) = 1 THEN min(cp.id::text) END
+          FROM customer_properties cp WHERE cp.customer_id = p.customer_id AND cp.active = true)`);
+    })
+    .orderByRaw('m.mirrored_at ASC NULLS FIRST').limit(limit).select('p.customer_id');
+  for (const { customer_id: customerId } of candidates) {
+    if (!enabled()) break;
+    try {
+      const out = await mirrorCustomer(conn, customerId);
+      tally.checked += 1;
+      tally.created += out.created;
+      tally.retired += out.retired;
+    } catch (err) {
+      tally.failed += 1;
+      logger.warn(`[access-codes] profile mirror failed for customer ${customerId} (${err.code || err.name || 'error'})`);
+    }
+  }
+  return tally;
 }
 
 // ---- the office's reads --------------------------------------------------------------
@@ -593,10 +786,104 @@ async function listForCustomer(conn, customerId) {
   return {
     active: kept.filter((r) => r.status === 'active').map(serialize),
     found: kept.filter((r) => r.status === 'found').map(serialize),
+    properties: await homeChoices(conn, [customerId]).then((m) => m.get(customerId) || []),
+    // The visit picker's choices, with the home each visit is at.
+    visits: await conn('scheduled_services').where({ customer_id: customerId })
+      .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+      .whereBetween('scheduled_date', [etDateString(new Date()), etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS * 2))])
+      .select('id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type', 'property_id')
+      .orderBy('scheduled_date').orderBy('id'),
   };
 }
 
+// The customer's active homes, for the home picker a multi-home account needs.
+async function homeChoices(conn, customerIds) {
+  const ids = [...new Set(customerIds.filter(Boolean))];
+  const rows = ids.length ? await conn('customer_properties').whereIn('customer_id', ids).where({ active: true })
+    .select('id', 'customer_id', 'address_line1', 'address_line2', 'label', 'is_primary').orderBy('is_primary', 'desc').orderBy('address_line1') : [];
+  const out = new Map();
+  // Street, unit and the property's own name, so two units at one street differ.
+  const name = (r) => [r.address_line1, r.address_line2, r.label].map((v) => String(v || '').trim()).filter(Boolean).join(' · ') || 'Home';
+  for (const r of rows) out.set(r.customer_id, [...(out.get(r.customer_id) || []), { id: r.id, label: name(r) }]);
+  return out;
+}
+
+// A standing code of a multi-home account must name its home, or a technician
+// at one home would get another home's code. Returns { propertyId } or { error }.
+async function resolveHome(trx, customerId, { life, propertyId, current = null, explicitOnly = false }) {
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+  if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
+    if (!homes.includes(propertyId)) return { error: 'invalid_property' };
+    return { propertyId };
+  }
+  if (current && homes.includes(current)) return { propertyId: current };
+  // A found code that lost its home (or never had one) is never moved to
+  // whatever home is left: the office names it.
+  if (explicitOnly && life === 'standing') return { error: 'property_required' };
+  if (homes.length === 1) return { propertyId: homes[0] };
+  if (life === 'standing' && homes.length > 1) return { error: 'property_required' };
+  return { propertyId: null };
+}
+
 // Every customer's codes waiting for a decision, newest first.
+// The codes a technician needs at one stop: the customer's active standing
+// codes plus one-visit codes bound to this visit. A technician reaches only a
+// visit assigned to them inside the current access window; the office reaches
+// any visit. Returns { ok, codes } or a typed refusal.
+async function listForVisit(conn, req, visitId) {
+  const { technicianCurrentVisitFilter, isTechnicianRequest } = require('./technician-visit-scope');
+  const scoped = () => {
+    const q = conn('scheduled_services').where('scheduled_services.id', visitId);
+    technicianCurrentVisitFilter(req, q);
+    // A technician reads codes only around the visit day (yesterday through
+    // tomorrow) and only for a visit still to be done; post-visit paperwork
+    // scope is wider than what a door code needs.
+    if (isTechnicianRequest(req)) {
+      q.whereBetween('scheduled_services.scheduled_date', [etDateString(addETDays(new Date(), -1)), etDateString(addETDays(new Date(), 1))])
+        .whereRaw(`COALESCE(scheduled_services.status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
+    }
+    return q;
+  };
+  const visit = await scoped().first('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id');
+  if (!visit) {
+    if (isTechnicianRequest(req) && await conn('scheduled_services').where({ id: visitId }).first('id')) return fail(403, 'service_not_assigned');
+    return fail(404, 'not_found');
+  }
+  const { active } = await listForCustomer(conn, visit.customer_id);
+  // A code tied to one home is shown only at a visit to that home. A visit not
+  // stamped with a home matches a home-bound code only when the customer has
+  // that one active home.
+  const homes = await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id');
+  const visitHome = visit.property_id || (homes.length === 1 ? homes[0] : null);
+  // One rule, fail closed: a code shows at a visit only when it is tied to
+  // exactly that visit's home. A code with no home (an older row, a home since
+  // deleted) or a visit with no known home shows nothing until the office binds it.
+  const sameHome = (r) => !!r.propertyId && !!visitHome && r.propertyId === visitHome;
+  // The visit may have been reassigned or moved to another home while the
+  // codes were read: answer only if it is still in scope with the same home.
+  const again = await scoped().first('scheduled_services.property_id');
+  const homesNow = again ? await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id') : [];
+  const homeNow = again && (again.property_id || (homesNow.length === 1 ? homesNow[0] : null));
+  if (!again || (homeNow || null) !== (visitHome || null)) {
+    return fail(isTechnicianRequest(req) ? 403 : 409, isTechnicianRequest(req) ? 'service_not_assigned' : 'visit_changed');
+  }
+  // One source per access point: a one-home account's gate, garage and lockbox
+  // codes are its profile fields (kept current by the mirror). The visit card
+  // shows those fields only when the brief's facts reached it, so the rows are
+  // never dropped here: each is marked `profileBacked` and the card hides it
+  // only when it holds the profile value for the same kind. Multi-home
+  // accounts' rows are never marked: their codes are bound to a home and never
+  // reach the profile.
+  const profileBacked = (r) => homes.length === 1 && r.life === 'standing' && !!r.code && !!PROFILE_FIELD[r.kind];
+  // Only what a stop needs: never the customer's message, its source or who decided.
+  return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id)
+    .filter(sameHome)
+    .map((r) => ({
+      id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId,
+      ...(profileBacked(r) ? { profileBacked: true } : {}),
+    })) };
+}
+
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const base = () => conn('customer_access_codes as a')
     .join('customers as c', 'c.id', 'a.customer_id')
@@ -610,12 +897,29 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const rows = await base()
     .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name')
     .orderBy('a.created_at', 'desc').orderBy('a.id').limit(limit).offset(offset);
+  // The visit picker's choices for every row on the page, in one query: the
+  // customer's live visits from today through 14 days after the code was sent.
+  const today = etDateString(new Date());
+  const customerIds = [...new Set(rows.map((r) => r.customer_id).filter(Boolean))];
+  const visits = customerIds.length ? await conn('scheduled_services').whereIn('customer_id', customerIds)
+    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+    .where('scheduled_date', '>=', today)
+    .where('scheduled_date', '<=', etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS)))
+    .select('id', 'customer_id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type', 'property_id')
+    .orderBy('scheduled_date').orderBy('id') : [];
+  const homes = await homeChoices(conn, customerIds);
   return {
     total: Number(count),
-    items: rows.map((r) => ({
-      ...serialize(r),
-      customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
-    })),
+    items: rows.map((r) => {
+      const last = etDateString(addETDays(new Date(r.source_at || r.created_at), VISIT_WINDOW_DAYS));
+      return {
+        ...serialize(r),
+        customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
+        propertyChoices: homes.get(r.customer_id) || [],
+        visitChoices: visits.filter((v) => v.customer_id === r.customer_id && v.scheduled_date <= last)
+          .map((v) => ({ id: v.id, scheduled_date: v.scheduled_date, status: v.status, service_type: v.service_type, property_id: v.property_id })),
+      };
+    }),
   };
 }
 
@@ -662,31 +966,63 @@ async function visitFor(trx, customerId, { from, chosenId }) {
   // only" code cannot be parked on an appointment months away.
   const live = () => trx('scheduled_services').where({ customer_id: customerId })
     .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
-    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
+    // From today at the earliest: a visit day already past is not one a code can
+    // still open the door for, and the office picker lists upcoming visits only.
+    .whereBetween('scheduled_date', [[etDateString(from), etDateString(new Date())].sort()[1],
+      etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
   if (chosenId !== undefined && chosenId !== null) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
     // Locked, so the visit cannot end or move before this code commits.
     const chosen = await live().where({ id: chosenId }).forUpdate().first('id', 'property_id');
-    return chosen ? { id: chosen.id, propertyId: chosen.property_id || null } : { error: 'invalid_visit' };
+    if (!chosen) return { error: 'invalid_visit' };
+    // The visit names the code's home; a multi-home account's visit with no home cannot.
+    const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+    const home = chosen.property_id || (homes.length === 1 ? homes[0] : null);
+    return home ? { id: chosen.id, propertyId: home } : { error: 'visit_home_unknown' };
   }
   const candidate = await live().first('id');
   return candidate ? { error: 'visit_required' } : { id: null, propertyId: null };
 }
 
-// A standing code fills its profile field only while that field is empty
-// (never an overwrite), under the preference lock the caller already holds.
-// Returns the field written, or null.
-async function fillEmptyProfileField(trx, customerId, { kind, life, code }) {
+// A standing code on a one-home account is the profile field's value too: the
+// office's accept (or add) replaces an older value, so the technician's card,
+// which reads the field, shows the code the office just decided on and the
+// profile mirror has nothing to undo. Runs under the preference lock the caller
+// already holds. Returns the field written, or null.
+async function syncProfileField(trx, customerId, { kind, life, code }) {
   const field = PROFILE_FIELD[kind];
   if (life !== 'standing' || !field || !code) return null;
+  // Profile fields are customer-wide and every visit of the customer reads
+  // them: a multi-home account's code stays on its own home only.
+  // Exactly one home: with none, a code has no home to belong to and the
+  // profile's own value is kept.
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).count({ n: '*' }).first();
+  if (Number(homes?.n || 0) !== 1) return null;
   const existing = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().first('id', field);
-  if (existing && String(existing[field] || '').trim() !== '') return null;
+  if (existing && canonicalLower(existing[field]) === canonicalLower(code)) return null;
   const proposal = { scope_id: customerId, field, resource_id: existing ? existing.id : null };
   const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: existing ? (existing[field] ?? null) : null });
   await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: code });
   // A pending text-extraction proposal for this field would now fail its before-value check.
   await stalePendingExtractionProposals({ trx, scope_id: customerId, field });
   return field;
+}
+
+// One source per access point: after the office writes a new standing code of
+// a profile-backed kind on a one-home account, every other active coded row
+// of that kind for that home is retired in the same transaction (the profile
+// field already holds the new code, so it is kept).
+async function retireReplacedRows(trx, customerId, { kind, life, code, property_id: home }, keepId, adminUserId) {
+  if (life !== 'standing' || !PROFILE_FIELD[kind] || !code || !home) return 0;
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+  if (homes.length !== 1 || homes[0] !== home) return 0;
+  const rows = await trx('customer_access_codes')
+    .where({ customer_id: customerId, kind, status: 'active', life: 'standing' })
+    // An older row with no home is the sole home's code too.
+    .where(function atHome() { this.where('property_id', home).orWhereNull('property_id'); })
+    .whereNotNull('code').whereNot('id', keepId).forUpdate();
+  for (const row of rows) await retireLocked(trx, row, { adminUserId, action: 'access_code.replaced', keepProfile: true });
+  return rows.length;
 }
 
 // The active standing row that already holds this kind and value, if any.
@@ -701,9 +1037,16 @@ async function visitTwin(trx, customerId, next, scheduledServiceId, exceptId = n
   return !!(await q.first('id'));
 }
 
-async function standingTwin(trx, customerId, { kind, life, value_hash: hash }, exceptId = null) {
+async function standingTwin(trx, customerId, { kind, life, value_hash: hash, property_id: home = null }, exceptId = null) {
   if (life !== 'standing') return null;
+  // The same code at another home of the customer is not a twin. On a one-home
+  // account an older row with no home is that home's code.
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).count({ n: '*' }).first();
   const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' })
+    .where(function sameHome() {
+      this.whereRaw('property_id IS NOT DISTINCT FROM ?', [home]);
+      if (Number(homes?.n || 0) <= 1) this.orWhereNull('property_id');
+    })
     .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
   if (exceptId) q.whereNot('id', exceptId);
   return (await q.forUpdate().first('id', 'instructions')) || null;
@@ -749,8 +1092,8 @@ async function officeTransaction(conn, work) {
 
 // Accept a found code (optionally edited by the office): it becomes active, a
 // visit-life code attaches to the customer's next visit, and a standing code
-// fills an empty profile field. Only a `found` row can be accepted.
-async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, scheduledServiceId: chosenId, now = new Date() } = {}) {
+// sets the profile field on a one-home account. Only a `found` row can be accepted.
+async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, scheduledServiceId: chosenId, propertyId, now = new Date() } = {}) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
   if (!head) return fail(404, 'not_found');
@@ -765,6 +1108,12 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
       if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       if (!(await sourceStillSupports(trx, row))) return fail(409, 'source_changed');
+      // A standing code's home is settled first: duplicates are per home.
+      // (A one-visit code takes its visit's home, below.)
+      const standingHome = next.life === 'standing'
+        ? await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id, explicitOnly: true }) : { propertyId: null };
+      if (standingHome.error) return fail(400, standingHome.error);
+      next.property_id = standingHome.propertyId;
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
       if (refused) return refused;
       // A one-visit candidate lives 14 days from the day it was sent; one past
@@ -777,19 +1126,22 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (visit.error) return fail(400, visit.error);
       const scheduledServiceId = visit.id;
       if (await visitTwin(trx, row.customer_id, next, scheduledServiceId, row.id)) return fail(409, 'duplicate_active');
-      const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
+      const home = next.life === 'standing' ? standingHome : { propertyId: visit.propertyId || null };
+      if (home.error) return fail(400, home.error);
+      const profileField = await syncProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         kind: next.kind, life: next.life, code: next.code, instructions: next.instructions, value_hash: next.value_hash,
         scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId || null,
-        // The named visit says which home the code is for.
-        ...(visit.propertyId ? { property_id: visit.propertyId } : {}),
+        // The named visit or the named home says which home the code is for.
+        property_id: home.propertyId,
         decided_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.accepted', id, {
         customer_id: row.customer_id, kind: next.kind, life: next.life, source_type: row.source_type,
         edited, profile_field: profileField, scheduled_service_id: scheduledServiceId,
       });
+      await retireReplacedRows(trx, row.customer_id, updated, updated.id, adminUserId);
       return { ok: true, row: serialize(updated), profileField };
     });
   } catch (err) {
@@ -818,17 +1170,23 @@ const dismiss = (conn, id, { adminUserId = null } = {}) => decide(conn, id, { fr
 // The retire step on a row already locked with its customer: the code leaves
 // the live list, and its value leaves the profile field when the field holds
 // it (another active standing code of the kind takes the field over).
-async function retireLocked(trx, row, { adminUserId = null, action }) {
+// `keepProfile` is for the profile mirror, which retires a row because the
+// profile field says otherwise: the field is the source and is left alone.
+async function retireLocked(trx, row, { adminUserId = null, action, keepProfile = false }) {
     let clearedField = null;
     let promoted = false;
     const field = PROFILE_FIELD[row.kind];
-    if (row.life === 'standing' && field && row.code) {
+    if (!keepProfile && row.life === 'standing' && field && row.code) {
       const prefs = await trx('property_preferences').where({ customer_id: row.customer_id }).forUpdate().first('id', field);
       if (prefs && canonicalLower(prefs[field]) === canonicalLower(row.code)) {
         // Another active standing code of this kind takes the field over (the
         // newest one), so profile readers never lose a code the customer still has.
-        const heir = await trx('customer_access_codes')
+        // Shared profile fields are read at every visit of the customer: only a
+        // one-home account hands the field to another code; otherwise it is cleared.
+        const liveHomes = await trx('customer_properties').where({ customer_id: row.customer_id, active: true }).pluck('id');
+        const heir = liveHomes.length !== 1 ? null : await trx('customer_access_codes')
           .where({ customer_id: row.customer_id, kind: row.kind, status: 'active', life: 'standing' })
+          .where('property_id', liveHomes[0])
           .whereNot('id', row.id).whereNotNull('code')
           .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'))
           .orderBy('decided_at', 'desc').orderBy('created_at', 'desc').orderBy('id').first('code');
@@ -873,7 +1231,7 @@ async function retireMovedSources(conn, { limit = BATCH } = {}) {
 }
 
 // Retire an active code. A standing gate, lockbox or garage code may also sit
-// in its profile field (accept and addByStaff fill an empty one): the same
+// in its profile field (accept and addByStaff write it): the same
 // value there is cleared under the preference lock, so existing profile
 // readers stop showing a dead code and its replacement can fill the field. A
 // field that holds a different value is left alone. The shared neighborhood
@@ -893,23 +1251,27 @@ async function retire(conn, id, { adminUserId = null } = {}) {
 }
 
 // The office adds a code itself: active at once.
-async function addByStaff(conn, { customerId, kind, life, code, instructions, scheduledServiceId: chosenId, adminUserId = null, now = new Date() } = {}) {
+async function addByStaff(conn, { customerId, kind, life, code, instructions, scheduledServiceId: chosenId, propertyId, adminUserId = null, now = new Date() } = {}) {
   if (!UUID_RE.test(String(customerId))) return fail(400, 'invalid_customer');
   const checked = validateFields({}, { kind, life, code, instructions });
   if (checked.error) return fail(400, checked.error);
   const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
   return officeTransaction(conn, async (trx) => {
     if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
+    const standingHome = next.life === 'standing' ? await resolveHome(trx, customerId, { life: next.life, propertyId }) : null;
+    if (standingHome?.error) return fail(400, standingHome.error);
+    if (standingHome) next.property_id = standingHome.propertyId;
     const refused = await supersedeOrRefuse(trx, customerId, next, { adminUserId });
     if (refused) return refused;
-    const properties = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
     const visit = next.life === 'visit' ? await visitFor(trx, customerId, { from: now, chosenId }) : { id: null };
     if (visit.error) return fail(400, visit.error);
     const scheduledServiceId = visit.id;
     if (await visitTwin(trx, customerId, next, scheduledServiceId)) return fail(409, 'duplicate_active');
-    const profileField = await fillEmptyProfileField(trx, customerId, next);
+    const home = standingHome || (visit.propertyId ? { propertyId: visit.propertyId } : await resolveHome(trx, customerId, { life: next.life, propertyId }));
+    if (home.error) return fail(400, home.error);
+    const profileField = await syncProfileField(trx, customerId, next);
     const [row] = await trx('customer_access_codes').insert({
-      customer_id: customerId, property_id: visit.propertyId || (properties.length === 1 ? properties[0].id : null),
+      customer_id: customerId, property_id: home.propertyId,
       kind: next.kind, code: next.code, instructions: next.instructions, life: next.life,
       scheduled_service_id: scheduledServiceId, status: 'active', source_type: 'staff', source_at: trx.fn.now(),
       value_hash: next.value_hash, decided_by: adminUserId || null, decided_at: trx.fn.now(),
@@ -917,11 +1279,13 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
     await audit(trx, adminUserId, 'access_code.added', row.id, {
       customer_id: customerId, kind: next.kind, life: next.life, profile_field: profileField, scheduled_service_id: scheduledServiceId,
     });
+    await retireReplacedRows(trx, customerId, row, row.id, adminUserId);
     return { ok: true, row: serialize(row), profileField };
   });
 }
 
 module.exports = {
+  listForVisit,
   VERSION,
   KINDS,
   LIVES,
@@ -932,6 +1296,7 @@ module.exports = {
   buildPrompt,
   readAccessCodes,
   runAccessCodeNet,
+  mirrorProfileCodes,
   listForCustomer,
   listFound,
   accept,

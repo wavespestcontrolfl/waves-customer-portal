@@ -380,14 +380,15 @@ function pestReportV2PdfSignature(service = {}) {
   // INDEPENDENTLY of PEST_REPORT_V2 (codex P1): the schematic suppression
   // applies to every pest PDF, V2 dashboard or not.
   const tonSuffix = pestTraceOrNothingGateOn() ? '-ton1' : '';
-  // '-pex3' rides every pest-line key while the expectations gate is on —
+  // '-pex4' rides every pest-line key while the expectations gate is on —
   // same append-not-switch pattern as '-ton1' above, and independent of
   // PEST_REPORT_V2 for the same reason: computed before the V2 early-return
   // so a flip re-renders cached documents once regardless of dashboard state.
   // Bumped from '-pex1' when the expectation wording changed (owner
   // 2026-10-01), and from '-pex2' when the rain card came off the report
   // (owner 2026-10-04), so PDFs cached under the old content re-render once.
-  const pexSuffix = pestReportExpectationsGateOn() ? '-pex3' : '';
+  // '-pex4' (owner 2026-10-05): Gentrol's line gained its 4-month label duration.
+  const pexSuffix = pestReportExpectationsGateOn() ? '-pex4' : '';
   // '-noarea1' rides every pest-line key, gate or not: the pest PDF dropped
   // its Areas serviced section and per-product Areas / Target lines (owner
   // 2026-10-05), so PDFs cached before that re-render once.

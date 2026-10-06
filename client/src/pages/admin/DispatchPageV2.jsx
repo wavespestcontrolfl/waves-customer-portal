@@ -43,7 +43,7 @@ import {
   Suspense,
 } from "react";
 import { createPortal } from "react-dom";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import { Plus } from "lucide-react";
 import {
   CompletionPanel,
@@ -374,6 +374,16 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   );
 }
 
+// The signed-in user scopes the Fast Complete attempts this device saves, as
+// Tech Home scopes them (staffIdForDevice), so either page finds them: the
+// profile AdminLayout verified, the stored copy only as a fallback (a failed
+// cache write can leave it missing; GitHub Codex P2 on #6001).
+function fastCompleteOperatorOf(outlet) {
+  const verified = outlet?.user;
+  const user = verified?.id ? verified : getAdminUser();
+  return String(user?.id || "");
+}
+
 export default function DispatchPageV2({
   activeTab: controlledActiveTab,
   setOpenCreateHandler,
@@ -447,6 +457,7 @@ export default function DispatchPageV2({
   // an eligible visit opens instead of CompletionPanel.
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnFastService, setLawnFastService] = useState(null);
+  const fastCompleteOperatorId = fastCompleteOperatorOf(useOutletContext());
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
@@ -1921,6 +1932,7 @@ export default function DispatchPageV2({
             routedAddress: typeof treeShrubFastService.address === "string" ? treeShrubFastService.address : null,
           }}
           request={adminFetch}
+          operatorId={fastCompleteOperatorId}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) {
@@ -1975,6 +1987,7 @@ export default function DispatchPageV2({
             routedCatalogServiceId: lawnFastService.catalogServiceId || null,
           }}
           request={adminFetch}
+          operatorId={fastCompleteOperatorId}
           catalog={products}
           onClose={(options) => {
             setLawnFastService(null);

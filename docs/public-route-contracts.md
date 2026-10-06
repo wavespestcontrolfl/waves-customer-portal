@@ -168,7 +168,7 @@ when the card is present.
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
 `data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
-and the pest PDF key suffix stays `-pex3`. Already-frozen
+and the pest PDF key suffix is `-pex4` (2026-10-05: the Gentrol growth regulator line gained its label's 4-month duration). Already-frozen
 `structured_notes.pestWeekWeather` values are left in place, unread.
 The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (the
@@ -349,6 +349,46 @@ render (gate on or off, every service line) — `report-data.js`'s
 `expectationFactsOut` out-param that is never attached to the object the
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
+
+Tree & Shrub "From your technician" paragraph (owner 2026-10-05, go-ahead; fixed
+sentences; `GATE_TS_TECH_PARAGRAPH` — dark, strict `'true'`, read at call time,
+effective only while `GATE_TS_TECH_FINDINGS_COPY` is also live; off leaves the
+tree/shrub payload, the render, the PDF and its cache signature unchanged, key for
+key, with no model call and no read): on the tree/shrub service-report payload
+(`/api/reports/:token/data` and the PDF) the one new optional key is
+`reportV2.techParagraph`, a string made ONLY of the sentences in the code constant
+`TS_SENTENCES` (`tree-shrub-tech-paragraph.js`), in this fixed order: "Our technician
+saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}"),
+"There may be early signs of {labels}; we will keep an eye on it." (low-confidence
+kept photo findings the note does not cover, at most 2), "Our technician confirmed
+signs of {labels}." (findings the technician confirmed), "Today we applied
+{products}." (product display names only) and "Your landscape looked {excellent|good}
+today." (only when nothing else applies, the visit has NO technician note, and the
+technician rated the landscape Excellent or Good). No model text is ever printed. It is written ONCE, at completion
+(`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), with at most
+one model call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second
+deadline across the whole step) that only EXTRACTS closed-list `{ condition, plant }`
+ids from the technician's note, each with `quote` (the technician's exact words) and
+a `seenToday` judgment. The model judges the language and the code only verifies
+(owner ruling 2026-10-05, the 2026-10-03 portal chat pattern): an item stays only
+when `seenToday` is true and the quote is word for word part of one note sentence
+that names the condition and no palm-banned term; the plant stays only when the
+quote names it. There is no sighting, negation or purpose word list; a failing item
+drops. Inputs: the note,
+the applied products' names, the kept photo findings (a finding the technician hid
+or rewrote never enters) and the technician's landscape rating. The seasonal watch
+list (`GATE_TS_WATCH_LIST`), the last visit, the report headline and a product's
+ingredient, targets and method are NOT inputs. The build used for the gather
+(`skipNarrativeGeneration`) never dispatches the treatment-narrative lane. The text
+freezes first-writer-wins under `structured_notes.treeShrubTechParagraph[assessmentId]`
+as `{ text, slots }`; a render only reads it from the record the build already
+loaded, and prints it only when the text equals the render of its slots under the
+current templates and passes the palm rules and the customer-copy screen. The key is
+absent when no sentence applied, the assessment is missing, the step timed out, or the
+stored entry fails the read-time check. The web report prints it under "What we
+applied today" as "From your technician"; the PDF prints the same text under the same
+label. The PDF cache signature gains `:tp=<hash of the text>` only while the gate is
+live AND a whole frozen entry exists; a failed lookup stamps a one-off sentinel.
 
 Tree & Shrub technician findings in the report (owner ruling 2026-10-02,
 lawn parity, `GATE_TS_TECH_FINDINGS_COPY` — dark, off unless exactly `'true'`,

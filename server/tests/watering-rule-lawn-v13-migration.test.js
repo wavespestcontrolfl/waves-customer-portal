@@ -29,10 +29,13 @@ describe('the v13 watering rules', () => {
     const names = new Set();
     for (const track of Object.values(JSON.parse(fs.readFileSync(recipe, 'utf8')))) {
       for (const visit of track.visits || []) {
-        for (const field of ['primary', 'secondary']) {
-          for (const line of String(visit[field] || '').split('\n')) {
-            const name = line.split(' — ')[0].trim();
-            if (name && !/^Scout visit/.test(name)) names.add(name);
+        // A visit's own lines and every plan-length variant of it (cadenceVariants["9"] ...).
+        for (const source of [visit, ...Object.values(visit.cadenceVariants || {})]) {
+          for (const field of ['primary', 'secondary']) {
+            for (const line of String(source[field] || '').split('\n')) {
+              const name = line.split(' — ')[0].trim();
+              if (name && !/^Scout visit/.test(name)) names.add(name);
+            }
           }
         }
       }
@@ -41,7 +44,8 @@ describe('the v13 watering rules', () => {
     const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F']);
     // Blindside (the v13 fallback weed spot) has its own migration.
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
-    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME]);
+    const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
+    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 
@@ -78,6 +82,13 @@ describe('the v13 watering rules', () => {
     // ...while the same pair at 3 PM ET gives hold, then water in by 11 PM.
     const afternoonPair = buildWateringInstruction({ rules: [dylox, certainty], completedAt: new Date('2026-10-14T19:00:00Z') });
     expect(afternoonPair.state).toBe('hold_then_water_in');
+  });
+
+  test('Dimension 18-0-10 waters in like the other v13 pre-emergents', () => {
+    const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
+    const checked = validateRule(dimensionGranular.RULE);
+    expect(checked.errors).toEqual([]);
+    expect(checked.rule).toMatchObject({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24, source: 'owner' });
   });
 
   test('Blindside is the label 24-hour hold', () => {
