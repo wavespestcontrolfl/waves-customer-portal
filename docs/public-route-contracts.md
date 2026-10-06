@@ -2391,6 +2391,20 @@ WaveGuard tier is never the signal), for a visit with no assessment date, and
 for a June to September visit that may have applied nitrogen (the program
 applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
 with no `analysis_n`, or any applied product the catalog cannot resolve.
+With `GATE_LAWN_V13` ALSO on (dark; read at call time), the sentence may instead
+be the universal v13 month sentence (the same twelve sentences for every grass,
+written from `server/config/lawn-protocol-v13.json`, same customer-copy rules as
+above), but only when the visit's RECORDED lawn protocol version is
+`2026.10-v13`: the version on the visit's completion ledger row, or, only when the
+visit has no completion row at all, the version pinned on its scheduled visit. A
+completion row whose version is empty (attribution `none`) is authoritative and
+takes the grass-specific legacy sentence, as does any visit with no recorded
+version (completed before protocol assignment existed), one pinned to an older
+version, and every visit while `GATE_LAWN_V13` is off; a visit whose record
+cannot be read gets no program line at all and keeps the old peak / shoulder /
+dormant note. A permanent past report is never rewritten with a program its visit did
+not run. `seasonalNoteSource` stays `"program"` either way; the payload shape
+(keys, types, route, token, privacy, rate limit) is unchanged.
 The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
 lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
 renders a program line once as a small "This time of year" card above the
