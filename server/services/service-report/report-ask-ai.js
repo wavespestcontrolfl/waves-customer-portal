@@ -603,7 +603,13 @@ const NOT_A_PATIENT_WORDS = new Set(('lawn yard yards grass turf fence fences pa
   + 'ant ants roach roaches spider spiders webs nest nests hive mosquito mosquitoes bug bugs insects wasps termites fleas ticks '
   + 'mound mounds area areas spot spots side corner corners exterior interior property entry entries station stations '
   + 'cage crate bowl bowls toy toys playset swing swingset trampoline furniture couch chair chairs table car truck boat trash can cans '
-  + 'bin bins grill hose sprinkler sprinklers everything stuff part parts room rooms closet laundry').split(' '));
+  + 'bin bins grill hose sprinkler sprinklers everything stuff part parts room rooms closet laundry '
+  // A phrase that opens on a place word ("the outside of the house").
+  + 'outside inside indoors outdoors upstairs downstairs front rear '
+  // The treatment itself ("the product was sprayed outside").
+  + 'product products chemical chemicals treatment treatments spray sprays pesticide pesticides insecticide insecticides '
+  + 'herbicide herbicides fungicide fungicides repellent bait baits granule granules liquid liquids material materials '
+  + 'solution mix mixture barrier application applications').split(' '));
 
 function headNoun(phrase) {
   const words = phrase.toLowerCase().split(/\s+/).map((word) => word.replace(/[^a-z'’-]/g, ''));

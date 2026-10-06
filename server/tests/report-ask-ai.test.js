@@ -629,6 +629,11 @@ describe('symptoms and exposure never reach the model', () => {
     'We got outside sprayed',
     'I got everything sprayed',
     'You sprayed my front lawn today',
+    'What was sprayed on the outside of the house?',
+    'What was sprayed on the inside?',
+    'The product was sprayed outside; what was it?',
+    'The chemical was sprayed near the door',
+    'Was the treatment sprayed on the front?',
     '',
   ])('no fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
