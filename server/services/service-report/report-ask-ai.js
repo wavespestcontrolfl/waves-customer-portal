@@ -216,7 +216,7 @@ const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'unr
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|arriv\w*|show\s+up|coming(?!\s+back)|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|arriv\w*|show\s+up|coming(?!\s+back)|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
@@ -302,9 +302,9 @@ const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'tr
 const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
   .sort((x, y) => y.length - x.length)
   .join('|');
-// "12 1/2 Example Street" and "88B Example Street" mask whole; street-name
+// "12 1/2 Example Street", "88B Example Street" and "12-14 Main Street" mask whole; street-name
 // words may hold accents and curly apostrophes ("12 José Lane", "12 O’Neil St").
-const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
+const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:[-/]\\d{1,6}[a-z]?)?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -594,6 +594,8 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
+  // Body part first: "my eyes were sprayed", "the dog's skin got sprayed" (Codex P1 #6016 r14).
+  /\b(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose)\s+(?:was|were|got|get|gets|is|are|been|has\s+been|have\s+been)\s+(?:\w+\s+)?sprayed\b/i,
   // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our|(?:the|a|my|our|his|her|their|your)\s+[\w-]+['’]s)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?|paws?|fur)\b/i,
   // Sprayed in the eyes, on the skin, in the face, with or without a possessive;
