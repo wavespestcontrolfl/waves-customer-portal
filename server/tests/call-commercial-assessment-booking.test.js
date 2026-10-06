@@ -28,7 +28,7 @@ const lines = ({ intro = `Agent: ${INTRO}`, proposal = `Agent: ${PROPOSAL}`, acc
 const OUTBOUND = lines();
 const swap = (t) => t.replace(/^Caller:/gm, 'X:').replace(/^Agent:/gm, 'Caller:').replace(/^X:/gm, 'Agent:');
 
-const ASSESSMENT_ROW = { id: 'svc-assess', service_key: 'waves_assessment', name: 'Waves Assessment', short_name: 'Assessment', billing_type: 'one_time', pricing_type: 'fixed', base_price: '0.00' };
+const ASSESSMENT_ROW = { id: 'svc-assess', service_key: 'lawn_inspection', name: 'Waves Assessment', short_name: 'Assessment', billing_type: 'one_time', pricing_type: 'fixed', base_price: '0.00' };
 const ONE_TIME_ROW = { id: 'svc-roach', service_key: 'cockroach_control', name: 'Cockroach Control Service', short_name: 'Cockroach Control', billing_type: 'one_time', pricing_type: 'fixed', base_price: '350.00' };
 const RECURRING_ROW = { id: 'svc-pest-q', service_key: 'pest_general_quarterly', name: 'General Pest Control (Quarterly)', short_name: 'Pest Quarterly', billing_type: 'recurring', pricing_type: 'variable', base_price: '65.00' };
 
@@ -144,6 +144,21 @@ describe('outbound staff identity (the labels are LLM-inferred and have swapped)
     for (const intro of ['this is Alex', 'this is Alex with Wave Cleaning', 'Alex with Waves here', 'it is Alex with Waves']) {
       expect(outboundStaffIdentityProven(OUTBOUND.replace('this is Alex with Waves', intro))).toBe(false);
     }
+  });
+
+  test('the introduction is a plain first-person assertion that opens the turn: no question, negation or reported speech (codex #6046 r1 P1)', () => {
+    const withAgentTurn = (text) => OUTBOUND.replace(`Agent: ${INTRO}`, `Agent: ${text}`);
+    for (const ok of ['Hi, this is Alex with Waves.', 'Good morning Jordan, this is Alex Smith from Waves Pest Control. How are you?', 'Hello Jordan this is Alex at Waves']) {
+      expect([ok, outboundStaffIdentityProven(withAgentTurn(ok))]).toEqual([ok, true]);
+    }
+    for (const bad of [
+      'this is Alex with Waves?', 'Is this Alex with Waves?', 'this is not Alex with Waves.', 'this is Alex not with Waves.', 'this is never Alex with Waves.',
+      'You told me this is Alex with Waves.', 'I think this is Alex with Waves', 'Hey, how are you, this is Alex with Waves', 'They said this is Alex with Waves.',
+    ]) {
+      expect([bad, outboundStaffIdentityProven(withAgentTurn(bad))]).toEqual([bad, false]);
+    }
+    // a Caller turn saying it ANYWHERE fails the whole proof (the labels are in doubt)
+    expect(outboundStaffIdentityProven(OUTBOUND.replace('Caller: Good, thanks.', 'Caller: Good, and this is Jordan with Waves too.'))).toBe(false);
     expect(outboundStaffIdentityProven('')).toBe(false);
     expect(outboundStaffIdentityProven(undefined)).toBe(false);
     expect(outboundStaffIdentityProven(OUTBOUND.replace('Agent: Hey Jordan', 'Hey Jordan'))).toBe(false); // an unlabeled line
@@ -157,7 +172,7 @@ describe('outbound staff identity (the labels are LLM-inferred and have swapped)
   });
 
   test('both sides introducing themselves as Waves, or neither, holds', () => {
-    const both = OUTBOUND.replace('Caller: Good, thanks.', 'Caller: Good, this is Jordan with Waves too.');
+    const both = OUTBOUND.replace('Caller: Good, thanks.', 'Caller: Hi, this is Jordan with Waves.');
     const none = OUTBOUND.replace('this is Alex with Waves', 'I am calling about your request');
     for (const t of [both, none]) {
       expect(grounded(extraction(), t)).toEqual({ ok: false, reason: 'outbound_staff_identity_unproven' });
@@ -193,6 +208,15 @@ describe('no price discussed: the assessment mode; any price: the priced path de
     expect(priceDiscussed({ prices: [{ amount_usd: null, amount_max_usd: 120 }] }, OUTBOUND)).toBe(true);
     expect(priceDiscussed({ price_offered_by_staff: true }, OUTBOUND)).toBe(true);
     expect(priceDiscussed({ price_accepted_by_caller: true }, OUTBOUND)).toBe(true);
+    // ANY non-null judgement means price talk happened: false counts, only null means none (codex #6046 r1 P1)
+    for (const j of ['price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final']) {
+      expect([j, priceDiscussed({ [j]: false }, OUTBOUND)]).toEqual([j, true]);
+      expect([j, priceDiscussed({ [j]: true }, OUTBOUND)]).toEqual([j, true]);
+      expect([j, priceDiscussed({ [j]: null }, OUTBOUND)]).toEqual([j, false]);
+      expect([j, priceDiscussed({ [j]: undefined }, OUTBOUND)]).toEqual([j, false]);
+      expect([j, grounded(extraction({ service: { [j]: false } }))]).toEqual([j, { ok: false, reason: 'price_discussed' }]);
+      expect([j, route(extraction({ service: { [j]: false } })).allowed]).toEqual([j, false]);
+    }
     expect(priceDiscussed({}, `${OUTBOUND}\nAgent: It is $150.`)).toBe(true);
     expect(priceDiscussed({}, `${OUTBOUND}\nAgent: It is a hundred dollars.`)).toBe(true);
     expect(priceDiscussed({}, `${OUTBOUND}\nAgent: Forty bucks.`)).toBe(true);
@@ -260,6 +284,21 @@ describe('the service must be the Waves Assessment on every view', () => {
     expect(bad(ex)).toBe(false);
     expect(grounded(ex, OUTBOUND, { assessmentBooking: assess({ bookable: bad }) })).toEqual({ ok: false, reason: 'assessment_service_not_resolved' });
     expect(route(ex, { commercialAssessmentBookable: bad }).allowed).toBe(false);
+  });
+
+  test('the catalog row is the shared assessment identity (isAssessmentServiceRow), not a name regex (codex #6046 r1 P1)', () => {
+    const { isAssessmentServiceRow } = require('../services/assessment-booking');
+    const KEY_ONLY = { ...ASSESSMENT_ROW, name: 'Waves Assessment (legacy)' }; // matches by service_key alone
+    expect(isAssessmentServiceRow(KEY_ONLY)).toBe(true);
+    const keyOnlyView = { requested_service: KEY_ONLY.name, matched_service: KEY_ONLY.name, specific_service_name: KEY_ONLY.name };
+    expect(check(keyOnlyView, null, OUTBOUND, [KEY_ONLY, ONE_TIME_ROW])(v2For(KEY_ONLY.name))).toBe(true);
+    const NOT_IT = { ...ASSESSMENT_ROW, service_key: 'waves_assessment_plus', name: 'Waves Assessment Plus' };
+    expect(isAssessmentServiceRow(NOT_IT)).toBe(false);
+    const notItView = { requested_service: NOT_IT.name, matched_service: NOT_IT.name, specific_service_name: NOT_IT.name };
+    expect(check(notItView, null, OUTBOUND, [NOT_IT, ONE_TIME_ROW])(v2For(NOT_IT.name))).toBe(false);
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toContain("const { isAssessmentServiceRow } = require('./assessment-booking');");
+    expect(src).not.toMatch(/waves assessment\$\/i\.test\(String\(row/);
   });
 
   test('the assessment on every view books', () => {
@@ -430,7 +469,22 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
     const check = () => true;
     expect(commercialAssessmentRoutingOptions(outbound, () => check, gatesOf())).toEqual({ commercialAssessmentBooking: true, commercialOutbound: true, commercialAssessmentBookable: check });
     expect(commercialAssessmentRoutingOptions(inbound, () => check, gatesOf())).toMatchObject({ commercialOutbound: false });
-    expect(commercialAssessmentRoutingOptions({ direction: 'Outbound-API' }, () => check, gatesOf())).toMatchObject({ commercialOutbound: true });
+    expect(commercialAssessmentRoutingOptions({ direction: 'Outbound-API', metadata: { type: 'lead_auto_bridge' } }, () => check, gatesOf())).toMatchObject({ commercialOutbound: true });
+  });
+
+  test('outbound is eligible only as a lead callback bridge (metadata.type), inbound always (codex #6046 r1 P1)', () => {
+    const gates = gatesOf();
+    expect(commercialAssessmentBookingActive(outbound, gates)).toBe(true);
+    expect(commercialAssessmentBookingActive({ ...outbound, metadata: JSON.stringify({ type: 'lead_auto_bridge' }) }, gates)).toBe(true); // a stored JSON string
+    for (const metadata of [undefined, null, {}, { type: 'office_dial' }, { type: 'lead_auto_bridge_x' }, '{not json', 'null']) {
+      expect([metadata, commercialAssessmentBookingActive({ direction: 'outbound', metadata }, gates)]).toEqual([metadata, false]);
+    }
+    expect(commercialAssessmentBookingActive({ direction: 'outbound' }, gates)).toBe(false);
+    expect(commercialAssessmentBookingActive(inbound, gates)).toBe(true);
+    expect(commercialAssessmentBookingActive({ direction: 'inbound', metadata: { type: 'office_dial' } }, gates)).toBe(true);
+    // the audit builder reads the SAME predicate: an ordinary outbound call gets no assessment keys
+    const ordinary = buildFailOpenRoutingContext({ call: { direction: 'outbound', transcription: OUTBOUND, created_at: CALL_STARTED_AT }, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates }).options;
+    expect(Object.keys(ordinary).some((k) => /^commercial/.test(k))).toBe(false);
   });
 
   test('both live lanes and the audit builder derive it through that ONE predicate', () => {
@@ -441,7 +495,7 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
     const body = src.slice(at, src.indexOf('\n}\n', at));
     expect(body).toContain("enabled('callAgentCommitBooking')");
     expect(body).toContain('callCommercialAssessmentBookingLive');
-    expect(body).not.toContain('isOutboundCall');
+    expect(body).toContain('isLeadCallbackBridge(call)');
     // the extraction is asked for the agent-proposed shape under the same predicate
     expect(src).toMatch(/\.\.\.\(commercialAssessmentBookingActive\(call\) \? \{ agentProposedSlotCommitment: true \} : \{\}\)/);
   });
@@ -522,7 +576,23 @@ describe('the extraction prompt reads the agent-proposed shape only under the ga
     expect(on).toContain('AGENT-PROPOSED SLOT');
     expect(base).not.toContain('AGENT-PROPOSED SLOT');
     expect(on.replace(/\nAGENT-PROPOSED SLOT[\s\S]*?\n(?=\n?Transcript:|PRIOR|\n)/, '')).not.toBe('');
-    // a per-call block, outside the version hash like the others
     expect(PROMPT_HASH).toMatch(/^v22-/);
+  });
+
+  test('the persisted prompt version carries the block: its own cohort, gate-off byte-identical (codex #6046 r1 P1)', () => {
+    const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
+    const names = ['Waves Assessment', 'Cockroach Control Service'];
+    for (const n of [undefined, [], names]) {
+      const base = extractionPromptVersion(n);
+      for (const o of [undefined, {}, { agentProposedSlotCommitment: false }, { agentProposedSlotCommitment: 'true' }]) expect(extractionPromptVersion(n, o)).toBe(base);
+      const on = extractionPromptVersion(n, { agentProposedSlotCommitment: true });
+      expect(on).toBe(`${base}-aps`);
+      expect(on).not.toBe(base);
+    }
+    expect(extractionPromptVersion([], {})).toBe(PROMPT_HASH);
+    // both stamps (the extractor's and the processor's per-call one) pass the block's own switch
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toContain('promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true })');
+    expect(src).toContain('const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: commercialAssessmentBookingActive(call) });');
   });
 });

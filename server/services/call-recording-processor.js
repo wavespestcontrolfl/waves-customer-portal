@@ -161,15 +161,25 @@ function commercialDictatedBookingActive(call = {}, gates = {}) {
 // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): a Waves Assessment
 // staff book on the call with no price discussed, OUTBOUND callback calls included.
 // Needs GATE_CALL_AGENT_COMMIT_BOOKING too (the kill switch of the commercial
-// exception) and is read at call time. Independent of the priced lane's gate and of
-// call direction; the staff-identity proof outbound needs lives in
+// exception) and is read at call time. Independent of the priced lane's gate; outbound
+// calls qualify only as lead callback bridges; the staff-identity proof outbound needs lives in
 // call-commercial-dictated-booking.js, reached through canAutoRoute from every lane.
 // ONE predicate for both processor lanes AND buildFailOpenRoutingContext (the offline
 // audits), like commercialDictatedBookingActive (codex #5377 r6).
-function commercialAssessmentBookingActive(_call = {}, gates = {}) {
+function commercialAssessmentBookingActive(call = {}, gates = {}) {
   const enabled = gates.isEnabled || isEnabled;
   const live = gates.assessmentLive || (() => require('../config/feature-gates').callCommercialAssessmentBookingLive?.());
-  return enabled('callAgentCommitBooking') === true && live() === true;
+  // Inbound is always eligible; outbound only for the lead callback bridge (the
+  // server-written metadata.type 'lead_auto_bridge'), never another outbound call.
+  return enabled('callAgentCommitBooking') === true && live() === true
+    && (!isOutboundCall(call) || isLeadCallbackBridge(call));
+}
+// The outbound call is the form-lead callback bridge: its server-written metadata
+// (the same record resolveCallContactPhone reads) says type 'lead_auto_bridge'.
+function isLeadCallbackBridge(call = {}) {
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  return metadata?.type === 'lead_auto_bridge';
 }
 // The canAutoRoute options of that lane: {} when it is off (so the options shape every
 // lane and audit compares is unchanged gate-off), else the switch, the call direction
@@ -184,6 +194,7 @@ const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
+const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -6773,7 +6784,7 @@ function commercialAssessmentBookableFor({ extracted = {}, preAdoptionExtracted 
           services,
           coarseServiceLabel: coarse.ok ? coarse.service : null,
         });
-        return !!row && /^waves assessment$/i.test(String(row.name || '').trim());
+        return isAssessmentServiceRow(row);
       });
     } catch (_e) {
       return false;
@@ -8577,7 +8588,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
     // The catalog block is part of the rendered prompt, so the stamped
     // version must carry its hash or cohorts mix under one version.
-    promptVersion: extractionPromptVersion(opts.bookableServiceNames),
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true }),
   });
 }
 
@@ -10189,7 +10200,7 @@ const CallRecordingProcessor = {
     const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
     // Catalog-aware provenance: the catalog block is part of the rendered
     // V2 prompt, so every stamp for this call must carry its hash.
-    const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: commercialAssessmentBookingActive(call) });
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the

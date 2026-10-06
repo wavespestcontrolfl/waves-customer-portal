@@ -195,8 +195,9 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
       : '');
   // The agent-proposed slot shape (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, owner
   // ruling 2026-10-06). Per-call variable, off by default and deliberately outside
-  // the version hash like the blocks above: empty (nothing rendered) unless the
-  // processor turns it on, so the prompt is byte-identical with the gate off.
+  // the BASE version hash like the blocks above, but extractionPromptVersion adds an
+  // '-aps' suffix when it renders (its own cohort). Empty unless the processor turns it
+  // on, so the prompt and its version are byte-identical with the gate off.
   const agentProposedSlotBlock = opts.agentProposedSlotCommitment === true ? AGENT_PROPOSED_SLOT_BLOCK : '';
   return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties, plus the south-Hillsborough towns Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, and Riverview).
 
@@ -468,16 +469,21 @@ const PROMPT_HASH = `${PROMPT_VERSION}-${_contractHash}`;
 // Order-sensitive by design: a reordered catalog renders a different
 // prompt and must version as a different cohort. No catalog → bare
 // PROMPT_HASH, so pre-catalog rows keep their existing version.
-function extractionPromptVersion(bookableServiceNames) {
+function extractionPromptVersion(bookableServiceNames, opts = {}) {
   const names = Array.isArray(bookableServiceNames)
     ? bookableServiceNames.filter(Boolean)
     : [];
-  if (!names.length) return PROMPT_HASH;
+  // The agent-proposed-slot block (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING) changes the
+  // rendered prompt too, so its calls are their own cohort: a '-aps' suffix, only when
+  // the block renders (buildExtractionPrompt's same strict === true), so gate-off
+  // versions are byte-identical.
+  const aps = opts.agentProposedSlotCommitment === true ? '-aps' : '';
+  if (!names.length) return `${PROMPT_HASH}${aps}`;
   const catalogHash = crypto.createHash('sha256')
     .update(names.join('\n'))
     .digest('hex')
     .slice(0, 8);
-  return `${PROMPT_HASH}-cat.${catalogHash}`;
+  return `${PROMPT_HASH}-cat.${catalogHash}${aps}`;
 }
 
 module.exports = {

@@ -207,54 +207,75 @@ function acceptedEntryFor(svc, quoted) {
 }
 
 // Did a price come up on the call at all? Any amount in the extraction (the quoted
-// total, a price entry with an amount or a range end), either price judgement, or a
-// dollar figure / "dollars" / "bucks" in the transcript. The no-price assessment mode
-// needs ALL of these quiet; one of them sends the call to the priced path.
+// total, a price entry with an amount or a range end), ANY price judgement (a false
+// one means price talk happened too: only null means none), or a dollar figure /
+// "dollars" / "bucks" in the transcript. The no-price assessment mode needs ALL of
+// these quiet; one of them sends the call to the priced path.
 const DOLLAR_TALK = /\$\s*\d|\bdollars?\b|\bbucks?\b/i;
 function priceDiscussed(svc = {}, transcript = '') {
-  if (svc.quoted_price_usd != null) return true;
-  if (svc.price_offered_by_staff === true || svc.price_accepted_by_caller === true) return true;
   const entries = [svc.price, ...(Array.isArray(svc.prices) ? svc.prices : [])];
-  if (entries.some((e) => e && typeof e === 'object' && (e.amount_usd != null || e.amount_max_usd != null))) return true;
-  return DOLLAR_TALK.test(String(transcript || ''));
+  return svc.quoted_price_usd != null
+    || [svc.price_offered_by_staff, svc.price_accepted_by_caller, svc.price_is_final].some((j) => j != null)
+    || entries.some((e) => e && typeof e === 'object' && (e.amount_usd != null || e.amount_max_usd != null))
+    || DOLLAR_TALK.test(String(transcript || ''));
 }
 
 // Staff identity on an OUTBOUND recording, independent of who the labels say is who:
-// an Agent-labeled turn introduces itself as Waves ("this is Adam with Waves") and
-// no Caller-labeled turn does. A swapped or mixed labeling puts the introduction on
-// the Caller side (or on neither), and the call holds.
-const STAFF_INTRO = /\bthis is\s+[a-z][a-z'.-]*(?:\s+[a-z][a-z'.-]*){0,2}\s*,?\s+(?:with|from|at)\s+waves\b/i;
+// an Agent-labeled turn introduces itself as Waves and no Caller-labeled turn does. A
+// swapped or mixed labeling puts the introduction on the Caller side (or on neither),
+// and the call holds. The introduction is a plain first-person ASSERTION that OPENS
+// the turn (an optional greeting and the customer's name first): "Hey Jennifer, this
+// is Adam with Waves." Not a question ("this is Adam with Waves?"), not a negation
+// ("this is not Adam with Waves"), not reported speech ("you told me this is Adam
+// with Waves": the turn does not start with it).
+const NAME_WORD = "(?!(?:not|never|no)\\b)[a-z][a-z'.-]*";
+const STAFF_INTRO = new RegExp(
+  "^\\s*(?:(?:hi|hello|hey|good\\s+(?:morning|afternoon|evening))\\b[\\s,.!-]*(?:(?!this\\b)[a-z][a-z'.-]*[\\s,.!-]*)?)?"
+  + `this\\s+is\\s+${NAME_WORD}(?:\\s+${NAME_WORD}){0,2}\\s*,?\\s+(?:with|from|at)\\s+waves\\b[^.!?]*([.!?]|$)`,
+  'i',
+);
+const ANY_STAFF_INTRO = /\bthis is\s+[a-z][a-z'.-]*(?:\s+[a-z][a-z'.-]*){0,2}\s*,?\s+(?:with|from|at)\s+waves\b/i;
 function outboundStaffIdentityProven(transcript) {
   const turns = parseTurns(transcript);
   if (!turns) return false;
-  const introduces = (turn) => STAFF_INTRO.test(String(turn.raw || ''));
-  return turns.some((t) => t.agent && introduces(t)) && !turns.some((t) => !t.agent && introduces(t));
+  const introduces = (turn) => {
+    const m = STAFF_INTRO.exec(String(turn.raw || ''));
+    return !!m && m[1] !== '?';
+  };
+  // The exclusion is the LOOSE reading: a Caller turn that says it anywhere ("... this is
+  // Jordan with Waves too") already puts the labels in doubt, so it fails closed.
+  return turns.some((t) => t.agent && introduces(t)) && !turns.some((t) => !t.agent && ANY_STAFF_INTRO.test(String(t.raw || '')));
 }
 
+// The schedule the call must carry before any price or agreement is read.
+const SCHEDULE_CHECKS = [
+  ['no_scheduling', (sched) => !sched || typeof sched !== 'object'],
+  ['not_confirmed', (sched) => sched.status !== 'confirmed' || !sched.confirmed_start_at],
+];
+
+// What the no-price assessment mode needs before it grounds the agreement, in order;
+// the first that fails is the reason. `t` carries { v2, transcript, assessmentBooking }.
+const ASSESSMENT_CHECKS = [
+  // Every service view must resolve to the Waves Assessment row (the caller's check).
+  ['assessment_service_not_resolved', (t) => typeof t.assessmentBooking.bookable !== 'function' || t.assessmentBooking.bookable(t.v2) !== true],
+  ['outbound_staff_identity_unproven', (t) => t.assessmentBooking.outbound === true && !outboundStaffIdentityProven(t.transcript)],
+];
+// A price came up (or the assessment mode is off): only the priced path may book it.
+const PRICED_PATH_CHECKS = [['price_discussed', (t) => !t.pricedPath], ...PRICE_TERM_CHECKS];
+
 function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable, pricedPath = true, assessmentBooking = null } = {}) {
-  const fail = (reason) => ({ ok: false, reason });
-  const scheduling = v2?.scheduling;
-  if (!scheduling || typeof scheduling !== 'object') return fail('no_scheduling');
-  if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return fail('not_confirmed');
+  const early = SCHEDULE_CHECKS.find(([, fails]) => fails(v2?.scheduling));
+  if (early) return { ok: false, reason: early[0] };
   const svc = v2.service_request || {};
-  if (assessmentBooking && !priceDiscussed(svc, transcript)) {
-    // Every service view must resolve to the Waves Assessment row (the caller's check).
-    if (typeof assessmentBooking.bookable !== 'function' || assessmentBooking.bookable(v2) !== true) return fail('assessment_service_not_resolved');
-    if (assessmentBooking.outbound === true && !outboundStaffIdentityProven(transcript)) return fail('outbound_staff_identity_unproven');
-    const agreed = groundNewBookingAgreement({ v2, transcript, callStartedAt, allowAgentProposed: true });
-    if (!agreed.ok) return fail(agreed.reason);
-    return { ok: true, reason: 'assessment_booking_grounded', mode: agreed.mode, assessment: true };
-  }
-  // A price came up (or the assessment mode is off): only the priced path may book it.
-  if (!pricedPath) return fail('price_discussed');
-  const terms = { v2, agreed: resolveCallAgreedPrice(v2), quoted: svc.quoted_price_usd, entry: acceptedEntryFor(svc, svc.quoted_price_usd), quoteBookable };
-  const failedTerm = PRICE_TERM_CHECKS.find(([, fails]) => fails(terms));
-  if (failedTerm) return fail(failedTerm[0]);
-  const grounding = groundNewBookingAgreement({ v2, transcript, callStartedAt });
-  if (!grounding.ok) return fail(grounding.reason);
-  const priceFailure = priceGrounded(v2, transcript, terms.quoted);
-  if (priceFailure) return fail(priceFailure);
-  return { ok: true, reason: 'dictated_booking_grounded', mode: grounding.mode };
+  const noPriceMode = !!assessmentBooking && !priceDiscussed(svc, transcript);
+  const terms = { v2, transcript, assessmentBooking, pricedPath, agreed: resolveCallAgreedPrice(v2), quoted: svc.quoted_price_usd, entry: acceptedEntryFor(svc, svc.quoted_price_usd), quoteBookable };
+  const failedTerm = (noPriceMode ? ASSESSMENT_CHECKS : PRICED_PATH_CHECKS).find(([, fails]) => fails(terms));
+  if (failedTerm) return { ok: false, reason: failedTerm[0] };
+  const grounding = groundNewBookingAgreement({ v2, transcript, callStartedAt, allowAgentProposed: noPriceMode });
+  // The priced path also grounds the amount in the staff's own offer quote; no-price has none.
+  const reason = (!grounding.ok && grounding.reason) || (grounding.ok && !noPriceMode && priceGrounded(v2, transcript, terms.quoted));
+  if (reason) return { ok: false, reason };
+  return { ok: true, reason: noPriceMode ? 'assessment_booking_grounded' : 'dictated_booking_grounded', mode: grounding.mode, ...(noPriceMode ? { assessment: true } : {}) };
 }
 
 module.exports = { commercialDictatedBookingGrounded, outboundStaffIdentityProven, priceDiscussed };
