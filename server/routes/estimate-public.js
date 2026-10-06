@@ -17524,7 +17524,13 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   // Good is priced by the SAME one-time-choice breakdown acceptance uses
   // (the pest visit from the plan's list price PLUS any preserved one-time
   // add-on, e.g. a roach treatment), judged as if the option were on.
-  const goodBreakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  // In the as-quoted state Good is reached only AFTER the lawn removal, so
+  // its preserved one-time rows come from the dry run's post-change
+  // breakdown (a removal can reallocate a fixed discount); on the pest-only
+  // row the served bundle already is that state.
+  const goodBreakdown = state === 'best'
+    ? (dry.body.oneTimeBreakdown || normalizeOneTimeBreakdown(estData))
+    : (pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData));
   const goodPest = oneTimePestChoiceAmountForEstimate({ ...estimate, show_one_time_option: true }, estData, pricingBundle) || 0;
   const goodAddOns = goodPest > 0
     ? preservedOneTimeAddOnRowsFromBreakdown(goodBreakdown, manualDiscountForChoiceBreakdown(goodBreakdown, estData))
@@ -17880,6 +17886,9 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         // Better / Best tiles read them; the disclosures say the same thing
         // in sentences).
         perApplication: impact.afterPerApplication,
+        // The post-change one-time rows (the Good tile prices from these in
+        // the as-quoted state: a removal can reallocate a fixed discount).
+        oneTimeBreakdown: normalizeOneTimeBreakdown({ ...parsedData, result: afterResult }),
         // Echo this back on the commit; the write refuses if the row, the
         // pricing config, or the membership verdict moved since this preview.
         previewBasis: previewDigest,

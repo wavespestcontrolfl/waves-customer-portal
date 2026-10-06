@@ -126,7 +126,10 @@ function oneTimeOptionUpdateForMixChange({
  * mark stays valid: the office reopening it must still see (and keep) the
  * Good / Better / Best choice.
  */
-function offerTiersMarkedPestOnlyState(estData) {
+function offerTiersMarkedPestOnlyState(estData, { gateOn = offerTiersGateLive(), railGateOn = optOutRailGateLive() } = {}) {
+  // Dark feature: a mark saved earlier must not resurface the checkbox or
+  // survive a save while either gate is off.
+  if (!gateOn || !railGateOn) return false;
   if (!offerTiersRequested(estData)) return false;
   try {
     const OptOut = require('./estimate-service-opt-out');

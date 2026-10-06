@@ -229,10 +229,20 @@ describe('Codex r2 on #5970', () => {
     const block = await buildOfferTiersBlock({
       estimate: { id: 'g', status: 'sent', category: 'RESIDENTIAL', expires_at: future, onetime_total: 218, waveguard_tier: 'Silver', show_one_time_option: false },
       estData: withRoach, pricingBundle: bundle, memberBlock: async () => false,
-      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 218, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }] } }),
+      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 218, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }],
+        // The POST-removal rows: here the roach row is unchanged by the removal.
+        oneTimeBreakdown: { total: 218, items: [{ service: 'pest_initial_roach', label: 'Initial Roach Knockdown', amount: 119 }, { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99 }] } } }),
     });
     // 107 x 2.2 = 235.4 → 235, plus the preserved $119 roach row the one-time choice carries.
     expect(block.good.oneTimeTotal).toBe(354);
+    // When the removal reallocates a discount onto the add-on, Good follows the post-change row, not the served bundle.
+    const reallocated = await buildOfferTiersBlock({
+      estimate: { id: 'g2', status: 'sent', category: 'RESIDENTIAL', expires_at: future, onetime_total: 218, waveguard_tier: 'Silver', show_one_time_option: false },
+      estData: withRoach, pricingBundle: bundle, memberBlock: async () => false,
+      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 199, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }],
+        oneTimeBreakdown: { total: 199, items: [{ service: 'pest_initial_roach', label: 'Initial Roach Knockdown', amount: 100 }, { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99 }] } } }),
+    });
+    expect(reallocated.good.oneTimeTotal).toBe(335);
     delete process.env.GATE_ESTIMATE_OFFER_TIERS; delete process.env.GATE_ESTIMATE_SERVICE_OPT_OUT;
   });
 
@@ -240,10 +250,14 @@ describe('Codex r2 on #5970', () => {
     const parked = pestLawnData();
     parked.result.recurring.services = parked.result.recurring.services.filter((s) => s.service === 'pest_control');
     recordServiceOptOutEvent(parked, { serviceKey: 'lawn_care', included: false, mode: 'remove', actor: 'staff', at: 'now', removedInputs: {} }, {});
-    expect(OfferTiers.offerTiersMarkedPestOnlyState(parked)).toBe(true);
+    const live = { gateOn: true, railGateOn: true };
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(parked, live)).toBe(true);
     expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: parked }).reason).toBe('no_lawn');
-    expect(OfferTiers.offerTiersMarkedPestOnlyState(pestLawnData())).toBe(false);
-    expect(OfferTiers.offerTiersMarkedPestOnlyState(pestLawnData({ offerTiersRequested: undefined }))).toBe(false);
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(pestLawnData(), live)).toBe(false);
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(pestLawnData({ offerTiersRequested: undefined }), live)).toBe(false);
+    // Dark feature: either gate off and the parked state no longer resurfaces the mark.
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(parked, { gateOn: false, railGateOn: true })).toBe(false);
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(parked, { gateOn: true, railGateOn: false })).toBe(false);
   });
 
   test('the lead-service send overrides the lead only while the tier gate is live', () => {
