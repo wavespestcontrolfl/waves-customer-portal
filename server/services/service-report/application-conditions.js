@@ -832,6 +832,10 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     const effectiveTtlMs = missingIndependentInput ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
     _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value, windowClosed });
   }
+  // Paid key, a week past Open-Meteo's reach and no MRMS rain: no source
+  // can ever answer it, so the caller may settle it instead of retrying
+  // (Codex #6052 r2).
+  if (!omCovers && value.rainInches == null && value.et0Inches == null) value = { ...value, noSource: true };
   return { ...value, windowClosed };
 }
 

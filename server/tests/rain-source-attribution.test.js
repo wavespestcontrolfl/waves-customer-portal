@@ -67,7 +67,10 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
     try {
       const urls = [];
       global.fetch = jest.fn(async (url) => { urls.push(String(url)); return OK([0.1, 0, 0.2, 1.0, 0.05, 0.38, 0.66]); });
-      await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: '2026-07-30' });
+      // A recent closed week, relative to today, so the 92-day reach never
+      // ages this test out (Codex #6052 r2).
+      const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+      await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: recent });
       expect(urls.length).toBeGreaterThan(0);
       expect(urls.every((u) => u.startsWith('https://customer-api.open-meteo.com/v1/forecast'))).toBe(true);
       expect(urls.every((u) => u.includes('apikey=fixture-key'))).toBe(true);
@@ -80,10 +83,11 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
     process.env.OPEN_METEO_API_KEY = 'fixture-key';
     try {
       const urls = [];
-      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return OK([0.1, 0, 0.2, 1.0, 0.05, 0.38, 0.66]); });
-      const out = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: '2026-01-10' });
+      // MRMS has nothing for the week either.
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return { ok: false, status: 503, json: async () => ({}) }; });
+      const out = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10) });
       expect(urls.some((u) => u.includes('open-meteo.com'))).toBe(false);
-      expect(out.et0Inches).toBeNull();
+      expect(out).toMatchObject({ rainInches: null, et0Inches: null, noSource: true });
     } finally {
       delete process.env.OPEN_METEO_API_KEY;
     }
