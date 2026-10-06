@@ -19936,7 +19936,81 @@ async function joinOwnStopExtension(ctx, candidate, clashRows) {
   const ownOnly = clashRows.every((r) => r.customer_id && String(r.customer_id) === String(ctx.parent.customer_id));
   const stopTechs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
   if (!ownOnly || stopTechs.length !== 1) return null;
-  return placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
+  const joined = await placeGroupedExtension(ctx, candidate, clashRows.map((r) => r.id), { technicianId: stopTechs[0] });
+  return joined || placeAfterOtherGroupStop(ctx, candidate, clashRows);
+}
+
+// Two stop groups (owner ruling 2026-10-05): pest and lawn never share a stop.
+// When the customer's own stop of the OTHER group sits on the cadence date,
+// the extension books right after it (the first whole hour after the stop's
+// work, same day and technician) instead of skipping a cadence step or
+// overlapping it. null = not that case, or the hour is not free.
+async function placeAfterOtherGroupStop(ctx, candidate, clashRows) {
+  const { conn, parent, parentId, cols, svcLike, opts } = ctx;
+  if (!parent.service_id || !parent.customer_id) return null;
+  if (!clashRows.every((r) => r.customer_id && String(r.customer_id) === String(parent.customer_id))) return null;
+  const techs = [...new Set(clashRows.map((r) => (r.technician_id ? String(r.technician_id) : null)))];
+  if (techs.length !== 1 || !techs[0]) return null;
+  // The whole stop, not only the rows whose raw window clashed: every live row
+  // of this customer that day on that technician.
+  const stopRows = await conn('scheduled_services as ss')
+    .leftJoin('services as svc', 'svc.id', 'ss.service_id')
+    .where({ 'ss.customer_id': parent.customer_id, 'ss.scheduled_date': candidate, 'ss.technician_id': techs[0] })
+    .whereNot('ss.id', parentId)
+    .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', ADMIN_OCCUPANCY_EXCLUDE_STATUSES))
+    .select('ss.*', 'svc.group_family as stop_group_family');
+  const ownFamily = (await conn('services').where({ id: parent.service_id }).first('group_family'))?.group_family;
+  const stop = stopRows.filter((r) => r.stop_group_family && r.stop_group_family !== ownFamily);
+  const otherFamilies = new Set(stop.map((r) => r.stop_group_family));
+  if (!ownFamily || !stop.length || otherFamilies.size !== 1
+    || !clashRows.every((c) => stop.some((r) => String(r.id) === String(c.id)))) return null;
+  // The same premise on every side (canonical scope: property id, else the
+  // normalized address), never a guess.
+  const Preview = require('../services/rider-series-preview');
+  const own = await Preview.resolveSeriesPropertyScope(conn, parent);
+  for (const row of stop) {
+    if (Preview.seriesPropertyVerdict(own, await Preview.resolveSeriesPropertyScope(conn, row)) !== 'same') return null;
+  }
+  // Members that share an arrival work one after another: each start's work is
+  // summed; the stop ends at the latest of those and of any window end.
+  const byStart = new Map();
+  for (const r of stop) {
+    const start = parseHHMM(r.window_start);
+    if (start == null) return null;
+    const minutes = Number(r.estimated_duration_minutes) || ((parseHHMM(r.window_end) ?? start + 60) - start) || 60;
+    byStart.set(start, (byStart.get(start) || 0) + minutes);
+  }
+  const stopEnd = Math.max(...[...byStart].map(([start, work]) => start + work),
+    ...stop.map((r) => parseHHMM(r.window_end) ?? 0));
+  let window;
+  try {
+    // The canonical appointment-window rules (shift / admin day end).
+    window = assertAdminAppointmentWindow({
+      windowStart: minutesToHHMM(Math.ceil(stopEnd / 60) * 60),
+      durationMinutes: Number(parent.estimated_duration_minutes) || 60,
+    });
+  } catch {
+    return null;
+  }
+  const scope = deferredCommitScope(conn);
+  try {
+    const placed = await conn.transaction(async (sp) => {
+      const tech = await assignablePlacementTechnicianId(sp, parent, techs[0], candidate);
+      const template = { ...parent, ...window, recurring_technician_override: true, recurring_technician_id: tech };
+      const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
+        ...opts, onSkip: undefined, forceDate: candidate, commitScope: scope,
+      });
+      if (!visit) throw new Error('nothing placed');
+      if (await placedRowOverlapsOutsideVisit(sp, visit.scheduledServiceId)) throw new Error('the next hour is taken');
+      return visit;
+    });
+    scope.keep();
+    return placed;
+  } catch (err) {
+    scope.drop(err);
+    logger.info(`[recurring] parent=${parentId} ${candidate} cannot follow the other group's stop (${err.message})`);
+    return null;
+  }
 }
 
 // The next-date search of extendSeriesOnceLocked: a ride on the lawn first
@@ -20002,7 +20076,13 @@ async function walkExtensionCandidates(ctx) {
     // series can lose most of a year's candidates to one recurring
     // conflict. Insert on the cadence date and log the overlap instead.
     if (opts.overlapAdvisoryOnly) {
-      if (await seriesCandidateDateClashes(conn, clashProbeTemplate, candidate)) {
+      // Top-up: the customer's own other-group stop on the date gets the
+      // follow-on hour too (owner ruling 2026-10-05), before the generic
+      // advisory overlap insert.
+      const clashRows = await seriesCandidateDateClashRows(conn, clashProbeTemplate, candidate);
+      const after = clashRows.length ? await placeAfterOtherGroupStop(ctx, candidate, clashRows) : null;
+      if (after) return { joined: after };
+      if (clashRows.length) {
         logger.warn(`[recurring-topup] parent=${parentId} candidate ${candidate} overlaps an existing visit on the calendar — inserting anyway (advisory only, same posture every other admin write already takes)`);
       }
     } else {

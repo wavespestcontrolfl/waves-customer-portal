@@ -68,7 +68,7 @@ postgres('series extension keeps riding the lawn', () => {
     Admin = require('../routes/admin-schedule');
     Reminders = require('../services/appointment-reminders');
     Renewals = require('../services/annual-prepay-renewals');
-    const catalog = await mockPg('services').whereIn('service_key', ['lawn_care_6week', 'tree_shrub_quarterly']).select('id', 'service_key');
+    const catalog = await mockPg('services').whereIn('service_key', ['lawn_care_6week', 'tree_shrub_quarterly', 'pest_general_quarterly']).select('id', 'service_key');
     ids = Object.fromEntries(catalog.map((r) => [r.service_key, r.id]));
   });
 
@@ -600,6 +600,68 @@ postgres('series extension keeps riding the lawn', () => {
         const host = await trx('scheduled_services').where({ id: lawn.id }).first();
         expect(row.visit_id).not.toBeNull();
         expect(row.visit_id).toBe(host.visit_id);
+      } finally { await trx.rollback(); }
+    });
+
+    // Two stop groups (owner 2026-10-05): a PEST series never joins the lawn
+    // stop; it books the first whole hour after the stop's work instead.
+    const pestWorld = (trx) => alignedPest(trx, { pestExtra: { service_id: ids.pest_general_quarterly,
+      service_key_snapshot: 'pest_general_quarterly', service_type: 'Quarterly Pest Control Service' } });
+
+    test('a pest series meeting its own lawn stop books right after it, same day and technician', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await pestWorld(trx);
+        const [lawn] = await lawnVisit(trx, w, date);
+        const spawned = await extend(trx, w.riderParent.id);
+        expect(spawned && spawned.scheduledDate).toBe(date);
+        const [row] = await extensionRows(trx, w.riderParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(date);
+        expect(String(row.window_start).slice(0, 5)).toBe('10:00');
+        expect(String(row.technician_id)).toBe(String(lawn.technician_id));
+        const host = await trx('scheduled_services').where({ id: lawn.id }).first();
+        expect(row.visit_id && host.visit_id && String(row.visit_id) === String(host.visit_id)).toBeFalsy();
+      } finally { await trx.rollback(); }
+    });
+
+    test('a lawn stop whose two members share 09:00 ends after both: the pest series books 11:00', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await pestWorld(trx);
+        await lawnVisit(trx, w, date);
+        await lawnVisit(trx, w, date, { service_id: ids.tree_shrub_quarterly, service_key_snapshot: 'tree_shrub_quarterly',
+          service_type: 'Quarterly Tree & Shrub Care Service' });
+        await extend(trx, w.riderParent.id);
+        const [row] = await extensionRows(trx, w.riderParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(date);
+        expect(String(row.window_start).slice(0, 5)).toBe('11:00');
+      } finally { await trx.rollback(); }
+    });
+
+    test('the customer\'s lawn stop at ANOTHER property is not the same stop: the cadence date is not taken after it', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await pestWorld(trx);
+        const otherProperty = randomUUID();
+        await trx('customer_properties').insert({ id: otherProperty, customer_id: w.customerId, is_primary: false, active: true,
+          address_line1: '410 Example Court', city: 'Parrish', state: 'FL', zip: '34219', source: 'estimate_accept' });
+        await lawnVisit(trx, w, date, { property_id: otherProperty });
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
+        expect(rows.filter((r) => dateOf(r.scheduled_date) === date)).toHaveLength(0);
+      } finally { await trx.rollback(); }
+    });
+
+    test('top-up: a pest series meeting its own lawn stop books right after it, not overlapping', async () => {
+      const trx = await mockPg.transaction();
+      try {
+        const { w, date } = await pestWorld(trx);
+        await lawnVisit(trx, w, date);
+        const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.riderParent.id, { horizonDays: 120 });
+        expect(result.skipped).toBeNull();
+        const first = (await extensionRows(trx, w.riderParent.id)).find((r) => dateOf(r.scheduled_date) === date);
+        expect(first).toBeDefined();
+        expect(String(first.window_start).slice(0, 5)).toBe('10:00');
       } finally { await trx.rollback(); }
     });
 
