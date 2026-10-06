@@ -233,6 +233,61 @@ describe('payment_failed bell', () => {
   });
 });
 
+describe('reservice_self_booked bell (owner 2026-10-05)', () => {
+  const { build } = TRIGGER_REGISTRY.reservice_self_booked;
+  const why = (built) => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    return composeAdminAlert({ area: 'Schedule', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
+      subject: { type: 'customer', id: 'c1' }, doneWhen: 'visit_closed', who: 'person' });
+  };
+
+  test('names the customer and the visit, quotes their words, links the customer', () => {
+    const request = 'German roaches got into the house a few weeks ago, I treated with a gel bait over a couple of weeks and they seem to have resolved.';
+    const built = build({ customerId: 'c1', name: 'Albert Clark', when: 'Thu, Oct 9 at 1:00 PM', pests: 'Roaches', request });
+    expect(built.title).toBe("Schedule — read Albert Clark's re-service request");
+    expect(built.body.startsWith('Roaches: “German roaches got into the house')).toBe(true);
+    expect(built.body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+    expect(built.detail).toBe(`Pests: Roaches\nVisit: Thu, Oct 9 at 1:00 PM\nRequest: ${request}`);
+    expect(built.link).toBe('/admin/customers?customerId=c1');
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('the row carries the structured parts: Schedule, needs-you, the visit, a person reads it', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', name: 'Albert Clark', request: 'ants' }).alert).toEqual({
+      area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'v1' }, doneWhen: 'visit_closed', who: 'person',
+    });
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).alert.subject).toEqual({ type: 'customer', id: 'c1' });
+  });
+
+  test('with the visit known, the link opens it on the schedule', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', serviceDate: '2026-10-09', name: 'Albert Clark', request: 'ants' }).link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-09&appointment=v1');
+  });
+
+  test('a short name keeps the visit day in the headline', () => {
+    const built = build({ customerId: 'c1', name: 'Al Day', when: 'Thu, Oct 9', request: 'ants' });
+    expect(built.title).toBe("Schedule — read Al Day's re-service request for Thu, Oct 9");
+    expect(built.title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+  });
+
+  test('no typed words says so, with the picked pests, and passes the rule', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', pests: 'Ants' });
+    expect(built.body).toBe('Picked ants and typed no description.');
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).body).toBe('They typed no description of the problem.');
+    expect(built.detail).toBeUndefined();
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('a phone number or street address in the words is masked', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', request: 'Call 941-555-0123, ants at 123 Palm Avenue' });
+    expect(built.detail).not.toMatch(/555-0123|123 Palm Avenue/);
+    expect(built.body).not.toMatch(/555-0123|123 Palm Avenue/);
+    // The masked address reads "[address]", a bracket the rule refuses: the alert still
+    // rings with every structured part kept and the broken rule stamped.
+    expect(built.alert).toEqual(expect.objectContaining({ area: 'Schedule', severity: 'needs-you', who: 'person', ruleViolations: ['why_forbidden_token:bracket_tag'] }));
+  });
+});
+
 describe('prepaid coverage bell', () => {
   const visit = { id: 'visit-1', customer_id: 'c1', service_date: '2026-10-06', service_type: 'Lawn Care' };
 

@@ -60,7 +60,8 @@
  * (2026-10-03), each closed only by the record that answers it: the
  * promise-chaser bell once the promise it chases is closed, and a portal chat
  * hand-off about adding a service once an estimate is handed off to that
- * customer. Every other missed-call bell and portal chat topic stays a
+ * customer. A self-booked re-service bell (owner 2026-10-05) closes once its
+ * booked visit is completed, cancelled or gone. Every other missed-call bell and portal chat topic stays a
  * person's to close. A promise-chaser retirement is final (`rearm: false`),
  * like the close its own emitter writes inside its 30-minute window: a
  * promise reopened later is the promise list's and the SLA pager's to
@@ -392,6 +393,17 @@ function addServiceQuoted(s) {
   return isAddServiceChat(s.meta) && s.chatQuoted ? 'Estimate was sent' : null;
 }
 
+// A re-service request bell (notification-triggers.js reservice_self_booked)
+// is about its booked visit: done once that visit is completed, cancelled or
+// gone. Its emitter re-raises the same per-visit key only while the visit is
+// open and new (reservice-public.js ringReserviceBooked), so a retire never
+// fights it.
+function reserviceVisitClosed(s) {
+  if (!s.refs.visitId) return null;
+  if (!s.visit) return 'Visit is gone';
+  return CLOSED_VISIT_STATUSES.has(String(s.visit.status)) ? 'Visit is closed' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -416,6 +428,9 @@ const CLASSES = [
   },
   { // promise-chaser-bell.js — one bell per promise and call day
     key: 'promise_chaser', categories: ['missed_call'], prefix: 'promise_chaser:', match: (meta) => meta.triggerKey === 'promise_chaser', rule: chasedPromiseClosed, rearm: false,
+  },
+  { // reservice-public.js ringReserviceBooked — one bell per self-booked visit
+    key: 'reservice_booked', categories: ['schedule'], prefix: 'reservice-booked:', match: (meta) => meta.triggerKey === 'reservice_self_booked', rule: reserviceVisitClosed,
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
