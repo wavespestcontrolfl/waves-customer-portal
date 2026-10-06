@@ -198,6 +198,27 @@ describe('property-lookup callers declare their scope decision', () => {
     expect(lookupOptionsFor('public_quote', { cacheOnly: true, commercialSuiteSizing: true })).toEqual({ cacheOnly: true });
     expect(lookupOptionsFor('report_cross_sell')).toEqual({});
     expect(() => lookupOptionsFor('nope')).toThrow(/unknown property-lookup caller/);
+    // Pinned INDEPENDENTLY of the registry (which this test otherwise reads):
+    // the only two ids that may opt in, and the files that are customer- or
+    // public-facing no matter how their entry is labelled. Reclassifying a
+    // public route as staff, or adding a third opt-in, fails here.
+    const MAY_OPT_IN = ['admin_estimate_tool', 'estimator_engine'];
+    const PROTECTED_FILES = [
+      'routes/public-property-lookup.js', 'routes/public-quote.js',
+      'services/customer-pricing-ai.js', 'services/service-report/cross-sell.js',
+    ];
+    expect(Object.entries(CALLERS).filter(([, c]) => c.suiteSizing).map(([id]) => id).sort()).toEqual(MAY_OPT_IN);
+    for (const f of PROTECTED_FILES) {
+      const entry = Object.values(CALLERS).find((c) => c.file === f);
+      expect(entry && ['public', 'customer'].includes(entry.surface) && entry.suiteSizing === false).toBe(true);
+    }
+    // ...and a file whose path says it is public or portal-facing may not be
+    // classified staff / automation, whatever the entry says.
+    for (const c of Object.values(CALLERS)) {
+      if (/^routes\/public-|\/customer-|\/portal|\/service-report\//.test(c.file) && !/prewarm/.test(c.file)) {
+        expect(['public', 'customer']).toContain(c.surface);
+      }
+    }
     for (const [id, c] of Object.entries(CALLERS)) {
       expect(['staff', 'automation', 'public', 'customer']).toContain(c.surface);
       expect(typeof c.suiteSizing).toBe('boolean');
