@@ -2783,14 +2783,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (lawnSkippedProductsError) {
       return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId (uuid), productName, reason? }, each product at most once.', code: 'lawn_skipped_products_invalid' } };
     }
-    // GATE_LAWN_BERMUDA_REMOVAL: on a visit that carries the bermuda removal step,
-    // Recognition and Fusilade II go on together; one without the other is refused
-    // before any write (the surfactant is optional). Any other visit, and gate off:
-    // no refusal.
-    const bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
-    if (bermudaPairMessage) {
-      return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
-    }
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });
     }
@@ -4537,6 +4529,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (lawnCompletionAreaError) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_completion_area_invalid'), db);
         return { status: 400, body: { error: 'treatedSqft must be a positive whole number, or null to clear the visit area.', code: 'lawn_completion_area_invalid' } };
+      }
+      // GATE_LAWN_BERMUDA_REMOVAL: on a visit that carries the bermuda removal step,
+      // Recognition and Fusilade II go on together; one without the other is refused
+      // before any write (the surfactant is optional). A FRESH attempt only, like the
+      // validations around it: a committed completion's retry or resume is judged by
+      // the account as it was then, never by today's flag. Any other visit, and gate
+      // off: no refusal.
+      const bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
+      if (bermudaPairMessage) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_pair_required'), db);
+        return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
       }
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {

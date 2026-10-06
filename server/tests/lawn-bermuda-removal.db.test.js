@@ -224,10 +224,10 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
 
     // Unselected and unusable: the three lines leave with a WARNING, never a block, and the
     // visit's own products, quantities and status are untouched.
-    test.each([['rec'], ['fus']])('%s limited, nothing selected: the three lines leave with a warning, the visit is not blocked', async (limited) => {
+    test('limited by the step\'s own sprays, nothing selected: the three lines leave with a warning, the visit is not blocked', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-16', bermuda: true });
-      await history(f.customerId, { rec, fus }[limited], ['2026-06-01']);
+      await history(f.customerId, rec, ['2026-06-01']);
       const result = await plan(f.visit);
       for (const name of [REC, FUS, NIS]) expect(optionNames(result)).not.toContain(name);
       expect(result.propertyGate.warnings.map((w) => w.code)).toContain('lawn_bermuda_step_unavailable');
@@ -249,10 +249,10 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(limited.mixingOrder).toEqual(clean.mixingOrder);
     });
 
-    test.each([['rec'], ['fus']])('%s limited AND selected: the three lines stay, unavailable, each with its own block', async (limited) => {
+    test('limited AND selected: the three lines stay, unavailable, each with its own block', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-16', bermuda: true });
-      await history(f.customerId, { rec, fus }[limited], ['2026-06-01']);
+      await history(f.customerId, rec, ['2026-06-01']);
       const result = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
       const lines = result.mixCalculator.items.filter((item) => item.bermudaStep);
       expect(lines.map((l) => l.product.name).sort()).toEqual([FUS, NIS, REC].sort());
@@ -496,22 +496,33 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       };
       return { f, other, ledger };
     }
-    const check = (f, propertyId, extra = {}) => limits.checkLimits(f.customerId, rec.id, '2026-06-20', knex, { propertyId, ...extra });
+    const check = (f, propertyId, extra = {}, product = rec) => limits.checkLimits(f.customerId, product.id, '2026-06-20', knex, { program: 'bermuda_removal', propertyId, ...extra });
 
-    test('gate off: the rows are inert (compliance results as before), gate on they block', async () => {
+    test('the rows apply only to a caller that names the program; compliance and every other caller ignore them', async () => {
       const f = await lawn({ date: '2026-06-20', bermuda: true });
       await history(f.customerId, rec, ['2026-03-01', '2026-04-20']);
-      setGates({ removal: false });
-      const off = await check(f, f.property.id);
-      expect(off.blocks).toEqual([]);
-      expect(off.warnings.filter((w) => w.type === 'annual_max_rate')).toEqual([]);
       setGates();
-      const on = await check(f, f.property.id);
-      expect(on.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
-      // A gate-off compliance read of the customer is the same read with no marked rows.
+      expect((await check(f, f.property.id)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      const noProgram = await limits.checkLimits(f.customerId, rec.id, '2026-06-20', knex, { propertyId: f.property.id });
+      expect(noProgram.blocks).toEqual([]);
+      expect(noProgram.warnings.filter((w) => w.type === 'annual_max_rate')).toEqual([]);
+      expect((await limits.checkLimits(f.customerId, fus.id, '2026-06-20', knex)).blocks).toEqual([]);
+      expect((await limits.getPropertyComplianceStatus(f.customerId)).blocks).toBe(0);
+      // Gate off: even the named program is inert.
       setGates({ removal: false });
-      const status = await limits.getPropertyComplianceStatus(f.customerId);
-      expect(status.blocks).toBe(0);
+      expect((await check(f, f.property.id)).blocks).toEqual([]);
+    });
+
+    test('Fusilade II used on its own (bed or border work) does not consume the step\'s quota; Recognition sprays count for BOTH products', async () => {
+      setGates();
+      const bed = await lawn({ date: '2026-06-20', bermuda: true });
+      await history(bed.customerId, fus, ['2026-03-01', '2026-04-20', '2026-06-10']);
+      expect((await check(bed, bed.property.id, {}, fus)).blocks).toEqual([]);
+      expect((await check(bed, bed.property.id, {}, rec)).blocks).toEqual([]);
+      const mix = await lawn({ date: '2026-06-20', bermuda: true });
+      await history(mix.customerId, rec, ['2026-03-01', '2026-04-20']);
+      expect((await check(mix, mix.property.id, {}, fus)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      expect((await check(mix, mix.property.id, {}, rec)).blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
     });
 
     test('with the treated property known, a spray at ANOTHER property does not count; this property and unknown-property rows do', async () => {
@@ -555,6 +566,83 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await ledger(other.id, '2026-04-20', celsius);
       const result = await limits.checkLimits(f.customerId, celsius.id, '2026-06-20', knex, { propertyId: f.property.id });
       expect(result.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+    });
+  });
+
+  describe('which lawn carries the step: track and property', () => {
+    const { stepForVisit } = require('../services/lawn-bermuda-removal');
+    const twoProps = async (changes = {}) => {
+      const f = await lawn({ bermuda: true, ...changes });
+      const [second] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '300 Second Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const [secondVisit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: second.id, scheduled_date: changes.date || '2026-04-14', service_type: 'Lawn fixture' }).returning('*');
+      return { f, second, secondVisit };
+    };
+    const step = (visit, trackKey = 'st_augustine', month = 'Apr') => stepForVisit(knex, visit, { trackKey, month });
+
+    test('the track comes from the active profile: a ProVista St. Augustine profile asked as zoysia opens nothing; a zoysia profile asked as St. Augustine opens nothing', async () => {
+      setGates();
+      const aug = await lawn({ bermuda: true, cultivar: 'Floratam' });
+      expect((await step(aug.visit, 'st_augustine')).active).toBe(true);
+      expect((await step(aug.visit, 'zoysia')).active).toBe(false);
+      const proVista = await lawn({ bermuda: true, cultivar: 'ProVista' });
+      expect((await step(proVista.visit, 'zoysia')).active).toBe(false);
+      expect((await step(proVista.visit, 'st_augustine')).excluded).toBe(true);
+      const zoysia = await lawn({ grass: 'zoysia', bermuda: true });
+      expect((await step(zoysia.visit, 'zoysia')).active).toBe(true);
+      expect((await step(zoysia.visit, 'st_augustine')).active).toBe(false);
+      const bahia = await lawn({ grass: 'bahia', bermuda: true });
+      expect((await step(bahia.visit, 'st_augustine')).active).toBe(false);
+    });
+
+    test('a one-property customer: the visit with or without its property carries the step', async () => {
+      setGates();
+      const f = await lawn({ bermuda: true });
+      expect((await step(f.visit)).active).toBe(true);
+      expect((await step({ ...f.visit, property_id: null })).active).toBe(true);
+    });
+
+    test('a two-property customer: the step follows the PRIMARY property only; the second property and a visit with no property carry none', async () => {
+      setGates();
+      const { f, secondVisit } = await twoProps();
+      expect((await step(f.visit)).active).toBe(true);
+      expect((await step(secondVisit)).active).toBe(false);
+      expect((await step({ ...f.visit, property_id: null })).active).toBe(false);
+    });
+
+    test('inactive properties do not count: a second property marked inactive leaves a one-property customer', async () => {
+      setGates();
+      const { f, second } = await twoProps();
+      await knex('customer_properties').where({ id: second.id }).update({ active: false });
+      expect((await step({ ...f.visit, property_id: null })).active).toBe(true);
+    });
+
+    test('estimate evidence counts only for the visit\'s property (or a property-less estimate of a one-property customer)', async () => {
+      setGates();
+      const estimateData = JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } });
+      const { f, second, secondVisit } = await twoProps({ bermuda: false });
+      await knex('estimates').insert({ customer_id: f.customerId, status: 'accepted', property_id: second.id, estimate_data: estimateData });
+      // The estimate is for the second property; the profile speaks for the primary one: nothing carries.
+      expect((await step(f.visit)).active).toBe(false);
+      expect((await step(secondVisit)).active).toBe(false);
+      await knex('estimates').del().where({ customer_id: f.customerId });
+      await knex('estimates').insert({ customer_id: f.customerId, status: 'accepted', property_id: f.property.id, estimate_data: estimateData });
+      expect((await step(f.visit)).active).toBe(true);
+      expect((await step(secondVisit)).active).toBe(false);
+      // No property on the estimate: counts only when the customer has one property.
+      await knex('estimates').del().where({ customer_id: f.customerId });
+      await knex('estimates').insert({ customer_id: f.customerId, status: 'accepted', estimate_data: estimateData });
+      expect((await step(f.visit)).active).toBe(false);
+      await knex('customer_properties').where({ id: second.id }).update({ active: false });
+      expect((await step(f.visit)).active).toBe(true);
+    });
+
+    test('the plan follows the same rule: a visit at the second property gets no step', async () => {
+      setGates();
+      const { f, secondVisit } = await twoProps();
+      expect((await plan(f.visit)).bermudaRemoval).toMatchObject({ active: true });
+      const second = await plan(secondVisit);
+      expect(second.bermudaRemoval).toBeUndefined();
+      expect(optionNames(second)).not.toContain(REC);
     });
   });
 

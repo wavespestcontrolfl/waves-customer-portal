@@ -1605,7 +1605,7 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     checked.add(id);
     const row = rows.get(id);
     const proposed = Number(row?.ratePer1000) > 0 ? { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit } : null;
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null, ...(item.bermudaStep ? { program: 'bermuda_removal' } : {}) }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
@@ -1792,7 +1792,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // staged rows. Gate off or any other lawn: no read, the call below is unchanged.
   const bermudaWanted = lawnV13On && bermudaRemoval.bermudaRemovalLive()
     && bermudaRemoval.BERMUDA_REMOVAL_TRACKS.includes(calendarProtocol.trackKey)
-    ? await bermudaRemoval.accountWantsBermudaRemoval(knex, { customerId: service.customer_id, profile, strict })
+    ? await bermudaRemoval.accountWantsBermudaRemoval(knex, { customerId: service.customer_id, profile, trackKey: calendarProtocol.trackKey, propertyId: service.property_id || null, strict })
     : { requested: false, source: null };
   // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
   // default gates say: a pinned older visit must be seen as pinned, never as
@@ -1934,7 +1934,7 @@ async function buildPlanForService(serviceId, options = {}) {
   if (bermudaActive && v13Active) {
     const stepItems = planItems.filter(bermudaRemoval.isStepLine);
     const limitProbe = stepItems.filter((item) => item.product?.id && (bermudaRemoval.isRecognitionLine(item) || bermudaRemoval.isFusiladeLine(item)))
-      .map((item) => ({ selected: true, product: { id: item.product.id, name: item.product.name } }));
+      .map((item) => ({ selected: true, bermudaStep: true, product: { id: item.product.id, name: item.product.name } }));
     const limited = limitProbe.length
       ? (await v13Limits(knex, service, serviceDate, limitProbe, { strict })).capped.size > 0
       : false;

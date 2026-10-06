@@ -81,14 +81,53 @@ function bermudaRemovalVisit({ trackKey, month }) {
     && BERMUDA_REMOVAL_MONTHS.includes(month);
 }
 
-// Is the account a bermuda removal lawn? Staff switch first (no read), then the
-// customer's accepted estimates, which count only while the CURRENT turf profile
-// grass is St. Augustine (the estimate add-on is St. Augustine only; a lawn
-// reclassified to Zoysia needs the staff switch). A failed read throws under
-// `strict` (the job card fails closed) and otherwise reads as "not requested".
-async function accountWantsBermudaRemoval(knex, { customerId, profile, strict = false }) {
-  if (profile?.bermuda_removal === true) return { requested: true, source: 'staff' };
-  if (!customerId || profile?.grass_type !== 'st_augustine') return { requested: false, source: null };
+// The track the ACTIVE turf profile's grass says (St. Augustine or Zoysia), or null. The
+// request's own track never decides eligibility: a caller's track that differs from the
+// profile's opens nothing.
+const profileTrack = (profile) => {
+  const grass = String(profile?.grass_type || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return BERMUDA_REMOVAL_TRACKS.includes(grass) ? grass : null;
+};
+
+// Which of the customer's properties the turf profile speaks for. The profile is
+// customer-level (no property column), and the repo already treats it as the PRIMARY
+// property's (lawn-size-sync mirrors lawn size there only; lawn-completion-defaults
+// seeds the profile "only the proven current home, never a second lawn"). So: the
+// customer's only active property, else the primary one. The visit's property must be
+// that property; a visit with no property counts only for a one-property customer.
+async function profilePropertyScope(knex, customerId, visitPropertyId, strict) {
+  const { savepointRead } = require('../utils/savepoint-read');
+  let props;
+  try {
+    props = await savepointRead(knex, (k) => k('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'is_primary'));
+  } catch (err) {
+    if (strict) throw err;
+    return { ok: false, effective: null, sole: null };
+  }
+  const sole = props.length === 1 ? String(props[0].id) : null;
+  const primary = props.find((row) => row.is_primary === true);
+  const profileProperty = sole || (primary ? String(primary.id) : null);
+  const effective = visitPropertyId ? String(visitPropertyId) : sole;
+  return { ok: !!effective && effective === profileProperty, effective, sole };
+}
+
+// Is the visit's lawn a bermuda removal lawn? The ACTIVE turf profile's grass is the
+// track (St. Augustine or Zoysia, and the caller's `trackKey` must agree), and the
+// visit's property must be the property the profile speaks for (see
+// profilePropertyScope). Then the staff switch, then an accepted estimate that carries
+// the add-on: the add-on is St. Augustine only, and the estimate must be for THIS
+// property (its property_id equals the visit's, or it names none and the customer has
+// one property). A failed read throws under `strict` (the job card fails closed) and
+// otherwise reads as "not requested".
+async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey, propertyId = null, strict = false }) {
+  const none = { requested: false, source: null };
+  const track = profileTrack(profile);
+  if (!customerId || !track || track !== trackKey) return none;
+  const staff = profile.bermuda_removal === true;
+  if (!staff && track !== 'st_augustine') return none;
+  const scope = await profilePropertyScope(knex, customerId, propertyId, strict);
+  if (!scope.ok) return none;
+  if (staff) return { requested: true, source: 'staff' };
   const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
   const { savepointRead } = require('../utils/savepoint-read');
   let rows;
@@ -96,14 +135,15 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, strict = 
     rows = await savepointRead(knex, (k) => k('estimates')
       .where({ customer_id: customerId, status: 'accepted' })
       .whereNull('archived_at')
-      .select('estimate_data'));
+      .select('estimate_data', 'property_id'));
   } catch (err) {
     if (strict) throw err;
-    return { requested: false, source: null };
+    return none;
   }
-  return rows.some((row) => estimateDataCarriesBermudaSuppression(row.estimate_data))
+  const forThisProperty = (row) => (row.property_id ? String(row.property_id) === scope.effective : scope.sole === scope.effective);
+  return rows.some((row) => forThisProperty(row) && estimateDataCarriesBermudaSuppression(row.estimate_data))
     ? { requested: true, source: 'estimate' }
-    : { requested: false, source: null };
+    : none;
 }
 
 // The step for a booked visit, for readers that have the visit but not the plan (the
@@ -116,7 +156,7 @@ async function stepForVisit(knex, visit, { trackKey, month }) {
   const off = { active: false, excluded: false, source: null, cultivar: null, addOn: null };
   if (!bermudaRemovalVisit({ trackKey, month }) || !visit?.customer_id) return off;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
-  const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile });
+  const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile, trackKey, propertyId: visit.property_id });
   if (!wants.requested) return off;
   const cultivar = cultivarState(trackKey, profile?.cultivar);
   if (cultivar === 'excluded') return { ...off, excluded: true, source: wants.source, cultivar };
@@ -148,11 +188,11 @@ async function bermudaPairViolation(knex, products, { serviceId } = {}) {
   if (hasRecognition === hasFusilade) return null;
   // One of the two alone: judged only when this visit carries the step.
   if (featureGates.lawnV13Live?.() !== true || !UUID_RE.test(String(serviceId || ''))) return null;
-  const visit = await knex('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+  const visit = await knex('scheduled_services').where({ id: serviceId }).first('customer_id', 'property_id', 'scheduled_date');
   if (!visit?.customer_id || !visit.scheduled_date) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
   const month = MONTH_ABBR[Number(require('../utils/datetime-et').etCalendarDayOf(visit.scheduled_date).slice(5, 7)) - 1];
-  const step = await stepForVisit(knex, visit, { trackKey: profile?.grass_type, month });
+  const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month });
   if (!step.active) return null;
   return hasRecognition
     ? 'Recognition goes on with Fusilade II in the bermuda removal mix. Add Fusilade II too, or take Recognition off this visit.'
@@ -210,7 +250,7 @@ function settleStep(items, usable) {
 module.exports = {
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
-  bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, stepAddOn, cultivarState,
+  bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
   selectStepAtomically, settleStep,
   stepForVisit, BERMUDA_GROUP, bermudaPairViolation,

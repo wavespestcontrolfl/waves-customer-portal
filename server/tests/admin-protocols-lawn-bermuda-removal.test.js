@@ -47,6 +47,8 @@ const freshAccount = () => ({
   customerId: 'cust-1',
   profile: { grass_type: 'st_augustine', cultivar: 'Floratam', bermuda_removal: true, active: true },
   estimates: [],
+  properties: [{ id: 'prop-1', is_primary: true }],
+  visitProperty: 'prop-1',
 });
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
@@ -88,15 +90,17 @@ beforeEach(() => {
     }
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery([]);
-    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, scheduled_date: '2026-04-14' }] : []);
+    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: '2026-04-14' }] : []);
     if (table === 'customer_turf_profiles') return readQuery(account.profile ? [account.profile] : []);
     if (table === 'estimates') return readQuery(account.estimates);
+    if (table === 'customer_properties') return readQuery(account.properties);
     throw new Error(`Unexpected table: ${table}`);
   });
 });
 afterEach(() => { delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN_BERMUDA_REMOVAL; });
 
 test.each([['st_augustine', '4'], ['zoysia', '6']])('%s month %s: the three spot lines show with the label rate and no amount; the loader asks for the bermuda rows', async (track, month) => {
+  account.profile.grass_type = track;
   const body = await lawnMix({ track, month, scheduledServiceId: SERVICE_ID });
   expect(operatingLayer.getProtocolWindowContext).toHaveBeenCalledWith(db, expect.objectContaining({ includeBermudaRemoval: true }));
   for (const name of [REC, FUS, NIS]) {
@@ -240,6 +244,35 @@ describe('the account decides, on the server', () => {
     expect(body.blocks).toEqual([]);
     expect(body.mixingOrder.length).toBeGreaterThan(0);
     applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
+  });
+
+  test('the track comes from the active profile, never the request: a ProVista St. Augustine profile asked as zoysia gets no step', async () => {
+    account.profile.cultivar = 'ProVista';
+    expect(stepNames(await lawnMix({ track: 'zoysia', scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    account.profile.cultivar = 'Floratam';
+    expect(stepNames(await lawnMix({ track: 'zoysia', scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    // And the reverse: a Zoysia profile asked as St. Augustine.
+    account.profile = { ...account.profile, grass_type: 'zoysia' };
+    expect(stepNames(await lawnMix({ track: 'st_augustine', scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    expect(stepNames(await lawnMix({ track: 'zoysia', scheduledServiceId: SERVICE_ID }))).toEqual(all);
+  });
+
+  test('a two-property customer: the step is on the primary property\'s visit only', async () => {
+    account.properties = [{ id: 'prop-1', is_primary: true }, { id: 'prop-2', is_primary: false }];
+    expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual(all);
+    account.visitProperty = 'prop-2';
+    expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    account.visitProperty = null;
+    expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual([]);
+  });
+
+  test('estimate evidence for another property does not open the step', async () => {
+    account.profile.bermuda_removal = false;
+    account.properties = [{ id: 'prop-1', is_primary: true }, { id: 'prop-2', is_primary: false }];
+    account.estimates = [{ ...estimate, property_id: 'prop-2' }];
+    expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    account.estimates = [{ ...estimate, property_id: 'prop-1' }];
+    expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual(all);
   });
 
   test('a malformed visit id reads nothing and shows no step', async () => {

@@ -122,7 +122,7 @@ class ApplicationLimitChecker {
     for (const limit of allLimits) {
       let limitHistory = history;
       if (isBermudaProgramRow(limit)) {
-        if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, yearStart, ...opts });
+        if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, productId, yearStart, ...opts });
         limitHistory = bermudaHistory;
       }
       const check = await this.evaluateLimit(limit, limitHistory, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
