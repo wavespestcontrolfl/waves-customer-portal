@@ -12,13 +12,14 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Notices that wait for the tech to see them but not past the end of the ET
-// day they were raised. Storm nudges keep their own 6-hour cap below: an
-// unseen morning storm warning must not show up stale in the afternoon.
-const DAY_CAPPED_TYPES = [
-  'geofence_arrival_reminder', 'geofence_arrival_select',
-  'geofence_timer_started', 'geofence_timer_stopped',
-];
+// Actionable arrival prompts wait for the tech to see them, but not past the
+// end of the ET day they were raised: Start timer on yesterday's visit is
+// wrong. The informational timer cards (started, stopped) are not held: they
+// keep the age rules they had before (a stop notice is served only inside
+// its 30-minute Undo window), and the client starts their dismiss clock when
+// the tech has seen them.
+const DAY_CAPPED_TYPES = ['geofence_arrival_reminder', 'geofence_arrival_select'];
+const UNDO_WINDOW_MINUTES = 30;
 
 // 00:00 ET of today as an instant (the server runs UTC).
 function startOfTodayET(now = new Date()) {
@@ -41,12 +42,18 @@ router.get('/', async (req, res, next) => {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
       })
-      // Arrival and timer notices stay until the tech has SEEN them
-      // (owner 2026-10-06, "keep notices"): the client starts its 5-minute
-      // clock only after the card has been on screen, and marks it read then.
-      // Until that, the row stays unread and this feed keeps serving it. The
-      // hard cap is the end of the tech's ET day, so an unseen notice from
-      // earlier days cannot pile up into a wall of cards on the next load.
+      // A stop notice is only useful inside its Undo window (undo-stop
+      // answers 410 after it), so the feed stops serving it then, seen or not.
+      .where(function stopFreshness() {
+        this.whereNot({ type: 'geofence_timer_stopped' })
+          .orWhereRaw(`created_at >= now() - interval '${UNDO_WINDOW_MINUTES} minutes'`);
+      })
+      // Arrival prompts stay until the tech has SEEN them (owner 2026-10-06,
+      // "keep notices"): the client starts its 5-minute clock only after the
+      // card has been on screen, and marks it read then. Until that, the row
+      // stays unread and this feed keeps serving it. The hard cap is the end
+      // of the tech's ET day, so an unseen prompt from earlier days cannot
+      // pile up into a wall of cards on the next load.
       .where(function noticeDayCap() {
         this.whereNotIn('type', DAY_CAPPED_TYPES)
           .orWhere('created_at', '>=', startOfTodayET());
@@ -106,12 +113,14 @@ router.get('/', async (req, res, next) => {
     // bucket 0 with them meant an offline tech who collected 20 newer
     // geofence/timer prompts — two events across ten stops — still lost the
     // stage-2 card from the window (codex P2 round 17). The other buckets
-    // keep their relative order, one step down. An unseen arrival or timer
-    // notice stays in bucket 1 for the rest of its ET day (owner 2026-10-06,
-    // "keep notices"), not only its first six hours, so a backlog of visit
-    // cards cannot push it out of the window before the tech has seen it.
+    // keep their relative order, one step down. Actionable arrival prompts
+    // (reminder, select) are held until the tech has seen them (owner
+    // 2026-10-06, "keep notices"), so they get their OWN bucket 1 for the
+    // rest of their ET day: a burst of informational started/stopped cards
+    // (automatic mode writes two per stop) or visit cards cannot push an
+    // unseen prompt out of the window.
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN type IN ('geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped') OR created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type IN ('geofence_arrival_reminder', 'geofence_arrival_select') THEN 1 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 4 WHEN type = 'storm_watch_alert' THEN 3 WHEN created_at >= now() - interval '6 hours' THEN 2 ELSE 4 END")
       // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
       // truncates: a tech with more than 20 undismissed tracking cards would
       // otherwise lose an older critical arrival check behind 20 newer

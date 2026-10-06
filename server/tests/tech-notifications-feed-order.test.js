@@ -19,7 +19,7 @@ function getHandler() {
   return layer.route.stack[layer.route.stack.length - 1].handle;
 }
 
-test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit notices AND stale rows on recency (3)', async () => {
+test('buckets: tracking (0) → arrival prompts (1) → fresh others (2) → fresh storms (3) → visit notices AND stale rows on recency (4)', async () => {
   const calls = { orderByRaw: [], orderBy: [], limit: [] };
   const chain = {};
   for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn', 'orWhere', 'join']) {
@@ -36,9 +36,7 @@ test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit
 
   expect(calls.orderByRaw).toHaveLength(2);
   const sql = calls.orderByRaw[0];
-  // visit rows + tech-line texts → 2; storms → 1; fresh other prompts → 0;
-  // stale others → 2 (stale legacy rows compete with visits on recency,
-  // never ahead of them).
+  // Stale legacy rows compete with visits on recency, never ahead of them.
   // Missing-tracking notices lead the window at ANY age, in their OWN bucket:
   // they exist only while the visit is still overdue with no arrival evidence
   // (the sweep dismisses them as soon as that stops being true), so one that
@@ -47,12 +45,14 @@ test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit
   // with them allowed (codex P2, PR #4403 rounds 8 and 17).
   expect(sql).toMatch(/WHEN type = 'follow_through_tracking' THEN 0/);
   expect(sql.indexOf("follow_through_tracking")).toBeLessThan(sql.indexOf("interval '6 hours'"));
-  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type IN \('tech_line_sms', 'customer_visit_photos'\) THEN 3/);
-  expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 2/);
-  expect(sql).toMatch(/interval '6 hours' THEN 1 ELSE 3 END/);
-  // Arrival and timer prompts stay in bucket 1 for their whole ET day, so a
-  // backlog of visit cards cannot push an unseen one out of the window.
-  expect(sql).toMatch(/WHEN type IN \('geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped'\) OR created_at >= now\(\) - interval '6 hours' THEN 1/);
+  // Actionable arrival prompts (reminder, select) are held until seen, so they
+  // lead the fresh rows in their own bucket 1 and a burst of started/stopped
+  // cards (two per automatic stop) cannot push an unseen prompt out of the
+  // window; fresh others → 2; storms → 3; visit rows, texts and stale → 4.
+  expect(sql).toMatch(/WHEN type = 'follow_through_tracking' THEN 0 WHEN type IN \('geofence_arrival_reminder', 'geofence_arrival_select'\) THEN 1 /);
+  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type IN \('tech_line_sms', 'customer_visit_photos'\) THEN 4/);
+  expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 3/);
+  expect(sql).toMatch(/interval '6 hours' THEN 2 ELSE 4 END/);
   // Stage 2 before stage 1 inside the tracking bucket, before the limit
   // truncates — the client's stage-first sort cannot rescue a row the 20-row
   // window never returned (round-20 P2).
@@ -139,12 +139,12 @@ describe('customer_visit_photos cards follow the visit-prep gates at request tim
   });
 });
 
-// Owner 2026-10-06, "keep notices": arrival and timer notices are not
-// aged out by the clock. The client marks one read only after the tech has
-// seen it, so the feed keeps serving the unread row until the end of its ET
-// day (the hard cap), not for a fixed 6 hours or 5 minutes. Storm nudges keep
-// their 6-hour cap (a stale storm warning misleads).
-describe('arrival and timer notices stay until the end of their ET day', () => {
+// Owner 2026-10-06, "keep notices": actionable arrival prompts are not aged
+// out by the clock. The client marks one read only after the tech has seen
+// it, so the feed keeps serving the unread row until the end of its ET day
+// (the hard cap). Storm nudges keep their 6-hour cap (a stale storm warning
+// misleads); started and stopped cards keep their earlier age rules.
+describe('arrival prompts stay until the end of their ET day', () => {
   async function run() {
     const chain = {};
     const calls = { whereNotIn: [], orWhere: [] };
@@ -163,13 +163,18 @@ describe('arrival and timer notices stay until the end of their ET day', () => {
 
   afterEach(() => { jest.useRealTimers(); });
 
-  test('the cap covers the four geofence notice types and nothing else', async () => {
+  test('the day cap covers the two actionable arrival types and nothing else', async () => {
     const { whereNotIn } = await run();
     expect(whereNotIn).toHaveLength(1);
     expect(whereNotIn[0][0]).toBe('type');
-    expect(whereNotIn[0][1].slice().sort()).toEqual([
-      'geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped',
-    ]);
+    expect(whereNotIn[0][1].slice().sort()).toEqual(['geofence_arrival_reminder', 'geofence_arrival_select']);
+  });
+
+  test('a stop notice is served only inside its 30-minute Undo window (undo-stop answers 410 after it)', async () => {
+    await run();
+    const chain = db.mock.results[db.mock.results.length - 1].value;
+    expect(chain.whereNot).toHaveBeenCalledWith({ type: 'geofence_timer_stopped' });
+    expect(chain.orWhereRaw).toHaveBeenCalledWith("created_at >= now() - interval '30 minutes'");
   });
 
   test('storm nudges keep their 6-hour cap', async () => {

@@ -65,8 +65,11 @@ const POLL_MS = 10_000;
 // marked read after 5 minutes unseen.
 const REMINDER_AUTODISMISS_MS = 5 * 60 * 1000;
 const STOP_TOAST_MS = 15_000;
+// The server refuses Undo on a stop notice older than this (410), and stops
+// serving the notice then, so the toast offers no Undo past it either.
+const UNDO_WINDOW_MS = 30 * 60 * 1000;
 // Seen = at least half the card (or half the screen, for a tall card) in view
-// for this long while the page is visible, or a tap on the card.
+// and not covered, still true after this long on a visible page, or a tap.
 const SEEN_VISIBLE_RATIO = 0.5;
 const SEEN_DWELL_MS = 1500;
 const MAX_STORM_CARDS = 2;
@@ -176,19 +179,22 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       if (fresh.some((n) => n.type === 'geofence_timer_started' || n.type === 'geofence_timer_stopped')) {
         window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
       }
-      // Visit cards never auto-dismiss, so the server feed is their only
-      // source of truth: one the feed no longer lists (tapped "Got it" on
-      // the tech's other device, or pushed out of the feed window by a
-      // burst) leaves this screen too — and is forgotten, so it can come
-      // back if the feed lists it again. Timed cards stay client-owned.
+      // The server feed is the source of truth for what is still open: a
+      // card the feed no longer lists leaves this screen too (tapped "Got it"
+      // on the tech's other device, pushed out of the feed window by a burst,
+      // or aged out by the server: an arrival prompt at ET midnight, a stop
+      // toast after its 30-minute Undo window, a storm nudge after 6 hours).
+      // It is forgotten, so it can come back if the feed lists it again. No
+      // /read post: the server already stopped serving it, or another device
+      // handled it.
       const listed = new Set(notifications.map((n) => n.id));
       // A photo card's date is re-read from the live visit on every poll
       // (visit-prep-tech-alert.js refreshPhotoCardDates), so a card already
       // on screen takes the new payload when the visit moves (Codex #5303 r6).
       const photoPayloads = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type)).map((n) => [n.id, n.payload]));
       setActive((prev) => {
-        const gone = prev.filter((n) => KEPT_TYPES.has(n.type) && !listed.has(n.id));
-        gone.forEach((n) => seenIds.current.delete(n.id));
+        const gone = prev.filter((n) => !listed.has(n.id));
+        gone.forEach((n) => { seenIds.current.delete(n.id); seenAt.current.delete(n.id); });
         let refreshed = false;
         const kept = prev.filter((n) => !gone.includes(n)).map((n) => {
           if (!photoPayloads.has(n.id)) return n;
@@ -419,51 +425,81 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
   );
 }
 
-// Wraps one card and reports it SEEN once it has been on screen: at least
-// SEEN_VISIBLE_RATIO of it (or of the viewport, for a card taller than the
-// screen) for SEEN_DWELL_MS while the page is visible. A tap on the card
-// counts too. The dwell timer drops when the card scrolls out or the tab is
-// hidden. A browser without IntersectionObserver counts a mounted card on a
-// visible page as in view.
+// Wraps one card and reports it SEEN once the tech has really had it on screen:
+// at least SEEN_VISIBLE_RATIO of the card (or of the viewport, for a card taller
+// than the screen) shows, and nothing sits on top of it. IntersectionObserver
+// only decides when to look: it ignores a modal or sheet drawn over the card
+// and cannot express "half the viewport" for a tall card, so the check runs at
+// the END of a SEEN_DWELL_MS dwell with a fresh measurement (cardReallyInView).
+// While the card is in the viewport and the page is visible the check repeats
+// every dwell, so a modal that closes later lets the card count then. A tap on
+// the card counts too. A browser without IntersectionObserver checks on the
+// same schedule.
 function SeenOnScreen({ id, onSeen, style, children }) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
-    let inView = typeof IntersectionObserver === 'undefined';
+    let nearViewport = typeof IntersectionObserver === 'undefined';
     let timer = null;
+    let done = false;
     const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
     const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    const schedule = () => {
+      if (done || timer || !nearViewport || !pageVisible()) return;
+      timer = setTimeout(() => {
+        timer = null;
+        if (!nearViewport || !pageVisible()) return;
+        if (cardReallyInView(el)) { done = true; onSeen(id); return; }
+        schedule();
+      }, SEEN_DWELL_MS);
+    };
     const evaluate = () => {
-      if (inView && pageVisible()) {
-        if (!timer) timer = setTimeout(() => { timer = null; onSeen(id); }, SEEN_DWELL_MS);
-      } else {
-        stop();
-      }
+      if (nearViewport && pageVisible()) schedule(); else stop();
     };
     let observer = null;
-    if (!inView) {
+    if (!nearViewport) {
       observer = new IntersectionObserver((entries) => {
         const entry = entries[entries.length - 1];
         if (!entry) return;
-        const viewportHeight = entry.rootBounds?.height || window.innerHeight || 0;
-        inView = entry.isIntersecting && (
-          entry.intersectionRatio >= SEEN_VISIBLE_RATIO
-          || (viewportHeight > 0 && entry.intersectionRect.height >= viewportHeight * SEEN_VISIBLE_RATIO)
-        );
+        nearViewport = entry.isIntersecting;
         evaluate();
-      }, { threshold: [0, 0.25, SEEN_VISIBLE_RATIO, 0.75, 1] });
+      }, { threshold: 0 });
       observer.observe(el);
     }
     document.addEventListener('visibilitychange', evaluate);
     evaluate();
     return () => {
+      done = true;
       stop();
       document.removeEventListener('visibilitychange', evaluate);
       if (observer) observer.disconnect();
     };
   }, [id, onSeen]);
   return <div ref={ref} style={style} onClickCapture={() => onSeen(id)}>{children}</div>;
+}
+
+// Fresh measurement: the part of the card inside the viewport covers at least
+// SEEN_VISIBLE_RATIO of the card, or of the viewport when the card is taller
+// than half of it, and the element at the middle of that part belongs to the
+// card (nothing fixed on top of it).
+function cardReallyInView(el) {
+  const rect = el.getBoundingClientRect();
+  const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+  const viewportW = window.innerWidth || document.documentElement.clientWidth || 0;
+  if (!(rect.width > 0 && rect.height > 0 && viewportH > 0 && viewportW > 0)) return false;
+  const left = Math.max(rect.left, 0);
+  const right = Math.min(rect.right, viewportW);
+  const top = Math.max(rect.top, 0);
+  const bottom = Math.min(rect.bottom, viewportH);
+  if (right <= left || bottom <= top) return false;
+  const shown = (right - left) * (bottom - top);
+  const enough = shown >= rect.width * rect.height * SEEN_VISIBLE_RATIO
+    || shown >= viewportW * viewportH * SEEN_VISIBLE_RATIO;
+  if (!enough) return false;
+  if (typeof document.elementFromPoint !== 'function') return true;
+  const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+  return !!hit && el.contains(hit);
 }
 
 // "N notices on Today": the one in-page line shown away from Today for the
@@ -708,12 +744,14 @@ function InfoCard({ n, onDismiss }) {
 }
 
 function StopToast({ n, onUndo, onDismiss }) {
+  const createdMs = new Date(n.created_at || 0).getTime();
+  const undoOpen = !Number.isFinite(createdMs) || !n.created_at || Date.now() - createdMs <= UNDO_WINDOW_MS;
   return (
     <div style={cardStyle(COLORS.amber)}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 14, color: COLORS.text }}>⏱️ {n.message}</div>
         <div style={{ display: 'flex', gap: 6 }}>
-          <button onClick={onUndo} style={btnSecondary}>Undo</button>
+          {undoOpen && <button onClick={onUndo} style={btnSecondary}>Undo</button>}
           <button onClick={onDismiss} style={closeX}>✕</button>
         </div>
       </div>
