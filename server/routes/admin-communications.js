@@ -2868,6 +2868,22 @@ async function revokeOfficeMove(scheduledServiceId, approvedFor) {
     .update({ office_move_approved_for: null });
 }
 
+// The composer's reschedule link for `svc`. Inside the self-serve move
+// notice window the office is the one asking the customer to move
+// (rain-out, running late — owner 2026-10-06), so it approves the move for
+// the refused snapshot's start and rebuilds the link. The page and its
+// commit honor the approval until the visit moves (self-serve-notice.js
+// officeApprovedMove). A rebuild without a usable link revokes it.
+async function officeRescheduleLink(svc) {
+  const first = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+  if (!first.tooSoonToMove) return first;
+  const approvedFor = await approveOfficeMove(svc);
+  if (!approvedFor) return first;
+  const rebuilt = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+  if (!rebuilt.url || rebuilt.tooSoonToMove) await revokeOfficeMove(svc.id, approvedFor);
+  return rebuilt;
+}
+
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
 // and return its self-serve /reschedule/:token short link for insertion into
@@ -2944,17 +2960,7 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
-    let { url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
-    // Inside the self-serve move notice window the office is the one asking
-    // the customer to move (rain-out, running late — owner 2026-10-06), so
-    // the composer approves the move for the visit's CURRENT start and
-    // rebuilds the link. The page and its commit honor the approval until
-    // the visit's start changes (self-serve-notice.js officeApprovedMove).
-    const approvedFor = tooSoonToMove ? await approveOfficeMove(svc) : null;
-    if (approvedFor) {
-      ({ url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id }));
-      if (!url || tooSoonToMove) await revokeOfficeMove(svc.id, approvedFor);
-    }
+    const { url, line, tooSoonToMove } = await officeRescheduleLink(svc);
     // Still refused: the row moved between the read and the approval.
     // Distinct 409 so the composer doesn't say the visit has no reschedule
     // link at all (independent-reviewer finding on PR #5308).
