@@ -4598,8 +4598,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
       const services = [
         { service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly',
           annual: 480, mo: 40, perTreatment: 120, catalog: 'pest_general_quarterly' },
-        { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6, frequency: 'bimonthly',
-          annual: 720, mo: 60, perTreatment: 120, catalog: 'lawn_care_recurring' },
+        // Pest + mosquito: one stop group (owner 2026-10-05: pest and lawn
+        // never share one stop, so a lawn line would book its own stop).
+        { service: 'mosquito', name: 'Monthly Mosquito Control', visitsPerYear: 12, frequency: 'monthly',
+          annual: 1440, mo: 120, perTreatment: 120, catalog: 'mosquito_monthly' },
       ];
       const catalogs = await trx('services').whereIn('service_key', services.map((service) => service.catalog));
       expect(catalogs).toHaveLength(2);
@@ -4627,7 +4629,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
         firstApplicationAmount: 240, visitEstimatedPrice: 240,
       });
       const profile = await resolveCatalogSlotProfile(estimate, {}, trx);
-      expect(profile.services.map((service) => service.service)).toEqual(['pest_control', 'lawn_care']);
+      expect(profile.services.map((service) => service.service)).toEqual(['pest_control', 'mosquito']);
       expect(profile.durationMinutes).toBe(120);
       expect(profile.reservationServiceMix).toMatchObject({ version: 1, durationMinutes: 120 });
       coordsSpy = jest.spyOn(require('../services/estimate-slot-availability'), 'resolveEstimateCoords')
@@ -4662,7 +4664,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(parents.filter((row) => row.estimated_price != null).map((row) => Number(row.estimated_price))).toEqual([240]);
       expect(parents.reduce((sum, row) => sum + Number(row.estimated_duration_minutes), 0)).toBe(120);
       expect(parents.map((row) => [row.window_start, row.window_end]).sort())
-        .toEqual([['09:00:00', '10:00:00'], ['10:00:00', '11:00:00']]);
+        .toEqual([['09:00:00', '10:00:00'], ['09:00:00', '10:00:00']]);
       expect(new Set(parents.map((row) => row.visit_id)).size).toBe(1);
       expect(parents.every((row) => row.property_id === propertyId && row.visit_id)).toBe(true);
       const visitId = parents[0].visit_id;

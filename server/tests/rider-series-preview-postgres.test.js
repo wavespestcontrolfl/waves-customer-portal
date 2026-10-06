@@ -870,11 +870,12 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
   describe('series gates read the OVERLAID rider parent, same as the top-up (Codex P2 round #2 on PR #5290)', () => {
     test('a price/service override that redirects the series into a HOLDABLE family is caught by plan_hold', async () => {
       const { lawnParent, riderParent } = await buildValidPair({ pestChildren: false });
-      // Raw service_type stays 'Tree and Shrub Quarterly' (pest_control is
-      // NOT a HOLDABLE_FAMILIES member); the override redirects it to a
-      // holdable family, exactly like a real series-scope price/service
-      // edit under GATE_EDIT_APPT_PRICE_SERVICE_SCOPE would.
+      // The raw parent is a pest series (pest_control is NOT a
+      // HOLDABLE_FAMILIES member); the override redirects it to a holdable
+      // family, exactly like a real series-scope price/service edit under
+      // GATE_EDIT_APPT_PRICE_SERVICE_SCOPE would.
       await trx('scheduled_services').where({ id: riderParent.id }).update({
+        service_type: 'Quarterly Pest Control',
         recurring_template_overrides: JSON.stringify({ service_type: 'Tree and Shrub Quarterly' }),
       });
       await trx('plan_holds').insert({

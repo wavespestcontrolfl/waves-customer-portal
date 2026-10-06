@@ -58,7 +58,8 @@ describe('combined visit booking capacity', () => {
         expect(profile.reservationServiceMix).toBeUndefined();
         process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
         const combined = await require('../services/estimate-slot-availability').resolveCatalogSlotProfile(estimateFor([first, second]));
-        expect(combined.durationMinutes).toBe(70);
+        // Two stop groups: the first group's work rounds up to the hour before the other starts.
+        expect(combined.durationMinutes).toBe(100);
         expect(combined.reservationServiceMix.version).toBe(2);
       } finally { link.mockRestore(); }
     },

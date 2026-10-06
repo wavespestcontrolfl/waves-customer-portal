@@ -18,7 +18,10 @@ test('versioned combined allowances preserve old holds and whole-hour new member
   const current = { window_start: '09:00', reservation_service_mix: capacityForServices(services, [30, 40]) };
   expect(windowForCapacityService(old, 1)).toEqual({ window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 });
   expect(windowForCapacityService(current, 1, 'lawn_care_recurring')).toEqual({ window_start: '10:00', window_end: '10:40', estimated_duration_minutes: 40 });
-  expect(capacityFromReservation(current).durationMinutes).toBe(70);
+  // 30 pest minutes, then lawn on the next whole hour: 60 + 40 held.
+  expect(capacityFromReservation(current).durationMinutes).toBe(100);
+  // A hold stamped before the stop groups (plain sum) still reads.
+  expect(capacityFromReservation({ reservation_service_mix: { ...current.reservation_service_mix, durationMinutes: 70 } }).durationMinutes).toBe(70);
   expect(() => capacityFromReservation({ reservation_service_mix: { version: 2, services: ['pest_control'], durationMinutes: 60 } })).toThrow();
 });
 
@@ -75,4 +78,15 @@ test('conversion allowances follow service identity when the pest anchor comes b
     window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40,
   });
   expect(() => windowForCapacityService(anchor, 1, 'mosquito_monthly')).toThrow();
+});
+
+test('the reserved anchor group keeps the picked hour, whatever the member order (version 1 and 2)', () => {
+  const services = [{ service: 'lawn_care' }, { service: 'pest_control' }, { service: 'tree_shrub' }];
+  for (const mix of [capacityForServices(services), capacityForServices(services, [60, 60, 60])]) {
+    const anchor = { window_start: '09:00', service_key_snapshot: 'pest_general_quarterly', reservation_service_mix: mix };
+    // Version 1 indexes are the converter's member order: pest first here.
+    expect(windowForCapacityService(anchor, 0, 'pest_general_quarterly').window_start).toBe('09:00');
+    expect(windowForCapacityService(anchor, 1, 'lawn_care_recurring').window_start).toBe('10:00');
+    expect(windowForCapacityService(anchor, 2, 'tree_shrub_6week').window_start).toBe('10:00');
+  }
 });
