@@ -229,40 +229,51 @@ async function clockOut(technicianId, { lat, lng, notes } = {}) {
 }
 
 // Geofence auto clock-in, inside startJob's transaction (GATE_GEOFENCE_AUTO_CLOCK_IN).
-// Returns the shift to run the job under; `created` is true only when THIS call
-// opened it. The technician row is locked first (the same lock clockIn takes), so
-// two simultaneous arrivals queue here and the second one finds the first one's
-// shift. The visit is then locked FOR UPDATE and re-checked (assigned to this
-// tech, today ET, live) before any shift is inserted, so a visit changed since
-// the handler read it never produces a shift. Any refusal throws the same
-// "Must be clocked in" error as today, and the whole transaction rolls back:
-// there is never a shift without the job timer on this path.
-async function openAutoClockInShift(trx, technicianId, jobId, { autoClockIn, lat, lng }) {
-  await lockActiveTechnician(trx, technicianId);
-  const raced = await lockActiveShift(trx, technicianId);
-  if (raced) return { shift: raced, created: false };
-
-  const refused = () => Object.assign(new Error('Must be clocked in to start a job.'), { code: 'auto_clock_in_ineligible' });
+// When the handler asked for an auto clock-in it claimed "this is the tech's own
+// live visit for today". That claim is re-checked HERE, once, on the visit row
+// locked FOR UPDATE (assigned to this tech, today ET, live), whether or not a
+// shift already exists: a shift that appeared concurrently must not let a timer
+// start for a visit reassigned or moved since the handler read it. Refusal throws
+// before any write and the transaction rolls back (no shift, no timer, no
+// arrival transition).
+async function assertAutoClockInVisit(trx, technicianId, jobId) {
   const job = jobId
     ? await trx('scheduled_services').where('scheduled_services.id', jobId).forUpdate().first()
     : null;
-  const now = new Date();
-  if (!isAutoClockInJobEligible(job, technicianId, now)) throw refused();
+  if (!isAutoClockInJobEligible(job, technicianId, new Date())) {
+    throw Object.assign(new Error('This visit is not yours to start today.'), { code: 'auto_clock_in_ineligible' });
+  }
+}
+
+// Opens the auto-clock-in shift (the visit was already re-checked). Refused when
+// the tech has any shift today: auto clock-in is for the first stop only.
+async function openAutoClockInShift(trx, technicianId, { autoClockIn, lat, lng }) {
   const worked = await trx('time_entries')
     .where({ technician_id: technicianId, entry_type: 'shift' })
     .where('status', '!=', 'voided')
-    .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [staffWorkDate(now)])
+    .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [staffWorkDate(new Date())])
     .first('id');
-  if (worked) throw refused();
-
-  const shift = await insertShift(trx, technicianId, { lat, lng, ...autoClockIn });
-  return { shift, created: true };
+  if (worked) {
+    throw Object.assign(new Error('Must be clocked in to start a job.'), { code: 'auto_clock_in_ineligible' });
+  }
+  return insertShift(trx, technicianId, { lat, lng, ...autoClockIn });
 }
 
-async function lockShiftForStart(trx, technicianId, jobId, options) {
-  const activeShift = await lockActiveShift(trx, technicianId);
-  if (activeShift || !options.autoClockIn) return { shift: activeShift, created: false };
-  return openAutoClockInShift(trx, technicianId, jobId, options);
+// Returns the shift to run the job under; `created` is true only when THIS call
+// opened it. With an auto clock-in request the technician row is locked (the same
+// lock clockIn takes) when there is no shift, so two simultaneous arrivals queue
+// there and the second finds the first one's shift; the visit check then runs
+// either way. Never a shift without the job timer on this path.
+async function lockShiftForStart(trx, technicianId, jobId, { autoClockIn, lat, lng }) {
+  let shift = await lockActiveShift(trx, technicianId);
+  if (!autoClockIn) return { shift, created: false };
+  if (!shift) {
+    await lockActiveTechnician(trx, technicianId);
+    shift = await lockActiveShift(trx, technicianId);
+  }
+  await assertAutoClockInVisit(trx, technicianId, jobId);
+  if (shift) return { shift, created: false };
+  return { shift: await openAutoClockInShift(trx, technicianId, { autoClockIn, lat, lng }), created: true };
 }
 
 /**

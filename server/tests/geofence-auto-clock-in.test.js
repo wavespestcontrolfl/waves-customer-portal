@@ -255,3 +255,32 @@ describe('geofence auto clock-in (handler)', () => {
     expect(lastAction()).toBe('timer_already_running');
   });
 });
+
+describe('freshness of the ENTER timestamp', () => {
+  const { isFreshEvent, MAX_EVENT_AGE_MS, MAX_EVENT_FUTURE_SKEW_MS } = require('../services/geofence-auto-clock-in');
+  const now = Date.parse('2026-10-06T15:00:00Z');
+
+  test.each([
+    ['just now', 0, true],
+    ['9 minutes old', 9 * 60 * 1000, true],
+    ['exactly the age limit', MAX_EVENT_AGE_MS, true],
+    ['over the age limit', MAX_EVENT_AGE_MS + 1, false],
+    ['1 minute in the future (clock drift)', -60 * 1000, true],
+    ['exactly the skew limit ahead', -MAX_EVENT_FUTURE_SKEW_MS, true],
+    ['over the skew limit ahead', -(MAX_EVENT_FUTURE_SKEW_MS + 1), false],
+    ['an hour in the future', -60 * 60 * 1000, false],
+  ])('%s -> %s', (_label, ageMs, expected) => {
+    expect(isFreshEvent(new Date(now - ageMs), now)).toBe(expected);
+  });
+
+  test('an invalid timestamp is not fresh', () => {
+    expect(isFreshEvent('not a date', now)).toBe(false);
+  });
+
+  test('handler: a far-future ENTER never requests a clock-in', async () => {
+    timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
+    await geofenceHandler.handleArrival(baseArgs({ eventTime: new Date(Date.now() + 60 * 60 * 1000) }));
+
+    expect(startOpts()).not.toHaveProperty('autoClockIn');
+  });
+});

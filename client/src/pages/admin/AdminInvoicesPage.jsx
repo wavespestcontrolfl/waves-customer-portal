@@ -107,6 +107,7 @@ import { getAdminUser } from "../../lib/adminAuth";
 import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
 import { stackDocumentDiscounts, stackablePresets } from "../../lib/discountStack";
 import { sendWithNoticedAmountConfirm } from "../../lib/noticedRenewalAmount";
+import useDictationPending from "../../hooks/dictationPending";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -6057,6 +6058,10 @@ function CreateInvoice({
   // Load active, invoice-visible discounts once. Tier discounts are included here
   // for explicit line-level selection; customer tier never applies a hidden discount.
   const builderBusy = saving || aiNotesLoading || aiMessageLoading;
+  // A mic (Notes or thank-you) is recording or transcribing: its words are still on the way, so
+  // Create / Save and the AI writers wait for them. Kept apart from builderBusy, which also
+  // disables the mics: a mic that went busy while recording could not be tapped to stop.
+  const dictationPending = useDictationPending();
   useEffect(() => {
     onPendingChange(saving || aiNotesLoading || aiMessageLoading);
     return () => onPendingChange(false);
@@ -6828,7 +6833,7 @@ function CreateInvoice({
   const linkedServiceRecordId =
     selectedService?.id || editInvoice?.service_record_id || null;
   const handleWriteNotesWithAI = async () => {
-    if (aiNotesLoadingRef.current) return;
+    if (aiNotesLoadingRef.current || dictationPending) return;
     const usableLines = lineItems.filter(
       (i) => i._kind !== "discount" && i.description,
     );
@@ -6874,7 +6879,7 @@ function CreateInvoice({
     setAiNotesLoading(false);
   };
   const handleWriteThankYouWithAI = async () => {
-    if (aiMessageLoadingRef.current) return;
+    if (aiMessageLoadingRef.current || dictationPending) return;
     const customerName = selectedCustomer
       ? `${selectedCustomer.first_name || ""} ${selectedCustomer.last_name || ""}`.trim()
       : "";
@@ -6923,6 +6928,10 @@ function CreateInvoice({
   };
   const handleCreate = async () => {
     if (savingRef.current) return;
+    if (dictationPending) {
+      showToast("Finish dictating first. The words are still being typed in.");
+      return;
+    }
     if (!selectedCustomer) {
       showToast("Select a customer");
       return;
@@ -7144,6 +7153,10 @@ function CreateInvoice({
   // money totals.
   const handleSave = async () => {
     if (savingRef.current) return;
+    if (dictationPending) {
+      showToast("Finish dictating first. The words are still being typed in.");
+      return;
+    }
     if (
       !lineItems.some(
         (i) => i._kind !== "discount" && i.description && i.unit_price > 0,
@@ -8593,13 +8606,14 @@ function CreateInvoice({
               </Field>
               <div className="mt-2 flex items-center justify-end gap-2">
                 <AiWriteButton
-                  disabled={builderBusy}
+                  disabled={builderBusy || dictationPending}
                   loading={aiNotesLoading}
                   onClick={handleWriteNotesWithAI}
                   title={notes.trim() ? "Rewrite with AI" : "Write with AI"}
                 />
                 <DictationButton
                   presentation="admin"
+                  dictationContext={{ customerId: selectedCustomer?.id || editInvoice?.customer_id }}
                   disabled={builderBusy}
                   onAppend={(t) => {
                     if (!builderBusy)
@@ -8658,7 +8672,7 @@ function CreateInvoice({
                 </Field>
                 <div className="mt-2 flex items-center justify-end gap-2">
                   <AiWriteButton
-                    disabled={builderBusy}
+                    disabled={builderBusy || dictationPending}
                     loading={aiMessageLoading}
                     onClick={handleWriteThankYouWithAI}
                     title={
@@ -8667,6 +8681,7 @@ function CreateInvoice({
                   />
                   <DictationButton
                     presentation="admin"
+                    dictationContext={{ customerId: selectedCustomer?.id || editInvoice?.customer_id }}
                     disabled={builderBusy}
                     onAppend={(t) =>
                       !builderBusy &&
@@ -8958,7 +8973,7 @@ function CreateInvoice({
               })
             }
             className="min-w-11"
-            disabled={builderBusy}
+            disabled={builderBusy || dictationPending}
             loading={saving}
             variant="primary"
           >

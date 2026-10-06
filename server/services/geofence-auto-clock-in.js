@@ -18,6 +18,10 @@ const NOTES = 'Auto clock-in on arrival at first stop';
 // the shift is stamped with the current time, so a delayed webhook would
 // start paid time late. Older events fall back to the reminder.
 const MAX_EVENT_AGE_MS = 10 * 60 * 1000;
+// A timestamp slightly in the FUTURE is device/server clock drift, not a fresh
+// event: allow up to 2 minutes ahead (Bouncie stamps with the device clock),
+// refuse anything further ahead.
+const MAX_EVENT_FUTURE_SKEW_MS = 2 * 60 * 1000;
 
 // A visit in one of these statuses is not work the tech is arriving to do.
 const NOT_LIVE_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
@@ -39,7 +43,7 @@ function isAutoClockInJobEligible(job, technicianId, now = new Date()) {
 
 function isFreshEvent(eventTime, now = Date.now()) {
   const age = now - new Date(eventTime).getTime();
-  return Number.isFinite(age) && age <= MAX_EVENT_AGE_MS;
+  return Number.isFinite(age) && age >= -MAX_EVENT_FUTURE_SKEW_MS && age <= MAX_EVENT_AGE_MS;
 }
 
 /**
@@ -71,6 +75,7 @@ module.exports = {
   SOURCE,
   NOTES,
   MAX_EVENT_AGE_MS,
+  MAX_EVENT_FUTURE_SKEW_MS,
   NOT_LIVE_STATUSES,
   isLiveVisit,
   isAutoClockInJobEligible,

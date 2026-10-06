@@ -102,8 +102,58 @@ describe('startJob with autoClockIn', () => {
   ])('revalidates the locked visit: %s -> no shift, no timer', async (_label, patch) => {
     Object.assign(state.job, patch);
     await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
-      .rejects.toThrow('Must be clocked in to start a job.');
+      .rejects.toMatchObject({ code: 'auto_clock_in_ineligible' });
     expect(state.inserted).toHaveLength(0);
+  });
+
+  test.each([
+    ['visit reassigned to another tech', { technician_id: 'tech-2' }],
+    ['visit moved to another day', { scheduled_date: '2020-01-02' }],
+    ['visit cancelled', { status: 'cancelled' }],
+    ['visit rescheduled', { status: 'rescheduled' }],
+  ])('a shift appeared concurrently but the locked %s -> refused: no timer, no transition', async (_label, patch) => {
+    // The handler asked for an auto clock-in on a snapshot; by the time the
+    // transaction runs, another path has opened a shift AND the visit changed.
+    state.activeShift = { id: 'shift-manual', technician_id: 'tech-1' };
+    Object.assign(state.job, patch);
+
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
+      .rejects.toMatchObject({ code: 'auto_clock_in_ineligible' });
+    expect(state.inserted).toHaveLength(0);
+    expect(require('../services/track-transitions').markOnProperty).not.toHaveBeenCalled();
+  });
+
+  test('the visit check also runs when the shift is found only after the technician-row lock (the race)', async () => {
+    // First shift read finds nothing; after the technician lock the winner's shift is visible.
+    const q = state;
+    let reads = 0;
+    const realTx = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation((fn) => realTx((trx) => fn(Object.assign(jest.fn((table) => {
+      const c = trx(table);
+      if (table === 'time_entries') {
+        const first = c.first;
+        c.first = jest.fn(async () => {
+          const isShiftLock = c.conds.some((x) => x.entry_type === 'shift' && x.status === 'active');
+          if (isShiftLock) { reads += 1; if (reads === 1) return null; q.activeShift = { id: 'shift-winner' }; }
+          return first();
+        });
+      }
+      return c;
+    }), { raw: trx.raw }))));
+    state.job.technician_id = 'tech-2';
+
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
+      .rejects.toMatchObject({ code: 'auto_clock_in_ineligible' });
+    expect(state.inserted).toHaveLength(0);
+  });
+
+  test('already clocked in and the visit still eligible: starts the timer, no new shift', async () => {
+    state.activeShift = { id: 'shift-manual', technician_id: 'tech-1' };
+    const entry = await timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO });
+
+    expect(shifts()).toHaveLength(0);
+    expect(entry.clocked_in_shift_id).toBeUndefined();
+    expect(jobs()).toHaveLength(1);
   });
 
   test('a shift already worked today (not the first stop) -> no shift', async () => {
