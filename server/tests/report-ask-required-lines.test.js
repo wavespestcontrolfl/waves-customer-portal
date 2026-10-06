@@ -1646,3 +1646,21 @@ describe('answer screen, Codex round 40', () => {
     expect(ask('Jordan completed your service.', 'Who was my technician?')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 41', () => {
+  const data = lawnData({ lawnAssessment: { scores: { overallScore: 92, turfDensity: 90 }, customerSummary: 'Healthy and stable.' }, reportV2: { aftercare: {} } });
+  const facts = buildReportAskFacts({ data });
+  const ask = (answer, question = 'How is my lawn doing?') => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['Your lawn health is poor.', 'The lawn looks unhealthy.', 'Density and coverage are poor.'])('a health verdict against the report is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('health_claim');
+  });
+
+  test('a health verdict that fits the report passes', () => {
+    expect(ask('Your lawn is healthy and stable.')).toBeNull();
+  });
+
+  test.each(['To help the lawn, water every day.', 'For better growth, water the lawn daily.', 'You can help by watering daily.'])('purpose-framed care is rejected: %s', (answer) => {
+    expect(ask(answer, 'How can I help my lawn?')).toBe('own_instruction');
+  });
+});

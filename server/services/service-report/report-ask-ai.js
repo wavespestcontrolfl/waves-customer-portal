@@ -1220,6 +1220,10 @@ const CARE_RECOMMENDATION_RE = /\b(?:is|are)\s+(?:highly\s+|strongly\s+)?(?:reco
 // Care framed as a benefit: "A daily watering schedule may be beneficial",
 // "Keeping the lawn shorter is beneficial" (Codex P1 #5964 r39).
 const CARE_BENEFIT_RE = new RegExp(`\\b${CARE_VERBS}\\b[^.?!]*\\b(?:beneficial|benefit\\w*|helpful|advisable|worthwhile|worth\\s+(?:it|doing|trying)|good\\s+for|best\\s+for|the\\s+way\\s+to\\s+go)\\b|\\b(?:beneficial|helpful|advisable|ideal|best)\\s+(?:to|for\\s+(?:you|the\\s+lawn|your\\s+lawn)\\s+to)\\s+(?:\\w+\\s+)?${CARE_VERBS}\\b`, 'i');
+// Purpose-framed care: "To help the lawn, water every day", "You can help by
+// watering daily" (Codex P1 #5964 r41). A clause after a comma that opens on
+// a care verb is caught in the check itself.
+const CARE_PURPOSE_RE = new RegExp(`\\b(?:help|helps|improve|support|boost|encourage)\\s+(?:\\w+\\s+){0,3}?by\\s+(?:\\w+\\s+)?${CARE_VERBS}\\b|^(?:to|for)\\s+[^,]{2,60},\\s*(?:please\\s+)?${CARE_VERBS}\\b`, 'i');
 const DRY_TIME_GUIDANCE = /\b(?:pets?|kids?|children|family|treated\s+(?:areas?|zones?))\b[^.?!]*\b(?:until|once|after)\b[^.?!]*\bdr(?:y|ied|ies)\b/i;
 // The treated place itself counts: "The yard is ready right now" (Codex P1 #5964 r40).
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|yards?|lawns?|grass|turf|patios?|lanais?|decks?|porch(?:es)?|pool\s+(?:area|deck)|play\s*(?:area|set|ground)|treated\s+(?:areas?|zones?|spots?)|(?:the\s+)?areas?|rooms?|home|house|inside|indoors|outside|outdoors|enter\w*|use\s+(?:it|the)|ready|safe\s+to|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
@@ -1459,9 +1463,29 @@ function namesWrongTechnician(text, facts) {
 }
 const TECH_NAME_STOP = new Set('we it they he she you i your our the this that our a an yes no our team office staff someone nobody'.split(' '));
 
+// A health verdict on the lawn or plants must fit the report: "Your lawn
+// health is poor" on a 92 report (Codex P1 #5964 r41). A word the report's own
+// text uses is grounded; otherwise the overall score must agree.
+const HEALTH_SUBJECT = /\b(?:lawn|grass|turf|yard|health|density|coverage|colou?r|plants?|shrubs?|trees?|hedges?|palms?|beds?|landscape)\b/i;
+const HEALTH_BAD = ['poor', 'unhealthy', 'bad', 'struggling', 'stressed', 'declining', 'thin', 'thinning', 'sparse', 'weak', 'sick', 'dying', 'dead', 'patchy', 'bare', 'damaged', 'diseased', 'worse', 'worsening', 'failing', 'suffering'];
+const HEALTH_GOOD = ['healthy', 'good', 'great', 'excellent', 'thriving', 'lush', 'strong', 'thick', 'dense', 'vibrant', 'perfect'];
+function contradictsHealth(text, facts) {
+  const sheet = JSON.stringify([facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary]).toLowerCase();
+  const score = Number(facts?.lawn_assessment?.overall_out_of_100);
+  const hasScore = Number.isFinite(score) && facts?.lawn_assessment?.overall_out_of_100 != null;
+  const has = (word) => new RegExp(`\\b${word}`).test(sheet);
+  return splitSentences(matchForm(text)).some((sentence) => {
+    const lower = sentence.toLowerCase();
+    if (!HEALTH_SUBJECT.test(lower) || NOT_CONFIRMED_RE.test(lower)) return false;
+    const said = (words) => words.filter((word) => new RegExp(`\\b${word}\\b`).test(lower) && !has(word));
+    return said(HEALTH_BAD).some(() => !hasScore || score >= 60) || said(HEALTH_GOOD).some(() => !hasScore || score < 70);
+  });
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['health_claim', (text, { facts }) => contradictsHealth(text, facts)],
   ['pressure_claim', (text, { facts }) => contradictsPressure(text, facts)],
   ['technician_name', (text, { facts }) => namesWrongTechnician(text, facts)],
   ['weather_claim', (text, { facts }) => contradictsWeather(text, facts)],
@@ -1499,7 +1523,7 @@ const ASK_CHECKS = [
   // A care instruction the model writes itself ("Water every day", "Mow the
   // lawn shorter") is not on the report; only required lines instruct
   // (Codex P1 #5964 r31). The prompt's own dry-time guidance (rule 6) stays.
-  ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => (CARE_INSTRUCTION_RE.test(sentence) || CARE_ADVICE_RE.test(sentence) || CARE_RECOMMENDATION_RE.test(sentence) || GERUND_CARE_RE.test(sentence) || CARE_BENEFIT_RE.test(sentence)) && !DRY_TIME_GUIDANCE.test(sentence))],
+  ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => (CARE_INSTRUCTION_RE.test(sentence) || CARE_ADVICE_RE.test(sentence) || CARE_RECOMMENDATION_RE.test(sentence) || GERUND_CARE_RE.test(sentence) || CARE_BENEFIT_RE.test(sentence) || CARE_PURPOSE_RE.test(sentence) || sentence.split(/[,;:]\s*/).slice(1).some((clause) => CARE_INSTRUCTION_RE.test(clause))) && !DRY_TIME_GUIDANCE.test(sentence))],
 ];
 
 function firstFailure(checks, text, context) {
