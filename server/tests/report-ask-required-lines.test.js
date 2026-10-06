@@ -297,7 +297,7 @@ describe('the fact sheet and prompt carry required lines', () => {
     test('insight card text is scrubbed like the concern', () => {
       const text = JSON.stringify(buildReportAskFacts({ data: treeData() }).tree_shrub_report);
       expect(text).not.toMatch(/941-555-0100|4421/);
-      expect(text).toContain('[address]');
+      expect(text).toContain('[number] Elm Street');
     });
 
     test('the five category rows the card draws are carried, a score of 100 and 0 intact', () => {
@@ -700,11 +700,12 @@ describe('a dismissal after a required line', () => {
   });
 });
 
-describe('street addresses with any USPS suffix are masked', () => {
+describe('house numbers before any USPS street type are masked', () => {
   test.each(['18 Bay Pass', '4 Ocean View', '7 Palm Walk', '12 Example Lane', '9 Heron Pointe'])('%s', (address) => {
     const facts = buildReportAskFacts({ question: `Can you come to ${address}?`, data: pestData({ customerConcern: `Ants at ${address}` }) });
+    // The house number is masked; the street name alone is not an address.
     expect(JSON.stringify(facts)).not.toContain(address);
-    expect(facts.customer_concern).toContain('[address]');
+    expect(facts.customer_concern).toContain(address.replace(/^\d+/, '[number]'));
   });
 
   test('ordinary numbers stay', () => {
@@ -778,5 +779,62 @@ describe('answer screen, Codex round 7', () => {
   test('ordinary lockbox words stay', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'The lockbox is on the side gate.' }) });
     expect(facts.customer_concern).toBe('The lockbox is on the side gate.');
+  });
+});
+
+describe('answer screen, Codex round 8', () => {
+  const lawnFacts = () => {
+    const data = lawnData({
+      reportV2: {
+        aftercare: {},
+        water: { rainInches: 1.23, irrigationInches: 0.8, totalInches: 2.03, status: 'balanced', scheduleOnFile: true },
+        diagnosis: [{ label: 'Water', score: 64, status: 'watch' }],
+      },
+    });
+    return { data, facts: buildReportAskFacts({ data }) };
+  };
+
+  test('a number must match the fact of its own kind', () => {
+    const { data, facts } = lawnFacts();
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How is my lawn?', data, facts });
+    expect(ask('The report shows 82 inches of rain.')).toBe('unstated_number');
+    expect(ask('Your score is 1.23 out of 100.')).toBe('unstated_number');
+    expect(ask('Your lawn health score is 82 out of 100.')).toBeNull();
+    expect(ask('The lawn got 1.23 inches of rain this week.')).toBeNull();
+  });
+
+  test('lawn diagnosis rows carry their score out of 100', () => {
+    expect(lawnFacts().facts.lawn_report.diagnosis[0]).toMatchObject({ area: 'Water', score_out_of_100: 64 });
+  });
+
+  test('irrigation figures the water card hides are not carried', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, water: { rainInches: 1.23, irrigationInches: 0.8, totalInches: 2.03, scheduleOnFile: false } } });
+    const water = buildReportAskFacts({ data }).lawn_report.water_this_week;
+    expect(water).toEqual({ rain_last_7_days_inches: 1.23 });
+  });
+
+  test.each([
+    'Your next visit is in February.',
+    'We return on the fifth.',
+    'We return tomorrow.',
+    'We come back next week.',
+  ])('a schedule in other words is rejected: %s', (answer) => {
+    const data = pestData();
+    expect(screenAskAnswer(answer, { question: 'What was done?', data, facts: buildReportAskFacts({ data }) })).toBe('states_a_date');
+  });
+
+  test.each([
+    'Keep the soil moist this week.',
+    'Run the hose over the dry areas.',
+    'Add some moisture to the turf.',
+  ])('while watering is held, an indirect watering directive is rejected: %s', (answer) => {
+    const data = lawnData();
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer(answer, { question: 'How is my lawn?', data, facts })).toBe('watering_during_hold');
+  });
+
+  test('a five-word street name loses its house number', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Ants at 18 Dr Martin Luther King Junior Boulevard' }) });
+    expect(facts.customer_concern).toBe('Ants at [number] Dr Martin Luther King Junior Boulevard');
   });
 });

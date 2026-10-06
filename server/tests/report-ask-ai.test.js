@@ -318,8 +318,9 @@ describe('buildReportAskPrompt', () => {
       dynamicContext: { aiSummary: { headline: 'Visit at 900 Example Trail', body: 'Reach us at pat@example.com' } },
     });
     const { user } = buildReportAskPrompt({ question: 'I live at 12 Example Lane. What did you find?', data, nextAppointment, now: NOW });
-    expect(user).not.toMatch(/555|example\.com|Example Lane|Sample Court|Test Avenue|Example Trail|A1B2|4821|\b900\b/);
-    expect(user).toMatch(/\[address\]/);
+    // House numbers are masked; a street name without its number may stay.
+    expect(user).not.toMatch(/555|example\.com|A1B2|4821|\b900\b|\b12 Example|\b77 Test/);
+    expect(user).toMatch(/\[number\] Example Lane/);
     expect(user).toMatch(/What did you find\?/);
     // The fixed lines and the calendar date are left as built.
     expect(user).toContain('Waves Pest Control');
@@ -732,7 +733,8 @@ describe('prompt and facts, review round 5', () => {
     ['18 Test St.', '18 Test St'],
   ])('masks the street address %s', (address) => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `Ants at ${address}, near the lanai` } });
-    expect(facts.customer_concern).toBe('Ants at [address], near the lanai');
+    // The house number is masked; the street name alone is not an address.
+    expect(facts.customer_concern).toBe(`Ants at ${address.replace(/^\d+/, '[number]')}, near the lanai`);
   });
 });
 

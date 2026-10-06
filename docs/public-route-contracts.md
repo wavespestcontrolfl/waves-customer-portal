@@ -97,8 +97,15 @@ pet precautions) go to the model as `required_lines` and must appear in the AI
 answer word for word, or the reply is the fixed-rule answer. A required line a
 technician typed (a recommendation, the next step, a finding's recommendation)
 never goes to the model: that question keeps the fixed-rule answer.
+Next-visit questions also keep the fixed-rule answer, and an AI answer may
+not state a calendar date, weekday, clock time, month or relative day of its
+own (required lines keep theirs). Every number the model writes must be a
+fact-sheet number of the same kind (a score out of 100, an inch figure).
+While the aftercare holds watering, no model sentence may tell the customer
+to water. Scrub: a house number before a street (any USPS street type, any
+case) and lockbox or keypad shorthand ("lockbox 42") are masked.
 
-Symptom and exposure questions (behavior change to the public route, owner review round 5, 2026-10-05): a question that reports a symptom or an exposure ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged.
+Symptom and ingestion questions (behavior change to the public route, owner review round 5, 2026-10-05; narrowed by owner option A, 2026-10-05): a question that reports a symptom, an ingestion or eye/skin contact ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged. A question that mentions spray plus a person, a pet or a body part from the cue list (`exposureSafetyLine`) and reports no symptom keeps its normal answer, with the fixed line "If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911." in front, gate on or off (owner 2026-10-05, option A); an unlisted word gets no line.
 
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share

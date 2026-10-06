@@ -303,21 +303,22 @@ function productsNamedIn(question, products) {
 // house number past two digits) is masked (Codex P1 r1 #5957). It cannot see a
 // customer's NAME in prose, or a street name without a number and a suffix: no
 // pattern tells those from ordinary words, so those pass through.
-// Every USPS street suffix and variant (Publication 28 C1, the table the
-// address matcher uses) plus local spellings the table lacks, longest first.
-// A hand-picked list missed real types ("18 Bay Pass", Codex P1 #5964 r6).
+// A house number before a street: a number, up to six words and any USPS
+// street type (Publication 28, the table the address matcher reads, in any
+// case: "21 heron bluff", "18 Bay Pass"). Only the number is masked: a street
+// name without its number is not an address, and the table's everyday nouns
+// ("2 ant hills", "2 rats by the lake") then lose only a count, which an
+// answer may not state anyway (Codex #5964 r6, #6016 r6-r8).
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 
 const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'trace', 'mews', 'landing', 'hollow', 'vista'];
-// "is" (ISLE) is an everyday word, not a street type in prose.
+// "is" (ISLE) is an everyday verb: "index 2 is improving".
 const NOT_STREET_SUFFIXES = new Set(['is']);
-const STREET_SUFFIX = `(?:${[...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
+const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
   .filter((suffix) => !NOT_STREET_SUFFIXES.has(suffix))
   .sort((x, y) => y.length - x.length)
-  .join('|')})`;
-// At least one street-name word, so a bare "2 is" or "3 way" is prose. Greedy:
-// "21 Harbor Crossing" takes both words, not the first suffix only.
-const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){1,4}${STREET_SUFFIX}\\b\\.?`, 'gi');
+  .join('|');
+const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}(?=\\s+(?:[a-z0-9'.-]+\\s+){0,6}(?:${STREET_SUFFIX})\\b)`, 'gi');
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value with a digit in it is a credential even with no
@@ -329,7 +330,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(STREET_ADDRESS, '[address]').replace(LOCKBOX_SHORTHAND, '$1$2[redacted]'))
+  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, '$1$2[redacted]'))
     .replace(/\d{3,}/g, '[number]');
   return clip(masked, max);
 }
@@ -493,16 +494,20 @@ function lawnCardFacts(v2, text) {
       what_we_saw: text(card?.whatWeSaw, 240),
       customer_action: text(card?.customerAction, 240),
     })).filter((card) => Object.keys(card).length),
-    diagnosis: diagnosisFacts(v2.diagnosis, text),
+    diagnosis: diagnosisFacts(v2.diagnosis, text, { scored: true }),
   };
 }
 
 function lawnWaterFacts(water, text) {
   const plan = objectOr(water.weekPlan);
+  // The water card shows irrigation and the weekly total only with a usable
+  // schedule on file (WaterIntakeBar: "Irrigation: Not on file"); the model
+  // gets the same (Codex P1 #5964 r8).
+  const scheduleShown = water.scheduleOnFile !== false && !water.scheduleUnconfirmed;
   return orNull(dropEmpty({
     rain_last_7_days_inches: inchesOf(water.rainInches),
-    irrigation_inches_per_week: inchesOf(water.irrigationInches),
-    total_inches_7_days: inchesOf(water.totalInches),
+    irrigation_inches_per_week: scheduleShown ? inchesOf(water.irrigationInches) : null,
+    total_inches_7_days: scheduleShown ? inchesOf(water.totalInches) : null,
     target_inches_per_week: inchesOf(water.targetInches),
     status: water.status === 'unknown' ? null : cleanText(water.status),
     explanation: text(water.explanation, 300),
@@ -839,27 +844,58 @@ const CONTENT_CHECKS = [
 // required line keeps its own date or time ("until Thu 3 PM"): only the
 // model's own words are checked.
 const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
-const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${MONTHS})|noon|midnight|o['’]?clock|half\\s+past|quarter\\s+(?:past|to)|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
 // Abbreviated weekdays only capitalized: a lowercase "sun" or "sat" is a word.
+// A month alone ("in February"), a spelled ordinal ("on the fifth") or a
+// relative day ("tomorrow", "next week") also states a schedule (Codex P1
+// #5964 r8). "This week" stays: rain and watering facts speak of it.
+const RELATIVE_DATE = /\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|next\s+(?:week|month|visit\s+on|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|the\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\s-]first))\b/i;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
   const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
-  return DATE_TOKEN.test(own) || WEEKDAY_ABBR.test(own);
+  return DATE_TOKEN.test(own) || WEEKDAY_ABBR.test(own) || RELATIVE_DATE.test(own);
 }
 
-// Every number the model writes itself must be a number the fact sheet holds:
-// a score of 95 when the facts say 82, or 4 inches of rain when they say
-// 1.23, is rejected (Codex P1 #5964 r7). Required lines keep their own
-// numbers; "out of 100" is the score scale the prompt asks for.
+// Every number the model writes itself must be a number the fact sheet holds,
+// and of the same kind: a score ("out of 100") must be a score fact and an
+// inch figure an inch fact, so "82 inches of rain" or "1.23 out of 100"
+// fails even though both numbers are on the sheet (Codex P1 #5964 r7-r8).
+// Required lines keep their own numbers.
 const NUMBER_RE = /\d+(?:\.\d+)?/g;
+const NUMBER_KINDS = [
+  ['score', /^\s*(?:out\s+of\s+100|points?\b|\/\s*100)/i, /out_of_100|score/],
+  ['inches', /^\s*(?:inch(?:es)?\b|in\.(?!\w)|["”])/i, /inches/],
+];
+
+function factNumbers(value, key = '', out = { any: new Set(), score: new Set(), inches: new Set() }) {
+  if (typeof value === 'number') {
+    out.any.add(value);
+    for (const [kind, , keyRe] of NUMBER_KINDS) if (keyRe.test(key)) out[kind].add(value);
+  } else if (typeof value === 'string') {
+    for (const n of value.match(NUMBER_RE) || []) out.any.add(Number(n));
+  } else if (Array.isArray(value)) {
+    value.forEach((item) => factNumbers(item, key, out));
+  } else if (value && typeof value === 'object') {
+    // A trend's from/to values belong to their series key.
+    Object.entries(value).forEach(([child, item]) => factNumbers(item, /^(?:from|to|value|days|inches)$/.test(child) ? `${key}.${child}` : child, out));
+  }
+  return out;
+}
+
 function statesUnknownNumber(text, { facts, requiredLines }) {
-  const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text))
-    .replace(/\bout of 100\b/gi, ' ');
-  const said = own.match(NUMBER_RE) || [];
+  const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
+  const said = [...own.matchAll(NUMBER_RE)];
   if (!said.length) return false;
-  const known = new Set((JSON.stringify([facts || {}, requiredLines]).match(NUMBER_RE) || []).map(Number));
-  return said.some((n) => !known.has(Number(n)));
+  const known = factNumbers([facts || {}, requiredLines]);
+  return said.some((m) => {
+    const value = Number(m[0]);
+    const after = own.slice(m.index + m[0].length);
+    // "out of 100" names the scale, not a value.
+    if (value === 100 && /out\s+of\s*$/i.test(own.slice(0, m.index))) return false;
+    const kind = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(after));
+    return !(kind ? known[kind[0]] : known.any).has(value);
+  });
 }
 
 // A sentence just before a required line that takes it back. The answer must
@@ -883,6 +919,10 @@ function statesLineAlone(sentences, line) {
   ));
 }
 
+// Watering directives the shared predicate does not know ("keep the soil
+// moist", "run the hose") (Codex P1 #5964 r8).
+const WATERING_DIRECTIVE = /\b(?:keep\s+(?:the\s+|your\s+)?(?:soil|lawn|turf|grass|yard|beds?|plants?|roots?)\s+(?:\w+\s+)?(?:moist|wet|damp|watered|hydrated)|run\s+(?:the\s+|your\s+)?(?:hose|sprinklers?|irrigation|sprinkler\s+system|system)|(?:add|give)\s+(?:\w+\s+){0,2}(?:moisture|water|a\s+drink)|soak(?:s|ing)?\b|hose\s+(?:it\s+|them\s+)?(?:down|off|over)|hand[\s-]?water|sprinkle\s+(?:it|the|some))/i;
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
@@ -900,7 +940,7 @@ const ASK_CHECKS = [
   // the hold itself.
   ['watering_during_hold', (text, { data, requiredLines }) => wateringRestricted(data)
     && splitSentences(matchForm(text)).some((sentence) => !requiredLines.some((line) => matchForm(line).includes(sentence.replace(/[.!?]$/, '')))
-      && isWateringRecommendation(sentence))],
+      && (isWateringRecommendation(sentence) || WATERING_DIRECTIVE.test(sentence)))],
 ];
 
 function firstFailure(checks, text, context) {
@@ -989,7 +1029,7 @@ const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, ca
 const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
 const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
 // "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
-const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|animals?|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you)\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b`, 'i');
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you)\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else

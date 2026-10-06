@@ -67,7 +67,7 @@ function main(argv) {
     topic: routed.topic,
     requiredLines: routed.requiredLines,
     // Null: the model answers. A reason: the customer gets ruleAnswer, no model call.
-    ruleAnswerOnlyBecause: ruleAnswerReason(data, routed.requiredLines),
+    ruleAnswerOnlyBecause: ruleAnswerReason(data, routed.requiredLines, routed.topic),
     ruleAnswer: routed.answer,
   }, null, 2)}\n`);
   return 0;
