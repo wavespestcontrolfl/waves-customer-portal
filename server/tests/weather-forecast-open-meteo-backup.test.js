@@ -10,7 +10,8 @@ const openMeteoBody = (chances) => ({
     time: chances.map((_, i) => BASE + i * 3600),
     precipitation_probability: chances,
     temperature_2m: chances.map(() => 84.4),
-    wind_speed_10m: chances.map(() => 7.6),
+    // Just past a 10 mph label max: must not round onto the limit.
+    wind_speed_10m: chances.map(() => 10.04),
   },
 });
 
@@ -50,10 +51,11 @@ describe('weather-forecast Open-Meteo backup', () => {
     global.fetch
       .mockResolvedValueOnce({ ok: false })
       .mockResolvedValueOnce({ ok: true, json: async () => openMeteoBody([10, 70]) });
-    const hours = await getHourlyRainOutlook(27.4, -82.4);
+    // Each test uses its own point: the shared client keeps its own cache.
+    const hours = await getHourlyRainOutlook(27.41, -82.41);
     expect(hours).toEqual([
-      { startTime: '2026-10-07T08:00:00-04:00', rainChance: 10, shortForecast: null, temperatureF: 84, windMph: 8, source: 'open-meteo' },
-      { startTime: '2026-10-07T09:00:00-04:00', rainChance: 70, shortForecast: null, temperatureF: 84, windMph: 8, source: 'open-meteo' },
+      { startTime: '2026-10-07T08:00:00-04:00', rainChance: 10, shortForecast: null, temperatureF: 84.4, windMph: 10.04, source: 'open-meteo' },
+      { startTime: '2026-10-07T09:00:00-04:00', rainChance: 70, shortForecast: null, temperatureF: 84.4, windMph: 10.04, source: 'open-meteo' },
     ]);
     const url = new URL(global.fetch.mock.calls[1][0]);
     expect(url.host).toBe('customer-api.open-meteo.com');
@@ -61,7 +63,7 @@ describe('weather-forecast Open-Meteo backup', () => {
     // The key rides in the URL: no log line may carry it.
     for (const call of logger.info.mock.calls) expect(String(call[0])).not.toContain('test-key');
     // Cached like an NWS answer.
-    await getHourlyRainOutlook(27.4, -82.4);
+    await getHourlyRainOutlook(27.41, -82.41);
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
@@ -71,13 +73,13 @@ describe('weather-forecast Open-Meteo backup', () => {
     global.fetch
       .mockResolvedValueOnce({ ok: true, json: async () => ({ properties: {} }) })
       .mockResolvedValueOnce({ ok: true, json: async () => openMeteoBody(chances) });
-    const outlook = await getDailyRainOutlook(27.4, -82.4);
+    const outlook = await getDailyRainOutlook(27.42, -82.42);
     expect(outlook).toEqual({ '2026-10-07': { rainChance: 55, shortForecast: null, source: 'open-meteo' } });
   });
 
   test('both down: null (fail-open)', async () => {
     global.fetch.mockRejectedValue(new Error('down'));
-    expect(await getHourlyRainOutlook(27.4, -82.4)).toBeNull();
-    expect(await getDailyRainOutlook(27.4, -82.4)).toBeNull();
+    expect(await getHourlyRainOutlook(27.43, -82.43)).toBeNull();
+    expect(await getDailyRainOutlook(27.43, -82.43)).toBeNull();
   });
 });

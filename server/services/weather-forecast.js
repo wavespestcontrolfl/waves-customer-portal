@@ -21,7 +21,6 @@
  */
 
 const logger = require('./logger');
-const { openMeteoForecastUrl } = require('./open-meteo-endpoint');
 
 const NWS_BASE = 'https://api.weather.gov';
 const USER_AGENT = '(wavespestcontrol.com, contact@wavespestcontrol.com)';
@@ -82,35 +81,34 @@ function etIso(ms) {
   return `${local}${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
 }
 
-// One Open-Meteo hourly read → NWS-shaped hours. Never logs the URL: with
-// the paid key set, the key rides in it.
+// One read through the shared property-forecast client (its paid-key URL,
+// hard deadline, cache and normalization) → NWS-shaped hours. Temperature
+// and wind are the UNROUNDED readings: the job-card spray check compares
+// them with label limits strictly, and NWS itself reports whole numbers.
+// Required lazily: application-conditions is a large module most callers of
+// this file never need.
+const BACKUP_HOURS = 7 * 24;
 async function fetchOpenMeteoHours(latNum, lngNum) {
-  const url = openMeteoForecastUrl();
-  url.searchParams.set('latitude', latNum.toFixed(4));
-  url.searchParams.set('longitude', lngNum.toFixed(4));
-  url.searchParams.set('hourly', 'precipitation_probability,temperature_2m,wind_speed_10m');
-  url.searchParams.set('temperature_unit', 'fahrenheit');
-  url.searchParams.set('wind_speed_unit', 'mph');
-  url.searchParams.set('timeformat', 'unixtime');
-  url.searchParams.set('forecast_days', '7');
-  const body = await fetchJson(url.toString(), 'open-meteo backup');
-  const h = body?.hourly;
-  if (!h || !Array.isArray(h.time)) return null;
-  const num = (arr, i) => (Array.isArray(arr) && Number.isFinite(arr[i]) ? arr[i] : null);
-  const nowHour = Math.floor(Date.now() / 3600000) * 3600000;
+  const { fetchPropertyForecast } = require('./service-report/application-conditions');
+  const fromMs = Math.floor(Date.now() / 3600000) * 3600000;
+  const forecast = await fetchPropertyForecast({
+    latitude: latNum,
+    longitude: lngNum,
+    from: new Date(fromMs),
+    to: new Date(fromMs + BACKUP_HOURS * 3600000),
+    exactReadings: true,
+  });
+  if (forecast?.status !== 'ok' || !Array.isArray(forecast.hourly)) return null;
   const hours = [];
-  for (let i = 0; i < h.time.length; i += 1) {
-    const ms = Number(h.time[i]) * 1000;
-    // NWS hourly starts at the current hour; match it.
-    if (!Number.isFinite(ms) || ms < nowHour) continue;
-    const temp = num(h.temperature_2m, i);
-    const wind = num(h.wind_speed_10m, i);
+  for (const row of forecast.hourly) {
+    const ms = Date.parse(row.at);
+    if (!Number.isFinite(ms)) continue;
     hours.push({
       startTime: etIso(ms),
-      rainChance: num(h.precipitation_probability, i),
+      rainChance: Number.isFinite(row.precipitation_probability_pct) ? row.precipitation_probability_pct : null,
       shortForecast: null,
-      temperatureF: temp == null ? null : Math.round(temp),
-      windMph: wind == null ? null : Math.round(wind),
+      temperatureF: Number.isFinite(row.temperature_f_exact) ? row.temperature_f_exact : null,
+      windMph: Number.isFinite(row.wind_mph_exact) ? row.wind_mph_exact : null,
       source: 'open-meteo',
     });
   }
