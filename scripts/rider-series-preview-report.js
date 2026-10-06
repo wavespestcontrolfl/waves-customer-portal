@@ -63,7 +63,9 @@ async function main() {
   // report finds lawn + PEST pairs, which the pairing table no longer allows;
   // tree & shrub riders are seeded at estimate accept, not by this report.
   if (!process.argv.includes('--force-retired')) {
-    process.stdout.write('rider-series-preview-report is retired: pest no longer rides a lawn (owner 2026-10-05).\n');
+    const reason = 'pest no longer rides a lawn (owner 2026-10-05)';
+    if (json) process.stdout.write(`${JSON.stringify({ retired: true, reason, results: [] })}\n`);
+    else process.stdout.write(`rider-series-preview-report is retired: ${reason}.\n`);
     return;
   }
   const report = await db.transaction(async (trx) => {
