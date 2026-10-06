@@ -2362,6 +2362,38 @@ const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
 // window start. Returns { start } (null start when no time was given) or
 // { error } for garbage input, so callers return a clear tool error instead
 // of a Postgres time-cast error.
+// The refusal for a start that is not on the hour (owner rule — every creator
+// enforces it; Codex #3109 r33 flagged this tool as the bypass). Rejects
+// rather than rounding, and names the nearest valid starts ("Visits start on
+// the hour. Use 2:00 PM or 3:00 PM.") so the model can re-ask. Each candidate
+// (the hour before and the hour after) is checked against the shared admin
+// window rule with the flat-60 duration, so a 7:30 PM request names only
+// 7:00 PM (8:00 PM would end past the day end) and an 8:30 PM request, with
+// no valid neighbor, gets the rule's own refusal as invalid_appointment_window
+// (Codex r1 on #6023, P2). The codes are stable: the proposal returns them
+// with no card (W5-dev-03), and the executor refuses the same start the same
+// way if no card was ever made.
+function offHourRefusal(hour) {
+  const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
+  const candidates = hour + 1 > 23 ? [hour] : [hour, hour + 1];
+  const valid = [];
+  let firstRefusal = null;
+  for (const h of candidates) {
+    const start = `${String(h).padStart(2, '0')}:00`;
+    const windowEnd = deriveWindowEnd(start, 60);
+    try {
+      if (!windowEnd) throw Object.assign(new Error('That window would cross midnight — pick an earlier start.'), { status: 422 });
+      assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes: 60 });
+      valid.push(hour12(h));
+    } catch (err) {
+      if (err?.status !== 422) throw err;
+      if (!firstRefusal) firstRefusal = err.message;
+    }
+  }
+  if (!valid.length) return { error: firstRefusal, code: 'invalid_appointment_window' };
+  return { error: `Visits start on the hour. Use ${valid.join(' or ')}.`, code: 'window_not_on_the_hour' };
+}
+
 function parseTimeWindowStart(timeWindow) {
   if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
   const raw = String(timeWindow).trim().toLowerCase();
@@ -2378,19 +2410,8 @@ function parseTimeWindowStart(timeWindow) {
   if (hour > 23 || minute > 59) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
   }
-  // Appointment windows start ON THE HOUR (owner rule — every creator
-  // enforces it; Codex #3109 r33 flagged this tool as the bypass). Reject
-  // rather than silently rounding: the operator asked for a specific time
-  // and the model can re-ask with the corrected value.
-  if (minute !== 0) {
-    // Names the nearest valid starts ("Visits start on the hour. Use 2:00 PM
-    // or 3:00 PM.") so the model can re-ask. The code is stable: the
-    // proposal returns it with no card (W5-dev-03), and the executor still
-    // refuses the same start if no card was ever made.
-    const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
-    const options = hour + 1 > 23 ? [hour12(hour)] : [hour12(hour), hour12(hour + 1)];
-    return { error: `Visits start on the hour. Use ${options.join(' or ')}.`, code: 'window_not_on_the_hour' };
-  }
+  // Appointment windows start ON THE HOUR; see offHourRefusal.
+  if (minute !== 0) return offHourRefusal(hour);
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 

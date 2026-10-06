@@ -594,6 +594,19 @@ describe('create_appointment — a start the window rule refuses gets a coded re
     expect(result).toEqual({ error: 'Visits start on the hour. Use 9:00 AM or 10:00 AM.', code: 'window_not_on_the_hour' });
   });
 
+  test('a 7:30 PM start names only 7:00 PM — 8:00 PM would end past the day end (Codex r1 on #6023)', async () => {
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '7:30 PM');
+    expect(result).toEqual({ error: 'Visits start on the hour. Use 7:00 PM.', code: 'window_not_on_the_hour' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an 8:30 PM start has no valid neighbor: the shared rule\'s own refusal, as invalid_appointment_window', async () => {
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '8:30 PM');
+    expect(result).toMatchObject({ code: 'invalid_appointment_window', error: expect.stringMatching(/end by 20:00/) });
+    expect(result.error).not.toMatch(/Use /);
+    expect(db).not.toHaveBeenCalled();
+  });
+
   test('the executor refuses the same start with the same code', async () => {
     const result = await executeTool('create_appointment', {
       customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '2:30 PM',

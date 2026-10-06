@@ -135,7 +135,6 @@ function estimateWasSentToCustomer(estimate) {
 
 async function estimatePreview(input, database = db, context = null) {
   context = context || await loadContext(input, database);
-  const body = estimateBody(input, context);
   let prior = null;
   if (input.estimate_id) {
     prior = await database('estimates').where({ id: input.estimate_id }).first();
@@ -145,11 +144,18 @@ async function estimatePreview(input, database = db, context = null) {
     // A quote the customer already has is honored (W8-dev-07): the bar does
     // not revise it in place, at the card or at Confirm (this preview reruns
     // under the locks). The path that exists is a new estimate draft, which
-    // the operator chooses. The admin estimate screen still edits a sent
-    // quote; that rule is unchanged.
+    // the operator chooses. Judged BEFORE the property's current quote
+    // eligibility (estimateBody), so a sent quote whose facts changed since
+    // (lawn profile cleared, property now commercial, lawn service now
+    // active) is still answered "honored", not "repair the facts" (Codex r1
+    // on #6023, P2). The admin estimate screen still edits a sent quote;
+    // that rule is unchanged.
     if (estimateWasSentToCustomer(prior)) {
       throw failure('That quote was already sent to the customer and is honored, so it was not changed and no card was made. Ask the operator whether to start a new estimate draft for this property; if they say yes, call save_customer_estimate again without estimate_id.', 'estimate_already_sent');
     }
+  }
+  const body = estimateBody(input, context);
+  if (prior) {
     // The whole group is judged, not only this row: a scheduled anchor pins
     // every sibling's offer in its receipt. Under confirmation this reruns
     // after the group locks are held, so the verdict is authoritative there.

@@ -337,6 +337,36 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toEqual([before]);
   }, 60000);
 
+  test('a sent quote whose lawn facts were cleared since is still answered "honored", not "repair the facts" (Codex r1 on #6023)', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
+    await db('customer_properties').where({ id: fixture.property.id }).update({ property_sqft: null });
+    await db('customers').where({ id: fixture.customer.id }).update({ property_sqft: null });
+    const before = await db('estimates').where({ id: estimateId }).first();
+    const { executeCustomerEstimateTool } = require('../services/intelligence-bar/customer-estimate-tools');
+    const fresh = await executeCustomerEstimateTool('save_customer_estimate', { customer_id: fixture.customer.id, property_id: fixture.property.id });
+    expect(fresh).toMatchObject({ success: false, code: 'missing_information' }); // the facts really are missing for a NEW draft
+    const refused = await executeCustomerEstimateTool('save_customer_estimate', {
+      customer_id: fixture.customer.id, property_id: fixture.property.id, estimate_id: estimateId, lawn_applications: 12,
+    });
+    expect(refused).toMatchObject({ success: false, code: 'estimate_already_sent' });
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toEqual([before]);
+  }, 60000);
+
+  test('a sent quote that belongs to another customer still gets the relationship refusal, not "honored"', async () => {
+    const owner = await customerFixture();
+    const other = await customerFixture();
+    const created = await confirm(await propose(owner));
+    const estimateId = created.body.result.estimate_id;
+    await db('estimates').where({ id: estimateId }).update({ status: 'sent', sent_at: new Date() });
+    const refused = await require('../services/intelligence-bar/customer-estimate-tools').executeCustomerEstimateTool('save_customer_estimate', {
+      customer_id: other.customer.id, property_id: other.property.id, estimate_id: estimateId, lawn_applications: 12,
+    });
+    expect(refused).toMatchObject({ success: false, code: 'target_relationship_mismatch' });
+  }, 60000);
+
   test('a quote sent after the card was made is refused at Confirm and stays unchanged (W8-dev-07)', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
