@@ -479,15 +479,16 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
 // ── this month's protocol window ────────────────────────────────────────────
 
 // The product's application method as the completion records it: the
-// operating layer's explicit mode, else the catalog formulation decides
-// between a spreader granule and a tank mix (lawn-completion-defaults
-// completionMethod, the same rule the planned rows take).
+// planned rows' own classifier (lawn-completion-defaults completionMethod), so
+// one product reads the same method here as when planned — the operating
+// layer's explicit mode, then the catalog's application_method, then the
+// formulation (Codex #5993 r6 P1).
 function protocolMethod(product, row) {
-  if (product.applicationMode === 'spot') return 'spot_treatment';
-  const formulation = String(row?.formulation || '').trim();
-  const dispersible = /water[- ]?(dispersible|soluble)|\b(WDG|WG|WSG|WP|SP|DF)\b/i.test(formulation);
-  const granular = /granul|\(G\)|^G$/i.test(formulation);
-  return granular && !dispersible ? 'granular_broadcast' : 'broadcast_spray';
+  const { completionMethod } = require('./lawn-completion-defaults');
+  return completionMethod(
+    { product: { applicationMethod: row?.application_method || null, formulation: row?.formulation } },
+    { applicationMode: product.application_mode },
+  );
 }
 
 // A protocol rate the sheet can figure an amount from: a number in a real
@@ -531,7 +532,7 @@ function windowProduct(product, { row, substitution, originalName, renamed }) {
     substituteFor: substitution ? (originalName || substitution.original_product_name || null) : null,
     role: product.role || null,
     defaultInPlan: product.default_in_plan === true,
-    applicationMethod: protocolMethod({ applicationMode: product.application_mode }, row),
+    applicationMethod: protocolMethod(product, row),
     ...protocolRate(rate),
     // The protocol's own words for when this product goes down, and EVERY
     // operating gate on the row (spreaderVisitOnly, stressGate,

@@ -789,6 +789,16 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
     }));
   });
 
+  test('a broadcast window product takes the catalog\'s own application method before the formulation, as a planned row does', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
+    getProtocolWindowContext.mockResolvedValue(window());
+    const drench = { ...granular, application_method: 'soil_drench' };
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, drench, unapproved] })), technicianId: 'tech-1' });
+    expect(ctx.protocolWindow.products.find((p) => p.productId === P_GRAN)).toMatchObject({ applicationMethod: 'soil_drench' });
+    // An explicit spot mode still wins over the catalog method.
+    expect(ctx.protocolWindow.products.find((p) => p.productId === P_HERB)).toMatchObject({ applicationMethod: 'spot_treatment' });
+  });
+
   test('the visit\'s product substitutions apply: a substituted window product is offered as its substitute, at the substitution\'s rate, named for the original; a tank mix naming the original names the substitute; a substitute colliding with a product\'s own listing is offered once, as the listing', async () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
     getProtocolWindowContext.mockResolvedValue(window());

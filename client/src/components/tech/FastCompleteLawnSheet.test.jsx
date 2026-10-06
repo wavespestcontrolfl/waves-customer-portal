@@ -978,6 +978,22 @@ describe('products', () => {
     expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 12, amountUnit: 'fl_oz', rate: 2, rateUnit: 'fl_oz', areaValue: 6000 });
   });
 
+  test('a planned row with no plan quantity moved to spot treatment figures nothing from the plan\'s area', async () => {
+    const ctx = plannedOne('broadcast_spray', { amount: null, treatedSqft: 6000, areaUnit: 'sqft', ratePer1000: 1, rateUnit: 'fl_oz' });
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog: RATED } });
+    const talak = editorFor('Talak 7.9%');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('12');
+    pickMethod(talak, 'Spot treatment');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('');
+    expect(within(talak).queryByText(/per 1,000 sq ft/)).toBeNull();
+    await analyze();
+    await submit();
+    const sent = completeCalls()[0].body.products[0];
+    expect(sent).toMatchObject({ applicationMethod: 'spot_treatment' });
+    expect(sent.totalAmount).toBeUndefined();
+    expect(sent.rate).toBeUndefined();
+  });
+
   test.each([
     ['a per-gallon rate', { default_rate_per_1000: 2, default_unit: 'fl_oz/gal' }],
     ['a rate in mL', { default_rate_per_1000: 2, default_unit: 'ml' }],

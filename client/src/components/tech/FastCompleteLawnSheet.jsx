@@ -477,8 +477,14 @@ function figuringRate(row) {
 }
 
 // The area a row is figured on: the one it submits for a sqft method; a
-// planned spot row's own plan area; else none.
-const figuringArea = (row, lawnSqft) => (requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (row.planned ? row.plannedSqft : null));
+// planned spot row's own plan area while the plan's method stands; else none.
+// The plan's area was given at the plan's method: a planned row moved to spot
+// treatment (rateChanged without a typed amount) figures nothing, so no amount
+// or rate from the old plan area reaches the record (Codex #5993 r6 P1).
+const figuringArea = (row, lawnSqft) => {
+  if (requirementOf(row)?.unit === 'sqft') return areaOf(row, lawnSqft);
+  return row.planned && !row.rateChanged ? row.plannedSqft : null;
+};
 
 function derivedAmount(row, lawnSqft) {
   if (row.amountPicked || row.fromPlan) return null;

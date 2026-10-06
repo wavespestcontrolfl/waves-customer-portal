@@ -251,4 +251,4 @@ function buildLawnCompletionDefaults(plan, context) {
   };
 }
 
-module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
+module.exports = { completionMethod, lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
