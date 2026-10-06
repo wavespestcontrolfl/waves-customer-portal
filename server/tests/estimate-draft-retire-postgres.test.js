@@ -155,33 +155,27 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).archived_at).toBeNull();
   });
 
-  test('the lead moves to the sent estimate, booking reminders stop, draft-ready bells close', async () => {
-    const { autoDraft, staffDraft, sent } = await sentAfterTwoDrafts();
+  test('drafts with a booking handoff, a clarify text or a website quote are kept; a lead link is cleared; bells close', async () => {
+    const { autoDraft, staffDraft } = await sentAfterTwoDrafts();
     const leadId = randomUUID();
     await mockPg('leads').insert({ id: leadId, estimate_id: autoDraft, first_name: 'Fixture', last_name: 'Retire' });
-    const intentId = randomUUID();
-    await mockPg('booking_intents').insert({ id: intentId, phone: '+12025550123', pricing_estimate_id: staffDraft, suppressed: false });
+    const c = await customer();
+    const handoff = await estimate(c, { createdAt: minutesAgo(60) });
+    const clarify = await estimate(c, { createdAt: minutesAgo(60) });
+    const wizard = await estimate(c, { createdAt: minutesAgo(60), source: 'quote_wizard' });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    await mockPg('booking_intents').insert({ id: randomUUID(), phone: '+12025550123', pricing_estimate_id: handoff, suppressed: false });
+    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', flags: JSON.stringify({ estimate_id: clarify }) });
     const bellId = randomUUID();
-    await mockPg('notifications').insert({ id: bellId, recipient_type: 'admin', category: 'lead', title: 'Draft ready', metadata: JSON.stringify({ estimateId: autoDraft }) });
+    await mockPg('notifications').insert({ id: bellId, recipient_type: 'admin', category: 'lead', title: 'Draft ready', metadata: JSON.stringify({ estimateId: staffDraft }) });
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
-    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBe(sent);
-    expect((await mockPg('booking_intents').where({ id: intentId }).first()).suppressed).toBe(true);
+    expect((await row(staffDraft)).archived_at).not.toBeNull();
+    expect((await row(autoDraft)).archived_at).not.toBeNull();
+    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBeNull();
+    for (const id of [handoff, clarify, wizard]) expect((await row(id)).archived_at).toBeNull();
     const bell = await mockPg('notifications').where({ id: bellId }).first();
     expect(bell.done_at).not.toBeNull();
     expect(bell.resolution).toBe('estimate_draft_replaced');
-  });
-
-  test('a lead is unlinked, not moved, when another lead already holds the sent estimate', async () => {
-    const { autoDraft, sent } = await sentAfterTwoDrafts();
-    const draftLead = randomUUID();
-    const sentLead = randomUUID();
-    await mockPg('leads').insert([
-      { id: draftLead, estimate_id: autoDraft, first_name: 'Fixture', last_name: 'Retire' },
-      { id: sentLead, estimate_id: sent, first_name: 'Fixture', last_name: 'Retire' },
-    ]);
-    await retireDraftsReplacedBySentEstimate();
-    expect((await mockPg('leads').where({ id: draftLead }).first()).estimate_id).toBeNull();
-    expect((await mockPg('leads').where({ id: sentLead }).first()).estimate_id).toBe(sent);
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {

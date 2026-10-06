@@ -42,6 +42,15 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
   AND ${ADDRESS_UNVERIFIED_ABSENT_SQL}
 )`;
 
+// A draft with its own live lifecycle is never retired (codex #6081 r1-r4):
+// a booking-page handoff (booking_intents, which the public capture can
+// re-open) or a staged clarification text. A linked lead is not a blocker:
+// the link is cleared, as the Delete action does (see retireOneDraft).
+const NO_LIVE_DEPENDENTS_SQL = `(
+  NOT EXISTS (SELECT 1 FROM booking_intents b WHERE b.pricing_estimate_id = estimates.id)
+  AND NOT EXISTS (SELECT 1 FROM message_drafts m WHERE m.flags->>'estimate_id' = estimates.id::text)
+)`;
+
 const DRAFT_ELIGIBLE_SQL = `
   status = 'draft'
   AND archived_at IS NULL
@@ -49,7 +58,8 @@ const DRAFT_ELIGIBLE_SQL = `
   AND estimate_group_id IS NULL
   AND scheduled_at IS NULL
   AND price_locked_at IS NULL
-  AND COALESCE(source, '') <> 'one_tap_purchase'
+  AND COALESCE(source, '') NOT IN ('one_tap_purchase', 'quote_wizard')
+  AND ${NO_LIVE_DEPENDENTS_SQL}
   AND ${DELIVERY_CLAIM_NOT_LIVE_SQL}
   AND ${DRAFT_HOLD_MARKERS_ABSENT_SQL}
 `;
@@ -72,17 +82,26 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND ${alias}.status <> 'draft'
   AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}`;
 
-// Archive one draft and close what still points at it, in one transaction:
-// the lead link moves to the sent estimate (or is cleared, as the Delete
-// action does, when another lead already holds it or several leads share
-// the draft); open booking-recovery intents on the draft are suppressed, so
-// the old funnel's reminder texts and emails never go out; open "draft
-// ready" bells for it are marked done.
+// Archive one draft, clear a lead link to it, and mark its open "draft
+// ready" bells done, in one transaction. The sent estimate is read FOR SHARE first, so a concurrent
+// revise (address move) or linkage invalidation of it either commits
+// before this check or waits until the archive commits.
 async function retireOneDraft(trx, pair) {
-  // Every predicate re-checked on the row itself: a draft edited, sent or
-  // claimed since the read — or a send since invalidated, re-pointed or
-  // moved to another address — is left alone. Both rows' property_id and
-  // address must still be what the JS match judged.
+  // Lead first, then estimates — the order createOrReuseAdminEstimate takes
+  // (lead, then its estimate), so a staff save of the same lead cannot
+  // deadlock with this sweep.
+  const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().select('id');
+  const sent = await trx.raw(`
+    SELECT id FROM estimates s
+     WHERE s.id = ?
+       AND s.property_id IS NOT DISTINCT FROM ?
+       AND s.address IS NOT DISTINCT FROM ?
+       AND ${SENT_EVIDENCE_SQL('s')}
+     FOR SHARE
+  `, [pair.sent_id, pair.sent_property_id, pair.sent_address]);
+  if (!sent?.rows?.length) return null;
+  // Every draft predicate re-checked on the row itself: a draft edited,
+  // sent, claimed or newly linked since the read is left alone.
   const result = await trx.raw(`
     UPDATE estimates
        SET archived_at = NOW(),
@@ -96,32 +115,18 @@ async function retireOneDraft(trx, pair) {
        AND updated_at <= ?
        AND property_id IS NOT DISTINCT FROM ?
        AND address IS NOT DISTINCT FROM ?
+       AND EXISTS (SELECT 1 FROM estimates s WHERE s.id = ? AND s.customer_id = estimates.customer_id AND s.created_at > estimates.created_at)
        AND ${DRAFT_ELIGIBLE_SQL}
-       AND EXISTS (
-         SELECT 1 FROM estimates s
-          WHERE s.id = ?
-            AND s.customer_id = estimates.customer_id
-            AND s.created_at > estimates.created_at
-            AND s.property_id IS NOT DISTINCT FROM ?
-            AND s.address IS NOT DISTINCT FROM ?
-            AND ${SENT_EVIDENCE_SQL('s')}
-       )
     RETURNING id, customer_id
-  `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.draft_property_id, pair.draft_address,
-    pair.sent_id, pair.sent_property_id, pair.sent_address]);
+  `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.draft_property_id, pair.draft_address, pair.sent_id]);
   const row = result?.rows?.[0];
   if (!row) return null;
-
-  const leads = await trx('leads').where({ estimate_id: row.id }).forUpdate().select('id');
+  // Unlink, never re-point: the sent estimate may already belong to another
+  // lead (by FK or by its estimate_data mirror), and staff can link it.
   if (leads.length) {
-    const sentTaken = await trx('leads').where({ estimate_id: pair.sent_id }).first('id');
-    const target = leads.length === 1 && !sentTaken ? pair.sent_id : null;
-    await trx('leads').whereIn('id', leads.map((l) => l.id)).update({ estimate_id: target, updated_at: trx.fn.now() });
+    await trx('leads').whereIn('id', leads.map((l) => l.id)).where({ estimate_id: row.id })
+      .update({ estimate_id: null, updated_at: trx.fn.now() });
   }
-  await trx('booking_intents')
-    .where({ pricing_estimate_id: row.id, suppressed: false })
-    .whereNull('converted_at')
-    .update({ suppressed: true, updated_at: trx.fn.now() });
   await trx('notifications')
     .whereRaw("metadata->>'estimateId' = ?", [String(row.id)])
     .whereNull('done_at')
