@@ -676,21 +676,71 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached', message: expect.stringMatching(/2\/2 applications this year — LIMIT REACHED/) });
     });
 
-    test('different properties of one customer do not serialize or block each other; a visit with no step, no step product, gate off and v13 off are untouched', async () => {
+    test('no step product submitted and gate off are untouched; a different property\'s sprays never count', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20', bermuda: true });
       await priorSpray(f, '2026-03-01');
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(nis), { serviceId: f.visit.id }))).resolves.toBeUndefined();
-      const unflagged = await lawn({ date: '2026-06-20' });
-      await priorSpray(unflagged, '2026-03-01');
-      await priorSpray(unflagged, '2026-04-20');
-      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: unflagged.visit.id }))).resolves.toBeUndefined();
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, [], { serviceId: f.visit.id }))).resolves.toBeUndefined();
       await priorSpray(f, '2026-04-20');
       setGates({ removal: false });
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+    });
+
+    test('eligibility no longer carries the step (switch off, estimate archived, grass or cultivar changed mid-completion): a recorded Recognition is STILL locked and capped, in any month', async () => {
+      setGates();
+      for (const change of [
+        (f) => knex('customer_turf_profiles').where({ customer_id: f.customerId }).update({ bermuda_removal: false }),
+        (f) => knex('customer_turf_profiles').where({ customer_id: f.customerId }).update({ grass_type: 'bahia', track_key: 'bahia' }),
+        (f) => knex('customer_turf_profiles').where({ customer_id: f.customerId }).update({ cultivar: 'ProVista' }),
+      ]) {
+        const f = await lawn({ date: '2026-06-20', bermuda: true });
+        await priorSpray(f, '2026-03-01');
+        await priorSpray(f, '2026-04-20');
+        // The preflight ran while the lawn still carried the step...
+        expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED/);
+        // ...then the account changed. The in-transaction check still refuses the third spray.
+        await change(f);
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
+          .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached', message: expect.stringMatching(/LIMIT REACHED/) });
+      }
+      // Any month: a May lawn visit that never carried the step is capped too.
+      const may = await lawn({ date: '2026-05-12' });
+      await priorSpray(may, '2026-03-01');
+      await priorSpray(may, '2026-04-20');
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: may.visit.id })))
+        .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+      // Fusilade II alone on a visit that does not carry the step is bed work: consumes and is refused nothing.
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: may.visit.id }))).resolves.toBeUndefined();
+    });
+
+    test('with the flag removed after the preflight, two concurrent Recognition completions for one property still serialize: exactly one commits', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01'); // 1 of 2 used
+      const [second] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: second.id })).toBeNull();
+      await knex('customer_turf_profiles').where({ customer_id: f.customerId }).update({ bermuda_removal: false });
+      const run = (visit) => knex.transaction(async (trx) => {
+        await enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: visit.id });
+        await sleep(300);
+        await ledger(trx, f, visit, '2026-06-20');
+      });
+      const results = await Promise.allSettled([run(f.visit), run(second)]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(results.find((r) => r.status === 'rejected').reason.code).toBe('lawn_bermuda_limit_reached');
+      expect(await knex('property_application_history').where({ customer_id: f.customerId, product_id: rec.id })).toHaveLength(2);
+    });
+
+    test('v13 off no longer exempts a recorded Recognition from the cap; the step-only rules (pair, Fusilade II cap) still need the step', async () => {
       setGates({ v13: false });
-      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01');
+      await priorSpray(f, '2026-04-20');
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
     });
 
     test('a propertyless visit of a one-property customer locks on that sole property: it serializes with an explicit-property completion', async () => {

@@ -197,16 +197,24 @@ const BERMUDA_GROUP = 'bermuda_removal';
 // the visit. Returns the refusal message, or null. Gate off: always null.
 // The visit when it carries the step (the checks above), else null.
 async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
-  if (featureGates.lawnV13Live?.() !== true || !UUID_RE.test(String(serviceId || ''))) return null;
-  const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date');
-  if (!visit?.customer_id || !visit.scheduled_date) return null;
+  if (featureGates.lawnV13Live?.() !== true) return null;
+  // The visit with the property the step is judged for (see resolvedVisitOf): the limits
+  // count it and the completion lock keys on it, so a propertyless visit and an
+  // explicit-property visit of the same lawn are one lock and one history.
+  const visit = await resolvedVisitOf(knex, serviceId, { strict });
+  if (!visit) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
   const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month: visitMonthOf(visit), strict });
-  if (!step.active) return null;
-  // The property the step was proven for (the visit's own, or a one-property customer's
-  // sole property when the visit names none): the limits count it and the completion
-  // lock keys on it, so a propertyless visit and an explicit-property visit of the same
-  // lawn are one lock and one history.
+  return step.active ? visit : null;
+}
+
+// A visit with the property its step is judged for, whether or not the visit carries the
+// step: the visit's own property, else a one-property customer's sole active property
+// (effective_property_id; null when none resolves).
+async function resolvedVisitOf(knex, serviceId, { strict = false } = {}) {
+  if (!UUID_RE.test(String(serviceId || ''))) return null;
+  const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date');
+  if (!visit?.customer_id || !visit.scheduled_date) return null;
   const scope = await profilePropertyScope(knex, visit.customer_id, visit.property_id, strict);
   return { ...visit, effective_property_id: scope.effective || null };
 }
@@ -277,6 +285,13 @@ async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
   const visit = await stepVisitOf(knex, serviceId, { strict: true });
   if (!visit) return null;
   if (unconfigured) return NOT_CONFIGURED_MESSAGE;
+  return capViolation(knex, visit, sprayed);
+}
+
+// The step's caps for the products being recorded, judged for the visit's effective
+// property through the same checkLimits path and program as the plan, bounded at the
+// visit's date and leaving this visit's own rows out. The refusal message, or null.
+async function capViolation(knex, visit, sprayed) {
   const limits = require('./application-limits');
   for (const product of sprayed) {
     const result = await limits.checkLimits(visit.customer_id, product.id, visit.scheduled_date, knex, {
@@ -301,13 +316,21 @@ async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
 const LOCK_NAMESPACE = 'bermuda-removal-step';
 async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return;
-  const { recognition, fusilade } = await submittedStepProducts(trx, products);
+  const { recognition, fusilade, unconfigured } = await submittedStepProducts(trx, products);
   if (!recognition && !fusilade) return;
-  const visit = await stepVisitOf(trx, serviceId, { strict: true });
+  // Eligibility decides only whether the PAIR rule and the Fusilade II cap apply. A recorded
+  // Recognition is capped on any visit of any month, whatever the account says NOW (a switch
+  // turned off, an estimate archived, a cultivar changed mid-completion): every Recognition
+  // spray is in the history the cap counts. Fusilade II alone on a visit that does not carry
+  // the step is bed or border work and consumes nothing.
+  const stepVisit = await stepVisitOf(trx, serviceId, { strict: true });
+  const sprayed = recognition ? [recognition, fusilade].filter(Boolean) : (stepVisit ? [fusilade] : []);
+  if (!sprayed.length) return;
+  const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
   if (!visit) return;
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [LOCK_NAMESPACE, visit.effective_property_id ? `property:${visit.effective_property_id}` : `customer:${visit.customer_id}`]);
-  const message = await bermudaLimitViolation(trx, products, { serviceId });
+  const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
   if (message) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
 }
 
