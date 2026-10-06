@@ -6797,6 +6797,7 @@ function businessWholeBuildingUnitWaiverForCall({ addressValidation, v2Extractio
     enabled: true,
     propertyType: property.property_type,
     wholeBuildingOccupancy: property.whole_building_occupancy,
+    wholeBuildingFinal: property.whole_building_occupancy_final,
     evidence: v2Extraction?.evidence,
     transcript: transcription,
     outbound,

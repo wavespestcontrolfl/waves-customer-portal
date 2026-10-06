@@ -125,7 +125,11 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // address (not a suite, unit, bay or space inside it) and pins the caller's
 // sentence; the pipeline verifies the quote and Google's business verdict
 // before it skips the unit ask (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT).
-// New field and instructions: a new cohort.
+// property.whole_building_occupancy_final is the model's judgement that the
+// claim stood unhedged, uncorrected, unshared and not a question or condition
+// for the WHOLE call (the price_is_final precedent: the model judges the
+// language, the code verifies the pinned quote). New fields and instructions:
+// a new cohort.
 const PROMPT_VERSION = 'v23';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
@@ -293,7 +297,8 @@ ADDRESS:
 PROPERTY:
 - hoa_community_flag: true if property is IN an HOA community (e.g. Lakewood Ranch, Heritage Harbor).
 - hoa_common_area_service: true ONLY if service is FOR HOA-owned common areas (clubhouse, retention ponds, entry beds). A single-family home inside an HOA is hoa_community_flag=true but hoa_common_area_service=false.
-- whole_building_occupancy: true ONLY when the CALLER states they own, bought, lease, rent or occupy the ENTIRE building at the service address ("we just bought this building", "we own the whole building", "the building is ours and we're making it a flower shop"). false when the caller says the address is only part of a building (a suite, unit, bay, space, a storefront in a plaza or strip center). null when unstated. A business name or property_type=commercial alone is NOT enough, and neither is "my business" or "our shop" (a tenant of one suite says that too). When true, pin the caller's sentence to /property/whole_building_occupancy with speaker "caller".
+- whole_building_occupancy: true ONLY when the CALLER states they own, bought, lease, rent or occupy the ENTIRE building at the service address ("we just bought this building", "we own the whole building", "the building is ours and we're making it a flower shop"). false when the caller says the address is only part of a building (a suite, unit, bay, space, a storefront in a plaza or strip center). null when unstated. A business name or property_type=commercial alone is NOT enough, and neither is "my business" or "our shop" (a tenant of one suite says that too). When true, pin the caller's statement to /property/whole_building_occupancy with speaker "caller": copy ONLY the shortest plain clause that states it ("We just bought this building"), word for word, with no hedge, question or condition inside it.
+- whole_building_occupancy_final (judge it over the WHOLE call): true ONLY when whole_building_occupancy is true AND the caller never hedged about occupying the entire building, never corrected it to a part (a floor, suite, space, storefront, side, wing, unit or bay), never said they share the building with another tenant, and the claim was a plain statement, not a question or a condition. false when ANY of that happened. null when whole_building_occupancy is not true. A hedge about a SIDE detail (when the sale closed, who signed, "I think the owner bought it a couple weeks ago, but we're just moving in") does not make it false; a hedge about WHETHER they occupy the whole building does. Examples that are false: "we only lease the second floor"; "I think we own the whole building"; "we probably have the whole building"; "do we own the whole building?" (a question); "if closing happens we'll own the whole building" (a condition); "actually we share it with a dentist"; "we have the storefront on the left". Examples that are true: "We just bought this building, and we're making it a flower shop"; "we own the whole building".
 
 MULTIPLE PROPERTIES (service_address vs additional_properties):
 - When the caller wants service at MORE THAN ONE property (a second home, a rental, another unit, "we bought a condo AND a house"), service_address holds the PRIMARY property and EVERY other property goes into property.additional_properties — never drop one, never merge two addresses into one.

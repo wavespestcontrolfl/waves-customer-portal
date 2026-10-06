@@ -45,6 +45,7 @@ const OK = {
   enabled: true,
   propertyType: 'commercial',
   wholeBuildingOccupancy: true,
+  wholeBuildingFinal: true,
   evidence: EVIDENCE,
   transcript: TRANSCRIPT,
 };
@@ -52,6 +53,8 @@ const OK = {
 const withTranscript = (lines) => ({ ...OK, transcript: lines.join('\n') });
 
 describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
+  const quoteEvidence = (q) => [{ ...EVIDENCE[0], quote: q }];
+
   test('gate off returns the very same verdict object', () => {
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, enabled: false })).toBe(AV_BUSINESS);
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, {})).toBe(AV_BUSINESS);
@@ -67,6 +70,47 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
     });
     expect(AV_BUSINESS.status).toBe('ambiguous');
     expect(AV_BUSINESS.missingComponents).toEqual(['subpremise']);
+  });
+
+  describe('REAL call shape (outbound lead call, chatty caller turn)', () => {
+    // Synthetic names and address; the shape of the audited call: the agent
+    // introduces itself, the caller's turn is chatty and hedges about a SIDE
+    // detail (when the owner bought it), and the pinned quote is the plain clause.
+    const CHATTY = 'We just bought this building, and we, well, anyway, I think the owner might have bought it a couple weeks ago, but we are just moving in. We are making it a flower shop, so we need pest control before we open.';
+    const REAL = [
+      'Agent: Hi, this is Sam with Waves Pest Control, I am returning your request.',
+      `Caller: ${CHATTY}`,
+      'Agent: Great. What is the address?',
+      'Caller: 200 Example Avenue in Bradenton, no unit, it is the whole thing.',
+      'Agent: Thank you, we will get you scheduled.',
+    ].join('\n');
+    const real = (extra = {}) => ({
+      ...OK, transcript: REAL, outbound: true, evidence: quoteEvidence('We just bought this building'), ...extra,
+    });
+
+    test('MUST waive: a chatty caller turn is not rejected for hedges outside the quote', () => {
+      const out = applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, real());
+      expect(out).not.toBe(AV_BUSINESS);
+      expect(out.wholeStructureUnitWaived.reason).toBe('business_whole_building');
+    });
+    test('the same call with swapped outbound labels waives too', () => {
+      const swapped = REAL.replace(/^Agent:/gm, 'X:').replace(/^Caller:/gm, 'Agent:').replace(/^X:/gm, 'Caller:');
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, real({ transcript: swapped }))).not.toBe(AV_BUSINESS);
+    });
+    test('the extraction judging it NOT final (false or null) holds the same call', () => {
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, real({ wholeBuildingFinal: false }))).toBe(AV_BUSINESS);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, real({ wholeBuildingFinal: null }))).toBe(AV_BUSINESS);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, real({ wholeBuildingFinal: undefined }))).toBe(AV_BUSINESS);
+    });
+    test('the processor path waives the real shape the same way', () => {
+      const out = businessWholeBuildingUnitWaiverForCall({
+        addressValidation: AV_BUSINESS,
+        v2Extraction: { property: { property_type: 'commercial', commercial_subtype: 'retail', service_address_occupancy: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: true }, evidence: quoteEvidence('We just bought this building') },
+        transcription: REAL,
+        outbound: true,
+      });
+      expect(out.status).toBe('validated_accept');
+    });
   });
 
   test.each([
@@ -93,30 +137,30 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
     ['whole_building_occupancy null', { wholeBuildingOccupancy: null }],
     ['whole_building_occupancy missing', { wholeBuildingOccupancy: undefined }],
     ['whole_building_occupancy a string', { wholeBuildingOccupancy: 'true' }],
+    ['_final false', { wholeBuildingFinal: false }],
+    ['_final null', { wholeBuildingFinal: null }],
+    ['_final missing', { wholeBuildingFinal: undefined }],
+    ['_final a string', { wholeBuildingFinal: 'true' }],
+    ['_final true but occupancy not true', { wholeBuildingOccupancy: false, wholeBuildingFinal: true }],
     ['no evidence', { evidence: [] }],
     ['evidence not an array', { evidence: null }],
     ['evidence for another field', { evidence: [{ ...EVIDENCE[0], field_path: '/property/hoa_common_area_service' }] }],
     ['evidence pinned to the agent', { evidence: [{ ...EVIDENCE[0], speaker: 'agent' }] }],
-    ['quote not in the transcript', { evidence: [{ ...EVIDENCE[0], quote: 'We own the whole building outright' }] }],
+    ['quote not in the transcript', { evidence: quoteEvidence('We own the whole building outright') }],
     ['no transcript', { transcript: '' }],
   ])('input check keeps the hold: %s', (_label, patch) => {
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, ...patch })).toBe(AV_BUSINESS);
   });
 
   test('a quote found only in an AGENT turn keeps the hold', () => {
-    const t = withTranscript([
-      `Agent: Just to confirm, ${QUOTE}, correct?`,
-      'Caller: Yes, that is right, thanks.',
-    ]);
+    const t = withTranscript([`Agent: Just to confirm, ${QUOTE}, correct?`, 'Caller: Yes, that is right, thanks.']);
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
   });
 
   test('an unlabeled or one-speaker transcript keeps the hold', () => {
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, transcript: `Hi. ${QUOTE}.` })).toBe(AV_BUSINESS);
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, withTranscript([`Caller: ${QUOTE}.`]))).toBe(AV_BUSINESS);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, withTranscript([
-      'Agent: Hello.', `Caller: ${QUOTE}.`, 'we will call you back',
-    ]))).toBe(AV_BUSINESS);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, 'we will call you back']))).toBe(AV_BUSINESS);
   });
 
   test('a quote stitched across two turns keeps the hold', () => {
@@ -124,137 +168,96 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
   });
 
-  test('a quote carrying a negation or hedge keeps the hold', () => {
-    const q = 'We might buy this building next year';
-    const t = withTranscript(['Agent: Hello.', `Caller: ${q}.`]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: q }] })).toBe(AV_BUSINESS);
-    const n = 'We do not own this building';
-    const t2 = withTranscript(['Agent: Hello.', `Caller: ${n}.`]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t2, evidence: [{ ...EVIDENCE[0], quote: n }] })).toBe(AV_BUSINESS);
-  });
-
-  test('the WHOLE holding caller turn is screened, not only the pinned fragment', () => {
-    const fragment = "we'll own the whole building";
-    const evidence = [{ ...EVIDENCE[0], quote: fragment }];
-    for (const turn of [
-      "We do not own it yet; if closing happens, we'll own the whole building.",
-      "Maybe, but we'll own the whole building.",
-      "Once the sale closes we'll own the whole building.",
-    ]) {
-      const t = withTranscript(['Agent: Hello.', `Caller: ${turn}`]);
-      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence })).toBe(AV_BUSINESS);
-    }
-    // The same fragment in a plain turn still waives.
-    const plain = withTranscript(['Agent: Hello.', "Caller: Good news, we'll own the whole building."]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...plain, evidence })).not.toBe(AV_BUSINESS);
-  });
-
-  test.each([
-    'Caller: Our space is suite 4 in the back.',
-    'Caller: It is ste 12.',
-    'Caller: The shop is unit B.',
-    'Caller: We have bay 3.',
-    'Caller: It is an apartment above the shop.',
-    'Caller: It is a condo office.',
-  ])('suite / unit wording in a CALLER turn keeps the hold: %s', (line) => {
-    const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, line]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
-  });
-
-  test.each([
-    'Caller: Actually we only lease the storefront inside it.',
-    'Caller: Actually we only have the space on the left.',
-    'Caller: We lease part of the building.',
-    'Caller: We have one side of it.',
-    'Caller: We share it with a dentist.',
-    'Caller: We sublease a portion of it.',
-  ])('a later caller correction to partial occupancy keeps the hold: %s', (line) => {
-    const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, 'Agent: Got it.', line]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
-  });
-
-  test('"office space" or "space" said by STAFF does not matter (agent turns are not screened for it)', () => {
-    const t = withTranscript(['Agent: Is it an office space or a whole building?', `Caller: ${QUOTE}.`, 'Agent: Great, we cover every kind of space.']);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
-  });
-
-  test.each([
-    ['punctuated question', 'Do we own the whole building?'],
-    ['unpunctuated question opener', 'is it the whole building'],
-    ['question after a filler', 'Well, are we leasing the whole building?'],
-    ['question sentence before an assertion-looking tail', 'Do we own the whole building or just a part'],
-  ])('a quote that is a question keeps the hold: %s', (_label, q) => {
-    const t = withTranscript(['Agent: Hello.', `Caller: ${q}`]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: q.replace(/\?$/, '') }] })).toBe(AV_BUSINESS);
-  });
-
-  test('a turn whose quoted sentence is a question keeps the hold even if another sentence asserts', () => {
-    const q = 'we own the whole building';
-    const t = withTranscript(['Agent: Hello.', 'Caller: Thanks. Is it true we own the whole building? I think so.']);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: q }] })).toBe(AV_BUSINESS);
-    // A plain assertion next to an unrelated question still waives.
-    const t2 = withTranscript(['Agent: Hello.', 'Caller: Is the technician licensed? We own the whole building.']);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t2, evidence: [{ ...EVIDENCE[0], quote: q }] })).not.toBe(AV_BUSINESS);
-  });
-
-  describe('uncertainty on the holding turn (whole class)', () => {
+  describe('the QUOTE TEXT itself is screened (negation, hedge, uncertainty, condition, question)', () => {
     test.each([
+      'We do not own this building',
+      'We might buy this building next year',
       'I think we own the whole building',
       'We probably own the whole building',
       'I believe we own the whole building',
       'I guess we own the whole building',
       "I'm pretty sure we own the whole building",
-      'Pretty sure we own the whole building',
       'Maybe we own the whole building',
-      'We might own the whole building',
       'We may own the whole building',
-      'I suppose we own the whole building',
       'We supposedly own the whole building',
       'As far as I know we own the whole building',
       'We should be the owners of the whole building',
-      "It's kind of the whole building that we own",
       'We sort of own the whole building',
       "I'm not sure but we own the whole building",
-      "I'd assume we own the whole building",
-      'We own the whole building I guess',
-      'We own the whole building, more or less',
-    ])('keeps the hold: %s', (turn) => {
-      const q = turn.replace(/^(?:I think|I believe|I guess|Maybe|I suppose|Pretty sure) /, '');
-      const t = withTranscript(['Agent: Hello.', `Caller: ${turn}.`]);
-      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: q }] })).toBe(AV_BUSINESS);
+      "If closing happens we'll own the whole building",
+      'Once the sale closes we own the whole building',
+      'Do we own the whole building?',
+      'is it the whole building',
+      'Well, are we leasing the whole building?',
+    ])('keeps the hold: %s', (q) => {
+      const t = withTranscript(['Agent: Hello.', `Caller: ${q.replace(/\?$/, '')}.`]);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: quoteEvidence(q.replace(/\?$/, '')) })).toBe(AV_BUSINESS);
     });
-    test('a confident turn ("I am sure") still waives', () => {
-      const t = withTranscript(['Agent: Hello.', 'Caller: Yes, I am sure we own the whole building.']);
-      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: 'we own the whole building' }] })).not.toBe(AV_BUSINESS);
+    test('a plain quote inside a hedgy, chatty or even questioning TURN is judged by the quote, not the turn', () => {
+      const q = 'we own the whole building';
+      for (const turn of [
+        "I think the owner might have closed last week, but we own the whole building, so that's that.",
+        'Do you cover commercial? We own the whole building.',
+        'Well, anyway, probably around two weeks ago, we own the whole building.',
+      ]) {
+        const t = withTranscript(['Agent: Hello.', `Caller: ${turn}`]);
+        expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: quoteEvidence(q) })).not.toBe(AV_BUSINESS);
+      }
     });
   });
 
-  describe('partial-building wording in a caller turn (whole class)', () => {
+  describe('hard vetoes across the call (explicit signals only)', () => {
     test.each([
-      'Actually, we only lease the second floor.',
-      'We are on the ground floor.',
-      'We have the upstairs.',
-      'We are downstairs.',
-      'It is on level two.',
-      'It is a two story building and we are in one half.',
-      'We only rent the back office.',
-      'We have the east wing.',
-      'We lease the annex.',
-      'It is the front room.',
-      'We only use the back.',
-      'We only have the north half.',
-      'We only own our part.',
-      'We lease only that room.',
-      'We are only the tenants.',
-      'We only really lease it.',
-    ])('keeps the hold: %s', (line) => {
-      const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, 'Agent: Got it.', `Caller: ${line}`]);
+      'Caller: Our space is suite 4 in the back.',
+      'Caller: It is ste 12.',
+      'Caller: The shop is unit B.',
+      'Caller: We have bay 3.',
+      'Caller: It is apartment 2B above the shop.',
+      'Caller: It is apt 5.',
+      'Caller: Put it down as # 12.',
+    ])('a unit designator in a CALLER turn keeps the hold: %s', (line) => {
+      const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, line]);
       expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
     });
-    test('an agent turn naming a floor does not matter, and "only" without a holding verb does not veto', () => {
-      const t = withTranscript(['Agent: Is it on the second floor or the whole building?', `Caller: ${QUOTE}. We only need a quick visit.`]);
+
+    test.each([
+      'Caller: It is in a strip mall.',
+      'Caller: It is in the Example Plaza.',
+      'Caller: It is in a shopping center.',
+      'Caller: It is in an office park.',
+      'Caller: It is part of an office complex.',
+    ])('strip mall / plaza wording in a caller turn keeps the hold: %s', (line) => {
+      const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, line]);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
+    });
+
+    test('strip mall wording in an AGENT turn also keeps the hold', () => {
+      const t = withTranscript(['Agent: Is that in a shopping center?', `Caller: ${QUOTE}.`]);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
+    });
+
+    test('an agent asking about a suite does not count against the caller', () => {
+      const t = withTranscript(['Agent: Is there a suite or unit number for that address?', `Caller: ${QUOTE}.`]);
       expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
     });
+
+    test('loose words are NOT vetoes any more (their job is the extraction\'s _final judgement)', () => {
+      for (const line of [
+        'We have plenty of parking space and a storefront window.',
+        'We share a fence with the neighbor and the second floor is storage.',
+        'The unit price matters, and a suite of services would be great.',
+        'We only need a quick visit; we only lease it out to nobody.',
+        'There is an upstairs and a basement.',
+      ]) {
+        const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}. ${line}`]);
+        expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
+      }
+    });
+  });
+
+  test('the quote matches through punctuation and case differences', () => {
+    const t = withTranscript(['Agent: Hello.', 'Caller: Hi. WE JUST BOUGHT THIS BUILDING, and we are making it a flower shop!']);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
   });
 
   describe('outbound swapped speaker labels', () => {
@@ -294,7 +297,7 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
     });
     test('the audit recompute and the processor thread direction through', () => {
       const stored = JSON.parse(JSON.stringify({ ...AV_BUSINESS, wholeStructureUnitWaived: { missingComponents: ['subpremise'], originalStatus: 'ambiguous', reason: 'business_whole_building' } }));
-      const cand = { property: { property_type: 'commercial', whole_building_occupancy: true }, evidence: EVIDENCE };
+      const cand = { property: { property_type: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: true }, evidence: EVIDENCE };
       expect(waiverCarriesToCandidate(stored, cand, { transcript: SWAPPED, outbound: true })).toBe(true);
       expect(waiverCarriesToCandidate(stored, cand, { transcript: SWAPPED, outbound: false })).toBe(false);
       const fs = require('fs');
@@ -302,43 +305,10 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
       for (const f of ['replay-call-extraction-variance', 'verify-v2-shadow-path']) {
         expect(fs.readFileSync(require.resolve(`../scripts/${f}`), 'utf8')).toContain("outbound: String(");
       }
-      expect(businessWholeBuildingUnitWaiverForCall({ addressValidation: AV_BUSINESS, v2Extraction: { property: { property_type: 'commercial', whole_building_occupancy: true }, evidence: EVIDENCE }, transcription: SWAPPED, outbound: true }).status).toBe('validated_accept');
+      expect(businessWholeBuildingUnitWaiverForCall({ addressValidation: AV_BUSINESS, v2Extraction: { property: { property_type: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: true }, evidence: EVIDENCE }, transcription: SWAPPED, outbound: true }).status).toBe('validated_accept');
     });
   });
 
-  test.each([
-    'Caller: It is in a strip mall.',
-    'Caller: It is in the Example Plaza.',
-    'Caller: It is in a shopping center.',
-    'Caller: It is in an office park.',
-    'Caller: It is part of a complex.',
-  ])('strip mall / plaza wording in a caller turn keeps the hold: %s', (line) => {
-    const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, line]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
-  });
-
-  test('strip mall wording in an AGENT turn also keeps the hold', () => {
-    const t = withTranscript(['Agent: Is that in a shopping center?', `Caller: ${QUOTE}.`]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
-  });
-
-  test('an agent asking about a suite does not count against the caller', () => {
-    const t = withTranscript([
-      'Agent: Is there a suite or unit number for that address?',
-      `Caller: ${QUOTE}.`,
-    ]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
-  });
-
-  test('words that merely contain the screened words do not trip it', () => {
-    const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}. It is near the Tampa Bayshore, the community united us, and a mallard pond.`]);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
-  });
-
-  test('the quote matches through punctuation and case differences', () => {
-    const t = withTranscript(['Agent: Hello.', 'Caller: Hi. WE JUST BOUGHT THIS BUILDING, and we are making it a flower shop!']);
-    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
-  });
 });
 
 describe('waived verdict through routing', () => {
@@ -352,6 +322,7 @@ describe('waived verdict through routing', () => {
         property_type: 'commercial',
         commercial_subtype: 'retail',
         whole_building_occupancy: true,
+        whole_building_occupancy_final: true,
         service_address: { street_line_1: '200 Example Avenue', city: 'Bradenton', state: 'FL', postal_code: '34205', county: 'Manatee' },
       },
       service_request: { primary_service_category: 'pest' },
@@ -380,7 +351,7 @@ describe('waived verdict through routing', () => {
 
 describe('processor helper', () => {
   const v2 = (patch = {}) => ({
-    property: { property_type: 'commercial', commercial_subtype: 'retail', whole_building_occupancy: true, ...patch },
+    property: { property_type: 'commercial', commercial_subtype: 'retail', whole_building_occupancy: true, whole_building_occupancy_final: true, ...patch },
     evidence: EVIDENCE,
   });
 
@@ -461,7 +432,7 @@ describe('persisted marker + audits', () => {
     const waived = applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, OK);
     const stored = JSON.parse(JSON.stringify({ ...AV_BUSINESS, wholeStructureUnitWaived: waived.wholeStructureUnitWaived }));
     const candidate = (patch = {}) => ({
-      property: { property_type: 'commercial', whole_building_occupancy: true },
+      property: { property_type: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: true },
       evidence: EVIDENCE,
       ...patch,
     });
@@ -475,7 +446,10 @@ describe('persisted marker + audits', () => {
       expect(waiverCarriesToCandidate(stored, candidate({ evidence: [] }), args())).toBe(false);
       expect(waiverCarriesToCandidate(stored, candidate({ evidence: [{ ...EVIDENCE[0], quote: 'We own the whole building outright' }] }), args())).toBe(false);
       expect(waiverCarriesToCandidate(stored, candidate({ evidence: [{ ...EVIDENCE[0], speaker: 'agent' }] }), args())).toBe(false);
-      expect(waiverCarriesToCandidate(stored, candidate({ property: { property_type: 'commercial', whole_building_occupancy: null } }), args())).toBe(false);
+      expect(waiverCarriesToCandidate(stored, candidate({ property: { property_type: 'commercial', whole_building_occupancy: null, whole_building_occupancy_final: true } }), args())).toBe(false);
+      // A candidate whose extraction no longer judges the claim final keeps the hold.
+      expect(waiverCarriesToCandidate(stored, candidate({ property: { property_type: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: false } }), args())).toBe(false);
+      expect(waiverCarriesToCandidate(stored, candidate({ property: { property_type: 'commercial', whole_building_occupancy: true } }), args())).toBe(false);
       expect(waiverCarriesToCandidate(stored, candidate(), args({ transcript: 'Agent: Hi.\nCaller: Hello.' }))).toBe(false);
     });
 
@@ -502,9 +476,10 @@ describe('extraction schema 1.23.0', () => {
     expect(SCHEMA_VERSION).toBe('1.23.0');
     for (const f of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
       const schema = require(`../schemas/${f}`);
-      const def = schema.properties.property.properties.whole_building_occupancy;
-      expect(def.type).toEqual(['boolean', 'null']);
-      expect(schema.properties.property.required || []).not.toContain('whole_building_occupancy');
+      for (const field of ['whole_building_occupancy', 'whole_building_occupancy_final']) {
+        expect(schema.properties.property.properties[field].type).toEqual(['boolean', 'null']);
+        expect(schema.properties.property.required || []).not.toContain(field);
+      }
     }
     expect(typeof validateModelOutput).toBe('function');
     expect(typeof validatePersisted).toBe('function');
@@ -514,6 +489,9 @@ describe('extraction schema 1.23.0', () => {
     expect(flatView({ meta: { schema_version: '1.23.0' }, property: { whole_building_occupancy: true } }).whole_building_occupancy).toBe(true);
     expect(flatView({ meta: { schema_version: '1.23.0' }, property: { whole_building_occupancy: false } }).whole_building_occupancy).toBe(false);
     expect(flatView({ meta: { schema_version: '1.23.0' }, property: {} }).whole_building_occupancy).toBeNull();
+    expect(flatView({ meta: { schema_version: '1.23.0' }, property: { whole_building_occupancy_final: true } }).whole_building_occupancy_final).toBe(true);
+    expect(flatView({ meta: { schema_version: '1.23.0' }, property: { whole_building_occupancy_final: false } }).whole_building_occupancy_final).toBe(false);
+    expect(flatView({ meta: { schema_version: '1.23.0' }, property: {} }).whole_building_occupancy_final).toBeNull();
   });
 
   test('the prompt asks for the field and the caller-pinned quote', () => {
@@ -521,5 +499,9 @@ describe('extraction schema 1.23.0', () => {
     const prompt = buildExtractionPrompt('', '', '');
     expect(prompt).toContain('- whole_building_occupancy: true ONLY when the CALLER states');
     expect(prompt).toContain('/property/whole_building_occupancy');
+    expect(prompt).toContain('- whole_building_occupancy_final (judge it over the WHOLE call)');
+    for (const example of ['we only lease the second floor', 'I think we own the whole building', 'do we own the whole building?', "if closing happens we'll own the whole building"]) {
+      expect(prompt).toContain(example);
+    }
   });
 });

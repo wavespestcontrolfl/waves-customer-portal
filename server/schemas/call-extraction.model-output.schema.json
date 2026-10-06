@@ -721,6 +721,13 @@
             "null"
           ],
           "description": "1.23.0, additive/optional (never `required`): true ONLY when the CALLER states they own, bought, lease, rent or occupy the ENTIRE building at the service address, not a suite, unit, bay, space or storefront inside a larger building (\"we just bought this building\", \"we own the whole building\", \"the building is ours, we're making it a flower shop\"). false when the caller says the service address is only part of a building (a suite, unit, bay, space, a plaza or strip center unit). null when unstated. Do not infer it from a business name or a commercial property_type alone. Pin the caller's sentence to /property/whole_building_occupancy with speaker \"caller\" when true."
+        },
+        "whole_building_occupancy_final": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.23.0, additive/optional (never `required`): the extraction's FINAL judgement of whole_building_occupancy, made over the WHOLE call. true ONLY when whole_building_occupancy is true AND the caller never hedged about occupying the entire building (\"I think we own the whole building\", \"probably\", \"might\"), never corrected it to a part (\"we only lease the second floor\", a suite, space, storefront, side, unit or bay), never said they share the building with another tenant, and the claim was a plain statement, not a question (\"do we own the whole building?\") or a condition (\"if closing happens we'll own it\"). A hedge about a SIDE detail (when the sale closed, who signed) does not make it false; a hedge about WHETHER they occupy the entire building does. false when any of those happened; null when whole_building_occupancy is not true or unstated. The server uses it only to verify; it never waives on whole_building_occupancy alone."
         }
       }
     },

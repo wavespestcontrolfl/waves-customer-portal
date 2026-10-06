@@ -938,34 +938,16 @@ function applyWholeStructureUnitWaiver(av, opts = {}) {
   };
 }
 
-// Wording that says the caller's space is one of several in a shared building.
-// The first half is the unit-level wording the whole-structure waiver already
-// screens (condo, apartment); the rest names a suite, bay or unit.
-const SUBUNIT_WORDING_RE = new RegExp(
-  `${UNIT_LEVEL_WORDING_RE.source}|\\b(?:suites?|ste|units?|bays?|spaces?|storefronts?|sublease[sd]?|shar(?:e|es|ed|ing))\\b`
-  + '|\\b(?:part|portion|section|half) of\\b|\\b(?:one|other) side\\b', 'i');
-// An interrogative sentence is not an assertion. Punctuation is only a hint in a
-// transcript, so a question opener ("do we own", "is it", "are we") counts too,
-// after any leading filler word.
-const QUESTION_FILLER_RE = /^(?:(?:well|so|and|but|okay|ok|um|uh|yeah|yes|no|hmm|like|then) )+/;
-const QUESTION_OPENER_RE = /^(?:do|does|did|is|are|was|were|am|will|would|can|could|should|shall|have|has|what|how|why|who|which|where|when)\b/;
-function sentenceIsQuestion(sentence) {
-  if (sentence.question) return true;
-  return QUESTION_OPENER_RE.test(sentence.ns.replace(QUESTION_FILLER_RE, ''));
-}
-// The turn states the quote as an assertion: no sentence of the turn that holds
-// the quote is a question. A quote spanning sentences is judged on every
-// question in the turn (fail closed).
-function turnAssertsQuote(turn, quote) {
-  const nq = ` ${normalizeForGrounding(quote)} `;
-  const holding = turn.sentences.filter((s) => ` ${s.ns} `.includes(nq));
-  const checked = holding.length ? holding : turn.sentences;
-  return !checked.some(sentenceIsQuestion) && !/\?/.test(quote)
-    && !QUESTION_OPENER_RE.test(normalizeForGrounding(quote).replace(QUESTION_FILLER_RE, ''));
-}
-
-// Uncertainty on the turn that holds the quote: the caller is guessing, not
-// stating. A LOCAL superset on purpose: the shared hedge screen
+// The extraction JUDGES the language (owner ruling 2026-10-01; the
+// service_request.price_is_final precedent in call-commercial-dictated-booking.js):
+// property.whole_building_occupancy_final says the claim stood unhedged,
+// uncorrected, unshared and neither a question nor a condition for the WHOLE
+// call. The code only VERIFIES. It screens the pinned QUOTE TEXT itself (a
+// fragment that carries its own hedge, negation, question or condition is not a
+// plain statement) and keeps two hard vetoes for EXPLICIT signals across the
+// call: a unit designator with a number or letter in a caller turn, and
+// multi-tenant center wording in any turn. Chatty asides never decide it.
+// Uncertainty IN the pinned quote itself: the caller is guessing, not stating. A LOCAL superset on purpose: the shared hedge screen
 // (turnHasNegationOrHedge) is calibrated for agent commitments and other
 // callers depend on it as it is. Tested on the normalized turn ("I'm" reads
 // "i m", "I'd" reads "i d").
@@ -976,13 +958,25 @@ const UNCERTAINTY_RE = new RegExp('(?:^| )(?:'
   + '|as far as i know|to my knowledge|should be|kind of|kinda|sort of|sorta|not sure|unsure|not certain|not positive'
   + '|no idea|think so|believe so|hopefully|more or less'
   + ')(?: |$)');
-// Wording that says the caller has only PART of the building: a floor, level,
-// wing, annex, a back/front room, or any "only lease/rent/use/have/own" turn.
-const PARTIAL_BUILDING_RE = new RegExp(
-  '\\b(?:floors?|levels?|stor(?:y|ies|eys?)|upstairs|downstairs|wings?|annex(?:es)?|mezzanine|basement|loft)\\b'
-  + '|\\b(?:back|front|rear|left|right|side) (?:unit|room|office|half|portion|section|part|building)\\b'
-  + '|\\bonly (?:\\w+ ){0,2}(?:leas(?:e|es|ed|ing)|rent(?:s|ed|ing)?|use|uses|used|using|have|has|had|own|owns|owned|occupy|occupies|occupied|operate|operates|operated|got|tenants?|renters?|lessees?)\\b'
-  + '|\\b(?:leas(?:e|es|ed|ing)|rent(?:s|ed|ing)?|use|uses|used|using|own|owns|owned|occupy|occupies|occupied|operate|operates|operated) only\\b', 'i');
+// A designator followed by a number or a single letter ("suite 4", "unit B",
+// "bay 3", "apt 2B", "# 12"): the caller named a specific unit. "unit" alone, or
+// "suite of services", is not a designator.
+const UNIT_DESIGNATOR_RE = /\b(?:suite|ste|unit|apt|apartment|bay|condo(?:minium)?|room)\.?\s*#?\s*(?:\d+[a-z]?|[a-z])\b|#\s*\d/i;
+// An interrogative quote is not an assertion. Punctuation is only a hint in a
+// transcript, so a question opener ("do we", "is it", "are we") counts too,
+// after any leading filler word.
+const QUESTION_FILLER_RE = /^(?:(?:well|so|and|but|okay|ok|um|uh|yeah|yes|no|hmm|like|then) )+/;
+const QUESTION_OPENER_RE = /^(?:do|does|did|is|are|was|were|am|will|would|can|could|should|shall|have|has|what|how|why|who|which|where|when)\b/;
+// The quote is a plain statement: no negation, hedge, open condition,
+// uncertainty or question inside the quote text itself.
+function quoteIsPlainStatement(quote) {
+  const nq = normalizeForGrounding(quote);
+  return !turnHasNegationOrHedge(nq)
+    && !turnHasUnresolvedConditional(nq)
+    && !UNCERTAINTY_RE.test(nq)
+    && !/\?/.test(quote)
+    && !QUESTION_OPENER_RE.test(nq.replace(QUESTION_FILLER_RE, ''));
+}
 
 // Outbound speaker labels have been swapped before (diarization): the lead is
 // labeled Agent and Waves staff Caller. A plain staff self-introduction at the
@@ -1004,7 +998,7 @@ function orientTranscriptForOutbound(transcript, outbound) {
 }
 
 // Wording that says the building sits in a multi-tenant center.
-const MULTI_TENANT_WORDING_RE = /\b(?:strip\s+(?:mall|center|centre|plaza)|plaza|shopping\s+(?:center|centre|mall|plaza)|mall|(?:office|business|industrial)\s+park|complex)\b/i;
+const MULTI_TENANT_WORDING_RE = /\b(?:strip\s+(?:mall|center|centre|plaza)|plaza|shopping\s+(?:center|centre|mall|plaza)|mall|(?:office|business|industrial)\s+park|(?:office|apartment|business)\s+complex)\b/i;
 const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
 
 /**
@@ -1018,25 +1012,21 @@ const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
  * non-qualifying call) is byte-identical. Conditions:
  *   - the gate is on and the verdict is exactly "PREMISE resolved, only
  *     subpremise missing", in service area, nothing unconfirmed or replaced;
- *   - Google's addressUse says business and not residential (mixed use keeps
- *     the hold);
+ *   - Google's addressUse says business AND residential === false (unknown
+ *     residential keeps the hold);
  *   - V2 property_type is commercial;
- *   - V2 property.whole_building_occupancy is true. The extraction judges the
- *     language (owner ruling 2026-10-01); this code only verifies that its
- *     pinned quote (field_path /property/whole_building_occupancy, speaker
- *     caller) is word for word inside ONE caller turn of a fully labeled
- *     two-speaker transcript, and that the quote itself carries no negation,
- *     hedge or condition;
- *   - (the quote's WHOLE caller turn carries no negation, hedge or condition, and
- *     the sentence holding it is an assertion, not a question)
- *   - (the holding turn also carries no uncertainty: I think, probably, maybe,
- *     should be, kind of, not sure ...; and no caller turn names a floor, wing,
- *     annex, or an "only lease/rent/use/have/own" construction)
- *   - (on an OUTBOUND call whose labels look swapped, roles are swapped first)
- *   - no CALLER turn says suite / ste / unit / bay / condo / apartment (an
- *     agent asking "is there a suite number?" does not count against the
- *     caller), and no turn at all names a strip mall, plaza, shopping center,
- *     mall, office/business/industrial park or complex.
+ *   - V2 property.whole_building_occupancy AND whole_building_occupancy_final
+ *     are both true. The extraction judges the language (owner ruling
+ *     2026-10-01; the price_is_final precedent); this code only verifies that
+ *     its pinned quote (field_path /property/whole_building_occupancy, speaker
+ *     caller) is word for word inside a CALLER turn of a fully labeled
+ *     two-speaker transcript (roles swapped first on an outbound call whose
+ *     labels look swapped) and that the QUOTE TEXT itself carries no negation,
+ *     hedge, uncertainty, open condition or question;
+ *   - no caller turn names a unit designator with a number or letter (suite 4,
+ *     unit B, bay 3, apt 2B), and no turn at all names a strip mall, plaza,
+ *     shopping center, mall, office/business/industrial park or office/
+ *     apartment/business complex. A chatty aside never decides the call.
  * The waived copy carries the same wholeStructureUnitWaived marker as the
  * whole-structure waiver plus reason 'business_whole_building', so
  * reconstructWaivedAddressValidation and the offline audits rebuild it.
@@ -1048,25 +1038,17 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
   // Both halves must be AFFIRMATIVE: unknown (null/absent) residential keeps the hold.
   if (av.addressUse?.business !== true || av.addressUse?.residential !== false) return av;
   if (opts.propertyType !== 'commercial') return av;
-  if (opts.wholeBuildingOccupancy !== true) return av;
+  if (opts.wholeBuildingOccupancy !== true || opts.wholeBuildingFinal !== true) return av;
   // Lazy: call-reschedule-agreement requires this module at load time.
   const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
   const turns = parseTurns(orientTranscriptForOutbound(opts.transcript, opts.outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return av;
   const quotes = (Array.isArray(opts.evidence) ? opts.evidence : [])
     .filter((e) => e?.field_path === '/property/whole_building_occupancy' && e.speaker === 'caller' && typeof e.quote === 'string');
-  // The quote must be plainly said: EVERY caller turn holding it, read WHOLE,
-  // carries no negation, hedge or open condition. A fragment can strip the
-  // words around it ("We do not own it yet; if closing happens, we'll own the
-  // whole building" holds the fragment "we'll own the whole building").
-  const grounded = quotes.some((e) => {
-    const holding = turnsHolding(turns, e.quote, 'caller');
-    return holding.length > 0 && holding.every((t) => !turnHasNegationOrHedge(t.ns)
-      && !turnHasUnresolvedConditional(t.ns) && !UNCERTAINTY_RE.test(t.ns)
-      && turnAssertsQuote(t, e.quote));
-  });
+  const grounded = quotes.some((e) => turnsHolding(turns, e.quote, 'caller').length > 0
+    && quoteIsPlainStatement(e.quote));
   if (!grounded) return av;
-  if (turns.some((t) => !t.agent && (SUBUNIT_WORDING_RE.test(t.raw) || PARTIAL_BUILDING_RE.test(t.raw)))) return av;
+  if (turns.some((t) => !t.agent && UNIT_DESIGNATOR_RE.test(t.raw))) return av;
   if (turns.some((t) => MULTI_TENANT_WORDING_RE.test(t.raw))) return av;
   return {
     ...av,
@@ -1096,6 +1078,7 @@ function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarIn
     enabled: true,
     propertyType: property.property_type,
     wholeBuildingOccupancy: property.whole_building_occupancy,
+    wholeBuildingFinal: property.whole_building_occupancy_final,
     evidence: candidate?.evidence,
     transcript,
     outbound,

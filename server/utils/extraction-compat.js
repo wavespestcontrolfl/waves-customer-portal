@@ -130,6 +130,11 @@ function flatView(extraction) {
     whole_building_occupancy: typeof property.whole_building_occupancy === 'boolean'
       ? property.whole_building_occupancy
       : null,
+    // The extraction's final judgement of the above over the whole call (schema
+    // 1.23.0): unhedged, uncorrected, unshared, not a question or a condition.
+    whole_building_occupancy_final: typeof property.whole_building_occupancy_final === 'boolean'
+      ? property.whole_building_occupancy_final
+      : null,
     // Caller-stated unit bedroom count (schema 1.10.0) — the bedroom-band
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
