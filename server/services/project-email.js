@@ -2,7 +2,9 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getPrimaryContact, getServiceContact } = require('./customer-contact');
+const {
+  getPrimaryContact, getServiceContact, getServiceContactSlots, slotWithheldFromReports,
+} = require('./customer-contact');
 const {
   getProjectType,
   redactInspectionFeeCuesForType,
@@ -122,9 +124,17 @@ function projectTitle(project = {}) {
   return safe;
 }
 
-function resolveProjectEmailRecipient(customer = {}) {
+// The project email (report link, attachments) goes to the slot-1 on-site
+// contact when one has an email, unless the report is withheld from that
+// contact (a tenant, or an occupant on a property manager's account —
+// customer-contact.js slotWithheldFromReports): then the account holder.
+// `applyReportRule: false` is for mail that carries no findings (the
+// treatment-sequence prep guides an occupant needs).
+function resolveProjectEmailRecipient(customer = {}, { applyReportRule = true } = {}) {
   const serviceEmail = clean(customer.service_contact_email);
-  if (isEmailLike(serviceEmail)) {
+  const slot1 = getServiceContactSlots(customer)[0];
+  const withheld = applyReportRule && slot1 && slotWithheldFromReports(customer, slot1);
+  if (isEmailLike(serviceEmail) && !withheld) {
     const service = getServiceContact(customer);
     return {
       email: cleanEmail(service.email),

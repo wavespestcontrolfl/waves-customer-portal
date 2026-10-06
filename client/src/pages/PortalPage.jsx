@@ -4487,7 +4487,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   // (customer-contact.js slotWithheldFromReports). A contact added here has
   // no recorded role, so the copy promises only what the records decide.
   const contactReportExceptionFor = (entry) => (entry?.contactReportTexts === true
-    ? ' Contacts on a property manager\'s account, and contacts our records list as tenants, get appointment texts only.'
+    ? ' Contacts our records list as tenants, and contacts on a property manager\'s account other than a manager or landlord, get appointment texts only.'
     : '');
   // The entries the contact card renders (one house, or the profile list).
   const contactCardEntries = perPropertyTexts

@@ -64,7 +64,18 @@ const {
 } = require('../services/project-completion');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
 const { wdoReportCopyEmails } = require('../services/wdo-report-copies');
-const { getInvoiceEmailRecipients } = require('../services/customer-contact');
+const { getInvoiceEmailRecipients, withAccountContactRole } = require('../services/customer-contact');
+
+// The project's customer row with its account role resolved: the project
+// email recipient (ProjectEmail.resolveProjectEmailRecipient) withholds the
+// report from an occupant on a property manager's account. An unreadable
+// account primary leaves the role unknown, which withholds (the email goes
+// to the account holder).
+async function loadProjectCustomer(customerId) {
+  const row = await db('customers').where({ id: customerId }).first();
+  if (!row) return row;
+  return withAccountContactRole(row).catch(() => row);
+}
 const { normalizeAddendumPhoto } = require('../services/pdf/addendum-photo');
 const { buildInvoicePDFBuffer } = require('../services/pdf/invoice-pdf');
 const InvoiceService = require('../services/invoice');
@@ -3305,7 +3316,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     }
 
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
 
     const readiness = evaluateProjectSendReadiness({ project, customer });
@@ -3976,7 +3987,7 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
     }
 
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     if (!customer) return await revertToHeld('customer_missing');
 
@@ -4257,7 +4268,7 @@ router.get('/:id/fdacs-pdf', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'FDACS-13645 PDF is only available for WDO inspections' });
     }
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     const [baseApplicator, photoRows] = await Promise.all([
       resolveProjectApplicator(project),
@@ -4617,7 +4628,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
     if (!project.customer_id) return res.status(400).json({ error: 'Project has no customer' });
 
-    const customer = await db('customers').where({ id: project.customer_id }).first();
+    const customer = await loadProjectCustomer(project.customer_id);
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     // The filled FDACS-13645 PDF rides on the email only (SMS can't carry it),
@@ -5516,7 +5527,7 @@ router.post('/:id/send-prep-guide', requireAdmin, async (req, res, next) => {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     if (!customer) return res.status(400).json({ error: 'Project has no customer' });
 
@@ -5609,7 +5620,7 @@ router.post('/:id/send-portal-invite', requireAdmin, async (req, res, next) => {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
+      ? await loadProjectCustomer(project.customer_id)
       : null;
     if (!customer) return res.status(400).json({ error: 'Project has no customer' });
 
@@ -5771,7 +5782,7 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       : project.recommendations) || '';
     const projectDate = normalizeDateOnly(req.body.project_date) || normalizeDateOnly(project.project_date) || normalizeDateOnly(project.created_at);
 
-    const customer = await db('customers').where({ id: project.customer_id }).first();
+    const customer = await loadProjectCustomer(project.customer_id);
     const tech = project.created_by_tech_id
       ? await db('technicians').where({ id: project.created_by_tech_id }).first()
       : null;

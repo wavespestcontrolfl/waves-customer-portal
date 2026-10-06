@@ -174,3 +174,28 @@ describe('project email service', () => {
     expect(result).toMatchObject({ ok: false, error: 'template missing' });
   });
 });
+
+describe('resolveProjectEmailRecipient: the tenant report rule', () => {
+  const base = {
+    first_name: 'Dana', email: 'dana@example.com', phone: '+19415550100',
+    service_contact_name: 'Riley Occupant', service_contact_email: 'riley@example.com',
+  };
+
+  test('the slot-1 contact gets the project email, as before, on an owner account', () => {
+    expect(ProjectEmail.resolveProjectEmailRecipient(base).email).toBe('riley@example.com');
+  });
+
+  test('a tenant, or an occupant on a manager account, never gets it: the account holder does', () => {
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, service_contact_role: 'tenant' }))
+      .toMatchObject({ email: 'dana@example.com', role: 'primary' });
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, contact_role: 'property_manager' }).email).toBe('dana@example.com');
+    // A manager listed as the slot-1 contact still gets it.
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, contact_role: 'property_manager', service_contact_role: 'property_manager' }).email)
+      .toBe('riley@example.com');
+  });
+
+  test('prep mail with no findings still reaches the on-site tenant', () => {
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, service_contact_role: 'tenant' }, { applyReportRule: false }).email)
+      .toBe('riley@example.com');
+  });
+});
