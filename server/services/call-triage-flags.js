@@ -942,7 +942,28 @@ function applyWholeStructureUnitWaiver(av, opts = {}) {
 // The first half is the unit-level wording the whole-structure waiver already
 // screens (condo, apartment); the rest names a suite, bay or unit.
 const SUBUNIT_WORDING_RE = new RegExp(
-  `${UNIT_LEVEL_WORDING_RE.source}|\\b(?:suites?|ste|units?|bays?)\\b`, 'i');
+  `${UNIT_LEVEL_WORDING_RE.source}|\\b(?:suites?|ste|units?|bays?|spaces?|storefronts?|sublease[sd]?|shar(?:e|es|ed|ing))\\b`
+  + '|\\b(?:part|portion|section|half) of\\b|\\b(?:one|other) side\\b', 'i');
+// An interrogative sentence is not an assertion. Punctuation is only a hint in a
+// transcript, so a question opener ("do we own", "is it", "are we") counts too,
+// after any leading filler word.
+const QUESTION_FILLER_RE = /^(?:(?:well|so|and|but|okay|ok|um|uh|yeah|yes|no|hmm|like|then) )+/;
+const QUESTION_OPENER_RE = /^(?:do|does|did|is|are|was|were|am|will|would|can|could|should|shall|have|has|what|how|why|who|which|where|when)\b/;
+function sentenceIsQuestion(sentence) {
+  if (sentence.question) return true;
+  return QUESTION_OPENER_RE.test(sentence.ns.replace(QUESTION_FILLER_RE, ''));
+}
+// The turn states the quote as an assertion: no sentence of the turn that holds
+// the quote is a question. A quote spanning sentences is judged on every
+// question in the turn (fail closed).
+function turnAssertsQuote(turn, quote) {
+  const nq = ` ${normalizeForGrounding(quote)} `;
+  const holding = turn.sentences.filter((s) => ` ${s.ns} `.includes(nq));
+  const checked = holding.length ? holding : turn.sentences;
+  return !checked.some(sentenceIsQuestion) && !/\?/.test(quote)
+    && !QUESTION_OPENER_RE.test(normalizeForGrounding(quote).replace(QUESTION_FILLER_RE, ''));
+}
+
 // Wording that says the building sits in a multi-tenant center.
 const MULTI_TENANT_WORDING_RE = /\b(?:strip\s+(?:mall|center|centre|plaza)|plaza|shopping\s+(?:center|centre|mall|plaza)|mall|(?:office|business|industrial)\s+park|complex)\b/i;
 const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
@@ -967,7 +988,8 @@ const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
  *     caller) is word for word inside ONE caller turn of a fully labeled
  *     two-speaker transcript, and that the quote itself carries no negation,
  *     hedge or condition;
- *   - (the quote's WHOLE caller turn carries no negation, hedge or condition)
+ *   - (the quote's WHOLE caller turn carries no negation, hedge or condition, and
+ *     the sentence holding it is an assertion, not a question)
  *   - no CALLER turn says suite / ste / unit / bay / condo / apartment (an
  *     agent asking "is there a suite number?" does not count against the
  *     caller), and no turn at all names a strip mall, plaza, shopping center,
@@ -997,7 +1019,7 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
   const grounded = quotes.some((e) => {
     const holding = turnsHolding(turns, e.quote, 'caller');
     return holding.length > 0 && holding.every((t) => !turnHasNegationOrHedge(t.ns)
-      && !turnHasUnresolvedConditional(t.ns));
+      && !turnHasUnresolvedConditional(t.ns) && turnAssertsQuote(t, e.quote));
   });
   if (!grounded) return av;
   if (turns.some((t) => !t.agent && SUBUNIT_WORDING_RE.test(t.raw))) return av;

@@ -161,6 +161,42 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
   });
 
   test.each([
+    'Caller: Actually we only lease the storefront inside it.',
+    'Caller: Actually we only have the space on the left.',
+    'Caller: We lease part of the building.',
+    'Caller: We have one side of it.',
+    'Caller: We share it with a dentist.',
+    'Caller: We sublease a portion of it.',
+  ])('a later caller correction to partial occupancy keeps the hold: %s', (line) => {
+    const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, 'Agent: Got it.', line]);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
+  });
+
+  test('"office space" or "space" said by STAFF does not matter (agent turns are not screened for it)', () => {
+    const t = withTranscript(['Agent: Is it an office space or a whole building?', `Caller: ${QUOTE}.`, 'Agent: Great, we cover every kind of space.']);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
+  });
+
+  test.each([
+    ['punctuated question', 'Do we own the whole building?'],
+    ['unpunctuated question opener', 'is it the whole building'],
+    ['question after a filler', 'Well, are we leasing the whole building?'],
+    ['question sentence before an assertion-looking tail', 'Do we own the whole building or just a part'],
+  ])('a quote that is a question keeps the hold: %s', (_label, q) => {
+    const t = withTranscript(['Agent: Hello.', `Caller: ${q}`]);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: q.replace(/\?$/, '') }] })).toBe(AV_BUSINESS);
+  });
+
+  test('a turn whose quoted sentence is a question keeps the hold even if another sentence asserts', () => {
+    const q = 'we own the whole building';
+    const t = withTranscript(['Agent: Hello.', 'Caller: Thanks. Is it true we own the whole building? I think so.']);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: q }] })).toBe(AV_BUSINESS);
+    // A plain assertion next to an unrelated question still waives.
+    const t2 = withTranscript(['Agent: Hello.', 'Caller: Is the technician licensed? We own the whole building.']);
+    expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t2, evidence: [{ ...EVIDENCE[0], quote: q }] })).not.toBe(AV_BUSINESS);
+  });
+
+  test.each([
     'Caller: It is in a strip mall.',
     'Caller: It is in the Example Plaza.',
     'Caller: It is in a shopping center.',
