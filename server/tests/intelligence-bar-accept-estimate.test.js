@@ -120,6 +120,20 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(writes).toEqual([]);
   });
 
+  test('a one-time estimate does not promise a plan, a bill change or customer activation', async () => {
+    seed({ estimate: { monthly_total: 0, onetime_total: 350, estimate_data: { result: { oneTime: { items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }] } } } } });
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    const lines = labels(card(preview));
+    expect(lines).toEqual(expect.arrayContaining([
+      'Accepts estimate addonquo for Lena Synthetic: $0.00 a month, $350.00 one-time',
+      'Bill: unchanged — a one-time estimate only changes status here. Schedule and invoice the work by hand',
+      "Marks the estimate accepted and locks its price; a linked lead is marked won; the customer's status and plan stay as they are",
+      'Message: No email or text: a one-time estimate only changes status here',
+    ]));
+    expect(lines.some((l) => /becomes an active customer|^Starts |^Bill line/.test(l))).toBe(false);
+    expect(card(preview).notifies_customer).toBe(false);
+  });
+
   test('the tier is the one the accept activates, not only what the quote says', async () => {
     // A legacy quote still says Silver, but with the live lawn plan the accept
     // counts three services and activates Gold; the card says Gold.

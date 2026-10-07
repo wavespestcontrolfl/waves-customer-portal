@@ -378,7 +378,12 @@ function cardLines(preview) {
         ? `Visits: keeps ${booked.length} visit(s) already booked from this estimate (first ${booked[0].date}) and seeds their follow-ups`
         : 'Visits: books none — book the first visit on the calendar after',
     },
-    { kind: 'operational', label: 'Marks the estimate accepted and locks its price; the customer becomes an active customer; a linked lead is marked won' },
+    {
+      kind: 'operational',
+      label: preview.converts
+        ? 'Marks the estimate accepted and locks its price; the customer becomes an active customer; a linked lead is marked won'
+        : "Marks the estimate accepted and locks its price; a linked lead is marked won; the customer's status and plan stay as they are",
+    },
     ...preview.customer_messages.map((m) => ({ kind: 'comms', label: `Message: ${m.text}` })),
   ];
 }
