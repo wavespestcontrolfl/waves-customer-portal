@@ -48,7 +48,7 @@ function buildWith(coverage, { reportV2 = { smsSummary: 'sms', snapshot: { statu
     return { reportV2 };
   });
 }
-const run = (knex) => finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex });
+const run = (knex) => finalizeLawnReportSynthesis({ service: { id: 's1', service_line: 'lawn' }, knex, coverageFreezeAllowed: true });
 
 describe('freeze at completion (write gate)', () => {
   test('gate live + technician-marked zones: freezes defaultsOnly false', async () => {
@@ -97,7 +97,16 @@ describe('freeze at completion (write gate)', () => {
     buildWith({ readOk: true, defaultsOnly: true });
     const { knex, state } = fakeKnex({});
     const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
-    await finalizeLawnReportSynthesis({ service: { id: 'svc-1', service_line: 'lawn', structured_notes: '{}' }, knex, zoneSyncOk: false });
+    await finalizeLawnReportSynthesis({ service: { id: 'svc-1', service_line: 'lawn', structured_notes: '{}' }, knex, coverageFreezeAllowed: false });
+    expect(state.notes).not.toHaveProperty('lawnCoverageVerdict');
+  });
+
+  test('a resumed completion (or any caller that does not allow it) freezes nothing (pre-push P1)', async () => {
+    process.env[KEY] = 'true';
+    buildWith({ readOk: true, defaultsOnly: true });
+    const { knex, state } = fakeKnex({});
+    const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
+    await finalizeLawnReportSynthesis({ service: { id: 'svc-2', service_line: 'lawn', structured_notes: '{}' }, knex });
     expect(state.notes).not.toHaveProperty('lawnCoverageVerdict');
   });
 

@@ -13560,7 +13560,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
       try {
         const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
-        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db, zoneSyncOk });
+        // The coverage verdict is a COMPLETION-time fact: only the original run
+        // with a successful zone sync may freeze it, never a resumed retry
+        // (which would derive a later verdict from live zones).
+        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db, coverageFreezeAllowed: zoneSyncOk && !resumingCommittedCompletion });
         // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
         // fold the frozen synthesis back in so the later sending/sent writes (which
         // spread recordStructuredNotes) don't clobber it.

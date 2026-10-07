@@ -63,7 +63,7 @@ async function freezeTechParagraphFor({ record, data, service, knex }) {
  * @param {object} input.knex
  * @returns {Promise<{ smsSummary: string|null, warnings: object[], persisted: boolean }>}
  */
-async function finalizeLawnReportSynthesis({ service, knex, zoneSyncOk = true } = {}) {
+async function finalizeLawnReportSynthesis({ service, knex, coverageFreezeAllowed = false } = {}) {
   const empty = { smsSummary: null, warnings: [], persisted: false };
   if (!service || !service.id || !knex) return empty;
   const serviceLine = service.service_line || (/(lawn)/i.test(String(service.service_type || '')) ? 'lawn' : null);
@@ -99,9 +99,10 @@ async function finalizeLawnReportSynthesis({ service, knex, zoneSyncOk = true } 
     // The joined record carries the map center drift resolution needs; a failed
     // join falls back to the bare row, where every mark reads as trusted, so it
     // freezes nothing (codex #6089 r7).
-    // A failed completion zone sync (zoneSyncOk false) freezes nothing either:
-    // the rows may be stale or partial (codex #6089).
-    if (data && joined && zoneSyncOk !== false && featureGates.lawnCoverageHideDefaultZonesLive()
+    // Only the original completion with a successful zone sync may freeze
+    // (coverageFreezeAllowed): a failed sync may leave stale or partial rows, and
+    // a resumed retry must not derive a later verdict from live zones (codex #6089).
+    if (data && joined && coverageFreezeAllowed === true && featureGates.lawnCoverageHideDefaultZonesLive()
       && coverageOut.readOk === true && typeof coverageOut.defaultsOnly === 'boolean') {
       await freezeCoverageVerdict({ knex, serviceRecordId: service.id, defaultsOnly: coverageOut.defaultsOnly });
     }
