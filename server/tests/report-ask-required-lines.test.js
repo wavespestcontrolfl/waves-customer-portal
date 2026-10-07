@@ -2122,3 +2122,28 @@ describe('answer screen, Codex round 57', () => {
     expect(ruleAnswerReason(lawnData(), [], 'unrouted', question)).toBe('next_steps');
   });
 });
+
+describe('answer screen, Codex round 58', () => {
+  test.each(['The shrubs received enough water this week.', 'The landscape was overwatered.'])('a Tree & Shrub water verdict must fit the card: %s', (answer) => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 }, water: { status: 'deficit', explanation: 'Beds are dry.' } } };
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('lawn_status_claim');
+  });
+
+  test.each([['surplus', 'There was no excess water.'], ['deficit', 'There was no water deficit.']])('a negated water verdict on %s is rejected', (status, answer) => {
+    const data = lawnData({ reportV2: { aftercare: {}, water: { status, explanation: 'Water card.' } } });
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('lawn_status_claim');
+  });
+
+  test('a copular care permission is rejected', () => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    expect(screenAskAnswer('Mowing now is fine.', { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
+  });
+
+  test('a fourth finding reaches the facts and may not be denied', () => {
+    const data = pestData({ applications: [], findings: [1, 2, 3, 4].map((i) => ({ title: i === 4 ? 'Termite tubes' : `Ant trail ${i}`, detail: '' })) });
+    const question = 'Did you find termite tubes?';
+    const facts = buildReportAskFacts({ question, data });
+    expect(facts.findings).toHaveLength(4);
+    expect(screenAskAnswer('The report does not show termite tubes.', { question, data, facts })).toBe('denies_findings');
+  });
+});

@@ -723,8 +723,10 @@ function buildReportAskFacts({
 
   // A finding's own recommendation is a recorded instruction: it reaches the
   // model only through required_lines, where it must be repeated verbatim.
+  // Every finding the report shows, so the answer cannot deny one (Codex P1
+  // #5964 r58).
   const findings = asArray(data.findings)
-    .slice(0, 3)
+    .slice(0, 10)
     .filter(Boolean)
     .map((finding) => ({
       title: clip(finding.title, 120),
@@ -1288,8 +1290,11 @@ const CARE_BENEFIT_RE = new RegExp(`\\b${CARE_VERBS}\\b[^.?!]*\\b(?:beneficial|b
 // watering daily" (Codex P1 #5964 r41). A clause after a comma that opens on
 // a care verb is caught in the check itself.
 const CARE_PURPOSE_RE = new RegExp(`\\b(?:help|helps|improve|support|boost|encourage)\\s+(?:\\w+\\s+){0,3}?by\\s+(?:\\w+\\s+)?${CARE_VERBS}\\b|^(?:to|for)\\s+[^,]{2,60},\\s*(?:please\\s+)?${CARE_VERBS}\\b`, 'i');
+// Copular care permission: "Mowing now is fine", "It's OK to water" (Codex P1
+// #5964 r58).
+const CARE_PERMISSION_STATEMENT = /\b(?:mowing|watering|fertiliz\w*|irrigat\w*|seeding|overseeding|aerating|trimming|pruning|cutting|raking|spraying|edging|weeding)\b(?:\s+\w+){0,3}\s+(?:is|are|would\s+be|will\s+be|should\s+be|seems)\s+(?:\w+\s+)?(?:fine|ok|okay|safe|good|alright|allowed|recommended|best|needed|necessary|unnecessary|important|helpful)\b|\b(?:it['’]s|it\s+is|it\s+would\s+be)\s+(?:\w+\s+)?(?:fine|ok|okay|safe|good|alright|time|best|important)\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|seed|overseed|aerat\w*|trim|prune|cut|rake|spray|edge|weed)\b|\b(?:you|we)\s+(?:are|['’]re)\s+(?:fine|ok|okay|clear|good|free)\s+to\s+(?:mow|water|irrigat\w*|fertiliz\w*|seed|aerat\w*|trim|prune|cut|rake|spray)\b/i;
 function isCareInstruction(sentence) {
-  return [CARE_INSTRUCTION_RE, CARE_ADVICE_RE, CARE_RECOMMENDATION_RE, GERUND_CARE_RE, CARE_BENEFIT_RE, CARE_PURPOSE_RE].some((re) => re.test(sentence))
+  return [CARE_PERMISSION_STATEMENT, CARE_INSTRUCTION_RE, CARE_ADVICE_RE, CARE_RECOMMENDATION_RE, GERUND_CARE_RE, CARE_BENEFIT_RE, CARE_PURPOSE_RE].some((re) => re.test(sentence))
     || sentence.split(/[,;:]\s*/).slice(1).some((clause) => CARE_INSTRUCTION_RE.test(clause));
 }
 function givesOwnCareInstruction(sentence) {
@@ -1807,10 +1812,20 @@ function deniesRecordedIngredient(text, facts) {
 // has some (Codex P1 #5964 r48).
 const NO_FINDINGS_RE = /\b(?:no|zero|without)\s+(?:\w+\s+)?(?:findings?|issues?|problems?|activity|signs?)\b|\b(?:nothing|none)\s+(?:was\s+|were\s+)?(?:found|noted|seen|recorded|observed|listed|reported)\b|\b(?:found|noted|saw|observed)\s+nothing\b|\b(?:didn['’]?t|did\s+not)\s+(?:find|note|see|observe|record)\s+(?:anything|any)\b/i;
 function deniesRecordedFindings(text, facts) {
-  if (!asArray(facts?.findings).length) return false;
-  return clausesOf(text).some((clause) => NO_FINDINGS_RE.test(clause) && !UNCERTAIN_RE.test(clause)
-    && !SAYS_INSIDE.test(clause) && !SAYS_OUTSIDE.test(clause));
+  const findings = asArray(facts?.findings);
+  if (!findings.length) return false;
+  // A named finding may not be denied either: "The report does not show
+  // termite tubes" when it does (Codex P1 #5964 r58).
+  const titles = findings.map((finding) => normalizeKey(finding.title || '').split(' ').filter((word) => word.length > 3 && !FINDING_TITLE_STOP.has(word)))
+    .filter((words) => words.length);
+  return clausesOf(text).some((clause) => {
+    const lower = normalizeKey(clause);
+    if (NO_FINDINGS_RE.test(clause) && !UNCERTAIN_RE.test(clause) && !SAYS_INSIDE.test(clause) && !SAYS_OUTSIDE.test(clause)) return true;
+    const denies = UNCERTAIN_RE.test(clause) || NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause);
+    return denies && titles.some((words) => words.every((word) => lower.includes(word.replace(/e?s$/, ''))));
+  });
 }
+const FINDING_TITLE_STOP = new Set('activity found seen noted signs sign area areas some minor light heavy'.split(' '));
 
 // The customer's recorded concern may not be denied: "No, you did not report
 // ants" when the concern names ants (Codex P1 #5964 r49).
@@ -1881,13 +1896,16 @@ function statesUnrecordedMethod(text, facts) {
 const WATER_ENOUGH = /\b(?:enough|sufficient|adequate|plenty\s+of)\s+(?:water|rain|moisture|irrigation)\b|\bwell[\s-]watered\b|\b(?:water|watering|moisture)\s+(?:was|is|were)\s+(?:enough|sufficient|adequate|fine|good|on\s+target)\b/i;
 const WATER_SURPLUS = /\b(?:more\s+(?:water|rain|moisture)?\s*than\s+(?:it\s+)?(?:needed|needs|required)|too\s+much\s+(?:water|rain|moisture)|over[\s-]?water\w*|excess\s+(?:water|rain|moisture)|surplus|soggy|waterlogged)\b/i;
 const WATER_DEFICIT = /\b(?:not\s+enough|too\s+little|insufficient)\s+(?:water|rain|moisture)|\bunder[\s-]?water\w*|\b(?:water|rain|moisture)\s+(?:deficit|shortfall|gap)|\b(?:too\s+dry|dried\s+out|thirsty|needs?\s+more\s+water)\b/i;
+const NEGATED_DEFICIT = /\b(?:deficit|shortfall|gap|too\s+dry|dried\s+out|thirsty|under[\s-]?water\w*|short\s+on\s+water)\b/i;
 const MOW_SHORT = /\b(?:too\s+short|cut\s+(?:too\s+)?short|scalp\w*|too\s+low)\b/i;
 const MOW_TALL = /\b(?:too\s+(?:tall|high|long)|overgrown)\b/i;
 const MOW_IDEAL = /\b(?:was|were|is|are|at|to)\s+(?:the\s+|an\s+|a\s+)?(?:ideal|right|correct|perfect|good|proper|recommended)\s+(?:mowing\s+)?(?:height|length)\b|\b(?:height|mowing)\s+(?:was|is)\s+(?:ideal|right|correct|perfect|good|in\s+range|on\s+target)\b|\b(?:was|is|were|are)\s+in\s+(?:the\s+)?(?:ideal|recommended)\s+range\b/i;
 function contradictsWater(clause, water, negated) {
   const enough = WATER_ENOUGH.test(clause) && !WATER_DEFICIT.test(clause);
   if (enough) return negated ? water !== 'deficit' : water === 'deficit';
-  if (negated) return false;
+  // "There was no excess water" on a surplus, "no water deficit" on a deficit
+  // (Codex P1 #5964 r58).
+  if (negated) return (WATER_SURPLUS.test(clause) && water === 'surplus') || (NEGATED_DEFICIT.test(clause) && water === 'deficit');
   return (WATER_SURPLUS.test(clause) && water !== 'surplus') || (WATER_DEFICIT.test(clause) && water !== 'deficit');
 }
 function contradictsMowing(clause, mow) {
@@ -1896,7 +1914,8 @@ function contradictsMowing(clause, mow) {
     || (MOW_IDEAL.test(clause) && !/ideal|range/.test(mow));
 }
 function contradictsLawnStatus(text, facts) {
-  const water = String(facts?.lawn_report?.water_this_week?.status || '').toLowerCase();
+  // The Tree & Shrub landscape water card too (Codex P1 #5964 r58).
+  const water = String(facts?.lawn_report?.water_this_week?.status || facts?.tree_shrub_report?.water?.status || '').toLowerCase();
   const mow = String(facts?.lawn_report?.mowing?.status || '').toLowerCase().replace(/_/g, ' ');
   return clausesOf(text).some((clause) => {
     if (UNCERTAIN_RE.test(clause)) return false;
