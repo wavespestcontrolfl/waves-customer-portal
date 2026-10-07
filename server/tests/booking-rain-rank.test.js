@@ -66,6 +66,17 @@ describe('isWetWindow', () => {
     expect(isWetWindow(hourly, chip('2026-10-09', '09:00', '10:00'), TODAY)).toBeNull();
     expect(isWetWindow(null, chip('2026-10-07', '09:00', '10:00'), TODAY)).toBeNull();
   });
+  test('one dry reading does not cover a window with a missing hour', () => {
+    const gappy = [
+      { startTime: '2026-10-08T09:00:00-04:00', rainChance: 10 },
+      { startTime: '2026-10-08T10:00:00-04:00', rainChance: null },
+      { startTime: '2026-10-08T11:00:00-04:00', rainChance: 10 },
+    ];
+    expect(isWetWindow(gappy, chip('2026-10-08', '09:00', '10:00'), TODAY)).toBeNull();
+    // A wet reading is known even when another hour is missing.
+    gappy[2].rainChance = 70;
+    expect(isWetWindow(gappy, chip('2026-10-08', '09:00', '10:00'), TODAY)).toBe(true);
+  });
   test('tiers', () => {
     expect([rainTier('avoid', false), rainTier('avoid', null), rainTier('avoid', true)]).toEqual([0, 1, 2]);
     expect([rainTier('prefer', true), rainTier('prefer', null), rainTier('prefer', false)]).toEqual([0, 1, 2]);
@@ -107,6 +118,25 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
     process.env.GATE_BOOKING_RAIN_RANK = 'true';
     const out = await run(['WaveGuard Assessment']);
     expect(out.rows.day[0].start_time).toBe('14:00');
+  });
+
+  test('gate on, every candidate past the 3-day horizon: rows do not wait for the forecast', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const far = '2026-10-14';
+    const farDays = [{ date: far, status: 'open', hours: [h(far, '14:00', 5), h(far, '08:00', 20)] }];
+    let priced = false;
+    let release;
+    const hourlyRain = jest.fn(() => new Promise((resolve) => { release = () => resolve(hourly); }));
+    const pending = buildBestRows(farDays, {
+      pickedDate: far, today: TODAY, lat: 1, lng: 2, serviceTypes: ['General Pest Control'],
+      deps: { priceChipsOnRoads: async (chips) => { priced = true; return chips; }, hourlyRain },
+    });
+    await new Promise((r) => setImmediate(r));
+    // Pricing started while the forecast is still out.
+    expect(priced).toBe(true);
+    release();
+    const out = await pending;
+    expect(out.rows.day.map((c) => c.start_time)).toEqual(['14:00', '08:00']);
   });
 
   test('gate on, no forecast: drive-only order (fail open)', async () => {

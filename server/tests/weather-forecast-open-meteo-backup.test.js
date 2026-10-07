@@ -150,6 +150,8 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(hours[0]).toMatchObject({ rainChance: 65, source: 'open-meteo' });
     // NWS was given at most 1.2 s, not its own 2.5 s.
     expect(realNow() - started).toBeLessThan(2000);
+    // Reached only through this caller's cap: not cached for uncapped readers.
+    expect(_test._hourlyCache.size).toBe(0);
   });
 
   test('both down: null (fail-open)', async () => {

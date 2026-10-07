@@ -11,7 +11,7 @@
  * enforcer).
  */
 
-const { bookingRainFit, rainTierOf } = require('./rain-fit');
+const { bookingRainFit, rainTierOf, rankingNeedsForecast } = require('./rain-fit');
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
@@ -564,7 +564,7 @@ async function buildBestRows(days, {
   const forecast = days.some((day) => day.hours.length) || picked?.fits === true
     ? rainLookup(lat, lng).catch(() => null) : Promise.resolve(null);
   const fit = bookingRainFit(serviceTypes);
-  const tierOf = rainTierOf(fit, fit === 'neutral' ? null : await forecast, today);
+  const tierOf = rainTierOf(fit, rankingNeedsForecast(fit, days, today) ? await forecast : null, today);
   const rows = pickBestRows(days, { pickedDate, today, tierOf });
   const { order } = rows;
   // The picked hour's verdict gets the same treatment, so its sentence and

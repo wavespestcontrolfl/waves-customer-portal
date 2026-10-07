@@ -304,10 +304,13 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS) return cached.value;
 
   const startedAt = Date.now();
-  const hours = (await nwsHourly(latNum, lngNum, startedAt + nwsBudgetMs))
-    || (await fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs));
+  const nws = await nwsHourly(latNum, lngNum, startedAt + nwsBudgetMs);
+  const hours = nws || (await fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs));
   if (!hours) return null;
-  _hourlyCache.set(key, { at: Date.now(), value: hours });
+  // A backup answer reached only because THIS caller capped NWS is not
+  // cached: an uncapped reader (storm watch, Rain Out) must still try NWS,
+  // the primary source (Codex #6102 r3).
+  if (nws || nwsBudgetMs >= TOTAL_BUDGET_MS) _hourlyCache.set(key, { at: Date.now(), value: hours });
   return hours;
 }
 

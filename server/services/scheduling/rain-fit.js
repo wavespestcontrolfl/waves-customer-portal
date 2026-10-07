@@ -60,24 +60,27 @@ function addDays(ymd, n) {
   return d.toISOString().slice(0, 10);
 }
 
-// True / false for a chip inside the forecast horizon, null when the date is
-// past it or the forecast has no reading for the window (unknown ≠ dry).
+function inRainHorizon(date, today) {
+  return !!date && !!today && date >= today && date <= addDays(today, RAIN_DAYS - 1);
+}
+
+// True when any hour reads wet; false only when EVERY hour of the window has
+// a dry reading; null when the date is past the horizon or any hour lacks a
+// reading (unknown ≠ dry, Codex #6102 r3).
 function isWetWindow(hourly, { date, start_time: start, end_time: end }, today) {
-  if (!Array.isArray(hourly) || !date || !today) return null;
-  if (date < today || date > addDays(today, RAIN_DAYS - 1)) return null;
+  if (!Array.isArray(hourly) || !inRainHorizon(date, today)) return null;
   const startMin = toMin(start);
   if (startMin == null) return null;
   const endMin = Math.max(startMin + 60, toMin(end) ?? startMin + 60);
   const lastMin = endMin + RAIN_AFTER_HOURS * 60;
-  let seen = false;
+  let missing = false;
   for (let m = Math.floor(startMin / 60) * 60; m < lastMin && m < 24 * 60; m += 60) {
     const key = `${date}T${String(Math.floor(m / 60)).padStart(2, '0')}`;
     const hour = hourly.find((h) => String(h.startTime).slice(0, 13) === key);
-    if (!hour || !Number.isFinite(hour.rainChance)) continue;
-    seen = true;
-    if (hour.rainChance >= RAIN_PCT) return true;
+    if (!hour || !Number.isFinite(hour.rainChance)) missing = true;
+    else if (hour.rainChance >= RAIN_PCT) return true;
   }
-  return seen ? false : null;
+  return missing ? null : false;
 }
 
 // Sort tier: 0 sorts first. Unknown rain sits between: an 'avoid' booking
@@ -90,6 +93,13 @@ function rainTier(fit, wet) {
   return wet ? 0 : 2;
 }
 
+// Whether ranking can use a forecast at all: a non-neutral booking with at
+// least one candidate date inside the horizon. Otherwise every tier would be
+// "unknown", so the caller need not wait for the forecast (Codex #6102 r3).
+function rankingNeedsForecast(fit, days, today) {
+  return fit !== 'neutral' && days.some((day) => day.hours.length && inRainHorizon(day.date, today));
+}
+
 // The ranking's tier function for one forecast, or null (drive-only order)
 // when there is no forecast or the booking is neutral.
 function rainTierOf(fit, hourly, today) {
@@ -97,4 +107,4 @@ function rainTierOf(fit, hourly, today) {
   return (chip) => rainTier(fit, isWetWindow(hourly, chip, today));
 }
 
-module.exports = { rainFitFor, bookingRainFit, rainTierOf, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { rainFitFor, bookingRainFit, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
