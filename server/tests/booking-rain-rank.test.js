@@ -138,6 +138,16 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
     release();
     const out = await pending;
     expect(out.rows.day.map((c) => c.start_time)).toEqual(['14:00', '08:00']);
+    // Labels only: the lookup is told it is not ranking, so it keeps the
+    // rows' short label wait instead of the ranking one (Codex #6102 r5).
+    expect(hourlyRain).toHaveBeenCalledWith(1, 2, false);
+  });
+
+  test('a date inside the horizon asks for the ranking wait', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const hourlyRain = jest.fn(async () => hourly);
+    await run(['General Pest Control'], hourlyRain);
+    expect(hourlyRain).toHaveBeenCalledWith(1, 2, true);
   });
 
   test('gate on, no forecast: drive-only order (fail open)', async () => {

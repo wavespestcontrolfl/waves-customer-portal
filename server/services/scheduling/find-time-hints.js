@@ -541,17 +541,21 @@ function publicChip(chip) {
  * chance of rain for each chip's hour. Both lookups fail open: a chip keeps
  * the model's numbers, or shows no rain.
  */
-// The chips' forecast: NWS hourly, Open-Meteo when NWS fails. NWS gets
-// 1.2 s so a slow failure still leaves the backup time inside the 2.5 s
-// wait (Codex #6102 r2); fail open to no rain.
-const RAIN_WAIT_MS = 2500;
-const RAIN_NWS_MS = 1200;
-function boundedHourlyRain(la, ln) {
+// The chips' forecast: NWS hourly, Open-Meteo when NWS fails; fail open to
+// no rain. Labels only: the 1.5 s wait the rows always had. Ranking
+// (GATE_BOOKING_RAIN_RANK, a date inside the horizon): NWS gets 1.2 s so a
+// slow failure still leaves the backup time inside a 2.5 s wait (Codex
+// #6102 r2); only then is the longer wait spent (Codex #6102 r5).
+const LABEL_WAIT_MS = 1500;
+const RANK_WAIT_MS = 2500;
+const RANK_NWS_MS = 1200;
+function boundedHourlyRain(la, ln, ranking = false) {
   const { getHourlyRainOutlook } = require('../weather-forecast');
+  const opts = ranking ? { budgetMs: RANK_WAIT_MS, nwsBudgetMs: RANK_NWS_MS } : undefined;
   let timer;
   return Promise.race([
-    getHourlyRainOutlook(la, ln, { budgetMs: RAIN_WAIT_MS, nwsBudgetMs: RAIN_NWS_MS }).catch(() => null),
-    new Promise((resolve) => { timer = setTimeout(resolve, RAIN_WAIT_MS + 100, null); }),
+    getHourlyRainOutlook(la, ln, opts).catch(() => null),
+    new Promise((resolve) => { timer = setTimeout(resolve, ranking ? RANK_WAIT_MS + 100 : LABEL_WAIT_MS, null); }),
   ]).finally(() => clearTimeout(timer));
 }
 
@@ -561,10 +565,11 @@ async function buildBestRows(days, {
   const rainLookup = deps.hourlyRain || boundedHourlyRain;
   // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
   // the ranking. No hour on screen: no lookup (Codex #6045 r1).
-  const forecast = days.some((day) => day.hours.length) || picked?.fits === true
-    ? rainLookup(lat, lng).catch(() => null) : Promise.resolve(null);
   const fit = bookingRainFit(serviceTypes);
-  const tierOf = rainTierOf(fit, rankingNeedsForecast(fit, days, today) ? await forecast : null, today);
+  const ranking = rankingNeedsForecast(fit, days, today);
+  const forecast = days.some((day) => day.hours.length) || picked?.fits === true
+    ? rainLookup(lat, lng, ranking).catch(() => null) : Promise.resolve(null);
+  const tierOf = rainTierOf(fit, ranking ? await forecast : null, today);
   const rows = pickBestRows(days, { pickedDate, today, tierOf });
   const { order } = rows;
   // The picked hour's verdict gets the same treatment, so its sentence and
