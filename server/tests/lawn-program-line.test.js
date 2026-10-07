@@ -392,11 +392,11 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
 
   test('no detail without a program line; gate is strict and needs the lead layout', () => {
     withBoth('true', () => {
-      expect(buildProgramDetail({ month: 10, programLine: null })).toBeNull();
+      expect(buildProgramDetail({ month: 10, programLine: null })).toBeUndefined();
       expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBe(PROGRAM_DETAIL_V13[10]);
     });
-    for (const loose of ['1', 'on', 'TRUE']) withBoth(loose, () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeNull());
-    withBoth('true', () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeNull(), null);
+    for (const loose of ['1', 'on', 'TRUE']) withBoth(loose, () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined());
+    withBoth('true', () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined(), null);
   });
 
   test('a visit with its own water-in or hold aftercare gets no seasonal watering lines (codex #6091 r1)', () => {
@@ -411,8 +411,8 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
 
   test('a weather-derived weekly water plan also takes over from the seasonal lines (codex #6091 r2)', () => {
     withBoth('true', () => {
-      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, weekPlan: { action: 'run' } }).watering).toEqual([]);
-      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, weekPlan: null }).watering).toEqual(PROGRAM_DETAIL_V13[4].watering);
+      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, water: { weekPlan: { action: 'run' } } }).watering).toEqual([]);
+      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, water: { weekPlan: null } }).watering).toEqual(PROGRAM_DETAIL_V13[4].watering);
     });
   });
 
@@ -420,9 +420,10 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
     for (const m of [1, 3, 5, 6, 10]) expect(PROGRAM_DETAIL_V13[m].whyNow).toMatch(/where it fits the property/);
   });
 
-  test('gate off: no seasonalDetail key and the payload is unchanged', () => {
+  test('gate off: no seasonalDetail value and the serialized payload is unchanged', () => {
     const off = withBoth(undefined, () => v13Report());
-    expect(off.snapshot).not.toHaveProperty('seasonalDetail');
+    expect(off.snapshot.seasonalDetail).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(off.snapshot))).not.toHaveProperty('seasonalDetail');
     expect(JSON.stringify(withBoth('false', () => v13Report()))).toBe(JSON.stringify(off));
   });
 
@@ -436,6 +437,12 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
 
   test('gate on without the program line (expectations off): no detail', () => {
     const on = withEnv({ [GATE]: undefined, GATE_LAWN_V13: 'true', GATE_LAWN_REPORT_LEAD: 'true', GATE_LAWN_PROGRAM_DETAIL: 'true' }, () => v13Report());
-    expect(on.snapshot).not.toHaveProperty('seasonalDetail');
+    expect(on.snapshot.seasonalDetail).toBeUndefined();
+  });
+
+  test('the copy is grass-neutral and assumes no earlier visit (codex #6091 r3)', () => {
+    const all = JSON.stringify(PROGRAM_DETAIL_V13);
+    expect(all).not.toMatch(/St\.? Augustine|Bermuda|Zoysia|Bahia/i);
+    expect(all).not.toMatch(/\b(?:renew\w*|first|second|again|already|another round|next round|re-?apply\w*)\b/i);
   });
 });

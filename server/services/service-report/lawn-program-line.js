@@ -227,7 +227,7 @@ const DRY = 'Water about \u00be inch only when the lawn shows thirst (blades fol
 const RAIN = 'Summer rain usually covers the lawn. Turn irrigation down or off in weeks with regular rain, and water only when the lawn shows thirst. Extra water now invites fungus.';
 const PROGRAM_DETAIL_V13 = Object.freeze({
   1: Object.freeze({
-    whyNow: 'January is the coolest stretch of the year. Winter weeds are sprouting while the grass grows slowly, so the weed barrier is renewed where it fits the property and a micronutrient feeding keeps the color up without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
+    whyNow: 'January is the coolest stretch of the year. Winter weeds are sprouting while the grass grows slowly, so a weed barrier goes down where it fits the property and a micronutrient feeding keeps the color up without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
     whatYouSee: 'Color holds steady and growth stays slow, so mowing is light. A few weeds that sprouted earlier may still show; we spot treat them.',
     watering: [DRY, 'In cool weather the lawn needs water less often than in spring.'],
   }),
@@ -247,7 +247,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
   }),
   5: Object.freeze({
-    whyNow: 'May, before the rains, is peak chinch bug season in sunny St. Augustine turf. The sunny turf gets an insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
+    whyNow: 'May, before the rains, is peak season for chinch bugs and other lawn insects in hot, sunny turf. The sunny turf gets an insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
     whatYouSee: 'The lawn should hold its color through the dry heat. Spots that stay yellow after watering are worth telling us about.',
     watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
   }),
@@ -267,7 +267,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [RAIN],
   }),
   9: Object.freeze({
-    whyNow: 'September is the end of the rainy season. A micronutrient feeding keeps the color up, mapped take-all areas get their first fall treatment, and we watch for caterpillars.',
+    whyNow: 'September is the end of the rainy season. A micronutrient feeding keeps the color up, mapped take-all areas get a fall treatment, and we watch for caterpillars.',
     whatYouSee: 'Growth starts to slow as the month goes on.',
     watering: [RAIN, 'As the rains taper off, turn irrigation back up only as the lawn needs it.'],
   }),
@@ -282,7 +282,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
   }),
   12: Object.freeze({
-    whyNow: 'December brings the first cool spells. A light feeding keeps the color up, and we treat any large patch and weed spots.',
+    whyNow: 'December brings cooler spells. A light feeding keeps the color up, and we treat any large patch and weed spots.',
     whatYouSee: 'Slow growth and light mowing through the holidays.',
     watering: [DRY, 'In cool weather the lawn needs water less often than in spring.'],
   }),
@@ -293,13 +293,15 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
 // own label aftercare (a water-in or a hold) or a weather-derived weekly water
 // plan, the seasonal watering lines step
 // aside so the report never gives two watering directions (codex #6091 r1).
-function buildProgramDetail({ month, programLine, aftercare = null, weekPlan = null } = {}) {
-  if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return null;
-  const detail = PROGRAM_DETAIL_V13[Number(month)] || null;
+function buildProgramDetail({ month, programLine, aftercare = null, water = null } = {}) {
+  if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return undefined;
+  const detail = PROGRAM_DETAIL_V13[Number(month)];
+  if (!detail) return undefined;
+  const weekPlan = water && water.weekPlan;
   // The weather-derived "Water This Week" plan is the report's watering
   // direction when present; the seasonal lines never sit beside it (codex #6091 r2).
   const visitWatering = !!(weekPlan || (aftercare && (aftercare.waterInRequired || aftercare.neutral === false)));
-  return detail && visitWatering ? { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee, watering: [] } : detail;
+  return visitWatering ? { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee, watering: [] } : detail;
 }
 
 module.exports = {

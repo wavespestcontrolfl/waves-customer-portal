@@ -753,7 +753,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     ? buildProgramLine({ month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
-  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine, aftercare, weekPlan: water ? water.weekPlan : null });
+  // GATE_LAWN_PROGRAM_DETAIL: undefined unless live beside a program line, so
+  // the key serializes away and the gate-off payload is byte-identical.
+  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine, aftercare, water });
 
   const snapshot = {
     overallScore,
@@ -763,8 +765,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     rootCause,
     seasonalNote,
     ...(programLine ? { seasonalNoteSource: 'program' } : {}),
-    // GATE_LAWN_PROGRAM_DETAIL: the month's detail lines under the program line.
-    ...(seasonalDetail ? { seasonalDetail } : {}),
+    seasonalDetail,
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).
