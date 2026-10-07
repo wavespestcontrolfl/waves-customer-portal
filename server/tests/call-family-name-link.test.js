@@ -186,8 +186,10 @@ describe('Step 3 wiring (structural)', () => {
     expect(source).toContain('const extracted = suppressCallerIdentity ? { ...extractedIn, first_name: null, last_name: null, phone: null, email: null } : extractedIn;');
   });
 
-  test('the holder is never filed as a contact on their own account (structured name key)', () => {
+  test('a family-linked call persists no secondary contact on the holder\'s account (caller, caller copy or holder)', () => {
+    expect(source).toContain("GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length && !familyNameLink) {");
     expect(fullNameKey({ first_name: 'Mary Ann', last_name: 'Testerson' })).toBe('mary ann|testerson');
+    // the holder is also left out of the second-contact review card
     expect(source).toContain('familyNameLink?.holderKey');
   });
 });

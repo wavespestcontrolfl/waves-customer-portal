@@ -14236,16 +14236,15 @@ const CallRecordingProcessor = {
       && callSecondaryContacts.some(onSiteOptinAskTrigger))
       ? await require('./recipient-optin').isOptinRailLive()
       : false;
-    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
+    // A family-linked call saves nobody on the holder's account (the caller, a copy of the caller,
+    // or the holder): the FYI card carries the caller and the office adds contacts by hand.
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length && !familyNameLink) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
       // dedup, cross-customer, empty slot). A full set of slots does not end
       // the scan: a later party already on record still gets its on-site ask.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       for (const resolvedEntry of callSecondaryContacts) {
-      // The named account holder is the account itself (GATE_CALL_FAMILY_NAME_LINK): never a
-      // service contact on their own account.
-      if (familyNameLink?.holderKey && require('./call-family-name-link').fullNameKey(resolvedEntry) === familyNameLink.holderKey) continue;
       // One cleaned entry drives the slot write AND every ask/send below: an
       // impossible number (a misheard +1 173-...) is never saved or texted,
       // even when the contact is still saved by its email.
