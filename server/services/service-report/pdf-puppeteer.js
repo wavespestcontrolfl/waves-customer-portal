@@ -119,7 +119,15 @@ async function renderReportPdfWithBrowser(url) {
         typeof globalThis.__WAVES_PDF_IMAGE_FAILURES === 'number' ? globalThis.__WAVES_PDF_IMAGE_FAILURES : null
       ));
     } catch { imageFailures = null; }
-    return { pdf, imageFailures };
+    // The Visit Summary the page printed (same channel; null = unknown, e.g. an old bundle).
+    let visitSummary = null;
+    try {
+      visitSummary = await page.evaluate(() => {
+        const v = globalThis.__WAVES_PDF_VISIT_SUMMARY;
+        return v && typeof v === 'object' ? { source: typeof v.source === 'string' ? v.source : null, summary: typeof v.summary === 'string' ? v.summary : null } : null;
+      });
+    } catch { visitSummary = null; }
+    return { pdf, imageFailures, visitSummary };
   } finally {
     if (page) await page.close().catch(() => {});
     await browser.close().catch(() => {});

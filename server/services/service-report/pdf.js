@@ -153,7 +153,7 @@ async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
 async function renderReportPdf(url, { serviceRecordId } = {}) {
   const provider = selectedPdfRenderer();
   if (provider === 'cloudflare_browser_rendering') {
-    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null };
+    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null, visitSummary: null };
   }
   return renderReportPdfWithBrowser(url);
 }
@@ -181,7 +181,8 @@ async function renderServiceReportV1Pdf(data, {
     });
     // imageFailures: the page's own image-load outcome (null = unknown,
     // e.g. the Cloudflare renderer) — store paths gate caching on it.
-    return { pdf, imageFailures: rendered.imageFailures ?? null };
+    // visitSummary: the Visit Summary the page printed (null = unknown, e.g. the Cloudflare renderer).
+    return { pdf, imageFailures: rendered.imageFailures ?? null, visitSummary: rendered.visitSummary ?? null };
   } catch (err) {
     const elapsedMs = Date.now() - started;
     const errText = safePdfRenderError(err);

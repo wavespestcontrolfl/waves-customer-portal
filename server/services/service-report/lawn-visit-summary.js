@@ -172,7 +172,7 @@ const WATERING_SENTENCE = Object.freeze({
   // The frozen hold has its own release condition (a clock time and/or "not before dry")
   // and the water-in deadline counts from the visit, so the note owns both: no amounts here.
   hold_then_water_in: () => 'Please follow the watering note in this report: hold off first, then water the treatment in when it says.',
-  hold: () => 'Please hold off on watering the treated lawn for now. The watering note in this report says when to start again.',
+  hold: () => 'Please hold off on watering the treated lawn for now and follow the watering note in this report for when to start again.',
 });
 
 // ── Facts ─────────────────────────────────────────────────────────────────
@@ -333,6 +333,12 @@ function buildSlots(rawFacts) {
   };
 }
 
+const MAX_SENTENCES = 6;
+// Reading order, and the order parts are dropped in when a paragraph would pass the cap: the
+// results line first, then the next-visit line, then the area read.
+const SENTENCE_ORDER = Object.freeze(['applied', 'photoRead', 'findings', 'results', 'watering', 'nextVisit']);
+const DROP_ORDER = Object.freeze(['results', 'nextVisit', 'photoRead']);
+
 // ── Render: slots -> sentences (a closed set; nothing else is ever printed) ──
 
 function joinList(items) {
@@ -390,14 +396,19 @@ function nextVisitSentence(slots) {
 function renderSentences(slots) {
   if (!slots || typeof slots !== 'object' || Array.isArray(slots)) return [];
   const applied = appliedSentence(slots);
-  return [
+  const parts = {
     applied,
-    photoReadSentence(slots),
-    findingsSentence(slots),
-    applied && slots.recurring === true ? SENTENCE.results : null,
-    wateringSentence(slots),
-    nextVisitSentence(slots),
-  ].filter(Boolean);
+    photoRead: photoReadSentence(slots),
+    findings: findingsSentence(slots),
+    results: applied && slots.recurring === true ? SENTENCE.results : null,
+    watering: wateringSentence(slots),
+    nextVisit: nextVisitSentence(slots),
+  };
+  // Every template is ONE sentence, so six parts are at most six sentences; the cap is still
+  // enforced here, dropping the lowest-priority parts first, so a template edit cannot break it.
+  const kept = new Set(SENTENCE_ORDER.filter((id) => parts[id]));
+  for (const id of DROP_ORDER) if (kept.size > MAX_SENTENCES) kept.delete(id);
+  return SENTENCE_ORDER.filter((id) => kept.has(id)).map((id) => parts[id]);
 }
 
 /** Slots -> the paragraph text, or '' when nothing applies. Pure. */
@@ -507,6 +518,7 @@ module.exports = {
   FREEZE_VERSION,
   BUDGET_MS,
   MAX_TEXT_CHARS,
+  MAX_SENTENCES,
   CATEGORY_BY_KIND,
   APPLIED_PHRASES,
   AREA_PHRASES,

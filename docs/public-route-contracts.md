@@ -2726,7 +2726,12 @@ decisions freeze in the slots. On the PDF the document prints the whole
 `summary` for `summarySource: 'lawn_visit_summary'` (the reconciled `todaysResult` is
 only its first sentence). The PDF key's `:vs` component is derived from the service
 row the render loaded, and a render whose printed summary differs from the key's
-component is not cached. When duplicate findings share a label, the
+component is not cached. The printed summary is the one the RENDERED page reports
+(`window.__WAVES_PDF_VISIT_SUMMARY`, read after `page.pdf()` like the image count,
+because the browser fetches its own `/data`); a renderer that cannot report one falls
+back to the worker's own payload. Both PDF writers (the queue and the public direct-PDF
+route) apply the fence. Every watering template is one sentence and the composer
+caps the paragraph at six sentences. When duplicate findings share a label, the
 least-confident read wins.
 The technician note, the program line, the headline and rain are not inputs. It
 freezes first-writer-wins under `structured_notes.lawnVisitSummary[assessmentId]`

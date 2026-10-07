@@ -179,7 +179,7 @@ const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps')
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
 const { treatmentNarrativePdfSignature } = require('../services/service-report/treatment-narrative');
-const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
+const { enqueuePdfRenderRetry, renderedVisitSummary, visitSummaryRenderMismatch } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
@@ -2161,6 +2161,10 @@ router.get('/:token', async (req, res, next) => {
       let laRenderSignature = null;
       // The page's own image-load failure count (null = unknown provider).
       let renderImageFailures = null;
+      // Visit Summary fence (GATE_LAWN_VISIT_SUMMARY_V2): the summary the key names vs the one the page printed.
+      let vsKeySignature = '';
+      let vsRendered = { source: null, signature: '' };
+      let vsPinned = false;
       // The payload the render was produced from — its flags decide whether
       // this output may be cached.
       let renderedData = null;
@@ -2174,6 +2178,8 @@ router.get('/:token', async (req, res, next) => {
         const canonical = await resolveCanonicalLawnRender(service, db, { propertyHistoryEnabled });
         const canonicalPin = canonical.pin;
         laRenderSignature = canonical.signature;
+        vsKeySignature = canonical.visitSummarySignature || '';
+        vsPinned = canonicalPin != null;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           // ONE card snapshot (gate + the score row its "Activity seen" word
@@ -2208,6 +2214,7 @@ router.get('/:token', async (req, res, next) => {
           });
           pdf = rendered.pdf;
           renderImageFailures = rendered.imageFailures ?? null;
+          vsRendered = renderedVisitSummary(rendered.visitSummary, data);
 
           const latestPestPressureConfig = await loadActiveConfig(db).catch(() => null);
           const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
@@ -2263,6 +2270,14 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] station map basemap transiently unavailable for ${service.id} — not caching this render`);
         } else if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
+        } else if (visitSummaryRenderMismatch({
+          live: require('../config/feature-gates').lawnVisitSummaryV2Live(),
+          pinned: vsPinned,
+          renderedSource: vsRendered.source,
+          renderedSignature: vsRendered.signature,
+          keySignature: vsKeySignature,
+        })) {
+          logger.warn(`[reports-public] visit summary rendered differs from the key's for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else if (cardFenceAtRender === null || await reserviceCardRenderFence(service, db) !== cardFenceAtRender) {

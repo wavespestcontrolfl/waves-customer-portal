@@ -272,8 +272,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
     cardFenceAtRender = await reserviceCardRenderFence(service, knex);
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, lawnPhotoFindings: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
-    vsRenderedSignature = lawnVisitSummaryRenderedSignature(data);
-    vsRenderedSource = data?.summarySource ?? null;
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
     renderedData = data;
@@ -316,6 +314,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     });
     pdf = rendered.pdf;
     renderImageFailures = rendered.imageFailures ?? null;
+    ({ source: vsRenderedSource, signature: vsRenderedSignature } = renderedVisitSummary(rendered.visitSummary, data));
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
     const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
@@ -969,6 +968,16 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
 // pinned, and the Visit Summary or the plain recap won the summary slot: a
 // higher-precedence source (technician report, typed narrative) prints no
 // summary, so there is nothing to compare (codex #6087 r6).
+// The Visit Summary the PDF actually printed. The headless page fetches its own /data (maybe from
+// another pod), so the page's own report decides; only a renderer that cannot report one (the
+// Cloudflare renderer, an old page bundle) falls back to the payload this worker built.
+function renderedVisitSummary(pageReport, localData) {
+  if (pageReport && typeof pageReport === 'object') {
+    return { source: pageReport.source ?? null, signature: lawnVisitSummaryRenderedSignature({ summary: pageReport.summary, summarySource: pageReport.source }) };
+  }
+  return { source: localData?.summarySource ?? null, signature: lawnVisitSummaryRenderedSignature(localData) };
+}
+
 function visitSummaryRenderMismatch({ live, pinned, renderedSource, renderedSignature, keySignature }) {
   if (!live || !pinned) return false;
   if (renderedSource != null && renderedSource !== 'lawn_visit_summary' && renderedSource !== 'recap') return false;
@@ -977,6 +986,7 @@ function visitSummaryRenderMismatch({ live, pinned, renderedSource, renderedSign
 
 module.exports = {
   visitSummaryRenderMismatch,
+  renderedVisitSummary,
   CLAIM_LIMIT,
   // Shared with the ops queue so its stale-claim rule cannot drift from
   // recoverStalePdfRenderClaims.

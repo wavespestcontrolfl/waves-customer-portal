@@ -71,7 +71,7 @@ const CASES = {
     expected: 'Today we applied weed control, which fits the winter season. '
       + 'In the photos we noticed some weed pressure. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please hold off on watering the treated lawn for now. The watering note in this report says when to start again. '
+      + 'Please hold off on watering the treated lawn for now and follow the watering note in this report for when to start again. '
       + 'At the next visit we will look at weeds and mowing height.',
   },
   holdThenWaterIn: {
@@ -373,19 +373,45 @@ describe('the closed tables', () => {
     }
   });
 
-  test('the longest paragraph any valid slots can render fits the cap and the screens', () => {
+  test('the longest paragraph any valid slots can render fits the cap and the screens (recurring, next visit, hold, finding, area)', () => {
     const slots = {
       season: 'winter',
       applied: ['combo_insecticide', 'supplement', 'herbicide', 'fungicide'],
       areas: [{ key: 'weed_pressure', band: 'needs_attention' }, { key: 'coverage', band: 'needs_attention' }, { key: 'color_vigor', band: 'needs_attention' }, { key: 'damage_disease_signals', band: 'needs_attention' }],
       findings: [{ label: 'color and nutrient stress', hedged: true }, { label: 'a lawn condition we are monitoring', hedged: true }, { label: 'general lawn stress', hedged: true }],
-      watering: { state: 'hold_then_water_in' },
+      recurring: true,
+      nextVisit: true,
+      watering: { state: 'hold' },
       watch: ['weeds', 'thin', 'color'],
     };
-    const text = summary.render(slots);
+    const sentences = summary.renderSentences(slots);
+    expect(sentences).toHaveLength(6);
+    const text = sentences.join(' ');
+    expect(splitSentences(text)).toHaveLength(6);
     expect(text.length).toBeLessThanOrEqual(summary.MAX_TEXT_CHARS);
-    expect(splitSentences(text).length).toBeLessThanOrEqual(6);
     expect(summary._test.textProblem(text)).toBeNull();
+  });
+
+  test('every watering template is ONE sentence, and no combination of slots passes six sentences', () => {
+    const T = summary;
+    for (const text of [T.WATERING_SENTENCE.hold(), T.WATERING_SENTENCE.hold_then_water_in(), T.WATERING_SENTENCE.water_in('0.5 inches', '24 hours')]) {
+      expect(splitSentences(text)).toHaveLength(1);
+    }
+    const base = {
+      season: 'fall',
+      applied: ['fertilizer'],
+      areas: [{ key: 'weed_pressure', band: 'good' }],
+      findings: [{ label: 'thinning turf', hedged: true }],
+      watch: ['weeds'],
+    };
+    for (const recurring of [true, false]) {
+      for (const nextVisit of [true, false]) {
+        for (const watering of [null, { state: 'hold' }, { state: 'hold_then_water_in' }, { state: 'water_in', inches: 1, hours: 12 }]) {
+          const text = T.render({ ...base, recurring, nextVisit, watering });
+          expect(splitSentences(text).length).toBeLessThanOrEqual(T.MAX_SENTENCES);
+        }
+      }
+    }
   });
 
   test('every status band of every area has the phrase the renderer needs, or none by design', () => {
