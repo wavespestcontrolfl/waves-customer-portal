@@ -2003,3 +2003,10 @@ test('swallowing sprayed material gets the medical answer (pre-push audit)', () 
   expect(medicalExposureAnswer('Alex swallowed the liquid you sprayed.')).toBeTruthy();
   expect(medicalExposureAnswer('My dog licked the treated grass.')).toBeTruthy();
 });
+
+test('a prose number keeps its measurement (pre-push audit)', () => {
+  const data = lawnData({ reportV2: { aftercare: {} } });
+  const facts = { report_sections: [{ title: 'Visit', text: 'Mowing height was 4 inches.' }] };
+  expect(screenAskAnswer('Rain was 4 inches this week.', { question: 'How much rain?', data, facts })).toBe('unstated_number');
+  expect(screenAskAnswer('The mowing height was 4 inches.', { question: 'How high?', data, facts })).toBeNull();
+});

@@ -1143,7 +1143,18 @@ function nounAfter(rest) {
 
 function factNumbers(value, key = '', out = []) {
   if (typeof value === 'number') out.push({ value, key });
-  else if (typeof value === 'string') for (const m of value.matchAll(NUMBER_RE)) out.push({ value: numberValue(m[0]), key: '', noun: nounAfter(value.slice(m.index + m[0].length)) });
+  // A prose number keeps its sentence, so "4 inches" of mowing height cannot
+  // ground "4 inches" of rain (pre-push audit, #5964).
+  else if (typeof value === 'string') {
+    for (const m of value.matchAll(NUMBER_RE)) {
+      const start = Math.max(value.lastIndexOf('.', m.index) + 1, 0);
+      const end = value.indexOf('.', m.index + m[0].length);
+      out.push({
+        value: numberValue(m[0]), key: '', noun: nounAfter(value.slice(m.index + m[0].length)),
+        context: value.slice(start, end === -1 ? undefined : end).toLowerCase(),
+      });
+    }
+  }
   // A diagnosis row keeps its category in the path, so "Pests scored 55" is
   // grounded only by the Pests row (pre-push audit, #5964 r52).
   else if (Array.isArray(value)) value.forEach((item) => factNumbers(item, item && typeof item === 'object' && item.area ? `${key}.${normalizeKey(item.area).replace(/ /g, '_')}` : key, out));
@@ -1191,7 +1202,8 @@ function numberIsKnown(value, after, sentence, known) {
   }
   const noun = nounAfter(unitText);
   return known.some((fact) => fact.value === value
-    && ((fact.key === '' && fact.noun && fact.noun === noun)
+    && ((fact.key === '' && fact.noun && fact.noun === noun
+        && named.every((keyRe) => keyRe.test(fact.context || '') || MEASUREMENTS.some(([wordRe, key]) => key === keyRe && wordRe.test(fact.context || ''))))
       // Every named measurement must fit the fact: "total rain" is not the
       // total-water fact (Codex P1 #5964 r43).
       || (kind[2].test(fact.key) && (!named.length || named.every((keyRe) => keyRe.test(fact.key))))));
