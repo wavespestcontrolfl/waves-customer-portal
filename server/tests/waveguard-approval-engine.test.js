@@ -300,6 +300,13 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([ARTAVIA], [other], { productId: 'base', targets: ['Take-all'] })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
     });
 
+    test('the Headway catalog row (frac_group "3 + 11") reads as groups 3 and 11', () => {
+      const { productGroups } = require('../services/waveguard-approval-engine');
+      expect(productGroups({ name: 'Headway Fungicide', frac_group: '3 + 11' })).toEqual([['frac', '3'], ['frac', '11']]);
+      expect(productGroups({ name: 'Artavia', frac_group: '11' })).toEqual([['frac', '11']]);
+      expect(productGroups({ name: 'Headway Fungicide', frac_group: null })).toEqual([]);
+    });
+
     test('a mixed-group field is a set: "3 + 11", "3/11", "11, 3" and "28+3A" compare by intersection', async () => {
       const groups = (frac) => ({ id: 'base', name: 'Mixed', category: 'fungicide', frac_group: frac });
       const last = prior({ service_date: '2026-05-13', product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11' });

@@ -382,13 +382,8 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
   if (!holds.length) {
     out.state = 'water_in';
     out.expiresAt = out.waterInBy;
-    // Every water-in asks for it "right after application" (label: water in immediately): no clock time is
-    // printed, only the amount. The deadline above stays internal (expiry), as for every water-in.
-    const immediate = waterIns.every((r) => r.water_in_immediately === true);
     out.lines = [
-      immediate
-        ? `Water in right after application (up to ${waterInDetail.inches} inch).`
-        : `Water in today’s treatment by ${out.waterInByLabel}.`,
+      `Water in today’s treatment by ${out.waterInByLabel}.`,
       `Run ${waterInDetail.clause}.`,
       ANY_DAY_LINE,
     ];

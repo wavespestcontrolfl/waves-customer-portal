@@ -45,122 +45,58 @@ describe('the three tracks carry the same adds', () => {
   });
 });
 
-describe('1. mole crickets: Talak 1.0 fl oz on nymph areas in July and August', () => {
-  test.each([7, 8])('month %i names the nymph rate, the backpack and the water-in', (month) => {
+describe('1. mole crickets: Talak 1.0 fl oz on nymph spots in July and August, watered in by the technician', () => {
+  test.each([7, 8])('month %i names the nymph rate, the backpack and the technician\'s hose water-in', (month) => {
     const [line] = lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l));
-    expect(line).toMatch(/mole cricket nymph areas/);
-    expect(line).toMatch(/1\.0 fl oz per 1,000 sq ft/);
-    expect(line).toMatch(/backpack/);
-    expect(line).toMatch(/water in at once with up to 0\.5 in/);
+    expect(line).toMatch(/mole cricket nymph spots: Talak 1\.0 fl oz per 1,000 sq ft by backpack/);
+    expect(line).toMatch(/the technician waters it in right after application with the hose \(up to 0\.5 inch\) before leaving/);
   });
-  test('the other months carry no mole cricket Talak line, and Dylox stays on spreader visits', () => {
+  test('July keeps the 24-hour customer hold on the same line; no month but July and August has a mole cricket Talak line', () => {
+    expect(lineFor(7, N.TAL)[0]).toMatch(/delay watering 24 hours; mole cricket nymph spots/);
     for (const month of [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))).toEqual([]);
     expect(lineFor(10, N.DYL)[0]).toMatch(/spreader visit only, water in/);
   });
-  test('the 24-hour bifenthrin hold names its one exception', () => {
-    expect(v13.st_augustine.safety_rules.join(' ')).toMatch(/delay watering 24 hours, except mole cricket nymph spots/);
+  test('the notes and the safety rule keep "delay watering 24 hours" for every bifenthrin use and add the technician\'s water-in', () => {
+    const track = v13.st_augustine;
+    expect(track.notes.join(' ')).toContain('Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets');
+    expect(track.notes.join(' ')).toMatch(/Mole cricket nymphs, July and August: Talak 7\.9 F on the spots, 1\.0 fl oz per 1,000 sq ft by backpack, and the technician waters it in right after application with the hose \(up to 0\.5 inch\) before leaving; the customer's 24-hour hold then applies/);
+    expect(track.safety_rules).toContain('Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours. On mole cricket nymph spots the technician first waters it in right after application with the hose (up to 0.5 inch).');
+    expect(JSON.stringify(v13)).not.toMatch(/except mole cricket|water in at once/);
+  });
+  test('August is a hose visit; July is a spreader visit (potash) with backpack spots: the water-in is the truck hose, never a second whole-lawn tool', () => {
+    expect(visitFor(8).notes).toMatch(/Hose visit/);
+    expect(visitFor(7).notes).toMatch(/Spreader visit/);
+    for (const month of [7, 8]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))[0]).toMatch(/by backpack/);
   });
 });
 
-describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
-  test('spring pair Mar (Artavia) then Apr (Headway); fall pair Sep (Artavia) then Oct (Headway)', () => {
-    expect(lineFor(3, N.ART)[0]).toMatch(/take-all areas, first spring application/);
-    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 28 days after the first/);
-    expect(lineFor(4, N.ART)).toEqual([]);
-    expect(lineFor(9, N.ART)[0]).toMatch(/take-all areas, first fall application/);
-    expect(lineFor(10, matrix.HEAD)[0]).toMatch(/take-all areas, second fall application, 3 fl oz per 1,000 sq ft/);
-    // October's Artavia line is large patch only now.
-    expect(lineFor(10, N.ART)[0]).toBe(`${N.ART} — mapped large patch with Velista at 2 gal per 1,000 sq ft`);
-  });
-  test('Headway rate is the Headway liquid label (EPA 100-1216): 3 fl oz, 28 days, so no "label rate to confirm" mark', () => {
-    const headway = matrix.CATALOG.find((p) => p.name === matrix.HEAD);
-    expect(headway).toMatchObject({ epa_reg_number: '100-1216', default_rate_per_1000: 3, max_label_rate_per_1000: 3, max_annual_per_1000: 23.75 });
-    // Two Headway passes a year (3 fl oz each) stay far under the label's 23.75 fl oz per 1,000 sq ft a year.
-    expect(2 * 3).toBeLessThan(headway.max_annual_per_1000);
-    expect(JSON.stringify(v13)).not.toMatch(/label rate to confirm/);
-  });
-  test('the notes keep the pair as the one named group 11 exception (Headway still carries the azoxystrobin)', () => {
-    const notes = v13.st_augustine.notes.join(' ');
-    expect(notes).toMatch(/Take-all: Artavia first, then Headway 28 days later/);
-    expect(notes).toMatch(/planned take-all pair: Headway adds propiconazole \(group 3\) to the same azoxystrobin \(group 11\), so group 11 repeats once and this is the named take-all exception/);
-    expect(notes).toMatch(/and the take-all pair \(Artavia, then Headway 28 days later, or Artavia twice; both recorded for take-all\)/);
-  });
-});
-
-describe('1b. Talak on mole crickets: a frozen water-in replaces the 24-hour hold for that use only', () => {
-  const { approvedReportProductFacts, withApplicationWaterIn, withApplicationHold } = require('../services/service-report/report-data');
+describe('1b. no customer-report override for Talak on mole crickets (the code and the gate are gone)', () => {
+  const reportData = require('../services/service-report/report-data');
   const { freezeReportProductFacts } = require('../services/complete-scheduled-service');
+  const { validateRule } = require('../services/service-report/lawn-watering-rule');
   const talak = { id: '7f1e2d3c-0000-4000-8000-0000000000aa', name: N.TAL, category: 'insecticide', epa_reg_number: '91234-145', active: true,
     label_verified_at: new Date(), approved_for_service_report: true, content_status: 'approved', customer_visibility: 'public',
     post_application_watering: { mode: 'hold', hold_hours: 24, source: 'label', label_note: 'Label: delay watering 24 hours.' } };
-  const base = () => approvedReportProductFacts(talak);
 
-  test('the row gate is on the July and August Talak rows, 0.5 inch', () => {
-    expect(matrix.MOLE_CRICKET_WATER_IN).toBe(0.5);
-    expect(matrix.INSERTS.find((s) => s.name === N.TAL && s.windowKey === matrix.WINDOWS.AUG).gates).toEqual({ trigger: 'mole_cricket_nymphs', moleCricketWaterInInches: 0.5 });
-    expect(matrix.UPDATES.find((u) => u.windowKey === matrix.WINDOWS.JUL).gates.moleCricketWaterInInches).toBe(0.5);
+  test('the override function and the immediate water-in flag do not exist', () => {
+    expect(reportData.withApplicationWaterIn).toBeUndefined();
+    expect(validateRule({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 1, water_in_immediately: true, source: 'label' }).valid).toBe(false);
   });
 
-  test('a mole cricket target freezes the water-in; every other target, or none, keeps the product\'s hold as it was', () => {
-    const facts = base();
-    expect(facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
-    const wet = withApplicationWaterIn(facts, { inches: 0.5, targets: ['Mole crickets'] });
-    expect(wet.wateringRule).toMatchObject({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 1, source: 'label' });
-    expect(wet.wateringRule.label_note).toBe('Label: water in right after application with up to 0.5 inch of water (mole cricket use).');
-    // Only the watering changes: the label's 1-day mowing hold stays (the catalog's own value, else 1 day).
-    expect(wet.mowHoldDays).toBe(1);
-    expect(withApplicationWaterIn({ ...facts, mowHoldDays: 2 }, { inches: 0.5, targets: ['Mole crickets'] }).mowHoldDays).toBe(2);
-    for (const targets of [['Mole cricket nymphs'], ['mole-crickets'], ['Chinch bugs', 'Mole crickets']]) {
-      expect(withApplicationWaterIn(facts, { inches: 0.5, targets }).wateringRule.mode).toBe('water_in');
-    }
-    for (const targets of [undefined, [], ['Chinch bugs'], ['Armyworms'], ['White grubs']]) expect(withApplicationWaterIn(facts, { inches: 0.5, targets })).toBe(facts);
-    expect(withApplicationWaterIn(facts, { targets: ['Mole crickets'] })).toBe(facts);
-    expect(withApplicationWaterIn(facts, { inches: 0, targets: ['Mole crickets'] })).toBe(facts);
-    expect(withApplicationWaterIn(null, { inches: 0.5, targets: ['Mole crickets'] })).toBeNull();
-  });
-
-  test('the completion freeze applies the applied row gate and the use target', () => {
+  test('a Talak use that records mole crickets (or no target) freezes the product\'s own 24-hour hold, gate or no gate', () => {
     const catalogById = new Map([[talak.id, talak]]);
-    const row = (gates) => ({ protocol: { structured: { products: [{ productId: talak.id, gates }] } } });
-    const frozen = (submitted, plan) => freezeReportProductFacts({ productIds: [talak.id], submitted, catalogById, plan })[talak.id];
-    const gated = row({ trigger: 'mole_cricket_nymphs', moleCricketWaterInInches: 0.5 });
-    expect(frozen([{ productId: talak.id, targets: ['Mole crickets'] }], gated).wateringRule).toMatchObject({ mode: 'water_in', water_in_inches: 0.5 });
-    // Chinch bugs, caterpillars, no target: the catalog's 24-hour hold, unchanged.
-    for (const targets of [['Chinch bugs'], ['Caterpillars'], undefined]) expect(frozen([{ productId: talak.id, targets }], gated).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
-    // A plan whose row has no gate (another month, an older plan) leaves a mole cricket use on the hold.
-    expect(frozen([{ productId: talak.id, targets: ['Mole crickets'] }], row({ trigger: 'x' })).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
-    // The Acelepryn caterpillar hold keeps working beside it: it only fills a silent catalog rule.
-    const silent = { ...talak, post_application_watering: null };
-    const acel = withApplicationHold(approvedReportProductFacts(silent), { hours: 24, targets: ['caterpillars'] });
-    expect(withApplicationWaterIn(acel, { inches: 0.5, targets: ['caterpillars'] })).toBe(acel);
+    const plan = { protocol: { structured: { products: [{ productId: talak.id, gates: { trigger: 'mole_cricket_nymphs' } }] } } };
+    for (const targets of [['Mole crickets'], [], undefined, ['Chinch bugs']]) {
+      const frozen = freezeReportProductFacts({ productIds: [talak.id], submitted: [{ productId: talak.id, targets }], catalogById, plan })[talak.id];
+      expect(frozen.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+    }
   });
 
-  test('the water-in is immediate: the rule carries water_in_immediately and the customer text prints no clock time', () => {
-    const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
-    const { validateRule } = require('../services/service-report/lawn-watering-rule');
-    const wet = withApplicationWaterIn(base(), { inches: 0.5, targets: ['Mole crickets'] });
-    expect(wet.wateringRule).toMatchObject({ mode: 'water_in', water_in_inches: 0.5, water_in_immediately: true });
-    expect(validateRule({ ...wet.wateringRule, water_in_immediately: 'yes' }).valid).toBe(false);
-    expect(validateRule({ ...wet.wateringRule, water_in_immediately: false }).rule.water_in_immediately).toBeUndefined();
-    const completedAt = '2026-07-14T14:00:00.000Z';
-    const out = buildWateringInstruction({ rules: [{ name: N.TAL, rule: wet.wateringRule }], completedAt });
-    expect(out.state).toBe('water_in');
-    expect(out.lines[0]).toBe('Water in right after application (up to 0.5 inch).');
-    expect(out.lines.join(' ')).not.toMatch(/\bby\b|\d{1,2}(:\d{2})? ?(AM|PM)|today|tonight|hour/i);
-    expect(out.lines[out.lines.length - 1]).toBe('Run it even if it is not your usual day.');
-    // The ordinary water-in still prints its deadline.
-    const plain = buildWateringInstruction({ rules: [{ name: 'x', rule: { ...wet.wateringRule, water_in_immediately: undefined, water_in_by_hours: 24 } }], completedAt });
-    expect(plain.lines[0]).toMatch(/^Water in today’s treatment by /);
-    // A visit that mixes an immediate and a timed water-in keeps the timed text.
-    const mixed = buildWateringInstruction({ rules: [{ name: N.TAL, rule: wet.wateringRule }, { name: 'x', rule: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' } }], completedAt });
-    expect(mixed.lines[0]).toMatch(/^Water in today’s treatment by /);
-    // The mow hold stays beside it (the label's one day).
-    const mow = buildWateringInstruction({ rules: [{ name: N.TAL, rule: wet.wateringRule, mowHoldDays: wet.mowHoldDays }], completedAt });
-    expect(mow.mowHold).toBeTruthy();
-  });
-
-  test('the plan note says what the gate does', () => {
-    expect(engine.v13GateNotes({ moleCricketWaterInInches: 0.5 })).toEqual([{ key: 'moleCricketWaterInInches', severity: 'note', text: 'Mole cricket nymph use: water in right after application with up to 0.5 inch (label); the 24-hour hold does not apply to this use.' }]);
+  test('migration 183000 takes the gate off the July and August Talak rows and gives them the 1.0 fl oz reference rate', () => {
+    const round3 = require('../models/migrations/20261007183000_lawn_v13_matrix_adds_round3');
+    expect(round3.GATE).toBe('moleCricketWaterInInches');
+    expect([round3.MOLE_CRICKET_RATE, round3.MOLE_CRICKET_UNIT]).toEqual([1, 'fl oz']);
+    expect([round3.HEADWAY_FRAC, round3.HEADWAY_RATE, round3.HEADWAY_UNIT]).toEqual(['3 + 11', 3, 'fl oz']);
   });
 });
 
@@ -302,7 +238,8 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const gate = source.indexOf("claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn' && Array.isArray(products)");
     expect(gate).toBeGreaterThan(source.indexOf('return ({ status: 422, body: internalOnlyProductsBlock });'));
-    expect(source.slice(gate, gate + 700)).toContain('lawnProhibitedProductBlocks(db, products, { propertyType: svc.property_type })');
+    expect(source.slice(gate, gate + 900)).toContain('treatedPropertyType(db, { propertyId: svc.property_id, customerId: svc.customer_id, fallback: svc.property_type })');
+    expect(source.slice(gate, gate + 900)).toContain('lawnProhibitedProductBlocks(db, products, { propertyType })');
     expect(source.slice(gate, gate + 900)).toContain('status: 400, body: lawnProhibitedProductsBlockPayload(prohibited)');
   });
 
@@ -340,6 +277,40 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
       const noRead = () => { throw new Error('no database read expected'); };
       expect((await run(noRead, { ...visit, property_type: 'business' })).capped.size).toBe(0);
       expect((await run(noRead, { ...visit, property_type: 'residential' })).capped.get('ron')).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate;
+    }
+  });
+
+  test('the treated property decides: the visit\'s linked customer_properties type first, the customer\'s as the fallback', async () => {
+    const tables = ({ property, customer }) => (table) => ({ where: () => ({ first: async () => (table === 'customer_properties' ? property : customer) }) });
+    const type = (stub, args) => prohibited.treatedPropertyType(stub, args);
+    // A residential customer with a commercial lot linked to the visit, and the reverse.
+    expect(await type(tables({ property: { property_type: 'commercial' }, customer: { property_type: 'residential' } }), { propertyId: 'p', customerId: 'c', fallback: 'residential' })).toBe('commercial');
+    expect(await type(tables({ property: { property_type: 'residential' }, customer: { property_type: 'commercial' } }), { propertyId: 'p', customerId: 'c', fallback: 'commercial' })).toBe('residential');
+    // The linked row says nothing (null type, or no row): the customer's type.
+    expect(await type(tables({ property: { property_type: null }, customer: { property_type: 'business' } }), { propertyId: 'p', customerId: 'c', fallback: 'business' })).toBe('business');
+    expect(await type(tables({ property: undefined, customer: { property_type: 'business' } }), { propertyId: 'p', customerId: 'c' })).toBe('business');
+    // No property on the visit: the fallback, else the customer's row, else nothing; a failed read says nothing.
+    expect(await type(tables({ customer: { property_type: 'residential' } }), { customerId: 'c', fallback: 'commercial' })).toBe('commercial');
+    expect(await type(tables({ customer: { property_type: 'commercial' } }), { customerId: 'c' })).toBe('commercial');
+    expect(await type(tables({}), {})).toBeUndefined();
+    const broken = () => { throw new Error('boom'); };
+    expect(await type(broken, { propertyId: 'p', customerId: 'c' })).toBeUndefined();
+  });
+
+  test('the plan judges the linked property: commercial lot beside a residential customer passes, the reverse is blocked', async () => {
+    const savedGate = process.env.GATE_LAWN_V13;
+    process.env.GATE_LAWN_V13 = 'true';
+    const spy = jest.spyOn(require('../services/application-limits'), 'checkLimits').mockResolvedValue({ blocks: [], warnings: [] });
+    try {
+      const items = [{ selected: true, product: { id: 'ron', name: 'Ronstar G' } }];
+      const visit = { scheduled_date: '2026-10-07', customer_id: 'c', id: 'v', property_id: 'p', property_type: 'residential' };
+      const tables = (property, customer) => (table) => ({ where: () => ({ first: async () => ({ property_type: table === 'customer_properties' ? property : customer }) }) });
+      const run = (knex, service) => engine.v13VisitLimits(knex, service, items, new Map());
+      expect((await run(tables('commercial', 'residential'), visit)).capped.size).toBe(0);
+      expect((await run(tables('residential', 'commercial'), { ...visit, property_type: 'commercial' })).capped.get('ron')).toHaveLength(1);
     } finally {
       spy.mockRestore();
       if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate;

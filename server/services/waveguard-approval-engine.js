@@ -366,4 +366,5 @@ module.exports = {
   evaluateWaveGuardManagerApprovals,
   managerApprovalSummary,
   latestComparableGroupApplication,
+  productGroups,
 };

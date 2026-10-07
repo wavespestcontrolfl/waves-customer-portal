@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
 const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
-const { lawnProhibitedProductBlock } = require('./lawn-prohibited-products');
+const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -521,7 +521,6 @@ const V13_GATE_NOTES = [
   { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'Not allowed in North Port this month; skip this product.' },
   { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port holds this product from June to September until the city confirms. Do not apply it at this visit.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
-  { key: 'moleCricketWaterInInches', text: (inches) => `Mole cricket nymph use: water in right after application with up to ${inches} inch (label); the 24-hour hold does not apply to this use.` },
   { key: 'delayWateringOrMowingHours', text: (hours) => `Delay watering (irrigation) or mowing for ${hours} hours after application (label).` },
   { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
   { key: 'noWaterIn', text: () => 'Do not water this in.' },
@@ -1648,14 +1647,11 @@ function v13ProposedApplication(product, row, targets) {
 // being planned, so a yearly cap shared across formulations (prodiamine, dithiopyr)
 // counts it with the season's earlier applications; the
 // visit's own earlier ledger rows are left out so a re-plan never counts it twice.
-// The Ronstar rule is for residential lawns: the visit's customer property_type (the plan's own row
-// carries it; the tank sheet's slimmer row does not, so it is read, and only for a product that matches).
+// The Ronstar rule is for residential lawns: the visit's linked property type, else the customer's (the plan's
+// own row carries it; the tank sheet's slimmer row does not, so it is read, and only for a product that matches).
 async function lawnProhibitedForVisit(knex, service, product) {
   if (!lawnProhibitedProductBlock(product, {})) return null;
-  let propertyType = service.property_type;
-  if (propertyType === undefined && service.customer_id) {
-    propertyType = (await savepointRead(knex, (k) => k('customers').where({ id: service.customer_id }).first('property_type')).catch(() => null))?.property_type;
-  }
+  const propertyType = await treatedPropertyType(knex, { propertyId: service.property_id, customerId: service.customer_id, fallback: service.property_type });
   return lawnProhibitedProductBlock(product, { propertyType });
 }
 
