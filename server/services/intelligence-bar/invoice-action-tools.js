@@ -49,7 +49,7 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
 const { maskEmail, maskPhone } = require('./closeout-repair-tools');
-const { assertInvoiceCollectible, invoiceAmountDue } = require('../invoice-helpers');
+const { assertInvoiceCollectible, invoiceAmountDue, neverRanVisitStatus } = require('../invoice-helpers');
 
 const PER_CHARGE_CAP_CENTS = 50000;
 const DAILY_CAP_CENTS = 150000;
@@ -159,6 +159,17 @@ async function sendRefusal(invoice, dueCents) {
   const at = { invoice_id: invoice.id };
   if (invoice.payer_statement_id) return refusal('Invoice is billed on the payer’s monthly statement; not sent individually.', 'payer_statement', at);
   if (dueCents <= 0) return refusal('Nothing is due on this invoice, so there is no pay link to send.', 'nothing_due', at);
+  // An annual-plan invoice's send re-enters under the renewal gate, which does not
+  // carry the bar's approved total or its no-credit rule: it stays on the Invoices page.
+  if (invoice.annual_prepay_term_id) return refusal('This is an annual-plan invoice. Send it from the Invoices page.', 'annual_plan_invoice', at);
+  // A linked visit that never ran: the Send handler would void the invoice instead
+  // of sending it, an effect the bar never takes (the route's own refusal text).
+  const visitId = await require('../invoice').linkedScheduledServiceId(invoice, db);
+  const visit = visitId ? await db('scheduled_services').where({ id: visitId }).first('status') : null;
+  const terminal = neverRanVisitStatus(visit?.status);
+  if (terminal) {
+    return refusal(`Linked visit is ${terminal}; delivery not attempted. Void or keep this invoice from the Invoices page.`, 'visit_terminal', at);
+  }
   if (await disputeHold(invoice.customer_id)) {
     return refusal('This customer has a billing-dispute hold. Send this invoice from the Invoices page if you mean to override it.', 'collection_hold', at);
   }
@@ -210,6 +221,8 @@ async function buildSendPlan(input) {
     email: legs.emailLine,
     send_note: invoice.sent_at ? `Already sent on ${etStamp(invoice.sent_at)}. This sends it again.` : 'Not sent before.',
     review_request: 'No review request is sent.',
+    // The Send handler's own effects the card must name (the bar skips the credit step).
+    effects_note: 'No account credit is applied by this send. If the visit is cancelled before the send runs, the Invoices page send voids the invoice instead of sending it.',
     _version: {
       invoice_id: invoice.id,
       status: invoice.status,
@@ -430,7 +443,10 @@ async function buildChargePlan(input) {
       : 'No card surcharge',
     total_charged: money(totalCents),
     receipt: 'After the charge succeeds, the customer gets the payment receipt by email and/or text per their receipt settings; a text waits for 8 AM–8 PM ET.',
-    limits: `At most ${money(PER_CHARGE_CAP_CENTS)} per charge and ${money(DAILY_CAP_CENTS)} a day from the bar; ${money(usedCents)} charged from the bar today.`,
+    limits: `At most ${money(PER_CHARGE_CAP_CENTS)} per charge and ${money(DAILY_CAP_CENTS)} a day from the bar.`,
+    // Shown on the card, kept out of the approval fingerprint (`_` key): another
+    // bar charge landing before Confirm changes it without changing this charge.
+    _charged_today: `${money(usedCents)} charged from the bar today`,
     _version: {
       invoice_id: invoice.id,
       status: invoice.status,
@@ -504,6 +520,7 @@ function cardLines(toolName, preview) {
       { kind: 'comms', text: preview.email },
       { kind: 'operational', text: preview.send_note },
       { kind: 'operational', text: preview.review_request },
+      { kind: 'billing', text: preview.effects_note },
     ];
   }
   if (toolName === 'charge_invoice') {

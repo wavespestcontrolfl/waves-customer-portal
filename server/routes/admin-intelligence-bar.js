@@ -863,7 +863,7 @@ const PINNED_DISPLAY_BUILDERS = {
     ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
     : null),
   charge_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'charge_invoice'
-    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, card: preview.card, balance: preview.balance, surcharge: preview.surcharge, total_charged: preview.total_charged }
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, card: preview.card, balance: preview.balance, surcharge: preview.surcharge, total_charged: preview.total_charged, bar_today: preview._charged_today }
     : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the

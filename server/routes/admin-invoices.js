@@ -1741,8 +1741,9 @@ async function invoiceSendHandler(req, res, next) {
         operatorInitiated: true,
         holdExempt: 'operator',
         actorTechnicianId: req.technicianId || null,
-        // Set only by sendInvoiceFromBar (never an HTTP field): the total the bar's card showed.
-        ...(req.ibApprovedSend ? { expectedTotal: req.ibApprovedSend.expectedTotal } : {}),
+        // Set only by sendInvoiceFromBar (never an HTTP field): the total the bar's
+        // card showed, and no account-credit draw (the card never offered one).
+        ...(req.ibApprovedSend ? { expectedTotal: req.ibApprovedSend.expectedTotal, skipAccountCreditAutoApply: true } : {}),
       });
     } catch (err) {
       // A FIRST delivery finding the invoice already owned by another live

@@ -62,6 +62,8 @@ function freshState() {
     stripe_invoice_charge_attempts: [],
     payments: [],
     ib_pending_actions: [],
+    scheduled_services: [],
+    service_records: [],
   };
 }
 
@@ -208,7 +210,8 @@ describe('send_invoice card', () => {
     expect(p.text).toBe('Text to ***0100: the invoice text (template invoice_sent, or its pre-service or annual-prepay variant when that applies) with the pay link. Not sent if the customer opted out of texts.');
     expect(p.email).toBe('Email to r***@example.com: the invoice email (template invoice.sent), subject "Invoice WPC-2099-0001 — $129.00", with the invoice PDF and the pay link.');
     const lines = cardLines('send_invoice', p).map((l) => l.text);
-    expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line: Quarterly Pest Control $99.00', p.text, p.email]));
+    expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line: Quarterly Pest Control $99.00', p.text, p.email,
+      'No account credit is applied by this send. If the visit is cancelled before the send runs, the Invoices page send voids the invoice instead of sending it.']));
     expect(JSON.stringify(p)).not.toContain('9415550100');
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
   });
@@ -228,9 +231,23 @@ describe('send_invoice card', () => {
     ['processing', { status: 'processing' }, 'Bank payment is already processing'],
     ['payer statement', { payer_statement_id: 'stmt-1' }, 'Invoice is billed on the payer’s monthly statement; not sent individually.'],
     ['nothing due', { credit_applied: '129.00' }, 'Nothing is due on this invoice, so there is no pay link to send.'],
+    ['an annual-plan invoice', { annual_prepay_term_id: 'term-1' }, 'This is an annual-plan invoice. Send it from the Invoices page.'],
   ])('refuses %s with the route text', async (_label, overrides, text) => {
     state.invoices[0] = invoiceRow(overrides);
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ error: text });
+  });
+
+  test('a linked visit that never ran is refused (the Send handler would void the invoice instead)', async () => {
+    state.invoices[0] = invoiceRow({ scheduled_service_id: 'svc-1' });
+    state.scheduled_services = [{ id: 'svc-1', status: 'cancelled' }];
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({
+      code: 'visit_terminal', error: 'Linked visit is cancelled; delivery not attempted. Void or keep this invoice from the Invoices page.',
+    });
+    state.invoices[0] = invoiceRow({ scheduled_service_id: null, service_record_id: 'rec-1' });
+    state.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1' }];
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'visit_terminal' });
+    state.scheduled_services = [{ id: 'svc-1', status: 'completed' }];
+    await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ preview: true });
   });
 
   test('refuses a dispute hold, no recipient, an unknown invoice and a double target', async () => {
@@ -253,7 +270,7 @@ describe('the confirmation card headline', () => {
     const charge = await preview('charge_invoice', { invoice_id: INV });
     expect(confirmationDisplayParams('charge_invoice', { invoice_id: INV }, charge)).toEqual({
       invoice: 'WPC-2099-0001', customer: 'Robin Sample', card: 'Visa •••• 4242 (exp 12/32)', balance: '$129.00',
-      surcharge: '$3.87 card surcharge (3.00%)', total_charged: '$132.87',
+      surcharge: '$3.87 card surcharge (3.00%)', total_charged: '$132.87', bar_today: '$0.00 charged from the bar today',
     });
   });
 });
@@ -309,7 +326,7 @@ describe('charge_invoice card', () => {
     expect(p).toMatchObject({
       preview: true, invoice_number: 'WPC-2099-0001', customer_name: 'Robin Sample', payment_method_id: CARD,
       card: 'Visa •••• 4242 (exp 12/32)', balance: '$129.00', surcharge: '$3.87 card surcharge (3.00%)', total_charged: '$132.87',
-      limits: 'At most $500.00 per charge and $1500.00 a day from the bar; $0.00 charged from the bar today.',
+      limits: 'At most $500.00 per charge and $1500.00 a day from the bar.', _charged_today: '$0.00 charged from the bar today',
     });
     expect(p.receipt).toMatch(/payment receipt/);
     expect(p._version).toMatchObject({ payment_method_id: CARD, base_cents: 12900, surcharge_cents: 387, charge_cents: 13287 });
@@ -400,6 +417,21 @@ describe('charge caps', () => {
     state.ib_pending_actions.push({ tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, result: { success: true }, params: { invoice_id: 'inv-done' } });
     await expect(chargedTodayCents(db, { excludeInvoiceId: INV })).resolves.toBe(140000);
     await expect(preview('charge_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'charge_limit' });
+  });
+
+  test('another bar charge between card and Confirm (or this approval being consumed) does not change the approval fingerprint', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    const before = await preview('charge_invoice', { invoice_id: INV });
+    // Confirm consumes this card's own approval before the route re-runs the preview,
+    // and another card for another invoice is in flight.
+    state.ib_pending_actions = [
+      { tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, result: null, params: { invoice_id: INV } },
+      { tool_name: 'charge_invoice', status: 'confirmed', consumed_day: TODAY, result: null, params: { invoice_id: INV2 } },
+    ];
+    state.payments = [{ amount: '100.00', payment_date: TODAY, status: 'paid', metadata: { initiated_via: 'intelligence_bar' } }];
+    const live = await preview('charge_invoice', { invoice_id: INV });
+    expect(live._charged_today).toBe('$600.00 charged from the bar today');
+    expect(previewFingerprint(live)).toBe(previewFingerprint(before));
   });
 
   test('the guard takes the advisory lock, then rechecks both caps and the dispute hold on the charge transaction', async () => {
