@@ -392,6 +392,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
         ? "Clearing the email also stamps the lead's email-confirmed time, but an open email-disagreement triage card on this lead stays open until a real address is saved"
         : "The email change also stamps the lead's email-confirmed time, which counts as the correction for any open email-disagreement triage card on this lead");
     }
+    if (preview.estimates_keep_address) {
+      push('operational', 'Estimates already made for this lead keep the address they were made with');
+    }
     push('operational', "A contact-updated entry is appended to the lead's activity history; a linked customer account is NOT changed");
   }
   // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a
