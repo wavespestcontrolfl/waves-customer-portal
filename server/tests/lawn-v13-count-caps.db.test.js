@@ -5,6 +5,7 @@ const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261007170000_lawn_v13_count_caps');
 const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps_wording');
 const restore = require('../models/migrations/20261007172000_lawn_v13_celsius_cap_v13_only');
+const gateOnly = require('../models/migrations/20261007174000_lawn_v13_count_caps_v13_only');
 const { DIMENSION } = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const { submittedProductLimitFindings } = require('../services/complete-scheduled-service');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -361,11 +362,13 @@ describeDb('v13 count caps through PostgreSQL', () => {
       expect((await celsiusRows())[0].description).toBe('Celsius WG: max 2 applications per lawn per year (owner 2026-10-06; lowered from 3).');
     });
 
-    test('the override lowers Celsius only, only while the gate is on, and never raises a value', () => {
+    test('the override lowers a stored value to the v13 cap, only while the gate is on, and never raises one', () => {
       expect(effectiveCountCap('Celsius WG', 3, true)).toBe(2);
       expect(effectiveCountCap('Celsius WG', 3, false)).toBe(3);
       expect(effectiveCountCap('Celsius WG', 1, true)).toBe(1);
-      expect(effectiveCountCap('Arena 50 WDG', 3, true)).toBe(3);
+      expect(effectiveCountCap('Arena 50 WDG', 3, true)).toBe(2);
+      expect(effectiveCountCap('Arena 50 WDG', 3, false)).toBe(3);
+      expect(effectiveCountCap('Tetrino Insecticide', 3, true)).toBe(3);
       expect(effectiveCountCap('Celsius WG', null, true)).toBeNull();
     });
 
@@ -415,6 +418,143 @@ describeDb('v13 count caps through PostgreSQL', () => {
         delete process.env.GATE_LAWN_V13;
         expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[CELSIUS].id], serviceDate: '2026-06-10', database: knex })).toEqual([]);
       });
+    });
+  });
+
+  describe('every v13 count cap is behind the gate (20261007174000)', () => {
+    const applicationLimits = require('../services/application-limits');
+    const NEW_CAPS = [ARENA, CERTAINTY, BLINDSIDE];
+    const audits = () => knex('lawn_protocol_audit_log').where({ action: 'v13_count_caps_row_removed' });
+    beforeEach(async () => {
+      await knex('product_limits').del(); await knex('product_aliases').del(); await knex('lawn_protocol_audit_log').del();
+      jest.spyOn(console, 'log').mockImplementation(() => {});
+    });
+    afterEach(() => jest.restoreAllMocks());
+
+    test('deletes exactly the three rows 170000 inserted (and 171000 reworded), audits each, leaves Celsius and other rows alone', async () => {
+      await migration.up(knex); await wording.up(knex);
+      const [admin] = await knex('product_limits').insert({ product_id: catalog['Tetrino Insecticide'].id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 4, limit_unit: 'applications', severity: 'hard_block', description: 'admin' }).returning('*');
+      const celsiusBefore = await limitsOf(CELSIUS);
+      await gateOnly.up(knex);
+      for (const name of NEW_CAPS) expect(await limitsOf(name)).toHaveLength(0);
+      expect(await limitsOf(CELSIUS)).toEqual(celsiusBefore);
+      expect(await limitsOf('Tetrino Insecticide')).toEqual([admin]);
+      expect(await audits()).toHaveLength(3);
+      await gateOnly.up(knex); // idempotent
+      expect(await audits()).toHaveLength(3);
+    });
+
+    test('an admin-edited row (another value, severity or description) is left alone and logged; the others are still deleted', async () => {
+      await migration.up(knex); await wording.up(knex);
+      await knex('product_limits').where({ product_id: catalog[ARENA].id }).update({ limit_value: 3 });
+      await knex('product_limits').where({ product_id: catalog[CERTAINTY].id }).update({ description: 'admin wrote this' });
+      await gateOnly.up(knex);
+      expect(await limitsOf(ARENA)).toHaveLength(1);
+      expect(await limitsOf(CERTAINTY)).toHaveLength(1);
+      expect(await limitsOf(BLINDSIDE)).toHaveLength(0);
+      expect(console.log.mock.calls.flat().join('\n')).toMatch(/Arena 50 WDG keeps its stored annual_max_apps row/);
+      expect(await audits()).toHaveLength(1);
+    });
+
+    test('down re-inserts each deleted row exactly (same id and every field), only where the product has no row, then spends the audit rows', async () => {
+      await migration.up(knex); await wording.up(knex);
+      const before = await knex('product_limits').whereIn('product_id', NEW_CAPS.map((n) => catalog[n].id)).orderBy('id');
+      await gateOnly.up(knex);
+      // An admin adds their own Blindside row meanwhile: down must not add a second.
+      await knex('product_limits').insert({ product_id: catalog[BLINDSIDE].id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 5, limit_unit: 'applications', severity: 'warning', description: 'admin' });
+      await gateOnly.down(knex);
+      const restored = await knex('product_limits').whereIn('product_id', [catalog[ARENA].id, catalog[CERTAINTY].id]).orderBy('id');
+      expect(restored.map((r) => r.id).sort()).toEqual(before.filter((r) => r.product_id !== catalog[BLINDSIDE].id).map((r) => r.id).sort());
+      for (const row of restored) expect(row).toEqual(before.find((b) => b.id === row.id));
+      expect(await limitsOf(BLINDSIDE)).toHaveLength(1);
+      expect(Number((await limitsOf(BLINDSIDE))[0].limit_value)).toBe(5);
+      expect(await audits()).toHaveLength(0);
+    });
+
+    describe('with no stored rows (after 174000)', () => {
+      async function history(name, dates, propertyId = null) {
+        const f = await fixture(knex);
+        for (const date of dates) await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[name].id, application_date: date, application_rate: 0.1, rate_unit: 'oz' });
+        return f;
+      }
+      const check = (customerId, name, gate) => {
+        if (gate) process.env.GATE_LAWN_V13 = 'true'; else delete process.env.GATE_LAWN_V13;
+        return applicationLimits.checkLimits(customerId, catalog[name].id, new Date('2026-06-10T16:00:00Z'), knex, {});
+      };
+
+      test.each(NEW_CAPS)('%s: gate off, the 3rd application is allowed (nothing is stored); gate on, it is blocked at 2', async (name) => {
+        const two = await history(name, ['2026-02-02', '2026-03-16']);
+        const off = await check(two.customerId, name, false);
+        expect(off.blocks).toEqual([]);
+        const on = await check(two.customerId, name, true);
+        expect(on.blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', current: 2, max: 2 })]);
+        expect(on.blocks[0].description).toMatch(/v13 lawn program/);
+        const one = await history(name, ['2026-02-02']);
+        expect((await check(one.customerId, name, true)).blocks).toEqual([]);
+      });
+
+      test.each(NEW_CAPS)('%s: the closeout flags the 3rd application under the gate, and says nothing with it off', async (name) => {
+        const f = await fixture(knex);
+        const visit = await f.visit(0, { scheduled_date: '2026-06-10', service_type: 'Every 6 Weeks Lawn Care Service' });
+        for (const date of ['2026-02-02', '2026-03-16']) await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[name].id, application_date: date, application_rate: 0.1, rate_unit: 'oz' });
+        process.env.GATE_LAWN_V13 = 'true';
+        expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[name].id], serviceDate: '2026-06-10', database: knex }))
+          .toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productName: name, limitType: 'annual_max_apps', current: 2, max: 2 })]);
+        delete process.env.GATE_LAWN_V13;
+        expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[name].id], serviceDate: '2026-06-10', database: knex })).toEqual([]);
+      });
+
+      test('a stored product row is lowered, never replaced or raised: an admin Arena row of 1 stays 1 under the gate', async () => {
+        await knex('product_limits').insert({ product_id: catalog[ARENA].id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 1, limit_unit: 'applications', severity: 'hard_block', description: 'admin' });
+        const one = await history(ARENA, ['2026-02-02']);
+        const on = await check(one.customerId, ARENA, true);
+        expect(on.blocks).toEqual([expect.objectContaining({ max: 1 })]);
+        await knex('product_limits').where({ product_id: catalog[ARENA].id }).update({ limit_value: 9 });
+        const two = await history(ARENA, ['2026-02-02', '2026-03-16']);
+        expect((await check(two.customerId, ARENA, true)).blocks).toEqual([expect.objectContaining({ max: 2 })]);
+        expect((await check(two.customerId, ARENA, false)).blocks).toEqual([]);
+      });
+    });
+  });
+
+  describe('a yearly count without a treated property is per lawn (legacy callers)', () => {
+    const applicationLimits = require('../services/application-limits');
+    let capped;
+    beforeAll(async () => {
+      capped = await product('Per-lawn fixture');
+      await knex('product_limits').insert({ product_id: capped.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 2, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' });
+    });
+    async function twoLawns(placements) {
+      const f = await fixture(knex);
+      const [other] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const properties = [f.property.id, other.id];
+      for (const [index, date] of placements) {
+        let recordId = null;
+        if (index != null) {
+          const [past] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: properties[index], scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+          [{ id: recordId }] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: date, service_type: 'Lawn fixture' }).returning('id');
+        }
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: capped.id, application_date: date, application_rate: 1, rate_unit: 'oz', service_record_id: recordId });
+      }
+      return f;
+    }
+    const blocks = async (f, opts = {}) => (await applicationLimits.checkLimits(f.customerId, capped.id, new Date('2026-06-10T16:00:00Z'), knex, opts)).blocks;
+
+    test('one application at each of two properties is not a block (1 per lawn), with no property given or with either', async () => {
+      const f = await twoLawns([[0, '2026-02-02'], [1, '2026-03-16']]);
+      expect(await blocks(f)).toEqual([]);
+      expect(await blocks(f, { propertyId: f.property.id })).toEqual([]);
+    });
+
+    test('two applications at one property are a block for that property and for a caller with none; the other property is clear', async () => {
+      const f = await twoLawns([[0, '2026-02-02'], [0, '2026-03-16'], [1, '2026-04-10']]);
+      expect(await blocks(f)).toEqual([expect.objectContaining({ current: 2, max: 2 })]);
+      expect(await blocks(f, { propertyId: f.property.id })).toHaveLength(1);
+    });
+
+    test('an application whose property is unknown counts with the busiest property', async () => {
+      const f = await twoLawns([[0, '2026-02-02'], [null, '2026-03-16']]);
+      expect(await blocks(f)).toEqual([expect.objectContaining({ current: 2 })]);
     });
   });
 
@@ -633,6 +773,23 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(limitBlocks(await plan(one.visitA, CELSIUS))).toEqual([]);
       } finally {
         await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 2 });
+      }
+    });
+
+    test.each([ARENA, CELSIUS])('%s with NO stored row at all (after 20261007174000 for Arena): gate on, the plan blocks the 3rd application from the synthetic v13 cap; gate off, nothing is blocked', async (name) => {
+      const saved = await knex('product_limits').where({ product_id: catalog[name].id }).select('*');
+      await knex('product_limits').where({ product_id: catalog[name].id }).del();
+      try {
+        const two = await twoProperties(name, ['2026-02-02', '2026-03-16']);
+        const blocked = limitBlocks(await plan(two.visitA, name));
+        expect(blocked).toHaveLength(1);
+        expect(blocked[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+        expect(limitBlocks(await plan(two.visitB, name))).toEqual([]);
+        delete process.env.GATE_LAWN_V13;
+        const off = await buildPlanForService(two.visitA.id, { db: knex, selectedConditionalProductNames: [name] });
+        expect(limitBlocks(off)).toEqual([]);
+      } finally {
+        if (saved.length) await knex('product_limits').insert(saved);
       }
     });
 

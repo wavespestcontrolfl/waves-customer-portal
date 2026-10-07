@@ -10,12 +10,12 @@ router.use(adminAuthenticate, requireAdmin);
 // POST /api/admin/compliance/check-limits — check proposed products
 router.post('/check-limits', async (req, res, next) => {
   try {
-    const { customerId, products } = req.body;
+    const { customerId, products, propertyId = null } = req.body;
     if (!customerId || !products?.length) return res.status(400).json({ error: 'customerId and products required' });
 
     const results = [];
     for (const p of products) {
-      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date());
+      const check = await LimitChecker.checkLimits(customerId, p.productId, new Date(), undefined, { propertyId: propertyId || null });
       results.push({ productId: p.productId, productName: p.name, ...check });
     }
 

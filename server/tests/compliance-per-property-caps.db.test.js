@@ -90,6 +90,30 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     }
   });
 
+  test('getProductLimits follows the gate for the v13-only caps: Arena has no stored row, so it appears (cap 2, exceeded) only with the gate on', async () => {
+    const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+    expect(await db('product_limits').where({ product_id: arena.id, limit_type: 'annual_max_apps' })).toHaveLength(0);
+    const customerId = await customerWithTwoProperties([0, 0], arena);
+    const saved = process.env.GATE_LAWN_V13;
+    const forArena = async () => (await ComplianceService.getProductLimits(customerId)).limits.find((l) => l.productId === arena.id && l.limitType === 'annual_max_apps');
+    try {
+      delete process.env.GATE_LAWN_V13;
+      expect(await forArena()).toBeUndefined();
+      process.env.GATE_LAWN_V13 = 'true';
+      expect(await forArena()).toMatchObject({ limitValue: 2, currentUsage: 2, status: 'exceeded', severity: 'hard_block' });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved;
+    }
+  });
+
+  test('getPropertyComplianceStatus (the compliance page, the context aggregator) is per lawn: one application at each of two properties is no block; two at one property is', async () => {
+    const applicationLimits = require('../services/application-limits');
+    const spread = await customerWithTwoProperties([0, 1]);
+    expect((await applicationLimits.getPropertyComplianceStatus(spread)).blocks).toBe(0);
+    const stacked = await customerWithTwoProperties([0, 0]);
+    expect((await applicationLimits.getPropertyComplianceStatus(stacked)).blocks).toBe(1);
+  });
+
   test('getDashboard: three customers with one application each never trip a per-lawn cap of 3 on the company total; two at one lawn of 3 does warn', async () => {
     const [capped] = await db('products_catalog').insert({ name: `Count cap dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
     made.products.push(capped.id);

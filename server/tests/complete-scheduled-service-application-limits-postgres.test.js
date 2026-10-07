@@ -218,6 +218,24 @@ postgres('closeout: a hard product count limit flags, never refuses', () => {
     } finally { mockPg = real; await cleanup(f); }
   });
 
+  test('Arena has no stored limit row (the v13 cap lives in code): a 3rd Arena application is flagged with the gate on', async () => {
+    const f = await seedLawnVisit({ priorApplications: 0 });
+    try {
+      const arena = await mockPg('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      expect(await mockPg('product_limits').where({ product_id: arena.id, limit_type: 'annual_max_apps' })).toHaveLength(0);
+      const year = new Date().getFullYear();
+      for (const date of [`${year}-02-02`, `${year}-03-02`]) {
+        const [past] = await mockPg('scheduled_services').insert({ customer_id: f.customerId, property_id: f.propertyId, scheduled_date: date, service_type: 'Lawn fixture', status: 'completed' }).returning('*');
+        const [rec] = await mockPg('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+        await mockPg('property_application_history').insert({ customer_id: f.customerId, product_id: arena.id, application_date: date, application_rate: 0.29, rate_unit: 'oz', service_record_id: rec.id });
+      }
+      const out = await complete(f, { products: [product(f, { productId: arena.id, rate: 0.29 })] });
+      expect(out.status).toBe(200);
+      expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Arena 50 WDG is over its yearly application limit\.$/)]);
+      expect(await mockPg('property_application_history').where({ customer_id: f.customerId, product_id: arena.id }).whereNull('retracted_at')).toHaveLength(3);
+    } finally { await cleanup(f); }
+  });
+
   test('more than 200 raw products is a 400 before any write', async () => {
     const f = await seedLawnVisit({ priorApplications: 0 });
     try {

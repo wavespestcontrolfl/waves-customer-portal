@@ -1983,7 +1983,9 @@ async function hardLimitedProductNames(database, ids) {
     .whereIn('limit_type', Object.keys(HARD_COUNT_LIMIT_LABELS))
     .select('product_id'));
   const limited = new Set((limitRows || []).map((row) => String(row.product_id)));
-  return new Map(rows.filter((row) => limited.has(String(row.id))).map((row) => [String(row.id), row.name]));
+  // The v13 count caps (Arena, Certainty, Blindside, Celsius) live in code, not in a stored row.
+  return new Map(rows.filter((row) => limited.has(String(row.id)) || require('../config/lawn-v13-count-caps').v13CountCapFor(row.name))
+    .map((row) => [String(row.id), row.name]));
 }
 
 // Every finding for one product: one per violated hard limit (the yearly count and the minimum
@@ -9178,7 +9180,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const alertedMoa = new Set();
         for (const p of products) {
           if (!p.productId) continue;
-          const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, proposedDate, connection);
+          const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, proposedDate, connection, { propertyId: svc.property_id || null });
           // checkLimits returns blocks (hard_block severity) and
           // warnings (warn/info severity). We surface BOTH for MOA
           // violations — operationally the difference is that hard

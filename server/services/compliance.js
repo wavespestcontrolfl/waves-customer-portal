@@ -3,7 +3,7 @@ const logger = require('./logger');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
-const { effectiveCountCap } = require('../config/lawn-v13-count-caps');
+const { effectiveCountCap, V13_COUNT_CAPS, syntheticCountLimit } = require('../config/lawn-v13-count-caps');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
 // JSON string — the writer must never throw on a malformed capture.
@@ -66,18 +66,21 @@ function areaTreatedSqft(sp) {
 // instead, so it never counts. The category is compared case-insensitively:
 // older history rows copied "Fertilizer" from the catalog before categories
 // were lowercased.
-// The per-lawn count an annual_max_apps cap is judged on: the busiest treated property's
-// applications, plus every application that cannot be placed at a property (application-limits
-// counts those at any property, since it cannot prove they happened elsewhere).
-function worstPropertyCount(apps = []) {
-  let unplaced = 0;
-  const byProperty = new Map();
-  for (const app of apps) {
-    const property = app && app.treated_property_id;
-    if (!property) unplaced += 1;
-    else byProperty.set(String(property), (byProperty.get(String(property)) || 0) + 1);
-  }
-  return unplaced + Math.max(0, ...byProperty.values());
+const { worstPropertyCount } = require('../utils/property-counts');
+
+// While GATE_LAWN_V13 is on, the v13 yearly caps that have no stored row (Arena, Certainty, Blindside,
+// and Celsius without a seed row) join the limit list as synthetic hard_block rows, so the compliance
+// summaries judge them as the plan and the closeout do. Gate off: the list is returned as it is.
+async function withV13SyntheticCaps(limits) {
+  if (require('../config/feature-gates').lawnV13Live?.() !== true) return limits;
+  const norm = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const missing = V13_COUNT_CAPS.filter((entry) => !limits.some((l) => l.limit_type === 'annual_max_apps' && l.match_type === 'product' && norm(l.product_name) === norm(entry.name)));
+  if (!missing.length) return limits;
+  const products = await db('products_catalog').whereIn('name', missing.map((entry) => entry.name)).select('id', 'name');
+  return [...limits, ...products.map((product) => ({
+    ...syntheticCountLimit(missing.find((entry) => norm(entry.name) === norm(product.name)), product.id),
+    product_name: product.name,
+  }))];
 }
 
 function isNitrogenApplication(app = {}) {
@@ -407,12 +410,12 @@ const ComplianceService = {
     // Get all product limits
     // The product name rides along: the v13 program's own yearly count (Celsius: 2) replaces the
     // stored legacy value while GATE_LAWN_V13 is on, the same reading application-limits enforces.
-    const limits = (await db('product_limits')
+    const limits = await withV13SyntheticCaps((await db('product_limits')
       .leftJoin('products_catalog', 'product_limits.product_id', 'products_catalog.id')
       .select('product_limits.*', 'products_catalog.name as product_name'))
       .map((limit) => (limit.limit_type === 'annual_max_apps' && limit.match_type === 'product'
         ? { ...limit, limit_value: effectiveCountCap(limit.product_name, limit.limit_value) }
-        : limit));
+        : limit)));
 
     const results = [];
     for (const limit of limits) {
@@ -573,13 +576,13 @@ const ComplianceService = {
       .count('* as count');
 
     // Warnings: check product limits that are approaching or exceeded
-    const limits = (await db('product_limits')
+    const limits = await withV13SyntheticCaps((await db('product_limits')
       .leftJoin('products_catalog', 'product_limits.product_id', 'products_catalog.id')
       .where({ 'product_limits.severity': 'hard_block' })
       .select('product_limits.*', 'products_catalog.name as product_name'))
       .map((limit) => (limit.limit_type === 'annual_max_apps'
         ? { ...limit, limit_value: effectiveCountCap(limit.product_name, limit.limit_value) }
-        : limit));
+        : limit)));
     let warningCount = 0;
     for (const limit of limits) {
       if (limit.limit_type === 'annual_max_apps' && limit.product_id) {

@@ -157,6 +157,15 @@ describe('closeout: hard count limits flag, they never refuse', () => {
     ]);
   });
 
+  test('the v13 caps that live in code (Arena, Certainty, Blindside) are audited even though no limit row is stored for them', async () => {
+    const ARENA_ID = '00000000-0000-4000-8000-000000000303';
+    catalogRows.push({ id: ARENA_ID, name: 'Arena 50 WDG' });
+    checkLimits.mockResolvedValue([{ type: 'annual_max_apps', message: 'x', current: 2, max: 2 }]);
+    expect(limitedIds.has(ARENA_ID)).toBe(false);
+    expect(await findings([ARENA_ID])).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productName: 'Arena 50 WDG' })]);
+    expect(checkLimits).toHaveBeenCalledTimes(1);
+  });
+
   test('gate off, a non-lawn visit and an empty list read nothing', async () => {
     delete process.env.GATE_LAWN_V13;
     expect(await findings([CELSIUS_ID])).toEqual([]);

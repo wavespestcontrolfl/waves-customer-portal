@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
 const { withV13CountCaps } = require('../config/lawn-v13-count-caps');
+const { worstPropertyCount } = require('../utils/property-counts');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
 // active ingredient shared by every product that carries it (prodiamine: 65 WDG,
@@ -112,7 +113,7 @@ class ApplicationLimitChecker {
 
     // Get applicable limits
     // The v13 program's own count cap (Celsius: 2) while GATE_LAWN_V13 is on; the stored row is the legacy value.
-    const productLimits = withV13CountCaps(product.name, await database('product_limits').where({ product_id: productId }));
+    const productLimits = withV13CountCaps(product.name, await database('product_limits').where({ product_id: productId }), undefined, productId);
     const moaLimits = product.moa_group ? await database('product_limits')
       .where({ match_type: 'moa_group', match_value: product.moa_group }) : [];
     const nitrogenLimits = this.isNitrogenFertilizer(product)
@@ -127,8 +128,14 @@ class ApplicationLimitChecker {
     const needsInterval = allLimits.some((limit) => limit.limit_type === 'min_interval_days');
     const lastApplication = history[0] || (needsInterval ? await priorApplications().first() : null);
 
+    // A yearly count is per lawn. With a treated property the history is already that property's; a
+    // caller with none (the compliance page, the legacy check-limits route) is judged on the busiest
+    // property of the customer, never on the sum across properties.
+    const needsAnnual = allLimits.some((limit) => limit.limit_type === 'annual_max_apps');
+    const annualCount = needsAnnual ? await this.annualCountFor(database, history, opts) : history.length;
+
     for (const limit of allLimits) {
-      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, lastApplication, ...opts });
+      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, lastApplication, annualCount, ...opts });
 
       if (check.violated) {
         const entry = { type: limit.limit_type, matchType: limit.match_type || null, matchValue: limit.match_value || null, message: check.message, description: limit.description, current: check.current, max: check.max };
@@ -152,7 +159,7 @@ class ApplicationLimitChecker {
     const limitValue = limit.limit_value == null ? null : Number(limit.limit_value);
     switch (limit.limit_type) {
       case 'annual_max_apps': {
-        const count = history.length;
+        const count = ctx.annualCount ?? history.length;
         const max = limitValue;
         if (count >= max) return { violated: true, message: `${product.name}: ${count}/${max} applications this year — LIMIT REACHED.`, current: count, max };
         if (count >= max - 1) return { approaching: true, message: `${product.name}: ${count}/${max} this year — this would be the LAST allowed.`, current: count, max };
@@ -378,6 +385,19 @@ class ApplicationLimitChecker {
 
   // Accepts a true instant or a hydrated pg DATE — etCalendarDayOf keeps a
   // UTC-midnight Jan 1 as Jan 1 (etParts would read it as Dec 31 ET).
+  // The per-lawn yearly count of already-loaded history rows (see checkLimits).
+  async annualCountFor(database, history, opts = {}) {
+    if (opts.propertyId || history.length < 2) return history.length;
+    const recordIds = [...new Set(history.map((row) => row.service_record_id).filter(Boolean))];
+    const placed = recordIds.length
+      ? await database('service_records as sr_prop')
+        .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
+        .whereIn('sr_prop.id', recordIds).select('sr_prop.id as record_id', 'ss_prop.property_id')
+      : [];
+    const propertyOf = new Map((placed || []).map((row) => [String(row.record_id), row.property_id]));
+    return worstPropertyCount(history.map((row) => ({ treated_property_id: row.service_record_id ? propertyOf.get(String(row.service_record_id)) || null : null })));
+  }
+
   // The closeout audit of one recorded application, whatever order the visits were recorded in
   // (a backdated closeout included). It judges the product-level hard_block count limits on the
   // service date and returns EVERY violated one:
@@ -390,8 +410,9 @@ class ApplicationLimitChecker {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return [];
     const limits = withV13CountCaps(product.name, await database('product_limits')
-      .where({ product_id: productId, match_type: 'product', severity: 'hard_block' })
-      .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']));
+      .where({ product_id: productId, match_type: 'product' })
+      .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']), undefined, productId)
+      .filter((limit) => limit.severity === 'hard_block');
     if (!limits.length) return [];
     const day = etCalendarDayOf(serviceDate);
     const others = () => scopeHistoryToTreatment(database('property_application_history')
