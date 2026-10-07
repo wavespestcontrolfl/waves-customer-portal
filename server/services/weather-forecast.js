@@ -130,11 +130,15 @@ function fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs = TOTAL_BUDGET_
   // the shared read finishes for the caller that started it.
   if (pending) return remaining > 0 ? raceDeadline(pending, remaining) : Promise.resolve(null);
   if (remaining < BACKUP_MIN_MS) return Promise.resolve(null);
-  const read = readOpenMeteoHours(latNum, lngNum, Math.min(remaining, FORECAST_BACKUP_MAX_MS))
-    .catch(() => null)
-    .finally(() => _backupInFlight.delete(key));
-  _backupInFlight.set(key, read);
-  return read;
+  const read = readOpenMeteoHours(latNum, lngNum, Math.min(remaining, FORECAST_BACKUP_MAX_MS)).catch(() => null);
+  // A read under a caller's own short budget is not published for others to
+  // join: an uncapped reader (storm watch, Rain Out) arriving meanwhile
+  // starts its own full-length read instead of inheriting this timeout
+  // (Codex #6102 r6).
+  if (budgetMs < TOTAL_BUDGET_MS) return read;
+  const shared = read.finally(() => _backupInFlight.delete(key));
+  _backupInFlight.set(key, shared);
+  return shared;
 }
 
 // Daily backup = the max hourly chance over the NWS daytime period

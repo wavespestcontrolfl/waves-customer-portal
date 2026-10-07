@@ -154,6 +154,24 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(_test._hourlyCache.size).toBe(0);
   });
 
+  test('a caller-capped backup read is not shared with uncapped readers (Codex #6102 r6)', async () => {
+    let omCalls = 0;
+    global.fetch.mockImplementation(async (url) => {
+      if (isOpenMeteo(url)) { omCalls += 1; return omOk([30]); }
+      return { ok: false };
+    });
+    const capped = getHourlyRainOutlook(27.48, -82.48, { budgetMs: 2500, nwsBudgetMs: 1200 });
+    await new Promise((r) => setImmediate(r));
+    expect(_test._backupInFlight.size).toBe(0);
+    expect((await capped)[0].rainChance).toBe(30);
+    // The capped answer was not put in this module's cache either; an
+    // uncapped reader runs its own lookup (the shared client may serve its
+    // own cached good answer, never a timed-out one).
+    expect(_test._hourlyCache.size).toBe(0);
+    expect((await getHourlyRainOutlook(27.48, -82.48))[0].rainChance).toBe(30);
+    expect(omCalls).toBeGreaterThanOrEqual(1);
+  });
+
   test('both down: null (fail-open)', async () => {
     global.fetch.mockRejectedValue(new Error('down'));
     expect(await getHourlyRainOutlook(27.43, -82.43)).toBeNull();
