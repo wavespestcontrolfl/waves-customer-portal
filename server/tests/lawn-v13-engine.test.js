@@ -21,8 +21,11 @@ const { buildLawnCompletionDefaults } = require('../services/lawn-completion-def
 const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-layer');
 const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
+const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// The v13 recipe has no bahia track (owner 2026-10-06); protocols.json (gate off) still does.
+const V13_GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
@@ -114,14 +117,59 @@ describe('gate off is byte-identical for the readers', () => {
     expect(Object.keys(protocolsJson.lawn)).toEqual(GRASSES);
   });
 
-  test('gate on reads the v13 visit for every grass', () => {
+  test('gate on reads the v13 visit for every v13 grass', () => {
     withGate('true', () => {
-      for (const grass of GRASSES) {
+      for (const grass of V13_GRASSES) {
         const got = engine.selectProtocolVisit({ track_key: grass }, new Date(Date.UTC(2026, 1, 15, 16)));
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
       expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toBe(v13.zoysia);
+    });
+  });
+
+  // Bahiagrass: Celsius and Blindside (the v13 weed spots) are not labeled for it, so v13 has no bahia
+  // track and a bahia lawn must never borrow another grass's program (owner 2026-10-06).
+  test('gate on: a bahia lawn has no v13 track and no fallback, however the grass is recorded', () => {
+    const date = new Date(Date.UTC(2026, 1, 15, 16));
+    expect(v13.bahia).toBeUndefined();
+    withGate('true', () => {
+      for (const [profile, legacy] of [[{ grass_type: 'bahia' }, null], [{ track_key: 'bahia' }, null], [{ grass_type: 'bahia', track_key: 'bahia' }, null], [{ grass_type: 'mixed', track_key: 'bahia' }, null],
+        // Either field naming bahia ends the lookup, whichever other track the other field names.
+        [{ grass_type: 'bahia', track_key: 'st_augustine' }, null], [{ grass_type: 'st_augustine', track_key: 'bahia' }, null],
+        [{ grass_type: 'bahia', track_key: 'zoysia' }, null], [{ grass_type: 'bermuda', track_key: 'bahia' }, null], [null, 'Argentine Bahia']]) {
+        for (const requireKnownGrass of [false, true]) {
+          const got = engine.selectProtocolVisit(profile, date, legacy, { requireKnownGrass });
+          expect({ profile, legacy, trackKey: got.trackKey, track: got.track, visit: got.visit, noProgram: got.v13NoProgram }).toEqual({ profile, legacy, trackKey: null, track: null, visit: null, noProgram: true });
+        }
+      }
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'bahia' }).protocol).toBeUndefined();
+    });
+  });
+
+  test('gate on: mixed and unknown lawns keep the any-grass fallback and carry no no-program flag', () => {
+    withGate('true', () => {
+      for (const grass of ['mixed', 'unknown']) {
+        const got = engine.selectProtocolVisit({ grass_type: grass }, new Date(Date.UTC(2026, 1, 15, 16)));
+        expect(got.trackKey).toBe('st_augustine');
+        expect('v13NoProgram' in got).toBe(false);
+      }
+    });
+  });
+
+  test('gate off: conflicting recorded fields resolve as before (the explicit track key wins), no flag', () => {
+    withGate(undefined, () => {
+      const got = engine.selectProtocolVisit({ grass_type: 'bahia', track_key: 'st_augustine' }, new Date(Date.UTC(2026, 1, 15, 16)));
+      expect(got.trackKey).toBe('st_augustine');
+      expect('v13NoProgram' in got).toBe(false);
+    });
+  });
+
+  test('gate off: a bahia lawn keeps its old track and no flag appears on any result', () => {
+    withGate(undefined, () => {
+      const got = engine.selectProtocolVisit({ grass_type: 'bahia' }, new Date(Date.UTC(2026, 1, 15, 16)));
+      expect(got.trackKey).toBe('bahia');
+      expect('v13NoProgram' in got).toBe(false);
     });
   });
 });
@@ -133,9 +181,9 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
   const date = new Date(Date.UTC(2026, 9, 6, 16));
   const knexFor = (rows) => (table) => ({ where() { return this; }, first: async () => rows[table] ?? null });
 
-  test('the four v13 copies are one program, so any key serves any grass', () => {
+  test('the three v13 copies are one program, so any key serves any grass', () => {
     const body = ({ name, ...rest }) => JSON.stringify(rest);
-    for (const grass of GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
+    for (const grass of V13_GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
   });
 
   test.each(['mixed', 'unknown', 'centipede'])('gate on: recorded %s plans the October v13 visit', (grass) => {
@@ -180,7 +228,10 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
 // ── Every line resolves to the intended catalog row ──────────────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE];
+// October's whole-lawn bag is the Dimension 0.21% 18-0-10 row (20261007120500 swaps it in for
+// the staged Stonewall 15-0-15 line).
+const DIMENSION_18 = octoberMigration.NEW_NAME;
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -257,7 +308,7 @@ function recordingKnex() {
   const calls = [];
   const knex = (table) => {
     const b = {};
-    for (const m of ['where', 'orWhere', 'orderBy', 'orderByRaw']) {
+    for (const m of ['where', 'whereNot', 'orWhere', 'orderBy', 'orderByRaw']) {
       b[m] = (...args) => {
         if (typeof args[0] === 'function') {
           const inner = {};
@@ -291,7 +342,8 @@ describe('getActiveLawnProtocol', () => {
     const { knex, calls } = recordingKnex();
     await withGateAsync('true', () => getActiveLawnProtocol(knex, { grassTrack: 'bermuda', region: 'swfl', planning: true }));
     expect(calls).toEqual([
-      ['table', 'lawn_protocols'], ['where', { status: 'staged', version: LAWN_V13_VERSION }],
+      // The staged bahia rows are never served for planning (the v13 program has no bahia track).
+      ['table', 'lawn_protocols'], ['where', { status: 'staged', version: LAWN_V13_VERSION }], ['whereNot', 'grass_track', 'bahia'],
       ['orderBy', 'effective_from', 'desc'], ['orderBy', 'created_at', 'desc'],
       ['where', { grass_track: 'bermuda' }], ['where', { region: 'swfl' }],
     ]);
@@ -307,10 +359,12 @@ describe('getActiveLawnProtocol', () => {
   function tableKnex(protocols) {
     return (table) => {
       const conds = [];
+      const nots = [];
       const b = {
         where(obj) { conds.push(obj); return b; },
+        whereNot(column, value) { nots.push([column, value]); return b; },
         orderBy() { return b; },
-        first() { return Promise.resolve(table === 'lawn_protocols' ? protocols.find((row) => conds.every((c) => Object.entries(c).every(([k, v]) => row[k] === v))) : undefined); },
+        first() { return Promise.resolve(table === 'lawn_protocols' ? protocols.find((row) => conds.every((c) => Object.entries(c).every(([k, v]) => row[k] === v)) && nots.every(([k, v]) => row[k] !== v)) : undefined); },
         then(resolve) { return Promise.resolve([]).then(resolve); },
       };
       return b;
@@ -318,6 +372,32 @@ describe('getActiveLawnProtocol', () => {
   }
   const ACTIVE = { id: 'a1', protocol_key: 'k', version: '2026.06', status: 'active', grass_track: 'bermuda', region: 'swfl' };
   const STAGED = { id: 's1', protocol_key: 'k', version: LAWN_V13_VERSION, status: 'staged', grass_track: 'bermuda', region: 'swfl' };
+
+  // The v13 program has no bahia track: the staged bahia rows stay in the table for history but are
+  // never served for planning, whatever the caller filters on.
+  const STAGED_BAHIA = { id: 's2', protocol_key: 'swfl_bahia_10_10', version: LAWN_V13_VERSION, status: 'staged', grass_track: 'bahia', region: 'swfl' };
+
+  test('gate on, planning caller: the staged bahia protocol is never served', async () => {
+    const rows = tableKnex([STAGED_BAHIA, STAGED]);
+    for (const filters of [{ grassTrack: 'bahia', region: 'swfl' }, { grassTrack: 'bahia', protocolKey: 'swfl_bahia_10_10' }, { protocolKey: 'swfl_bahia_10_10' }]) {
+      expect(await withGateAsync('true', () => getActiveLawnProtocol(rows, { ...filters, planning: true }))).toBeNull();
+    }
+    // With no track filter the bahia row is skipped, not returned ahead of the real tracks.
+    expect((await withGateAsync('true', () => getActiveLawnProtocol(rows, { region: 'swfl', planning: true }))).grass_track).toBe('bermuda');
+    // Gate off, and a historical reader, keep the old reads (bahia has its own active protocol then).
+    const active = { ...STAGED_BAHIA, id: 'a2', version: '2026.06', status: 'active' };
+    expect((await withGateAsync(undefined, () => getActiveLawnProtocol(tableKnex([active]), { grassTrack: 'bahia', planning: true }))).id).toBe('a2');
+    expect((await withGateAsync('true', () => getActiveLawnProtocol(tableKnex([active]), { grassTrack: 'bahia' }))).id).toBe('a2');
+  });
+
+  test('a visit pinned to the staged bahia version plans from no protocol; a historical read still gets it', async () => {
+    const { getProtocolWindowContext } = require('../services/lawn-protocol-operating-layer');
+    const knex = tableKnex([STAGED_BAHIA]);
+    const pinned = { protocolId: 's2', region: 'swfl' };
+    expect(await withGateAsync('true', () => getProtocolWindowContext(knex, { ...pinned, planning: true }))).toBeNull();
+    expect((await withGateAsync('true', () => getProtocolWindowContext(knex, pinned))).protocol.grass_track).toBe('bahia');
+    expect((await withGateAsync(undefined, () => getProtocolWindowContext(knex, { ...pinned, planning: true }))).protocol.grass_track).toBe('bahia');
+  });
 
   test('gate on with the staged row missing returns nothing instead of the old active version', async () => {
     const filters = { grassTrack: 'bermuda', region: 'swfl', planning: true };
@@ -343,7 +423,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     7: [],
     8: [migration.NAMES.NT],
     9: [migration.NAMES.NT],
-    10: [migration.NAMES.STW15],
+    10: [DIMENSION_18],
     11: [migration.NAMES.F24],
     12: [migration.NAMES.F24],
   };
@@ -357,7 +437,11 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const parsed = [...engine.parseProtocolLines(visit.primary, 'base', { exactName }), ...engine.parseProtocolLines(visit.secondary, 'conditional', { exactName })];
     const resolved = engine.resolveProtocolItems(parsed, catalog, {}, {});
     const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
-    const products = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => ({
+    // The staged rows as 20261007120500 leaves them: October's bag is Dimension 18-0-10 at 4.04 lb.
+    const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
+      ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
+      : spec);
+    const products = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => swapped(s)).map((s) => ({
       productId: idOf(s[0]), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
     const items = resolved.filter((i) => i.product).map((i) => ({ ...i, product: { id: i.product.id, name: i.product.name, active: true }, mix: { amount: 1, amountUnit: 'fl oz', treatedSqft: 4000 } }));
@@ -369,7 +453,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     };
   }
 
-  test.each(GRASSES)('%s: each month prefills exactly the whole-lawn products (July none)', async (grass) => {
+  test.each(V13_GRASSES)('%s: each month prefills exactly the whole-lawn products (July none)', async (grass) => {
     await withGateAsync('true', async () => {
       for (const month of MONTHS) {
         const result = buildLawnCompletionDefaults(planFor(grass, month), { isLawn: true, propertyId: 'p', propertyMatchesProfile: true, history: { rows: [] } });
@@ -391,10 +475,8 @@ describe('completion defaults with the v13 protocol resolved', () => {
 
 describe('v13 safety rules reach the reference tab through the catalog payload', () => {
   test('every track carries the same non-empty list; the old tracks carry none (the tab keeps its static list)', () => {
-    for (const grass of GRASSES) {
-      expect(v13[grass].safety_rules).toEqual(v13.st_augustine.safety_rules);
-      expect(protocolsJson.lawn[grass].safety_rules).toBeUndefined();
-    }
+    for (const grass of V13_GRASSES) expect(v13[grass].safety_rules).toEqual(v13.st_augustine.safety_rules);
+    for (const grass of GRASSES) expect(protocolsJson.lawn[grass].safety_rules).toBeUndefined();
   });
 });
 
@@ -478,7 +560,7 @@ describe('plan engine reads the matched v13 protocol row', () => {
   describe('which v13 rows compute a quantity (v13RowCalculates)', () => {
     test('only a whole-lawn row that states a rate or a nutrient target', () => {
       const calc = (row) => engine.v13RowCalculates(row);
-      expect(calc({ applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz' })).toBe(true); // Stonewall 4FL, Nutra-TECH, Tetrino, Stonewall 15-0-15
+      expect(calc({ applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz' })).toBe(true); // Stonewall 4FL, Nutra-TECH, Tetrino, Dimension 18-0-10
       expect(calc({ applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n' })).toBe(true); // 24-0-11
       expect(calc({ applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz' })).toBe(false); // Celsius: stated rate, but spot
       expect(calc({ applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate' })).toBe(false); // Arena, Artavia, the surfactant ...
@@ -678,7 +760,7 @@ describe('the material-cost audit reads the gate-aware program', () => {
 
 describe('lb_n nutrition rows derive from the visit target (v13)', () => {
   const f24 = { id: 'f24', name: migration.NAMES.F24, analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
-  const stw15 = { id: 's15', name: migration.NAMES.STW15, analysis_n: 15, analysis_k: 15, default_rate_per_1000: 4.02, rate_unit: 'lb' };
+  const dim18 = { id: 'd18', name: DIMENSION_18, analysis_n: 18, analysis_k: 10, default_rate_per_1000: 2.78, rate_unit: 'lb' };
   const rowFor = (windowMonth, name) => {
     const [, windowKey] = migration.WINDOWS.find((w) => w[0] === windowMonth);
     const [, spec] = migration.PRODUCTS.find(([key, s]) => key === windowKey && s[0] === name);
@@ -694,9 +776,19 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
     expect(result.amount).toBeCloseTo(lb, 3);
   });
 
-  test('October Stonewall 15-0-15 is its stated 4.02 lb', () => {
-    const result = amountFor(stw15, 10, rowFor(10, migration.NAMES.STW15));
-    expect(result).toMatchObject({ rateSource: 'protocol_rate', amount: 4.02 });
+  test('October Dimension 18-0-10 is its stated 4.04 lb (0.73 lb N, 0.40 lb K2O, the commercial Coastal South rate)', () => {
+    const row = { ratePer1000: octoberMigration.OCT_RATE, rateUnit: 'lb' };
+    const result = amountFor(dim18, 10, row);
+    expect(result).toMatchObject({ rateSource: 'protocol_rate', amount: 4.04 });
+    expect(result.amount * 0.18).toBeCloseTo(0.7272, 4);
+    expect(result.amount * 0.10).toBeCloseTo(0.404, 4);
+    // 4.04 lb x 0.21% = 0.0085 lb ai per 1,000 sq ft = 0.37 lb ai per acre, under the 5.46 lb per-application maximum.
+    expect((result.amount * 0.0021) * 43.56).toBeCloseTo(0.37, 2);
+    expect(result.amount).toBeLessThan(octoberMigration.MAX_LABEL);
+    // The recipe's own October notes and primary line state the same figures.
+    const targets = engine.parseVisitNutrientTargets(visitFor(10).notes);
+    expect(targets).toMatchObject({ targetNPer1000: 0.73, targetKPer1000: 0.4 });
+    expect(visitFor(10).primary).toContain('4.04 lb per 1,000 sq ft (0.73 lb N, 0.4 lb K2O)');
   });
 
   test('without a v13 row (gate off or no match) the catalog default still applies, unchanged', () => {

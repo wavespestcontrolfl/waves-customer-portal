@@ -34,6 +34,16 @@ describe('isPickerOfferSnapshot', () => {
     expect(suggest.isPickerOfferSnapshot(picker({ source: 'book', serviceKey: 'pest_control' }))).toBe(true);
   });
 
+  // Codex r3 P1 on #6073: the website-engine city fallback (GATE_MULTI_TECH_TEXT_TIMES)
+  // stamps its own source; it must classify as a picker offer like /book's.
+  test('the website-engine source, read from the shared constant, counts with its serviceKey (and only with it)', () => {
+    const { WEBSITE_OFFER_SOURCE } = require('../services/sms-offer-sources');
+    expect(WEBSITE_OFFER_SOURCE).toBe('website_engine');
+    expect(suggest.isPickerOfferSnapshot(picker({ source: WEBSITE_OFFER_SOURCE, serviceKey: 'lawn_care' }))).toBe(true);
+    expect(suggest.isPickerOfferSnapshot(picker({ source: WEBSITE_OFFER_SOURCE }))).toBe(false);
+    expect(suggest.isPickerOfferSnapshot(picker({ source: WEBSITE_OFFER_SOURCE, serviceKey: '' }))).toBe(false);
+  });
+
   test('a legacy zone-finder snapshot, a missing id, or no quoted window does not', () => {
     expect(suggest.isPickerOfferSnapshot(picker({}))).toBe(false);
     expect(suggest.isPickerOfferSnapshot(picker({ source: 'scheduler' }))).toBe(false);
@@ -73,6 +83,16 @@ describe('resolveDeliveryMode for scheduling drafts', () => {
     await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: snapshot })).resolves.toBe('suggest');
     mockModeRow = { mode: 'shadow' };
     await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: snapshot })).resolves.toBe('suggest');
+  });
+
+  test('gate on + a website-engine snapshot (Codex r3 P1 on #6073): a suggestion too, not left in shadow', async () => {
+    process.env[GATE] = 'true';
+    mockModeRow = { mode: 'shadow' };
+    const website = picker({ source: 'website_engine', serviceKey: 'pest_control' });
+    await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: website })).resolves.toBe('suggest');
+    expect(suggest.suggestionEligible({ ...BASE, openTimesSnapshot: website })).toBe(true);
+    delete process.env[GATE];
+    await expect(suggest.resolveDeliveryMode({ ...BASE, openTimesSnapshot: website })).resolves.toBe('shadow');
   });
 
   test('gate off, or no picker snapshot: shadow, as before', async () => {

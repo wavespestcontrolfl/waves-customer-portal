@@ -3178,6 +3178,10 @@ export default function EstimateToolViewV2({
   // failure / older server all keep the option hidden rather than offering
   // a control the engine would reject with a 400.
   const [bermudaSuppressionAvailable, setBermudaSuppressionAvailable] = useState(false);
+  // Bahia as a NEW lawn plan (GATE_LAWN_V13 has no bahia program, so the server parks it for review).
+  // Only an explicit false hides the option; an older server or a failed read keeps it, and a
+  // reopened estimate that already carries bahia still shows it.
+  const [bahiaOffered, setBahiaOffered] = useState(true);
   const [lawnStandardSold, setLawnStandardSold] = useState(() => isLawnStandardSold());
   useEffect(() => {
     let active = true;
@@ -3188,6 +3192,7 @@ export default function EstimateToolViewV2({
         const row = await r.json();
         if (active) {
           setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
+          setBahiaOffered(row?.subFeaturesAvailable?.bahiaOffered !== false);
           // Same row carries tier sellability (6x hidden 2026-09-24); a DB
           // re-enable must reach this estimator on a direct load too.
           setLawnStandardSold(applyServerLawnTierConfig(row?.data));
@@ -6243,7 +6248,7 @@ export default function EstimateToolViewV2({
                           { value: "st_augustine", label: "St. Augustine" },
                           { value: "bermuda", label: "Bermuda" },
                           { value: "zoysia", label: "Zoysia" },
-                          { value: "bahia", label: "Bahia" },
+                          ...(bahiaOffered || form.grassType === "bahia" ? [{ value: "bahia", label: "Bahia" }] : []),
                         ]}
                       />
                     </Field>

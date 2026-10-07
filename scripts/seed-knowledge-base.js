@@ -168,12 +168,12 @@ Celsius WG (thiencarbazone-methyl + iodosulfuron + dicamba) is limited to a MAXI
       forceUpdate: true,
     },
     {
-      title: 'Recognition + Fusilade II — Bermudagrass Suppression in St. Augustine',
+      title: 'Recognition + Fusilade II — Bermudagrass Suppression in St. Augustine and Zoysia',
       // Slug kept from the original (wrong) article so the live row is
       // corrected in place rather than orphaned alongside a duplicate.
       slug: 'fusilade-ii-bermuda-bahia-eradication',
       category: 'chemicals',
-      tags: ['fusilade', 'recognition', 'bermuda', 'st-augustine', 'tank-mix', '2ee'],
+      tags: ['fusilade', 'recognition', 'bermuda', 'st-augustine', 'tank-mix', '2ee', 'zoysia'],
       confidence: 'high',
       // Correction (2026-08-07): the original article taught Fusilade II ALONE
       // at 1 oz/gal per 1,000 sq ft — 4-8x the labeled turf rate, on a use
@@ -181,6 +181,8 @@ Celsius WG (thiencarbazone-methyl + iodosulfuron + dicamba) is limited to a MAXI
       // allow. Rewritten to the Recognition + Fusilade II tank-mix protocol
       // (matches the published blog protocol, fact-checked 2026-08-05).
       // forceUpdate re-seeds in place; migration 20260808000001 fixes prod.
+      // Correction (2026-10-06): zoysia is a supported 2(ee) use of the mix, not a
+      // kill target — migration 20261007110000 fixes the live row.
       forceUpdate: true,
       content: `# Recognition + Fusilade II — Bermudagrass Suppression in St. Augustine (TANK MIX ONLY)
 
@@ -222,7 +224,8 @@ An earlier version of this article described Fusilade II by itself at 1 oz per g
 - Sprayer cleanout: 2.5 oz household ammonia per gallon, recirculate 15+ min, repeat, rinse.
 
 ## Critical warnings
-- The mix kills bermudagrass AND zoysiagrass — confirm the lawn is St. Augustine first.
+- Zoysiagrass: the Recognition + Fusilade II tank mix is supported on established zoysia under the Syngenta FIFRA 2(ee) recommendation (2023-03-28, FL listed) at Recognition 0.03–0.045 oz + Fusilade II 0.367–0.55 fl oz per 1,000 sq ft. A 2(ee) is not the printed label: keep it on hand when applying. Fusilade II ALONE at 12–24 fl oz/acre may injure zoysia.
+- The mix kills bermudagrass (including bermudagrass lawns): confirm the lawn is St. Augustine or zoysia first.
 - Bahiagrass is NOT in the 2026 Fusilade II weed table — do not sell or apply this program for bahia.
 - Single-MOA for bermuda: never exceed the 2-application season ceiling — that is how resistant bermudagrass gets selected.
 

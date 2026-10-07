@@ -44,6 +44,15 @@ function load() {
   return require('../services/service-report/application-conditions');
 }
 
+// These tests pin the free endpoint; a caller's own paid key must not
+// change it, and must survive the suite (Codex #6052 r4).
+const ORIGINAL_OPEN_METEO_KEY = process.env.OPEN_METEO_API_KEY;
+beforeEach(() => { delete process.env.OPEN_METEO_API_KEY; });
+afterAll(() => {
+  if (ORIGINAL_OPEN_METEO_KEY === undefined) delete process.env.OPEN_METEO_API_KEY;
+  else process.env.OPEN_METEO_API_KEY = ORIGINAL_OPEN_METEO_KEY;
+});
+
 describe('fetchPropertyForecast', () => {
   const realFetch = global.fetch;
   afterEach(() => { global.fetch = realFetch; });

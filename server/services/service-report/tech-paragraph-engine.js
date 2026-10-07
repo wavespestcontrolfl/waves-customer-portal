@@ -44,25 +44,18 @@ function parseJsonObject(value) {
  * @param {number} cfg.budgetMs          the technician is waiting at Complete: ONE deadline for the step
  * @param {Function} cfg.normalizeInputs (raw) => canonical inputs (idempotent)
  * @param {Function} cfg.buildPrompt     (inputs) => { system, text, jsonSchema, promptVersion }
- * @param {Function} cfg.validateParagraph (answer, inputs) => { ok, paragraph, sources, problems }
- * @param {Function} [cfg.frozenTextProblem] (text) => null | reason (input-free read-time guard)
- * @param {Function} [cfg.frozenEntryProblem] (entry) => null | reason; replaces frozenTextProblem
- *   when the stored entry carries more than text (the T&S paragraph re-renders from its slots)
- * @param {Function} [cfg.precheck] (inputs) => null | reason; replaces the lawn rule (a note and a product)
+ * @param {Function} cfg.validateParagraph (answer, inputs) => { ok, paragraph, slots, problems }
+ * @param {Function} cfg.frozenEntryProblem (entry) => null | reason (read-time guard; both
+ *   paragraphs re-render the entry from its slots)
+ * @param {Function} cfg.precheck (inputs) => null | reason; a reason means no model call
  * @param {number} [cfg.reserveMs] slice of the step's deadline the model call may not use (default 0)
  * @param {boolean} [cfg.freezeNothing] also freeze a text-less marker when the step has nothing to say, so a retried completion spends no second call (default false)
  */
-// The lawn rule: a note and an applied product, or no call.
-function lawnPrecheck(inputs) {
-  if (!inputs.technicianNote || inputs.technicianNote.length < 12) return 'no_note';
-  return inputs.products.length ? null : 'no_products';
-}
-
 function createTechParagraphEngine(cfg) {
   const {
     logTag, laneId, promptVersion, freezeKey, freezeVersion, budgetMs: BUDGET_MS,
-    normalizeInputs, buildPrompt, validateParagraph, frozenTextProblem, frozenEntryProblem,
-    precheck = lawnPrecheck, reserveMs = 0, freezeNothing = false,
+    normalizeInputs, buildPrompt, validateParagraph, frozenEntryProblem,
+    precheck, reserveMs = 0, freezeNothing = false,
   } = cfg;
 
   function inputsHash(inputs) {
@@ -73,7 +66,7 @@ function createTechParagraphEngine(cfg) {
   /**
    * One model call, validated in code. Never throws. `deps.callModel` is injectable
    * for tests (and receives the exact payload the dispatcher would).
-   * @returns {Promise<{ ok: boolean, paragraph?: string, sources?: object[], reason?: string, problems?: string[] }>}
+   * @returns {Promise<{ ok: boolean, paragraph?: string, slots?: object, reason?: string, problems?: string[] }>}
    */
   async function generateTechParagraph(rawInputs, deps = {}) {
     const inputs = normalizeInputs(rawInputs);
@@ -119,7 +112,7 @@ function createTechParagraphEngine(cfg) {
       }
       if (!verdict || !verdict.ok) return { ok: false, reason: 'rejected', problems: verdict ? verdict.problems : ['unvalidated'] };
       return {
-        ok: true, paragraph: verdict.paragraph, sources: verdict.sources, inputsHash: inputsHash(inputs),
+        ok: true, paragraph: verdict.paragraph, inputsHash: inputsHash(inputs),
         ...(verdict.slots !== undefined ? { slots: verdict.slots } : {}),
       };
     } catch (err) {
@@ -151,7 +144,7 @@ function createTechParagraphEngine(cfg) {
       const entry = storedTechParagraphFor(structuredNotes, assessmentId);
       if (!entry) return null;
       const text = clean(entry.text);
-      if (typeof frozenEntryProblem === 'function' ? frozenEntryProblem(entry) : frozenTextProblem(text)) return null;
+      if (frozenEntryProblem(entry)) return null;
       return text;
     } catch { return null; }
   }
@@ -257,7 +250,6 @@ function createTechParagraphEngine(cfg) {
         promptVersion,
         assessmentId: String(assessmentId),
         text: generated.paragraph,
-        sources: generated.sources,
         ...(generated.slots !== undefined ? { slots: generated.slots } : {}),
         inputsHash: generated.inputsHash || null,
         frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),

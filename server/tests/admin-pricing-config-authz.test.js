@@ -123,6 +123,24 @@ beforeEach(() => {
   mockActivePlanCustomer.mockReset().mockResolvedValue(false);
 });
 
+test('lawn_pricing_v2 offers bahia as a new lawn plan only while GATE_LAWN_V13 is off', async () => {
+  const prior = process.env.GATE_LAWN_V13;
+  mockPricingConfigRow = { config_key: 'lawn_pricing_v2', data: {} };
+  try {
+    await withServer(async (baseUrl) => {
+      for (const [gate, offered] of [[undefined, true], ['false', true], ['1', true], ['true', false]]) {
+        if (gate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = gate;
+        const response = await call(baseUrl, 'GET', '/lawn_pricing_v2', { role: 'admin' });
+        expect(response.status).toBe(200);
+        expect(response.json.subFeaturesAvailable.bahiaOffered).toBe(offered);
+        expect(response.json.subFeaturesAvailable).toHaveProperty('bermudaSuppression');
+      }
+    });
+  } finally {
+    if (prior === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = prior;
+  }
+});
+
 test('annual availability follows both prerequisite gates at request time', async () => {
   const keys = ['GATE_TERMITE_ANNUAL_PLAN', 'GATE_CANCEL_FLOW_V2'];
   const prior = keys.map((key) => process.env[key]);
@@ -200,6 +218,54 @@ describe.each(['/estimate', '/quick-quote'])('%s customer eligibility', (path) =
       });
     } finally { spy.mockRestore(); }
   });
+});
+
+// The GATE_LAWN_V13 bahia review exemption (a stored estimate replayed as sold, minus the lines the
+// replay adds) is server-declared: a posted copy never reaches the engine on either calculator.
+describe.each(['/estimate', '/quick-quote'])('%s replay authority', (path) => {
+  const body = {
+    homeSqFt: 1800, lotSqFt: 8783, stories: 1, estimatedTurfSf: 4500,
+    services: { lawn: { track: 'bahia', tier: 'enhanced' } },
+    savedEstimateReplay: true, addedServiceKeys: ['mosquito'],
+  };
+
+  test('posted savedEstimateReplay and addedServiceKeys are stripped before the engine', async () => {
+    const engine = require('../services/pricing-engine');
+    const method = path === '/estimate' ? 'generateEstimate' : 'quickQuote';
+    const spy = jest.spyOn(engine, method).mockReturnValue({});
+    try {
+      await withServer(async (baseUrl) => {
+        expect((await call(baseUrl, 'POST', path, { role: 'admin', body })).status).toBe(200);
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy.mock.calls[0][0]).not.toHaveProperty('savedEstimateReplay');
+        expect(spy.mock.calls[0][0]).not.toHaveProperty('addedServiceKeys');
+        expect(spy.mock.calls[0][0].services.lawn.track).toBe('bahia');
+      });
+    } finally { spy.mockRestore(); }
+  });
+});
+
+const BAHIA_REPLAY_CLAIM = {
+  homeSqFt: 1800, lotSqFt: 8783, stories: 1, estimatedTurfSf: 4500,
+  services: { lawn: { track: 'bahia', tier: 'enhanced' } },
+  savedEstimateReplay: true, addedServiceKeys: ['mosquito'],
+};
+// quickQuote prices through the engine's own binding with no per-line review field, so the reviewed
+// line is read off the full /estimate response.
+test('GATE_LAWN_V13 on: a bahia lawn claiming to be a replay is still reviewed', async () => {
+  process.env.GATE_LAWN_V13 = 'true';
+  try {
+    const engine = require('../services/pricing-engine');
+    const spy = jest.spyOn(engine, 'generateEstimate');
+    await withServer(async (baseUrl) => {
+      expect((await call(baseUrl, 'POST', '/estimate', { role: 'admin', body: BAHIA_REPLAY_CLAIM })).status).toBe(200);
+    });
+    const result = spy.mock.results[0].value;
+    const lawn = result.lineItems.find((line) => line.service === 'lawn_care');
+    expect(lawn.manualReviewReasons).toContain('lawn_v13_bahia_no_program');
+    expect(lawn.requiresCustomQuote).toBe(true);
+    spy.mockRestore();
+  } finally { delete process.env.GATE_LAWN_V13; }
 });
 
 test('admin trapping estimates read the catalog when this process still has a fresh stale price', async () => {

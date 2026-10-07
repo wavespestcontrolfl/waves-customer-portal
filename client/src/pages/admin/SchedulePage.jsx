@@ -7818,8 +7818,12 @@ export function ProtocolPanel({ service, onClose }) {
       const recordedLawnTypes = profileLawnTypes.some((value) => String(value || "").trim())
         ? profileLawnTypes
         : [service.lawnType, service.lawn_type];
+      // The server says when GATE_LAWN_V13 is on and this lawn records bahia in any field (any
+      // spelling): the v13 program has none, so the track is bahia and the server answers no program
+      // instead of another grass's program. Otherwise the resolution is the old one, unchanged.
+      const noBahiaProgram = profileResponse?.lawn_v13_no_program === true;
       const trackKey = isLawn && !failedSections.includes("Turf profile")
-        ? recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean)
+        ? (noBahiaProgram ? "bahia" : recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean))
           || (recordedLawnTypes.some((value) => String(value || '').trim()) ? null : "st_augustine")
         : null;
       const lawnSqft = isLawn
