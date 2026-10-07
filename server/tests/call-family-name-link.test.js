@@ -162,7 +162,7 @@ describe('Step 3 wiring (structural)', () => {
   test('the saved family contact goes through the recipient double opt-in, never texted on role alone', () => {
     const after = source.slice(source.indexOf('family-link caller saved as a service contact'));
     const block = after.slice(0, after.indexOf('family-link service contact skipped'));
-    expect(block).toContain("if (saved === 'written' && !v2DoNotContact) {");
+    expect(block).toContain("(saved === 'written' || String(saved).startsWith('skipped_phone_on_record')) && !v2DoNotContact");
     expect(block).toContain("const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');");
     expect(block).toContain('void dispatchRecipientOptins(claims, custRow)');
     // fail closed: a failed claim leaves a blocking ask_failed row

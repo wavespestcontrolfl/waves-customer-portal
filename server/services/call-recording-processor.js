@@ -12539,7 +12539,9 @@ const CallRecordingProcessor = {
           // Recipient double opt-in, the same claim + dispatch the secondary-contact path uses for a
           // new service-contact phone (#2956): the saved number is asked for its own YES and is
           // never texted on role alone. Skipped for a do-not-contact request (the number stays held).
-          if (saved === 'written' && !v2DoNotContact) {
+          // 'skipped_phone_on_record': a retry of a pass that saved the slot but died before the ask;
+          // the claim only re-asks a never-delivered or never-dispatched ask, never an answered one.
+          if ((saved === 'written' || String(saved).startsWith('skipped_phone_on_record')) && !v2DoNotContact) {
             try {
               const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
               const custRow = await db('customers').where({ id: linkedCustomerId }).first();
