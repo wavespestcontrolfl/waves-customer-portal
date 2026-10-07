@@ -1409,7 +1409,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (_booking_price etc.) are unchanged. No catalog price: no guard.
       const priceConfirmedClaim = params.price_confirmed === true;
       delete params.price_confirmed;
-      if (booking.source === 'stated' && booking.catalogPrice != null) {
+      if (booking.source === 'stated' && booking.catalogPrice != null && !priceAcceptedOnCard(reproposal?.acceptedPrice, booking)) {
         const readBackKey = {
           actorId: getAdminActorId(req), customerId: String(params.customer_id), statedPrice: booking.price,
         };
@@ -2069,10 +2069,11 @@ function cardRoleRefusal(req, toolName) {
   return null;
 }
 
-// The tool input a stored card was built from: every `_`-prefixed key is a
-// server pin the fresh proposal recomputes, so none is carried over.
-function publicCardInput(params) {
-  return Object.fromEntries(Object.entries(params || {}).filter(([key]) => !key.startsWith('_')));
+// The tool input a stored card was built from: the server's execution pins
+// (every `_` key, and the historical non-underscore ones) are recomputed by
+// the fresh proposal, so none is carried over.
+function publicCardInput(toolName, params) {
+  return splitApprovedParams(toolName, params).input;
 }
 
 const claimErrorStatus = (error) => (error === 'not_found' ? 404 : error === 'actor_mismatch' ? 403 : 409);
@@ -2138,7 +2139,7 @@ async function proposeChosenProduct(req, action, productId, trx) {
   if (!(offeredProductIds(action.params) || []).includes(productId)) {
     return { status: 409, body: { error: 'That product was not on this card. Nothing was written.', code: 'product_not_offered' } };
   }
-  const input = publicCardInput(action.params);
+  const input = publicCardInput('adjust_stock', action.params);
   delete input.product_name;
   // A task's picker hands its step to the new card: the task keeps waiting
   // for that card's outcome instead of reading the picker as the result.
@@ -2252,7 +2253,7 @@ async function showCardAgain(req, id) {
 // pinned _rate_family; the service the operator chose comes back as
 // rate_service, and the fresh proposal re-pins the ledger.
 function showAgainInput(row) {
-  const input = publicCardInput(row.params);
+  const input = publicCardInput(row.tool_name, row.params);
   const rateService = row.tool_name === 'update_customer'
     ? require('../services/intelligence-bar/rate-change').rateServiceForFamily(row.params?._rate_family) : null;
   if (rateService) input.rate_service = rateService;
@@ -2265,6 +2266,13 @@ async function showAgainReplay(id, actor) {
   const made = await PendingActions.findDerivedCard('_ib_shown_from', id, actor);
   if (made) return { status: 200, body: { success: true, replayed: true, pendingAction: cardPayload(made) } };
   return { status: 409, body: { error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' } };
+}
+
+// Show again of a booking card: the stated price that card carried already
+// passed the price read-back (no card is made otherwise). It still counts
+// only while the price and the catalog list price are both unchanged.
+function priceAcceptedOnCard(accepted, booking) {
+  return !!accepted && Number(accepted.price) === Number(booking.price) && Number(accepted.listPrice) === Number(booking.listPrice);
 }
 
 // Show again's fresh proposal for a retired card. A picker card re-lists its
@@ -2282,7 +2290,8 @@ async function proposeShownAgain(req, row, input, trx) {
   }
   const grounded = STOCK_WRITE_TOOL_NAMES.has(row.tool_name)
     ? { groundedTarget: { productId: stored.product_id || null, requestId: stored.request_id || null } } : {};
-  return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input }, reproposal: { ...grounded, sourcePin, trx } });
+  const acceptedPrice = stored._booking_price != null ? { price: stored._booking_price, listPrice: stored._booking_list_price } : null;
+  return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input }, reproposal: { ...grounded, acceptedPrice, sourcePin, trx } });
 }
 
 function getAdminActorId(req) {
@@ -3078,8 +3087,15 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
 // Only claimed, hash-verified approval parameters enter here. Model arguments
 // go directly to executeToolByName and must pass the registry schema unchanged.
 function executeApprovedTool(toolName, params, techContext, actionContext) {
+  const { input, executionPins } = splitApprovedParams(toolName, params);
+  return executeToolByName(toolName, input, techContext, { ...actionContext, executionPins });
+}
+
+// A stored card's params, split into the tool's schema input and the server's
+// execution pins. Show again re-proposes from the input part alone.
+function splitApprovedParams(toolName, params) {
   const input = {}, executionPins = {};
-  for (const [key, value] of Object.entries(params)) {
+  for (const [key, value] of Object.entries(params || {})) {
     if (key.startsWith('_')) executionPins[key] = value;
     // Existing pending cancellation rows store this historical field name.
     else if (key === 'preview_fingerprint') executionPins._approved_cancel_plan_fingerprint = value;
@@ -3088,7 +3104,7 @@ function executeApprovedTool(toolName, params, techContext, actionContext) {
     else if (toolName === 'bulk_update_leads' && key === 'lead_ids') executionPins._approved_lead_ids = value;
     else if (key !== 'confirmed' && key !== 'confirm') input[key] = value;
   }
-  return executeToolByName(toolName, input, techContext, { ...actionContext, executionPins });
+  return { input, executionPins };
 }
 
 // Field technicians who can take an assignment right now (active AND

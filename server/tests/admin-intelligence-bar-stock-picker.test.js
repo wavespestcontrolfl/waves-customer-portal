@@ -25,6 +25,8 @@ const mockGetPendingRow = jest.fn();
 const mockRetireExpiredAction = jest.fn();
 const mockAttachThread = jest.fn(async () => 1);
 const mockFindDerivedCard = jest.fn(async () => null);
+const mockIbBookingProposal = jest.fn();
+const mockPreviewBulkLeadUpdate = jest.fn();
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -52,6 +54,9 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: jest.fn(),
   resolveActiveTechnicianById: jest.fn(),
+  ibBookingProposal: (...args) => mockIbBookingProposal(...args),
+  ibBookingOverlapProposal: jest.fn(async () => null),
+  ibBookingOverlapWho: jest.fn(async () => []),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -78,7 +83,7 @@ jest.mock('../services/intelligence-bar/comms-tools', () => ({
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
 }));
 jest.mock('../services/intelligence-bar/tax-tools', () => ({ TAX_TOOLS: [], executeTaxTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/leads-tools', () => ({ LEADS_TOOLS: [], executeLeadsTool: jest.fn(), resolveLeadForUpdate: jest.fn(), previewBulkLeadUpdate: jest.fn(), BULK_LEAD_UPDATE_CAP: 500 }));
+jest.mock('../services/intelligence-bar/leads-tools', () => ({ LEADS_TOOLS: [], executeLeadsTool: jest.fn(), resolveLeadForUpdate: jest.fn(), previewBulkLeadUpdate: (...args) => mockPreviewBulkLeadUpdate(...args), BULK_LEAD_UPDATE_CAP: 500 }));
 jest.mock('../services/intelligence-bar/email-tools', () => ({ EMAIL_TOOLS: [], executeEmailTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS: [], executeEstimateTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/banking-tools', () => ({ BANKING_TOOLS: [], BANKING_QUERY_TOOLS: [], executeBankingTool: jest.fn() }));
@@ -500,6 +505,64 @@ describe('/show-again', () => {
       proposal.mockRestore();
       delete require('../services/intelligence-bar/tools').UPDATABLE_FIELDS.monthly_rate;
     }
+  });
+
+  describe('a booking card with a stated price', () => {
+    const CUSTOMER = '9a0c8f1e-0000-4000-8000-0000000000c2';
+    const bookingRow = () => ({ id: CHOICE_ID, tool_name: 'create_appointment', status: 'pending', context: 'schedule',
+      params: { customer_id: CUSTOMER, service_type: 'Monthly Lawn Care Service', scheduled_date: '2099-01-05', price: 60.33,
+        _booking_price: 60.33, _booking_list_price: 61.33, _booking_service_id: 'svc-lawn' } });
+    const booking = (listPrice) => ({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service',
+      catalogPrice: 61.33, listPrice });
+    beforeEach(() => {
+      mockResolveCommsCustomer.mockResolvedValue({ id: CUSTOMER, first_name: 'Synthetic', last_name: 'Booker' });
+      mockGetPendingRow.mockResolvedValue(bookingRow());
+      mockRetireExpiredAction.mockResolvedValue({ ...bookingRow(), status: 'cancelled' });
+    });
+
+    test('comes back without asking the price again: that card already passed the read-back', async () => {
+      mockIbBookingProposal.mockResolvedValue(booking(61.33));
+      await withServer(async (baseUrl) => {
+        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+        expect([status, body.error]).toEqual([200, undefined]);
+      });
+      expect(mockCreatePendingAction.mock.calls[0][0].params._booking_price).toBe(60.33);
+    });
+
+    test('asks the price again when the catalog price changed since that card', async () => {
+      mockIbBookingProposal.mockResolvedValue(booking(65));
+      await withServer(async (baseUrl) => {
+        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+        expect(status).toBe(409);
+        expect(body.code).toBe('price_read_back');
+      });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    });
+  });
+
+  test('server pins outside the tool schema stay out of the re-proposed input (bulk lead ids)', async () => {
+    const LEAD = '9a0c8f1e-0000-4000-8000-00000000000e';
+    const row = { id: CHOICE_ID, tool_name: 'bulk_update_leads', status: 'pending', context: 'leads',
+      params: { current_status: 'new', new_status: 'contacted', dry_run: false, lead_ids: [LEAD], _expect_full_set: true } };
+    mockGetPendingRow.mockResolvedValue(row);
+    mockRetireExpiredAction.mockResolvedValue({ ...row, status: 'cancelled' });
+    mockPreviewBulkLeadUpdate.mockResolvedValue({ matched_ids: [LEAD], all_names: ['Synthetic Lead'], matches: 1, preview: [], action: 'update' });
+    // The registry's own schema check (strict, no extra properties) is
+    // covered by its suite; here it records what Show again asks it about.
+    const validate = jest.spyOn(require('../services/intelligence-bar/action-registry'), 'validateInput').mockReturnValue(null);
+    const previous = process.env.GATE_IB_PLATFORM;
+    process.env.GATE_IB_PLATFORM = 'true';
+    try {
+      await withServer(async (baseUrl) => {
+        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+        expect([status, body.error]).toEqual([200, undefined]);
+      });
+      expect(validate).toHaveBeenCalledWith('bulk_update_leads', { current_status: 'new', new_status: 'contacted', dry_run: false }, expect.objectContaining({ role: 'admin' }));
+    } finally {
+      validate.mockRestore();
+      if (previous === undefined) delete process.env.GATE_IB_PLATFORM; else process.env.GATE_IB_PLATFORM = previous;
+    }
+    expect(mockCreatePendingAction.mock.calls[0][0].params.lead_ids).toEqual([LEAD]);
   });
 
   test('another operator card is not found', async () => {
