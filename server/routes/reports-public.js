@@ -2521,7 +2521,6 @@ router.get('/:token/data', async (req, res, next) => {
       // differs is refused with a generic 409 and no data: the page then fails to render, the render
       // errors, and nothing is cached (the retry path runs). Absent `vs`, or the gate off: unchanged.
       if (visitSummaryDataMismatch({
-        live: require('../config/feature-gates').lawnVisitSummaryV2Live?.() === true,
         mode,
         expected: typeof req.query.vs === 'string' ? req.query.vs.trim() : '',
         data: v1Data,

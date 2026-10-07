@@ -2733,8 +2733,9 @@ back to the worker's own payload. Both PDF writers (the queue and the public dir
 route) apply the fence.
 
 `GET /api/reports/:token/data` accepts ONE optional query parameter, `vs`, used only by the PDF
-renderer and only while `GATE_LAWN_VISIT_SUMMARY_V2` is live (any other request, any other mode and the
-gate off ignore it, so the payload and the status are unchanged without it). The renderer's page URL
+renderer (any other request and any other mode ignore it, so the payload and the status are unchanged
+without it). An explicit `vs` in `pdf` mode is validated whatever the receiving pod's gate says, so a
+mixed-gate rollout (a gate-on worker reaching a gate-off pod that builds the plain recap) answers 409 too. The renderer's page URL
 (`/report/:token?mode=pdf&...&vs=<value>`) carries the Visit Summary component the PDF cache key names
 (`:vs=<hash>`, or `none` when the key names no summary); the page forwards it, in `pdf` mode only, to its own
 `/data` request. When the payload the route is about to return would print a different summary (same

@@ -136,7 +136,7 @@ describe('the renderer URL carries the expected Visit Summary signature', () => 
     expect(expectedVisitSummaryFor({ pin: null, signature: '' })).toBeUndefined(); // not a lawn render
   });
 
-  test('/data side: same snapshot passes, another is refused, absent / not-pdf / gate-off change nothing', () => {
+  test('/data side: same snapshot passes, another is refused, absent / not-pdf change nothing; gate-off still validates', () => {
     const TEXT = 'Today we applied a feeding, which fits the fall season.';
     const summaryData = { summarySource: 'lawn_visit_summary', summary: TEXT };
     const key = lawnVisitSummaryRenderedSignature(summaryData);
@@ -150,6 +150,7 @@ describe('the renderer URL carries the expected Visit Summary signature', () => 
     expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: key, data: { summarySource: 'technician_report', summary: 'x' } })).toBe(false);
     expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: '', data: { summarySource: 'recap' } })).toBe(false);
     expect(visitSummaryDataMismatch({ live, mode: 'live', expected: key, data: { summarySource: 'recap' } })).toBe(false);
-    expect(visitSummaryDataMismatch({ live: false, mode: 'pdf', expected: key, data: { summarySource: 'recap' } })).toBe(false);
+    // An explicit vs is validated whatever the receiving pod's gate says (mixed-gate rollout).
+    expect(visitSummaryDataMismatch({ live: false, mode: 'pdf', expected: key, data: { summarySource: 'recap' } })).toBe(true);
   });
 });

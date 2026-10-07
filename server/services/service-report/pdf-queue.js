@@ -993,10 +993,14 @@ function expectedVisitSummaryFor(canonical, { isDeliveryPin = false, effectivePi
 // The /data route's side of that binding: with a `vs` the PDF renderer sent, the payload about to be
 // returned must carry the summary the key names (same precedence rule as the render fence), else the
 // route answers 409 and the page never renders, so the renderer fails and nothing is cached.
-function visitSummaryDataMismatch({ live, mode, expected, data }) {
-  if (!live || mode !== 'pdf' || typeof expected !== 'string' || !expected) return false;
+// An explicit `vs` is the renderer's expectation, so it is validated whatever
+// the RECEIVING pod's gate says (pre-push P1): during a rollout a gate-on worker
+// can reach a gate-off pod, which builds the plain recap; that mismatch must 409,
+// not pass. Without `vs` (or outside pdf mode) nothing is checked.
+function visitSummaryDataMismatch({ mode, expected, data }) {
+  if (mode !== 'pdf' || typeof expected !== 'string' || !expected) return false;
   return visitSummaryRenderMismatch({
-    live,
+    live: true,
     pinned: true,
     renderedSource: data?.summarySource ?? null,
     renderedSignature: lawnVisitSummaryRenderedSignature(data),

@@ -2,7 +2,8 @@
  * GATE_LAWN_VISIT_SUMMARY_V2 (Codex r8): the PDF renderer's URL carries the Visit Summary signature the cache
  * key names (`vs`), the page forwards it to GET /reports/:token/data, and the route answers a generic 409
  * (no data) when the payload it is about to return carries another summary. The renderer then fails and
- * nothing is cached. No `vs`, a non-pdf mode, or the gate off: the route is unchanged.
+ * nothing is cached. No `vs` or a non-pdf mode: the route is unchanged. An explicit `vs` is checked even on a
+ * gate-off pod (mixed-gate rollout).
  */
 jest.mock('../models/db', () => {
   const mock = jest.fn();
@@ -119,11 +120,17 @@ describe('GET /reports/:token/data with the renderer\'s vs', () => {
     expect((await get('', SUMMARY_PAYLOAD)).status).toBe(200);
   });
 
-  test('vs on a live or static request, or with the gate off, is ignored', async () => {
+  test('vs on a live or static request is ignored', async () => {
     expect((await get('?vs=none', SUMMARY_PAYLOAD)).status).toBe(200);
     expect((await get('?mode=static&vs=none', SUMMARY_PAYLOAD)).status).toBe(200);
+  });
+
+  test('mixed-gate rollout: a gate-OFF pod still validates an explicit vs (pre-push P1)', async () => {
     mockGate.live = false;
-    expect((await get('?mode=pdf&vs=none', SUMMARY_PAYLOAD)).status).toBe(200);
+    // The gate-on worker keyed a frozen summary; this gate-off pod built the recap: refuse.
+    expect((await get(`?mode=pdf&vs=${encodeURIComponent(KEY)}`, RECAP_PAYLOAD)).status).toBe(409);
+    // The key named no summary and this pod built the recap: matches.
+    expect((await get('?mode=pdf&vs=none', RECAP_PAYLOAD)).status).toBe(200);
   });
 
   test('a higher-precedence summary source (technician report) is never fenced', async () => {
