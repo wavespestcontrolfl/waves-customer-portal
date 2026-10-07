@@ -189,6 +189,19 @@ function startedServices(estimateData, slices) {
   }));
 }
 
+// maybeCreateTermiteProgramAgreement: a commercial estimate is always handed
+// to the office to prepare by hand; otherwise it drafts the agreement (and
+// emails it only under its autosend gate), or bells the office when the
+// agreement cannot be prepared automatically.
+function termiteAgreementMessage(termiteProgram) {
+  if (termiteProgram.commercial) {
+    return { kind: 'none', will_send: false, text: 'Termite program agreement: commercial, so the office is belled to prepare it by hand; nothing is sent to the customer' };
+  }
+  return termiteProgram.autosend
+    ? { kind: 'email', will_send: true, text: 'Termite program agreement may be emailed to the customer to sign after Confirm (autosend is on); if it cannot be prepared automatically the office is belled instead' }
+    : { kind: 'none', will_send: false, text: 'Termite program agreement drafted for the office to send (or the office is belled to prepare it); the customer is not sent it' };
+}
+
 function customerMessages({ customer, prefs, converts, commercialOnly, lane, termiteProgram }) {
   const messages = [];
   const email = String(customer.email || '').trim();
@@ -210,11 +223,7 @@ function customerMessages({ customer, prefs, converts, commercialOnly, lane, ter
     });
   }
   messages.push({ kind: 'none', will_send: false, text: 'No welcome text now (Mark accepted skips it). Booking the first visit later on the calendar may send it' });
-  if (termiteProgram.has_program) {
-    messages.push(termiteProgram.autosend
-      ? { kind: 'email', will_send: true, text: 'Termite program agreement emailed to the customer to sign, after Confirm (agreement autosend is on)' }
-      : { kind: 'none', will_send: false, text: 'Termite program agreement drafted for the office to send; the customer is not sent it' });
-  }
+  if (termiteProgram.has_program) messages.push(termiteAgreementMessage(termiteProgram));
   return messages;
 }
 
@@ -436,8 +445,12 @@ async function planAccept(input) {
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
-  const { collectTermiteFacts, autosendGateOn } = require('../termite-program-agreement');
-  const termiteProgram = { has_program: !!collectTermiteFacts(estimateData)?.hasProgram, autosend: autosendGateOn() };
+  const Termite = require('../termite-program-agreement');
+  const termiteProgram = {
+    has_program: !!Termite.collectTermiteFacts(estimateData)?.hasProgram,
+    commercial: Termite.isCommercialEstimate(estimate, estimateData),
+    autosend: Termite.autosendGateOn(),
+  };
   const messages = customerMessages({ customer, prefs, converts, commercialOnly, lane: lt.laneAfter, termiteProgram });
 
   const preview = {

@@ -202,12 +202,12 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     });
     const drafted = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(drafted.customer_messages).toContainEqual(expect.objectContaining({
-      will_send: false, text: 'Termite program agreement drafted for the office to send; the customer is not sent it',
+      will_send: false, text: 'Termite program agreement drafted for the office to send (or the office is belled to prepare it); the customer is not sent it',
     }));
     process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND = 'true';
     const sent = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(sent.customer_messages).toContainEqual(expect.objectContaining({
-      will_send: true, text: 'Termite program agreement emailed to the customer to sign, after Confirm (agreement autosend is on)',
+      will_send: true, text: 'Termite program agreement may be emailed to the customer to sign after Confirm (autosend is on); if it cannot be prepared automatically the office is belled instead',
     }));
   });
 });
