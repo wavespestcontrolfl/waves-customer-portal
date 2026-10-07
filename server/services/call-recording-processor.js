@@ -11079,25 +11079,35 @@ const CallRecordingProcessor = {
       if (contactDictation) {
         // A last/first name the CALLER spelled out letter by letter beats the
         // misheard word. The decoder model judged whose name each spelling is;
-        // the policy only replaces an empty (name-context) or near-identical
-        // (misheard) name, in the V1/flat record only, so a NEW customer/lead
-        // is created with the spelled name. The V2 extraction is never touched.
-        // An existing customer's row is never written here: the spelled value
-        // reaches it only as a staged candidate (decoder confidence + quote)
-        // through the GATE_CONTACT_CORRECTION lane and its own gates.
-        // Secondary contacts are never touched.
+        // the policy only acts with name context, on an empty or near-identical
+        // (misheard) name. The V2 extraction is never touched, and secondary
+        // contacts are never touched.
+        //  - NEW caller (no linked customer): the V1/flat `extracted` record takes
+        //    the spelled name, so the customer/lead is created with it.
+        //  - EXISTING customer: `extracted` is left as heard (the backfill paths
+        //    must not write a spelled name onto the row); the spelled value
+        //    reaches the customer only as a staged candidate through the
+        //    GATE_CONTACT_CORRECTION lane and its own gates.
+        // Either way the spelling is staged with the decoder's confidence and
+        // quote whenever a grounded caller spelling with name context exists for
+        // a name the policy changed or the record already holds, so staging never
+        // falls back to a different V2 mishearing.
         const nameChanges = applyNameDictationPolicy({ current: extracted, dictation: contactDictation });
-        for (const field of ['first_name', 'last_name']) {
-          const spelled = callerSpelledName(contactDictation, field);
-          // Decoder-backed whenever a grounded caller spelling with name context exists
-          // for a name the policy changed OR the record already holds, so staging never
-          // falls back to a different V2 mishearing.
-          if (!spelled?.nameContext || !(nameChanges[field] || String(extracted[field] || '').trim() === spelled.value)) continue;
-          extracted[field] = spelled.value;
-          spelledNameOverrides[field] = { value: spelled.value, confidence: spelled.confidence, quote: spelled.quote };
+        const spelledNames = ['first_name', 'last_name']
+          .map((field) => ({ field, spelled: callerSpelledName(contactDictation, field) }))
+          .filter(({ field, spelled }) => spelled?.nameContext
+            && (nameChanges[field] || String(extracted[field] || '').trim() === spelled.value));
+        if (spelledNames.length) {
+          const linkedCustomerId = call.customer_id
+            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
+            || null;
+          for (const { field, spelled } of spelledNames) {
+            if (!linkedCustomerId) extracted[field] = spelled.value;
+            spelledNameOverrides[field] = { value: spelled.value, confidence: spelled.confidence, quote: spelled.quote };
+          }
         }
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
-        if (Object.keys(nameChanges).length) logger.info(`[call-proc-dictation] Applied caller-spelled name field(s) for ${maskSid(callSid)}: ${Object.keys(nameChanges).join(', ')}`);
+        if (spelledNames.length) logger.info(`[call-proc-dictation] Caller-spelled name field(s) for ${maskSid(callSid)}: ${spelledNames.map((n) => n.field).join(', ')}`);
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
         dictationEmailPayload = emailDecision.payload;
         if (emailDecision.adopt) {

@@ -472,10 +472,13 @@ describe('processor wiring — the spelled name goes to the flat record and the 
   test('the V2 extraction is never rewritten and no cohort marker or version suffix exists', () => {
     const at = src.indexOf('applyNameDictationPolicy({ current: extracted');
     expect(at).toBeGreaterThan(0);
-    const block = src.slice(at, at + 900);
-    expect(block).toMatch(/extracted\[field\] = spelled\.value;/);
-    expect(block).toMatch(/spelledNameOverrides\[field\] = \{ value: spelled\.value, confidence: spelled\.confidence, quote: spelled\.quote \}/);
+    const block = src.slice(at, at + 2600);
+    // Decoder-backed override for a changed name or one the record already holds.
     expect(block).toMatch(/nameChanges\[field\] \|\| String\(extracted\[field\] \|\| ''\)\.trim\(\) === spelled\.value/);
+    // The flat record takes the spelling only for a NEW caller; an existing customer gets the staged candidate alone.
+    expect(block).toMatch(/linkedCustomerId = call\.customer_id/);
+    expect(block).toMatch(/if \(!linkedCustomerId\) extracted\[field\] = spelled\.value;/);
+    expect(block).toMatch(/spelledNameOverrides\[field\] = \{ value: spelled\.value, confidence: spelled\.confidence, quote: spelled\.quote \}/);
     expect(block).not.toMatch(/v2Result/);
     expect(src).not.toMatch(/NAME_DICTATION_MARKER|name_dictation|applyNameDictationToV2Caller/);
     expect(src).toMatch(/nameOverrides: spelledNameOverrides,/);
