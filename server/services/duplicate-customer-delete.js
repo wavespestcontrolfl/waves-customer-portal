@@ -24,8 +24,9 @@
  *   - previewMergeEffects: every row in every table that points at the
  *     customer (declared FKs, every *customer_id column, and the polymorphic
  *     notification / email pointers) — the same set a merge would move;
- *   - customer_plan_rates and field_credit_allocations, which that sweep
- *     deliberately skips, are counted here directly.
+ *   - every table that sweep deliberately skips (REPOINT_EXCLUDED_TABLES:
+ *     plan rates, credit allocations, location reviews, merge journal,
+ *     dismissals) is counted here directly from the engine's own list.
  * Two pointer kinds are not history and are allowed: ONE primary saved
  * property (created automatically from the customer's address) and the
  * nightly derived health score.
@@ -80,6 +81,13 @@ const CHECKS = [
   },
   { key: 'other', label: 'Other linked records' },
 ];
+
+// Key columns of the merge-excluded tables that are not keyed on
+// customer_id (a merge or a "not duplicates" decision involving the record).
+const EXCLUDED_TABLE_KEYS = {
+  customer_merge_journal: ['winner_customer_id', 'loser_customer_id'],
+  customer_duplicate_dismissals: ['customer_id_a', 'customer_id_b'],
+};
 
 const BLOCKER_LABELS = {
   stripe_customer_id: 'a Stripe customer profile',
@@ -145,9 +153,9 @@ async function findLiveTwins(stub) {
   });
 }
 
-async function countTable(table, customerId, conn = db) {
+async function countTable(table, customerId, conn = db, columns = ['customer_id']) {
   try {
-    const row = await conn(table).where({ customer_id: customerId }).count({ n: '*' }).first();
+    const row = await conn(table).where((q) => { for (const column of columns) q.orWhere(column, customerId); }).count({ n: '*' }).first();
     return Number(row?.n || 0);
   } catch (err) {
     logger.warn(`[intelligence-bar] delete_duplicate_customer: count failed for ${table}: ${err.message}`);
@@ -161,7 +169,7 @@ async function countTable(table, customerId, conn = db) {
 // checked" — it blocks, like a found row (fail closed). `conn` is the
 // archive transaction on the commit's locked re-check.
 async function readEmptiness(stub, conn = db) {
-  const { loserAutoBlockers, previewMergeEffects } = require('./customer-dedupe');
+  const { loserAutoBlockers, previewMergeEffects, REPOINT_EXCLUDED_TABLES } = require('./customer-dedupe');
   const { hasMembership } = require('./membership-state');
   const found = Object.fromEntries(CHECKS.map((c) => [c.key, []]));
   const add = (key, text) => { if (!found[key].includes(text)) found[key].push(text); };
@@ -196,9 +204,12 @@ async function readEmptiness(stub, conn = db) {
     add(category, countText(key, n));
   }
 
-  // Tables the merge sweep skips on purpose (its own ledgers).
-  for (const table of ['customer_plan_rates', 'field_credit_allocations']) {
-    const n = await countTable(table, stub.id, conn);
+  // Every table the merge sweep skips on purpose (REPOINT_EXCLUDED_TABLES:
+  // plan rates, credit allocations, location reviews, merge journal and
+  // dismissals), read from the engine's own list so a new exclusion is
+  // counted too. An unknown key column reads "could not be checked".
+  for (const table of REPOINT_EXCLUDED_TABLES) {
+    const n = await countTable(table, stub.id, conn, EXCLUDED_TABLE_KEYS[table]);
     if (n !== 0) add(categoryFor(table), countText(table, n));
   }
 

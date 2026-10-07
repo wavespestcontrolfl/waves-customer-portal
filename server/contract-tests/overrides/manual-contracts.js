@@ -48,12 +48,15 @@ module.exports = {
   // customer-dedupe.js's (loserAutoBlockers, previewMergeEffects). Smoke runs
   // only the unconfirmed preview (two-step), which writes nothing.
   delete_duplicate_customer: {
-    tables: ['customers', 'customer_properties', 'customer_plan_rates', 'field_credit_allocations'],
+    tables: ['customers', 'customer_properties', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews', 'customer_merge_journal', 'customer_duplicate_dismissals'],
     columns: {
       customers: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at', 'created_at', 'updated_at', 'waveguard_tier', 'account_credits'],
       customer_properties: ['customer_id', 'is_primary'],
       customer_plan_rates: ['customer_id'],
       field_credit_allocations: ['customer_id'],
+      customer_geocode_reviews: ['customer_id'],
+      customer_merge_journal: ['winner_customer_id', 'loser_customer_id'],
+      customer_duplicate_dismissals: ['customer_id_a', 'customer_id_b'],
     },
     reason: 'queries live in services/duplicate-customer-delete.js, outside the registered tool module',
   },

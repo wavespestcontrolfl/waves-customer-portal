@@ -7041,6 +7041,9 @@ module.exports = {
   // The "not a shell" blocker list — the IB delete_duplicate_customer
   // emptiness check reads the same list the auto-merge refuses on.
   loserAutoBlockers,
+  // The tables previewMergeEffects never counts — the same check counts them
+  // itself so a table excluded here can never read as "empty".
+  REPOINT_EXCLUDED_TABLES,
   executeMerge,
   lockSeriesCreateForMerge,
   runAutoMergeSweep,

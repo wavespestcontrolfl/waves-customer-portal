@@ -14,7 +14,7 @@ jest.mock('../models/db', () => {
   const state = { stub: null, twins: [], counts: {}, primaryCount: 1 };
   const builder = (table) => {
     const q = { _table: table, _single: false, _count: false, _where: {} };
-    q.where = (arg) => { if (arg && typeof arg === 'object') Object.assign(q._where, arg); else if (typeof arg === 'function') arg({ orWhereRaw: () => null }); return q; };
+    q.where = (arg) => { if (arg && typeof arg === 'object') Object.assign(q._where, arg); else if (typeof arg === 'function') arg({ orWhereRaw: () => null, orWhere: () => null }); return q; };
     q.whereNull = () => q;
     q.whereNot = () => q;
     q.whereIn = () => q;
@@ -45,6 +45,8 @@ const mockPreviewMergeEffects = jest.fn();
 jest.mock('../services/customer-dedupe', () => ({
   loserAutoBlockers: (...args) => mockLoserAutoBlockers(...args),
   previewMergeEffects: (...args) => mockPreviewMergeEffects(...args),
+  // The REAL exclusion list: every table the merge reader skips is counted.
+  REPOINT_EXCLUDED_TABLES: jest.requireActual('../services/customer-dedupe').REPOINT_EXCLUDED_TABLES,
 }));
 const mockArchiveCustomerAsAdmin = jest.fn();
 jest.mock('../routes/admin-customers', () => ({
@@ -175,6 +177,19 @@ describe('refuses any record that is not empty, naming what it found and pointin
     ['a blocker table that could not be read (fail closed)', blockers(['payments (check failed)']), 'Payments, saved cards, Stripe profile', /payments \(could not be checked\)/],
     ['the linked-table sweep failing (fail closed)', moving({ fk_sweep: 'unknown' }), 'Other linked records', /could not be checked/],
   ];
+
+  // Every table the merge reader (previewMergeEffects) excludes is counted by
+  // this check itself, read from the engine's own REPOINT_EXCLUDED_TABLES.
+  const { REPOINT_EXCLUDED_TABLES } = jest.requireActual('../services/customer-dedupe');
+  test('the real exclusion list covers plan rates, credits, location reviews, merge journal and dismissals', () => {
+    expect([...REPOINT_EXCLUDED_TABLES].sort()).toEqual(['customer_duplicate_dismissals', 'customer_geocode_reviews', 'customer_merge_journal', 'customer_plan_rates', 'field_credit_allocations']);
+  });
+  test.each([...REPOINT_EXCLUDED_TABLES])('a row in merge-excluded table %s refuses', async (table) => {
+    db.__state.counts[table] = 1;
+    const result = await preview();
+    expect(result).toMatchObject({ code: 'not_empty' });
+    expect(result.error).toContain(`1 ${table}`);
+  });
 
   test.each(CASES)('%s', async (_name, arrange, label, detail) => {
     arrange();
