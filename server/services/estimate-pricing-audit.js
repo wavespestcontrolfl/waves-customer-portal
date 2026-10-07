@@ -703,15 +703,6 @@ async function inventoryCostFor(serviceKey, dimensions) {
   return inventoryCostFromRows(serviceKey, dimensions, await loadInventoryCostRows());
 }
 
-// The bermuda removal cost on the raw engine lawn line of THE result the audit settled on
-// (the authoritative container: a current `result` is never mixed with a stale engineResult
-// left behind by a revision), for an estimate whose mapped lawnMeta is absent.
-function rawLawnBermudaCost(result) {
-  const lines = Array.isArray(result?.lineItems) ? result.lineItems : [];
-  const lawn = lines.find((item) => item?.service === 'lawn_care' && item?.costs?.annualBermudaRemoval != null);
-  return lawn ? lawn.costs.annualBermudaRemoval : undefined;
-}
-
 // A legacy estimate whose result carries the bermuda suppression marker but no stored removal
 // cost (it was priced before the cost existed): the cost the engine would state, from the
 // marker and the lawn area in that result, by the engine's own calculation. No marker or no
@@ -721,14 +712,26 @@ function derivedBermudaCost(result, lawnSqFt) {
   return require('./pricing-engine/service-pricing').calcBermudaRemovalAnnualCost(Number(lawnSqFt));
 }
 
-// The bermuda removal cost the audit adds to a lawn line: stored on the result, on its raw lawn
-// line, or derived from the marker and the lawn area. The WHOLE lookup is gated on
-// GATE_LAWN_BERMUDA_REMOVAL (off = 0 whatever is stored), and an authored proposal, which is the
+// The bermuda removal cost a raw lawn line states itself, as a line field ({} for any other line).
+const storedBermudaCost = (serviceKey, item) => (serviceKey === 'lawn_care' && item.costs?.annualBermudaRemoval != null
+  ? { bermudaRemovalStored: item.costs.annualBermudaRemoval } : {});
+
+// The bermuda removal cost on a raw lawn line of THE result the audit settled on (an unpriced
+// witness line the line merge skips still states its cost there).
+function rawLawnBermudaCost(result) {
+  const lines = Array.isArray(result?.lineItems) ? result.lineItems : [];
+  const lawn = lines.find((item) => item?.service === 'lawn_care' && item?.costs?.annualBermudaRemoval != null);
+  return lawn ? lawn.costs.annualBermudaRemoval : undefined;
+}
+
+// The bermuda removal cost the audit adds to a lawn line: stored on the result, on the raw lawn
+// line itself (which carries it from whichever container it came from), or derived from the
+// marker and the lawn area. The WHOLE lookup is gated on GATE_LAWN_BERMUDA_REMOVAL (off = 0 whatever is stored), and an authored proposal, which is the
 // accepted quote, takes none from the retained result.
-function bermudaRemovalCostOf(result, dimensions, proposalAuthoritative) {
+function bermudaRemovalCostOf(raw, result, dimensions, proposalAuthoritative) {
   if (proposalAuthoritative || require('../config/feature-gates').lawnBermudaRemovalLive?.() !== true) return 0;
   return Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
-    ?? rawLawnBermudaCost(result) ?? derivedBermudaCost(result, dimensions.lawnSqFt)) || 0;
+    ?? raw.bermudaRemovalStored ?? rawLawnBermudaCost(result) ?? derivedBermudaCost(result, dimensions.lawnSqFt)) || 0;
 }
 
 function visitsFor(line, result) {
@@ -963,6 +966,9 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
         cogsServiceTypeFixedMultipliers: mosquitoExtras.serviceTypeFixedMultipliers,
       } : {}),
       ...(quoted ? { quoted } : {}),
+      // The bermuda removal cost this raw lawn line states itself: it travels with the line, so a lawn line
+      // merged in from another container is costed from its own source.
+      ...storedBermudaCost(serviceKey, item),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: isRecurring ? 'recurring' : 'one_time',
@@ -1157,7 +1163,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // Bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL): its two yearly sprays are
     // not in the lawn inventory registry, so the quote's own cost line joins the
     // lawn COGS. Absent (gate off, no add-on) = 0.
-    const bermudaRemovalCost = raw.serviceKey === 'lawn_care' ? bermudaRemovalCostOf(result, dimensions, proposalLines.length > 0) : 0;
+    const bermudaRemovalCost = raw.serviceKey === 'lawn_care' ? bermudaRemovalCostOf(raw, result, dimensions, proposalLines.length > 0) : 0;
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);
     const margin = raw.price > 0 ? Math.round((grossProfit / raw.price) * 1000) / 1000 : null;

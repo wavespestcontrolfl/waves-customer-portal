@@ -89,7 +89,7 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
   rawLines.forEach(remember);
   const mappedServiceKeys = new Set(rawLines.map(priceKey));
   const serverRepriced = String(pricingAuthority || '').toUpperCase() === 'SERVER' && !!data.result && data.result !== data.engineResult;
-  const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false } = {}) => {
+  const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false, current = false } = {}) => {
     const survivors = [];
     for (const line of extra) {
       const entries = covered.get(priceKey(line)) || [];
@@ -103,6 +103,9 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
           retained.cogsServiceTypeFixedMultipliers = line.cogsServiceTypeFixedMultipliers;
         }
         if (retained.visitsPerYear === undefined && line.visitsPerYear !== undefined) retained.visitsPerYear = line.visitsPerYear;
+        // A stored bermuda removal cost on the CURRENT container's own raw lawn line is the line's cost; an older
+        // container's is stale and never transfers.
+        if (current && retained.bermudaRemovalStored === undefined && line.bermudaRemovalStored !== undefined) retained.bermudaRemovalStored = line.bermudaRemovalStored;
         if (line.quoted) retained.quoted = { ...line.quoted, ...(retained.quoted || {}) };
         continue;
       }
@@ -112,7 +115,7 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
     // Intra-container siblings never dedupe against each other: they join the covered set only for LATER containers.
     survivors.forEach(remember);
   };
-  merge(collectors.raw(result, setupOpts));
+  merge(collectors.raw(result, setupOpts), { current: true });
   // The current container's raw lines are priced services too: an older container's row for the same
   // service and cadence is a stale revision of them, never an extra.
   rawLines.forEach((line) => mappedServiceKeys.add(priceKey(line)));

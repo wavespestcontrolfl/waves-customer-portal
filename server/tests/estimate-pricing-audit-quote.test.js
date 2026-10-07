@@ -265,6 +265,26 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     });
   });
 
+  test('a lawn line merged in from the engine container is costed from its own bermuda cost, once (the result prices another service)', async () => {
+    await withRemovalGate('true', async () => {
+      const pest = { service: 'pest_control', name: 'Pest Control', mo: 40, monthly: 40 };
+      const engineLawn = { service: 'lawn_care', name: 'Lawn Care', monthly: 60, annual: 720, frequency: 9, costs: { annualBermudaRemoval: 71.25 } };
+      const audit = (extra = {}) => buildEstimatePricingAudit({ id: 'est-merged', status: 'sent', source: 'manual', monthly_total: '100.00', annual_total: '1200.00', onetime_total: null, estimate_data: { result: { recurring: { services: [pest] } }, engineResult: { lineItems: [engineLawn] }, ...extra } });
+      const lawn = (built) => built.lines.filter((l) => l.serviceKey === 'lawn_care');
+      const built = await audit();
+      expect(lawn(built)).toHaveLength(1);
+      expect(lawn(built)[0].cogs.bermudaRemovalCost).toBe(71.25);
+      // Counted once: the audit's total cost carries it a single time.
+      const noCost = await audit({ engineResult: { lineItems: [{ ...engineLawn, costs: undefined }] } });
+      expect(built.estimate && built.lines.reduce((sum, l) => sum + l.cogs.estimatedCost, 0) - noCost.lines.reduce((sum, l) => sum + l.cogs.estimatedCost, 0)).toBeCloseTo(71.25, 2);
+      // Gate off: 0, whatever the merged line states.
+      expect(lawn(await withRemovalGate(undefined, () => audit()))[0].cogs).not.toHaveProperty('bermudaRemovalCost');
+      // A SERVER-repriced result (older container consume-only) never costs a stale engine lawn line.
+      const repriced = await buildEstimatePricingAudit({ id: 'est-merged2', status: 'sent', source: 'manual', pricing_authority: 'SERVER', monthly_total: '40.00', annual_total: '480.00', onetime_total: null, estimate_data: { result: { recurring: { services: [pest] } }, engineResult: { lineItems: [engineLawn] } } });
+      expect(lawn(repriced)).toEqual([]);
+    });
+  });
+
   test('the current container\'s raw lines make a stale older row of the same service consume-only: one lawn line, at the current price', async () => {
     const audit = (data) => buildEstimatePricingAudit({ id: 'est-stale', status: 'sent', source: 'manual', monthly_total: '60.00', annual_total: '720.00', onetime_total: null, estimate_data: data });
     const lawnLines = async (data) => (await audit(data)).lines.filter((l) => l.serviceKey === 'lawn_care');
