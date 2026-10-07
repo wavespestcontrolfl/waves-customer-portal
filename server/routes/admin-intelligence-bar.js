@@ -2218,10 +2218,47 @@ function platformInputRefusal(req, row, input) {
   return ActionRegistry.validateInput(row.tool_name, input, { role: req.techRole, context: row.context || null, fullAccess: ibFullAccess(req) });
 }
 
+// Retires the expired card and stores its fresh proposal in ONE transaction:
+// a refusal or an error on the way rolls the retirement back, so the card
+// stays expired and a retry can succeed. Returns { status, body }.
+async function showCardAgain(req, id) {
+  const actor = getAdminActorId(req);
+  const rollback = new Error('show again rolled back');
+  let answer = null;
+  let retired = null;
+  try {
+    await db.transaction(async (trx) => {
+      retired = await PendingActions.retireExpiredAction(id, actor, { trx });
+      if (!retired) throw rollback;
+      const proposed = await proposeShownAgain(req, retired, publicCardInput(retired.params), trx);
+      if (proposed.failed || !proposed.clientPayload) {
+        answer = { status: 409, body: { error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code } };
+        throw rollback;
+      }
+      answer = { status: 200, body: { success: true, pendingAction: proposed.clientPayload } };
+    });
+  } catch (err) {
+    if (err !== rollback) throw err;
+  }
+  if (answer?.status === 200) {
+    await attachDerivedCard(retired, answer.body.pendingAction.id, actor);
+    logger.info(`[intelligence-bar:pending] Expired action ${id} shown again as ${answer.body.pendingAction.id}`);
+  }
+  return answer || showAgainReplay(id, actor);
+}
+
+// Not retired now: a retry after a lost response gets the card Show again
+// already made; otherwise the card was live or decided.
+async function showAgainReplay(id, actor) {
+  const made = await PendingActions.findDerivedCard('_ib_shown_from', id, actor);
+  if (made) return { status: 200, body: { success: true, replayed: true, pendingAction: cardPayload(made) } };
+  return { status: 409, body: { error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' } };
+}
+
 // Show again's fresh proposal for a retired card. A picker card re-lists its
 // own products with fresh numbers; a stock card keeps the product (and
 // request) its row stored; every other card is proposed from its input.
-async function proposeShownAgain(req, row, input) {
+async function proposeShownAgain(req, row, input, trx) {
   const stored = row.params || {};
   const base = { req, context: row.context || null, requestStartedAt: new Date() };
   const sourcePin = { _ib_shown_from: String(row.id) };
@@ -2229,11 +2266,11 @@ async function proposeShownAgain(req, row, input) {
     const card = await require('../services/intelligence-bar/procurement-tools').productChoiceCard({ params: input, seedIds: stored._ib_product_choices });
     if (!card) return { failed: true, modelResult: { error: 'None of the products on the earlier card can take this amount now. Nothing was written and no confirmation card was created.', code: 'target_clarification_required' } };
     if (card.failed) return card;
-    return storeProposalCard({ ...base, toolName: row.tool_name, params: card.params, preview: card.preview, task: null, cardText: card, reproposal: { sourcePin } });
+    return storeProposalCard({ ...base, toolName: row.tool_name, params: card.params, preview: card.preview, task: null, cardText: card, reproposal: { sourcePin, trx } });
   }
   const grounded = STOCK_WRITE_TOOL_NAMES.has(row.tool_name)
     ? { groundedTarget: { productId: stored.product_id || null, requestId: stored.request_id || null } } : {};
-  return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input }, reproposal: { ...grounded, sourcePin } });
+  return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input }, reproposal: { ...grounded, sourcePin, trx } });
 }
 
 function getAdminActorId(req) {
@@ -4521,26 +4558,13 @@ router.post('/show-again', async (req, res, next) => {
     const id = String(req.body?.pending_action_id || '').trim();
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'pending_action_id is required' });
     if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
-    const actor = getAdminActorId(req);
-    const refusal = await showAgainRefusal(req, await PendingActions.getPendingRow(id, actor));
+    const row = await PendingActions.getPendingRow(id, getAdminActorId(req));
+    const refusal = await showAgainRefusal(req, row);
     if (refusal) return res.status(refusal.status).json(refusal.body);
-    const retired = await PendingActions.retireExpiredAction(id, actor);
-    if (!retired) {
-      // A retry after a lost response gets the card Show again already made.
-      const made = await PendingActions.findDerivedCard('_ib_shown_from', id, actor);
-      if (made) return res.json({ success: true, replayed: true, pendingAction: cardPayload(made) });
-      return res.status(409).json({ error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' });
-    }
-    const input = publicCardInput(retired.params);
-    const invalid = platformInputRefusal(req, retired, input);
+    const invalid = platformInputRefusal(req, row, publicCardInput(row.params));
     if (invalid) return res.status(409).json({ error: invalid.error || 'This action cannot be shown again.', code: invalid.code });
-    const proposed = await proposeShownAgain(req, retired, input);
-    if (proposed.failed || !proposed.clientPayload) {
-      return res.status(409).json({ error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code });
-    }
-    await attachDerivedCard(retired, proposed.clientPayload.id, actor);
-    logger.info(`[intelligence-bar:pending] Expired action ${id} shown again as ${proposed.clientPayload.id}`);
-    return res.json({ success: true, pendingAction: proposed.clientPayload });
+    const shown = await showCardAgain(req, id);
+    return res.status(shown.status).json(shown.body);
   } catch (err) {
     logger.error(`[intelligence-bar] show-again failed (code=${err.code || 'unknown'})`);
     return next(err);

@@ -367,6 +367,16 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect((await db('ib_pending_actions').where({ id: card.id }).first()).task_id).toBeNull();
     expect(await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id })).toMatchObject({ status: 409, body: { code: 'not_expired' } });
     await db('ib_pending_actions').where({ id: card.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    // An insert failure rolls the retirement back (Codex #6111 pre-push): the
+    // card stays expired and pending, and a retry succeeds.
+    const insertSpy = jest.spyOn(require('../services/intelligence-bar/pending-actions'), 'createPendingAction')
+      .mockRejectedValueOnce(new Error('Synthetic insert failure'));
+    let broken;
+    try {
+      broken = await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id });
+    } finally { insertSpy.mockRestore(); }
+    expect(broken.status).toBe(500);
+    expect((await db('ib_pending_actions').where({ id: card.id }).first()).status).toBe('pending');
     const shown = await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id });
     expect(shown.status).toBe(200);
     expect(shown.body.pendingAction.id).not.toBe(card.id);

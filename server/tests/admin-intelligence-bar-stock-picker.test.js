@@ -390,7 +390,9 @@ describe('/show-again', () => {
       expect(body.pendingAction.id).toBe(NEW_ID);
       expect(body.pendingAction.contract.effects.map((e) => e.label)).toContain('Zentrovex 10% SC: restock 78 fl_oz; on hand 20 → 98 fl_oz');
     });
-    expect(mockRetireExpiredAction).toHaveBeenCalledWith(CHOICE_ID, 'admin-1');
+    // Retired inside the same transaction that stores the new card.
+    expect(mockRetireExpiredAction).toHaveBeenCalledWith(CHOICE_ID, 'admin-1', { trx: { isTrx: true } });
+    expect(mockCreatePendingAction.mock.calls[0][0].trx).toEqual({ isTrx: true });
     const previewInput = mockExecuteProcurementTool.mock.calls[0][1];
     expect(Object.keys(previewInput).some((k) => k.startsWith('_'))).toBe(false);
     const stored = mockCreatePendingAction.mock.calls[0][0].params;

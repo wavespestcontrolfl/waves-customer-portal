@@ -458,12 +458,14 @@ async function findDerivedCard(pin, sourceId, requestedBy) {
 // Show again (owner 2026-10-07): retires a card that expired with no decision,
 // in one statement, so one expired card is shown again at most once. Returns
 // the retired row (params parsed), or null when the card is not this actor's,
-// not expired, or was already confirmed or cancelled.
-async function retireExpiredAction(id, requestedBy) {
-  const [row] = await db('ib_pending_actions')
+// not expired, or was already confirmed or cancelled. `trx`: inside the
+// caller's transaction, so a failed re-proposal puts the card back.
+async function retireExpiredAction(id, requestedBy, { trx = null } = {}) {
+  const q = trx || db;
+  const [row] = await q('ib_pending_actions')
     .where({ id, requested_by: String(requestedBy), status: 'pending' })
-    .where('expires_at', '<=', db.fn.now())
-    .update({ status: 'cancelled', updated_at: db.fn.now() })
+    .where('expires_at', '<=', q.fn.now())
+    .update({ status: 'cancelled', updated_at: q.fn.now() })
     .returning('*');
   return row ? { ...row, params: paramsOf(row) } : null;
 }
