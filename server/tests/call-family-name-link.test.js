@@ -21,6 +21,7 @@ const gates = require('../config/feature-gates');
 const {
   pickNamedAccountHolder, normName, fullNameKey, resolveFamilyNameLink,
   findLiveCustomersByFullName, linkCallToCustomer, phoneOnAnyLiveAccount, statedAddressCorroborates,
+  scrubCallerIdentity, familyLinkContextFromCall, linkFamilyCall,
 } = require('../services/call-family-name-link');
 
 const { buildTriageItem } = require('../services/call-routing-gates');
@@ -101,6 +102,15 @@ describe('statedAddressCorroborates', () => {
     expect(statedAddressCorroborates({ street_line_1: '100 Other Street' }, onFile)).toBe(false);
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop' }, { address_line1: null })).toBe(false);
   });
+  test('a stated unit that differs from the stored unit does not; same unit, or one side blank, does', () => {
+    const condo = { address_line1: '100 Example Loop', address_line2: 'Apt 4B', city: 'Sarasota', zip: '34240' };
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: 'Unit 5C' }, condo)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop Apt 5C' }, condo)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: '#4b' }, condo)).toBe(true);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop' }, condo)).toBe(true);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: '4B' }, onFile)).toBe(true);
+  });
+
   test('a stated ZIP or city that disagrees with the account does not', () => {
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', postal_code: '34202' }, onFile)).toBe(false);
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', city: 'Bradenton' }, onFile)).toBe(false);
@@ -125,69 +135,86 @@ describe('Step 3 wiring (structural)', () => {
     expect(shared).toBeGreaterThan(0);
     expect(family).toBeGreaterThan(shared);
     expect(create).toBeGreaterThan(family);
-  });
-
-  test('inbound only, gated, fail-open, token-fenced through the shared module', () => {
     expect(source).toContain('!isOutboundCall(call) && (familyLinked = await tryFamilyNameLink())');
-    expect(source).toContain("require('../config/feature-gates').callFamilyNameLinkLive()");
-    expect(source).toContain('procToken,\n          callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property');
   });
 
-  test('the caller is saved through the one slot writer, on the inbound number only, never clearing the account consent stamp', () => {
-    expect(source).toMatch(/!isOutboundCall\(call\) && phone && samePhone\(phone, call\.from_phone\)\)/);
-    expect(source).toMatch(/persistCallSecondaryContact\(linkedCustomerId, \{[\s\S]*?\}, \{\s*smsConsentExplicit: consentGiven,\s*keepConsentStamp: !consentGiven,\s*holdPhone: held,/);
+  test('the processor keeps a short call; the decisions live in the family link module', () => {
+    const start = source.indexOf('const tryFamilyNameLink = async () => {');
+    const block = source.slice(start, source.indexOf('const sharedPhoneAmbiguity = {};'));
+    expect(block).toContain("require('./call-family-name-link').linkFamilyCall({");
+    expect(block.split('\n').length).toBeLessThan(14);
+    expect(block).toContain('statedAddress: v2StatedServiceAddressRaw');
+    expect(block).not.toMatch(/extracted\.(address_line1|city|zip)/);
+  });
+
+  test('the caller is NOT saved on the holder: no slot write, no opt-in claim, no consent branch', () => {
+    expect(source).not.toMatch(/persistCallSecondaryContact\(linkedCustomerId/);
+    expect(source).not.toContain('family-link opt-in');
+    expect(source).not.toContain('family-link caller saved');
+    const moduleSource = fs.readFileSync(require.resolve('../services/call-family-name-link'), 'utf8');
+    const code = moduleSource.split('\n').filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('//')).join('\n');
+    expect(code).not.toMatch(/persistCallSecondaryContact|claimRecipientOptins|dispatchRecipientOptins|recipient_optin|sendCustomerMessage/);
+  });
+
+  test('a family link sends the holder no text on the caller\'s consent: SMS blocked, implied and explicit consent cleared', () => {
+    const adopt = source.slice(source.indexOf('const adoptFamilyNameLink = (context) => {'), source.indexOf('const tryFamilyNameLink = async () => {'));
+    expect(adopt).toContain('v2SmsBlocked = true;');
+    expect(adopt).toContain('v2SmsClearedByImpliedConsent = false;');
+    expect(adopt).toContain('v2SmsConsentExplicit = false;');
+    // adopted after the consent was computed, so it cannot be overwritten by that read
+    expect(source.indexOf('v2SmsBlocked = !tcpa.canSms;')).toBeLessThan(source.indexOf('const adoptFamilyNameLink'));
+    expect(source.indexOf('v2SmsConsentExplicit = v2Result?.status')).toBeLessThan(source.indexOf('const adoptFamilyNameLink'));
+    // nothing after Step 3 recomputes SMS blocking from consent without keeping a block already set
+    const later = source.slice(source.indexOf('const adoptFamilyNameLink')).match(/v2SmsBlocked = [^;]*;/g) || [];
+    for (const assignment of later) expect(assignment).toMatch(/v2SmsBlocked = (true|v2SmsBlocked \|\|)/);
   });
 
   test('the protective context follows the persisted marker, not the gate, on a reprocess', () => {
-    const resume = source.slice(source.indexOf('// A call this feature linked on an earlier pass'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
-    expect(resume).toContain("String(call.metadata?.family_name_link?.customer_id || '') === String(customerId)");
-    expect(resume.indexOf('adoptFamilyNameLink(customerId, markedHolder)')).toBeGreaterThan(resume.indexOf('callFamilyNameLinkLive()'));
-    expect(resume.slice(0, resume.indexOf('try {'))).not.toContain('callFamilyNameLinkLive');
+    const resume = source.slice(source.indexOf('A call this feature linked on an earlier pass keeps its protections'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
+    expect(resume).toContain('familyLinkContextFromCall(call, customerId)');
+    expect(resume).not.toContain('callFamilyNameLinkLive');
   });
 
-  test('corroboration uses the ORIGINALLY stated address, never the validated or recovered one', () => {
-    expect(source).toContain('statedAddress: v2StatedServiceAddressRaw,');
-    const call = source.slice(source.indexOf('const result = await resolveFamilyNameLink('), source.indexOf('statedAddress: v2StatedServiceAddressRaw,') + 60)
-      .split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
-    expect(call).not.toMatch(/extracted\.(address_line1|city|zip)/);
-    expect(call).not.toContain('v2CanonicalExtraction?.property');
-    // frozen before address validation rewrites the extraction
-    expect(source.indexOf('v2StatedServiceAddressRaw = rawServiceAddress ?')).toBeLessThan(source.indexOf('v2AddressValidation = await validateWithOnFileAssist'));
-  });
-
-  test('a card says why when the name matched but the address did not', () => {
-    expect(source).toContain("result.status === 'uncorroborated'\n                  ? 'The caller named this account but gave no matching address. Confirm before linking.'");
-  });
-
-  test('the saved family contact goes through the recipient double opt-in, never texted on role alone', () => {
-    const after = source.slice(source.indexOf('family-link caller saved as a service contact'));
-    const block = after.slice(0, after.indexOf('family-link service contact skipped'));
-    expect(block).toContain("(saved === 'written' || String(saved).startsWith('skipped_phone_on_record')) && !v2DoNotContact");
-    expect(block).toContain("const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');");
-    expect(block).toContain('void dispatchRecipientOptins(claims, custRow)');
-    // fail closed: a failed claim leaves a blocking ask_failed row
-    expect(block).toContain("status: 'ask_failed'");
-    // no direct send anywhere in the family-link writer
-    expect(block).not.toMatch(/sendCustomerMessage|sendSMS|twilio/i);
-  });
-
-  test('both the dictated callback number and the inbound caller ID are checked for an account', () => {
-    expect(source).toContain('callerPhones: [phone, call.from_phone],');
-  });
-
-  test('canonical V2 output is trusted only in primary mode, for the link and for the retry', () => {
-    expect(source).toContain('!callExtractionV2PrimaryEnabled()) return null;');
-    expect(source).toContain('callFamilyNameLinkLive() && callExtractionV2PrimaryEnabled()');
-  });
-
-  test('the holder exclusion uses the structured name, so a two-word first name keys the same', () => {
-    expect(fullNameKey({ first_name: 'Mary Ann', last_name: 'Testerson' })).toBe('mary ann|testerson');
-    expect(source).toContain('holderKey: fullNameKey(holder)');
+  test('candidate staging scrubs the caller identity on a family link', () => {
+    expect(source).toContain('scrubCallerIdentity(extracted, v2ExtractionForAudit)');
+    expect(source).toContain('extraction: stagingInput.extracted,');
+    expect(source).toContain('v2Extraction: stagingInput.v2Extraction,');
   });
 
   test('the booking backfill never copies the caller onto the holder', () => {
     expect(source).toContain('suppressCallerIdentity: !!familyNameLink');
     expect(source).toContain('const extracted = suppressCallerIdentity ? { ...extractedIn, first_name: null, last_name: null, phone: null, email: null } : extractedIn;');
+  });
+
+  test('the holder is never filed as a contact on their own account (structured name key)', () => {
+    expect(fullNameKey({ first_name: 'Mary Ann', last_name: 'Testerson' })).toBe('mary ann|testerson');
+    expect(source).toContain('familyNameLink?.holderKey');
+  });
+});
+
+describe('scrubCallerIdentity', () => {
+  test('drops the caller name, number and email from both extractions and keeps the address', () => {
+    const extracted = { first_name: 'Dana', last_name: 'Lee', phone: '+19415550101', email: 'dana@example.com', address_line1: '100 Example Loop' };
+    const v2 = { meta: { schema_version: '1.24.0' }, caller: { first_name: 'Dana', last_name: 'Lee', name_full: 'Dana Lee', email: 'dana@example.com', phone_e164: '+19415550101', phone_raw_spoken: '941 555 0101', relationship_to_property: 'family_member' }, property: { service_address: { street_line_1: '100 Example Loop' } } };
+    const out = scrubCallerIdentity(extracted, v2);
+    expect(out.extracted).toMatchObject({ first_name: null, last_name: null, phone: null, email: null, address_line1: '100 Example Loop' });
+    expect(out.v2Extraction.caller).toMatchObject({ first_name: null, last_name: null, name_full: null, email: null, phone_e164: null, phone_raw_spoken: null, relationship_to_property: 'family_member' });
+    expect(out.v2Extraction.property.service_address.street_line_1).toBe('100 Example Loop');
+    expect(extracted.first_name).toBe('Dana'); // input untouched
+    expect(v2.caller.email).toBe('dana@example.com');
+  });
+
+  test('with no V2 extraction it still scrubs the V1 record', () => {
+    expect(scrubCallerIdentity({ first_name: 'Dana', email: 'd@example.com' }, null).extracted).toMatchObject({ first_name: null, email: null });
+  });
+});
+
+describe('familyLinkContextFromCall', () => {
+  const marker = { customer_id: 'c1', holder_first_name: 'Mary Ann', holder_last_name: 'Testerson' };
+  test('restores the structured holder key from the persisted marker for the same customer only', () => {
+    expect(familyLinkContextFromCall({ metadata: { family_name_link: marker } }, 'c1')).toMatchObject({ customerId: 'c1', holderKey: 'mary ann|testerson' });
+    expect(familyLinkContextFromCall({ metadata: { family_name_link: marker } }, 'c2')).toBeNull();
+    expect(familyLinkContextFromCall({ metadata: {} }, 'c1')).toBeNull();
   });
 });
 
@@ -353,6 +380,72 @@ const SKIP = !process.env.DATABASE_URL;
     await trx('customers').where({ id: mom }).update({ address_line1: '100 Example Loop' });
     r = await tryLink();
     expect(r.outcome).toBe('linked');
+  });
+
+  test('a voicemail never links: the card lists the one candidate and the call stays unlinked', async () => {
+    const mom = await customer();
+    const callLogId = await call();
+    const out = await resolveFamilyNameLink(args(callLogId, { allowLink: false }));
+    expect(out.status).toBe('voicemail');
+    expect(out.candidates).toEqual([{ customer_id: String(mom), name: 'Angelina Testerson', city: 'Sarasota' }]);
+    expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+  });
+
+  test('a different stated unit on a matching street links nothing', async () => {
+    await customer({ address_line2: 'Apt 4B' });
+    const callLogId = await call();
+    const out = await resolveFamilyNameLink(args(callLogId, { statedAddress: { street_line_1: '100 Example Loop', street_line_2: 'Apt 9', city: 'Sarasota', postal_code: '34240' } }));
+    expect(out.status).toBe('uncorroborated');
+    expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+  });
+
+  describe('linkFamilyCall files the cards and saves nothing on the account', () => {
+    beforeAll(() => { process.env.GATE_CALL_FAMILY_NAME_LINK = 'true'; });
+    afterAll(() => { delete process.env.GATE_CALL_FAMILY_NAME_LINK; });
+    const base = (callRow, over = {}) => ({
+      call: { id: callRow, from_phone: '+19415550101' },
+      procToken: TOKEN,
+      extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: false },
+      v2CanonicalExtraction: { caller: { relationship_to_property: 'family_member' }, meta: { call_summary: 'x' } },
+      statedAddress: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' },
+      secondaryContacts: [{ first_name: 'Angelina', last_name: 'Testerson', role: 'family_member' }],
+      phone: '+19415550102',
+      v2Primary: true,
+      isOutbound: false,
+      conn: trx,
+      ...over,
+    });
+    test('linked: FYI card shows the caller name and numbers, the holder row is untouched', async () => {
+      const mom = await customer();
+      const before = await trx('customers').where({ id: mom }).first();
+      const callLogId = await call();
+      const out = await linkFamilyCall(base(callLogId));
+      expect(String(out.customer.id)).toBe(String(mom));
+      expect(out.context.holderKey).toBe('angelina|testerson');
+      const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(card).toMatchObject({ reason_code: 'family_account_linked', severity: 'advisory' });
+      expect(card.payload).toMatchObject({ caller_name: 'Dana Lee', caller_phone: '+19415550101', caller_callback_phone: '+19415550102', account_holder_name: 'Angelina Testerson' });
+      expect(card.payload.reason).toContain('Add them as a contact on this account if that is right');
+      const after = await trx('customers').where({ id: mom }).first();
+      expect(after).toEqual(before); // no slot, no phone, no email, nothing
+      expect(await trx('recipient_optin').where({ customer_id: mom })).toHaveLength(0);
+    });
+    test('voicemail, outbound, V2 shadow mode and gate off all link nothing', async () => {
+      await customer();
+      for (const over of [{ extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: true } }, { isOutbound: true }, { v2Primary: false }]) {
+        const callLogId = await call();
+        const out = await linkFamilyCall(base(callLogId, over));
+        expect(out).toBeNull();
+        expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+      }
+      const voicemailCall = await call();
+      await linkFamilyCall(base(voicemailCall, { extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: true } }));
+      expect((await trx('triage_items').where({ call_log_id: voicemailCall, reason_code: 'family_account_candidates' }))).toHaveLength(1);
+      delete process.env.GATE_CALL_FAMILY_NAME_LINK;
+      const off = await call();
+      expect(await linkFamilyCall(base(off))).toBeNull();
+      process.env.GATE_CALL_FAMILY_NAME_LINK = 'true';
+    });
   });
 
   test('a caller who is not a family member links nothing', async () => {

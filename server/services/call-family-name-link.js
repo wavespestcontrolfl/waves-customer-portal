@@ -19,9 +19,13 @@
  *      re-reads the customer under a share lock) and file an advisory FYI card.
  *      Zero or 2+ -> link nothing and file an advisory card with the candidates.
  *
+ * The caller is NOT saved on the holder's account (no service contact, no opt-in
+ * ask): the FYI card shows the caller's name and number and the office adds them if
+ * that is right. A voicemail never links. The call's own texts never go out on a
+ * family link (the caller's consent is not the holder's).
+ *
+ * linkFamilyCall is the one entry point the processor calls; the decisions live here.
  * Pure helpers are exported for unit tests; the writers take a knex connection.
- * This file never decides the caller number is the account's: the caller is
- * saved as a service contact by the processor through persistCallSecondaryContact.
  */
 
 const db = require('../models/db');
@@ -29,6 +33,7 @@ const logger = require('./logger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
+const { splitStreetLineUnit } = require('../utils/address-normalizer');
 
 // Roles the model may give the person the family caller names. A named person
 // the model tagged as an arranger, tenant, buyer, lender and so on is someone
@@ -87,7 +92,7 @@ async function findLiveCustomersByFullName(conn, holder, { limit = MAX_CANDIDATE
     .orderBy('created_at', 'asc')
     .orderBy('id', 'asc')
     .limit(limit)
-    .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'zip');
+    .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'address_line2', 'zip');
 }
 
 // Corroboration (owner ruling 2026-10-07 after the PR #6110 security review): a name alone
@@ -105,6 +110,12 @@ function statedAddressCorroborates(stated, customer) {
   if (statedZip && zip5(customer.zip) && statedZip !== zip5(customer.zip)) return false;
   const statedCity = cityKey(stated.city);
   if (statedCity && cityKey(customer.city) && statedCity !== cityKey(customer.city)) return false;
+  // sameHouseNumberStreet strips the unit on purpose, so the unit is judged here: when the call
+  // stated a unit and the account has one, they must be the same door.
+  const unitKey = (v) => String(v || '').toLowerCase().replace(/\b(apartment|apt|unit|suite|ste|number|no|bldg|building|lot|#)\b/g, '').replace(/[^a-z0-9]/g, '');
+  const statedUnit = unitKey(stated.street_line_2 || stated.unit || splitStreetLineUnit(street).unit);
+  const onFileUnit = unitKey(customer.address_line2 || splitStreetLineUnit(onFile).unit);
+  if (statedUnit && onFileUnit && statedUnit !== onFileUnit) return false;
   return true;
 }
 
@@ -124,7 +135,7 @@ async function linkCallToCustomer({ callLogId, procToken, customer, holder, call
       .modify(whereLiveCustomer)
       .where({ id: customer.id })
       .forShare()
-      .first('id', 'first_name', 'last_name', 'city', 'address_line1', 'zip');
+      .first('id', 'first_name', 'last_name', 'city', 'address_line1', 'address_line2', 'zip');
     if (!live) {
       outcome = 'customer_gone';
       return;
@@ -190,7 +201,7 @@ async function phoneOnAnyLiveAccount(conn, phone) {
  * The processor files the cards (it owns buildTriageItem and the card context).
  */
 async function resolveFamilyNameLink({
-  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhones = [], statedAddress = null, conn = db,
+  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhones = [], statedAddress = null, allowLink = true, conn = db,
 }) {
   const holder = pickNamedAccountHolder({ callerRelationship, caller, secondaryContacts });
   if (!holder) return { status: 'not_applicable' };
@@ -219,6 +230,14 @@ async function resolveFamilyNameLink({
       candidates: [{ customer_id: String(customer.id), name: displayName(customer), city: customer.city || null }],
     };
   }
+  // A voicemail (one-sided, lossy) never establishes identity: the card only.
+  if (!allowLink) {
+    return {
+      status: 'voicemail',
+      holder,
+      candidates: [{ customer_id: String(customer.id), name: displayName(customer), city: customer.city || null }],
+    };
+  }
   const outcome = await linkCallToCustomer({ callLogId, procToken, customer, holder, caller, statedAddress, conn });
   if (outcome === 'no_longer_matches') {
     // Changed under us: link nothing and let the candidates card show what matches now.
@@ -236,6 +255,100 @@ async function resolveFamilyNameLink({
   return { status: 'linked', customer, holder };
 }
 
+
+function fileCard(callLogId, flag, extraction, extraPayload, conn) {
+  const { buildTriageItem } = require('./call-routing-gates');
+  return conn('triage_items')
+    .insert(buildTriageItem({ callLogId, flag, extraction: extraction || undefined, severity: 'advisory', extraPayload }))
+    .onConflict(conn.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+    .ignore();
+}
+
+const CANDIDATE_REASONS = Object.freeze({
+  candidates: 'The caller named a family member. Zero or more than one live account has that name, so nothing was linked. Pick the right account.',
+  uncorroborated: 'The caller named this account but gave no matching address. Confirm before linking.',
+  voicemail: 'The caller named this account in a voicemail. A voicemail never links a call to an account. Confirm before linking.',
+});
+
+// The one entry point for the processor's Step 3. Returns null when nothing was linked, else
+// { customer, context } (context = what the later steps need to protect the holder's record).
+// Fail-open: an error leaves the call exactly as it was without the gate.
+async function linkFamilyCall({
+  call, procToken, extracted, v2CanonicalExtraction, statedAddress, secondaryContacts, phone,
+  v2Primary, isOutbound, conn = db,
+}) {
+  try {
+    if (!require('../config/feature-gates').callFamilyNameLinkLive() || !v2Primary || isOutbound) return null;
+    const callerName = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null;
+    const result = await resolveFamilyNameLink({
+      callLogId: call.id,
+      procToken,
+      callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
+      caller: { first_name: extracted.first_name, last_name: extracted.last_name },
+      secondaryContacts,
+      // Both numbers: the dictated callback number AND the inbound caller ID.
+      callerPhones: [phone, call.from_phone],
+      statedAddress,
+      allowLink: !extracted.is_voicemail,
+      conn,
+    });
+    const caller = {
+      caller_name: callerName,
+      caller_phone: call.from_phone || null,
+      caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
+    };
+    if (CANDIDATE_REASONS[result.status]) {
+      await fileCard(call.id, 'family_account_candidates', v2CanonicalExtraction, {
+        account_holder_name: displayName(result.holder),
+        ...caller,
+        candidates: result.candidates,
+        reason: CANDIDATE_REASONS[result.status],
+      }, conn);
+      return null;
+    }
+    if (result.status !== 'linked') return null;
+    logger.info(`[call-family-link] linked call ${call.id} to customer ${result.customer.id} by the spoken account-holder name`);
+    await fileCard(call.id, 'family_account_linked', v2CanonicalExtraction, {
+      linked_customer_id: String(result.customer.id),
+      account_holder_name: displayName(result.holder),
+      ...caller,
+      reason: 'The caller said they were calling for a family member, gave that person\'s full name and the address on file. Exactly one live account matches. The caller was not saved on the account and no confirmation text was sent. Add them as a contact on this account if that is right. Relink the call if this is the wrong account.',
+    }, conn).catch((err) => logger.warn(`[call-family-link] card insert failed for call ${call.id}: ${err.code || err.name || 'db_error'}`));
+    return { customer: result.customer, context: contextFor(result.customer.id, result.holder) };
+  } catch (e) {
+    logger.warn(`[call-family-link] skipped for call ${call.id}: ${e.code || e.name || 'error'}`);
+    return null;
+  }
+}
+
+// What the later steps need: the holder's name key (never filed as a contact on their own
+// account). Structured, never a re-split display name ("Mary Ann" + "Testerson").
+function contextFor(customerId, holder) {
+  return { customerId, holderName: displayName(holder), holderKey: fullNameKey(holder) };
+}
+
+// The protective context on a reprocess, from the call row's persisted marker, whatever the gate
+// says now: the holder's record still never takes the caller's identity.
+function familyLinkContextFromCall(call, customerId) {
+  const marker = call && call.metadata && call.metadata.family_name_link;
+  if (!marker || String(marker.customer_id || '') !== String(customerId) || !marker.holder_first_name || !marker.holder_last_name) return null;
+  return contextFor(customerId, { first_name: marker.holder_first_name, last_name: marker.holder_last_name });
+}
+
+// Candidate staging must not carry the caller's own identity onto the holder's record.
+function scrubCallerIdentity(extracted, v2Extraction) {
+  const scrubbedV1 = extracted ? { ...extracted, first_name: null, last_name: null, phone: null, email: null } : extracted;
+  const scrubbedV2 = v2Extraction && v2Extraction.caller
+    ? {
+      ...v2Extraction,
+      caller: {
+        ...v2Extraction.caller, first_name: null, last_name: null, name_full: null, email: null, phone_e164: null, phone_raw_spoken: null,
+      },
+    }
+    : v2Extraction;
+  return { extracted: scrubbedV1, v2Extraction: scrubbedV2 };
+}
+
 module.exports = {
   HOLDER_ROLES,
   MAX_CANDIDATES,
@@ -248,4 +361,8 @@ module.exports = {
   statedAddressCorroborates,
   linkCallToCustomer,
   resolveFamilyNameLink,
+  linkFamilyCall,
+  familyLinkContextFromCall,
+  scrubCallerIdentity,
+  CANDIDATE_REASONS,
 };
