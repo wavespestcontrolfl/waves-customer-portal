@@ -308,7 +308,10 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS) return cached.value;
 
   const startedAt = Date.now();
-  const nws = await nwsHourly(latNum, lngNum, startedAt + nwsBudgetMs);
+  const nws = await nwsHourlyShared(latNum, lngNum, key, startedAt + nwsBudgetMs, nwsBudgetMs < TOTAL_BUDGET_MS);
+  // Another reader may have cached an NWS answer while this one waited.
+  const fresh = _hourlyCache.get(key);
+  if (!nws && fresh && Date.now() - fresh.at < HOURLY_CACHE_TTL_MS) return fresh.value;
   const hours = nws || (await fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs));
   if (!hours) return null;
   // A backup answer reached only because THIS caller capped NWS is not
@@ -316,6 +319,25 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
   // the primary source (Codex #6102 r3).
   if (nws || nwsBudgetMs >= TOTAL_BUDGET_MS) _hourlyCache.set(key, { at: Date.now(), value: hours });
   return hours;
+}
+
+// One uncapped NWS hourly read per grid key at a time. A capped caller (the
+// picker) joins one already running for up to its own NWS deadline instead
+// of starting a second, shorter read that may lose to the backup while the
+// full read is about to answer (Codex #6102 r9). A capped read is never
+// published: an uncapped reader must not inherit its short deadline.
+const _nwsHourlyInFlight = new Map();
+function nwsHourlyShared(latNum, lngNum, key, deadlineAt, capped) {
+  const pending = _nwsHourlyInFlight.get(key);
+  if (pending) {
+    const left = deadlineAt - Date.now();
+    return left > 0 ? raceDeadline(pending, left) : Promise.resolve(null);
+  }
+  const read = nwsHourly(latNum, lngNum, deadlineAt).catch(() => null);
+  if (capped) return read;
+  const shared = read.finally(() => _nwsHourlyInFlight.delete(key));
+  _nwsHourlyInFlight.set(key, shared);
+  return shared;
 }
 
 // Each NWS fetch waits at most its own timeout and never past `deadlineAt`.
@@ -366,5 +388,5 @@ module.exports = {
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
   forecastLinkForZip,
-  _test: { dailyFromHours, _backupInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { dailyFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };

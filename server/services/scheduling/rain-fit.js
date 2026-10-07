@@ -33,7 +33,14 @@ const RODENT_CHECK = /check|monitor|inspect/i;
 // word: "Termite Inspection & Spot Treatment" applies product (r8).
 const OUTDOOR = /exterior|exclu|mesh|seal|remediat|accepted|treat|liquid|spot|applicat|spray|fumigat|foam/i;
 
+// Interior-only lanes whose catalog names say "treatment" without saying
+// "interior" (trace-eligibility.js: bed_bug, german_roach_knockdown,
+// Codex #6102 r9). Checked before the treatment words; "exterior" still wins.
+const INDOOR_TREATMENT = /bed ?bugs?|german (cock)?roach/i;
+
 function rainOkService(name) {
+  if (/exterior/i.test(name)) return false;
+  if (INDOOR_TREATMENT.test(name)) return true;
   if (OUTDOOR.test(name)) return false;
   if (RAIN_OK.test(name)) return true;
   return RODENT.test(name) && RODENT_CHECK.test(name);

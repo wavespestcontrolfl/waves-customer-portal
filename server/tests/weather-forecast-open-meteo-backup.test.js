@@ -172,6 +172,30 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(omCalls).toBeGreaterThanOrEqual(1);
   });
 
+  test('a capped reader joins a full NWS read in flight instead of racing it (Codex #6102 r9)', async () => {
+    let releaseNws;
+    let nwsStarts = 0;
+    global.fetch.mockImplementation((url) => {
+      if (isOpenMeteo(url)) return Promise.resolve(omOk([5]));
+      if (String(url).includes('/points/')) {
+        nwsStarts += 1;
+        return Promise.resolve({ ok: true, json: async () => ({ properties: { forecastHourly: 'https://api.weather.gov/x' } }) });
+      }
+      return new Promise((resolve) => { releaseNws = () => resolve({ ok: true, json: async () => ({ properties: { periods: [{ startTime: '2026-10-07T06:00:00-04:00', probabilityOfPrecipitation: { value: 88 } }] } }) }); });
+    });
+    const tick = () => new Promise((r) => setImmediate(r));
+    const full = getHourlyRainOutlook(27.49, -82.49);
+    await tick(); await tick();
+    const capped = getHourlyRainOutlook(27.49, -82.49, { budgetMs: 2500, nwsBudgetMs: 1200 });
+    await tick();
+    releaseNws();
+    expect((await capped)[0]).toMatchObject({ rainChance: 88 });
+    expect((await full)[0]).toMatchObject({ rainChance: 88 });
+    // One NWS read served both.
+    expect(nwsStarts).toBe(1);
+    expect(_test._nwsHourlyInFlight.size).toBe(0);
+  });
+
   test('both down: null (fail-open)', async () => {
     global.fetch.mockRejectedValue(new Error('down'));
     expect(await getHourlyRainOutlook(27.43, -82.43)).toBeNull();
