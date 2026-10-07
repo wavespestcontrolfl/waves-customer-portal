@@ -32,10 +32,16 @@ function estimateNeverIssued(estimate) {
 //   - V1 form inputs  { svcLawn: true, grassType }               (inputs, result.inputs, IB drafts)
 //   - a saved request { engineRequest: { selectedServices, options.grassType } }
 //   - stored results  result.results.lawnMeta, engineResult.lineItems, recurring.services lawn rows
+// Every accepted bahia spelling: the pricing engine's own normalizer (track D / BAHIA / bahia, the
+// one the replay prices with), the grass-context normalizer (Argentine, Pensacola), and the legacy
+// protocol aliases (d, d_bahia, D_Bahia).
+const LEGACY_BAHIA_ALIASES = new Set(['d', 'd_bahia', 'd-bahia', 'dbahia', 'd bahia', 'bahia']);
 const isBahia = (value) => {
   if (value == null || value === '') return false;
+  if (LEGACY_BAHIA_ALIASES.has(String(value).trim().toLowerCase())) return true;
   const { normalizeGrassType } = require('./pricing-engine/service-pricing');
-  return normalizeGrassType(value) === 'bahia';
+  if (normalizeGrassType(value) === 'bahia') return true;
+  return require('./lawn-grass-context').normalizeGrassType(value) === 'bahia';
 };
 const isObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const looksLikeLawnRow = (row) => isObject(row)
@@ -44,7 +50,11 @@ const looksLikeLawnRow = (row) => isObject(row)
 
 function inputCarrierHasBahiaLawn(carrier) {
   if (!isObject(carrier)) return false;
-  if (isObject(carrier.services?.lawn)) return isBahia(carrier.services.lawn.track);
+  if (isObject(carrier.services?.lawn)) {
+    // The lawn line's own track, or any other grass spelling it (or the carrier) holds.
+    const lawn = carrier.services.lawn;
+    return [lawn.track, lawn.grassType, lawn.grass_type, lawn.lawnTrack, lawn.turfType, carrier.lawnTrack, carrier.grassType].some(isBahia);
+  }
   if (carrier.svcLawn === true) {
     return [carrier.grassType, carrier.grass_type, carrier.lawnTrack, carrier.track].some(isBahia);
   }

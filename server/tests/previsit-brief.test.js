@@ -913,11 +913,72 @@ describe('lawn bounded product section', () => {
       expect(out.generated).toBe(true);
       const { brief } = storedBrief(state);
       expect(brief.product_guidance.available).toBe(false);
-      expect(brief.product_guidance.reason).toBe('unknown_grass_track');
+      expect(brief.product_guidance.reason).toBe('lawn_v13_bahia_no_program');
       expect(mockWindowContext).not.toHaveBeenCalled();
     } finally {
       delete process.env.GATE_LAWN_V13;
     }
+  });
+
+  // A visit assigned a protocol window keeps that window ONLY for a lawn that has a program: a bahia
+  // lawn under v13 gets no guidance from another grass's pinned assignment.
+  describe('GATE_LAWN_V13 with a pinned assignment', () => {
+    const PINNED = {
+      ...SVC, service_type: 'Lawn Care Service',
+      lawn_protocol_window_key: 'jun_blackout_stress', lawn_protocol_key: 'sa_swfl', lawn_protocol_version: 3,
+    };
+    const WINDOW = {
+      window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },
+      products: [{ productName: 'Fe/Mn Micros', role: 'micronutrients', applicationMode: 'spray', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: true, gates: {} }],
+    };
+    beforeEach(() => {
+      process.env.GATE_LAWN_V13 = 'true';
+      mockGrassContext.mockImplementation((...args) => jest.requireActual('../services/lawn-grass-context').loadCustomerGrassContext(...args));
+      mockSummarize.mockReturnValue(WINDOW);
+    });
+    afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+    test.each([
+      [{ grass_type: 'bahia', track_key: null }],
+      [{ grass_type: 'bahia', track_key: 'st_augustine' }],
+      [{ grass_type: 'st_augustine', track_key: 'bahia' }],
+    ])('a bahia lawn (%j) pinned to a St. Augustine protocol shows no guidance', async (profile) => {
+      const state = useDb(baseResponses({
+        scheduled_services: [PINNED],
+        lawn_protocols: [{ id: 'proto-1' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, ...profile }],
+      }));
+      await PrevisitBrief.generateVisitBrief('svc-1');
+      const { brief } = storedBrief(state);
+      expect(brief.product_guidance.available).toBe(false);
+      expect(brief.product_guidance.reason).toBe('lawn_v13_bahia_no_program');
+      expect(brief.product_guidance.products).toEqual([]);
+      expect(mockWindowContext).not.toHaveBeenCalled();
+    });
+
+    test('a St. Augustine lawn with the same pinned assignment keeps its window guidance', async () => {
+      const state = useDb(baseResponses({
+        scheduled_services: [PINNED],
+        lawn_protocols: [{ id: 'proto-1' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, grass_type: 'st_augustine', track_key: 'st_augustine' }],
+      }));
+      await PrevisitBrief.generateVisitBrief('svc-1');
+      const { brief } = storedBrief(state);
+      expect(brief.product_guidance.available).toBe(true);
+      expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
+      expect(mockWindowContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ windowKey: 'jun_blackout_stress', protocolId: 'proto-1' }));
+    });
+
+    test('gate off, a bahia lawn keeps its pinned window as before', async () => {
+      delete process.env.GATE_LAWN_V13;
+      useDb(baseResponses({
+        scheduled_services: [PINNED],
+        lawn_protocols: [{ id: 'proto-1' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, grass_type: 'bahia' }],
+      }));
+      await PrevisitBrief.generateVisitBrief('svc-1');
+      expect(mockWindowContext).toHaveBeenCalledTimes(2);
+    });
   });
 
   test('gate off, a conflicting profile keeps the old resolution (the explicit track key)', async () => {

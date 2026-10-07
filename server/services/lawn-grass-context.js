@@ -97,8 +97,21 @@ function resolveTrackKey(trackKey, grassType) {
   return null;
 }
 
+// Whether a lawn record names bahia: the profile's grass type, its track key, or (only when no profile
+// grass or track is recorded) the legacy lawn text. The ONE rule the plan engine, the pre-visit brief
+// and every other planning reader share, so a conflicting record reads the same everywhere.
+function recordedGrassNamesBahia(profile, legacyGrass) {
+  const profileRecorded = [profile?.track_key, profile?.grass_type].some((value) => String(value || '').trim());
+  return [
+    normalizeGrassType(profile?.grass_type),
+    String(profile?.track_key || '').trim().toLowerCase(),
+    profileRecorded ? null : normalizeGrassType(legacyGrass),
+  ].includes('bahia');
+}
+
 function emptyContext() {
   return {
+    noProgram: false,
     grassType: null,
     grassTypeLabel: null,
     trackKey: null,
@@ -131,6 +144,9 @@ async function loadCustomerGrassContext(customerId, knex = db, { strict = false 
   const grassType = profile?.grass_type || normalizeGrassType(customer?.lawn_type) || null;
 
   return {
+    // GATE_LAWN_V13 has no bahia program: planning readers show no window guidance for this lawn,
+    // even when the visit is assigned a protocol (historical readers do not read this).
+    noProgram: lawnV13NoProgramGrass(recordedGrassNamesBahia(profile, customer?.lawn_type) ? 'bahia' : null),
     grassType,
     grassTypeLabel: grassTypeLabel(grassType),
     trackKey: resolveTrackKey(profile?.track_key, grassType),
@@ -150,5 +166,6 @@ module.exports = {
   normalizeGrassType,
   irrigationTypeHasSystem,
   resolveTrackKey,
+  recordedGrassNamesBahia,
   loadCustomerGrassContext,
 };

@@ -2,7 +2,7 @@ const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
 const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
-const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
+const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
@@ -1165,11 +1165,10 @@ async function lawnVisitsPerYear(knex, service) {
 // has no program for. Bahia in ANY recorded field wins over another field's track.
 function recordedGrassFacts(profile, legacyGrass) {
   const profileRecorded = [profile?.track_key, profile?.grass_type].some((value) => String(value || '').trim());
-  const named = [normalizeGrassType(profile?.grass_type), String(profile?.track_key || '').trim().toLowerCase(), profileRecorded ? null : normalizeGrassType(legacyGrass)];
   return {
     profileRecorded,
     recorded: profileRecorded || String(legacyGrass || '').trim(),
-    noProgram: lawnV13NoProgramGrass(named.includes('bahia') ? 'bahia' : null),
+    noProgram: lawnV13NoProgramGrass(recordedGrassNamesBahia(profile, legacyGrass) ? 'bahia' : null),
   };
 }
 
@@ -1813,7 +1812,9 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
   // default gates say: a pinned older visit must be seen as pinned, never as
   // unpinned (which would resolve the staged v13 version for it).
-  const structuredProtocolContext = (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
+  // GATE_LAWN_V13: a bahia lawn has no program, so no protocol window (a pinned assignment included)
+  // is read for it; the plan blocks on lawn_v13_bahia_no_program instead.
+  const structuredProtocolContext = !calendarProtocol.v13NoProgram && (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',

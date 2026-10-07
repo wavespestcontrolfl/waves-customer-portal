@@ -155,6 +155,19 @@ describeDb('the v13 plan through PostgreSQL', () => {
       expect(JSON.stringify(result.mixCalculator.items) + JSON.stringify(result.protocol)).not.toMatch(/"amount":\s*[1-9]/);
     });
 
+    test('a bahia lawn pinned to a protocol assignment reads no protocol window and no products', async () => {
+      setGates({ v13: 'on', completion, history });
+      const pinned = { lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'may_v13' };
+      const result = await plan(await plannedVisit(pinned, { grass_type: 'bahia', track_key: 'st_augustine' }));
+      expect(codes(result)).toContain('lawn_v13_bahia_no_program');
+      expect(result.protocol.structured ?? null).toBeNull();
+      expect(result.mixCalculator.items).toEqual([]);
+      expect(result.protocol.base).toEqual([]);
+      // The same assignment on a lawn that has a program is read as before.
+      const fine = await plan(await plannedVisit(pinned));
+      expect(fine.protocol.structured.version).toBe(LAWN_V13_VERSION);
+    });
+
     test('a mixed lawn still plans from the one program (the any-grass fallback), with no bahia block', async () => {
       setGates({ v13: 'on', completion, history });
       const result = await plan(await plannedVisit({}, { grass_type: 'mixed', track_key: null }));

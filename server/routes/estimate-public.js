@@ -28091,7 +28091,9 @@ async function buildPricingBundleInner(estimate) {
     : estimate.estimate_data;
   // A row that was never issued (draft, scheduled, first send) is not sold: its replay keeps the
   // GATE_LAWN_V13 bahia review, so the send snapshot cannot price a new bahia plan unreviewed.
-  if (estData && typeof estData === 'object' && estimateNeverIssued(estimate)) estData[UNISSUED_ESTIMATE] = true;
+  // Set on EVERY call (true or false), so a mark left on a shared object by an earlier call for the same
+  // row never outlives that row's first send.
+  if (estData && typeof estData === 'object') estData[UNISSUED_ESTIMATE] = estimateNeverIssued(estimate);
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
   // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
   // accept paths bill this frozen figure UP FRONT beside the first

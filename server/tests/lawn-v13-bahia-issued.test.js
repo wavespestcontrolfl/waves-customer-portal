@@ -84,6 +84,49 @@ describe.each(Object.entries(SHAPES))('shape: %s', (_name, make) => {
   });
 });
 
+// Every accepted bahia spelling, on every key a lawn line may carry it under, must count as bahia:
+// detection uses the same normalizer the engine replay prices with (D -> bahia), plus the legacy
+// protocol aliases, so the guard, the quote requirement and the replay agree.
+const BAHIA_ALIASES = ['D', 'd', 'd_bahia', 'D_Bahia', 'bahia', 'BAHIA', 'Bahia', 'Argentine Bahia'];
+const OTHER_GRASS = ['bermuda', 'zoysia', 'st_augustine', 'C1', 'C2', 'A', 'mixed'];
+const LAWN_KEYS = ['track', 'grassType', 'grass_type', 'lawnTrack', 'turfType'];
+
+describe.each(LAWN_KEYS)('services.lawn.%s', (key) => {
+  const make = (value) => ({ engineInputs: { ...BASE, services: { lawn: { [key]: value, tier: 'enhanced' } } } });
+  const send = (row, value) => router._internals.assertEstimateSendable({ id: 'e1', token: 'tok', monthly_total: 80, onetime_total: 0, ...row, estimate_data: make(value) });
+
+  test.each(BAHIA_ALIASES)('alias %s is a bahia lawn plan: detected, and the send guard blocks a never-issued estimate', (alias) => {
+    expect(estimateHasBahiaLawn(make(alias))).toBe(true);
+    expect(() => send(NEVER, alias)).toThrow(/Bahia lawn plans need manual review/);
+    expect(() => send(SENT, alias)).not.toThrow();
+  });
+
+  test.each(OTHER_GRASS)('grass %s is not', (grass) => {
+    expect(estimateHasBahiaLawn(make(grass))).toBe(false);
+    expect(() => send(NEVER, grass)).not.toThrow();
+  });
+});
+
+describe('legacy alias shapes, flat and root level', () => {
+  test.each(BAHIA_ALIASES)('V1 form inputs with grassType %s', (alias) => {
+    expect(estimateHasBahiaLawn({ inputs: { svcLawn: true, grassType: alias } })).toBe(true);
+  });
+  test.each(BAHIA_ALIASES)('engine inputs whose root names the grass %s beside a lawn line', (alias) => {
+    expect(estimateHasBahiaLawn({ engineInputs: { ...BASE, grassType: alias, services: { lawn: { tier: 'enhanced' } } } })).toBe(true);
+  });
+  test.each(BAHIA_ALIASES)('a saved request with options.grassType %s', (alias) => {
+    expect(estimateHasBahiaLawn({ engineRequest: { selectedServices: ['LAWN'], options: { grassType: alias } } })).toBe(true);
+  });
+  test('the bundle holds a never-issued alias-only draft for review and honors a sent one', async () => {
+    const data = { engineInputs: { ...BASE, services: { lawn: { grassType: 'D', tier: 'enhanced' } } } };
+    const draft = await buildPricingBundle({ id: 'alias-draft', token: 't', ...NEVER, estimate_data: data });
+    expect(draft.quoteRequired).toBe(true);
+    expect(draft.quoteRequiredReason).toBe('lawn_v13_bahia_no_program');
+    const sent = await buildPricingBundle({ id: 'alias-sent', token: 't', ...SENT, estimate_data: data });
+    expect(sent.quoteRequired).toBeFalsy();
+  });
+});
+
 describe('V1 blobs: the bundle is served from stored rows, so the review is the quote requirement', () => {
   let bundleSeq = 0;
   const bundle = (row, grass) => buildPricingBundle({ id: `v1-${bundleSeq += 1}`, token: 't', ...row, estimate_data: SHAPES['V1 form inputs + result'](grass) });

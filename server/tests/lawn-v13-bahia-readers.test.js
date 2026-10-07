@@ -77,4 +77,24 @@ describe('resolveTrackKey and loadCustomerGrassContext', () => {
     expect(resolveTrackKey('st_augustine', 'bahia')).toBe('st_augustine');
     expect(resolveTrackKey(null, 'bahia')).toBe('bahia');
   });
+
+  // The customer's grass context tells planning readers a bahia lawn has no program (the plan engine's rule).
+  test.each([
+    [{ grass_type: 'bahia', track_key: 'st_augustine' }, null, true],
+    [{ grass_type: 'st_augustine', track_key: 'bahia' }, null, true],
+    [{ grass_type: 'bahia', track_key: null }, null, true],
+    [{ grass_type: 'zoysia', track_key: 'zoysia' }, null, false],
+    [null, 'Argentine Bahia', true],
+    // a profile that records a grass/track outranks the legacy lawn text
+    [{ grass_type: 'zoysia', track_key: 'zoysia' }, 'Bahia', false],
+  ])('gate on: profile %j with legacy text %s -> noProgram %s', async (profile, legacy, expected) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const ctx = await loadCustomerGrassContext('cust-1', fakeKnex(profile && { ...profile, active: true }, { lawn_type: legacy }));
+    expect(ctx.noProgram).toBe(expected);
+  });
+
+  test('gate off: noProgram is never set', async () => {
+    const ctx = await loadCustomerGrassContext('cust-1', fakeKnex({ grass_type: 'bahia', active: true }));
+    expect(ctx.noProgram).toBe(false);
+  });
 });
