@@ -6936,6 +6936,9 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
 // unit card stays (same safeguard the business whole-building waiver keeps).
 const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|center|centre)|plaza|shopping (?:center|centre)|multi-tenant|tenant space|space\s*#?\s*\d+)\b|#\s*\d+/i;
 
+const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
+const WHOLE_STRUCTURE_CATEGORIES = new Set(['termite', 'wdo', 'inspection_only']);
+
 // Card-only companion to the waiver above (owner 2026-10-07): true when EVERY
 // view of the call's service resolves to a whole-structure catalog row (slab
 // pre-treat, trenching, WDO inspection), the property is not typed as a condo
@@ -6947,8 +6950,15 @@ function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = nu
   // unclear-service rule may book as a Waves Assessment is not whole-structure,
   // and the V1 service as heard BEFORE V2-primary adoption must agree too.
   if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return false;
-  const propertyType = String(v2Extraction?.property?.property_type || '').toLowerCase();
-  if (propertyType === 'condo' || propertyType === 'apartment') return false;
+  // Positive evidence only (fails closed): a KNOWN building-level property
+  // type (an unknown type cannot prove the work is not unit-level), no
+  // explicit partial occupancy, and every requested service category
+  // building-level too.
+  const property = v2Extraction?.property || {};
+  if (!CARD_WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(property.property_type || '').toLowerCase())) return false;
+  if (property.whole_building_occupancy === false) return false;
+  const secondary = Array.isArray(v2Extraction?.service_request?.secondary_categories) ? v2Extraction.service_request.secondary_categories : [];
+  if (secondary.some((c) => !WHOLE_STRUCTURE_CATEGORIES.has(String(c)))) return false;
   const views = preAdoptionExtracted ? [preAdoptionExtracted, extracted] : [extracted];
   const finalView = v2BookingServiceView(extracted, v2Extraction);
   if (finalView) views.push(finalView);

@@ -404,7 +404,16 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run({ matched_service: 'General Pest Control', requested_service: 'roaches inside' })).toBe(false);
     const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
     expect(run(slab, { property: { property_type: 'condo' } })).toBe(false);
-    expect(run(slab, null, 'the slab for the new apartment building')).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial' } }, 'the slab for the new apartment building')).toBe(false);
+  });
+
+  test('fails closed: unknown property type, partial occupancy, or a unit-level second service', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    expect(run(slab, { property: { property_type: 'unknown' } })).toBe(false);
+    expect(run(slab, null)).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial', whole_building_occupancy: false } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial' }, service_request: { secondary_categories: ['pest_general'] } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['termite'] } })).toBe(true);
   });
 
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
@@ -421,7 +430,7 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
     const interior = { matched_service: 'General Pest Control', requested_service: 'roaches inside' };
     expect(callIsWholeStructureService({ extracted: slab, preAdoptionExtracted: interior, services: CATALOG })).toBe(false);
-    expect(callIsWholeStructureService({ extracted: slab, preAdoptionExtracted: { ...slab }, services: CATALOG })).toBe(true);
+    expect(callIsWholeStructureService({ extracted: slab, preAdoptionExtracted: { ...slab }, v2Extraction: { property: { property_type: 'commercial' } }, services: CATALOG })).toBe(true);
     const unclear = { triage_flags: ['ambiguous_pest_or_service'], property: { property_type: 'commercial' } };
     expect(callIsWholeStructureService({ extracted: slab, v2Extraction: unclear, services: CATALOG, unclearServiceAssessment: true })).toBe(false);
   });
