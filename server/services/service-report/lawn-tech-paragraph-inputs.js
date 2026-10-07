@@ -1,36 +1,30 @@
 'use strict';
 
 /**
- * Inputs for the lawn "From your technician" paragraph (lawn-tech-paragraph.js),
- * read once at completion from the report data the completion gate has just
- * built (the same object the customer report renders) plus three small reads:
- * the visit's kept photo findings, the last visit's kept photo findings, and the
- * product catalog's names (a defense list for the validator).
+ * Inputs for the lawn "From your technician" paragraph (lawn-tech-paragraph.js,
+ * fixed sentences), read once at completion from the report data the completion
+ * gate has just built (the same object the customer report renders) plus one
+ * small read: the visit's kept photo findings.
+ *
+ * The paragraph uses three inputs: the technician's note (the model extracts from
+ * it), the applied product names, and the LOW-confidence kept photo findings (the
+ * "may be" line). A higher-confidence finding is not an input: the report's own
+ * "What the photos showed" block prints it.
  *
  * Fail closed: a read that throws propagates, and the caller stores no
- * paragraph. A read that succeeds and finds nothing is an empty input, not a
- * failure.
+ * paragraph. A read that succeeds and finds nothing is an empty input.
  *
- * What it never passes on: the raw observation free text, any customer name, an
- * address, a price, the visit's raw photo list.
+ * What it never passes on: any customer name, an address, a price, the raw photo
+ * list, the photo read's free text, a score, a prior visit.
  */
 
 const { appliedFromProducts } = require('./lawn-visit-memory');
 const { keptRunRows } = require('./tip-library');
 const { PHOTO_FINDING_LABELS } = require('./lawn-photo-findings');
-const { buildSinceLastCopy, METRIC_SENTENCE, WATCH_TOPIC } = require('./lawn-since-last-copy');
-const { normalizeInputs } = require('./lawn-tech-paragraph');
-
-// The progress sentences that speak to density, weeds and stressed areas. Color
-// and the overall direction are left out: the paragraph never compares color
-// between visits, and the overall direction can rest on color when the lighting
-// gate is off.
-const PROGRESS_METRICS = ['turf_density', 'weed_suppression', 'stress_damage'];
-const PROGRESS_SENTENCES = new Set(PROGRESS_METRICS.flatMap((metric) => Object.values(METRIC_SENTENCE[metric] || {})));
-// Watch topics the watering banner owns: the paragraph says nothing about them.
-const SKIPPED_WATCH = new Set(['water', 'coverage']);
+const { normalizeInputs, FINDING_OF_PHOTO_LABEL } = require('./lawn-tech-paragraph');
 
 const ALLOWED_LABELS = new Set(PHOTO_FINDING_LABELS);
+const LOW_CONFIDENCE = new Set(['low', 'unknown']);
 
 /**
  * The kept, allowlisted findings of one assessment's reviewed run: the same keep
@@ -64,73 +58,29 @@ async function readKeptFindings(knex, assessmentId) {
   return keptFindings(run, assessment);
 }
 
-function withMethods(applied, products) {
-  const methodOf = new Map((Array.isArray(products) ? products : []).map((p) => [p && p.name, p && p.method]));
-  return applied.map((a) => ({ ...a, method: methodOf.get(a.name) || null }));
-}
-
-function wateringSummary(instruction) {
-  const lines = instruction && Array.isArray(instruction.lines) ? instruction.lines.filter((l) => typeof l === 'string' && l.trim()) : [];
-  return lines.slice(0, 2).join(' ') || null;
-}
-
 /**
  * @param {object} args
- * @param {object} args.record  the customer-joined service record (technician_notes, first_name)
+ * @param {object} args.record  the customer-joined service record (technician_notes)
  * @param {object} args.data    buildReportV1Data output (reportV2, lawnAssessment)
- * @param {object} [args.instruction]  the visit's watering instruction (lines)
  * @param {object} args.knex
  * @returns {Promise<object|null>} normalized inputs, or null when the visit cannot support a paragraph
  */
-async function gatherTechParagraphInputs({ record, data, instruction = null, knex }) {
+async function gatherTechParagraphInputs({ record, data, knex }) {
   const reportV2 = data && data.reportV2;
   const lawnAssessment = data && data.lawnAssessment;
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
   if (!reportV2 || assessmentId == null || !record) return null;
   // A report build that could not read its inputs cleanly froze nothing; the
-  // paragraph is not written from a degraded read either.
-  if (lawnAssessment.lawnCopyV6Unfrozen === true) return null;
+  // paragraph is not written from a degraded read either. A failed product read is
+  // checked on its own: it must not freeze a paragraph without the products, with
+  // or without the copy-v6 gate (Codex r4).
+  if (lawnAssessment.lawnCopyV6Unfrozen === true || lawnAssessment.productsReadFailed === true) return null;
 
-  const products = withMethods(appliedFromProducts(reportV2.treatment && reportV2.treatment.products), reportV2.treatment && reportV2.treatment.products);
-  const snapshot = reportV2.snapshot || {};
-
-  const sinceLast = reportV2.sinceLast && typeof reportV2.sinceLast === 'object' ? reportV2.sinceLast : null;
-  let prior = null;
-  if (sinceLast && /^\d{4}-\d{2}-\d{2}$/.test(String(sinceLast.priorDate || ''))) {
-    prior = {
-      date: sinceLast.priorDate,
-      products: Array.isArray(sinceLast.applied) ? sinceLast.applied : [],
-      watched: (Array.isArray(sinceLast.checks) ? sinceLast.checks : [])
-        .filter((c) => c && !SKIPPED_WATCH.has(c.key) && WATCH_TOPIC[c.key])
-        .map((c) => WATCH_TOPIC[c.key]),
-      findings: sinceLast.priorAssessmentId != null ? await readKeptFindings(knex, sinceLast.priorAssessmentId) : [],
-    };
-  }
-
-  let progressLines = [];
-  if (sinceLast && reportV2.progress) {
-    // The fixed sentences the "Since your last visit" block would print; a build
-    // failure leaves the paragraph without progress lines, never with a guess.
-    try {
-      const copy = buildSinceLastCopy({ sinceLast, progress: reportV2.progress, insights: reportV2.insights, bannerPresent: true });
-      progressLines = copy ? copy.lines.filter((line) => PROGRESS_SENTENCES.has(line)) : [];
-    } catch { progressLines = []; }
-  }
-
-  const catalogRows = await knex('products_catalog').select('name');
-  return normalizeInputs({
-    technicianNote: record.technician_notes,
-    products,
-    scores: {
-      overall: snapshot.overallScore,
-      rows: (Array.isArray(reportV2.diagnosis) ? reportV2.diagnosis : []).map((d) => ({ label: d && d.label, score: d && d.score })),
-    },
-    findings: await readKeptFindings(knex, assessmentId),
-    prior,
-    progressLines,
-    facts: { headline: snapshot.statusHeadline, watering: wateringSummary(instruction) },
-    knownProductNames: (catalogRows || []).map((row) => row && row.name),
-  });
+  const products = appliedFromProducts(reportV2.treatment && reportV2.treatment.products);
+  const findings = (await readKeptFindings(knex, assessmentId))
+    .filter((f) => LOW_CONFIDENCE.has(f.confidence) && FINDING_OF_PHOTO_LABEL[f.label])
+    .map((f) => ({ key: FINDING_OF_PHOTO_LABEL[f.label] }));
+  return normalizeInputs({ technicianNote: record.technician_notes, products, findings });
 }
 
-module.exports = { gatherTechParagraphInputs, keptFindings, PROGRESS_SENTENCES };
+module.exports = { gatherTechParagraphInputs, keptFindings };

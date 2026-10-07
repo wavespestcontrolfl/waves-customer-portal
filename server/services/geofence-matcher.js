@@ -356,6 +356,25 @@ async function getActiveJobTimer(techId) {
 }
 
 /**
+ * Every live visit assigned to this tech for this customer on the ET calendar
+ * day of `date`, earliest window first. `notLive` ({ statuses, trackStates }) is
+ * owned by services/geofence-auto-clock-in.js so the one definition of "live"
+ * is shared. `conn` is db, or the open transaction for the locked recheck in
+ * time-tracking.startJob. Throws on a read error: the caller must fail closed.
+ */
+async function findLiveVisitsOn(conn, technicianId, customerId, date, notLive) {
+  return conn('scheduled_services')
+    .where({ technician_id: technicianId, customer_id: customerId })
+    .where('scheduled_date', etDateString(new Date(date)))
+    .whereNotIn('status', notLive.statuses)
+    .where(function () {
+      this.whereNull('track_state').orWhereNotIn('track_state', notLive.trackStates);
+    })
+    .orderBy('window_start', 'asc')
+    .select('*');
+}
+
+/**
  * The tech's shift state for the current ET work day, for the geofence auto
  * clock-in decision: { active, anyToday } (voided shifts do not count), or
  * null when it cannot be read (the caller then does NOT clock anyone in).
@@ -425,6 +444,7 @@ module.exports = {
   isRecentAutoFlipForCustomer,
   getActiveJobTimer,
   getShiftStateToday,
+  findLiveVisitsOn,
   getActiveTimerDwellMinutes,
   logEvent,
   distanceMeters,

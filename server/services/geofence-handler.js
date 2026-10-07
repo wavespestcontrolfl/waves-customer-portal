@@ -263,14 +263,21 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const unscheduled = !job;
 
   if (mode === 'automatic') {
+    const jobId = job ? job.id : null;
+    const { ambiguousVisits, ...startOptions } = await arrivalStartOptions({ tech, job, eventTime });
+    if (ambiguousVisits) {
+      // Several live visits for this tech at this customer today: do not guess
+      // which one to clock in on. Same selection prompt as a multi-customer arrival.
+      return handleMultiArrival({
+        tech, candidates: ambiguousVisits.map((v) => ({ customer, job: v })), lat, lng, eventTime, imei, payload,
+      });
+    }
     let entry = null;
     try {
       // Gate off: no options, exactly today's call. Gate on: the start also
       // clocks in a tech with no shift today (one transaction, re-checked on
       // the locked visit) and is idempotent for a job already running.
-      entry = await timeTracking.startJob(tech.id, job ? job.id : null, {
-        lat, lng, ...(await arrivalStartOptions({ tech, job, eventTime })),
-      });
+      entry = await timeTracking.startJob(tech.id, jobId, { lat, lng, ...startOptions });
     } catch (err) {
       // The visit was completed between the job lookup above and the timer
       // start (the office closed it out on its paid invoice): there is
@@ -279,7 +286,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       // notification.
       const skippedAction = SKIPPED_START_ACTIONS[err.code];
       if (skippedAction) {
-        logger.info(`[geofence-handler] auto startJob skipped: visit ${job ? job.id : null} (${err.code})`);
+        logger.info(`[geofence-handler] auto startJob skipped: visit ${jobId} (${err.code})`);
         await matcher.logEvent({
           bouncie_imei: imei,
           technician_id: tech.id,
@@ -287,7 +294,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
           latitude: lat,
           longitude: lng,
           matched_customer_id: customer.id,
-          matched_job_id: job ? job.id : null,
+          matched_job_id: jobId,
           action_taken: skippedAction,
           raw_payload: payload,
           event_timestamp: eventTime,
@@ -299,7 +306,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       await sendTechNotification(tech.id, {
         type: 'geofence_arrival_reminder',
         message: `You're at ${customerLabel}. Start timer?`,
-        payload: { customer_id: customer.id, job_id: job ? job.id : null, reason: err.message },
+        payload: { customer_id: customer.id, job_id: jobId, reason: err.message },
       });
       await matcher.logEvent({
         bouncie_imei: imei,
@@ -308,7 +315,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
         latitude: lat,
         longitude: lng,
         matched_customer_id: customer.id,
-        matched_job_id: job ? job.id : null,
+        matched_job_id: jobId,
         action_taken: 'reminder_sent',
         raw_payload: payload,
         event_timestamp: eventTime,
@@ -326,7 +333,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
         latitude: lat,
         longitude: lng,
         matched_customer_id: customer.id,
-        matched_job_id: job ? job.id : null,
+        matched_job_id: jobId,
         action_taken: 'ignored_duplicate',
         time_entry_id: entry.id,
         raw_payload: payload,
@@ -352,7 +359,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       payload: {
         customer_id: customer.id,
         customer_name: customerLabel,
-        job_id: job ? job.id : null,
+        job_id: jobId,
         time_entry_id: entry.id,
         unscheduled,
         ...outcome.extra,
@@ -366,7 +373,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       latitude: lat,
       longitude: lng,
       matched_customer_id: customer.id,
-      matched_job_id: job ? job.id : null,
+      matched_job_id: jobId,
       action_taken: outcome.action,
       time_entry_id: entry.id,
       raw_payload: payload,

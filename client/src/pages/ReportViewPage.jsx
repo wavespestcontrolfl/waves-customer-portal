@@ -2884,11 +2884,22 @@ export function ReserviceReportCard({ data, mode }) {
 // so `mode` is a belt-and-braces check here, same as the other live-only
 // cards on this page.
 function PlanSummaryCard({ data, mode }) {
+  if (mode !== 'live') return null;
   const plan = data.planSummary;
-  if (mode !== 'live' || !plan) return null;
-  const visits = Number(plan.visitsThisYear) || 0;
-  if (visits <= 0) return null;
-  const reservices = Number(plan.reservicesThisYear) || 0;
+  // With the gate on, upcoming visits live INSIDE this section (owner
+  // 2026-10-06: one "Your plan" section, a Reschedule button on each
+  // visit). Server-driven, same
+  // as the old standalone card: property scoping, the 90-day window, the
+  // excluded statuses and the ~6 cap all live in report-data.js.
+  // Only when the server sent `merged: true` (GATE_REPORT_PLAN_RESCHEDULE);
+  // otherwise the standalone UpcomingVisitsCard shows them, as before.
+  const merged = data?.upcomingVisitsCard?.merged === true;
+  const upcoming = merged && Array.isArray(data.upcomingVisitsCard.visits) ? data.upcomingVisitsCard.visits : [];
+  const hasUpcoming = upcoming.length > 0;
+  const visits = Number(plan?.visitsThisYear) || 0;
+  const hasPlan = Boolean(plan) && visits > 0;
+  if (!hasPlan && !hasUpcoming) return null;
+  const reservices = Number(plan?.reservicesThisYear) || 0;
   const visitWord = visits === 1 ? 'visit' : 'visits';
   const reserviceWord = reservices === 1 ? 're-service' : 're-services';
   const yearLine = reservices > 0
@@ -2897,30 +2908,59 @@ function PlanSummaryCard({ data, mode }) {
   // The current tier the server sends with the counts, never the tier frozen
   // on this visit (data.waveGuardTier): an old report must not name a tier
   // the customer has since left.
-  const tier = String(plan.tier || '').trim();
-  // The upcoming-visits card already lists the dates when it is on the page.
+  const tier = String(plan?.tier || '').trim();
+  // The upcoming-visits list names the dates when it is on the page.
   // nextAppointment is the account-wide pick (the plan is account-level) and
   // prefers this report's own service line, so the line names the service:
   // another line's visit may come sooner. Not nextSameServiceAppointment,
   // which is scoped to this property for the "What's next" section.
   const nextAppointment = data.upcomingVisitsCard ? null : data.nextAppointment;
-  const nextVisit = planNextVisitDateLabel(nextAppointment);
+  const nextVisit = hasPlan ? planNextVisitDateLabel(nextAppointment) : null;
   const nextVisitService = String(nextServiceName(nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim();
   return (
-    <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
+    <section
+      data-glass="card"
+      className={`sr-section plan-summary-section${hasUpcoming ? ' upcoming-visits-card' : ''}`}
+      id={hasPlan ? 'your-plan' : undefined}
+      data-section={hasUpcoming ? 'upcoming-visits' : undefined}
+    >
       {/* h2, not .section-eyebrow: the glass theme hides every
           .section-eyebrow outside the hero kicker, which left this card
-          with no visible title (codex P2 on #5177; same fix as
-          UpcomingVisitsCard). */}
-      <h2>Your plan</h2>
-      {tier && <p className="map-context-copy">You&apos;re a WaveGuard {tier} member.</p>}
-      <p className="map-context-copy">{yearLine}</p>
+          with no visible title (codex P2 on #5177). With no plan summary the
+          section is only the visits list, under a neutral title. */}
+      <h2>{hasPlan ? 'Your plan' : 'Your upcoming visits'}</h2>
+      {hasPlan && tier && <p className="map-context-copy">You&apos;re a WaveGuard {tier} member.</p>}
+      {hasPlan && <p className="map-context-copy">{yearLine}</p>}
       {nextVisit && nextVisitService && (
         <p className="map-context-copy">Your next {nextVisitService} visit is {nextVisit}.</p>
       )}
+      {hasUpcoming && (
+        <>
+          <div className="service-status-grid">
+            {upcoming.map((visit, index) => (
+              <div className="sr-cell plan-visit-row" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
+                <div className="sr-cell-value plan-visit-label">
+                  {formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'Scheduled visit'}
+                </div>
+                {typeof visit.rescheduleUrl === 'string' && visit.rescheduleUrl && (
+                  <a
+                    className="plan-visit-reschedule"
+                    href={visit.rescheduleUrl}
+                    style={{ ...actionButtonStyle('plain'), minHeight: 44, padding: '0 14px' }}
+                    aria-label={`Reschedule ${formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'this visit'}`}
+                  >
+                    Reschedule
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="sr-cell-note">Dates and windows are subject to change</div>
+        </>
+      )}
       {/* An invitation only, no promise to come back: reserviceEligible
           does not say this report's own service line is covered. */}
-      {data.reserviceEligible === true && (
+      {hasPlan && data.reserviceEligible === true && (
         <p className="map-context-copy">Something come up between visits? Text us.</p>
       )}
     </section>
@@ -3681,6 +3721,9 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
 // above, which stays scoped to this report's own service line only.
 function UpcomingVisitsCard({ data, mode }) {
   const visits = data?.upcomingVisitsCard?.visits;
+  // GATE_REPORT_PLAN_RESCHEDULE: the server sets `merged` and the visits move
+  // into the "Your plan" section (PlanSummaryCard). Off = this card, as before.
+  if (data?.upcomingVisitsCard?.merged === true) return null;
   if (mode !== 'live' || !Array.isArray(visits) || !visits.length) return null;
   return (
     <section data-glass="card" className="report-card upcoming-visits-card" data-section="upcoming-visits">
@@ -7834,6 +7877,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         /* Customer-facing body copy floor is 16px; 14px stays reserved for
            labels (codex round-2 P2, owner type scale 2026-10-05). */
         .sr-cell-value { margin-top: 8px; font-size: 16px; color: var(--text); }
+        /* "Your plan" upcoming-visit row: label left, small secondary
+           Reschedule link right; wraps under the label on a narrow phone
+           instead of overflowing. */
+        .plan-visit-row {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px 12px;
+          min-height: 0;
+        }
+        .plan-visit-row .plan-visit-label { margin-top: 0; flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+        .plan-visit-reschedule { flex: 0 0 auto; text-decoration: none; white-space: nowrap; }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
@@ -9377,6 +9433,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              report content (the PDF has no equivalent). This comment
              renders into the page text, so it never quotes the CTA copy. */
           .reservice-card-cta { display: none; }
+          .plan-visit-reschedule { display: none; }
           /* The accordion is a control, not content: never print the
              "More information / Details" toggle bar or its frame. An open
              details (force-open on pdf/static, or customer-expanded on a
@@ -9535,7 +9592,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Your upcoming visits (owner-approved 2026-09-27,
             GATE_REPORT_UPCOMING_VISITS) — right beside the cross-sell offer,
             same interwoven placement. Live-only; renders nothing unless the
-            payload carries upcomingVisitsCard. */}
+            payload carries upcomingVisitsCard. Renders nothing too when
+            GATE_REPORT_PLAN_RESCHEDULE merged it into "Your plan". */}
         <UpcomingVisitsCard data={data} mode={mode} />
 
         {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced

@@ -30,7 +30,14 @@ let mutex;
 
 function chain(table) {
   const q = { conds: [], raw: false };
-  q.where = jest.fn((a, b, c) => { q.conds.push(typeof a === 'object' ? a : { [a]: c === undefined ? b : c, __op: c === undefined ? '=' : b }); return q; });
+  q.where = jest.fn((a, b, c) => {
+    if (typeof a === 'function') return q;
+    q.conds.push(typeof a === 'object' ? a : { [a]: c === undefined ? b : c, __op: c === undefined ? '=' : b });
+    return q;
+  });
+  q.whereNotIn = jest.fn(() => q);
+  q.orderBy = jest.fn(() => q);
+  q.select = jest.fn(async () => state.liveVisits || [state.job]);
   q.whereRaw = jest.fn(() => { q.raw = true; return q; });
   q.forUpdate = jest.fn(() => q);
   q.first = jest.fn(async () => {
@@ -64,6 +71,7 @@ beforeEach(() => {
     activeShift: null,
     activeJob: null,
     workedToday: null,
+    liveVisits: null,
     job: {
       id: 'job-1', technician_id: 'tech-1', status: 'confirmed', track_state: 'scheduled',
       scheduled_date: etDateString(new Date()), customer_id: 'cust-1', service_type: 'Pest',
@@ -99,6 +107,7 @@ describe('startJob with autoClockIn', () => {
     ['visit cancelled after the handler read it', { status: 'cancelled' }],
     ['visit completed after the handler read it', { status: 'completed' }],
     ['visit rescheduled', { status: 'rescheduled' }],
+    ['visit whose tracker says cancelled (status still confirmed)', { track_state: 'cancelled' }],
   ])('revalidates the locked visit: %s -> no shift, no timer', async (_label, patch) => {
     Object.assign(state.job, patch);
     await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
@@ -111,6 +120,8 @@ describe('startJob with autoClockIn', () => {
     ['visit moved to another day', { scheduled_date: '2020-01-02' }],
     ['visit cancelled', { status: 'cancelled' }],
     ['visit rescheduled', { status: 'rescheduled' }],
+    ['visit whose tracker says cancelled (status still confirmed)', { track_state: 'cancelled' }],
+    ['visit whose tracker says complete', { track_state: 'complete' }],
   ])('a shift appeared concurrently but the locked %s -> refused: no timer, no transition', async (_label, patch) => {
     // The handler asked for an auto clock-in on a snapshot; by the time the
     // transaction runs, another path has opened a shift AND the visit changed.
@@ -219,11 +230,43 @@ describe('startJob with autoClockIn', () => {
   });
 });
 
+describe('two live visits at the same customer', () => {
+  const twoVisits = () => [{ id: 'job-1' }, { id: 'job-2' }];
+
+  test('no shift: refused inside the transaction (never guess which visit), nothing written', async () => {
+    state.liveVisits = twoVisits();
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
+      .rejects.toMatchObject({ code: 'auto_clock_in_ineligible' });
+    expect(state.inserted).toHaveLength(0);
+  });
+
+  test('a shift appeared concurrently: still refused', async () => {
+    state.activeShift = { id: 'shift-manual', technician_id: 'tech-1' };
+    state.liveVisits = twoVisits();
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO }))
+      .rejects.toMatchObject({ code: 'auto_clock_in_ineligible' });
+    expect(state.inserted).toHaveLength(0);
+  });
+
+  test('exactly one live visit: clocks in', async () => {
+    state.liveVisits = [{ id: 'job-1' }];
+    const entry = await timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO });
+    expect(entry.clocked_in_shift_id).toBeDefined();
+  });
+
+  test('without an auto clock-in request the count is not consulted (today)', async () => {
+    state.activeShift = { id: 'shift-manual', technician_id: 'tech-1' };
+    state.liveVisits = twoVisits();
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true })).resolves.toBeTruthy();
+  });
+});
+
 describe('freshness is re-checked inside the locked transaction', () => {
   test('fresh at the pre-check, stale by the time the locks are won -> no shift, no timer', async () => {
     const { requestAutoClockIn } = require('../services/geofence-auto-clock-in');
     const matcher = require('../services/geofence-matcher');
     jest.spyOn(matcher, 'getShiftStateToday').mockResolvedValue({ active: false, anyToday: false });
+    jest.spyOn(matcher, 'findLiveVisitsOn').mockResolvedValue([{ id: 'job-1' }]);
     const start = Date.parse('2026-10-06T15:00:00Z');
     const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(start);
     const eventTime = new Date(start - 60 * 1000); // 1 min old at the pre-check

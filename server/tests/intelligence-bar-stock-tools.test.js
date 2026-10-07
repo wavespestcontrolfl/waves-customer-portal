@@ -153,6 +153,16 @@ describe('adjust_stock', () => {
     });
   });
 
+  test('a confirmed card the writer refuses (stale preview) says the stock was not written', async () => {
+    const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
+    const result = await executeRaw('adjust_stock', {
+      product_id: 'prod-1', movement_type: 'restock', quantity: 2, unit: 'gal', _verified_inventory_version: 'stale-version',
+    }, { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+    expect(result).toMatchObject({ success: false, written: false, code: 'preview_changed', preview_changed: true });
+    expect(result.error).toMatch(/Stock was not written\.$/);
+    expect(mutations.filter(m => m.op !== 'select')).toEqual([]);
+  });
+
   test('set_total 0 on an UNTRACKED product seeds tracking at zero (Codex P2)', async () => {
     const mutations = useDb({ products_catalog: [UNTRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
@@ -1776,6 +1786,27 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         });
         expect(result).toMatchObject({ code: 'target_clarification_required' });
       });
+    });
+  });
+
+  // Short product names stay out of scope (owner direction pending): the
+  // prompts Codex raised against earlier resolvers are still refused, as on
+  // main.
+  describe('short or unknown product phrases are still refused, as on main', () => {
+    const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
+    const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
+    const restock = product => ({ product: { id: product.id, name: product.name }, movement_type: 'restock' });
+    test.each([
+      'Add 2 gallons of the Guard to inventory',
+      'Add 2 gallons of Unlisted Guard Chemical to inventory',
+      'Add 2 gallons of Unlisted Chemical to inventory',
+      'request 2 gallons of the Guard',
+      'Yes',
+      'Actually use the other one',
+    ])('"%s" is refused', async (prompt) => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const result = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: restock(GUARD) });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
   });
 });

@@ -11,6 +11,7 @@ jest.mock('../services/geofence-matcher', () => ({
   isDuplicateEnter: jest.fn().mockResolvedValue(false),
   getActiveJobTimer: jest.fn().mockResolvedValue(null),
   getShiftStateToday: jest.fn().mockResolvedValue({ active: false, anyToday: false }),
+  findLiveVisitsOn: jest.fn().mockResolvedValue([{ id: 'job-1' }]),
   getTechByImei: jest.fn(),
   getRadiusMeters: jest.fn().mockResolvedValue(100),
   findNearbyCustomers: jest.fn(),
@@ -47,7 +48,7 @@ function baseArgs(overrides = {}) {
     tech: { id: 'tech-1' },
     customer: { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' },
     job: {
-      id: 'job-1', technician_id: 'tech-1', status: 'confirmed',
+      id: 'job-1', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed',
       track_state: 'scheduled', scheduled_date: today(),
     },
     lat: 27.1, lng: -82.4,
@@ -72,6 +73,7 @@ beforeEach(() => {
   }));
   matcher.getMode.mockResolvedValue('automatic');
   matcher.getShiftStateToday.mockResolvedValue({ active: false, anyToday: false });
+  matcher.findLiveVisitsOn.mockResolvedValue([{ id: 'job-1' }]);
   timeTracking.startJob.mockResolvedValue({ id: 'job-entry-1' });
 });
 
@@ -136,6 +138,9 @@ describe('geofence auto clock-in (handler)', () => {
     ['a cancelled visit', {
       job: { id: 'job-1', technician_id: 'tech-1', status: 'cancelled', track_state: 'scheduled', scheduled_date: today() },
     }],
+    ['a visit whose tracker says cancelled while status reads confirmed', {
+      job: { id: 'job-1', technician_id: 'tech-1', status: 'confirmed', track_state: 'cancelled', scheduled_date: today() },
+    }],
     ['a stale (delayed) ENTER', { eventTime: new Date(Date.now() - 30 * 60 * 1000) }],
   ])('never requests a clock-in on %s', async (_label, overrides) => {
     timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
@@ -143,6 +148,66 @@ describe('geofence auto clock-in (handler)', () => {
 
     expect(startOpts()).not.toHaveProperty('autoClockIn');
     expect(insertedNotifications[0].type).toBe('geofence_arrival_reminder');
+  });
+
+  describe('two live visits for this tech at this customer today', () => {
+    const visits = () => [
+      { id: 'job-1', technician_id: 'tech-1', service_type: 'Pest' },
+      { id: 'job-2', technician_id: 'tech-1', service_type: 'Lawn' },
+    ];
+
+    test('nothing is clocked in or started: the tech gets the selection prompt for both visits', async () => {
+      matcher.findLiveVisitsOn.mockResolvedValue(visits());
+      await geofenceHandler.handleArrival(baseArgs());
+
+      expect(timeTracking.startJob).not.toHaveBeenCalled();
+      expect(timeTracking.clockIn).not.toHaveBeenCalled();
+      expect(insertedNotifications).toHaveLength(1);
+      expect(insertedNotifications[0].type).toBe('geofence_arrival_select');
+      const candidates = JSON.parse(insertedNotifications[0].payload).candidates;
+      expect(candidates.map((c) => c.job_id)).toEqual(['job-1', 'job-2']);
+      expect(candidates.every((c) => c.customer_id === 'cust-1')).toBe(true);
+      expect(matcher.logEvent.mock.calls.map((c) => c[0].action_taken)).toEqual(['reminder_sent', 'reminder_sent']);
+    });
+
+    test('the live-visit count is read for this tech, customer and the ET day', async () => {
+      matcher.findLiveVisitsOn.mockResolvedValue(visits());
+      await geofenceHandler.handleArrival(baseArgs());
+
+      const [conn, techId, customerId, date, notLive] = matcher.findLiveVisitsOn.mock.calls[0];
+      expect(conn).toBe(db);
+      expect([techId, customerId]).toEqual(['tech-1', 'cust-1']);
+      expect(etDateString(new Date(date))).toBe(today());
+      expect(notLive.statuses).toEqual(expect.arrayContaining(['completed', 'cancelled']));
+      expect(notLive.trackStates).toEqual(expect.arrayContaining(['complete', 'cancelled']));
+    });
+
+    test('a read error counts as "cannot tell": no clock-in, normal start path', async () => {
+      matcher.findLiveVisitsOn.mockRejectedValue(new Error('db down'));
+      timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
+      await geofenceHandler.handleArrival(baseArgs());
+
+      expect(startOpts()).not.toHaveProperty('autoClockIn');
+      expect(lastAction()).toBe('reminder_sent');
+    });
+
+    test('a tech who is already clocked in is not re-routed (the count is never read)', async () => {
+      matcher.getShiftStateToday.mockResolvedValue({ active: true, anyToday: true });
+      matcher.findLiveVisitsOn.mockResolvedValue(visits());
+      await geofenceHandler.handleArrival(baseArgs());
+
+      expect(matcher.findLiveVisitsOn).not.toHaveBeenCalled();
+      expect(timeTracking.startJob).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate off: the count is never read, today\'s start runs', async () => {
+      delete process.env[GATE];
+      matcher.findLiveVisitsOn.mockResolvedValue(visits());
+      await geofenceHandler.handleArrival(baseArgs());
+
+      expect(matcher.findLiveVisitsOn).not.toHaveBeenCalled();
+      expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-1', { lat: 27.1, lng: -82.4 });
+    });
   });
 
   test('never requests a clock-in for a tech already clocked in (shop first); normal start', async () => {
@@ -282,5 +347,36 @@ describe('freshness of the ENTER timestamp', () => {
     await geofenceHandler.handleArrival(baseArgs({ eventTime: new Date(Date.now() + 60 * 60 * 1000) }));
 
     expect(startOpts()).not.toHaveProperty('autoClockIn');
+  });
+});
+
+describe('matcher.findLiveVisitsOn query shape', () => {
+  const realMatcher = jest.requireActual('../services/geofence-matcher');
+  const { NOT_LIVE } = jest.requireActual('../services/geofence-auto-clock-in');
+
+  test('this tech + customer + ET day, live status, tracker not finished or cancelled (NULL tracker allowed)', async () => {
+    const calls = [];
+    const q = {};
+    ['where', 'whereNotIn', 'whereNull', 'orWhereNotIn', 'orderBy'].forEach((m) => {
+      q[m] = jest.fn((...a) => {
+        calls.push([m, ...a.filter((x) => typeof x !== 'function')]);
+        if (m === 'where' && typeof a[0] === 'function') a[0].call(q);
+        return q;
+      });
+    });
+    q.select = jest.fn(async () => [{ id: 'x' }]);
+    const conn = jest.fn(() => q);
+
+    const rows = await realMatcher.findLiveVisitsOn(conn, 'tech-1', 'cust-1', new Date(), NOT_LIVE);
+
+    expect(rows).toEqual([{ id: 'x' }]);
+    expect(conn).toHaveBeenCalledWith('scheduled_services');
+    expect(calls).toEqual(expect.arrayContaining([
+      ['where', { technician_id: 'tech-1', customer_id: 'cust-1' }],
+      ['where', 'scheduled_date', today()],
+      ['whereNotIn', 'status', NOT_LIVE.statuses],
+      ['whereNull', 'track_state'],
+      ['orWhereNotIn', 'track_state', NOT_LIVE.trackStates],
+    ]));
   });
 });

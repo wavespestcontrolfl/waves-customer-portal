@@ -8,7 +8,9 @@ const {
   staffWorkDateSql,
   validateWorkDate,
 } = require('../utils/staff-time-work-date');
-const { isAutoClockInJobEligible, isFreshEvent, isLiveVisit } = require('./geofence-auto-clock-in');
+const {
+  isAutoClockInJobEligible, isFreshEvent, isLiveVisit, liveVisitsAtCustomer,
+} = require('./geofence-auto-clock-in');
 const {
   ACTIVE_WRITE_GENERATION,
   WEEKLY_OT_THRESHOLD_MINUTES,
@@ -240,7 +242,13 @@ async function assertAutoClockInVisit(trx, technicianId, jobId) {
   const job = jobId
     ? await trx('scheduled_services').where('scheduled_services.id', jobId).forUpdate().first()
     : null;
-  if (!isAutoClockInJobEligible(job, technicianId, new Date())) {
+  // Also exactly one live visit at this customer today: with two, which one the
+  // tech arrived for is a guess, so nothing is auto-started (counted under the
+  // same transaction, after the visit lock above).
+  const now = new Date();
+  const eligible = isAutoClockInJobEligible(job, technicianId, now)
+    && (await liveVisitsAtCustomer(trx, technicianId, job, now)).length === 1;
+  if (!eligible) {
     throw Object.assign(new Error('This visit is not yours to start today.'), { code: 'auto_clock_in_ineligible' });
   }
 }

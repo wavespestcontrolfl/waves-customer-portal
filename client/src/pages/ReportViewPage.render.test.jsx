@@ -1528,6 +1528,101 @@ describe('ReportViewPage — "Your upcoming visits" card title', () => {
   });
 });
 
+// Owner 2026-10-06: ONE "Your plan" section holding the member line, the
+// visits-completed line, the upcoming visits (each with a Reschedule link
+// when the server minted one) and the between-visits invitation.
+describe('ReportViewPage — merged "Your plan" + upcoming visits section (GATE_REPORT_PLAN_RESCHEDULE)', () => {
+  function mergedPayload() {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 3, reservicesThisYear: 0, tier: 'Gold' };
+    payload.reserviceEligible = true;
+    payload.upcomingVisitsCard = {
+      merged: true,
+      visits: [
+        { serviceType: 'Every 6 Weeks Lawn Care Service', scheduledDate: '2099-11-02', windowStart: '15:00:00', rescheduleUrl: 'https://wavespestcontrol.com/l/abc123' },
+        { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2099-12-01', windowStart: '09:00:00', rescheduleUrl: null },
+      ],
+    };
+    return payload;
+  }
+
+  it('gate off (no merged flag): two separate sections, no Reschedule button, today\'s markup', async () => {
+    const payload = mergedPayload();
+    delete payload.upcomingVisitsCard.merged;
+    payload.upcomingVisitsCard.visits.forEach((v) => { delete v.rescheduleUrl; });
+    const { container } = renderReport(payload);
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    const plan = container.querySelector('#your-plan');
+    expect(plan.getAttribute('data-section')).toBeNull();
+    expect(plan.querySelector('.plan-visit-row')).toBeNull();
+    expect(within(plan).queryByText('Dates and windows are subject to change')).toBeNull();
+    const card = container.querySelector('.report-card[data-section="upcoming-visits"]');
+    expect(card).not.toBeNull();
+    expect(card.querySelectorAll('.sr-cell')).toHaveLength(2);
+    expect(container.querySelectorAll('a.plan-visit-reschedule')).toHaveLength(0);
+  });
+
+  it('gate off with a rescheduleUrl in the payload still renders no button (merged flag is the switch)', async () => {
+    const payload = mergedPayload();
+    delete payload.upcomingVisitsCard.merged;
+    const { container } = renderReport(payload);
+    await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    expect(container.querySelectorAll('a.plan-visit-reschedule')).toHaveLength(0);
+  });
+
+  it('shows one section in order: member line, completed line, visits, note, between-visits line', async () => {
+    const { container } = renderReport(mergedPayload());
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    expect(container.querySelectorAll('[data-section="upcoming-visits"]')).toHaveLength(1);
+    expect(screen.queryByRole('heading', { name: 'Your upcoming visits' })).toBeNull();
+    const section = container.querySelector('#your-plan');
+    expect(section.getAttribute('data-section')).toBe('upcoming-visits');
+    const text = section.textContent;
+    const order = [
+      "You're a WaveGuard Gold member.",
+      "We've completed 3 visits for you this year.",
+      'Every 6 Weeks Lawn Care',
+      'Quarterly Pest Control',
+      'Dates and windows are subject to change',
+      'Something come up between visits? Text us.',
+    ].map((part) => text.indexOf(part));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it('shows a Reschedule link only on the visit that carries a rescheduleUrl', async () => {
+    const { container } = renderReport(mergedPayload());
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    const links = within(section).getAllByRole('link', { name: /^Reschedule/ });
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('https://wavespestcontrol.com/l/abc123');
+    expect(links[0].closest('.plan-visit-row').textContent).toContain('Lawn Care');
+  });
+
+  it('plan with no upcoming visits keeps the plan-only section', async () => {
+    const payload = mergedPayload();
+    delete payload.upcomingVisitsCard;
+    const { container } = renderReport(payload);
+    await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(section.querySelector('.plan-visit-row')).toBeNull();
+    expect(within(section).queryByText('Dates and windows are subject to change')).toBeNull();
+  });
+
+  it('no plan summary but upcoming visits: neutral title, visits still listed with Reschedule', async () => {
+    const payload = mergedPayload();
+    delete payload.planSummary;
+    const { container } = renderReport(payload);
+    const heading = await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    expect(container.querySelector('#your-plan')).toBeNull();
+    const section = heading.closest('[data-section="upcoming-visits"]');
+    expect(within(section).getAllByRole('link', { name: /^Reschedule/ })).toHaveLength(1);
+    expect(within(section).queryByText(/between visits/)).toBeNull();
+  });
+});
+
 // "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
 // re-service COUNTS for this year (never a price — prices only ever live on
 // estimate pages, and no "at no charge" money claim), live mode only.
@@ -1852,5 +1947,13 @@ describe('ReportViewPage — four-section report in the termite dashboard', () =
     expect(await screen.findByText('What we did and why')).toBeInTheDocument();
     expect(screen.getByText(/^Next visit: Termite Bait Station Monitoring · /)).toBeInTheDocument();
     expect(screen.queryByText('Next monitoring visit')).toBeNull();
+  });
+});
+
+describe('print (Codex r2 on #6088)', () => {
+  it('the per-visit Reschedule control is hidden when the live view is printed', async () => {
+    const { default: src } = await import('./ReportViewPage.jsx?raw');
+    const printBlocks = src.split('@media print').slice(1).map((b) => b.slice(0, 2500));
+    expect(printBlocks.some((b) => /\.plan-visit-reschedule\s*\{\s*display:\s*none;/.test(b))).toBe(true);
   });
 });

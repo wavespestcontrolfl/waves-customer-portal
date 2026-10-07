@@ -59,7 +59,7 @@ describe('v13 monthly program line', () => {
   const EVIDENCE = {
     pre_emergent: /stonewall|dimension|pre-emergent/i,
     micros: /nutra-tech/i,
-    feed: /24-0-11|stonewall 0\.43/i,
+    feed: /24-0-11|dimension 0\.21/i,
     fungicide: /artavia|velista|gravex/i,
     broadleaf: /celsius|dismiss/i,
     insect_spot: /arena|talak|acelepryn|dylox/i,
@@ -236,7 +236,7 @@ describe('the service outline bullets with GATE_LAWN_V13 on name treatment categ
     });
   });
 
-  test('October and May read as the categories the recipe applies (Stonewall 15-0-15 and its spots; Tetrino)', () => {
+  test('October and May read as the categories the recipe applies (Dimension 18-0-10 and its spots; Tetrino)', () => {
     withGate('true', () => {
       const oct = outlineService.customerProtocolBullets(v13.bermuda.visits.find((v) => v.month === 'Oct')).map((b) => b.split(' may be')[0]);
       expect(oct).toEqual(expect.arrayContaining(['Pre-emergent weed control with fertilizer', 'Disease control', 'Insect control', 'Weed spot treatment']));

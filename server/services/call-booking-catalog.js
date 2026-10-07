@@ -184,7 +184,7 @@ const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|c
 // Waves Assessment fallback (assess on-site) instead of guessing which free
 // service to dispatch.
 const RE_SERVICE_PEST_CONTEXT_RE = /\b(?:pests?|bugs?|insects?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|wasps?|hornets?|fleas?|ticks?|silverfish|earwigs?|millipedes?|centipedes?|scorpions?)\b/i;
-const GENERIC_CALL_CATALOG_ROW_RE = /^(?:waves pest control appointment service|waves assessment|waves appointment)$/i;
+const GENERIC_CALL_CATALOG_ROW_RE = /^(?:waves pest control appointment service|waves appointment)$/i;
 // Coarse resolveSchedulableCallService labels a lane's re-service may stand in
 // for. Anything else ("Mosquito Control", "Termite Inspection", …) means the
 // call asked for a DIFFERENT real service and the override must not replace it
@@ -194,10 +194,22 @@ const RE_SERVICE_COARSE_COMPATIBLE = {
   lawn: new Set(['Waves Appointment', 'Lawn Care']),
 };
 
+// Generic = a pick the re-service override may replace. The Waves Assessment
+// is generic here by its canonical identity (key or name), so a renamed
+// label stays replaceable; keyword rules still never replace it (see the
+// resolver's last step).
 function isGenericCallCatalogRow(row) {
   if (!row) return false;
   return row.service_key === 'general_appointment'
-    || GENERIC_CALL_CATALOG_ROW_RE.test(String(row.name || '').trim());
+    || GENERIC_CALL_CATALOG_ROW_RE.test(String(row.name || '').trim())
+    || isAssessmentCatalogRow(row);
+}
+
+// The canonical assessment identity (stable lawn_inspection key OR display
+// name). Lazy require: assessment-booking loads the db module, which this
+// otherwise-pure module must not load at import.
+function isAssessmentCatalogRow(row) {
+  return require('./assessment-booking').isAssessmentServiceRow(row);
 }
 
 function isReServiceCatalogRow(row) {
@@ -333,7 +345,10 @@ function findServiceByName(services, value) {
     const hit = match(normalizeServiceText(candidate));
     if (hit) return hit;
   }
-  return null;
+  // A stored extraction that still says "Waves Assessment" after the row was
+  // renamed resolves to the row with the stable assessment key.
+  const { isAssessmentServiceType } = require('./assessment-booking');
+  return isAssessmentServiceType(value) ? (services.find(isAssessmentCatalogRow) || null) : null;
 }
 
 /**
@@ -343,9 +358,55 @@ function findServiceByName(services, value) {
  * then deterministic keyword rules over the extraction + transcript.
  * Returns a catalog row or null (null -> legacy coarse service label).
  */
+// Re-service override (see RE_SERVICE_INTENT_RE block above): AFFIRMATIVE
+// revisit intent from a LANE-ELIGIBLE customer anchors to the covered
+// re-service row. `reServiceLanes` carries the live plan eligibility —
+// lanes with an open callback are NOT pre-filtered (codex r3): the anchor
+// must still resolve so the locked booking transaction can reject the
+// duplicate into hold-for-review or attach to the existing visit, instead
+// of silently booking a second appointment under a generic label. The
+// coarse label must be lane-compatible, and a replaceable plan pick pins
+// the lane to its own family (a pest plan revisit never books the lawn
+// lane). Single candidate: eligibility + coarse-compat + plan-pin already
+// narrowed the lane. Dual candidates need lane EVIDENCE from the call —
+// exactly one of pest/lawn wording — or the override declines (codex r5:
+// never guess which free service to dispatch; the processor's Waves
+// Assessment fallback books an assessment instead).
+function reServiceOverrideRow({ extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane }) {
+  const intentText = callBookingReServiceIntentText(extracted);
+  if (!intentText || !hasAffirmativeReServiceIntent(intentText)) return null;
+  const coarse = coarseServiceLabel ? String(coarseServiceLabel) : null;
+  const candidates = (reServiceLanes || []).filter((lane) => (
+    (!pickPlanLane || lane === pickPlanLane)
+    && !!RE_SERVICE_COARSE_COMPATIBLE[lane]
+    && (coarse === null || RE_SERVICE_COARSE_COMPATIBLE[lane].has(coarse))
+  ));
+  const evidence = [
+    RE_SERVICE_LAWN_CONTEXT_RE.test(haystack) && 'lawn',
+    RE_SERVICE_PEST_CONTEXT_RE.test(haystack) && 'pest',
+  ].filter(Boolean);
+  const lane = candidates.length === 1 ? candidates[0]
+    : (evidence.length === 1 && candidates.includes(evidence[0]) ? evidence[0] : null);
+  return (reServices || []).find((s) => lane && s.service_key === RE_SERVICE_KEYS[lane]) || null;
+}
+
+// The Assessment pick holds against keyword rules only when it is the call's
+// one service pick: if matched_service / requested_service name a SPECIFIC
+// catalog row (e.g. a recorded pre-adoption V1 pick), the views disagree and
+// the pre-existing keyword precedence decides, as before.
+function assessmentPickHolds(pick, extracted, services) {
+  if (!isAssessmentCatalogRow(pick)) return false;
+  return ![extracted.matched_service, extracted.requested_service]
+    .map((value) => findServiceByName(services, value))
+    .some((row) => row && !isGenericCallCatalogRow(row));
+}
+
+// transcription / reServices / reServiceLanes / coarseServiceLabel may be
+// absent: the haystack drops empty parts and reServiceOverrideRow treats
+// missing lists and labels as none.
 function resolveCallBookingCatalogService({
-  extracted = {}, transcription = '', services = [],
-  reServices = [], reServiceLanes = [], coarseServiceLabel = null,
+  extracted = {}, transcription, services = [],
+  reServices, reServiceLanes, coarseServiceLabel,
 } = {}) {
   if (!Array.isArray(services) || services.length === 0) return null;
 
@@ -367,67 +428,29 @@ function resolveCallBookingCatalogService({
   // Computed before the re-service override so a concrete service keyword
   // ("rodent inspection re-visit", "roach re-treatment") anchors the real
   // specialty row, never a free re-service (codex #3222 r1 P2).
-  let keywordRow = null;
-  if (haystack) {
-    for (const rule of KEYWORD_SERVICE_RULES) {
-      if (!rule.matches(haystack)) continue;
-      const row = services.find((s) => s.service_key === rule.serviceKey);
-      if (row) { keywordRow = row; break; }
-    }
-  }
+  const keywordRow = KEYWORD_SERVICE_RULES
+    .filter((rule) => haystack && rule.matches(haystack))
+    .map((rule) => services.find((s) => s.service_key === rule.serviceKey))
+    .find(Boolean) || null;
 
-  // Re-service override (see RE_SERVICE_INTENT_RE block above): AFFIRMATIVE
-  // revisit intent from a LANE-ELIGIBLE customer anchors to the covered
-  // re-service row. `reServiceLanes` carries the live plan eligibility —
-  // lanes with an open callback are NOT pre-filtered (codex r3): the anchor
-  // must still resolve so the locked booking transaction can reject the
-  // duplicate into hold-for-review or attach to the existing visit, instead
-  // of silently booking a second appointment under a generic label. The
-  // coarse label must be lane-compatible, and a replaceable plan pick pins
-  // the lane to its own family (a pest plan revisit never books the lawn
-  // lane).
-  const reServiceIntentText = callBookingReServiceIntentText(extracted);
-  if (
-    !keywordRow
-    && reServiceIntentText
-    && hasAffirmativeReServiceIntent(reServiceIntentText)
-    && Array.isArray(reServiceLanes) && reServiceLanes.length > 0
-  ) {
-    const coarse = coarseServiceLabel ? String(coarseServiceLabel) : null;
-    const candidates = reServiceLanes.filter((lane) => {
-      if (pickPlanLane && lane !== pickPlanLane) return false;
-      const compat = RE_SERVICE_COARSE_COMPATIBLE[lane];
-      return !!compat && (coarse === null || compat.has(coarse));
-    });
-    if (candidates.length > 0) {
-      // Single candidate: eligibility + coarse-compat + plan-pin already
-      // narrowed the lane. Dual candidates need lane EVIDENCE from the call
-      // — exactly one of pest/lawn wording — or the override declines
-      // (codex r5: never guess which free service to dispatch; the
-      // processor's Waves Assessment fallback books an assessment instead).
-      let lane = null;
-      if (candidates.length === 1) {
-        lane = candidates[0];
-      } else {
-        const lawnEvidence = RE_SERVICE_LAWN_CONTEXT_RE.test(haystack);
-        const pestEvidence = RE_SERVICE_PEST_CONTEXT_RE.test(haystack);
-        if (lawnEvidence !== pestEvidence) lane = lawnEvidence ? 'lawn' : 'pest';
-      }
-      if (lane && candidates.includes(lane)) {
-        const reServiceRow = (Array.isArray(reServices) ? reServices : [])
-          .find((s) => s.service_key === RE_SERVICE_KEYS[lane]);
-        if (reServiceRow) return reServiceRow;
-      }
-    }
-  }
+  const reServiceRow = keywordRow ? null : reServiceOverrideRow({
+    extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane,
+  });
+  if (reServiceRow) return reServiceRow;
 
   // A GENERIC model pick is outranked by a deterministic keyword match
   // (codex #3222 r7): "rodent inspection re-visit" with a
   // Waves-Appointment pick books the inspection, not the generic anything-
   // row. A replaceable lane-family PLAN pick is still a SPECIFIC service the
   // model chose exactly — it keeps its precedence over keyword rules.
-  if (byModelPick && !isGenericCallCatalogRow(byModelPick)) return byModelPick;
-  return keywordRow || byModelPick || null;
+  // A Waves Assessment pick is the visit the staff member offered ("let me
+  // come out and take a look"), not a service-less placeholder: a passing
+  // "rodent" in a pest + rodent + termite plan quote must not turn it into a
+  // one-time rodent job (2026-10-05 call a12fd5ef). It stays generic above
+  // only so the re-service override may still replace it.
+  const keywordMayReplacePick = !assessmentPickHolds(byModelPick, extracted, services)
+    && (!byModelPick || isGenericCallCatalogRow(byModelPick));
+  return (keywordMayReplacePick && keywordRow) || byModelPick || null;
 }
 
 function sanitizeQuotedCallPrice(value) {
@@ -469,7 +492,10 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
   // visit's invoice amount (codex #3222 r2). Same shape the self-serve
   // callback insert uses: no price, and the insert stamps
   // create_invoice_on_complete false.
-  if (isReServiceCatalogRow(catalogRow)) {
+  // A Waves Assessment is the free look-before-quote visit: a treatment or
+  // plan price said on the same call is the quote, not this visit's charge.
+  // The forced-assessment path clears quoted_price for the same reason.
+  if (isReServiceCatalogRow(catalogRow) || isAssessmentCatalogRow(catalogRow)) {
     return { price: null, source: null };
   }
   if (!catalogRow || catalogRow.billing_type !== 'one_time') {
@@ -538,8 +564,21 @@ function isValidWindowTime(value) {
  * future date was stated, else parent date + the service's catalog interval
  * (default 14 days). Returns { scheduledDate, windowStart } or null.
  */
-function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate, parentWindowStart } = {}) {
-  if (!isValidCalendarDate(parentDate)) return null;
+// Parent date + the service's catalog interval (default 14 days). parentDate
+// is an ET wall-clock calendar date; the server runs UTC, so day math goes
+// through the ET helpers (noon anchor clears DST seams). Null if unparseable.
+function catalogIntervalFollowUpDate(parentDate, catalogRow) {
+  const configured = Number(catalogRow?.follow_up_interval_days);
+  const days = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_FOLLOW_UP_INTERVAL_DAYS;
+  const base = parseETDateTime(`${parentDate}T12:00`);
+  return Number.isNaN(base.getTime()) ? null : etDateString(addETDays(base, days));
+}
+
+function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, parentWindowStart } = {}) {
+  // A follow-up treatment talked about on an assessment call follows the
+  // quote, not the assessment (the forced-assessment path clears the same
+  // signals).
+  if (!isValidCalendarDate(parentDate) || isAssessmentCatalogRow(catalogRow)) return null;
 
   // A stated date only counts as a mention signal when it parses as a real
   // calendar date AND falls after the initial visit: the V1 normalizer merely
@@ -559,27 +598,14 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   const discussed = extracted.follow_up_visit_mentioned === true || statedFutureDate;
   if (!discussed && !packageRow) return null;
 
-  let scheduledDate = null;
-  let windowStart = null;
-  if (statedFutureDate) {
-    scheduledDate = m[1];
-    windowStart = m[2] && isValidWindowTime(m[2]) ? m[2] : null;
-  }
-
-  if (!scheduledDate) {
-    const configured = Number(catalogRow?.follow_up_interval_days);
-    const days = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_FOLLOW_UP_INTERVAL_DAYS;
-    // parentDate is an ET wall-clock calendar date; the server runs UTC, so
-    // day math goes through the ET helpers (noon anchor clears DST seams).
-    const base = parseETDateTime(`${parentDate}T12:00`);
-    if (Number.isNaN(base.getTime())) return null;
-    scheduledDate = etDateString(addETDays(base, days));
-  }
-
-  const finalWindowStart = windowStart || parentWindowStart || '09:00';
+  // Date from the transcript when a valid future date was stated, else the
+  // catalog interval. Window: the stated time, else the parent's, else 09:00.
+  const scheduledDate = statedFutureDate ? m[1] : catalogIntervalFollowUpDate(parentDate, catalogRow);
+  if (!scheduledDate) return null;
+  const statedWindow = statedFutureDate ? m[2] : null;
   return {
     scheduledDate,
-    windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00',
+    windowStart: [statedWindow, parentWindowStart].find(isValidWindowTime) || '09:00',
     // The plan exists only because the service is a package — nobody on the
     // call discussed a second visit. The writer skips it while the primary
     // is still a pending office-review request (office confirm books it).
