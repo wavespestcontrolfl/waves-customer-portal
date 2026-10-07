@@ -2122,6 +2122,8 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           // payer-billed invoice settling during a homeowner's failed retry
           // must not read as the homeowner's own tender.
           ...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {}),
+          // The Intelligence Bar's charge_invoice provenance (stripe.js initiatedVia): its daily cap counts this row.
+          ...(paymentIntent.metadata?.initiated_via === 'intelligence_bar' ? { initiated_via: 'intelligence_bar' } : {}),
         }),
       });
       if (matchingAmbiguousAttempt) {

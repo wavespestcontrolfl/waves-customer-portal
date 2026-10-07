@@ -2136,7 +2136,8 @@ const StripeService = {
   // the charge transaction, under the invoice lock, after the final surcharged
   // total is known and before any Stripe call; a throw refuses the charge.
   // opts.initiatedVia — 'intelligence_bar' stamps payments.metadata.initiated_via
-  // (the bar's daily charge cap counts those rows). Both null = unchanged.
+  // and the PaymentIntent's metadata (the webhook's fallback payment insert copies
+  // it), so the bar's daily charge cap counts those rows. Both null = unchanged.
   // opts.operatorOverride — a staff member explicitly ordered THIS charge
   // (admin card-on-file): skips the default collections-dispute-hold guard and
   // records the override (opts.overrideTrail = {actorId, ip, userAgent, route,
@@ -2801,6 +2802,9 @@ const StripeService = {
             // Send-window provenance for the webhook's lifecycle notices +
             // receipt (see the customerInitiated option doc above).
             initiated_by: customerInitiated ? 'customer' : 'machine',
+            // Bar provenance on the intent too, so a payment row the webhook writes
+            // later (a deferred success) is stamped and counted like this one.
+            ...(initiatedVia === 'intelligence_bar' ? { initiated_via: 'intelligence_bar' } : {}),
           },
         };
         if (invSurchargeDetails) invPiParams.amount_details = invSurchargeDetails;

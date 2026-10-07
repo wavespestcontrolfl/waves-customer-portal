@@ -786,7 +786,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(attemptUpdates.some((u) => u.submitted_at)).toBe(false);
   });
 
-  test('the bar guard runs after the final-total checks and before the submission marker; the stamp rides the payments insert only (source contract)', () => {
+  test('the bar guard runs after the final-total checks and before the submission marker; the stamp rides the PaymentIntent and the payments insert, and the webhook fallback copies it (source contract)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/stripe.js'), 'utf8');
     const fn = src.slice(src.indexOf('async chargeInvoiceWithSavedCard('));
     const totalIdx = fn.indexOf('const chargeInfo = computeChargeAmount(invoiceAmountDue(lockedInvoice)');
@@ -799,11 +799,18 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(maxIdx).toBeLessThan(guardIdx);
     expect(guardIdx).toBeLessThan(cancelIdx);
     expect(guardIdx).toBeLessThan(submitIdx);
+    const piIdx = fn.indexOf('const invPiParams = {');
     const insertIdx = fn.indexOf("[paymentRecord] = await trx('payments').insert({");
     const stamp = "...(initiatedVia === 'intelligence_bar' ? { initiated_via: 'intelligence_bar' } : {}),";
-    const stampIdx = fn.indexOf(stamp);
-    expect(stampIdx).toBeGreaterThan(insertIdx);
-    expect(fn.indexOf('initiated_via', stampIdx + stamp.length)).toBe(-1);
+    const piStampIdx = fn.indexOf(stamp);
+    const rowStampIdx = fn.indexOf(stamp, piStampIdx + stamp.length);
+    // On the PaymentIntent (a later webhook-written row copies it) and on this payments row; nowhere else.
+    expect(piStampIdx).toBeGreaterThan(piIdx);
+    expect(piStampIdx).toBeLessThan(fn.indexOf('await commitInvoiceSavedCardChargeSubmission({'));
+    expect(rowStampIdx).toBeGreaterThan(insertIdx);
+    expect(fn.indexOf('initiated_via', rowStampIdx + stamp.length)).toBe(-1);
+    const webhook = require('fs').readFileSync(require.resolve('../routes/stripe-webhook.js'), 'utf8');
+    expect(webhook).toContain("...(paymentIntent.metadata?.initiated_via === 'intelligence_bar' ? { initiated_via: 'intelligence_bar' } : {}),");
   });
 
   test('requireCompletedVisit without a visit id refuses before touching Stripe', async () => {
