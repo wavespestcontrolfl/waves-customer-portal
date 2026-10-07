@@ -529,6 +529,22 @@ async function assertExpectedEstimate(trx, estimateId, expected) {
   }
 }
 
+// Visits linked to an estimate: the rows the converter's reservation path
+// starts from (estimate-converter.js reservation lookup — any status).
+function estimateLinkedVisitsQuery(conn, estimateId) {
+  return conn('scheduled_services').where({ source_estimate_id: estimateId })
+    .whereNotNull('customer_id').whereNull('reservation_expires_at');
+}
+
+// Open termite program agreement requests this accept's agreement prep would
+// cancel (or that block it): every open request not provably at another
+// property (termite-program-agreement.js classifyExistingAgreement).
+async function openTermiteAgreementsForAccept(conn, customerId, estimate) {
+  const Termite = require('./termite-program-agreement');
+  const rows = await Termite.openProgramAgreements(customerId, conn);
+  return rows.filter((row) => Termite.classifyExistingAgreement(row, estimate) !== 'ignore');
+}
+
 // Same property-preferences advisory then customer row order as the
 // annual-prepay guard in markEstimateManuallyAccepted (and convertEstimate).
 async function assertExpectedCustomerBill(trx, customerId, expected) {
@@ -540,6 +556,15 @@ async function assertExpectedCustomerBill(trx, customerId, expected) {
     const { ledgerPin } = require('./intelligence-bar/rate-change');
     if (ledgerPin(await loadComponents(trx, customerId), customer.monthly_rate) !== expected.ledgerPin) throw cardChanged();
   }
+}
+
+// What the card promised is still true under the locks: no visit linked to
+// the estimate since (the reservation path the card cannot show), and no
+// open termite agreement the accept would cancel.
+async function assertExpectedNoNewWork(trx, estimate, expected) {
+  if (expected.noLinkedVisits && await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) throw cardChanged();
+  if (expected.noOpenTermiteAgreement
+    && (await openTermiteAgreementsForAccept(trx, estimate.customer_id, estimate)).length > 0) throw cardChanged();
 }
 
 async function logManualAcceptance(database, {
@@ -710,6 +735,7 @@ async function markEstimateManuallyAccepted({
 
     throwRefusal(manualAcceptLockedRowRefusal(estimate));
     if (expected) await assertExpectedCustomerBill(trx, estimate.customer_id, expected);
+    if (expected) await assertExpectedNoNewWork(trx, estimate, expected);
 
     const isCommercialProposal = isCommercialProposalEstimate(estimate);
 
@@ -1292,6 +1318,8 @@ async function markEstimateManuallyAccepted({
 module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   MANUAL_ACCEPTABLE_STATUSES,
   markEstimateManuallyAccepted,
+  estimateLinkedVisitsQuery,
+  openTermiteAgreementsForAccept,
   oneTapPurchaseRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,

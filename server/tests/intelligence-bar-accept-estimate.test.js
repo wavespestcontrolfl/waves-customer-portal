@@ -207,8 +207,26 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND = 'true';
     const sent = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(sent.customer_messages).toContainEqual(expect.objectContaining({
-      will_send: true, text: 'Termite program agreement may be emailed to the customer to sign after Confirm (autosend is on); if it cannot be prepared automatically the office is belled instead',
+      will_send: false, may_send: true, text: 'May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it',
     }));
+  });
+
+  test('only a definite send marks the card as contacting the customer; the autosend agreement is a "may"', async () => {
+    process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND = 'true';
+    const termite = {
+      estimate_data: { recurring: { services: [{ name: 'Termite Bait Monitoring', service: 'termite_bait', visitsPerYear: 4, monthly: 35 }] } },
+      monthly_total: 35,
+    };
+    // Membership email will go out: the card contacts the customer.
+    seed({ estimate: termite });
+    const withEmail = card(await executeEstimateAcceptTool('accept_estimate', INPUT));
+    expect(withEmail.notifies_customer).toBe(true);
+    expect(labels(withEmail)).toContain('Message: May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it');
+    // Email off: the possible agreement email alone does not set the flag.
+    seed({ estimate: termite, prefs: [{ customer_id: CUSTOMER_ID, email_enabled: false }] });
+    const onlyMaybe = card(await executeEstimateAcceptTool('accept_estimate', INPUT));
+    expect(onlyMaybe.notifies_customer).toBe(false);
+    expect(labels(onlyMaybe)).toContain('Message: May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it');
   });
 });
 
@@ -256,6 +274,23 @@ describe('refusals before any card', () => {
     }
   });
 
+  test('a termite estimate is refused while an open termite agreement for the property would be cancelled', async () => {
+    seed({
+      estimate: {
+        estimate_data: { recurring: { services: [{ name: 'Termite Bait Monitoring', service: 'termite_bait', visitsPerYear: 4, monthly: 35 }] } },
+        monthly_total: 35,
+      },
+    });
+    tables.customer_contracts = [{ id: 'contract-open', customer_id: CUSTOMER_ID, status: 'sent', share_token_expires_at: null, document_variables_snapshot: {}, document_template_version_id: 'v-1' }];
+    try {
+      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(result.code).toBe('open_termite_agreement');
+      expect(result.error).toBe('Accept this on the estimate page; it would cancel the open termite agreement and its signing link. Nothing was changed.');
+    } finally {
+      delete tables.customer_contracts;
+    }
+  });
+
   test('an estimate that belongs to another customer names its real owner', async () => {
     seed({ estimate: { customer_id: OTHER_CUSTOMER_ID } });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
@@ -279,7 +314,10 @@ describe('Confirm', () => {
 
   test('runs the estimate page handler with the page\'s own verbal-yes body', async () => {
     const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    markEstimateAcceptedAsStaff.mockResolvedValue({ status: 200, json: { success: true, alreadyAccepted: false, conversion: { monthlyRate: 145, tier: 'Silver' }, warnings: [] } });
+    markEstimateAcceptedAsStaff.mockImplementation(async () => {
+      tables.customers[0].waveguard_tier = 'Gold';
+      return { status: 200, json: { success: true, alreadyAccepted: false, conversion: { monthlyRate: 145, tier: 'Gold' }, warnings: [] } };
+    });
     const result = await confirmWith(approved);
     expect(markEstimateAcceptedAsStaff).toHaveBeenCalledWith({
       estimateId: ESTIMATE_ID,
@@ -289,12 +327,13 @@ describe('Confirm', () => {
         expected: {
           estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: CUSTOMER_ID,
           customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
+          noLinkedVisits: true, noOpenTermiteAgreement: false,
         },
       },
       actor: { technicianId: 'tech-owner' },
     });
     expect(approved.pins.ledger).toBe('55.00|lawn_care=55.00');
-    expect(result).toMatchObject({ success: true, monthly_rate_now: 145, tier_now: 'Silver' });
+    expect(result).toMatchObject({ success: true, monthly_rate_now: 145, tier_now: 'Gold' });
     expect(result.message).toMatch(/No visits were booked/);
   });
 
@@ -316,6 +355,16 @@ describe('Confirm', () => {
     const result = await confirmWith(approved);
     expect(result).toMatchObject({ preview_changed: true });
     expect(result.success).toBeUndefined();
+  });
+
+  test('tier_now is the tier as stored, so a commercial-only plan reads Commercial, not the converter\'s internal none', async () => {
+    const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    markEstimateAcceptedAsStaff.mockImplementation(async () => {
+      tables.customers[0].waveguard_tier = 'Commercial'; // what the converter stores
+      return { status: 200, json: { success: true, alreadyAccepted: false, conversion: { monthlyRate: 145, tier: 'none' }, warnings: [] } };
+    });
+    const result = await confirmWith(approved);
+    expect(result.tier_now).toBe('Commercial');
   });
 
   test('refuses without a verified card', async () => {

@@ -197,8 +197,10 @@ function termiteAgreementMessage(termiteProgram) {
   if (termiteProgram.commercial) {
     return { kind: 'none', will_send: false, text: 'Termite program agreement: commercial, so the office is belled to prepare it by hand; nothing is sent to the customer' };
   }
+  // Conditional, never a definite send: the agreement goes out only if the
+  // figures, the template and the customer's email allow.
   return termiteProgram.autosend
-    ? { kind: 'email', will_send: true, text: 'Termite program agreement may be emailed to the customer to sign after Confirm (autosend is on); if it cannot be prepared automatically the office is belled instead' }
+    ? { kind: 'email', will_send: false, may_send: true, text: 'May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it' }
     : { kind: 'none', will_send: false, text: 'Termite program agreement drafted for the office to send (or the office is belled to prepare it); the customer is not sent it' };
 }
 
@@ -359,13 +361,37 @@ function laneAndTier({ customer, converts, tierAfter, totalAfter, pinnedLegacyRo
   return { laneBefore, laneAfter, tierBefore, tierAfter };
 }
 
+function termiteProgramFor(estimate, estimateData) {
+  const Termite = require('../termite-program-agreement');
+  return {
+    has_program: !!Termite.collectTermiteFacts(estimateData)?.hasProgram,
+    commercial: Termite.isCommercialEstimate(estimate, estimateData),
+    autosend: Termite.autosendGateOn(),
+  };
+}
+
+// The refusals that need the activation facts: what the conversion would do
+// that the card cannot show, linked visits, an open termite agreement.
+async function laterRefusal({ converts, estimate, estimateData, tier, termiteProgram, customerId }) {
+  const blocked = converts && (conversionRefusal(estimate, estimateData, tier) || await bookedRefusal(estimate.id));
+  return blocked || (termiteProgram.has_program && await termiteAgreementRefusal(estimate, customerId)) || null;
+}
+
+// An open termite agreement request for this property would be cancelled
+// (with its signing link) by the accept's agreement prep — refused here.
+async function termiteAgreementRefusal(estimate, customerId) {
+  const { openTermiteAgreementsForAccept } = require('../estimate-manual-acceptance');
+  if (!(await openTermiteAgreementsForAccept(db, customerId, estimate)).length) return null;
+  return refuse('Accept this on the estimate page; it would cancel the open termite agreement and its signing link.', 'open_termite_agreement');
+}
+
 // Visits already booked from this estimate (its booking link) send the
 // converter down its reservation path, which can add visits for the other
 // services and rewrite the booked ones — more than this card can show yet.
 // Same predicate as the converter's reservation lookup (any status).
 async function bookedRefusal(estimateId) {
-  const rows = await db('scheduled_services').where({ source_estimate_id: estimateId }).whereNotNull('customer_id')
-    .whereNull('reservation_expires_at').orderBy('scheduled_date', 'asc').select('id', 'scheduled_date');
+  const { estimateLinkedVisitsQuery } = require('../estimate-manual-acceptance');
+  const rows = await estimateLinkedVisitsQuery(db, estimateId).orderBy('scheduled_date', 'asc').select('id', 'scheduled_date');
   if (!rows.length) return null;
   return refuse(`${rows.length} visit(s) are already linked to this estimate (first ${dateOnly(rows[0].scheduled_date)}). Accepting it can add and change visits that this card cannot show yet; use Mark accepted on the estimate page.`, 'booked_from_estimate');
 }
@@ -441,16 +467,11 @@ async function planAccept(input) {
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
   const { commercialOnly, commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = await activation(estimateData, customerId);
-  const blocked = converts && (conversionRefusal(estimate, estimateData, tier) || await bookedRefusal(estimate.id));
+  const termiteProgram = termiteProgramFor(estimate, estimateData);
+  const blocked = await laterRefusal({ converts, estimate, estimateData, tier, termiteProgram, customerId });
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
-  const Termite = require('../termite-program-agreement');
-  const termiteProgram = {
-    has_program: !!Termite.collectTermiteFacts(estimateData)?.hasProgram,
-    commercial: Termite.isCommercialEstimate(estimate, estimateData),
-    autosend: Termite.autosendGateOn(),
-  };
   const messages = customerMessages({ customer, prefs, converts, commercialOnly, lane: lt.laneAfter, termiteProgram });
 
   const preview = {
@@ -480,6 +501,8 @@ async function planAccept(input) {
       estimate_status: estimate.status,
       customer_version: iso(customer.updated_at),
       ledger: bill ? bill.pin : null,
+      no_linked_visits: converts,
+      no_open_termite_agreement: termiteProgram.has_program,
     },
     note_to_operator: 'PREVIEW ONLY — nothing was changed. Confirm runs the estimate page\'s Mark accepted.',
   };
@@ -500,17 +523,19 @@ function expectedFrom(approved) {
     customerId: approved.customer_id,
     customerVersion: approved.pins.customer_version,
     ledgerPin: approved.pins.ledger,
+    noLinkedVisits: approved.pins.no_linked_visits === true,
+    noOpenTermiteAgreement: approved.pins.no_open_termite_agreement === true,
   };
 }
 
-function acceptedResult(preview, json) {
+function acceptedResult(preview, json, tierNow) {
   return {
     success: true,
     estimate_id: preview.estimate_id,
     customer_id: preview.customer_id,
     already_accepted: json.alreadyAccepted === true,
     monthly_rate_now: json.conversion?.monthlyRate ?? null,
-    tier_now: json.conversion?.tier ?? null,
+    tier_now: tierNow,
     warnings: Array.isArray(json.warnings) ? json.warnings : [],
     message: `${preview.customer_name || 'The customer'}'s ${preview.estimate.label} is accepted. No visits were booked — book the first visit on the calendar.`,
   };
@@ -547,7 +572,10 @@ async function acceptEstimate(input, actionContext = {}) {
     return { ...refuse(reply.json?.error || 'The estimate was not accepted.', reply.json?.code), status: reply.status };
   }
   logger.info(`[intelligence-bar:estimate-accept] estimate ${preview.estimate_id} accepted for customer ${preview.customer_id}`);
-  return acceptedResult(preview, reply.json);
+  // The tier as stored (the converter writes 'Commercial' for a commercial-only
+  // plan where its own result says 'none'), read after the commit.
+  const stored = await db('customers').where({ id: preview.customer_id }).first('waveguard_tier').catch(() => null);
+  return acceptedResult(preview, reply.json, stored ? (stored.waveguard_tier || null) : null);
 }
 
 async function executeEstimateAcceptTool(toolName, input, actionContext = {}) {

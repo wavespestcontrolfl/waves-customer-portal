@@ -1963,12 +1963,20 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: 'customer-pins',
     customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: ledgerPin([], '55.00'),
   };
-  function dbWith(estimate, customer) {
+  function dbWith(estimate, customer, { linkedVisit = null, openAgreements = [] } = {}) {
     const made = makeDb(estimate);
     const inner = made.database;
     const database = jest.fn((table) => {
+      if (table === 'customer_contracts') {
+        const q = { where: () => q, whereIn: () => q, select: async () => openAgreements };
+        return q;
+      }
       const builder = inner(table);
       if (table === 'customers') builder.first = async () => customer;
+      if (table === 'scheduled_services') {
+        const q = { where: () => q, whereNotNull: () => q, whereNull: () => q, first: async () => linkedVisit };
+        return q;
+      }
       return builder;
     });
     database.fn = inner.fn;
@@ -1976,8 +1984,8 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     database.transaction = jest.fn(async (callback) => callback(database));
     return { ...made, database };
   }
-  const accept = (database, estimateConverter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) }) => markEstimateManuallyAccepted({
-    estimateId: 'estimate-pins', adminUserId: 'admin-1', source: 'verbal_yes', expected: pins,
+  const accept = (database, estimateConverter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) }, extraPins = {}) => markEstimateManuallyAccepted({
+    estimateId: 'estimate-pins', adminUserId: 'admin-1', source: 'verbal_yes', expected: { ...pins, ...extraPins },
     database, estimateConverter, leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
   });
 
@@ -2002,5 +2010,25 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     expect(updates).toEqual([]);
     expect(inserts).toEqual([]);
     expect(converter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a visit was linked to the estimate', { linkedVisit: { id: 'svc-late' } }, { noLinkedVisits: true }],
+    ['an open termite agreement appeared for the property', {
+      openAgreements: [{ id: 'contract-late', status: 'sent', share_token_expires_at: null, document_variables_snapshot: {}, document_template_version_id: 'v-1' }],
+    }, { noOpenTermiteAgreement: true }],
+  ])('refuses under the locks when %s after the card, and converts nothing', async (_name, world, extraPins) => {
+    const { database, updates } = dbWith(estimateRow(), customerRow(), world);
+    const converter = { convertEstimate: jest.fn() };
+    await expect(accept(database, converter, extraPins)).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(updates).toEqual([]);
+    expect(converter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test('with no linked visit and no open agreement those pins let the accept through', async () => {
+    const { database } = dbWith(estimateRow(), customerRow());
+    const converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
+    await accept(database, converter, { noLinkedVisits: true, noOpenTermiteAgreement: true });
+    expect(converter.convertEstimate).toHaveBeenCalled();
   });
 });
