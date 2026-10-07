@@ -223,8 +223,9 @@ function buildProgramLine({ month = null, applications = [], nitrogenApplied = n
 // dry season Nov-May, rainy season Jun-Sep, summer nitrogen limits Jun-Sep.
 // Watering here is general seasonal guidance only; a product's own water-in
 // or hold step comes from its label rule in the report's watering section.
-const DRY = 'Water about \u00be inch only when the lawn shows thirst (blades fold or footprints stay). Water early in the morning, on your county\u2019s allowed watering days.';
+const DRY = 'Water only when the lawn shows thirst (blades fold or footprints stay), early in the morning, on your county\u2019s allowed watering days.';
 const RAIN = 'Summer rain usually covers the lawn. Turn irrigation down or off in weeks with regular rain, and water only when the lawn shows thirst. Extra water now invites fungus.';
+const MONTH_NAMES = Object.freeze(['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']);
 const PROGRAM_DETAIL_V13 = Object.freeze({
   1: Object.freeze({
     whyNow: 'January is the coolest stretch of the year. Winter weeds are sprouting while the grass grows slowly, so a weed barrier goes down where it fits the property and a micronutrient feeding keeps the color up without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
@@ -277,7 +278,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
   }),
   11: Object.freeze({
-    whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, mapped large patch areas are treated, and sedge spots are treated if they come back.',
+    whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, mapped large patch areas are treated, and we treat sedge where it shows up.',
     whatYouSee: 'Growth slows and color holds.',
     watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
   }),
@@ -298,10 +299,15 @@ function buildProgramDetail({ month, programLine, aftercare = null, water = null
   const detail = PROGRAM_DETAIL_V13[Number(month)];
   if (!detail) return undefined;
   const weekPlan = water && water.weekPlan;
-  // The weather-derived "Water This Week" plan is the report's watering
-  // direction when present; the seasonal lines never sit beside it (codex #6091 r2).
-  const visitWatering = !!(weekPlan || (aftercare && (aftercare.waterInRequired || aftercare.neutral === false)));
-  return visitWatering ? { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee, watering: [] } : detail;
+  // Any watering card the report shows (the "Water This Week" card with its
+  // calculated target, a weekly plan) or the visit's own label aftercare owns
+  // the watering direction; the seasonal tips appear only when none does, and
+  // never carry an amount (codex #6091 r2, r4).
+  const visitWatering = !!(water || weekPlan || (aftercare && (aftercare.waterInRequired || aftercare.neutral === false)));
+  // monthName titles the watering tips ("Watering in October") so a report
+  // reopened in a later season reads as the visit's season, not today's.
+  const monthName = MONTH_NAMES[Number(month)];
+  return { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee, watering: visitWatering ? [] : detail.watering, monthName };
 }
 
 module.exports = {

@@ -474,7 +474,7 @@ export function LawnProgramLine({ snapshot = null }) {
 // will see and seasonal watering lines, under the program line. The server
 // sends snapshot.seasonalDetail only while the gate is live.
 function ProgramDetail({ detail }) {
-  const paragraph = (text) => <p style={{ margin: 0, fontSize: 14.5, color: BODY, lineHeight: 1.55 }}>{text}</p>;
+  const paragraph = (text) => <p style={{ margin: 0, fontSize: 16, color: BODY, lineHeight: 1.55 }}>{text}</p>;
   const section = (label, body) => (
     <div style={{ marginTop: 14 }}>
       <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>{label}</div>
@@ -486,8 +486,8 @@ function ProgramDetail({ detail }) {
     <>
       {detail.whyNow ? section('Why now', paragraph(detail.whyNow)) : null}
       {detail.whatYouSee ? section('What you will see', paragraph(detail.whatYouSee)) : null}
-      {watering.length ? section('Watering this month', (
-        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 14.5, color: BODY, lineHeight: 1.55 }}>
+      {watering.length ? section(detail.monthName ? `Watering in ${detail.monthName}` : 'Watering tips', (
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 16, color: BODY, lineHeight: 1.55 }}>
           {watering.map((line) => <li key={line} style={{ marginBottom: 4 }}>{line}</li>)}
         </ul>
       )) : null}

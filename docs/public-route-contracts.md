@@ -2412,16 +2412,18 @@ effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above
 and `GATE_LAWN_REPORT_LEAD` is on, because only the lead layout mounts it; gate
 off leaves the lawn payload unchanged, key for key) adds one key to the lawn
 report payload: `reportV2.snapshot.seasonalDetail` = `{ whyNow, whatYouSee,
-watering[] }`, present only beside `seasonalNoteSource: "program"` (lawn only;
+watering[], monthName }`, present only beside `seasonalNoteSource: "program"` (lawn only;
 no new route, token, privacy or rate-limit surface). The text is static copy
 for the visit month from `lawn-program-line.js` `PROGRAM_DETAIL_V13`, written
 from the same v13 month step by category: never a product, brand, active
 ingredient or rate, and a conditional step (the weed barrier) keeps the "where
-it fits the property" qualifier. `watering[]` is seasonal guidance only and is
-EMPTY when the visit carries its own label aftercare (`reportV2.aftercare`
-water-in required or not neutral) or a weather-derived weekly water plan
-(`reportV2.water.weekPlan`), so the report never shows two watering
-directions. Conditional steps (the weed barrier, the May sunny-turf insect
+it fits the property" qualifier. `watering[]` is seasonal tips only, never an amount, and is
+EMPTY whenever the report carries any watering direction of its own: the visit's
+label aftercare (`reportV2.aftercare` water-in required or not neutral) or a
+"Water This Week" card (`reportV2.water`, with its calculated target or weekly
+plan), so the report never shows two watering directions. The card titles the
+tips "Watering in {monthName}" (the visit's month), so a report reopened in a
+later season does not read as current advice. Conditional steps (the weed barrier, the May sunny-turf insect
 treatment) keep "where it fits the property". The lead layout's "This time of year" card renders the three parts
 under the sentence; no other client reads the key.
 

@@ -393,7 +393,7 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
   test('no detail without a program line; gate is strict and needs the lead layout', () => {
     withBoth('true', () => {
       expect(buildProgramDetail({ month: 10, programLine: null })).toBeUndefined();
-      expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBe(PROGRAM_DETAIL_V13[10]);
+      expect(buildProgramDetail({ month: 10, programLine: 'x' })).toEqual({ ...PROGRAM_DETAIL_V13[10], monthName: 'October' });
     });
     for (const loose of ['1', 'on', 'TRUE']) withBoth(loose, () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined());
     withBoth('true', () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined(), null);
@@ -406,13 +406,15 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
       expect(waterIn.whyNow).toBe(PROGRAM_DETAIL_V13[10].whyNow);
       expect(buildProgramDetail({ month: 10, programLine: 'x', aftercare: { waterInRequired: null, neutral: false } }).watering).toEqual([]);
       expect(buildProgramDetail({ month: 10, programLine: 'x', aftercare: { neutral: true } }).watering).toEqual(PROGRAM_DETAIL_V13[10].watering);
+      // any Water This Week card owns the direction (codex #6091 r4)
+      expect(buildProgramDetail({ month: 10, programLine: 'x', aftercare: { neutral: true }, water: { targetInches: 1.1 } }).watering).toEqual([]);
     });
   });
 
   test('a weather-derived weekly water plan also takes over from the seasonal lines (codex #6091 r2)', () => {
     withBoth('true', () => {
       expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, water: { weekPlan: { action: 'run' } } }).watering).toEqual([]);
-      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, water: { weekPlan: null } }).watering).toEqual(PROGRAM_DETAIL_V13[4].watering);
+      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, water: null }).watering).toEqual(PROGRAM_DETAIL_V13[4].watering);
     });
   });
 
@@ -438,6 +440,10 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
   test('gate on without the program line (expectations off): no detail', () => {
     const on = withEnv({ [GATE]: undefined, GATE_LAWN_V13: 'true', GATE_LAWN_REPORT_LEAD: 'true', GATE_LAWN_PROGRAM_DETAIL: 'true' }, () => v13Report());
     expect(on.snapshot.seasonalDetail).toBeUndefined();
+  });
+
+  test('the watering tips carry no amount (codex #6091 r4)', () => {
+    for (let m = 1; m <= 12; m += 1) for (const line of PROGRAM_DETAIL_V13[m].watering) expect(line).not.toMatch(/\d|\u00bd|\u00be|\u00bc|inch/);
   });
 
   test('the copy is grass-neutral and assumes no earlier visit (codex #6091 r3)', () => {
