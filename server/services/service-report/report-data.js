@@ -6772,10 +6772,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
-  // GATE_LAWN_VISIT_SUMMARY_V2 (PROTOTYPE ONLY): a lawn visit with a frozen,
-  // validated Visit Summary prints it in place of the generic completion recap
-  // (which the completion text keeps using). A render only READS the frozen text:
-  // no model call. No frozen entry, a failed read-time screen or any error leaves
+  // GATE_LAWN_VISIT_SUMMARY_V2 (PROTOTYPE ONLY): a lawn visit with a frozen
+  // Visit Summary (fixed sentences written by code, no model) prints it in place of
+  // the generic completion recap (which the completion text keeps using). A render
+  // only READS the frozen text. No frozen entry, a failed read-time check or any error leaves
   // the recap exactly as it was. The tech-reviewed AI report below still wins.
   if (serviceLine === 'lawn' && lawnAssessment?.assessmentId && featureGates.lawnVisitSummaryV2Live()) {
     try {

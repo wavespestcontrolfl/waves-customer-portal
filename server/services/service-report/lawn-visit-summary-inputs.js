@@ -1,24 +1,23 @@
 'use strict';
 
 /**
- * PROTOTYPE ONLY. Facts for the lawn Visit Summary writer (lawn-visit-summary.js),
+ * PROTOTYPE ONLY. Facts for the lawn Visit Summary composer (lawn-visit-summary.js),
  * read once at completion from the report data the write gate has just built (the
- * same object the customer report renders) plus two small reads: the visit's kept
- * photo findings, and the product catalog (each applied product's watering rule
- * and the catalog's names, a defense list for the validator).
+ * same object the customer report renders) plus one small read: the visit's kept
+ * photo findings. No model reads these; code picks fixed sentences from them.
  *
  * Fail closed: a read that throws propagates and the caller stores no summary.
  * A read that succeeds and finds nothing is an empty fact, not a failure.
  *
- * What it never passes on: a product name to the model (only its CATEGORY; the
- * name rides the facts for the validator), a rate, a score, a date, an address, a
- * customer name, a price.
+ * What it never passes on: a product's name, active ingredient or rate (only its
+ * KIND), the technician note, the program line, the headline, a score, a date, an
+ * address, a customer name, a price, the weather. Not rain: conditions.rain_24h_in
+ * mixes observed and forecast hours (application-conditions.js), so observed rain
+ * cannot be told apart and the summary never states it.
  */
 
 const { appliedFromProducts } = require('./lawn-visit-memory');
 const { keptFindings } = require('./lawn-tech-paragraph-inputs');
-const { WATCH_TOPIC } = require('./lawn-since-last-copy');
-const { resolveWateringRule } = require('./lawn-watering-rule');
 const { normalizeFacts } = require('./lawn-visit-summary');
 
 // Florida seasons by visit month.
@@ -38,53 +37,62 @@ function visitMonth(record) {
   return m ? Number(m[1]) : null;
 }
 
-function parseJsonObject(value) {
-  if (!value) return {};
-  if (typeof value === 'object' && !Array.isArray(value)) return value;
-  try { const p = JSON.parse(value); return p && typeof p === 'object' && !Array.isArray(p) ? p : {}; } catch { return {}; }
-}
-
-// Did rain fall in the day before the visit? null when the record has no reading.
-function recentRainOf(record) {
-  const conditions = parseJsonObject(record && record.conditions);
-  const n = conditions.rain_24h_in;
-  if (n === null || n === undefined || n === '' || !Number.isFinite(Number(n))) return null;
-  return Number(n) >= 0.1;
-}
-
 /**
- * The visit's watering step in the facts' shape. The frozen instruction is the
- * authority for the STATE and the inches (it resolved every product's rule, the
- * holds and the same-day cutoff). The hours come from the water-in rules
- * themselves (the shortest window, exactly as the instruction builder takes it),
- * bounded by the deadline the instruction froze, so the paragraph can never ask
- * for a longer window than the report's own banner.
+ * The visit's watering step in the facts' shape, from the FROZEN instruction only
+ * (never the live catalog, so a later rule edit changes nothing). The instruction
+ * is the authority for the state and the inches; the hours are the window it froze,
+ * from completion to its water-in deadline, rounded DOWN so the paragraph can never
+ * ask for a longer window than the report's own banner. A deadline under an hour
+ * away, or an unreadable one, gives no step: the banner owns it.
  */
-function wateringFacts(instruction, ruleRows) {
+function wateringFacts(instruction) {
   if (!instruction || !['water_in', 'hold_then_water_in', 'hold'].includes(instruction.state)) return null;
   if (instruction.state === 'hold') return { state: 'hold' };
   const inches = Number(instruction.waterInInches);
-  const ruleHours = (Array.isArray(ruleRows) ? ruleRows : [])
-    .map((row) => resolveWateringRule(row))
-    .filter((rule) => rule && rule.mode === 'water_in')
-    .map((rule) => Number(rule.water_in_by_hours))
-    .filter((h) => Number.isFinite(h) && h > 0);
-  let hours = ruleHours.length ? Math.min(...ruleHours) : null;
   const at = Date.parse(instruction.completedAt);
   const by = Date.parse(instruction.waterInBy);
-  if (Number.isFinite(at) && Number.isFinite(by) && by > at) {
-    const window = Math.ceil((by - at) / 3600000);
-    hours = hours == null ? window : Math.min(hours, window);
+  if (!Number.isFinite(inches) || !(inches > 0) || !Number.isFinite(at) || !Number.isFinite(by) || by <= at) return null;
+  const hours = Math.floor((by - at) / 3600000);
+  return hours >= 1 ? { state: instruction.state, inches, hours } : null;
+}
+
+// Products as kinds only; the composer reads a name solely to spot a fertilizer analysis.
+function appliedFacts(reportV2) {
+  const products = (reportV2.treatment && reportV2.treatment.products) || [];
+  return appliedFromProducts(products).map((a) => ({ name: a.name, activeIngredient: a.activeIngredient, kind: a.kind }));
+}
+
+// The report's score cards by their own key.
+function areaFacts(reportV2) {
+  return (Array.isArray(reportV2.diagnosis) ? reportV2.diagnosis : []).map((d) => ({ key: d && d.key, label: d && d.label, status: d && d.status }));
+}
+
+// Insight categories that read watch or needs attention, as the composer's topic keys.
+// Water and sprinkler coverage belong to the watering banner.
+const TOPIC_BY_INSIGHT = Object.freeze({ weeds: 'weeds', damage: 'damage', mowing: 'mowing' });
+function watchTopics(reportV2) {
+  const topics = [];
+  for (const card of Array.isArray(reportV2.insights) ? reportV2.insights : []) {
+    const topic = card && TOPIC_BY_INSIGHT[card.category];
+    if (topic && ['watch', 'needs_attention'].includes(card.status) && !topics.includes(topic)) topics.push(topic);
   }
-  if (!Number.isFinite(inches) || !(inches > 0) || !Number.isFinite(hours)) return null;
-  return { state: instruction.state, inches, hours };
+  return topics;
+}
+
+async function readKeptFindingsFor(knex, assessmentId) {
+  const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first('id', 'customer_id', 'confirmed_by_tech');
+  if (!assessment) return [];
+  const run = await knex('lawn_assessment_runs')
+    .where({ assessment_id: assessmentId, customer_id: assessment.customer_id })
+    .first('assessment_id', 'customer_id', 'reviewed_findings', 'added_details', 'reviewed_at');
+  return keptFindings(run, assessment);
 }
 
 /**
  * @param {object} args
- * @param {object} args.record       the customer-joined service record (technician_notes, service_date, conditions)
+ * @param {object} args.record       the customer-joined service record (service_date)
  * @param {object} args.data         buildReportV1Data output (reportV2, lawnAssessment)
- * @param {object} [args.instruction] the visit's watering instruction
+ * @param {object} [args.instruction] the visit's frozen watering instruction
  * @param {object} args.knex
  * @returns {Promise<object|null>} normalized facts, or null when the visit cannot support a summary
  */
@@ -94,53 +102,14 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, knex 
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
   if (!reportV2 || assessmentId == null || !record) return null;
   if (lawnAssessment.lawnCopyV6Unfrozen === true) return null; // a degraded report read writes no summary
-
-  const treatmentProducts = (reportV2.treatment && reportV2.treatment.products) || [];
-  const methodOf = new Map(treatmentProducts.map((p) => [p && p.name, p && p.method]));
-  const applied = appliedFromProducts(treatmentProducts).map((a) => ({ ...a, method: methodOf.get(a.name) || null }));
-
-  // Catalog: every name and active ingredient (validator defense) and the applied products' full rows (watering rules).
-  const catalog = await knex('products_catalog').select('name', 'active_ingredient');
-  const appliedNames = applied.map((a) => a.name);
-  const ruleRows = appliedNames.length ? await knex('products_catalog').whereIn('name', appliedNames).select('*') : [];
-
-  const findingsRun = await (async () => {
-    const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first('id', 'customer_id', 'confirmed_by_tech');
-    if (!assessment) return [];
-    const run = await knex('lawn_assessment_runs')
-      .where({ assessment_id: assessmentId, customer_id: assessment.customer_id })
-      .first('assessment_id', 'customer_id', 'reviewed_findings', 'added_details', 'reviewed_at');
-    return keptFindings(run, assessment);
-  })();
-
-  const snapshot = reportV2.snapshot || {};
-  const programLine = snapshot.seasonalNoteSource === 'program' ? snapshot.seasonalNote : null;
-
-  const insights = Array.isArray(reportV2.insights) ? reportV2.insights : [];
-  const watch = [];
-  for (const card of insights) {
-    const topic = card && WATCH_TOPIC[card.category];
-    if (!topic || card.category === 'water' || card.category === 'coverage') continue;
-    if (!['watch', 'needs_attention'].includes(card.status)) continue;
-    if (!watch.includes(topic)) watch.push(topic);
-  }
-  for (const f of findingsRun) if (!watch.includes(f.label)) watch.push(f.label);
-
   return normalizeFacts({
     season: seasonOf(visitMonth(record)),
-    programLine,
-    applied,
-    findings: findingsRun,
-    areas: (Array.isArray(reportV2.diagnosis) ? reportV2.diagnosis : []).map((d) => ({ label: d && d.label, status: d && d.status })),
-    headline: snapshot.statusHeadline,
-    watering: wateringFacts(instruction, ruleRows),
-    recentRain: recentRainOf(record),
-    watchNext: watch.length ? watch : ['how the lawn responds to today’s treatment'],
-    technicianNote: record.technician_notes,
-    knownProductNames: (catalog || []).map((row) => row && row.name),
-    // Validator only, like the names: every catalog active (a note may repeat one).
-    knownActiveIngredients: (catalog || []).map((row) => row && row.active_ingredient),
+    applied: appliedFacts(reportV2),
+    findings: await readKeptFindingsFor(knex, assessmentId),
+    areas: areaFacts(reportV2),
+    watering: wateringFacts(instruction),
+    watchNext: watchTopics(reportV2),
   });
 }
 
-module.exports = { gatherVisitSummaryFacts, wateringFacts, seasonOf, recentRainOf, _test: { visitMonth } };
+module.exports = { gatherVisitSummaryFacts, wateringFacts, seasonOf, _test: { visitMonth } };

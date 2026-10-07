@@ -1,338 +1,455 @@
-// PROTOTYPE ONLY. Lawn Visit Summary writer (GATE_LAWN_VISIT_SUMMARY_V2): the facts
-// builder, the prompt's grounding, the code-side validator, the one model call (never
-// a real one: every call is injected or mocked), the first-writer-wins freeze and the
-// report-side read. Synthetic data only.
+// PROTOTYPE ONLY. Lawn Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2), FIXED SENTENCES, NO MODEL
+// (owner 2026-10-07): the facts builder, the closed phrase tables and the composer, the
+// first-writer-wins freeze and the read-time guard. Synthetic data only.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 
 const { dispatchWithFallback } = require('../services/llm/call');
 const summary = require('../services/service-report/lawn-visit-summary');
-const { gatherVisitSummaryFacts, wateringFacts, seasonOf, recentRainOf } = require('../services/service-report/lawn-visit-summary-inputs');
-
+const { gatherVisitSummaryFacts, wateringFacts, seasonOf } = require('../services/service-report/lawn-visit-summary-inputs');
+const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
+const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
 const { splitSentences } = require('../services/service-report/next-visit-claims');
-const sourcesFor = (text, from = ['applied']) => splitSentences(text).map((sentence) => ({ sentence, from }));
-const answer = (text) => ({ summary: text, sources: sourcesFor(text) });
+const featureGates = require('../config/feature-gates');
 
-const RAW = {
-  season: 'fall',
-  programLine: 'In October the program focuses on the fall feeding with a pre-emergent weed barrier where it fits the property, plus spot treatment for large patch, grubs and weeds where needed.',
-  applied: [
-    { name: 'Arena 50 WDG', activeIngredient: 'clothianidin', kind: 'insecticide', method: 'spray' },
-    { name: 'LESCO 24-0-11', kind: 'fertilizer', method: 'granular' },
-    { name: 'Prodiamine 65 WDG', activeIngredient: 'prodiamine', kind: 'pre_emergent', method: 'granular' },
-  ],
-  findings: [
-    { label: 'weed pressure', confidence: 'moderate' },
-    { label: 'thinning turf', confidence: 'low' },
-  ],
-  areas: [
-    { label: 'Turf Density', status: 'watch' },
-    { label: 'Weed Pressure', status: 'watch' },
-    { label: 'Color & Vigor', status: 'healthy' },
-  ],
-  headline: 'Your lawn is in good shape',
-  watering: { state: 'water_in', inches: 0.5, hours: 24 },
-  recentRain: false,
-  watchNext: ['weeds', 'stressed areas'],
-  technicianNote: 'Front yard has some thin spots by the driveway. Put the fall feeding down.',
-  knownProductNames: ['Arena 50 WDG', 'LESCO 24-0-11', 'Prodiamine 65 WDG', 'Celsius WG', 'Talstar P'],
+const areas = (o) => Object.entries(o).map(([key, status]) => ({ key, status }));
+
+// Names, brands and actives that must never reach the text.
+const PRODUCT_WORDS = ['Stonewall', 'Prodiamine', 'prodiamine', 'Arena', 'clothianidin', 'LESCO', 'Celsius', 'Talstar', 'bifenthrin', 'Insecticide X', 'Fungicide Y', 'Liquid Z'];
+
+// The fact sets the owner reads. Every `expected` is the exact paragraph.
+const CASES = {
+  stonewallCombinationFall: {
+    facts: {
+      season: 'fall',
+      applied: [
+        { name: 'Stonewall 0.43% + 15-0-15', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent' },
+        { name: 'Arena 50 WDG', activeIngredient: 'clothianidin', kind: 'insecticide' },
+      ],
+      areas: areas({ weed_pressure: 'strong', coverage: 'healthy', color_vigor: 'healthy', damage_disease_signals: 'watch' }),
+      findings: [],
+      watering: { state: 'water_in', inches: 0.5, hours: 24 },
+      watchNext: [],
+    },
+    expected: 'Today we applied a feeding with a pre-emergent weed barrier and insect control, which fits the fall season. '
+      + 'Our photo read shows few weeds, thick coverage and good color, along with a few areas showing stress we are keeping an eye on. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
+      + 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. '
+      + 'At the next visit we will look at stressed areas.',
+  },
+  insectOnlySummer: {
+    facts: {
+      season: 'summer',
+      applied: [{ name: 'Insecticide X', kind: 'insecticide' }],
+      areas: areas({ damage_disease_signals: 'watch' }),
+      findings: [{ label: 'general lawn stress', confidence: 'moderate' }],
+      watering: { state: 'water_in', inches: 0.25, hours: 24 },
+      watchNext: [],
+    },
+    expected: 'Today we applied insect control, which fits the summer season. '
+      + 'In the photos we noticed some general lawn stress. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
+      + 'Please water the treated lawn in with 0.25 inches of water within 24 hours of today’s visit. '
+      + 'At the next visit we will look at stressed areas.',
+  },
+  fungicideOnlyWaterIn: {
+    facts: { season: 'spring', applied: [{ name: 'Fungicide Y', kind: 'fungicide' }], areas: [], findings: [], watering: { state: 'water_in', inches: 1, hours: 12 }, watchNext: [] },
+    expected: 'Today we applied disease protection, which fits the spring season. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
+      + 'Please water the treated lawn in with 1 inch of water within 12 hours of today’s visit.',
+  },
+  holdWithFinding: {
+    facts: {
+      season: 'winter',
+      applied: [{ name: 'Liquid Z', kind: 'herbicide' }],
+      areas: areas({ weed_pressure: 'watch' }),
+      findings: [{ label: 'weed pressure', confidence: 'high' }],
+      watering: { state: 'hold' },
+      watchNext: ['mowing'],
+    },
+    expected: 'Today we applied weed control, which fits the winter season. '
+      + 'In the photos we noticed some weed pressure. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
+      + 'Please hold off on watering the treated lawn for now. The watering note in this report says when to start again. '
+      + 'At the next visit we will look at weeds and mowing height.',
+  },
+  holdThenWaterIn: {
+    facts: {
+      season: 'fall',
+      applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }, { name: 'Micro blend', kind: 'supplement' }],
+      areas: areas({ color_vigor: 'needs_attention', coverage: 'watch' }),
+      findings: [{ label: 'color and nutrient stress', confidence: 'low' }, { label: 'thinning turf', confidence: 'unknown' }],
+      watering: { state: 'hold_then_water_in', inches: 0.75, hours: 24 },
+      watchNext: [],
+    },
+    expected: 'Today we applied a feeding and a micronutrient and color boost, which fits the fall season. '
+      + 'In the photos we noticed what may be some color and nutrient stress and what may be some thinning turf. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
+      + 'Please hold off on watering the treated lawn at first, then water it in with 0.75 inches of water within 24 hours of today’s visit. '
+      + 'At the next visit we will look at thin areas and lawn color.',
+  },
+  noFindingsNoWatering: {
+    facts: { season: 'fall', applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }], areas: areas({ weed_pressure: 'healthy' }), findings: [], watering: null, watchNext: [] },
+    expected: 'Today we applied a feeding, which fits the fall season. '
+      + 'Our photo read shows few weeds. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one.',
+  },
+  lowConfidenceThinning: {
+    facts: {
+      season: 'fall',
+      applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }],
+      areas: areas({ coverage: 'watch', color_vigor: 'healthy' }),
+      findings: [{ label: 'thinning turf', confidence: 'low' }],
+      watering: null,
+      watchNext: [],
+    },
+    expected: 'Today we applied a feeding, which fits the fall season. '
+      + 'Our photo read shows good color. '
+      + 'In the photos we noticed what may be some thinning turf. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
+      + 'At the next visit we will look at thin areas.',
+  },
 };
-const FACTS = summary.normalizeFacts(RAW);
+const composeCase = (name) => summary.composeVisitSummary(CASES[name].facts);
 
-const GOOD = 'Today we put down a fall feeding along with a pre-emergent weed barrier, which fits the season. '
-  + 'The photo read showed some weed pressure in the lawn, and we are keeping an eye on a few thin spots near the driveway. '
-  + 'Feedings like this build gradually, so color and thickness improve a little at a time rather than all at once. '
-  + 'Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots. '
-  + 'At the next visit we will look at the weeds and the thin areas again.';
+const DIGIT_RE = /\d/;
+const WATERING_SENTENCE_RE = /^Please /;
+const TIME_WORD_RE = /\b(?:today|tomorrow|yesterday|tonight|week|weeks|month|months|day|days|soon|shortly|within\s+\d+\s+(?:days?|weeks?)|by\s+(?:next|the\s+next)|in\s+\d+)\b/i;
+const FUTURE_TREATMENT_RE = /\bwe(?:['’]ll|\s+will)\s+(?!look at\b)|\bwill\s+(?:apply|treat|spray|return|come|schedule|re-?treat)|\bnext\s+(?:application|treatment|round)\b|\bfollow[\s-]?up\b/i;
+const ALL_CLEAR_RE = /\bno\s+(?:\w+\s+)?(?:issues?|problems?|concerns?|pests?|damage|weeds?|disease|stress)\b|\bnothing\s+(?:wrong|to\s+worry|of\s+concern)|\ball\s+clear\b|\bperfect|\bflawless|significant|healthy\s+lawn|pest[\s-]?free|guarantee/i;
+const RETIRED_NAME_RE = /&\s*lawn\s*care|lawn\s*care\s*&|Waves Pest Control & /i;
 
-const check = (text, facts = FACTS) => summary.validateSummary(answer(text), facts);
-const problems = (text, facts) => check(text, facts).problems;
+// Every rule the owner asked the paragraph to hold, on one composed text.
+function expectOwnerRules(text) {
+  const sentences = splitSentences(text);
+  expect(sentences.length).toBeLessThanOrEqual(6);
+  expect(text.split(/\s+/).length).toBeLessThanOrEqual(150);
+  for (const name of PRODUCT_WORDS) expect(text).not.toContain(name);
+  // Digits: only the frozen watering amounts, in a watering sentence.
+  for (const s of sentences) if (!WATERING_SENTENCE_RE.test(s)) expect(s).not.toMatch(DIGIT_RE);
+  // Time words: none outside the watering sentence ("today" opens the applied line and the visit possessive).
+  for (const s of sentences) {
+    if (WATERING_SENTENCE_RE.test(s)) continue;
+    expect(lawnResultTimingViolation(s, { carePlanExempt: false })).toBe(false);
+    expect(s.replace(/^Today we applied/, '')).not.toMatch(TIME_WORD_RE);
+  }
+  expect(lawnResultTimingViolation(text)).toBe(false);
+  expect(text).not.toMatch(ALL_CLEAR_RE);
+  expect(text).not.toMatch(FUTURE_TREATMENT_RE);
+  expect(text).not.toMatch(RETIRED_NAME_RE);
+  expect(text).not.toMatch(/\b(?:rain|rained|raining|forecast)\b/i);
+  expect(customerCopyViolations(text)).toEqual([]);
+  expect(summary._test.textProblem(text)).toBeNull();
+}
 
-describe('facts builder', () => {
-  test('applied products become plain categories; names stay in the facts for the validator only', () => {
-    expect(FACTS.applied.map((p) => p.category)).toEqual(['insect control', 'a feeding', 'a pre-emergent weed barrier']);
-    expect(FACTS.applied[0]).toMatchObject({ name: 'Arena 50 WDG', method: 'liquid' });
+beforeEach(() => { jest.clearAllMocks(); });
+
+describe('the paragraphs the owner reads', () => {
+  test.each(Object.keys(CASES))('%s: exact text, and every owner rule holds', (name) => {
+    const result = composeCase(name);
+    expect(result.ok).toBe(true);
+    expect(result.paragraph).toBe(CASES[name].expected);
+    expectOwnerRules(result.paragraph);
   });
 
-  test('two products of one kind and method collapse into one category line', () => {
-    const f = summary.normalizeFacts({ applied: [{ name: 'A', kind: 'fertilizer', method: 'granular' }, { name: 'B', kind: 'fertilizer', method: 'granular' }] });
-    expect(f.applied).toHaveLength(1);
-  });
-
-  test('a half-known water-in step (no hours) is dropped, never guessed', () => {
-    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0.5 } }).watering).toBeNull();
-    expect(summary.normalizeFacts({ watering: { state: 'bogus' } }).watering).toBeNull();
-    expect(summary.normalizeFacts({ watering: { state: 'hold' } }).watering).toEqual({ state: 'hold', inches: null, hours: null });
-  });
-
-  test('wateringFacts: inches from the frozen instruction, hours from the catalog rule, never longer than the frozen deadline', () => {
-    const rows = [{ name: 'LESCO 24-0-11', post_application_watering: { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24, source: 'label' } }];
-    const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:00:00Z' };
-    expect(wateringFacts(instruction, rows)).toEqual({ state: 'water_in', inches: 0.5, hours: 24 });
-    // A same-day cap shortens the window: the paragraph asks for the shorter one.
-    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T23:00:00Z' }, rows)).toEqual({ state: 'water_in', inches: 0.5, hours: 9 });
-    expect(wateringFacts({ state: 'hold' }, rows)).toEqual({ state: 'hold' });
-    expect(wateringFacts({ state: null }, rows)).toBeNull();
-    expect(wateringFacts(null, rows)).toBeNull();
-  });
-
-  test('season and rain helpers', () => {
-    expect(seasonOf(10)).toBe('fall');
-    expect(seasonOf(7)).toBe('summer');
-    expect(seasonOf(null)).toBeNull();
-    expect(recentRainOf({ conditions: { rain_24h_in: 0.4 } })).toBe(true);
-    expect(recentRainOf({ conditions: '{"rain_24h_in":0}' })).toBe(false);
-    expect(recentRainOf({ conditions: null })).toBeNull();
-  });
-
-  describe('gatherVisitSummaryFacts reads the report data the render uses', () => {
-    const fakeKnex = ({ catalog = RAW.knownProductNames.map((name) => ({ name })), rules = [] } = {}) => {
-      const knex = (table) => {
-        const q = { ids: null };
-        q.where = (c) => { q.criteria = c; return q; };
-        q.whereIn = (_col, names) => { q.names = names; return q; };
-        q.first = async () => {
-          if (table === 'lawn_assessments') return { id: 77, customer_id: 9, confirmed_by_tech: true };
-          if (table === 'lawn_assessment_runs') {
-            return { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: [{ label: 'weed pressure', confidence: 'moderate', keep: true }, { label: 'thinning turf', confidence: 'low', keep: true }], added_details: [] };
-          }
-          return null;
-        };
-        q.select = async (col) => (q.names ? rules.filter((r) => q.names.includes(r.name)) : (col === 'name' ? catalog : []));
-        return q;
-      };
-      return knex;
-    };
-    const DATA = {
-      lawnAssessment: { assessmentId: 77 },
-      reportV2: {
-        snapshot: { statusHeadline: 'Your lawn is in good shape', seasonalNote: RAW.programLine, seasonalNoteSource: 'program', overallScore: 91 },
-        diagnosis: [{ label: 'Turf Density', score: 62, status: 'watch' }, { label: 'Color & Vigor', score: 88, status: 'strong' }],
-        insights: [{ category: 'weeds', status: 'watch' }, { category: 'water', status: 'watch' }, { category: 'mowing', status: 'healthy' }],
-        treatment: { products: [
-          { name: 'LESCO 24-0-11', activeIngredient: 'nitrogen', kind: 'fertilizer', method: 'granular', targets: [] },
-          { name: 'Wetting Agent', kind: 'other', activeIngredient: 'surfactant blend' },
-        ] },
-      },
-    };
-    const RECORD = { id: 's1', technician_notes: 'Thin spots by the driveway.', service_date: '2026-10-06', conditions: { rain_24h_in: 0 } };
-
-    test('builds the grounded facts: program line, categories, kept findings, areas, watch list, rain, watering', async () => {
-      const rules = [{ name: 'LESCO 24-0-11', category: 'fertilizer', post_application_watering: { mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 24, source: 'label' } }];
-      const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:00:00Z', waterInBy: '2026-10-07T14:00:00Z' };
-      const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction, knex: fakeKnex({ rules }) });
-      expect(facts).toMatchObject({
-        season: 'fall',
-        programLine: RAW.programLine,
-        applied: [{ kind: 'fertilizer', category: 'a feeding', method: 'granular' }],
-        findings: [{ label: 'weed pressure', confidence: 'moderate' }, { label: 'thinning turf', confidence: 'low' }],
-        areas: [{ label: 'Turf Density', status: 'watch' }, { label: 'Color & Vigor', status: 'strong' }],
-        watering: { state: 'water_in', inches: 0.5, hours: 24 },
-        recentRain: false,
-        watchNext: ['weeds', 'weed pressure', 'thinning turf'],
-      });
-      expect(facts.knownProductNames).toContain('Celsius WG');
-    });
-
-    test('no confirmed assessment id or a degraded report read: no facts, so no summary', async () => {
-      expect(await gatherVisitSummaryFacts({ record: RECORD, data: { reportV2: DATA.reportV2 }, knex: fakeKnex() })).toBeNull();
-      expect(await gatherVisitSummaryFacts({ record: RECORD, data: { ...DATA, lawnAssessment: { assessmentId: 77, lawnCopyV6Unfrozen: true } }, knex: fakeKnex() })).toBeNull();
-    });
-
-    test('a read that throws propagates (the caller stores nothing)', async () => {
-      const boom = () => { throw new Error('read failed'); };
-      await expect(gatherVisitSummaryFacts({ record: RECORD, data: DATA, knex: boom })).rejects.toThrow('read failed');
-    });
-  });
-});
-
-describe('prompt grounding', () => {
-  const prompt = summary.buildPrompt(FACTS);
-
-  test('the user message carries every labeled fact', () => {
-    for (const label of ['SEASON: fall', 'PROGRAM LINE', 'WHAT WE APPLIED', 'PHOTO FINDINGS THE TECHNICIAN KEPT', 'AREAS OF THE LAWN', 'REPORT HEADLINE', 'WATERING STEP', 'RECENT RAIN', 'WE WILL LOOK AT', 'TECHNICIAN NOTE']) {
-      expect(prompt.text).toContain(label);
-    }
-    expect(prompt.text).toContain('- a feeding (granular)');
-    expect(prompt.text).toContain('- a pre-emergent weed barrier (granular)');
-    expect(prompt.text).toContain('weed pressure (moderate confidence)');
-    expect(prompt.text).toContain('thinning turf (low confidence)');
-    expect(prompt.text).toContain('Turf coverage (healthy = thick, few bare spots): worth watching');
-    expect(prompt.text).toContain('water_in: 0.5 inches, within 24 hours');
-    expect(prompt.text).toContain('RECENT RAIN: no');
-  });
-
-  test('no product name, active ingredient, score or catalog list ever reaches the model', () => {
-    expect(prompt.text).not.toMatch(/Arena|LESCO|Prodiamine|Celsius|Talstar|clothianidin|prodiamine/i);
-    expect(prompt.text).not.toMatch(/\bscore\b.*\d/i);
-  });
-
-  test('the system prompt carries the owner rules the code then enforces', () => {
-    const sys = prompt.system.toLowerCase();
-    for (const phrase of [
-      '4 to 6 sentences', 'category', 'never name a product', 'not a sighting', 'exact inches and hours',
-      'no numbers of any kind', 'no guarantee', 'hedge', 'next visit', 'human prose rules', 'water_in',
-    ]) expect(sys).toContain(phrase.toLowerCase());
-  });
-
-  test('a visit with no watering step says so, and rain is not offered', () => {
-    const none = summary.buildPrompt(summary.normalizeFacts({ ...RAW, watering: null, recentRain: null })).text;
-    expect(none).toContain('WATERING STEP: (none)');
-    expect(none).toContain('RECENT RAIN: (unknown)');
-  });
-
-  test('the schema asks for a summary and per-sentence sources from a closed set', () => {
-    const schema = prompt.jsonSchema;
-    expect(schema.required).toEqual(['summary', 'sources']);
-    expect(schema.properties.sources.items.properties.from.items.enum).toEqual(summary.SOURCE_KEYS);
-  });
-});
-
-describe('validator', () => {
-  test('a grounded paragraph passes', () => {
-    const verdict = check(GOOD);
-    expect(verdict.problems).toEqual([]);
-    expect(verdict.ok).toBe(true);
-    expect(verdict.paragraph).toBe(GOOD);
-    expect(verdict.sources).toHaveLength(5);
-  });
-
-  test('rejects a pest the findings and note do not contain (invented, or lifted from the program line)', () => {
-    const invented = GOOD.replace('some weed pressure', 'chinch bugs');
-    expect(problems(invented)).toContain('invented_condition:chinch');
-    const fromProgramLine = GOOD.replace('some weed pressure', 'some large patch');
-    expect(problems(fromProgramLine)).toContain('invented_condition:large_patch');
-    expect(problems(GOOD.replace('some weed pressure', 'grubs'))).toContain('invented_condition:grub');
-    expect(problems(GOOD.replace('some weed pressure', 'fungus'))).toContain('invented_condition:fungus');
-  });
-
-  test('a cause the technician named in the note may be repeated; a cause the note denies may not', () => {
-    const named = summary.normalizeFacts({ ...RAW, technicianNote: 'Possible chinch bugs by the driveway.' });
-    expect(problems(GOOD.replace('some weed pressure', 'possible chinch bugs'), named)).toEqual([]);
-    const denied = summary.normalizeFacts({ ...RAW, technicianNote: 'No chinch bugs found.' });
-    expect(problems(GOOD.replace('some weed pressure', 'chinch bugs'), denied)).toContain('invented_condition:chinch');
-  });
-
-  test('rejects a product name: applied, catalog-only, or an active ingredient', () => {
-    expect(problems(GOOD.replace('a fall feeding', 'a fall feeding of LESCO 24-0-11'))).toContain('product_name');
-    expect(problems(GOOD.replace('a fall feeding', 'a round of Arena'))).toContain('product_name');
-    expect(problems(GOOD.replace('a fall feeding', 'a Celsius WG pass'))).toContain('product_name');
-    // An applied product's own name token (here also its active) and a common active that was never applied.
-    expect(problems(GOOD.replace('a fall feeding', 'a prodiamine barrier'))).toEqual(expect.arrayContaining(['product_name']));
-    expect(problems(GOOD.replace('a fall feeding', 'a bifenthrin pass'))).toContain('active_ingredient');
-  });
-
-  test('a low-confidence finding stated as fact needs a hedge', () => {
-    const asFact = GOOD.replace('we are keeping an eye on a few thin spots near the driveway', 'the lawn has thin spots near the driveway');
-    expect(problems(asFact)).toContain('unhedged_low_confidence:thin');
-    expect(problems(GOOD)).not.toContain('unhedged_low_confidence:thin');
-  });
-
-  test('numbers: only the exact watering inches and hours', () => {
-    expect(problems(GOOD.replace('0.5 inches', '1 inch'))).toEqual(expect.arrayContaining(['number', 'watering_inches_missing']));
-    expect(problems(GOOD.replace('24 hours', '48 hours'))).toEqual(expect.arrayContaining(['number', 'watering_hours_missing']));
-    expect(problems(GOOD.replace('color and thickness', '30 percent more color and thickness'))).toContain('number');
-    expect(problems(GOOD.replace('color and thickness', 'two weeks of color and thickness'))).toContain('spelled_number');
-    // Spelled "half an inch" and "twenty-four hours" are the same exact amounts.
-    expect(problems(GOOD.replace('0.5 inches within 24 hours', 'half an inch within twenty-four hours'))).toEqual([]);
-  });
-
-  test('result timing, dates, guarantees and an all-clear are rejected', () => {
-    expect(problems(GOOD.replace('a little at a time', 'in 2 weeks'))).toEqual(expect.arrayContaining(['number', 'result_timing']));
-    expect(problems(GOOD.replace('a little at a time', 'over time'))).toContain('result_timing');
-    expect(problems(GOOD.replace('a little at a time', 'in the days ahead'))).toContain('result_timing');
-    expect(problems(GOOD.replace('a little at a time', 'by next Tuesday'))).toContain('result_timing');
-    expect(problems(GOOD.replace('rather than all at once', 'and we guarantee it'))).toContain('banned_wording');
-    expect(problems(GOOD.replace('some weed pressure', 'no problems'))).toContain('banned_wording');
-    expect(problems(GOOD.replace('build gradually', 'eliminate the weeds'))).toContain('banned_wording');
-  });
-
-  test('watering: the required step must be there; no step in the facts means no watering advice', () => {
-    expect(problems(GOOD.replace('Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots. ', ''))).toEqual(expect.arrayContaining(['watering_step_missing']));
-    const none = summary.normalizeFacts({ ...RAW, watering: null });
-    expect(problems(GOOD.replace('0.5 inches within 24 hours', 'a good soaking'), none)).toContain('watering_not_in_facts');
-    expect(problems(GOOD.replace('Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots. ', 'The feeding settles in on its own. '), none)).not.toContain('watering_not_in_facts');
-  });
-
-  test('rain is mentioned only when the facts say it rained', () => {
-    expect(problems(GOOD.replace('so the feeding reaches the roots', 'since the rain only helped a little'))).toContain('rain_not_in_facts');
-    const rainy = summary.normalizeFacts({ ...RAW, recentRain: true });
-    expect(problems(GOOD.replace('so the feeding reaches the roots', 'on top of the rain we had'), rainy)).not.toContain('rain_not_in_facts');
-  });
-
-  test('the photos never confirm a cause', () => {
-    expect(problems(GOOD.replace('The photo read showed', 'The photos confirmed'))).toContain('photo_confirms');
-  });
-
-  test('shape: sentence count, length, markup, first person, greeting', () => {
-    expect(problems('We fed the lawn. We watered it in.')).toContain('sentence_count');
-    expect(problems(`${GOOD} Also, I think the lawn looks better.`)).toEqual(expect.arrayContaining(['first_person']));
-    expect(problems(`Hi there, ${GOOD}`)).toContain('greeting_or_signoff');
-    expect(problems(GOOD.replace('Today we put down', '**Today** we put down'))).toContain('markup');
-    expect(summary.validateSummary({ summary: '', sources: [] }, FACTS).problems).toEqual(['empty']);
-  });
-
-  test('sources: one per sentence, from the closed set', () => {
-    const bad = { summary: GOOD, sources: [{ sentence: 'x', from: ['guess'] }] };
-    expect(summary.validateSummary(bad, FACTS).problems).toEqual(expect.arrayContaining(['sources_count']));
-  });
-
-  test('a hold step carries no numbers', () => {
-    const hold = summary.normalizeFacts({ ...RAW, watering: { state: 'hold' } });
-    const text = GOOD.replace('Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots.', 'Please hold off watering and follow the watering note in this report.');
-    expect(problems(text, hold)).toEqual([]);
-    expect(problems(text.replace('hold off', 'hold off for 12 hours'), hold)).toContain('number');
-  });
-});
-
-describe('one model call, frozen, with the generic recap as the fallback', () => {
-  const modelReturns = (json) => dispatchWithFallback.mockImplementation(async (_policy, _payload, options) => {
-    const result = { ok: true, json };
-    return options.validate(result) ? { ok: false, reason: 'all_providers_failed' } : result;
-  });
-  beforeEach(() => { jest.clearAllMocks(); });
-
-  test('a grounded answer is returned with its sources and an inputs hash; the call goes out on its own lane', async () => {
-    modelReturns(answer(GOOD));
-    const out = await summary.generateVisitSummary(RAW);
-    expect(out.ok).toBe(true);
-    expect(out.paragraph).toBe(GOOD);
-    expect(out.inputsHash).toMatch(/^[0-9a-f]{12}$/);
-    const payload = dispatchWithFallback.mock.calls[0][1];
-    expect(payload.laneId).toBe('lawn_visit_summary');
-    expect(payload.promptVersion).toBe(summary.PROMPT_VERSION);
-    expect(payload.text).not.toMatch(/Arena|LESCO/);
-  });
-
-  test('FALLBACK: an invented pest or a product name means no summary (the report keeps the generic recap)', async () => {
-    modelReturns(answer(GOOD.replace('some weed pressure', 'chinch bugs')));
-    const a = await summary.generateVisitSummary(RAW);
-    expect(a).toMatchObject({ ok: false, reason: 'rejected' });
-    expect(a.problems).toContain('invented_condition:chinch');
-    modelReturns(answer(GOOD.replace('a fall feeding', 'Arena')));
-    const b = await summary.generateVisitSummary(RAW);
-    expect(b).toMatchObject({ ok: false, reason: 'rejected' });
-    expect(b.problems).toContain('product_name');
-  });
-
-  test('FALLBACK: a provider miss, a thrown error and a timeout all return no summary and never throw', async () => {
-    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
-    expect((await summary.generateVisitSummary(RAW)).ok).toBe(false);
-    dispatchWithFallback.mockRejectedValueOnce(new Error('boom'));
-    expect(await summary.generateVisitSummary(RAW)).toMatchObject({ ok: false, reason: 'error' });
-    expect(await summary.generateVisitSummary(RAW, { budgetMs: 500 })).toMatchObject({ ok: false, reason: 'timeout' });
-  });
-
-  test('nothing to ground (no products and no kept findings) makes no call at all', async () => {
-    const out = await summary.generateVisitSummary({ ...RAW, applied: [], findings: [] });
-    expect(out).toEqual({ ok: false, reason: 'nothing_to_ground' });
+  test('no model is ever called, and the same facts always give the same paragraph', () => {
+    const a = composeCase('stonewallCombinationFall');
+    const b = composeCase('stonewallCombinationFall');
+    expect(a.paragraph).toBe(b.paragraph);
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  // First-writer-wins freeze against a fake record, the way Postgres applies it.
-  function fakeKnex(initialNotes = {}) {
-    const state = { notes: JSON.parse(JSON.stringify(initialNotes)) };
+  test('nothing grounded (no product, no photo read, no finding that prints) composes nothing', () => {
+    expect(summary.composeVisitSummary({ season: 'fall', applied: [], areas: areas({ weed_pressure: 'tracking' }), findings: [] })).toEqual({ ok: false, reason: 'nothing_to_ground' });
+    expect(summary.composeVisitSummary({})).toEqual({ ok: false, reason: 'nothing_to_ground' });
+    expect(summary.composeVisitSummary(null)).toEqual({ ok: false, reason: 'nothing_to_ground' });
+  });
+
+  test('a visit with a photo read and no product still gets one (no applied line, no results line)', () => {
+    const r = summary.composeVisitSummary({ areas: areas({ weed_pressure: 'strong' }) });
+    expect(r.paragraph).toBe('Our photo read shows few weeds.');
+  });
+});
+
+describe('what the facts can and cannot say', () => {
+  test('a photo finding prints only while the report’s own card for that topic shows a concern', () => {
+    const base = { applied: [{ name: 'x', kind: 'fertilizer' }], findings: [{ label: 'thinning turf', confidence: 'low' }] };
+    // Coverage reads healthy: "thick coverage" and "may be thinning turf" would contradict, so no finding.
+    const healthy = summary.composeVisitSummary({ ...base, areas: areas({ coverage: 'healthy' }) }).paragraph;
+    expect(healthy).toContain('thick coverage');
+    expect(healthy).not.toMatch(/thinning/);
+    // No card at all: no finding either.
+    expect(summary.composeVisitSummary({ ...base, areas: [] }).paragraph).not.toMatch(/thinning/);
+    // A concern on the card: the finding prints, hedged, and the card's own phrase steps aside.
+    const watch = summary.composeVisitSummary({ ...base, areas: areas({ coverage: 'watch' }) }).paragraph;
+    expect(watch).toContain('what may be some thinning turf');
+    expect(watch).not.toContain('keeping an eye on');
+  });
+
+  test('confidence: moderate and high speak plainly, low and unknown hedge', () => {
+    const text = (confidence) => summary.composeVisitSummary({ applied: [{ kind: 'herbicide', name: 'a' }], areas: areas({ weed_pressure: 'watch' }), findings: [{ label: 'weed pressure', confidence }] }).paragraph;
+    expect(text('high')).toContain('we noticed some weed pressure');
+    expect(text('moderate')).toContain('we noticed some weed pressure');
+    expect(text('low')).toContain('we noticed what may be some weed pressure');
+    expect(text('unknown')).toContain('we noticed what may be some weed pressure');
+    expect(text(undefined)).toContain('what may be');
+  });
+
+  test('a finding label off the symptom allowlist (a named cause, a water or clean label) never prints', () => {
+    const f = (label) => summary.normalizeFacts({ findings: [{ label, confidence: 'high' }] }).findings;
+    for (const label of ['chinch bugs', 'insect damage', 'large patch', 'drought stress', 'no major visible stress', 'gray leaf spot', 'grubs']) expect(f(label)).toEqual([]);
+    expect(f('weed pressure')).toHaveLength(1);
+  });
+
+  test('a healthy stress card says nothing (no "no stress" all clear); a watch stress card says so', () => {
+    const t = (status) => summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], areas: areas({ damage_disease_signals: status, weed_pressure: 'strong' }) }).paragraph;
+    expect(t('healthy')).not.toMatch(/stress/);
+    expect(t('watch')).toContain('a few areas showing stress we are keeping an eye on');
+    expect(t('needs_attention')).toContain('some areas showing stress that need more attention');
+  });
+
+  test('the Water / Coverage card and a tracking status have no phrase', () => {
+    const r = summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'water_moisture_stress', status: 'watch' }, { key: 'coverage', status: 'tracking' }] });
+    expect(r.paragraph).not.toMatch(/photo read/);
+    expect(summary.normalizeFacts({ areas: [{ key: 'water_moisture_stress', status: 'watch' }] }).areas).toEqual([]);
+  });
+
+  test('score-card labels map to their card when a row has no key', () => {
+    const f = summary.normalizeFacts({ areas: [{ label: 'Weed Pressure', status: 'strong' }, { label: 'Turf Coverage', status: 'watch' }, { label: 'Color & Vigor', status: 'healthy' }, { label: 'Stress / Damage Signals', status: 'watch' }, { label: 'Water / Coverage', status: 'watch' }] });
+    expect(f.areas.map((a) => a.key)).toEqual(['weed_pressure', 'coverage', 'color_vigor', 'damage_disease_signals']);
+  });
+
+  test('a combination product keeps its feeding half; a plain feeding beside it folds in; "a lawn treatment" steps aside', () => {
+    const t = (applied) => summary.composeVisitSummary({ applied }).paragraph;
+    expect(t([{ name: 'Barrier 0.43% + 15-0-15', kind: 'pre_emergent' }])).toContain('Today we applied a feeding with a pre-emergent weed barrier.');
+    expect(t([{ name: 'Barrier 0.43% + 15-0-15', kind: 'pre_emergent' }, { name: 'Plain feed', kind: 'fertilizer' }])).toContain('Today we applied a feeding with a pre-emergent weed barrier.');
+    expect(t([{ name: 'Plain barrier', kind: 'pre_emergent' }, { name: 'Wetter', kind: 'other' }])).toContain('Today we applied a pre-emergent weed barrier.');
+    expect(t([{ name: 'Wetter', kind: 'other' }])).toContain('Today we applied a lawn treatment.');
+  });
+
+  test('the technician note, program line, headline, product names and rain are not inputs: passing them changes nothing', () => {
+    const facts = CASES.stonewallCombinationFall.facts;
+    const noisy = {
+      ...facts,
+      technicianNote: 'Chinch bugs by the driveway. Front yard looks perfect. No issues. Used Celsius.',
+      programLine: 'In October the program targets large patch and grubs.',
+      headline: 'Your lawn is in good shape',
+      recentRain: true,
+      knownProductNames: ['Celsius WG'],
+    };
+    expect(summary.composeVisitSummary(noisy).paragraph).toBe(CASES.stonewallCombinationFall.expected);
+    expect(Object.keys(summary.normalizeFacts(noisy)).sort()).toEqual(['applied', 'areas', 'findings', 'season', 'watchNext', 'watering']);
+  });
+
+  test('a product enters the facts as its kind only: no name, active or rate survives', () => {
+    const f = summary.normalizeFacts({ applied: [{ name: 'Stonewall 0.43% + 15-0-15', activeIngredient: 'prodiamine', kind: 'pre_emergent' }] });
+    expect(f.applied).toEqual([{ kind: 'pre_emergent', alsoFeeds: true }]);
+    expect(JSON.stringify(f)).not.toMatch(/Stonewall|prodiamine|0\.43/);
+  });
+});
+
+describe('watering comes from the frozen instruction only', () => {
+  const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z' };
+
+  test('hours are the frozen deadline rounded DOWN, never up', () => {
+    expect(wateringFacts(instruction)).toEqual({ state: 'water_in', inches: 0.5, hours: 24 });
+    // 23 h 30 min left: 23, not 24.
+    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-07T14:10:00Z' })).toEqual({ state: 'water_in', inches: 0.5, hours: 23 });
+    // A same-day cap shortens the window.
+    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T23:59:00Z' })).toEqual({ state: 'water_in', inches: 0.5, hours: 9 });
+    // Under an hour, an unreadable deadline or no inches: no step (the banner owns it).
+    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T15:20:00Z' })).toBeNull();
+    expect(wateringFacts({ ...instruction, waterInBy: null })).toBeNull();
+    expect(wateringFacts({ ...instruction, waterInInches: null })).toBeNull();
+  });
+
+  test('hold has no numbers; none, null and an unknown state give no step', () => {
+    expect(wateringFacts({ state: 'hold' })).toEqual({ state: 'hold' });
+    expect(wateringFacts({ state: 'none' })).toBeNull();
+    expect(wateringFacts({ state: null })).toBeNull();
+    expect(wateringFacts(null)).toBeNull();
+  });
+
+  test('a half-known water-in step is dropped, never guessed', () => {
+    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0.5 } }).watering).toBeNull();
+    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0, hours: 24 } }).watering).toBeNull();
+    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 9, hours: 24 } }).watering).toBeNull();
+    expect(summary.normalizeFacts({ watering: { state: 'bogus' } }).watering).toBeNull();
+    expect(summary.normalizeFacts({ watering: { state: 'hold' } }).watering).toEqual({ state: 'hold', inches: null, hours: null });
+    // A fractional hour from a hand-built fact floors.
+    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0.5, hours: 23.9 } }).watering.hours).toBe(23);
+  });
+
+  test('each state says its own action: water in, hold, or hold then water in', () => {
+    const t = (watering) => summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], watering }).paragraph;
+    const waterIn = t({ state: 'water_in', inches: 0.5, hours: 24 });
+    expect(waterIn).toContain('Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit.');
+    expect(waterIn).not.toMatch(/hold/);
+    const hold = t({ state: 'hold' });
+    expect(hold).toMatch(/hold off on watering/);
+    expect(hold).not.toMatch(/\d/);
+    expect(hold).not.toMatch(/water (?:it )?in/);
+    const both = t({ state: 'hold_then_water_in', inches: 1, hours: 24 });
+    expect(both.indexOf('hold off')).toBeGreaterThan(-1);
+    expect(both.indexOf('hold off')).toBeLessThan(both.indexOf('water it in with 1 inch'));
+    // No instruction: no watering sentence at all.
+    expect(t(null)).not.toMatch(/water/i);
+  });
+
+  test('seasonOf', () => {
+    expect([10, 7, 4, 1].map(seasonOf)).toEqual(['fall', 'summer', 'spring', 'winter']);
+    expect(seasonOf(null)).toBeNull();
+  });
+});
+
+describe('the closed tables', () => {
+  const T = summary;
+  const everyPhrase = () => [
+    ...Object.values(T.APPLIED_PHRASES),
+    ...Object.values(T.AREA_PHRASES).flatMap((p) => Object.values(p)),
+    ...Object.values(T.FINDING_PHRASES).flatMap((p) => Object.values(p)),
+    ...Object.values(T.TOPIC_PHRASES),
+  ];
+
+  test('no phrase carries a digit, a product name, a time word, an all clear or a promise', () => {
+    for (const phrase of everyPhrase()) {
+      expect(phrase).not.toMatch(DIGIT_RE);
+      expect(phrase).not.toMatch(TIME_WORD_RE);
+      expect(phrase).not.toMatch(ALL_CLEAR_RE);
+      expect(phrase).not.toMatch(FUTURE_TREATMENT_RE);
+      expect(phrase).not.toMatch(/\b(?:rain|forecast)\b/i);
+      for (const name of PRODUCT_WORDS) expect(phrase).not.toContain(name);
+    }
+  });
+
+  test('every phrase, in its own sentence, passes the customer-copy and result-timing screens', () => {
+    const S = T.SENTENCE;
+    const sentences = [
+      ...Object.values(T.APPLIED_PHRASES).map((p) => S.applied(p, 'fall')),
+      ...Object.values(T.AREA_PHRASES).flatMap((p) => Object.values(p)).flatMap((p) => [S.photoRead(p), S.photoReadMixed(p, p)]),
+      ...Object.values(T.FINDING_PHRASES).flatMap((p) => Object.values(p)).map((p) => S.findings(p)),
+      ...Object.values(T.TOPIC_PHRASES).map((p) => S.nextVisit(p)),
+      S.results,
+    ];
+    for (const sentence of sentences) {
+      expect(customerCopyViolations(sentence)).toEqual([]);
+      expect(lawnResultTimingViolation(sentence.replace(/^Today we applied/, 'We applied'), { carePlanExempt: false })).toBe(false);
+      expect(sentence).not.toMatch(ALL_CLEAR_RE);
+    }
+  });
+
+  test('every watering sentence, for 1 and for many inches and hours, passes the screens', () => {
+    for (const [inches, hours] of [[0.25, 1], [0.5, 24], [1, 12], [1.5, 72]]) {
+      for (const text of [
+        T.WATERING_SENTENCE.water_in(`${inches} ${inches === 1 ? 'inch' : 'inches'}`, `${hours} ${hours === 1 ? 'hour' : 'hours'}`),
+        T.WATERING_SENTENCE.hold_then_water_in(`${inches} inches`, `${hours} hours`),
+        T.WATERING_SENTENCE.hold(),
+      ]) {
+        expect(customerCopyViolations(text)).toEqual([]);
+        expect(lawnResultTimingViolation(text)).toBe(false);
+        expect(text).not.toMatch(FUTURE_TREATMENT_RE);
+      }
+    }
+  });
+
+  test('the longest paragraph any valid slots can render fits the cap and the screens', () => {
+    const slots = {
+      season: 'winter',
+      applied: ['combo_insecticide', 'supplement', 'herbicide', 'fungicide'],
+      areas: [{ key: 'weed_pressure', band: 'needs_attention' }, { key: 'coverage', band: 'needs_attention' }, { key: 'color_vigor', band: 'needs_attention' }, { key: 'damage_disease_signals', band: 'needs_attention' }],
+      findings: [{ label: 'color and nutrient stress', hedged: true }, { label: 'a lawn condition we are monitoring', hedged: true }, { label: 'general lawn stress', hedged: true }],
+      watering: { state: 'hold_then_water_in', inches: 1.5, hours: 72 },
+      watch: ['weeds', 'thin', 'color'],
+    };
+    const text = summary.render(slots);
+    expect(text.length).toBeLessThanOrEqual(summary.MAX_TEXT_CHARS);
+    expect(splitSentences(text).length).toBeLessThanOrEqual(6);
+    expect(summary._test.textProblem(text)).toBeNull();
+  });
+
+  test('every status band of every area has the phrase the renderer needs, or none by design', () => {
+    for (const key of Object.keys(T.AREA_PHRASES)) {
+      const bands = Object.keys(T.AREA_PHRASES[key]);
+      expect(bands).toEqual(expect.arrayContaining(['watch', 'needs_attention']));
+    }
+    expect(T.AREA_PHRASES.damage_disease_signals.good).toBeUndefined();
+  });
+
+  test('a render never prints an id outside the tables', () => {
+    const text = summary.render({ season: 'monsoon', applied: ['__proto__', 'constructor', 'rodenticide'], areas: [{ key: 'toString', band: 'good' }], findings: [{ label: 'chinch bugs', hedged: false }], watering: { state: 'water_in', inches: 99, hours: 1000 }, watch: ['nothing'] });
+    expect(text).toBe('');
+  });
+});
+
+describe('gatherVisitSummaryFacts reads the report data the render uses', () => {
+  const DATA = {
+    lawnAssessment: { assessmentId: 77 },
+    reportV2: {
+      snapshot: { statusHeadline: 'Your lawn is in good shape', seasonalNote: 'The program targets large patch and grubs.', seasonalNoteSource: 'program', overallScore: 91 },
+      diagnosis: [
+        { key: 'coverage', label: 'Turf Coverage', score: 62, status: 'watch' },
+        { key: 'color_vigor', label: 'Color & Vigor', score: 88, status: 'strong' },
+        { key: 'water_moisture_stress', label: 'Water / Coverage', status: 'watch' },
+      ],
+      insights: [{ category: 'weeds', status: 'watch' }, { category: 'water', status: 'watch' }, { category: 'coverage', status: 'watch' }, { category: 'mowing', status: 'healthy' }],
+      treatment: { products: [
+        { name: 'LESCO 24-0-11', activeIngredient: 'nitrogen', kind: 'fertilizer', method: 'granular', targets: [] },
+        { name: 'Wetting Agent', kind: 'other', activeIngredient: 'surfactant blend' },
+      ] },
+    },
+  };
+  const RECORD = { id: 's1', technician_notes: 'Chinch bugs by the driveway.', service_date: '2026-10-06', conditions: { rain_24h_in: 1.2 } };
+  const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z' };
+  const reads = [];
+  const fakeKnex = () => (table) => {
+    reads.push(table);
+    if (table !== 'lawn_assessments' && table !== 'lawn_assessment_runs') throw new Error(`unexpected read of ${table}`);
+    const q = { where: () => q };
+    q.first = async () => (table === 'lawn_assessments'
+      ? { id: 77, customer_id: 9, confirmed_by_tech: true }
+      : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: [{ label: 'thinning turf', confidence: 'low', keep: true }, { label: 'chinch bugs', confidence: 'high', keep: true }], added_details: [] });
+    return q;
+  };
+
+  test('facts are kinds, statuses, kept symptom findings, topics and the frozen watering step; no catalog read', async () => {
+    reads.length = 0;
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction, knex: fakeKnex() });
+    expect(reads).toEqual(['lawn_assessments', 'lawn_assessment_runs']);
+    expect(facts).toEqual({
+      season: 'fall',
+      applied: [{ kind: 'fertilizer', alsoFeeds: false }],
+      findings: [{ label: 'thinning turf', confidence: 'low' }],
+      areas: [{ key: 'coverage', status: 'watch' }, { key: 'color_vigor', status: 'strong' }],
+      watering: { state: 'water_in', inches: 0.5, hours: 24 },
+      watchNext: ['weeds'],
+    });
+    const json = JSON.stringify(facts);
+    for (const leak of ['LESCO', 'nitrogen', 'Chinch', 'large patch', 'good shape', '1.2']) expect(json).not.toContain(leak);
+  });
+
+  test('the composed paragraph for that visit', async () => {
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction, knex: fakeKnex() });
+    const { paragraph } = summary.composeVisitSummary(facts);
+    expect(paragraph).toBe('Today we applied a feeding, which fits the fall season. '
+      + 'Our photo read shows good color. '
+      + 'In the photos we noticed what may be some thinning turf. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
+      + 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. '
+      + 'At the next visit we will look at weeds and thin areas.');
+    expectOwnerRules(paragraph);
+  });
+
+  test('a degraded report read, a missing assessment or a missing report writes no summary', async () => {
+    expect(await gatherVisitSummaryFacts({ record: RECORD, data: { ...DATA, lawnAssessment: { assessmentId: 77, lawnCopyV6Unfrozen: true } }, knex: fakeKnex() })).toBeNull();
+    expect(await gatherVisitSummaryFacts({ record: RECORD, data: { reportV2: DATA.reportV2, lawnAssessment: {} }, knex: fakeKnex() })).toBeNull();
+    expect(await gatherVisitSummaryFacts({ record: RECORD, data: {}, knex: fakeKnex() })).toBeNull();
+  });
+});
+
+describe('freeze and read-back', () => {
+  function fakeKnex(initial = {}) {
+    const state = { notes: JSON.parse(JSON.stringify(initial)) };
     const knex = () => {
       const q = { guardKey: null };
       q.where = () => q;
@@ -349,234 +466,88 @@ describe('one model call, frozen, with the generic recap as the fallback', () =>
     knex.raw = (sql, bindings) => ({ sql, bindings });
     return { knex, state };
   }
+  const freeze = (knex, facts = CASES.stonewallCombinationFall.facts, extra = {}) => summary.createAndFreezeVisitSummary({
+    serviceRecordId: 's1', assessmentId: 77, getStructuredNotes: async () => (await knex('x').first()).structured_notes, gatherInputs: async () => facts, knex, ...extra,
+  });
 
-  test('freezes under lawnVisitSummary[assessmentId]; a retry spends no second call; the render reads it back', async () => {
-    modelReturns(answer(GOOD));
-    const { knex, state } = fakeKnex({});
-    const step = () => summary.createAndFreezeVisitSummary({
-      serviceRecordId: 's1',
-      assessmentId: 77,
-      getStructuredNotes: async () => state.notes,
-      gatherInputs: async () => RAW,
-      knex,
-    });
-    const first = await step();
-    expect(first.status).toBe('frozen');
-    expect(state.notes.lawnVisitSummary['77']).toMatchObject({ v: 1, text: GOOD, assessmentId: '77', promptVersion: summary.PROMPT_VERSION });
-    expect((await step()).status).toBe('already_frozen');
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    expect(summary.readFrozenVisitSummary(state.notes, 77)).toBe(GOOD);
+  test('freezes { text, slots } under lawnVisitSummary[assessmentId]; a retry changes nothing; the render reads it back', async () => {
+    const { knex, state } = fakeKnex();
+    const out = await freeze(knex);
+    expect(out.status).toBe('frozen');
+    const entry = state.notes.lawnVisitSummary['77'];
+    expect(entry).toMatchObject({ v: summary.FREEZE_VERSION, assessmentId: '77', text: CASES.stonewallCombinationFall.expected });
+    expect(entry.slots).toMatchObject({ season: 'fall', applied: ['combo_pre_emergent', 'insecticide'] });
+    expect(entry).not.toHaveProperty('sources');
+    expect((await freeze(knex, CASES.holdWithFinding.facts)).status).toBe('already_frozen');
+    expect(state.notes.lawnVisitSummary['77'].text).toBe(CASES.stonewallCombinationFall.expected);
+    expect(summary.readFrozenVisitSummary(state.notes, 77)).toBe(CASES.stonewallCombinationFall.expected);
     expect(summary.visitSummarySignature(state.notes, 77)).toMatch(/^:tp=[0-9a-f]{8}$/);
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('FALLBACK: a rejected answer freezes nothing', async () => {
-    modelReturns(answer(GOOD.replace('some weed pressure', 'chinch bugs')));
-    const { knex, state } = fakeKnex({});
-    const out = await summary.createAndFreezeVisitSummary({
-      serviceRecordId: 's1', assessmentId: 77, getStructuredNotes: async () => state.notes, gatherInputs: async () => RAW, knex,
+  test('nothing to ground freezes nothing; a failed fact read freezes nothing', async () => {
+    const a = fakeKnex();
+    expect((await freeze(a.knex, { season: 'fall', applied: [], areas: [], findings: [] })).status).toBe('nothing_to_ground');
+    expect(a.state.notes.lawnVisitSummary).toBeUndefined();
+    const b = fakeKnex();
+    const out = await summary.createAndFreezeVisitSummary({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: {}, gatherInputs: async () => { throw new Error('read failed'); }, knex: b.knex });
+    expect(out.status).toBe('read_failed');
+    expect(b.state.notes.lawnVisitSummary).toBeUndefined();
+  });
+
+  describe('the read-time guard prints nothing for an entry that no longer matches', () => {
+    const entryOf = async () => {
+      const { knex, state } = fakeKnex();
+      await freeze(knex);
+      return JSON.parse(JSON.stringify(state.notes));
+    };
+    const read = (notes) => summary.readFrozenVisitSummary(notes, 77);
+
+    test('a hand-edited text (banned copy, an all clear, a product name)', async () => {
+      for (const edit of [
+        (t) => t.replace('Our photo read shows few weeds', 'There are no issues'),
+        (t) => `${t} We guarantee results.`,
+        (t) => t.replace('a feeding', 'Stonewall'),
+      ]) {
+        const notes = await entryOf();
+        notes.lawnVisitSummary['77'].text = edit(notes.lawnVisitSummary['77'].text);
+        expect(read(notes)).toBeNull();
+      }
     });
-    expect(out.status).toBe('rejected');
-    expect(state.notes.lawnVisitSummary).toBeUndefined();
-  });
 
-  test('the read-time guard drops a frozen text that was hand-edited into banned copy', () => {
-    const notes = { lawnVisitSummary: { 77: { v: 1, assessmentId: '77', text: 'We guarantee your lawn is cured.' } } };
-    expect(summary.readFrozenVisitSummary(notes, 77)).toBeNull();
-    expect(summary.readFrozenVisitSummary({}, 77)).toBeNull();
-    expect(summary.readFrozenVisitSummary(notes, null)).toBeNull();
+    test('edited slots, a missing slots object, an old version or another assessment', async () => {
+      let notes = await entryOf();
+      notes.lawnVisitSummary['77'].slots.watering.inches = 2;
+      expect(read(notes)).toBeNull();
+      notes = await entryOf();
+      delete notes.lawnVisitSummary['77'].slots;
+      expect(read(notes)).toBeNull();
+      notes = await entryOf();
+      notes.lawnVisitSummary['77'].v = 1;
+      expect(read(notes)).toBeNull();
+      notes = await entryOf();
+      expect(summary.readFrozenVisitSummary(notes, 78)).toBeNull();
+    });
+
+    test('a table change after the freeze: the stored text no longer equals what the tables render', async () => {
+      const notes = await entryOf();
+      notes.lawnVisitSummary['77'].text = notes.lawnVisitSummary['77'].text.replace('few weeds', 'hardly any weeds');
+      expect(read(notes)).toBeNull();
+    });
+
+    test('an unchanged entry reads back', async () => {
+      expect(read(await entryOf())).toBe(CASES.stonewallCombinationFall.expected);
+    });
   });
 });
 
 describe('the gate', () => {
-  const gates = require('../config/feature-gates');
-  afterEach(() => { delete process.env.GATE_LAWN_VISIT_SUMMARY_V2; });
-
   test('dark by default, strict opt-in, read at call time', () => {
-    expect(gates.lawnVisitSummaryV2Live()).toBe(false);
-    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = '1';
-    expect(gates.lawnVisitSummaryV2Live()).toBe(false);
-    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
-    expect(gates.lawnVisitSummaryV2Live()).toBe(true);
     delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
-    expect(gates.lawnVisitSummaryV2Live()).toBe(false);
-  });
-});
-
-describe('owner 2026-10-06 local-test fixes', () => {
-  const COMBO = summary.normalizeFacts({
-    ...RAW,
-    applied: [{ name: 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent', method: 'granular' }],
-    knownProductNames: [...RAW.knownProductNames, 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', 'LESCO Moisture Manager'],
-  });
-
-  test('a weed barrier that carries a fertilizer analysis is both a feeding and a barrier', () => {
-    expect(COMBO.applied[0].category).toBe('a feeding with a pre-emergent weed barrier');
-    expect(summary.buildUserMessage(COMBO)).toContain('- a feeding with a pre-emergent weed barrier (granular)');
-    expect(summary.normalizeFacts(RAW).applied.map((a) => a.category)).toEqual(['insect control', 'a feeding', 'a pre-emergent weed barrier']);
-  });
-
-  test('category words and plain words from catalog names are not product names; a brand still is', () => {
-    expect(problems(GOOD, COMBO)).not.toContain('product_name');
-    expect(problems(GOOD.replace('which fits the season', 'and the soil moisture should help it settle'), COMBO)).not.toContain('product_name');
-    expect(problems(GOOD.replace('a pre-emergent weed barrier', 'Stonewall'), COMBO)).toContain('product_name');
-  });
-
-  test('"keep an eye on" and "look again at" count as hedges for a low-confidence finding', () => {
-    const text = GOOD.replace('we are keeping an eye on a few thin spots near the driveway', 'we want to keep an eye on some thinning turf near the driveway');
-    expect(problems(text).filter((p) => p.startsWith('unhedged'))).toEqual([]);
-  });
-
-  test('the score-card labels reach the writer with their meaning', () => {
-    const msg = summary.buildUserMessage(FACTS);
-    expect(msg).toContain('Weed control (strong or healthy = few weeds): worth watching');
-    expect(msg).not.toContain('Weed Pressure:');
-  });
-});
-
-describe('Codex round 1 on #6087', () => {
-  const sourcesOf = (text) => splitSentences(text).map((sentence) => ({ sentence, from: ['applied'] }));
-
-  describe('1. a category word licenses wording only in the sentence that says what we applied', () => {
-    const FUNGUS_FACTS = summary.normalizeFacts({
-      season: 'fall', applied: [{ name: 'Headway G', kind: 'fungicide', method: 'granular' }], findings: [], areas: [], watering: null, recentRain: null, watchNext: ['how the lawn responds'], technicianNote: '', knownProductNames: [],
-    });
-    const base = (second) => `Today we applied disease protection across the lawn, which fits the season. ${second} Protection like this builds gradually, a little at a time. At the next visit we will look again at how the lawn responds.`;
-
-    test('a fungicide-only visit may say what it applied, never that the lawn has the disease', () => {
-      expect(problems(base('The turf coverage holds steady in the areas we checked.'), FUNGUS_FACTS)).toEqual([]);
-      expect(problems(base('The lawn has fungus in the front yard.'), FUNGUS_FACTS).some((p) => p.includes('fungus'))).toBe(true);
-      expect(problems(base('The photo read showed some disease on the lawn.'), FUNGUS_FACTS).some((p) => p.includes('fungus'))).toBe(true);
-      expect(problems(base('We treated the front yard, which has fungus.'), FUNGUS_FACTS).some((p) => p.includes('fungus'))).toBe(true);
-    });
-
-    test('an insecticide visit does not turn "insect control" into a sighting', () => {
-      const facts = summary.normalizeFacts({ ...RAW, applied: [{ name: 'Arena 50 WDG', kind: 'insecticide', method: 'spray' }], findings: [], technicianNote: '', watering: null, recentRain: null, knownProductNames: [] });
-      expect(problems(GOOD.replace('Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots. ', '').replace('some weed pressure', 'a lot of insects'), facts).some((p) => p.includes('insect'))).toBe(true);
-    });
-  });
-
-  describe('2. the watering action must match the frozen state', () => {
-    const HOLD = summary.normalizeFacts({ ...RAW, watering: { state: 'hold' } });
-    const HOLD_SENTENCE = 'Please hold off watering and follow the watering note in this report.';
-    const WATER_SENTENCE = 'Please water the treated lawn in with 0.5 inches within 24 hours so the feeding reaches the roots.';
-    const holdText = (s) => GOOD.replace(WATER_SENTENCE, s);
-
-    test('hold: must tell the customer to hold off, never that we watered or to water in', () => {
-      expect(problems(holdText(HOLD_SENTENCE), HOLD)).toEqual([]);
-      expect(problems(holdText('We watered the treatment today.'), HOLD)).toContain('hold_state_waters');
-      expect(problems(holdText('Please water the treated lawn in as soon as you can.'), HOLD)).toContain('hold_state_waters');
-      expect(problems(holdText('Please run the sprinklers now.'), HOLD)).toContain('hold_state_waters');
-      expect(problems(holdText('Please keep the lawn well supplied with water.'), HOLD)).toContain('watering_hold_missing');
-    });
-
-    test('water_in: must not say hold or skip', () => {
-      expect(problems(GOOD)).toEqual([]);
-      expect(problems(GOOD.replace(WATER_SENTENCE, 'Please hold off watering, then water with 0.5 inches within 24 hours.'))).toContain('watering_hold_in_water_state');
-      expect(problems(GOOD.replace(WATER_SENTENCE, 'Please skip watering; 0.5 inches within 24 hours is noted.'))).toContain('watering_hold_in_water_state');
-      expect(problems(GOOD.replace(WATER_SENTENCE, 'The feeding settles in with 0.5 inches within 24 hours.'))).toContain('watering_action_missing');
-    });
-
-    test('hold_then_water_in: both the hold and the later water-in', () => {
-      const both = summary.normalizeFacts({ ...RAW, watering: { state: 'hold_then_water_in', inches: 0.5, hours: 24 } });
-      const ok = 'Please hold off watering until the report says it is time, then water the lawn in with 0.5 inches within 24 hours.';
-      expect(problems(holdText(ok), both)).toEqual([]);
-      expect(problems(holdText(WATER_SENTENCE), both)).toContain('watering_hold_missing');
-      expect(problems(holdText('Please hold off watering and follow the watering note in this report.'), both)).toEqual(expect.arrayContaining(['watering_inches_missing']));
-      expect(problems(holdText('Please water the lawn in with 0.5 inches within 24 hours, after you hold off watering.'), both)).toContain('watering_order');
-    });
-  });
-
-  describe('3. a tentative technician-note term keeps its hedge', () => {
-    const tentative = summary.normalizeFacts({ ...RAW, technicianNote: 'Possible chinch bugs by the driveway.' });
-    test('stated as fact it fails; hedged it passes', () => {
-      const asFact = GOOD.replace('The photo read showed some weed pressure in the lawn, and we are keeping an eye on a few thin spots near the driveway.', 'The photo read showed chinch bugs damaging the lawn near the driveway.');
-      expect(problems(asFact, tentative)).toContain('unhedged_low_confidence:chinch');
-      expect(problems(GOOD.replace('some weed pressure', 'possible chinch bugs'), tentative)).toEqual([]);
-    });
-    test('a definite note term needs no hedge', () => {
-      const definite = summary.normalizeFacts({ ...RAW, technicianNote: 'Chinch bugs by the driveway.' });
-      expect(problems(GOOD.replace('some weed pressure', 'chinch bugs'), definite)).toEqual([]);
-    });
-  });
-
-  describe('4. every spelled-out quantity is rejected, except the exact watering amounts', () => {
-    test.each([
-      ['two thin spots', 'a few thin spots', 'two thin spots'],
-      ['thirteen affected areas', 'a few thin spots', 'thirteen affected areas'],
-      ['a dozen spots', 'a few thin spots', 'a dozen thin spots'],
-      ['one thin spot', 'a few thin spots', 'one thin spot'],
-      ['hundreds', 'color and thickness', 'hundred percent color and thickness'],
-    ])('%s', (_name, from, to) => {
-      expect(problems(GOOD.replace(from, to))).toContain('spelled_number');
-    });
-    test('the exact watering amounts and plain "the last one" pass', () => {
-      expect(problems(GOOD.replace('0.5 inches within 24 hours', 'half an inch within twenty-four hours'))).toEqual([]);
-      expect(problems(GOOD.replace('0.5 inches within 24 hours', 'a half inch within 24 hours'))).toEqual([]);
-      expect(problems(GOOD.replace('rather than all at once', 'and each visit builds on the last one'))).toEqual([]);
-      // Not the exact amount: a spelled number of inches that the facts do not carry.
-      expect(problems(GOOD.replace('0.5 inches within 24 hours', 'two inches within twelve hours'))).toContain('spelled_number');
-    });
-  });
-
-  describe('5. catalog active ingredients are screened (validator only)', () => {
-    const withActives = summary.normalizeFacts({ ...RAW, knownActiveIngredients: ['Penthiopyrad 20%', 'prodiamine 0.43% + 15-0-15', 'Nitrogen, Iron'] });
-    test('a catalog active outside the fixed list is rejected; generic nutrient words are not', () => {
-      expect(problems(GOOD.replace('a fall feeding', 'a fall feeding with penthiopyrad'), withActives)).toContain('active_ingredient');
-      expect(problems(GOOD, withActives)).toEqual([]);
-    });
-    test('the facts builder reads every catalog active_ingredient, and the model never sees one', async () => {
-      const catalog = [{ name: 'Velista', active_ingredient: 'Penthiopyrad 20%' }, { name: 'Wetting Agent', active_ingredient: null }];
-      const knex = (table) => {
-        const q = {};
-        q.where = () => q;
-        q.whereIn = () => q;
-        q.first = async () => (table === 'lawn_assessments' ? { id: 77, customer_id: 9 } : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: [{ label: 'thinning turf', confidence: 'low', keep: true }], added_details: [] });
-        q.select = async (...cols) => { q.cols = cols; return cols[0] === 'name' ? catalog : []; };
-        return q;
-      };
-      const facts = await gatherVisitSummaryFacts({
-        record: { id: 's1', technician_notes: 'x', service_date: '2026-10-06' },
-        data: { lawnAssessment: { assessmentId: 77 }, reportV2: { snapshot: {}, diagnosis: [], insights: [], treatment: { products: [{ name: 'LESCO 24-0-11', kind: 'fertilizer', method: 'granular' }] } } },
-        knex,
-      });
-      expect(facts.knownActiveIngredients).toEqual(['Penthiopyrad 20%']);
-      expect(summary.buildUserMessage(facts)).not.toMatch(/penthiopyrad/i);
-    });
-  });
-
-  describe('6. each source sentence must be its paragraph sentence, in order', () => {
-    const goodSources = () => sourcesOf(GOOD);
-    test('"unrelated" sentences or a reordered list are rejected; spacing and quote style are normalized', () => {
-      expect(summary.validateSummary({ summary: GOOD, sources: goodSources() }, FACTS).problems).toEqual([]);
-      expect(summary.validateSummary({ summary: GOOD, sources: goodSources().map((s) => ({ ...s, sentence: 'unrelated' })) }, FACTS).problems).toContain('sources_sentence_mismatch');
-      expect(summary.validateSummary({ summary: GOOD, sources: goodSources().reverse() }, FACTS).problems).toContain('sources_sentence_mismatch');
-      const spaced = goodSources().map((s) => ({ ...s, sentence: `  ${s.sentence.replace(/ /g, '  ')} ` }));
-      expect(summary.validateSummary({ summary: GOOD, sources: spaced }, FACTS).problems).toEqual([]);
-      const curly = 'Today we put down a fall feeding that fits the season. The photo read showed some weed pressure, and we are keeping an eye on a few thin spots. Feedings like this build gradually, so the lawn’s color improves a little at a time. At the next visit we will look at the weeds again.';
-      const straightSources = splitSentences(curly).map((sentence) => ({ sentence: sentence.replace(/’/g, "'"), from: ['applied'] }));
-      expect(summary.validateSummary({ summary: curly, sources: straightSources }, summary.normalizeFacts({ ...RAW, watering: null })).problems).toEqual([]);
-    });
-  });
-
-  describe('real good outputs still pass', () => {
-    const REAL = summary.normalizeFacts({
-      season: 'fall',
-      programLine: RAW.programLine,
-      applied: [{ name: 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent', method: 'granular' }],
-      findings: [{ label: 'thinning turf', confidence: 'low' }],
-      areas: [{ label: 'Turf Density', status: 'healthy' }, { label: 'Weed Pressure', status: 'strong' }, { label: 'Stress or Damage', status: 'watch' }, { label: 'Color & Vigor', status: 'healthy' }],
-      headline: 'Your lawn is in good shape',
-      watering: null,
-      recentRain: true,
-      watchNext: ['stressed areas', 'thinning turf'],
-      technicianNote: '',
-      knownProductNames: ['LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', 'LESCO Moisture Manager'],
-      knownActiveIngredients: ['prodiamine 0.43% + 15-0-15', 'Penthiopyrad 20%'],
-    });
-    const A = 'Today we laid down a pre-emergent weed barrier across the parts of your lawn where it fits, which suits the fall and sets up the season ahead. The photo read showed turf coverage coming in thick with healthy color, and weed control holding strong with no stress signs in the areas we checked. We did note what may be a little thinning in the turf, and we are keeping an eye on that. A barrier like this works quietly in the soil, building a little at a time so weeds have a harder time taking hold with each visit. At the next visit we will take another look at that thinning turf.';
-    const B = 'Today we laid down a pre-emergent weed barrier across the property, a step that fits the fall feeding window and holds back weeds before they take hold. Reading the photos, the turf shows thick coverage with good color, and weeds are staying well in check, though we are keeping an eye on a few spots that look thin and on some areas showing stress. A barrier like this builds a little at a time, with each visit adding to the last. The rain that fell before our visit helps the treatment settle into the soil. At the next visit we will look again at the stressed areas and those thinning spots.';
-    test.each([['a', A], ['b', B]])('output %s', (_n, text) => {
-      expect(summary.validateSummary({ summary: text, sources: sourcesOf(text) }, REAL).problems).toEqual([]);
-    });
+    expect(featureGates.lawnVisitSummaryV2Live()).toBe(false);
+    for (const v of ['1', 'on', 'TRUE', 'yes', '']) { process.env.GATE_LAWN_VISIT_SUMMARY_V2 = v; expect(featureGates.lawnVisitSummaryV2Live()).toBe(false); }
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    expect(featureGates.lawnVisitSummaryV2Live()).toBe(true);
+    delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
   });
 });

@@ -56,14 +56,18 @@ async function freezeTechParagraphFor({ record, data, instruction, service, knex
   }
 }
 
-// The Visit Summary step (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY): never
-// throws, returns { [assessmentId]: entry } for the caller's in-memory
-// structured_notes, or null. Same posture as the tech paragraph above.
-async function freezeVisitSummaryFor({ record, data, instruction, service, knex }) {
+// The Visit Summary step (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY): code writes
+// fixed sentences from the visit's facts (no model call). Never throws, returns
+// { [assessmentId]: entry } for the caller's in-memory structured_notes, or null.
+// It reads the watering instruction the record is FROZEN to (the persisted
+// freeze when there is one), so a replay or a later rule edit changes nothing.
+// A degraded product read writes none (the facts would be partial).
+async function freezeVisitSummaryFor({ record, data, instructionOut, wateringFreeze, service, knex }) {
   try {
     const summary = require('./lawn-visit-summary');
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
-    if (assessmentId == null) return null;
+    if (assessmentId == null || instructionOut.productsLoadFailed) return null;
+    const instruction = (wateringFreeze && wateringFreeze.wateringInstruction) || instructionOut.instruction;
     const outcome = await summary.createAndFreezeVisitSummary({
       serviceRecordId: service.id,
       assessmentId,
@@ -201,13 +205,15 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       techParagraphFreeze = await freezeTechParagraphFor({ record, data, instruction: instructionOut.instruction, service, knex });
     }
 
-    // Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY): same shape as the
-    // paragraph above, under its own key. The report swaps it in for the generic
-    // recap; the completion SMS keeps the short customerRecap. Gate off: no read
-    // and no call.
+    // Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY): fixed sentences
+    // written by code from the visit's facts, frozen under its own key. No model
+    // call, so it is synchronous with this awaited step: it lands before the
+    // completion path queues the report email (whose worker rebuilds the PDF at
+    // send time). The report swaps it in for the generic recap; the completion
+    // SMS keeps the short customerRecap. Gate off: no read.
     let visitSummaryFreeze = null;
     if (featureGates.lawnVisitSummaryV2Live()) {
-      visitSummaryFreeze = await freezeVisitSummaryFor({ record, data, instruction: instructionOut.instruction, service, knex });
+      visitSummaryFreeze = await freezeVisitSummaryFor({ record, data, instructionOut, wateringFreeze, service, knex });
     }
 
     return {

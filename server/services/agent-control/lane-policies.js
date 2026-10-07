@@ -263,7 +263,6 @@ const LANE_RUNTIME = {
   // M3 (Codex r21): buildTreatmentNarrative runs on report read with no staff step and caches the copy in service_report_ai_summaries.
   treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   lawn_tech_paragraph: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
-  lawn_visit_summary: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
   ts_tech_paragraph: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
   rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   // M2 (Codex r20): both admin-projects AI-write endpoints return copy into the editable Recommendations field; delivery is a separate admin action.
