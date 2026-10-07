@@ -174,6 +174,35 @@ test('confirmed with the pinned diff: the WHERE re-asserts the APPROVED old valu
   expect(activities.insert).not.toHaveBeenCalled();
 });
 
+test('confirmed: the WHERE re-asserts the approved customer link, so a lead converted after the card refuses', async () => {
+  const leads = chain({ first: { ...LEAD, customer_id: 'cust-9' }, update: [] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', first_name: 'Tess', confirmed: true,
+    _approved_changes: { first_name: { from: 'Testc', to: 'Tess' } },
+    _approved_customer_link: 'none',
+  });
+  expect(leads.whereNull).toHaveBeenCalledWith('customer_id');
+  expect(res.preview_changed).toBe(true);
+  // A linked lead pins its exact customer.
+  const linked = chain({ first: { ...LEAD, customer_id: 'cust-9' }, update: [{ id: 'lead-1' }] });
+  db.mockImplementation((table) => (table === 'leads' ? linked : activities));
+  await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', first_name: 'Tess', confirmed: true,
+    _approved_changes: { first_name: { from: 'Testc', to: 'Tess' } },
+    _approved_customer_link: 'cust-9',
+  });
+  expect(linked.where).toHaveBeenCalledWith('customer_id', 'cust-9');
+});
+
+test('the preview carries the observed customer link for the route pin', async () => {
+  db.mockReturnValue(chain({ first: LEAD }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' }))._customer_id).toBeNull();
+  db.mockReturnValue(chain({ first: { ...LEAD, customer_id: 'cust-9' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' }))._customer_id).toBe('cust-9');
+});
+
 test('confirmed: a pinned diff that does not match the request is refused', async () => {
   const leads = chain({ first: LEAD, update: [{ id: 'lead-1' }] });
   db.mockReturnValue(leads);
@@ -224,7 +253,7 @@ test('a lead linked to a customer says the customer account is untouched', async
   db.mockReturnValue(chain({ first: { ...LEAD, customer_id: 'cust-1' } }));
   const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' });
   expect(res.linked_customer_unchanged).toBe(true);
-  expect(res.note).toMatch(/customer account is NOT changed/);
+  expect(res.note).toMatch(/customer account, if any, is NOT changed/);
 });
 
 test('authorization contract: clearing the email says the disagreement card stays open', () => {
@@ -255,4 +284,132 @@ test('authorization contract: one before/after effect per changed field, tier ye
     expect.objectContaining({ kind: 'operational', label: expect.stringMatching(/email-confirmed time.*email-disagreement/) }),
   ]));
   expect(c.preview_fingerprint).toEqual(expect.any(String));
+});
+
+// Address (owner IB history 10-06: the bar could not fix a lead's street
+// address). One structural rule (Codex #6099 r7): an address edit gives
+// street, city and ZIP together, none blank; the card and the commit treat
+// the three as one set. No state field (leads have no state column).
+test('query_leads returns the stored ZIP, so a street-only fix can pass the current city and ZIP', async () => {
+  const q = chain({ limit: [{ ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' }] });
+  q.select = jest.fn(() => q);
+  db.mockReturnValue(q);
+  const res = await executeLeadsTool('query_leads', { search: 'Beta' });
+  expect(res.leads[0]).toMatchObject({ address: '21 Palm Ave', city: 'Sarasota', zip: '34201' });
+});
+
+test('the street part must be the street line only: an embedded city or ZIP is refused, a unit is fine', async () => {
+  db.mockReturnValue(chain({ first: { ...LEAD, address: '100 Main St, Sarasota, FL 34201', city: 'Sarasota', zip: '34201' } }));
+  const full = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St, Sarasota, FL 34201', city: 'Bradenton', zip: '34208' });
+  expect(full.error).toMatch(/street line only/);
+  const trailingZip = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St Sarasota FL 34201', city: 'Bradenton', zip: '34208' });
+  expect(trailingZip.error).toMatch(/street line only/);
+  const unit = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '1 Example Way, Apt 4B', city: 'Bradenton', zip: '34208' });
+  expect(unit.preview).toBe(true);
+});
+
+test('a floor unit is a street line; a malformed ZIP is refused', async () => {
+  db.mockReturnValue(chain({ first: { ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St, Fl 2', city: 'Bradenton', zip: '34208' })).preview).toBe(true);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St', city: 'Bradenton', zip: '3420B' })).error).toMatch(/5-digit ZIP/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St', city: 'Bradenton', zip: '34208-1234' })).preview).toBe(true);
+});
+
+describe('address fields', () => {
+  const ADDR_LEAD = { ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' };
+  const NEW = { address: '12 Palm Ave', city: 'Sarasota', zip: '34201' };
+
+  test('all three together: a card with the whole address, unchanged parts shown as they stay; nothing written', async () => {
+    const leads = chain({ first: ADDR_LEAD });
+    db.mockReturnValue(leads);
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: ' 12 Palm Ave ', city: 'Sarasota', zip: '34201' });
+    expect(res.preview).toBe(true);
+    expect(res.changes).toEqual({
+      address: { from: '21 Palm Ave', to: '12 Palm Ave' },
+      city: { from: 'Sarasota', to: 'Sarasota' },
+      zip: { from: '34201', to: '34201' },
+    });
+    expect(res.estimates_keep_address).toBe(true);
+    expect(leads.update).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['street only', { address: '12 Palm Ave' }],
+    ['city only', { city: 'Bradenton' }],
+    ['ZIP only', { zip: '34208' }],
+    ['street and city', { address: '12 Palm Ave', city: 'Bradenton' }],
+    ['a blank part', { address: '12 Palm Ave', city: 'Bradenton', zip: '' }],
+    ['all blank', { address: '', city: '', zip: '' }],
+  ])('refuses a partial address edit: %s', async (_label, fields) => {
+    const leads = chain({ first: { ...ADDR_LEAD, address: '100 Main St, Sarasota, FL 34201' } });
+    db.mockReturnValue(leads);
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...fields });
+    expect(res).toEqual({ error: 'Give the street, city and ZIP together. Nothing was proposed.' });
+    expect(leads.first).not.toHaveBeenCalled();
+  });
+
+  test('the same address again is not a change; a name-only edit does not mention estimates', async () => {
+    db.mockReturnValue(chain({ first: ADDR_LEAD }));
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '21 Palm Ave', city: 'Sarasota', zip: '34201' })).error)
+      .toMatch(/already has those contact details/);
+    const name = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' });
+    expect(name.estimates_keep_address).toBeUndefined();
+    expect(Object.keys(name.changes)).toEqual(['first_name']);
+  });
+
+  test('over-long parts are refused (the lead editor\'s caps)', async () => {
+    db.mockReturnValue(chain({ first: ADDR_LEAD }));
+    const edit = (over) => executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...NEW, ...over });
+    expect((await edit({ address: 'x'.repeat(256) })).error).toBe('address is too long (255 characters max).');
+    expect((await edit({ city: 'x'.repeat(121) })).error).toBe('city is too long (120 characters max).');
+    expect((await edit({ zip: '1'.repeat(21) })).error).toBe('zip must be a 5-digit ZIP (or ZIP+4). Nothing was proposed.');
+  });
+
+  test('the schema offers address, city and zip but no state (leads have no state column)', () => {
+    const props = LEADS_TOOLS.find(t => t.name === 'update_lead_contact').input_schema.properties;
+    expect(props).toEqual(expect.objectContaining({ address: expect.any(Object), city: expect.any(Object), zip: expect.any(Object) }));
+    expect(props).not.toHaveProperty('state');
+  });
+
+  const APPROVED = {
+    address: { from: '21 Palm Ave', to: '12 Palm Ave' },
+    city: { from: 'Sarasota', to: 'Sarasota' },
+    zip: { from: '34201', to: '34201' },
+  };
+
+  test('confirmed: writes the address and re-asserts ALL THREE approved stored values in the WHERE', async () => {
+    const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...NEW, confirmed: true, _approved_changes: APPROVED });
+    expect(res.success).toBe(true);
+    expect(leads.where).toHaveBeenCalledWith('address', '21 Palm Ave');
+    expect(leads.where).toHaveBeenCalledWith('city', 'Sarasota');
+    expect(leads.where).toHaveBeenCalledWith('zip', '34201');
+    expect(leads.update.mock.calls[0][0]).toMatchObject({ address: '12 Palm Ave', city: 'Sarasota', zip: '34201' });
+    expect(leads.update.mock.calls[0][0]).not.toHaveProperty('email_confirmed_at');
+  });
+
+  test('confirmed: another edit to an UNCHANGED part (the city) after the card matches no row → preview_changed', async () => {
+    // The guarded UPDATE matches nothing because the stored city is no longer the approved "Sarasota".
+    const leads = chain({ first: { ...ADDR_LEAD, city: 'Venice' }, update: [] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...NEW, confirmed: true, _approved_changes: APPROVED });
+    expect(leads.where).toHaveBeenCalledWith('city', 'Sarasota');
+    expect(res.preview_changed).toBe(true);
+    expect(activities.insert).not.toHaveBeenCalled();
+  });
+
+  test('authorization contract: one line per address part, plus the estimates line', () => {
+    const preview = { preview: true, lead_id: 'lead-1', lead_name: 'Testc Beta', lead_status: 'contacted', estimates_keep_address: true, changes: APPROVED };
+    const c = buildContract({ toolName: 'update_lead_contact', params: { lead_id: 'lead-1', ...NEW }, displayParams: {}, preview });
+    expect(c.effects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'customer', label: 'Lead Testc Beta: address 21 Palm Ave → 12 Palm Ave', before: '21 Palm Ave', after: '12 Palm Ave' }),
+      expect.objectContaining({ kind: 'customer', label: 'Lead Testc Beta: zip 34201 → 34201' }),
+      expect.objectContaining({ kind: 'operational', label: 'Estimates already made for this lead keep the address they were made with' }),
+    ]));
+    expect(c.notifies_customer).toBe(false);
+  });
 });

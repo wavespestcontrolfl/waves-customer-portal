@@ -4,9 +4,10 @@
  *
  * GATE_LAWN_V13 off (the default) returns protocols.json `lawn`, the object
  * every reader used before. On, it returns server/config/lawn-protocol-v13.json:
- * the same four track keys (st_augustine, bermuda, zoysia, bahia) in the same
- * visit shape, each holding the one universal v13 program (owner 2026-10-05,
- * no per-grass tracks).
+ * the track keys st_augustine, bermuda and zoysia in the same visit shape, each
+ * holding the one universal v13 program (owner 2026-10-05, no per-grass tracks).
+ * There is no bahia track: Celsius and Blindside are not labeled for bahiagrass
+ * (owner 2026-10-06, the track is deleted and a bahia lawn plans nothing).
  *
  * Read at call time so unsetting the gate is the kill switch with no redeploy.
  * The structured (database) side of the same switch is
@@ -28,15 +29,63 @@ function lawnProtocols() {
   return featureGates.lawnV13Live?.() ? v13 : protocols.lawn;
 }
 
-// v13 is one program for every grass, still filed under the four track keys.
+// v13 is one program for every grass, still filed under the three track keys.
 // A lawn whose recorded grass names none of them (mixed, unknown, free text)
-// plans from this key while GATE_LAWN_V13 is live: the four copies are the same
+// plans from this key while GATE_LAWN_V13 is live: the copies are the same
 // steps and the same safety rules, so the key changes nothing but the lookup.
 // Gate off: null, and such a lawn has no track, as before. Planning only (the
 // plan engine): historical readers never synthesize a track for a past visit.
+// Bahiagrass is the one grass that never takes this key: v13 weed spots use
+// Celsius and Blindside, and both labels exclude bahiagrass, so a bahia lawn has
+// no v13 track and no fallback (lawnV13NoProgramGrass).
 const LAWN_V13_ANY_GRASS_TRACK = 'st_augustine';
-function lawnV13AnyGrassTrack() {
-  return featureGates.lawnV13Live?.() === true ? LAWN_V13_ANY_GRASS_TRACK : null;
+
+// ── Bahia: the ONE alias table and the ONE gate-aware check ─────────────────
+// Every bahia test in the portal asks these two, never a literal compare: a lawn recorded as `D`,
+// `d_bahia`, Argentine or Pensacola is bahia everywhere or nowhere.
+//   isBahiaGrass(value)        - does this grass / track / lawn-text value name bahia (gate-blind)?
+//   lawnV13NoBahiaProgram()    - is the live program one that has no bahia track (GATE_LAWN_V13 on)?
+//   bahiaHasNoProgram(value)   - both: bahia under a program that has none.
+// The alias table is the pricing engine's own (GRASS_TYPE_ALIASES.bahia: D, BAHIA, bahia) plus the
+// legacy protocol codes and the free-text names a lawn type is typed as.
+const BAHIA_TRACK = 'bahia';
+const BAHIA_LEGACY_CODES = Object.freeze(['d', 'd_bahia', 'd-bahia', 'dbahia', 'd bahia']);
+const BAHIA_FREE_TEXT = /bahia|argentine|pensacola/;
+const squash = (text) => String(text).toUpperCase().replace(/[^A-Z0-9]/g, '');
+function isBahiaGrass(value) {
+  if (value == null) return false;
+  const text = String(value).trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  if (BAHIA_LEGACY_CODES.includes(lower) || BAHIA_FREE_TEXT.test(lower)) return true;
+  const { GRASS_TYPE_ALIASES } = require('./pricing-engine/constants');
+  return (GRASS_TYPE_ALIASES.bahia || []).some((alias) => squash(alias) === squash(text));
+}
+function lawnV13NoBahiaProgram() {
+  return featureGates.lawnV13Live?.() === true && !lawnProtocols()?.[BAHIA_TRACK];
+}
+function bahiaHasNoProgram(value) {
+  return lawnV13NoBahiaProgram() && isBahiaGrass(value);
+}
+// Kept as the plan engine's name for the same question.
+const lawnV13NoProgramGrass = bahiaHasNoProgram;
+function lawnV13AnyGrassTrack(grass = null) {
+  if (featureGates.lawnV13Live?.() !== true || isBahiaGrass(grass)) return null;
+  return LAWN_V13_ANY_GRASS_TRACK;
+}
+
+// The display names of the tracks the live program holds, for copy that lists them (the pricing
+// knowledge entry, the customer guide): the old program's four, or v13's three (no bahia).
+const LAWN_TRACK_NAMES = { st_augustine: 'St. Augustine', bermuda: 'Bermuda', zoysia: 'Zoysia', bahia: 'Bahia' };
+function lawnTrackNames() {
+  return Object.keys(lawnProtocols() || {}).map((key) => LAWN_TRACK_NAMES[key] || key);
+}
+// The "Tracks:" lines of the pricing knowledge entry. Gate off: the one old line, word for word.
+function lawnTrackKnowledgeLines() {
+  return [
+    `Tracks: ${lawnTrackNames().join(' | ')}`,
+    ...(lawnV13NoBahiaProgram() ? ['Bahiagrass lawns: no program (Celsius and Blindside are not labeled for bahiagrass); the office reviews each one before quoting'] : []),
+  ];
 }
 
 // A protocol version that can serve a visit: the published one, or the staged
@@ -95,4 +144,4 @@ function unknownCadenceWarning(unknownCadence) {
   };
 }
 
-module.exports = { lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };
+module.exports = { BAHIA_TRACK, isBahiaGrass, lawnV13NoBahiaProgram, bahiaHasNoProgram, lawnTrackKnowledgeLines, lawnTrackNames, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };

@@ -21,6 +21,8 @@ const { validateCustomerCopy } = require('../services/service-report/premium-exp
 
 const { buildProgramLine, PROGRAM_LINES_V13, QUALIFIERS } = lineModule;
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// The v13 recipe has no bahia track (owner 2026-10-06); the old protocols.json still does.
+const V13_GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
@@ -59,7 +61,7 @@ describe('v13 monthly program line', () => {
   const EVIDENCE = {
     pre_emergent: /stonewall|dimension|pre-emergent/i,
     micros: /nutra-tech/i,
-    feed: /24-0-11|stonewall 0\.43/i,
+    feed: /24-0-11|dimension 0\.21/i,
     fungicide: /artavia|velista|gravex/i,
     broadleaf: /celsius|dismiss/i,
     insect_spot: /arena|talak|acelepryn|dylox/i,
@@ -222,7 +224,7 @@ describe('the service outline bullets with GATE_LAWN_V13 on name treatment categ
 
   test('every month of every grass: only category bullets, no product name, number or rate', () => {
     withGate('true', () => {
-      for (const grass of GRASSES) {
+      for (const grass of V13_GRASSES) {
         for (const visit of v13[grass].visits) {
           const bullets = outlineService.customerProtocolBullets(visit);
           expect({ grass, month: visit.month, any: bullets.length > 0 }).toEqual({ grass, month: visit.month, any: true });
@@ -236,7 +238,7 @@ describe('the service outline bullets with GATE_LAWN_V13 on name treatment categ
     });
   });
 
-  test('October and May read as the categories the recipe applies (Stonewall 15-0-15 and its spots; Tetrino)', () => {
+  test('October and May read as the categories the recipe applies (Dimension 18-0-10 and its spots; Tetrino)', () => {
     withGate('true', () => {
       const oct = outlineService.customerProtocolBullets(v13.bermuda.visits.find((v) => v.month === 'Oct')).map((b) => b.split(' may be')[0]);
       expect(oct).toEqual(expect.arrayContaining(['Pre-emergent weed control with fertilizer', 'Disease control', 'Insect control', 'Weed spot treatment']));

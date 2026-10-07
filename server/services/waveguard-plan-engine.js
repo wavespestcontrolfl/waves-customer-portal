@@ -1,8 +1,8 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
-const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
+const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
@@ -1159,18 +1159,34 @@ async function lawnVisitsPerYear(knex, service) {
     ?? stated(service.service_type);
 }
 
+// What a visit's lawn record says about its grass, read once: whether a profile records a grass or
+// track, whether anything does (the legacy free text counts when no profile is recorded), and
+// whether the record names bahia (the grass type, the track key, or that legacy text), which GATE_LAWN_V13
+// has no program for. Bahia in ANY recorded field wins over another field's track.
+function recordedGrassFacts(profile, legacyGrass) {
+  const profileRecorded = [profile?.track_key, profile?.grass_type].some((value) => String(value || '').trim());
+  return {
+    profileRecorded,
+    recorded: profileRecorded || String(legacyGrass || '').trim(),
+    noProgram: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, legacyGrass),
+  };
+}
+
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
-  const profileRecorded = [profile?.track_key, profile?.grass_type]
-    .some((value) => String(value || '').trim());
-  const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const { profileRecorded, recorded, noProgram } = recordedGrassFacts(profile, legacyGrass);
+  const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
+  // GATE_LAWN_V13: any recorded field that says bahia ends the lookup here, before another
+  // recorded value (a conflicting track key or grass type) can pick a track. Only this
+  // result carries the flag; every other keeps its old shape.
+  if (noProgram) return { trackKey: null, track: null, month, visit: null, v13NoProgram: true };
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
-    // free text) runs the one v13 program instead of blocking the visit.
+    // free text) runs the one v13 program instead of blocking the visit (bahia never
+    // reaches this: it returned above).
     || (recorded ? lawnV13AnyGrassTrack() : null)
     || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? lawnProtocols()?.[trackKey] : null;
-  const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
   return { trackKey, track, month, visit };
 }
@@ -1578,16 +1594,29 @@ const V13_UNAVAILABLE = {
   capped: 'An application limit is reached for this product, so no amount is planned.',
 };
 
+// The application a v13 line plans, for the limit reader: the row's stated rate, else (a lb_n /
+// lb_k nutrition row, the 9x April Dimension step) the rate its nutrient target derives, the
+// amount the plan itself will quote. null for a row with neither, which counts nothing.
+function v13ProposedApplication(product, row, targets) {
+  if (!row) return null;
+  if (Number(row.ratePer1000) > 0) return { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit };
+  if (!/^lb_[nk]/i.test(String(row.rateUnit || ''))) return null;
+  const derived = productRatePer1000(product, { ...targets, ...v13RateOptions(row) });
+  const fromTarget = derived.source === 'target_n_analysis' || derived.source === 'target_k_analysis';
+  return fromTarget && derived.rate > 0 ? { ratePer1000: derived.rate, unit: derived.unit } : null;
+}
+
 // product_limits (annual caps, minimum intervals, blackouts) through the one
 // application-limits reader the completion path uses, over the customer's own
 // application history, for each SELECTED product: the hard blocks per product id
 // (`capped`: no amount) and the warning-level findings (`warnings`: a minimum
 // interval, an approaching cap; the dose stays). A failed read fails closed
 // (strict throws; otherwise the product reads as capped). The line's own staged
-// rate is the application being planned, so a yearly cap shared across
-// formulations (prodiamine) counts it with the season's earlier applications; the
+// rate (a lb_n row: the rate its visit's nutrient target derives) is the application
+// being planned, so a yearly cap shared across formulations (prodiamine, dithiopyr)
+// counts it with the season's earlier applications; the
 // visit's own earlier ledger rows are left out so a re-plan never counts it twice.
-async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map() } = {}) {
+async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map(), targets = {} } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
   const warnings = [];
@@ -1597,7 +1626,7 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     if (checked.has(id)) continue;
     checked.add(id);
     const row = rows.get(id);
-    const proposed = Number(row?.ratePer1000) > 0 ? { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit } : null;
+    const proposed = v13ProposedApplication(item.product, row, targets);
     const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
       .catch((err) => {
         if (strict) throw err;
@@ -1633,9 +1662,9 @@ async function loadVisitForPlan(knex, id, scope = (q) => q) {
 
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
 // block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
-async function v13VisitLimits(knex, service, items, rows) {
+async function v13VisitLimits(knex, service, items, rows, targets = {}) {
   if (!service || featureGates.lawnV13Live?.() !== true) return { capped: new Map(), warnings: [], blocks: [] };
-  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows });
+  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets });
   return { ...found, blocks: v13LineNotices([], found.capped, new Set()).blocks };
 }
 
@@ -1783,7 +1812,9 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
   // default gates say: a pinned older visit must be seen as pinned, never as
   // unpinned (which would resolve the staged v13 version for it).
-  const structuredProtocolContext = (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
+  // GATE_LAWN_V13: a bahia lawn has no program, so no protocol window (a pinned assignment included)
+  // is read for it; the plan blocks on lawn_v13_bahia_no_program instead.
+  const structuredProtocolContext = !calendarProtocol.v13NoProgram && (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
@@ -1860,7 +1891,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows }) : { capped: new Map(), warnings: [] };
+  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
   const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
@@ -1958,6 +1989,13 @@ async function buildPlanForService(serviceId, options = {}) {
       code: 'missing_lawn_area',
       severity: 'block',
       message: 'Turf profile is missing lawn square footage, so mix amounts cannot be calculated.',
+    });
+  }
+  if (selection.v13NoProgram) {
+    blocks.push({
+      code: 'lawn_v13_bahia_no_program',
+      severity: 'block',
+      message: 'Bahiagrass has no v13 lawn program: Celsius and Blindside are not labeled for bahiagrass, so no suggested amounts are planned. Enter the actual work.',
     });
   }
   if (!track || !visit) {

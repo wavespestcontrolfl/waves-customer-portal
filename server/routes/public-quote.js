@@ -1006,6 +1006,7 @@ const RESIDENTIAL_VERIFICATION_REASONS = new Set([
   'unit_in_multi_unit_building',
   'low_confidence_turf_requires_field_verification',
   'unknown_grass_type_priced_st_augustine',
+  'lawn_v13_bahia_no_program',
 ]);
 
 const PUBLIC_QUOTE_SERVICE_KEYS = [
@@ -4092,7 +4093,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
           : quoteRequiredReason === 'low_confidence_turf_requires_field_verification'
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
-          : quoteRequiredReason === 'unknown_grass_type_priced_st_augustine'
+          : (quoteRequiredReason === 'unknown_grass_type_priced_st_augustine' || quoteRequiredReason === 'lawn_v13_bahia_no_program')
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'

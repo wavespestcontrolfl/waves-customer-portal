@@ -32,7 +32,7 @@ function hasFrozenWateringInstruction(record) {
 
 // The paragraph step on its own: never throws, returns { [assessmentId]: entry }
 // for the caller's in-memory structured_notes, or null.
-async function freezeTechParagraphFor({ record, data, instruction, service, knex }) {
+async function freezeTechParagraphFor({ record, data, service, knex }) {
   try {
     const tech = require('./lawn-tech-paragraph');
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
@@ -43,7 +43,7 @@ async function freezeTechParagraphFor({ record, data, instruction, service, knex
       // The row's CURRENT notes, read inside the step's one deadline: a retried
       // completion finds the freeze and spends no second call.
       getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
-      gatherInputs: () => require('./lawn-tech-paragraph-inputs').gatherTechParagraphInputs({ record, data, instruction, knex }),
+      gatherInputs: () => require('./lawn-tech-paragraph-inputs').gatherTechParagraphInputs({ record, data, knex }),
       knex,
     });
     if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
@@ -165,15 +165,15 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
         .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
     }
 
-    // "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH): ONE model call,
-    // here, frozen first-writer-wins under its own top-level key (never inside
-    // lawnReportV2, whose write above replaces the whole object). A render only
-    // reads the frozen text. Any miss, slow call or rejection stores nothing and
-    // costs the completion nothing but the call's own deadline. Gate off: no
-    // read and no call.
+    // "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH, fixed sentences):
+    // at most ONE model call, here, frozen first-writer-wins under its own top-level
+    // key (never inside lawnReportV2, whose write above replaces the whole object).
+    // A render only reads the frozen text. A miss falls back to the deterministic
+    // lines; nothing to say freezes a text-less marker so a resume makes no second
+    // call. Gate off: no read and no call.
     let techParagraphFreeze = null;
     if (featureGates.lawnTechParagraphLive()) {
-      techParagraphFreeze = await freezeTechParagraphFor({ record, data, instruction: instructionOut.instruction, service, knex });
+      techParagraphFreeze = await freezeTechParagraphFor({ record, data, service, knex });
     }
 
     return {
