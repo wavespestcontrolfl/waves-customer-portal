@@ -315,10 +315,17 @@ function perApplicationPlan({ estimate, estimateData, customer, monthlyRate, act
   } catch {
     return { refusal: needsReview, line: null };
   }
+  const stamped = Converter.resolveConvertedPerApplicationFee({
+    customer, recurringUnitCount: units.recurringUnitCount, perApplicationAmount: charge.perApplicationAmount,
+  });
   if (units.recurringUnitCount !== 1) {
-    return { refusal: null, line: 'Bills each service per application at its own visit price (no single account fee)' };
+    return {
+      refusal: null,
+      line: stamped == null
+        ? 'Bills each service per application at its own visit price (no single account fee)'
+        : `Bills each service per application at its own visit price; the account fee stays ${money(stamped)} for any visit with no price`,
+    };
   }
-  const stamped = Converter.resolveConvertedPerApplicationFee({ customer, recurringUnitCount: 1, perApplicationAmount: charge.perApplicationAmount });
   if (stamped == null) return { refusal: needsReview, line: null };
   const amount = Number(charge.perApplicationAmount) > 0 ? Number(charge.perApplicationAmount) : stamped;
   const kept = round2(stamped) !== round2(amount) ? ` (the account fee stays ${money(stamped)})` : '';

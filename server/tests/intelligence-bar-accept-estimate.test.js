@@ -183,6 +183,12 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(lines).toContain('Bills $147.00 per application (about $49.00 a month)');
   });
 
+  test("a multi-service accept by a per-application customer discloses the account fee it keeps", async () => {
+    seed({ customer: { per_application_fee: 62 } });
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines).toContain('Bills each service per application at its own visit price; the account fee stays $62.00 for any visit with no price');
+  });
+
   test('a pest line accepted monthly shows the accepted 12 visits a year, not its stale quote-time 4', async () => {
     seed({
       estimate: {
