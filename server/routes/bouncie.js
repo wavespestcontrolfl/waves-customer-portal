@@ -216,6 +216,7 @@ router.get('/auth', adminAuthenticate, requireAdmin, async (req, res, next) => {
     const state = await createStaffOAuthState({
       prefix: BOUNCIE_OAUTH_STATE_PREFIX,
       technician: req.technician,
+      staffToken: req.staffToken,
       ttlMs: BOUNCIE_OAUTH_STATE_TTL_MS,
       description: 'Bouncie OAuth one-time state',
     });

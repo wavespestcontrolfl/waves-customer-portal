@@ -3,6 +3,14 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import useSpeechDictation from "./useSpeechDictation";
 
+// These tests cover the per-visit upload fallback with GATE_SERVER_DICTATION off;
+// the server-dictation path has its own file (useSpeechDictation.server.test.js).
+vi.mock("./serverDictation", async (importOriginal) => ({
+  ...(await importOriginal()),
+  checkServerDictation: vi.fn(async () => false),
+  knownServerDictation: vi.fn(() => false),
+}));
+
 class FakeRecorder {
   static instances = [];
   static isTypeSupported(t) { return t === "audio/webm;codecs=opus"; }

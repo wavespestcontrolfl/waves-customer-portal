@@ -675,6 +675,58 @@ describe('create_appointment — an overlap that is NEW since the card gets a fr
     expect(insertChain.insert).toHaveBeenCalled();
   });
 
+  // The commit-time check compares exactly what the card showed about each
+  // overlapping visit (id, customer, service, date, window), built by the same
+  // function as the pin: bookingOverlapFacts.
+  const OTHER_FACT = 'other|Testa Beta||2099-01-15|10:00 AM-11:00 AM';
+  const wireClashWithNames = (names = [{ id: 'other', first_name: 'Testa', last_name: 'Beta' }]) => {
+    const insertChain = chain();
+    wireDb({
+      customers: [adaCustomer(), adaCustomer()],
+      scheduled_services: [clash(), chain({ select: jest.fn().mockResolvedValue(names) }), insertChain],
+    });
+    return insertChain;
+  };
+
+  test('the card named visit A with the same facts and A is still the only overlap: books with the warning', async () => {
+    const insertChain = wireClashWithNames();
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: [OTHER_FACT] });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toMatch(/2099-01-15/);
+    expect(insertChain.insert).toHaveBeenCalled();
+  });
+
+  test('the card named visit A but a DIFFERENT visit holds the slot now: preview_changed, nothing inserted', async () => {
+    const insertChain = wireClashWithNames();
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: ['visit-a-cancelled|Testa Beta||2099-01-15|10:00 AM-11:00 AM'] });
+    expect(result).toMatchObject({ preview_changed: true, error: expect.stringMatching(/^Another visit now overlaps this time\./) });
+    expect(insertChain.insert).not.toHaveBeenCalled();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
+  });
+
+  test('the same visit id but a changed customer, service or window is refused: the card must show what is there now', async () => {
+    for (const stale of [
+      'other|Testa Alpha||2099-01-15|10:00 AM-11:00 AM',
+      'other|Testa Beta|Lawn Care|2099-01-15|10:00 AM-11:00 AM',
+      'other|Testa Beta||2099-01-15|9:00 AM-10:00 AM',
+    ]) {
+      jest.clearAllMocks();
+      const insertChain = wireClashWithNames();
+      const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: [stale] });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(insertChain.insert).not.toHaveBeenCalled();
+    }
+  });
+
+  test('the visit the card named is gone and nothing overlaps now: books with no warning', async () => {
+    const insertChain = chain();
+    wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [chain(), insertChain] });
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: ['visit-a-cancelled|Testa Beta||2099-01-15|10:00 AM-11:00 AM'] });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toBeUndefined();
+  });
+
   test('no pin (never proposed through a card): books with the warning, as before', async () => {
     const insertChain = wireClash();
     const result = await bookAt();
@@ -699,6 +751,24 @@ describe('create_appointment — an overlap that is NEW since the card gets a fr
     await expect(ibBookingOverlapProposal('2099-01-15', '10:00 AM')).resolves.toBe(false);
     await expect(ibBookingOverlapProposal('2099-01-15', undefined)).resolves.toBeNull();
     await expect(ibBookingOverlapProposal('not a date', '10:00 AM')).resolves.toBeNull();
+  });
+
+  test('ibBookingOverlapWho names the overlapping visit for the card line: customer, service and window (owner 2026-10-06)', async () => {
+    const { ibBookingOverlapWho } = require('../services/intelligence-bar/tools');
+    const probeWith = (rows) => chain({ whereNotIn: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue(rows) });
+    const namesWith = (rows) => chain({ select: jest.fn().mockResolvedValue(rows) });
+    wireDb({
+      scheduled_services: [
+        probeWith([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Lawn Care' }]),
+        namesWith([{ id: 'other', first_name: 'Testa', last_name: 'Beta' }]),
+        probeWith([]),
+      ],
+    });
+    await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([
+      { id: 'other', customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM', fact: 'other|Testa Beta|Lawn Care|2099-01-15|10:00 AM-11:00 AM' },
+    ]);
+    await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([]);
+    await expect(ibBookingOverlapWho('2099-01-15', undefined)).resolves.toEqual([]);
   });
 });
 
@@ -1005,6 +1075,23 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     const result = await book({ price: 180, _booking_price: 180, _booking_service_id: 'svc-otp' });
     expect(result.success).toBe(true);
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 180, primary_line_price: 180, service_id: 'svc-otp' });
+  });
+
+  test('the proposal of a STATED price carries the catalog price beside it only when the two differ (card text; owner 2026-10-06)', async () => {
+    const wireProposal = () => wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
+      services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
+      scheduled_services: [chain()],
+    });
+    wireProposal();
+    let result = await ibBookingProposal('cust-1', 'One-Time Pest Control Service', 180);
+    expect(result).toMatchObject({ price: 180, source: 'stated', catalogPrice: 250 });
+    wireProposal();
+    result = await ibBookingProposal('cust-1', 'One-Time Pest Control Service', 250);
+    expect(result).toMatchObject({ price: 250, source: 'stated', catalogPrice: null });
+    wireProposal();
+    result = await ibBookingProposal('cust-1', 'One-Time Pest Control Service', undefined);
+    expect(result).toMatchObject({ price: 250, source: 'catalog', catalogPrice: null });
   });
 
   test('a stated price books a service the catalog has no price for — the case that used to be refused', async () => {

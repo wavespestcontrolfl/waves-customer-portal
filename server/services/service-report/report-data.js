@@ -4351,6 +4351,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // paths already refuse to cache on image-resolution failures.
   imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
   imageResolutionFailures += Number(lawnAssessment?.photoFindingsUnresolved) || 0;
+  // A failed service_products read leaves this build's product list empty, not
+  // known-empty. The "From your technician" paragraph is frozen once and never
+  // rewritten, so it must not be written from such a build whatever the copy-v6
+  // gate is (Codex r4, #6067). Non-enumerable: the payload is unchanged.
+  if (lawnAssessment && productsLoadFailed) {
+    Object.defineProperty(lawnAssessment, 'productsReadFailed', { value: true, enumerable: false, configurable: true });
+  }
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
   // grounded regen or stored-copy sanitize lands, and nothing shown can be

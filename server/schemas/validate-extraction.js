@@ -163,7 +163,16 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // quote and Address Validation's business verdict
 // (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT). Older payloads, which lack it,
 // still validate and simply never qualify.
-const SCHEMA_VERSION = '1.23.0';
+// 1.24.0: additive — service_request.price_discussed (optional nullable boolean in both
+// schemas, never `required`): the extraction's judgement, over the WHOLE call, of whether
+// ANY price came up (false only when neither side mentioned a price, amount, cost, fee,
+// estimate, quote, discount or payment; a bare amount from either side is true). Owner
+// ruling 2026-10-06: a staff-booked commercial Waves Assessment with no price discussed
+// auto-books; the extraction judges the language (owner ruling 2026-10-01, the
+// price_is_final precedent) and the call pipeline requires exactly false
+// (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING), keeping its transcript screens as an extra
+// fail-closed layer. Older payloads, which lack it, still validate and never qualify.
+const SCHEMA_VERSION = '1.24.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

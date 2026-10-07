@@ -8,6 +8,7 @@ import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
 import WdoSignaturePad from "../../components/tech/WdoSignaturePad";
 import useIsMobile from "../../hooks/useIsMobile";
+import useDictationPending from "../../hooks/dictationPending";
 import { applyProfileToWdoFindings, applyHistoryToWdoFindings } from "../../lib/wdoProfileToFindings";
 import {
   INTERNAL_FINDING_KEYS,
@@ -1587,6 +1588,10 @@ export function ProjectDetail({
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // A finding-field mic is recording or transcribing: its words are still on the way, so every
+  // action that saves or sends the project waits for them.
+  const dictationPending = useDictationPending();
+  const actionsBlocked = saving || dictationPending;
   const [editFindings, setEditFindings] = useState({});
   const [editRecs, setEditRecs] = useState("");
   const [editTitle, setEditTitle] = useState("");
@@ -2795,6 +2800,7 @@ export function ProjectDetail({
                 )}
             </div>
             <ProjectFindingFieldInput
+              dictationContext={{ customerId: project.customer_id }}
               field={field}
               id={fieldInputId(field.key)}
               name={`findings.${field.key}`}
@@ -2834,7 +2840,7 @@ export function ProjectDetail({
               <button
                 type="button"
                 onClick={handleAiWrite}
-                disabled={aiWriting || saving}
+                disabled={aiWriting || actionsBlocked}
                 title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from selected context."
                 style={{
                   padding: "4px 10px",
@@ -2845,7 +2851,7 @@ export function ProjectDetail({
                   background: aiWriting ? "#71717A" : "#FFFFFF",
                   color: "#09090B",
                   border: `1px solid #D4D4D8`,
-                  cursor: aiWriting || saving ? "default" : "pointer",
+                  cursor: aiWriting || actionsBlocked ? "default" : "pointer",
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 6,
@@ -3176,7 +3182,7 @@ export function ProjectDetail({
               type="checkbox"
               checked={holdReportUntilPaid}
               onChange={(e) => setHoldReportUntilPaid(e.target.checked)}
-              disabled={saving}
+              disabled={actionsBlocked}
             />
             Hold report until invoice is paid
           </label>
@@ -3185,13 +3191,13 @@ export function ProjectDetail({
           <button
             type="button"
             onClick={handleSendPortalInvite}
-            disabled={saving}
+            disabled={actionsBlocked}
             style={{
               ...btnSecondary,
               display: "inline-flex",
               alignItems: "center",
               gap: 8,
-              opacity: saving ? 0.5 : 1,
+              opacity: actionsBlocked ? 0.5 : 1,
             }}
           >
             <Mail size={16} />
@@ -3202,14 +3208,14 @@ export function ProjectDetail({
           <button
             type="button"
             onClick={handleSendPrepGuide}
-            disabled={saving || !hasPrepGuide}
+            disabled={actionsBlocked || !hasPrepGuide}
             title={hasPrepGuide ? "Send prep guide" : "No default prep guide for this project type"}
             style={{
               ...btnSecondary,
               display: "inline-flex",
               alignItems: "center",
               gap: 8,
-              opacity: saving || !hasPrepGuide ? 0.45 : 1,
+              opacity: actionsBlocked || !hasPrepGuide ? 0.45 : 1,
             }}
           >
             <BookOpen size={16} />
@@ -3220,7 +3226,7 @@ export function ProjectDetail({
           <button
             type="button"
             onClick={handleClose}
-            disabled={saving || closeoutBlocksClose}
+            disabled={actionsBlocked || closeoutBlocksClose}
             title={
               billingBlocksClose
                 ? "Send the invoice before closing"
@@ -3230,7 +3236,7 @@ export function ProjectDetail({
                     ? "Project cannot close from the current service state"
                   : "Close project"
             }
-            style={{ ...btnSecondary, opacity: saving || closeoutBlocksClose ? 0.5 : 1 }}
+            style={{ ...btnSecondary, opacity: actionsBlocked || closeoutBlocksClose ? 0.5 : 1 }}
           >
             {billingBlocksClose
               ? "Send invoice first"
@@ -3244,8 +3250,8 @@ export function ProjectDetail({
         <button
           type="button"
           onClick={saveEdits}
-          disabled={saving || !dirty}
-          style={{ ...btnSecondary, opacity: saving || !dirty ? 0.4 : 1 }}
+          disabled={actionsBlocked || !dirty}
+          style={{ ...btnSecondary, opacity: actionsBlocked || !dirty ? 0.4 : 1 }}
         >
           {saving ? "Saving…" : "Save changes"}
         </button>
@@ -3255,8 +3261,8 @@ export function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving || wdoSendBlocked}
-              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
+              disabled={actionsBlocked || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: actionsBlocked || wdoSendBlocked ? 0.5 : 1 }}
               title={wdoSendBlocked ? wdoSendBlockedTitle : undefined}
             >
               Resend report
@@ -3268,8 +3274,8 @@ export function ProjectDetail({
             <button
               type="button"
               onClick={handleSend}
-              disabled={saving || wdoSendBlocked}
-              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
+              disabled={actionsBlocked || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: actionsBlocked || wdoSendBlocked ? 0.5 : 1 }}
               title={
                 wdoSendBlocked
                   ? wdoSendBlockedTitle
@@ -3289,8 +3295,8 @@ export function ProjectDetail({
             <button
               type="button"
               onClick={handleSendWithInvoice}
-              disabled={saving || wdoSendBlocked}
-              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
+              disabled={actionsBlocked || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: actionsBlocked || wdoSendBlocked ? 0.5 : 1 }}
               title={
                 wdoSendBlocked
                   ? wdoSendBlockedTitle

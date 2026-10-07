@@ -306,19 +306,22 @@ test('cancel_appointment is irreversible unconditionally — money moves no port
   expect(silent.irreversible).toBe(true);
 });
 
-test('create_appointment: card bookings are credit-free by construction; a windowless one never sends a booking confirmation', () => {
+test('create_appointment: a card booking is credit-free by construction and says nothing about credit; a windowless one never sends a booking confirmation', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^No inspection credit is redeemed by this booking/));
-  expect(labels).toContainEqual(expect.stringMatching(/placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h\/24h reminders/));
+  expect(labels.some((l) => /inspection credit|credit lock/i.test(l))).toBe(false);
+  expect(labels).toContain('No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) are set up once a time is added. They skip if the customer turned reminders off. If setup fails, you see a warning.');
   expect(c.notifies_customer).toBe(false);
 });
 
-test('create_appointment with a time texts the booking confirmation, as on the Schedule screen (owner 2026-09-27)', () => {
+test('create_appointment with a time texts the booking confirmation, as on the Schedule screen (owner 2026-09-27), in short plain lines', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both/));
-  expect(labels).toContainEqual(expect.stringMatching(/^Registers the 72h\/24h reminder rows/));
+  expect(labels).toContain('Booking confirmation goes out by text or email, per their settings.');
+  expect(labels).toContain('No confirmation if they turned it off or were already confirmed for another visit at this time.');
+  expect(labels).toContain('Sets reminders for 3 days and 1 day before. They skip if the customer turned reminders off, and the 3-day one skips when the visit is sooner. If setup fails, you see a warning.');
+  expect(labels.filter((l) => /confirmation/i.test(l) && l.length > 100)).toEqual([]);
+  expect(labels.some((l) => /go out 3 days/.test(l))).toBe(false);
   expect(c.notifies_customer).toBe(true);
 });
 
@@ -330,9 +333,35 @@ test('create_appointment with a time texts the booking confirmation, as on the S
 test('the after-8PM hold is disclosed as a TEXT-only hold — an email confirmation still goes right away', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
-  const confirmationLabel = labels.find((l) => l.startsWith('Customer is sent a booking confirmation'));
-  expect(confirmationLabel).toMatch(/a text after 8 PM waits until 8 AM, but an email goes right away/);
-  expect(confirmationLabel).not.toMatch(/after 8 PM it waits for 8 AM/);
+  expect(labels).toContain('Texts after 8 PM wait until 8 AM; an email goes right away.');
+  expect(labels.some((l) => /after 8 PM it waits for 8 AM/.test(l))).toBe(false);
+});
+
+test('create_appointment names the technician once and the overlapping visit by who, service and window', () => {
+  const c = buildContract({
+    toolName: 'create_appointment',
+    params: { customer_id: 'c1', time_window: '9:00 AM' },
+    displayParams: { when: 'Thursday, Oct 9, 9:00 AM', service: 'Lawn Care', technician: 'Testa Tech' },
+    preview: {
+      proposal: true,
+      pinned_technician: { id: 't1', name: 'Testa Tech' },
+      pinned_customer: { id: 'c1', name: 'Testa Alpha' },
+      slot_overlap: { already_overlaps: true, with: [{ customer: 'Testa Beta', service: 'Pest Control', window: '9:00 AM-10:00 AM' }, { customer: 'Testa Gamma', service: 'Lawn Care', window: '9:00 AM-10:00 AM' }] },
+    },
+  });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels.filter((l) => /Testa Tech/.test(l))).toEqual(['Technician: Testa Tech']);
+  expect(labels).toContain('When: Thursday, Oct 9, 9:00 AM');
+  expect(labels).toContain('Service: Lawn Care');
+  expect(labels).toContain('Another visit is at this time: Testa Beta, Pest Control, 9:00 AM-10:00 AM (and 1 more). Both stay on the calendar.');
+});
+
+test('create_appointment overlap line without a name stays short and plain', () => {
+  const c = buildContract({
+    toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: {},
+    preview: { proposal: true, slot_overlap: { already_overlaps: true } },
+  });
+  expect(c.effects.map((e) => e.label)).toContain('Another visit is at this time. Both stay on the calendar.');
 });
 
 test('dynamic legacy jobs disclose launch, spend, variable writes, and internal comms explicitly', () => {
@@ -978,4 +1007,22 @@ test('cancel_appointment always discloses that it closes any open overdue dispat
   const preview = { cancellation: { appointment: { id: 'svc-1' }, customer_notice: 'none', technician_notice: 'none' } };
   const contract = buildContract({ toolName: 'cancel_appointment', params: { appointment_id: 'svc-1' }, preview });
   expect(contract.effects.some((e) => e.kind === 'operational' && /running-late \/ unassigned-overdue dispatch alert/.test(e.label))).toBe(true);
+});
+
+// Owner 2026-10-06: a rate edit's card shows the whole monthly bill by service,
+// so replacing a pest plan with a lawn price can never hide behind one number.
+test('update_customer monthly-rate edit lists every bill line, the total and the no-notice line', () => {
+  const params = { customer_id: 'c1', updates: { monthly_rate: 60.33 }, _rate_family: 'whole_bill' };
+  const contract = buildContract({
+    toolName: 'update_customer', params, displayParams: { updates: { monthly_rate: 60.33 } },
+    preview: { rate_change: {
+      billing_mode: 'monthly_membership', replaces_whole_bill: true,
+      lines: [{ label: 'Pest control', before: 41.33, after: 0 }, { label: 'Earlier rate (not split by service)', before: 0, after: 60.33 }],
+      total_before: 41.33, total_after: 60.33,
+    } },
+  });
+  const labels = contract.effects.map((e) => e.label);
+  expect(labels).toContain('Pest control: $41.33 → $0.00 a month (drops off the bill)');
+  expect(labels).toContain('Monthly bill total: $41.33 → $60.33 (replaces the whole bill)');
+  expect(labels).toContain('No price-change notice is sent to the customer');
 });

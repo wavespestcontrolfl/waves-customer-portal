@@ -63,6 +63,11 @@ const DEFAULT_SERVICE_MIN = 60;
 // route-optimizer's model, so this module and auto-dispatch score on the
 // same scale (a local copy lived here until the travel-gap lane).
 
+// The pins and times of a gap candidate's two neighbours, for a caller that
+// re-prices the shown legs on real roads (find-time-hints.js). Symbol-keyed
+// so JSON never carries stop coordinates to a client; spreads keep it.
+const GAP_LEGS = Symbol('gapLegs');
+
 function hasCoords(stop) {
   return stop != null && stop.lat != null && stop.lng != null;
 }
@@ -310,8 +315,12 @@ async function findCapacitySlots(opts) {
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
       context.target.service_type, { before: byId.get(fit.routeOrder[index - 1]), after: byId.get(fit.routeOrder[index + 1]) });
     const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
+    const legs = capacityLegs({ fit, target: context.target });
     slots.push({ date, technician: { id: tech.id, name: tech.name }, start_time: options.windowStart,
       end_time: options.windowEnd, detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
+      // The drive into this stop as the simulation drove it, so a picker can
+      // show "N min here". from_name stays null: route rows carry no name.
+      drive_in_minutes: legs.driveIn, from_home_base: legs.fromHome, from_name: null,
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
@@ -774,6 +783,22 @@ function toPackingBoundAnchor(stop) {
   return { rawStartMin: stop.startMin, rawEndMin: stop.endMin, expectedEndMin: stop.startMin + expected };
 }
 
+// A capacity placement's drive in, as its own route simulation drove it
+// (waiting excluded), and whether it starts from home base. These are model
+// numbers: the road-times gate re-prices gap chips only, and capacity chips
+// show as estimates (Codex #6045 r3-r9).
+function capacityLegs({ fit, target }) {
+  const arrivals = fit.arrivals || [];
+  const at = arrivals.findIndex((row) => row.id === target.id);
+  if (at < 0) return { driveIn: null, fromHome: null };
+  const drive = Number(arrivals[at].drive);
+  const knownOrigin = at > 0 || !!fit.origin;
+  return {
+    driveIn: knownOrigin && Number.isFinite(drive) ? Math.max(0, Math.round(drive)) : null,
+    fromHome: at === 0 ? (fit.origin ? fit.origin.isHome === true : null) : false,
+  };
+}
+
 // The geometry of ONE route gap (between consecutive anchors prev/next):
 // how much drive the detour adds, how early/late a candidate can start in
 // it, and a maker for the candidate object at a given start. Pulled out of
@@ -895,6 +920,18 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo, dayClose }) {
         before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,
       },
       stops_that_day: dayStops.length,
+      [GAP_LEGS]: {
+        prev: hasCoords(prev) ? { lat: Number(prev.lat), lng: Number(prev.lng) } : null,
+        next: hasCoords(next) ? { lat: Number(next.lat), lng: Number(next.lng) } : null,
+        prevEndMin: prev.endMin,
+        prevIsHome: !prevIsStop,
+        // For a home-base baseline: when the van would leave home to reach
+        // the next stop just in time without this one (Codex #6045 r10).
+        nextStartMin: next.startMin,
+        baselineDriveMinutes: baselineDrive,
+        newStop: { lat: Number(newStop.lat), lng: Number(newStop.lng) },
+        durationMinutes,
+      },
     };
   };
 
@@ -1268,11 +1305,13 @@ async function findAvailableSlots(opts) {
 
 module.exports = {
   findAvailableSlots,
+  GAP_LEGS,
   // Service-day bounds (ET hours) — the one place they are defined; other
   // offer surfaces (rain-out same-day presets) clamp to these.
   DAY_START_HOUR,
   DAY_END_HOUR,
   _internals: {
+    capacityLegs,
     enumerateDates,
     packCapacityEnds,
     capacityGapNeighbours,

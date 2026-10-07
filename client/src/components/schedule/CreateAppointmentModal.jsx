@@ -3992,6 +3992,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     compareTechsAt: techMode === 'choose' ? undefined : windowStart,
     serviceTypes: services.map((svc) => svc?.name).filter(Boolean),
     rangeFrom: etDateString(),
+    bestRows: true,
   });
 
   // Submit
@@ -6402,6 +6403,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           />
           <AvailabilityStrip
             availability={availability}
+            bestRows
             currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentStart={windowStart}
             currentTechnicianId={techMode === 'choose' ? techId : null}

@@ -12,12 +12,16 @@
  * the forecast grid URL, then the grid forecast returns 12-hour
  * periods with probabilityOfPrecipitation.
  *
- * Everything here is fail-open: any timeout / non-200 / parse problem
- * returns null and the caller renders options without rain badges.
+ * Backup (owner 2026-10-06): when NWS fails, the same readers answer from
+ * Open-Meteo (paid key via open-meteo-endpoint.js) in the same shape.
+ *
+ * Everything here is fail-open: when both sources fail, any timeout / non-200
+ * / parse problem returns null and the caller renders options without rain badges.
  * Weather decoration must never block a reschedule.
  */
 
 const logger = require('./logger');
+const { etOffsetIso } = require('../utils/datetime-et');
 
 const NWS_BASE = 'https://api.weather.gov';
 const USER_AGENT = '(wavespestcontrol.com, contact@wavespestcontrol.com)';
@@ -54,6 +58,114 @@ async function fetchJson(url, label) {
   }
 }
 
+// ── Open-Meteo backup (owner 2026-10-06) ─────────────────────────────────
+// NWS stays the primary source: its hourly chance of rain is forecaster-
+// checked on a 2.5 km grid, and on 2026-10-06 it read 78-85% through an
+// afternoon storm at HQ that Open-Meteo's coarse ensemble chance put at
+// 36-49%. Open-Meteo answers only when NWS fails, so a surface that shows
+// rain keeps a number through an NWS outage. Same output shapes as the NWS
+// readers; every entry carries source: 'open-meteo'.
+// One read through the shared property-forecast client (its paid-key URL,
+// hard deadline, cache and normalization) → NWS-shaped hours. Temperature
+// and wind are the UNROUNDED readings: the job-card spray check compares
+// them with label limits strictly, and NWS itself reports whole numbers.
+// Required lazily: application-conditions is a large module most callers of
+// this file never need.
+const BACKUP_HOURS = 7 * 24;
+// Whole-call budget, NWS included: the two NWS fetches (2.5 s each) were the
+// worst case before the backup existed, so the backup only spends what NWS
+// left of it and is skipped when too little remains. Direct callers (Rain Out
+// options) await these readers without their own race.
+const TOTAL_BUDGET_MS = 2 * FETCH_TIMEOUT_MS;
+const BACKUP_MIN_MS = 1000;
+// The shared client's own default deadline; never longer than that.
+const FORECAST_BACKUP_MAX_MS = 3500;
+// One backup read per grid key at a time: Rain Out asks for the daily and the
+// hourly outlook together, and both reach the backup during an NWS outage
+// before the shared client's cache is warm.
+const _backupInFlight = new Map();
+
+async function readOpenMeteoHours(latNum, lngNum, timeoutMs) {
+  const { fetchPropertyForecast } = require('./service-report/application-conditions');
+  const fromMs = Math.floor(Date.now() / 3600000) * 3600000;
+  const forecast = await fetchPropertyForecast({
+    latitude: latNum,
+    longitude: lngNum,
+    from: new Date(fromMs),
+    to: new Date(fromMs + BACKUP_HOURS * 3600000),
+    timeoutMs,
+    exactReadings: true,
+  });
+  if (forecast?.status !== 'ok' || !Array.isArray(forecast.hourly)) return null;
+  const hours = [];
+  for (const row of forecast.hourly) {
+    const startTime = etOffsetIso(row.at);
+    if (!startTime) continue;
+    hours.push({
+      startTime,
+      rainChance: Number.isFinite(row.precipitation_probability_pct) ? row.precipitation_probability_pct : null,
+      shortForecast: null,
+      temperatureF: Number.isFinite(row.temperature_f_exact) ? row.temperature_f_exact : null,
+      windMph: Number.isFinite(row.wind_mph_exact) ? row.wind_mph_exact : null,
+      source: 'open-meteo',
+    });
+  }
+  return hours.length ? hours : null;
+}
+
+function raceDeadline(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((resolve) => { timer = setTimeout(resolve, ms, null); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function fetchOpenMeteoHours(latNum, lngNum, startedAt) {
+  const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+  const key = cacheKey(latNum, lngNum);
+  const pending = _backupInFlight.get(key);
+  // Joining a read another lookup started still keeps THIS lookup's budget:
+  // it waits at most its own remaining time, then gives up with null while
+  // the shared read finishes for the caller that started it.
+  if (pending) return remaining > 0 ? raceDeadline(pending, remaining) : Promise.resolve(null);
+  if (remaining < BACKUP_MIN_MS) return Promise.resolve(null);
+  const read = readOpenMeteoHours(latNum, lngNum, Math.min(remaining, FORECAST_BACKUP_MAX_MS))
+    .catch(() => null)
+    .finally(() => _backupInFlight.delete(key));
+  _backupInFlight.set(key, read);
+  return read;
+}
+
+// Daily backup = the max hourly chance over the NWS daytime period
+// (6 AM-6 PM ET), the window the NWS daily reader prefers. A date is stated
+// only when all 12 daytime hours are present: the window starts at the
+// current hour and ends 7 days later, so its first and last dates can be
+// partial, and a max over part of a day understates a wetter missing part.
+const DAYTIME_HOURS = 12;
+function dailyFromHours(hours) {
+  const byDate = {};
+  for (const hour of hours) {
+    const date = hour.startTime.slice(0, 10);
+    const hh = Number(hour.startTime.slice(11, 13));
+    if (hh < 6 || hh >= 18) continue;
+    const day = byDate[date] || (byDate[date] = { hours: new Set(), rainChance: null });
+    day.hours.add(hh);
+    const chance = hour.rainChance;
+    if (chance != null && (day.rainChance == null || chance > day.rainChance)) day.rainChance = chance;
+  }
+  const out = {};
+  for (const [date, day] of Object.entries(byDate)) {
+    if (day.hours.size === DAYTIME_HOURS) out[date] = { rainChance: day.rainChance, shortForecast: null, source: 'open-meteo' };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+async function openMeteoDailyBackup(latNum, lngNum, startedAt) {
+  const hours = await fetchOpenMeteoHours(latNum, lngNum, startedAt);
+  return hours ? dailyFromHours(hours) : null;
+}
+
 /**
  * Daily rain outlook for a coordinate.
  *
@@ -73,6 +185,14 @@ async function getDailyRainOutlook(lat, lng) {
   const cached = _cache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
 
+  const startedAt = Date.now();
+  const byDate = (await nwsDaily(latNum, lngNum)) || (await openMeteoDailyBackup(latNum, lngNum, startedAt));
+  if (!byDate) return null;
+  _cache.set(key, { at: Date.now(), value: byDate });
+  return byDate;
+}
+
+async function nwsDaily(latNum, lngNum) {
   const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
   const forecastUrl = points?.properties?.forecast;
   if (!forecastUrl) return null;
@@ -97,9 +217,7 @@ async function getDailyRainOutlook(lat, lng) {
     if (period.isDaytime || !byDate[date]) byDate[date] = entry;
   }
 
-  if (Object.keys(byDate).length === 0) return null;
-  _cache.set(key, { at: Date.now(), value: byDate });
-  return byDate;
+  return Object.keys(byDate).length === 0 ? null : byDate;
 }
 
 // Bounded daily lookup for decorative consumers (rain chips): the raw
@@ -181,6 +299,14 @@ async function getHourlyRainOutlook(lat, lng) {
   const cached = _hourlyCache.get(key);
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS) return cached.value;
 
+  const startedAt = Date.now();
+  const hours = (await nwsHourly(latNum, lngNum)) || (await fetchOpenMeteoHours(latNum, lngNum, startedAt));
+  if (!hours) return null;
+  _hourlyCache.set(key, { at: Date.now(), value: hours });
+  return hours;
+}
+
+async function nwsHourly(latNum, lngNum) {
   const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
   const hourlyUrl = points?.properties?.forecastHourly;
   if (!hourlyUrl) return null;
@@ -205,9 +331,7 @@ async function getHourlyRainOutlook(lat, lng) {
       windMph: parseWindMph(p?.windSpeed),
     }));
 
-  if (hours.length === 0) return null;
-  _hourlyCache.set(key, { at: Date.now(), value: hours });
-  return hours;
+  return hours.length === 0 ? null : hours;
 }
 
 /**
@@ -224,5 +348,5 @@ module.exports = {
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
   forecastLinkForZip,
-  _test: { cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { dailyFromHours, _backupInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };

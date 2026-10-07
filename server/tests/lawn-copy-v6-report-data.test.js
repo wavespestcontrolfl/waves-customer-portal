@@ -612,9 +612,11 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
 describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
   const ENV = ['GATE_LAWN_TECH_PARAGRAPH', 'GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_REPORT_COPY_V6'];
   const saved = {};
-  const TEXT = 'Our technician saw chinch bugs at the trouble spot, which explains the damaged turf in the photo. Arena 50 WDG went on the front and side yards to treat them.';
-  const entry = (text = TEXT) => ({ v: 1, promptVersion: 'lawn_tech_paragraph_v1', assessmentId: 'la-cur', text, sources: [], frozenAt: '2026-09-30T18:41:00.000Z' });
-  const recordsWith = (text) => ({ 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK }, ...(text ? { lawnTechParagraph: { 'la-cur': entry(text) } } : {}) } } });
+  // A fixed-sentence entry (v2, owner 2026-10-06): the text must be the render of its slots.
+  const SLOTS = { observed: [{ condition: 'chinch_bugs', place: 'front_lawn' }], maybe: [], products: ['Arena 50 WDG'] };
+  const TEXT = 'Our technician saw chinch bugs in the front lawn. Today we applied Arena 50 WDG.';
+  const entry = (text = TEXT, slots = SLOTS) => ({ v: 2, promptVersion: 'lawn_tech_paragraph_v2', assessmentId: 'la-cur', text, slots, frozenAt: '2026-09-30T18:41:00.000Z' });
+  const recordsWith = (text, slots) => ({ 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK }, ...(text ? { lawnTechParagraph: { 'la-cur': entry(text, slots) } } : {}) } } });
 
   beforeEach(() => {
     ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
@@ -641,6 +643,16 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
     expect(frozen.data.reportV2.techParagraph).toBeUndefined();
     expect(JSON.stringify(reconciled(frozen.data))).not.toContain(TEXT);
     expect(JSON.parse(JSON.stringify(reconciled(frozen.data)))).toEqual(JSON.parse(JSON.stringify(reconciled(bare.data))));
+  });
+
+  test('a failed service_products read flags the build for the paragraph step, with the copy-v6 gate off, and changes no payload key (Codex r4)', async () => {
+    live(); // GATE_LAWN_REPORT_COPY_V6 stays off
+    const { knex } = withRecords({ ...fixtures(), service_products: FAIL }, recordsWith(null));
+    const data = await buildReportV1Data(service(recordsWith(null)['svc-cur'].structured_notes), 'token-tp', knex, {});
+    expect(data.lawnAssessment.productsReadFailed).toBe(true);
+    expect(Object.keys(data.lawnAssessment)).not.toContain('productsReadFailed');
+    const ok = await render(recordsWith(null));
+    expect(ok.data.lawnAssessment.productsReadFailed).toBeUndefined();
   });
 
   test('gate on: the lead carries the frozen text and nothing else carries it; no model call', async () => {
@@ -673,12 +685,12 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
 
   test('the PDF cache signature: unchanged while the gate is off or nothing is frozen; moves with the frozen text', async () => {
     const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
-    const sig = async (text) => (await resolveCanonicalLawnRender(svc, withRecords(fixtures(), recordsWith(text)).knex)).signature;
+    const sig = async (text, slots) => (await resolveCanonicalLawnRender(svc, withRecords(fixtures(), recordsWith(text, slots)).knex)).signature;
     const off = await sig(TEXT);
     live();
     const none = await sig(null);
     const withText = await sig(TEXT);
-    const other = await sig('Our technician found thin spots near the driveway, so we fed the whole lawn with LESCO 24-0-11.');
+    const other = await sig('Today we applied LESCO 24-0-11.', { observed: [], maybe: [], products: ['LESCO 24-0-11'] });
     process.env.GATE_LAWN_TECH_PARAGRAPH = 'false';
     const leadOnly = await sig(TEXT);
     expect(leadOnly).toBe(none); // gate off: the frozen text does not key the PDF
