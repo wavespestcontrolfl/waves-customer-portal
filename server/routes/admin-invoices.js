@@ -1744,10 +1744,11 @@ async function invoiceSendHandler(req, res, next) {
         // Set only by sendInvoiceFromBar (never an HTTP field): the total and the
         // recipients the bar's card showed, no account-credit draw (the card never
         // offered one), no dispute-hold exemption (the bar never overrides one) and
-        // no void of a terminal-visit invoice (refused and held for review instead).
+        // refusalOnly: a terminal-visit invoice is never voided and a hold refusal is
+        // never requeued for a later send outside the approval.
         ...(req.ibApprovedSend ? {
           expectedTotal: req.ibApprovedSend.expectedTotal, expectedRecipients: req.ibApprovedSend.recipients,
-          skipAccountCreditAutoApply: true, holdExempt: null, refuseTerminalVoid: true,
+          skipAccountCreditAutoApply: true, holdExempt: null, refusalOnly: true,
         } : {}),
       });
     } catch (err) {

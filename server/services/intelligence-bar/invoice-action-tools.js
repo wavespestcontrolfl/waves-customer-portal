@@ -249,8 +249,15 @@ async function buildSendPlan(input, { forSend = false } = {}) {
 function channelResult(leg) {
   if (!leg) return { status: 'not_sent', detail: 'not attempted' };
   if (leg.ok) return { status: 'sent' };
+  // The provider may have taken it: never reported as not sent (a resend could duplicate it).
+  if (leg.deliveryOutcome === 'uncertain') {
+    return { status: 'unknown', detail: 'the provider did not confirm — it may or may not have gone out; check before sending again' };
+  }
   return { status: 'not_sent', detail: String(leg.error || leg.code || 'not sent').slice(0, 160) };
 }
+
+// Route codes that mean a leg may have been delivered.
+const UNCERTAIN_SEND_CODES = new Set(['INVOICE_DELIVERY_OUTCOME_UNCERTAIN', 'INVOICE_VISIT_TERMINAL_OUTCOME_UNCERTAIN']);
 
 // The re-derived plan when it still matches the card's pin, or the refusal.
 async function verifiedPlan(input, pinned, build, { what, changed }) {
@@ -272,6 +279,11 @@ function sendOutcome(plan, status, json = {}) {
   if (status === 409) return { ...base, error: `Nothing was sent: ${json.error || 'the invoice is busy'}`, code: json.code || 'send_conflict', preview_changed: true };
   const text = channelResult(json.sms);
   const email = channelResult(json.email);
+  const unknown = UNCERTAIN_SEND_CODES.has(json.code) || [text, email].some((leg) => leg.status === 'unknown');
+  if (unknown && ![text, email].some((leg) => leg.status === 'sent')) {
+    return { ...base, outcome_unknown: true, code: json.code || 'delivery_uncertain', text, email,
+      error: 'Delivery of the invoice could not be confirmed — it may or may not have gone out. Check before sending again.' };
+  }
   // Both channels failed (or the route refused before sending).
   if (status !== 200) {
     return { ...base, error: `The invoice was not sent: ${json.error || 'send failed'}`, code: json.code || 'send_failed', failed: true, text, email };
@@ -282,8 +294,10 @@ function sendOutcome(plan, status, json = {}) {
   }
   const requested = [plan.text.startsWith('Text to') && text, plan.email.startsWith('Email to') && email].filter(Boolean);
   const allSent = requested.every((leg) => leg.status === 'sent');
-  return { ...base, ...(allSent ? { success: true } : { partial: true }), text, email,
-    note: allSent ? 'The invoice was sent.' : 'Part of the invoice send did not go out — see text and email.' };
+  let note = 'Part of the invoice send did not go out — see text and email.';
+  if (allSent) note = 'The invoice was sent.';
+  else if (unknown) note = 'Part of the invoice was sent; delivery of the rest could not be confirmed — check before sending again.';
+  return { ...base, ...(allSent ? { success: true } : { partial: true }), text, email, note };
 }
 
 async function commitSend(input, actionContext) {

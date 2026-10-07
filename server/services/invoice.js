@@ -4053,15 +4053,15 @@ async function zeroDueDirectSendOutcome(invoiceId, outcome) {
 // genuinely collectible again, not stuck. Bounded to the one retry the
 // caller's own `_zeroDueRetried` guard allows; omit it (or leave the
 // guard already tripped) to map `not_zero_due` like any other outcome.
-async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, retryOnceFn = null, { refuseTerminalVoid = false } = {}) {
+async function zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, retryOnceFn = null, { refusalOnly = false } = {}) {
   if (err?.code !== "zero_due_detected") return null;
   const outcome = await settleZeroDueBeforeSend(invoiceId, { fenceOwnership: !allowClaimed });
   if (outcome.kind === "not_zero_due" && retryOnceFn) return retryOnceFn();
-  return zeroDueWrapperOutcome(invoiceId, outcome, { refuseTerminalVoid });
+  return zeroDueWrapperOutcome(invoiceId, outcome, { refusalOnly });
 }
 
 // Wrapper result shape (sendViaSMSAndEmail): { ok, sms, email, payUrl }.
-async function zeroDueWrapperOutcome(invoiceId, outcome, { refuseTerminalVoid = false } = {}) {
+async function zeroDueWrapperOutcome(invoiceId, outcome, { refusalOnly = false } = {}) {
   if (outcome.kind === "settled") {
     return { ok: true, settled_zero_due: true, sms: { ok: false, code: "settled_zero_due" }, email: { ok: false, code: "settled_zero_due" }, payUrl: null };
   }
@@ -4070,7 +4070,7 @@ async function zeroDueWrapperOutcome(invoiceId, outcome, { refuseTerminalVoid = 
     // safety-refused void must never be reported the same as a completed
     // one. A refusal-only caller (the Intelligence Bar's send_invoice) never
     // voids: it gets the same held-for-review result as a refused void.
-    const voided = refuseTerminalVoid ? false : await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
+    const voided = refusalOnly ? false : await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);
     if (!voided) {
       logger.warn(`[invoice] ${invoiceId}: zero-due terminal-visit invoice could not be safely voided (a live PaymentIntent, money in flight, or an unverifiable lookup) — held for review, not reported handled`);
       const reason = `${ZERO_DUE_TERMINAL_ERROR}, but the invoice could not be safely voided yet — held for review`;
@@ -7845,16 +7845,17 @@ const InvoiceService = {
       // digits / lowercased email, null = that leg was not on the card). Each
       // leg refuses a different recipient at its own send. Null = unchanged.
       expectedRecipients = null,
-      // Intelligence Bar send_invoice: a linked visit found terminal at send
-      // never voids the invoice here; the send is refused and held for review
-      // (INVOICE_VISIT_TERMINAL_UNVOIDED), exactly as a safety-refused void.
-      refuseTerminalVoid = false,
+      // Intelligence Bar send_invoice: a refusal stays a refusal. A linked visit
+      // found terminal at send never voids the invoice here (held for review,
+      // INVOICE_VISIT_TERMINAL_UNVOIDED, exactly as a safety-refused void), and a
+      // hold refusal never requeues it for a later send outside the approval.
+      refusalOnly = false,
     } = {},
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
       emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
-      expectedRecipients, refuseTerminalVoid,
+      expectedRecipients, refusalOnly,
     });
 
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -7877,7 +7878,7 @@ const InvoiceService = {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
           emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
-          expectedRecipients, refuseTerminalVoid,
+          expectedRecipients, refusalOnly,
         }));
       }
     }
@@ -7898,7 +7899,7 @@ const InvoiceService = {
     try {
       packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt });
     } catch (err) {
-      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refuseTerminalVoid });
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       // A self-pay renewal the clearance parked behind the customer's dispute hold: the same coded,
       // retryable refusal every unclaimed sender entry returns (nothing claimed, nothing sent).
@@ -7949,7 +7950,7 @@ const InvoiceService = {
     try {
       claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
     } catch (err) {
-      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refuseTerminalVoid });
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce, { refusalOnly });
       if (zeroDueResult) return zeroDueResult;
       throw err;
     }
@@ -8528,7 +8529,7 @@ const InvoiceService = {
         }
       }
     } else if (terminalVisitRefused) {
-      if (claimed && refuseTerminalVoid) {
+      if (claimed && refusalOnly) {
         // Refusal-only caller: no void; the claim is retained for review, the
         // same state as a safety-refused void below.
         terminalVisitVoided = false;
@@ -8598,7 +8599,7 @@ const InvoiceService = {
       }
       // A collections dispute-hold refusal always leaves the invoice SCHEDULED, never a
       // draft nothing sends after the release (the sender holds it, then sends it).
-      if (restored && !allowClaimed && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
+      if (restored && !allowClaimed && !refusalOnly && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {
         await require("./collections/collection-hold").requeueHeldInvoice(invoiceId, { customerId: claim.invoice.customer_id });
       }
     }

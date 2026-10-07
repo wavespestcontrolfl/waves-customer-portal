@@ -316,6 +316,21 @@ describe('send_invoice commit', () => {
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
   });
 
+  test('an uncertain delivery is reported as unknown, never as not sent', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 400, json: { ok: false, code: 'INVOICE_DELIVERY_OUTCOME_UNCERTAIN', error: 'x',
+      sms: { ok: false, deliveryOutcome: 'uncertain' }, email: { ok: false, error: 'bounced' } } });
+    let { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    let result = await run();
+    expect(result).toMatchObject({ outcome_unknown: true, code: 'INVOICE_DELIVERY_OUTCOME_UNCERTAIN', text: { status: 'unknown' } });
+    expect(result.failed).toBeUndefined();
+    expect(executionOutcome(result)).toBe('outcome_unknown');
+    Invoices.sendInvoiceFromBar.mockResolvedValueOnce({ status: 200, json: { ok: true, sms: { ok: false, deliveryOutcome: 'uncertain' }, email: { ok: true } } });
+    ({ run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version'));
+    result = await run();
+    expect(result).toMatchObject({ partial: true, text: { status: 'unknown' }, email: { status: 'sent' } });
+    expect(result.note).toMatch(/could not be confirmed/);
+  });
+
   test('a visit cancelled between the check and the send: the handler refuses (held for review), nothing voided or sent', async () => {
     Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 409, json: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', error: 'Linked visit is cancelled; delivery not attempted' } });
     const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
