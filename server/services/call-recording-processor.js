@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, applyNameDictationPolicy, applyNameDictationToV2Caller, NAME_DECODER_VERSION_SUFFIX, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, applyNameDictationPolicy, applyNameDictationToV2Caller, NAME_DICTATION_MARKER, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -10280,9 +10280,10 @@ const CallRecordingProcessor = {
     // did not render (or route on a block the prompt never carried).
     const assessmentLaneActive = commercialAssessmentBookingActive(call);
     const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });
-    // The version this row finally carries: v2PromptVersion, plus the name-decoder suffix when
-    // the spelled-name policy changed the caller name (its own cohort).
-    let v2CohortVersion = v2PromptVersion;
+    // Set when the spelled-name policy changed the V2 caller name: stamped into
+    // ai_validation (the version column is varchar(30), full) so the promotion-readiness
+    // audit can leave decoder-modified rows out of the extractor's own cohort.
+    let nameDictationApplied = false;
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -11097,14 +11098,16 @@ const CallRecordingProcessor = {
           // The canonical V2 blob was serialized to ai_extraction_enriched
           // right after extraction — re-persist it (token-fenced, best
           // effort) so blob readers see the spelled name too.
-          // The decoder changed identity the extractor produced, so this row
-          // is its own cohort: the promotion-readiness and replay audits
-          // match ai_extraction_prompt_version exactly, and the recovery-card
-          // stamp below reads the same value.
-          if (!v2CohortVersion.endsWith(NAME_DECODER_VERSION_SUFFIX)) v2CohortVersion += NAME_DECODER_VERSION_SUFFIX;
+          // The decoder changed identity the extractor produced, so the row
+          // carries a cohort marker in ai_validation (merged here; the final
+          // validation write below includes it too).
+          nameDictationApplied = true;
           await db('call_log').where({ id: call.id })
             .where('processing_token', procToken)
-            .update({ ai_extraction_enriched: JSON.stringify(v2Result.extraction), ai_extraction_prompt_version: v2CohortVersion })
+            .update({
+              ai_extraction_enriched: JSON.stringify(v2Result.extraction),
+              ai_validation: db.raw("COALESCE(ai_validation, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ name_dictation: NAME_DICTATION_MARKER })]),
+            })
             .catch((e) => logger.warn(`[call-proc-dictation] enriched-blob re-persist after spelled-name adoption failed: ${e.code || e.name || 'db_error'}`));
         }
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
@@ -11336,7 +11339,7 @@ const CallRecordingProcessor = {
     // ai_extraction_prompt_version), so the audits can match exactly.
     const recoveryPassStamp = {
       extraction_model: v2Result?.extraction?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
-      extraction_prompt_version: v2CohortVersion,
+      extraction_prompt_version: v2PromptVersion,
     };
     // Model + prompt identifies an extractor COHORT, not an individual pass
     // (codex round-18 P2): reprocess the same call on the same extractor with
@@ -22026,6 +22029,8 @@ const CallRecordingProcessor = {
         // the offline audits mirror the live lane (codex #4685 r2 P1).
         on_file_address_validation: knownCaller?.onFileAddressVerdict || null,
         errors: v2Result.errors || null,
+        // Cohort marker (see nameDictationApplied): the audits skip decoder-modified rows.
+        ...(nameDictationApplied ? { name_dictation: NAME_DICTATION_MARKER } : {}),
         generated_at: new Date().toISOString(),
       };
 

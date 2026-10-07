@@ -10,7 +10,7 @@ const {
   applyNameDictationPolicy,
   applyNameDictationToV2Caller,
   sanitizeNameEntries,
-  NAME_DECODER_VERSION_SUFFIX,
+  NAME_DICTATION_MARKER,
   sanitizeEmailCandidates,
   buildDecoderPrompt,
   CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
@@ -280,11 +280,11 @@ describe('applyEmailDictationPolicy — risk-flagged candidates are never adopte
 });
 
 describe('spelled-name decoding', () => {
-  const spellOut = (v) => `Caller: ${v.split('').join('-').toUpperCase()}`;
+  const spellOut = (v, field) => `Caller: my ${field === 'first_name' ? 'first' : 'last'} name is ${v.split('').join('-').toUpperCase()}`;
   const entry = (over = {}) => {
     const spelled = over.spelled_value || 'Orlmeyer';
     return {
-      raw_spoken: spellOut(spelled),
+      raw_spoken: spellOut(spelled, over.field),
       spelled_value: spelled,
       field: 'last_name',
       whose: 'caller',
@@ -321,9 +321,36 @@ describe('spelled-name decoding', () => {
       },
     });
     expect(out.names).toEqual([
-      { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.9 },
-      { raw_spoken: 'T-O-B-I-A-S', spelled_value: 'Tobias', field: 'first_name', whose: 'other', confidence: 1 },
+      { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.9, name_context: false },
+      { raw_spoken: 'T-O-B-I-A-S', spelled_value: 'Tobias', field: 'first_name', whose: 'other', confidence: 1, name_context: false },
     ]);
+  });
+
+  describe('name context (filling an empty name)', () => {
+    const ctx = (turn, raw, spelled = 'Jones', field = 'last_name') => sanitizeNameEntries(
+      [{ raw_spoken: raw, spelled_value: spelled, field, whose: 'caller', confidence: 0.95 }], [turn],
+    )[0]?.name_context;
+
+    test('true right after name wording in the caller turn', () => {
+      expect(ctx('Agent: how do you spell that?\nCaller: my last name is Jones, J-O-N-E-S', 'J-O-N-E-S')).toBe(true);
+      expect(ctx('Caller: it is spelled J O N E S', 'J O N E S')).toBe(true);
+    });
+    test('false with no name wording, or in an email context', () => {
+      expect(ctx('Caller: sure, J-O-N-E-S', 'J-O-N-E-S')).toBe(false);
+      expect(ctx('Caller: my email is J-O-N-E-S at gmail dot com', 'J-O-N-E-S')).toBe(false);
+      expect(ctx('Caller: my name is Bob. The email is, J-O-N-E-S, at example dot com', 'J-O-N-E-S')).toBe(false);
+      expect(ctx('Caller: my name is Bob.\nCaller: ok? J-O-N-E-S', 'J-O-N-E-S')).toBe(false);
+    });
+    test('an empty name is NOT filled from a spelling with no name context (the J-O-N-E-S email case)', () => {
+      const names = sanitizeNameEntries(
+        [{ raw_spoken: 'J-O-N-E-S', spelled_value: 'Jones', field: 'last_name', whose: 'caller', confidence: 0.95 }],
+        ['Caller: my email is J-O-N-E-S at example dot com'],
+      );
+      const d = { emails: [], addresses: [], names };
+      expect(applyNameDictationPolicy({ current: { first_name: 'Quentrell', last_name: null }, dictation: d })).toEqual({});
+      // ...but a near-match correction of an existing name keeps today's rule.
+      expect(applyNameDictationPolicy({ current: { last_name: 'Jonas' }, dictation: d })).toEqual({ last_name: 'Jones' });
+    });
   });
 
   describe('grounding', () => {
@@ -493,12 +520,36 @@ describe('spelled-name decoding', () => {
       expect(caller).toEqual({ first_name: 'Jon', last_name: null, name_full: 'Jane Smith' });
     });
 
-    test('exports the cohort suffix', () => {
-      expect(NAME_DECODER_VERSION_SUFFIX).toBe('+namedec1');
+    test('exports a JSON cohort marker', () => {
+      expect(NAME_DICTATION_MARKER).toEqual({ applied: true, version: 'namedec1' });
     });
 
     test('tolerates a missing caller', () => {
       expect(applyNameDictationToV2Caller(null, dictation(entry()))).toEqual({});
     });
+  });
+});
+
+describe('processor wiring — decoder-modified rows carry a JSON cohort marker', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  test('the marker rides the blob re-persist and the final validation payload; the version column is untouched', () => {
+    const flagAt = src.indexOf('nameDictationApplied = true;');
+    expect(flagAt).toBeGreaterThan(0);
+    const persist = src.slice(flagAt, flagAt + 700);
+    expect(persist).toMatch(/ai_extraction_enriched: JSON\.stringify\(v2Result\.extraction\)/);
+    expect(persist).toMatch(/\{ name_dictation: NAME_DICTATION_MARKER \}/);
+    expect(persist).not.toMatch(/ai_extraction_prompt_version/);
+    expect(src).toMatch(/\.\.\.\(nameDictationApplied \? \{ name_dictation: NAME_DICTATION_MARKER \} : \{\}\)/);
+  });
+});
+
+describe('promotion-readiness audit leaves marked rows out of the cohort', () => {
+  const knex = require('knex')({ client: 'pg' });
+  const { DECODER_MODIFIED_EXCLUSION_SQL } = require('../scripts/v2-promotion-readiness');
+
+  test('the exclusion reads the exact JSON path the processor writes', () => {
+    expect(DECODER_MODIFIED_EXCLUSION_SQL).toContain("ai_validation->'name_dictation'->>'applied'");
+    const sql = knex('call_log').whereRaw(DECODER_MODIFIED_EXCLUSION_SQL).toSQL().sql;
+    expect(sql).toMatch(/COALESCE\(ai_validation->'name_dictation'->>'applied', ''\) <> 'true'/);
   });
 });
