@@ -12,7 +12,7 @@ const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
 const { toE164, isValidNanpNumber } = require('../../utils/phone');
 const { cleanValidEmailOrNull } = require('../../utils/intake-normalize');
-const { parseRawAddress, UNIT_DESIGNATORS } = require('../../utils/address-normalizer');
+const { parseRawAddress, UNIT_DESIGNATORS, STREET_SUFFIX_ALIASES } = require('../../utils/address-normalizer');
 const leadAttribution = require('../lead-attribution');
 const { scopeToProspects, unlessHandledSince } = require('../lead-statuses');
 
@@ -757,6 +757,9 @@ function cityIsReal(city) {
   // is the tail of the street, not a city.
   const rest = DIRECTIONAL_TOKENS.has(tokens[0]) ? tokens.slice(1) : tokens;
   if (rest.length === 0) return false;
+  // A street suffix the parser left behind a first suffix ("123 Main Street
+  // Circle" parses to city "Circle") is street text, not a city.
+  if (rest.length === 1 && Object.prototype.hasOwnProperty.call(STREET_SUFFIX_ALIASES, rest[0])) return false;
   return !UNIT_DESIGNATORS.has(rest[0]);
 }
 
@@ -798,19 +801,26 @@ function storedIsOneLine(lead) {
   if (parts.zip && zipMatchesColumn(parts.zip, lead.zip)) return true;
   // The city column's text at the tail of the line, with or without a comma
   // ("21 Oak Ave, Sarasota", "123 Broadway Sarasota"), is a locality too.
-  const city = String(lead.city || '').trim().toLowerCase();
+  return endsWithCity(stored, lead.city);
+}
+
+// Is the city column's text the tail of the line, as a comma segment or as
+// the last words ("21 Oak Ave, Sarasota", "123 Broadway Sarasota")?
+function endsWithCity(text, cityColumn) {
+  const city = String(cityColumn || '').trim().toLowerCase();
   if (!city) return false;
-  if (stored.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city)) return true;
-  const tail = stored.toLowerCase().replace(/[.,]+$/, '');
+  const line = String(text || '').trim();
+  if (line.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city)) return true;
+  const tail = line.toLowerCase().replace(/[.,]+$/, '');
   return tail.endsWith(` ${city}`);
 }
 
-// Does a given `address` text carry a locality (state, 5-digit ZIP, or a real
-// city)? Such text is refused on a bare row: stored as a street it would
+// Does a given `address` text carry a locality (state, 5-digit ZIP, a real
+// city, or the lead's own city as its tail)? Such text is refused on a bare row: stored as a street it would
 // contradict the city and zip columns, and the bar never splits it.
-function carriesLocality(text) {
+function carriesLocality(text, cityColumn) {
   const parts = parseRawAddress(text);
-  return /^\d{5}(-\d{4})?$/.test(String(parts.zip || '')) || parsedCarriesLocality(parts, text);
+  return /^\d{5}(-\d{4})?$/.test(String(parts.zip || '')) || parsedCarriesLocality(parts, text) || endsWithCity(text, cityColumn);
 }
 
 // Applies the rule above. Returns { requested } or { error }.
@@ -818,7 +828,9 @@ function resolveLeadAddressRequest(lead, requested) {
   if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested };
   if (storedIsOneLine(lead)) return { error: ONE_LINE_REFUSAL };
   const text = requested.address;
-  if (typeof text === 'string' && text.trim() && carriesLocality(text)) return { error: LOCALITY_REFUSAL };
+  // The city the row will have after this edit: the requested one, else the column.
+  const cityAfter = 'city' in requested ? requested.city : lead.city;
+  if (typeof text === 'string' && text.trim() && carriesLocality(text, cityAfter)) return { error: LOCALITY_REFUSAL };
   return { requested };
 }
 

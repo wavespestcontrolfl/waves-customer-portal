@@ -387,6 +387,20 @@ test('the city column at the tail of a comma-free line is one line; FL before an
   }
 });
 
+test('requested street text ending in the row\'s city (or the city requested with it) is refused', async () => {
+  db.mockImplementation(() => chain({ first: { ...ADDR_LEAD, city: 'Sarasota' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Broadway Sarasota' })).error).toMatch(/street alone/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Broadway, Sarasota' })).error).toMatch(/street alone/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Broadway Bradenton', city: 'Bradenton' })).error).toMatch(/street alone/);
+  // A street that merely contains a city-like word elsewhere is fine.
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Sarasota Way' })).changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: '123 Sarasota Way' } });
+});
+
+test('a stored compound-suffix street stays editable', async () => {
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '123 Main Street Circle', city: 'Testville', zip: '34200' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).changes).toEqual({ zip: { from: '34200', to: '34201' } });
+});
+
 test('confirmed phone change does not touch the address columns in the guard', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
   const activities = chain({ insert: undefined });
@@ -462,7 +476,7 @@ test('a lead whose address is stored as one line refuses every address, city or 
 test('bare row: a plain street is written as typed, never parsed', async () => {
   const leads = chain({ first: ADDR_LEAD });
   db.mockReturnValue(leads);
-  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '123 Main St N', '123 Main St North', '123 Main St North Apt 4', '123 Main St N Apt 4', '12 Oak Avenue']) {
+  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '123 Main St N', '123 Main St North', '123 Main St North Apt 4', '123 Main St N Apt 4', '123 Main Street Circle', '123 Main St Cir', '12 Oak Avenue']) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
     expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
   }
