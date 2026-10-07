@@ -99,11 +99,23 @@ describe('the atrazine option data (no database)', () => {
     expect(singleTurfFamily(text)).toBeNull();
   });
 
-  test('the closeout list names the atrazine bag for St. Augustine and centipede only, and no other product', () => {
-    expect(allowedTurfFor(ATRAZINE)).toEqual(['st_augustine', 'centipede']);
-    expect(allowedTurfFor('lesco atrazine 1.05% 18-0-10 56% polyplus opti45 2%fe 0.5%mn 0.5%mg as mop')).toEqual(['st_augustine', 'centipede']);
-    expect(allowedTurfFor(F24)).toBeNull();
-    expect(JSON.parse(migration.PROTOCOL_ROW.gates).turfOnly).toEqual(allowedTurfFor(ATRAZINE));
+  test('the turf restriction is read from the catalog row\'s own lists; the name map is only the fallback', () => {
+    const lists = (labeled, excluded, name = 'Renamed bag') => ({ name, labeled_turf_species: labeled, excluded_turf_species: excluded });
+    const atrazineRow = lists(['st_augustine', 'centipede'], ['bermuda', 'zoysia', 'bahia', 'fescue'], 'Whatever inventory renamed it');
+    expect(allowedTurfFor(atrazineRow)).toEqual(['st_augustine', 'centipede']);
+    expect(allowedTurfFor(lists(JSON.stringify(['st_augustine', 'centipede']), JSON.stringify(['bermuda', 'zoysia', 'bahia'])))).toEqual(['st_augustine', 'centipede']);
+    // Merely labeled for several grasses, or excluding one: not turf-only, never refused.
+    expect(allowedTurfFor(lists(['st_augustine', 'bermuda', 'zoysia', 'centipede'], ['bahia']))).toBeNull();
+    expect(allowedTurfFor(lists(['st_augustine', 'centipede'], ['bahia']))).toBeNull();
+    expect(allowedTurfFor(lists([], []))).toBeNull();
+    expect(allowedTurfFor(lists(null, null))).toBeNull();
+    // Empty lists: the name map still names the atrazine bag; any other name is not restricted.
+    expect(allowedTurfFor(lists([], [], ATRAZINE))).toEqual(['st_augustine', 'centipede']);
+    expect(allowedTurfFor({ name: 'lesco atrazine 1.05% 18-0-10 56% polyplus opti45 2%fe 0.5%mn 0.5%mg as mop' })).toEqual(['st_augustine', 'centipede']);
+    expect(allowedTurfFor({ name: F24 })).toBeNull();
+    expect(JSON.parse(migration.PROTOCOL_ROW.gates).turfOnly).toEqual(allowedTurfFor({ name: ATRAZINE }));
+    // What 20261007160000 writes to the catalog row is itself a turf-only row.
+    expect(allowedTurfFor({ name: 'x', labeled_turf_species: JSON.parse(migration.PRODUCT.labeled_turf_species), excluded_turf_species: JSON.parse(migration.PRODUCT.excluded_turf_species) })).toEqual(['st_augustine', 'centipede']);
   });
 });
 
@@ -381,6 +393,36 @@ describeDb('the atrazine option through PostgreSQL', () => {
       const bad = await visitOn('bahia', 'bahia', '2026-09-08');
       expect(await turfRestrictedProductsBlock(knex, bad, [{ productId: f24.id }])).toBeNull();
       expect(await turfRestrictedProductsBlock(knex, bad, [])).toBeNull();
+    });
+
+    test('an inventory rename of the bag changes nothing: still refused on bahia, mixed and unknown, still allowed on St. Augustine and centipede', async () => {
+      const row = await knex('products_catalog').where({ name: ATRAZINE }).first();
+      await knex('products_catalog').where({ id: row.id }).update({ name: 'Renamed in inventory 50 lb bag' });
+      try {
+        for (const [grass, track] of [['bahia', 'bahia'], ['mixed', null], ['unknown', null], ['St. Augustine / Bahia mix', null]]) {
+          const scheduled = await visitOn(grass, track, '2026-02-12');
+          expect(await turfRestrictedProductsBlock(knex, scheduled, [{ productId: row.id }])).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed', productIds: [String(row.id)] });
+        }
+        for (const [grass, track] of [['st_augustine', 'st_augustine'], ['centipede', null]]) {
+          expect(await turfRestrictedProductsBlock(knex, await visitOn(grass, track, '2026-02-12'), [{ productId: row.id }])).toBeNull();
+        }
+      } finally {
+        await knex('products_catalog').where({ id: row.id }).update({ name: ATRAZINE });
+      }
+    });
+
+    test('the plan reads the same catalog lists: with the staged row\'s turfOnly gate stripped, a mixed lawn is still blocked and St. Augustine still sized', async () => {
+      const staged = await knex('lawn_protocol_products').where({ product_name: ATRAZINE }).first();
+      const { turfOnly: ignored, ...withoutGate } = staged.gates;
+      await knex('lawn_protocol_products').where({ id: staged.id }).update({ gates: JSON.stringify(withoutGate) });
+      try {
+        const mixed = await plan(await visit('mixed', null));
+        expect(blockCodes(mixed)).toContain('lawn_v13_turf_species');
+        expect(item(mixed, ATRAZINE).mix).toBeNull();
+        expect(item(await plan(await visit('st_augustine', 'st_augustine')), ATRAZINE).mix).toMatchObject({ amount: 40 });
+      } finally {
+        await knex('lawn_protocol_products').where({ id: staged.id }).update({ gates: JSON.stringify(staged.gates) });
+      }
     });
 
     test('the check does not depend on GATE_LAWN_V13', async () => {

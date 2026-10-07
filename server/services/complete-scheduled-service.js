@@ -1902,8 +1902,8 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
 async function turfRestrictedProductsBlock(knex, svc, products = []) {
   const ids = [...new Set((Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean).map(String))];
   if (!ids.length) return null;
-  const rows = await savepointRead(knex, (k) => k('products_catalog').whereIn('id', ids).select('id', 'name'));
-  const limited = rows.map((row) => ({ ...row, allowed: allowedTurfFor(row.name) })).filter((row) => row.allowed);
+  const rows = await savepointRead(knex, (k) => k('products_catalog').whereIn('id', ids).select('id', 'name', 'labeled_turf_species', 'excluded_turf_species'));
+  const limited = rows.map((row) => ({ ...row, allowed: allowedTurfFor(row) })).filter((row) => row.allowed);
   if (!limited.length) return null;
   const { species } = await savepointRead(knex, (k) => loadV13Turf(k, svc));
   const refused = limited.filter((row) => !row.allowed.includes(species));

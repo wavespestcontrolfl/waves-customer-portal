@@ -14,7 +14,7 @@ const {
 const { describeInventoryConversion } = require('./inventory-units');
 const { resolveAddressCounty } = require('../config/address-county');
 const { addressKey } = require('./customer-property-address-keys');
-const { singleTurfFamily } = require('./lawn-turf-restrictions');
+const { singleTurfFamily, allowedTurfFor } = require('./lawn-turf-restrictions');
 const { grassConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
 const { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches } = require('./lawn-completion-defaults');
 
@@ -586,8 +586,9 @@ async function loadV13Turf(knex, visit) {
   return { species: v13TurfSpecies(profile, customer?.lawn_type) };
 }
 
-function v13TurfBlocked(row, turf) {
-  const allowed = row?.gates?.turfOnly;
+function v13TurfBlocked(row, turf, product = null) {
+  // The catalog row's own turf lists (by product id) first, then the staged row's turfOnly gate.
+  const allowed = (product && allowedTurfFor(product)) || row?.gates?.turfOnly;
   return Boolean(turf) && Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(turf.species);
 }
 
@@ -597,7 +598,7 @@ function v13TurfBlocked(row, turf) {
 function v13ReplaceDefaultBag(items, rows, turf = null) {
   const rowOf = (item) => (item.product ? rows.get(String(item.product.id)) : null);
   const replaced = new Set(items
-    .filter((item) => item.selected && rowOf(item)?.gates?.replacesProduct && !v13TurfBlocked(rowOf(item), turf))
+    .filter((item) => item.selected && rowOf(item)?.gates?.replacesProduct && !v13TurfBlocked(rowOf(item), turf, item.product))
     .map((item) => normalizeText(rowOf(item).gates.replacesProduct)));
   if (!replaced.size) return items;
   return items.map((item) => (item.selected && replaced.has(normalizeText(rowOf(item)?.protocolProductName))
@@ -647,7 +648,7 @@ function v13ApplyAloneBlocks(selectedItems) {
 function v13TurfBlocks(lines, stateOf, turf) {
   return lines.filter((line) => line.selected && line.product && stateOf(line)?.state === 'turf').map((line) => ({
     code: 'lawn_v13_turf_species', severity: 'block', productId: line.product.id, productName: line.product.name,
-    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and ${turf.species ? `the grass on file is ${TURF_LABELS[turf.species] || turf.species}` : (turf.untied ? 'the saved turf profile cannot be tied to this visit\'s property' : (turf.unconfirmed ? 'the grass has not been re-confirmed since the home move' : 'no single allowed grass is on file'))}. No amount is planned. Enter the actual work.`,
+    message: `${line.product.name} is for ${(allowedTurfFor(line.product) || stateOf(line).row.gates.turfOnly).map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and ${turf.species ? `the grass on file is ${TURF_LABELS[turf.species] || turf.species}` : (turf.untied ? 'the saved turf profile cannot be tied to this visit\'s property' : (turf.unconfirmed ? 'the grass has not been re-confirmed since the home move' : 'no single allowed grass is on file'))}. No amount is planned. Enter the actual work.`,
   }));
 }
 
@@ -1374,7 +1375,7 @@ async function getProducts(knex, { strict = false } = {}) {
       'default_rate_per_1000', 'rate_unit',
       'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
-      'label_verified_at', 'application_method', 'formulation',
+      'label_verified_at', 'application_method', 'formulation', 'labeled_turf_species', 'excluded_turf_species',
       'active', 'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
     ))
     .catch((err) => { if (strict) throw err; return []; });
@@ -1656,7 +1657,7 @@ function planLineFields(item) {
 function v13LineState(product, v13Rows, cappedIds = new Set(), turf = null) {
   const row = v13Rows.get(String(product.id)) || null;
   if (!row) return { row, state: 'unavailable' };
-  if (v13TurfBlocked(row, turf)) return { row, state: 'turf' };
+  if (v13TurfBlocked(row, turf, product)) return { row, state: 'turf' };
   if (cappedIds.has(String(product.id))) return { row, state: 'capped' };
   return { row, state: v13RowCalculates(row) ? 'calculate' : 'spot' };
 }
