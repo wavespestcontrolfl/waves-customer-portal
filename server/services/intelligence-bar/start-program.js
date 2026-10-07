@@ -179,11 +179,6 @@ function parsePrices(input) {
   return { monthly, monthlyTotal };
 }
 
-// null = ongoing; otherwise the Schedule screen's finite count (>= 2).
-function validVisitCount(n) {
-  return n == null || (Number.isInteger(n) && n >= 2 && n <= 52);
-}
-
 function parseProgramInput(input) {
   const { validScheduleDate } = require('../../utils/datetime-et');
   const customerId = String(input.customer_id || '').trim().toLowerCase();
@@ -194,9 +189,10 @@ function parseProgramInput(input) {
   if (!tier) return refusal(`tier must be one of ${TIERS.join(', ')}.`);
   const cadence = String(input.cadence || '').trim().toLowerCase();
   if (!CADENCES[cadence]) return refusal(`cadence must be one of ${Object.keys(CADENCES).join(', ')}.`);
-  const visitCount = input.visit_count == null ? null : Number(input.visit_count);
-  if (!validVisitCount(visitCount)) {
-    return refusal('visit_count must be a whole number from 2 to 52, or left out for an ongoing program.');
+  // Ongoing programs only: a finite series beside a monthly bill line that
+  // never ends would keep billing after the last visit.
+  if (input.visit_count != null) {
+    return refusal('start_program starts ongoing programs only; a set number of visits is not supported. Propose again without visit_count, or book a fixed series from the Schedule screen. Nothing was proposed.', 'program_visit_count_refused');
   }
   const prices = parsePrices(input);
   if (prices.error) return prices;
@@ -213,7 +209,7 @@ function parseProgramInput(input) {
   const win = require('./tools').parseTimeWindowStart(input.time_window);
   if (win.error) return refusal(win.error, win.code || 'invalid_appointment_window');
   return {
-    customerId, serviceText, tier, cadence, visitCount, firstDate, start: win.start,
+    customerId, serviceText, tier, cadence, firstDate, start: win.start,
     ...prices, sendTexts: input.send_texts !== false,
   };
 }
@@ -381,6 +377,37 @@ async function firstVisitOverlap(firstDate, window) {
   return facts.sort((a, b) => (a.fact < b.fact ? -1 : a.fact > b.fact ? 1 : 0));
 }
 
+// D3: the Schedule screen's texts. The new-recurring welcome text has no
+// switch on that screen either, so a "no texts" card is refused when the
+// welcome would still go out.
+async function welcomeVerdict(args) {
+  const { isNewRecurringSignupCandidate, WELCOME_DELAY_MINUTES } = require('../new-recurring-welcome-sms');
+  const welcomeCandidate = await isNewRecurringSignupCandidate(args.customerId);
+  if (!args.sendTexts && welcomeCandidate) {
+    return refusal('This customer has never had a recurring service, so booking the program queues the new-customer welcome text. The Schedule screen has no switch for that text, and neither does this tool. Propose again with send_texts on. Nothing was proposed.', 'program_welcome_cannot_skip');
+  }
+  return { welcomeCandidate, delay: WELCOME_DELAY_MINUTES };
+}
+
+// create_appointment's rule: the booking redeems an open inspection-credit
+// offer after commit (account credit this card cannot pin exactly), so a
+// credit-bearing booking is refused. Every offer counts, gate-paused ones
+// included; the 0 rides the version pin, so an offer that appears after the
+// card refuses at commit. Returns { amount: 0 } or { error, code }.
+async function openInspectionCredit(customerId) {
+  let amount;
+  try {
+    const projected = await require('../inspection-credit').projectRedeemableOfferAmount(customerId, { includePaused: true });
+    amount = Number(projected?.amount ?? projected) || 0;
+  } catch {
+    return refusal('Could not verify the customer\'s inspection credit. Book the first visit from the Schedule screen instead. Nothing was proposed.', 'program_inspection_credit');
+  }
+  if (amount > 0) {
+    return refusal(`This customer has $${amount.toFixed(2)} of open inspection-credit offer(s) that booking would redeem, which this card cannot pin. Book the first visit from the Schedule screen. Nothing was proposed.`, 'program_inspection_credit');
+  }
+  return { amount };
+}
+
 /**
  * Everything the card shows and the commit needs, read without writing.
  * Returns { error, code } to refuse, or { plan } for the card and commit.
@@ -425,14 +452,13 @@ async function buildProgramPlan(input) {
   const planSync = await predictPlanSync(customer, catalogRow, args.firstDate, args.cadence);
   if (planSync.error) return planSync;
 
-  // D3: the Schedule screen's texts. The new-recurring welcome text has no
-  // switch on that screen either, so a "no texts" card is refused when the
-  // welcome would still go out.
-  const { isNewRecurringSignupCandidate, WELCOME_DELAY_MINUTES } = require('../new-recurring-welcome-sms');
-  const welcomeCandidate = await isNewRecurringSignupCandidate(args.customerId);
-  if (!args.sendTexts && welcomeCandidate) {
-    return refusal('This customer has never had a recurring service, so booking the program queues the new-customer welcome text. The Schedule screen has no switch for that text, and neither does this tool. Propose again with send_texts on. Nothing was proposed.', 'program_welcome_cannot_skip');
-  }
+  const welcome = await welcomeVerdict(args);
+  if (welcome.error) return welcome;
+  const { welcomeCandidate } = welcome;
+  const credit = await openInspectionCredit(args.customerId);
+  if (credit.error) return credit;
+  const inspectionCredit = credit.amount;
+
   // update_customer's implied-lane rule (#3140): a write that turns a row
   // into an inferred monthly member stamps the lane. A customer this tool
   // accepts is already on the monthly lane, so the rule never fires here; if
@@ -448,8 +474,8 @@ async function buildProgramPlan(input) {
     plan: {
       customer, customerId: args.customerId, catalogRow, family, tier: args.tier, tierBefore,
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
-      cadence: args.cadence, visitCount: args.visitCount, firstDate: args.firstDate, ...window,
-      tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: WELCOME_DELAY_MINUTES,
+      cadence: args.cadence, firstDate: args.firstDate, ...window,
+      tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
       bill, reprice, ledgerPin, overlap, planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
@@ -457,8 +483,8 @@ async function buildProgramPlan(input) {
       // before anything is written.
       version: crypto.createHash('sha256').update(JSON.stringify([
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
-        customer.payer_id || null, catalogRow.id, family, args.tier, args.cadence, args.visitCount, args.firstDate,
-        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds,
+        customer.payer_id || null, catalogRow.id, family, args.tier, args.cadence, args.firstDate,
+        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit,
         overlap.map((o) => o.fact), planSync.updates,
       ])).digest('hex'),
     },
@@ -472,9 +498,7 @@ function cardLines(plan) {
   const lines = [];
   const add = (kind, text) => lines.push({ kind, text });
   const when = `${dateLabel(plan.firstDate)}, ${clockLabel(plan.windowStart)}-${clockLabel(plan.windowEnd)}`;
-  const series = plan.visitCount
-    ? `${plan.visitCount} visits`
-    : `ongoing, no end date (the first ${ONGOING_PRESEED} visits are booked now, as on the Schedule screen)`;
+  const series = `ongoing, no end date (the first ${ONGOING_PRESEED} visits are booked now, as on the Schedule screen)`;
   add('operational', `Series: ${plan.catalogRow.name}, ${CADENCES[plan.cadence]}, ${series}`);
   add('operational', `First visit: ${when}, technician ${plan.tech.name}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
@@ -533,7 +557,6 @@ function previewFromPlan(plan) {
     customer_name: customerName(plan.customer),
     service: plan.catalogRow.name,
     cadence: plan.cadence,
-    visit_count: plan.visitCount,
     first_visit: { date: plan.firstDate, start: plan.windowStart, end: plan.windowEnd, technician: plan.tech.name },
     tier: { before: plan.tierBefore, after: plan.tier },
     bill: {
@@ -544,7 +567,9 @@ function previewFromPlan(plan) {
     ...(plan.overlap.length ? { slot_overlap: { with: plan.overlap.map(({ id: _id, fact: _fact, ...shown }) => shown) } } : {}),
     plan_sync: plan.planSyncUpdates,
     send_texts: plan.sendTexts,
-    notifies_customer: plan.sendTexts || plan.welcomeCandidate,
+    // The handler registers the 72 h / 24 h reminder rows for every visit it
+    // books, whatever send_texts says, so the customer is always contacted.
+    notifies_customer: true,
     card_lines: lines,
     _version: plan.version,
     note: 'PREVIEW ONLY: nothing was booked or changed. The operator confirms from the card.',
@@ -572,8 +597,7 @@ function scheduleBody(plan) {
     createInvoice: true,
     isRecurring: true,
     recurringPattern: plan.cadence,
-    recurringCount: plan.visitCount ?? undefined,
-    recurringOngoing: plan.visitCount == null,
+    recurringOngoing: true,
     skipWeekends: false,
     sendConfirmationSms: plan.sendTexts,
     sendConfirmation: plan.sendTexts,
@@ -705,7 +729,7 @@ async function commitProgram(input, actionContext) {
   // Fewer visits than the card promised (blackout days, closed weekdays):
   // the program is not what was approved, so the tier and bill stay as they
   // are and the receipt names the shortfall.
-  const planned = plan.visitCount ?? ONGOING_PRESEED;
+  const planned = ONGOING_PRESEED;
   const createdCount = Number(created.recurringCreated) || 0;
   if (createdCount < planned) {
     const state = await customerStateAfterBooking(plan.customerId);
@@ -755,14 +779,13 @@ Before you call it:
 - If the customer has other monthly services, ask the operator once per service: "Also apply <tier> to <service>? Today $X. If yes, what is the new monthly price?" Put only the yes answers in reprice_lines with the price the operator gave. Never work out a discounted price yourself.
 - send_texts defaults to true (the Schedule screen's booking confirmation). Set it false only when the operator says not to text.
 - technician and time_window are required. Route optimization is NOT part of this tool; after it succeeds, offer optimize_tech_route as a second card.
-Refuses: a customer who is not on a monthly plan bill, more than one saved address, an open estimate for the service (mark the estimate accepted on the estimate page), a service already on the bill or already running as a series, and a monthly_total below the other services. The first call returns a PREVIEW; nothing changes until the operator confirms the card.`,
+Ongoing programs only (no visit count). Refuses: a customer who is not on a monthly plan bill, open inspection credit (book from the Schedule screen), more than one saved address, an open estimate for the service (mark the estimate accepted on the estimate page), a service already on the bill or already running as a series, and a monthly_total below the other services. The first call returns a PREVIEW; nothing changes until the operator confirms the card.`,
   input_schema: {
     type: 'object',
     properties: {
       customer_id: { type: 'string', format: 'uuid', description: 'The customer the program is for' },
       service: { type: 'string', description: 'Catalog service name for the program, for example "Lawn Care"' },
       cadence: { type: 'string', enum: Object.keys(CADENCES), description: 'How often the visits repeat' },
-      visit_count: { type: 'integer', description: 'Number of visits; leave out for an ongoing program (the Schedule screen books the first 4)' },
       monthly: { type: 'number', description: 'The new service\'s monthly price, as the operator stated it' },
       monthly_total: { type: 'number', description: 'Instead of monthly: the new WHOLE monthly bill the operator stated' },
       tier: { type: 'string', enum: TIERS, description: 'The WaveGuard tier to set' },

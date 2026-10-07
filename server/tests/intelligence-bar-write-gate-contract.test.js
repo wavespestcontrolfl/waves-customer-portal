@@ -858,6 +858,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // intelligence-bar-start-program.test.js).
     const overlapProbe = toolName === 'start_program'
       ? jest.spyOn(require('../services/scheduling/window-rules'), 'probeSlotOverlap').mockResolvedValue([]) : null;
+    const creditProbe = toolName === 'start_program'
+      ? jest.spyOn(require('../services/inspection-credit'), 'projectRedeemableOfferAmount').mockResolvedValue(0) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -885,6 +887,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       overlapProbe?.mockRestore();
+      creditProbe?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {

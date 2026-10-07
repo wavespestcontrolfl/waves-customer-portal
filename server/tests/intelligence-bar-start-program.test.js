@@ -25,6 +25,7 @@ const Existing = require('../services/waveguard-existing-services');
 const Sync = require('../services/self-booking-plan-sync');
 const WindowRules = require('../services/scheduling/window-rules');
 const DatetimeEt = require('../utils/datetime-et');
+const InspectionCredit = require('../services/inspection-credit');
 const { createScheduleBooking } = require('../routes/admin-schedule');
 const { executeCustomerLifecycleTool, CUSTOMER_LIFECYCLE_TOOLS } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { buildContract } = require('../services/intelligence-bar/authorization-contract');
@@ -112,6 +113,7 @@ beforeEach(() => {
     { id: 'series-pest', service_type: 'General Pest Control', service_key: 'pest_general_quarterly', scheduled_date: '2099-02-01', is_recurring: true, status: 'pending' },
   ]);
   jest.spyOn(WindowRules, 'probeSlotOverlap').mockResolvedValue([]);
+  jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockResolvedValue(0);
   createScheduleBooking.mockReset();
 });
 
@@ -210,7 +212,15 @@ describe('send_texts (owner D3)', () => {
   test('off: the card says no confirmation goes out, and the booking asks for none', async () => {
     const preview = await run({ ...BASE_INPUT, send_texts: false });
     expect(lines(preview, 'comms')[0]).toBe('Texts: no booking confirmation is sent (send texts is off)');
-    expect(preview.notifies_customer).toBe(false);
+    // Reminder rows are registered for every booked visit, so the customer
+    // is still contacted and the card keeps its contact warning.
+    expect(preview.notifies_customer).toBe(true);
+    expect(lines(preview, 'comms')).toContain('Texts: visit reminders before each visit, set up as the Schedule screen sets them up');
+    const contract = buildContract({
+      toolName: 'start_program', params: BASE_INPUT, displayParams: { customer: preview.customer_name }, preview,
+    });
+    expect(contract.notifies_customer).toBe(true);
+    expect(contract.effects.map((e) => e.label)).toContain('Customer will be contacted: the texts listed on this card');
     const { scheduleBody } = require('../services/intelligence-bar/start-program')._test;
     const built = await require('../services/intelligence-bar/start-program')._test.buildProgramPlan({ ...BASE_INPUT, send_texts: false });
     expect(scheduleBody(built.plan)).toMatchObject({ sendConfirmationSms: false, sendConfirmation: false });
@@ -246,6 +256,18 @@ describe('refusals', () => {
     expect(estimateCalls).toContainEqual({ table: 'estimates', method: 'whereNull', args: ['archived_at'] });
     const statuses = estimateCalls.find((c) => c.method === 'whereIn').args[1];
     expect(statuses).toEqual(expect.arrayContaining(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']));
+  });
+
+  test('open inspection credit: refused, book from the Schedule screen', async () => {
+    InspectionCredit.projectRedeemableOfferAmount.mockResolvedValue(25);
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_inspection_credit');
+    expect(result.error).toContain('Book the first visit from the Schedule screen');
+    expect(InspectionCredit.projectRedeemableOfferAmount).toHaveBeenCalledWith(CUSTOMER_ID, { includePaused: true });
+  });
+
+  test('a fixed visit count is refused: ongoing programs only', async () => {
+    expect(await run({ ...BASE_INPUT, visit_count: 12 })).toMatchObject({ code: 'program_visit_count_refused' });
   });
 
   test('a one-time catalog service cannot start a program', async () => {
@@ -412,6 +434,14 @@ describe('commit', () => {
     expect(preview.slot_overlap.with).toEqual([{ customer: 'Pat Sample', service: 'Pest Control', window: '9:00 AM-10:00 AM' }]);
     WindowRules.probeSlotOverlap.mockResolvedValue([existing, { id: 'visit-10', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Lawn Care' }]);
     const result = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('an inspection credit that appears after the card refuses with preview_changed', async () => {
+    const version = await approvedVersion();
+    InspectionCredit.projectRedeemableOfferAmount.mockResolvedValue(25);
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result.preview_changed).toBe(true);
     expect(createScheduleBooking).not.toHaveBeenCalled();
   });
