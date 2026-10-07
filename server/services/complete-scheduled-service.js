@@ -1933,7 +1933,8 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
 // application-limits reader, scoped to the treated property and leaving this visit's own ledger
 // rows out (a retry never counts itself). Lawn visits under GATE_LAWN_V13 only: the caps are v13
 // recipe rules. A failed read never blocks a closeout (the savepoint keeps the transaction usable).
-// Returns the first hard block as a 422 body, or null.
+// Returns the first hard block as a 422 body, or null. A limits read that fails is NOT a pass: it
+// returns a 503 'application_limit_check_unavailable' body (see applicationLimitBlockStatus).
 //
 // `lock: true` (the closeout's record transaction, right before the compliance-ledger rows are
 // written) first takes one transaction-scoped advisory lock per property + product + year, in
@@ -1941,6 +1942,9 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
 // second reads the first's committed ledger rows and is refused. The lock key is also the key
 // style of the other closeout locks (hashtextextended of a text key).
 const HARD_COUNT_LIMIT_TYPES = new Set(['annual_max_apps', 'min_interval_days']);
+const APPLICATION_LIMIT_UNAVAILABLE_CODE = 'application_limit_check_unavailable';
+// 503 (retryable) when the limits could not be read, 422 when a limit is reached.
+const applicationLimitBlockStatus = (payload) => (payload && payload.code === APPLICATION_LIMIT_UNAVAILABLE_CODE ? 503 : 422);
 function applicationLimitLockKey(svc, productId, serviceDate) {
   const day = serviceDate || svc.scheduled_date || etDateString();
   const year = (day instanceof Date ? etDateString(day) : String(day)).slice(0, 4);
@@ -1966,8 +1970,15 @@ async function submittedProductLimitBlockPayload({ svc, products = [], serviceDa
         excludeScheduledServiceId: svc.id,
       }));
     } catch (err) {
-      logger.warn('completion application limits: read failed, not blocking', { serviceId: svc.id, productId, error: err?.message });
-      continue;
+      // Fail CLOSED, like the v13 planner: a limit that cannot be read cannot be passed. The
+      // savepoint has already rolled the failed read back, so the caller's transaction is usable
+      // (it rolls the completion back); the attempt is marked failed and the tech retries.
+      logger.warn('completion application limits: read failed, refusing the closeout (retryable)', { serviceId: svc.id, productId, error: err?.message });
+      return {
+        error: 'Could not check product limits — try again.',
+        code: APPLICATION_LIMIT_UNAVAILABLE_CODE,
+        productId,
+      };
     }
     const hard = (result.blocks || []).find((b) => b.matchType === 'product' && HARD_COUNT_LIMIT_TYPES.has(b.type));
     if (!hard) continue;
@@ -4561,7 +4572,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           new Error(limitBlock.code),
           db,
         );
-        return ({ status: 422, body: limitBlock });
+        return ({ status: applicationLimitBlockStatus(limitBlock), body: limitBlock });
       }
     }
 
@@ -7885,7 +7896,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               database: trx,
               lock: true,
             });
-            if (raced) throw Object.assign(new Error(raced.error), { code: 'application_limit_reached', isOperational: true, limitBlock: raced });
+            if (raced) throw Object.assign(new Error(raced.error), { code: raced.code, isOperational: true, limitBlock: raced });
           }
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
@@ -8390,9 +8401,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             code: 'issued_visit_identity_changed',
           } });
         }
-        if (err && err.code === 'application_limit_reached' && err.limitBlock) {
+        if (err && err.limitBlock && (err.code === 'application_limit_reached' || err.code === APPLICATION_LIMIT_UNAVAILABLE_CODE)) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
-          return ({ status: 422, body: err.limitBlock });
+          return ({ status: applicationLimitBlockStatus(err.limitBlock), body: err.limitBlock });
         }
         if (err && err.code === 'project_required_completion' && issuedInvoiceCloseout) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
@@ -15401,6 +15412,7 @@ module.exports = {
   internalOnlyProductsBlockPayload,
   submittedProductLimitBlockPayload,
   applicationLimitLockKey,
+  applicationLimitBlockStatus,
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,

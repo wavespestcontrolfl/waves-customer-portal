@@ -31,7 +31,7 @@ jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(
 const db = require('../models/db');
 const attempts = require('../services/completion-attempts');
 const limits = require('../services/application-limits');
-const { completeScheduledService, submittedProductLimitBlockPayload } = require('../services/complete-scheduled-service');
+const { completeScheduledService, submittedProductLimitBlockPayload, applicationLimitBlockStatus } = require('../services/complete-scheduled-service');
 const { etDateString } = require('../utils/datetime-et');
 const completionObservationCatalog = require('../../shared/service-completion-observations.json');
 
@@ -127,8 +127,21 @@ describe('closeout: submitted products against hard count limits', () => {
     expect(checkLimits).not.toHaveBeenCalled();
   });
 
-  test('a failed limits read never blocks the closeout', async () => {
+  test('a failed limits read fails closed: a retryable 503, the attempt marked failed, nothing written', async () => {
     checkLimits.mockRejectedValue(new Error('read failed'));
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: [applied(CELSIUS_ID)], database: db })).toBeNull();
+    expect(await submittedProductLimitBlockPayload({ svc: service, products: [applied(CELSIUS_ID)], database: db }))
+      .toMatchObject({ code: 'application_limit_check_unavailable', productId: CELSIUS_ID, error: 'Could not check product limits — try again.' });
+    const result = await complete([applied(CELSIUS_ID)]);
+    expect(result).toMatchObject({ status: 503, body: { code: 'application_limit_check_unavailable' } });
+    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'fixture-attempt' }),
+      expect.objectContaining({ message: 'application_limit_check_unavailable' }),
+      db,
+    );
+  });
+
+  test('a reached limit stays a 422; only an unreadable limit is a 503', () => {
+    expect(applicationLimitBlockStatus({ code: 'application_limit_reached' })).toBe(422);
+    expect(applicationLimitBlockStatus({ code: 'application_limit_check_unavailable' })).toBe(503);
   });
 });

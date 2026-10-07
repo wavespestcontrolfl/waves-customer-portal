@@ -4,7 +4,7 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261007170000_lawn_v13_count_caps');
 const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps_wording');
-const { submittedProductLimitBlockPayload } = require('../services/complete-scheduled-service');
+const { submittedProductLimitBlockPayload, applicationLimitBlockStatus } = require('../services/complete-scheduled-service');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
@@ -377,6 +377,28 @@ describeDb('v13 count caps through PostgreSQL', () => {
           closeout(visitB, visitA.customer_id, CELSIUS, { lock: true }),
         ]);
         expect(results.map((r) => r.status)).toEqual([200, 200]);
+      });
+
+      test('an unreadable history (a SQL error inside the locked transaction) fails closed: 503 code, the savepoint keeps the transaction usable, rolling back leaves no ledger row', async () => {
+        const { visitA } = await setup(CELSIUS, ['2026-02-02']);
+        const limitsModule = require('../services/application-limits');
+        const spy = jest.spyOn(limitsModule, 'checkLimits').mockImplementation(async (customerId, productId, date, k) => k.raw('SELECT * FROM table_that_does_not_exist'));
+        const trx = await knex.transaction();
+        try {
+          const unavailable = await submittedProductLimitBlockPayload({
+            svc: visitA, products: [{ productId: catalog[CELSIUS].id }], serviceDate: '2026-05-12', database: trx, lock: true,
+          });
+          expect(unavailable).toMatchObject({ code: 'application_limit_check_unavailable', productId: catalog[CELSIUS].id });
+          expect(applicationLimitBlockStatus(unavailable)).toBe(503);
+          // The failed read was rolled back to its savepoint: the transaction is still usable.
+          await expect(trx.raw('SELECT 1 AS ok')).resolves.toBeTruthy();
+        } finally {
+          spy.mockRestore();
+          await trx.rollback();
+        }
+        expect(await knex('property_application_history').where({ customer_id: visitA.customer_id, product_id: catalog[CELSIUS].id }).count('* as n').first()).toMatchObject({ n: '1' });
+        // With the read healthy again the same closeout is judged normally (1 prior: allowed).
+        expect(await check(visitA, CELSIUS)).toBeNull();
       });
 
       test('lock keys differ by property, product and year', () => {
