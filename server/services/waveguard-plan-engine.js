@@ -1588,9 +1588,10 @@ function planLineFields(item) {
 //   capped:      a hard application limit (annual cap, interval, blackout) is reached;
 //   spot:        a spot or label-rate row, no quantity (enter the area and amount used);
 //   calculate:   a whole-lawn row that states a rate or a nutrient target.
-function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {}) {
+function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {}, item = null) {
   const row = v13Rows.get(String(product.id)) || null;
   if (!row) return { row, state: 'unavailable' };
+  if (v13NonDefaultBase(item, row)) return { row, state: 'not_default' };
   if (v13NorthPortHold(row, gateContext.municipality)) return { row, state: 'held' };
   if (cappedIds.has(String(product.id))) return { row, state: 'capped' };
   return { row, state: v13RowCalculates(row) ? 'calculate' : 'spot' };
@@ -1598,6 +1599,22 @@ function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {})
 
 const NORTH_PORT_HOLD_REASON = 'north_port_product_window';
 const CITY_HOLD_KIND = 'city_hold';
+const NOT_DEFAULT_REASON = 'staged_row_not_default';
+const NOT_DEFAULT_KIND = 'not_default';
+
+// A recipe line of the visit's own step (role 'base') whose staged row says it is NOT a default of the window
+// (default_in_plan false). The recipe names the step, the staged window decides whether it applies: July's
+// 0-0-50 on a protocol whose July window is still the scout window (20261007185000 clears the default there).
+// Optional rows (Advion) are conditional lines, never base, and are untouched.
+function v13NonDefaultBase(item, row) {
+  return Boolean(item?.product) && item.role === 'base' && row?.defaultInPlan === false;
+}
+
+// The base lines whose staged row is not a default: not selected, so no default, no amount.
+function suppressNonDefaultBaseProducts(items, v13Rows) {
+  return items.map((item) => (item.product && v13NonDefaultBase(item, v13Rows.get(String(item.product.id)))
+    ? { ...item, selected: false, selectionReason: NOT_DEFAULT_REASON } : item));
+}
 
 // A staged v13 row the city bans for the visit's window (gates.northPortProductWindow) in North
 // Port. The product has no N or P analysis, so the ordinance check cannot see it: the plan holds
@@ -1613,14 +1630,20 @@ function holdNorthPortProducts(items, v13Rows, municipality) {
 }
 
 function v13HoldWarnings(planItems) {
-  return planItems.filter((item) => item.selectionReason === NORTH_PORT_HOLD_REASON && item.product).map((item) => ({
+  const city = planItems.filter((item) => item.selectionReason === NORTH_PORT_HOLD_REASON && item.product).map((item) => ({
     code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
     message: `${item.product.name}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`,
   }));
+  const notDefault = planItems.filter((item) => item.selectionReason === NOT_DEFAULT_REASON && item.product).map((item) => ({
+    code: 'lawn_v13_row_not_default', severity: 'warning', productId: item.product.id, productName: item.product.name,
+    message: `${item.product.name}: this window's protocol row is not a default (the window kept its earlier form), so the plan does not plan it.`,
+  }));
+  return [...city, ...notDefault];
 }
 
 const V13_UNAVAILABLE = {
   held: 'North Port holds this product in the summer until the city confirms, so it is not selected and no amount is planned.',
+  not_default: 'The protocol row for this window is not a default, so the product is not selected and no amount is planned.',
   unavailable: 'No protocol row is linked to this product, so no amount is planned. Enter the actual work.',
   capped: 'An application limit is reached for this product, so no amount is planned.',
 };
@@ -1740,7 +1763,7 @@ function v13LineNotices(planItems, capped, ignoredSubstitutionIds) {
     code: 'lawn_v13_annual_limit', severity: 'block', productId, productName: block.productName, message: block.message,
   })));
   // A product the city holds back has its own warning (v13HoldWarnings); it is not an unlinked line.
-  const warnings = planItems.filter((item) => item.unavailable && item.unavailable.kind !== CITY_HOLD_KIND && item.product).map((item) => ({
+  const warnings = planItems.filter((item) => item.unavailable && item.unavailable.kind !== CITY_HOLD_KIND && item.unavailable.kind !== NOT_DEFAULT_KIND && item.product).map((item) => ({
     code: 'lawn_v13_line_unlinked', severity: 'warning', productId: item.product.id, productName: item.product.name,
     message: `${item.product.name}: no protocol row is linked to this product, so no amount is planned.`,
   }));
@@ -1763,7 +1786,7 @@ function v13ItemFields(line, gateContext, product) {
       ? { note: 'Spot: enter the area treated and the amount used.', reference: v13SpotReference(row, product) }
       : null,
     // A line the plan cannot size at all: say why; the tech enters the actual work.
-    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}) } : null,
+    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}), ...(line.state === 'not_default' ? { kind: NOT_DEFAULT_KIND } : {}) } : null,
   };
 }
 
@@ -1920,7 +1943,7 @@ async function buildPlanForService(serviceId, options = {}) {
     stressFlags,
   });
   // A product the city bans for this visit's window is held back before anything is sized.
-  const candidateItems = holdNorthPortProducts(resolvedItems, v13Rows, resolvedOrdinanceCity);
+  const candidateItems = suppressNonDefaultBaseProducts(holdNorthPortProducts(resolvedItems, v13Rows, resolvedOrdinanceCity), v13Rows);
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
   // A rig the visit names (assignment or explicit request) is the visit's;
@@ -1961,7 +1984,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
-  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, gateContext) : null);
+  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, gateContext, item) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
   // blocks and withholds the selection's quantities (as the tank sheet does).
   const applyAloneBlocks = v13SelectionBlocks(candidateItems, (item) => v13LineOf(item)?.row, gateContext);
@@ -2299,6 +2322,7 @@ module.exports = {
   v13SelectionBlocks,
   v13LineState,
   holdNorthPortProducts,
+  suppressNonDefaultBaseProducts,
   v13NorthPortHold,
   loadVisitCity,
   v13NorthPortReferenceWarnings,

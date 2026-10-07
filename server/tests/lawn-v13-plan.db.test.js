@@ -119,6 +119,47 @@ describeDb('the v13 plan through PostgreSQL', () => {
     });
   });
 
+  // July potash (20261007180000): the recipe's July step names the 0-0-50; the staged window decides whether it applies.
+  describe('the July 0-0-50 follows its staged row (20261007186000)', () => {
+    const SOP = require('../models/migrations/20261007180000_lawn_v13_matrix_adds').SOP;
+    let julyRow;
+    beforeAll(async () => {
+      const [product] = await knex('products_catalog').insert({
+        name: SOP, category: 'fertilizer', product_type: 'fertilizer', default_rate_per_1000: 1, rate_unit: 'lb', analysis_n: 0, analysis_p: 0, analysis_k: 50,
+        label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'lb', active: true,
+      }).returning('*');
+      const staged = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
+      const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 7, window_key: 'jul_v13_inspect_spot', title: 'July', visit_type: 'granular_production_plus_spots' }).returning('*');
+      [julyRow] = await knex('lawn_protocol_products').insert({
+        lawn_protocol_window_id: window.id, product_id: product.id, product_name: SOP, role: 'potassium_nutrition', application_mode: 'broadcast',
+        default_in_plan: true, rate_per_1000: 1, rate_unit: 'lb', gates: JSON.stringify({ targetK2O: '0.5 lb K2O/1000', requiresZeroNP: true }),
+      }).returning('*');
+    });
+    const sopItem = (result) => result.mixCalculator.items.find((item) => item.product?.name === SOP);
+
+    test('a normal July window: the 0-0-50 is planned, 1 lb per 1,000 sq ft on 10,000 sq ft', async () => {
+      setGates();
+      await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: true });
+      const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
+      expect(sopItem(result)).toBeTruthy();
+      expect(sopItem(result).mix.amount).toBeGreaterThan(0);
+    });
+
+    test('a July window that kept its scout form (the row is not a default): the plan does not plan the 0-0-50, and says why', async () => {
+      setGates();
+      await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: false });
+      try {
+        const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
+        expect(sopItem(result)).toBeUndefined();
+        expect(JSON.stringify(result.mixCalculator.items)).not.toContain(SOP);
+        expect(result.propertyGate.warnings.map((warning) => warning.code)).toContain('lawn_v13_row_not_default');
+        expect(codes(result)).not.toContain('lawn_v13_protocol_missing');
+      } finally {
+        await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: true });
+      }
+    });
+  });
+
   test('no staged v13 row: no products, no amounts anywhere in the plan, a block', async () => {
     setGates();
     const staged = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();

@@ -214,6 +214,29 @@ describe('6b. July potash is a 12-visit-plan step: a 9-visit lawn with a July ap
     expect(wholeLawn(twelve.visit)).toEqual([matrix.SOP]);
   });
 
+  test('a base line whose staged row is not a default is not selected and has no amount; conditional lines and default rows are untouched', () => {
+    const catalog = [{ id: 'sop', name: matrix.SOP, aliases: [], default_rate_per_1000: 1, rate_unit: 'lb', analysis_n: 0, analysis_k: 50, cost_per_unit: 1, needs_pricing: false }];
+    const items = engine.resolveProtocolItems(engine.parseProtocolLines(visitFor(7).primary, 'base', { exactName: true }), catalog, {}, {});
+    const sop = items.find((item) => item.product?.id === 'sop');
+    expect(sop.selected).toBe(true);
+    const row = (defaultInPlan) => new Map([['sop', { productId: 'sop', defaultInPlan, applicationMode: 'broadcast', ratePer1000: 1, rateUnit: 'lb', gates: {} }]]);
+    // Default row (the normal 12x July): selected, calculated.
+    const normal = engine.suppressNonDefaultBaseProducts(items, row(true));
+    expect(normal.find((item) => item.product?.id === 'sop').selected).toBe(true);
+    expect(engine.v13LineState(sop.product, row(true), new Set(), {}, sop).state).toBe('calculate');
+    // Not a default (the July window kept its scout form): not selected, state not_default, no quantity.
+    const suppressed = engine.suppressNonDefaultBaseProducts(items, row(false));
+    expect(suppressed.find((item) => item.product?.id === 'sop')).toMatchObject({ selected: false, selectionReason: 'staged_row_not_default' });
+    expect(engine.v13LineState(sop.product, row(false), new Set(), {}, sop).state).toBe('not_default');
+    expect(engine.v13HoldWarnings(suppressed).map((warning) => warning.code)).toEqual(['lawn_v13_row_not_default']);
+    // An optional row is a conditional line, never base: a non-default row does not unselect it.
+    const conditional = { ...sop, role: 'conditional', selected: true };
+    expect(engine.suppressNonDefaultBaseProducts([conditional], row(false))[0].selected).toBe(true);
+    expect(engine.v13LineState(sop.product, row(false), new Set(), {}, conditional).state).toBe('calculate');
+    // A row with no stated default (older fixtures) is not suppressed.
+    expect(engine.suppressNonDefaultBaseProducts(items, new Map([['sop', { productId: 'sop' }]])).find((item) => item.product?.id === 'sop').selected).toBe(true);
+  });
+
   test('a lawn whose plan is not on file keeps the 12x step and the warning says there is no product on the 9x step', () => {
     const unknown = visitForCadence(visitFor(7), null);
     expect(wholeLawn(unknown.visit)).toEqual([matrix.SOP]);
@@ -229,7 +252,7 @@ describe('7. Advion fire ant bait: an optional add-on in April and October (both
     for (const m of [4, 10]) {
       const [line] = lineFor(m, matrix.ADVION);
       expect(line).toMatch(/optional add-on, office prices it/);
-      expect(line).toMatch(/1\.5 lb per acre \(0\.034 lb per 1,000 sq ft\) with a hand spreader, on request only/);
+      expect(line).toMatch(/1\.5 lb per acre \(0\.0344 lb per 1,000 sq ft\) with a hand spreader, on request only/);
       expect(lines(visitFor(m).primary).map(nameOf)).not.toContain(matrix.ADVION);
     }
     for (const m of [1, 2, 3, 5, 6, 7, 8, 9, 11, 12]) expect(lineFor(m, matrix.ADVION)).toEqual([]);
@@ -401,7 +424,12 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
   });
 
   test('the recipe says so, and no v13 line names an oxadiazon product', () => {
-    expect(v13.st_augustine.safety_rules.join(' ')).toMatch(/Ronstar and other oxadiazon products: not for use on home lawns/);
+    const scoped = 'Ronstar / oxadiazon: never on residential home lawns (label: not for use on home lawns); commercial turf per label.';
+    for (const track of TRACKS) {
+      expect(v13[track].safety_rules).toContain(scoped);
+      expect(v13[track].notes).toContain(scoped);
+    }
+    expect(JSON.stringify(v13)).not.toMatch(/Never log them on a lawn visit|Ronstar and other oxadiazon/);
     const lineNames = v13.st_augustine.visits.flatMap((v) => [...lines(v.primary), ...lines(v.secondary)]).filter((l) => l.includes(' — ')).map(nameOf);
     expect(lineNames.filter((n) => prohibited.isProhibitedOnHomeLawns({ name: n }))).toEqual([]);
   });
