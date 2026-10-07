@@ -38,3 +38,12 @@ describe('staffEditLocksVisit', () => {
     expect(staffEditLocksVisit(before(), null)).toBe(false);
   });
 });
+
+describe('staffEditLockPatch (merged by the edit route next to recurringDispatchDuePatch)', () => {
+  const { staffEditLockPatch } = require('../services/auto-dispatch/staff-edit-lock');
+  test('a slot change returns the lock column; anything else returns nothing', () => {
+    expect(staffEditLockPatch(before(), { window_start: '13:00', window_end: '14:00' })).toEqual({ auto_dispatch_locked: true });
+    expect(staffEditLockPatch(before(), { window_start: '09:00', window_end: '10:00' })).toEqual({});
+    expect(staffEditLockPatch(null, { window_start: '13:00' })).toEqual({});
+  });
+});

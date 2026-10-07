@@ -11,7 +11,9 @@
  * re-read) and staff can clear on the auto-dispatch screen. No reschedule_log
  * row is written, so the ~20 readers of that table see no change.
  *
- * Pure: decides from the row before the edit and the update about to be written.
+ * Pure: decides from the locked row before the edit and the update about to be
+ * written. The edit route merges staffEditLockPatch() in its occupancy step, next
+ * to recurringDispatchDuePatch().
  */
 const { toDateStr } = require('./dates');
 
@@ -36,4 +38,10 @@ function staffEditLocksVisit(before, updates) {
   return !landsWithoutWindow;
 }
 
-module.exports = { staffEditLocksVisit };
+// The update patch for the edit route, in the same shape as
+// recurringDispatchDuePatch: the columns to merge into this save.
+function staffEditLockPatch(row, updates) {
+  return staffEditLocksVisit(row, updates) ? { auto_dispatch_locked: true } : {};
+}
+
+module.exports = { staffEditLocksVisit, staffEditLockPatch };

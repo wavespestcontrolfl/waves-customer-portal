@@ -1,4 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
+const { staffEditLockPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -14512,6 +14513,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
+        // A staff date/window choice locks the occurrence from auto-dispatch
+        // (this path writes no reschedule_log row the person-placed guard reads).
+        Object.assign(updates, staffEditLockPatch(occRow, updates));
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)
@@ -15032,16 +15036,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id, source_action: 'package_followup_auto' })
             .first('customer_id', 'scheduled_date')
           : null;
-        // A staff date or window choice on a live recurring occurrence locks
-        // it from auto-dispatch: this path writes no reschedule_log row, so
-        // the person-placed guard cannot see it (auto-dispatch/staff-edit-lock.js).
-        if (updates.scheduled_date !== undefined || updates.window_start !== undefined || updates.window_end !== undefined) {
-          const slotBefore = preTupleRow || await trx('scheduled_services').where({ id: req.params.id })
-            .first('is_recurring', 'recurring_parent_id', 'status', 'scheduled_date', 'window_start', 'window_end');
-          if (require('../services/auto-dispatch/staff-edit-lock').staffEditLocksVisit(slotBefore, updates)) {
-            updates.auto_dispatch_locked = true;
-          }
-        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
           await trx('reschedule_log').insert({
