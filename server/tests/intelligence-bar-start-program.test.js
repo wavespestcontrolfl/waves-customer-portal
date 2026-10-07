@@ -485,7 +485,8 @@ describe('commit', () => {
   });
 
   test('an overlap is shown on the card; a new overlap after the card refuses with preview_changed', async () => {
-    tables.scheduled_services = [{ id: 'visit-9', first_name: 'Pat', last_name: 'Sample' }];
+    // Another customer's visit: shown on the card, not refused.
+    tables.scheduled_services = [{ id: 'visit-9', customer_id: 'other-customer', property_id: 'prop-other', first_name: 'Pat', last_name: 'Sample' }];
     const existing = { id: 'visit-9', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control' };
     WindowRules.probeSlotOverlap.mockResolvedValue([existing]);
     const preview = await run(BASE_INPUT);
@@ -512,6 +513,20 @@ describe('commit', () => {
     expect(result).toMatchObject({ code: 'INSPECTION_CREDIT_CHANGED', preview_changed: true, nothing_changed: true });
     expect(writes).toEqual([]);
     expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+  });
+
+  test('an overlapping visit of the same customer is refused (visit grouping would change it)', async () => {
+    tables.scheduled_services = [{ id: 'visit-own', customer_id: CUSTOMER_ID, property_id: 'prop-1', first_name: 'Dana', last_name: 'Example' }];
+    WindowRules.probeSlotOverlap.mockResolvedValue([{ id: 'visit-own', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control' }]);
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_same_customer_overlap');
+    expect(result.error).toContain('This customer already has a visit at that time');
+  });
+
+  test('an overlapping visit at the same property is refused', async () => {
+    tables.scheduled_services = [{ id: 'visit-prop', customer_id: 'someone-else', property_id: 'prop-1' }];
+    WindowRules.probeSlotOverlap.mockResolvedValue([{ id: 'visit-prop', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control' }]);
+    expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_same_customer_overlap' });
   });
 
   test('the tech-notice gate flipping after the card refuses with preview_changed', async () => {

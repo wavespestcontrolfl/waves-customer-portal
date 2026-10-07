@@ -403,12 +403,23 @@ async function predictPlanSync(customer, catalogRow, firstDate, cadence) {
 // Visits that already overlap the first visit's window (create_appointment's
 // probe and fact shape, #6047): shown on the card and pinned, so an overlap
 // that appears after the card refuses as preview_changed.
-async function firstVisitOverlap(firstDate, window) {
+//
+// An overlapping visit of this same customer or property is refused: with
+// GATE_VISIT_GROUPS on, the handler's maybeGroupRow would group it with the
+// new visit (stamping it, possibly reassigning its technician), which this
+// card does not show. Returns the facts, or { error, code }.
+async function firstVisitOverlap(firstDate, window, customerId, propertyId) {
   const { probeSlotOverlap } = require('../scheduling/window-rules');
   const rows = await db.transaction((trx) => probeSlotOverlap({
     trx, date: firstDate, windowStart: window.windowStart, windowEnd: window.windowEnd,
   }));
   if (!rows || !rows.length) return [];
+  const owners = await db('scheduled_services').whereIn('id', rows.map((r) => r.id)).select('id', 'customer_id', 'property_id');
+  const ours = (owners || []).some((o) => String(o.customer_id || '') === String(customerId)
+    || (propertyId && String(o.property_id || '') === String(propertyId)));
+  if (ours) {
+    return refusal('This customer already has a visit at that time. Pick another time, or book it from the Schedule screen. Nothing was proposed.', 'program_same_customer_overlap');
+  }
   const facts = await require('./tools').bookingOverlapFacts(db, rows, firstDate);
   return facts.sort((a, b) => (a.fact < b.fact ? -1 : a.fact > b.fact ? 1 : 0));
 }
@@ -479,12 +490,9 @@ async function buildProgramPlan(input, actionContext) {
   if (tech.error) return { ...tech };
   const window = firstVisitWindow(args.firstDate, args.start, catalogRow);
   if (window.error) return window;
-  let overlap;
-  try {
-    overlap = await firstVisitOverlap(args.firstDate, window);
-  } catch {
-    return refusal('Could not check the schedule for visits that overlap the first visit. Try again in a moment. Nothing was proposed.');
-  }
+  const overlap = await firstVisitOverlap(args.firstDate, window, args.customerId, propertyId)
+    .catch(() => refusal('Could not check the schedule for visits that overlap the first visit. Try again in a moment. Nothing was proposed.'));
+  if (overlap.error) return overlap;
   const planSync = await predictPlanSync(customer, catalogRow, args.firstDate, args.cadence);
   if (planSync.error) return planSync;
 
