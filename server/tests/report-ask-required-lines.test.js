@@ -1977,3 +1977,9 @@ describe('answer screen, Codex round 53', () => {
     expect(ask(answer)).toBe('technician_name');
   });
 });
+
+describe('answer screen, pre-push audit on round 53', () => {
+  test.each(['Alex swallowed a small amount of pesticide.', 'Alex drank water contaminated with pesticide.'])('a quantity or contaminated thing is an ingestion: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+});

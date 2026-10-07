@@ -1999,7 +1999,11 @@ const OBJECT_WORDS = '(?:(?:down|up|on|into|at|through|some|the|a|an|of|any|more
 const NOT_IN_PRODUCT_NAME = '(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are|outside|inside)\\b)';
 // A pronoun object counts when the sentence names the product: "John
 // swallowed it after touching the pesticide" (Codex P1 #5964 r43).
-const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}\\s+(?:it|them|some|any|that|this|those|these)\\b|\\b${EAT_VERBS}(?!\\s+of\\b)\\s+${OBJECT_WORDS}(?:${NOT_IN_PRODUCT_NAME}\\w+\\s+){0,3}${EXPOSURE_PRODUCT}\\b|\\b${EXPOSURE_PRODUCT}\\s+(?:\\w+\\s+){0,2}?(?:was|were|got|gets|been|has\\s+been|have\\s+been|is|are)\\s+(?:\\w+\\s+)?${EAT_VERBS}`, 'i');
+// Quantities and contaminated things count too: "swallowed a small amount of
+// pesticide", "drank water contaminated with pesticide" (pre-push audit #5964).
+const INGESTED_AMOUNT = '(?:a\\s+|an\\s+|some\\s+)?(?:small\\s+|little\\s+|tiny\\s+|large\\s+|bit\\s+of\\s+)?(?:amount|bit|drops?|sips?|mouthfuls?|taste|licks?|handfuls?|dose|spoonfuls?|pieces?|chunks?|some|little|traces?)\\s+of\\s+(?:the\\s+|that\\s+|this\\s+|some\\s+)?(?:\\w+\\s+){0,2}';
+const CONTAMINATED = '(?:\\w+\\s+){0,4}?(?:contaminated|laced|mixed|covered|coated|tainted|sprayed|treated|soaked|dusted)\\s+(?:with\\s+|by\\s+|in\\s+)?(?:the\\s+|some\\s+)?(?:\\w+\\s+){0,2}';
+const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}\\s+${INGESTED_AMOUNT}${EXPOSURE_PRODUCT}\\b|\\b${EAT_VERBS}\\s+${CONTAMINATED}${EXPOSURE_PRODUCT}\\b|\\b${EAT_VERBS}\\s+(?:it|them|some|any|that|this|those|these)\\b|\\b${EAT_VERBS}(?!\\s+of\\b)\\s+${OBJECT_WORDS}(?:${NOT_IN_PRODUCT_NAME}\\w+\\s+){0,3}${EXPOSURE_PRODUCT}\\b|\\b${EXPOSURE_PRODUCT}\\s+(?:\\w+\\s+){0,2}?(?:was|were|got|gets|been|has\\s+been|have\\s+been|is|are)\\s+(?:\\w+\\s+)?${EAT_VERBS}`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence))
     && EXPOSURE_WORD.test(sentence) && boundToProduct(sentence)
