@@ -151,6 +151,20 @@ Pipeline (all fail-open, kill switch `CONTACT_DICTATION_ENABLED=false`):
    contradict a clean extracted value → adopted (behind the cross-customer
    ownership gate). Anything else → review card with candidates + the
    confirmation question. Nothing ambiguous ever reaches a send.
+7. **Spelled names** — the decoder also returns `names` entries (a first or
+   last name spelled out letter by letter) and the MODEL labels each
+   `whose: "caller" | "other"`; no regex decides whose name it is. A caller
+   entry at ≥ 0.75 confidence replaces the extracted caller first/last name
+   (V1 record and V2 caller, including `name_full`) only when that name is
+   empty or within a small edit distance of the spelling (the same name,
+   misheard). Two caller spellings of one field that disagree apply nothing.
+   Secondary contacts are never touched. This runs before the customer/lead
+   writes and candidate staging; an existing customer's row is NOT written
+   here. The corrected value reaches it only as a staged candidate through
+   the `GATE_CONTACT_CORRECTION` lane, whose gates are unchanged: a bare
+   "my last name is spelled S-E-R-O-V" is not an error claim and its letters
+   do not ground the name, so the lane leaves it pending; "my last name is
+   misspelled, it is Serov, S-E-R-O-V" applies (first timely pass only).
 
 ### 1d. CSR read-back script (dictation-quality upstream fix)
 

@@ -20,11 +20,15 @@
  *     diarized primary model does not support prompts, so this pass is the
  *     only place transcription prompting actually applies on the OpenAI path).
  *   - decodeDictatedContacts(): one structured Gemini call over both
- *     transcripts → { emails, addresses } candidates. Number words become
+ *     transcripts → { emails, addresses, names } candidates. Number words become
  *     digits HERE ("six three" → 63), never in the literal transcript.
  *   - applyEmailDictationPolicy(): pure decision — adopt exactly one strong,
  *     validated candidate; anything ambiguous or URL-shaped is quarantined to
  *     the review card with a ready-to-read confirmation question.
+ *   - applyNameDictationPolicy(): pure decision — a first/last name the CALLER
+ *     spelled out letter by letter beats the misheard word, when the extracted
+ *     name is empty or the same name misheard (small edit distance). The model
+ *     decides whose name each spelling is; this code never guesses that.
  *
  * Fail-open everywhere: any model/provider failure returns null and the
  * pipeline behaves exactly as before this module existed.
@@ -48,6 +52,11 @@ const ADOPT_CONFIDENCE = 0.75;
 
 const EMAIL_SIGNAL_RE = /\b(e-?mail|at g ?mail|at gmail|gmail dot|yahoo dot|outlook dot|hotmail dot|dot com|dot net|dot org)\b/i;
 const SPELLING_SIGNAL_RE = /\b(spell(ed|ing)?|letter by letter|(as|like|for) in [a-z]+|[a-z] for [a-z]+)\b/i;
+// A name spelled out letter by letter ("S-E-R-O-V", "S E R O V", "S as in
+// Sam"). Tighter than SPELLING_SIGNAL_RE on purpose: this gates a paid decoder
+// pass, and "like in the past" must not buy one.
+const NAME_SPELLING_WORD_RE = /\bspell(?:ed|ing|s)?\b/i;
+const NAME_SPELLING_LETTERS_RE = /\b(?:[A-Za-z]\s*[-.,]\s*){3,}[A-Za-z]\b|\b(?:[A-Z]\s+){3,}[A-Z]\b|\b[A-Za-z]\s+as\s+in\s+[A-Za-z]{3,}\b|\b[A-Z]\s+for\s+[A-Z][a-z]{2,}\b/;
 // Suffix coverage for the service area's street vocabulary — Fruitville ROAD,
 // Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
 // dictation-focused second STT pass never ran for those calls. The common
@@ -65,7 +74,8 @@ function detectContactDictationSignals(transcript) {
   const t = String(transcript || '');
   const email = EMAIL_SIGNAL_RE.test(t) || (/@/.test(t) && SPELLING_SIGNAL_RE.test(t));
   const address = ADDRESS_SIGNAL_RE.test(t);
-  return { email, address, any: email || address };
+  const name = NAME_SPELLING_WORD_RE.test(t) || NAME_SPELLING_LETTERS_RE.test(t);
+  return { email, address, name, any: email || address || name };
 }
 
 // ── Second-pass transcription prompt ─────────────────────────────────────────
@@ -95,7 +105,7 @@ Use clear punctuation and line breaks where helpful.`;
 // ── Structured decoder ───────────────────────────────────────────────────────
 
 function buildDecoderPrompt({ transcript, contactPassTranscript }) {
-  return `You are decoding dictated CONTACT FIELDS (email addresses and service addresses) from a pest-control phone call. Use the transcripts as EVIDENCE — do not blindly copy malformed transcript text; transcription mishears dictation.
+  return `You are decoding dictated CONTACT FIELDS (email addresses, service addresses, and spelled-out names) from a pest-control phone call. Use the transcripts as EVIDENCE — do not blindly copy malformed transcript text; transcription mishears dictation.
 
 PRIMARY TRANSCRIPT (diarized):
 """
@@ -122,6 +132,13 @@ ADDRESS RULES:
 3. Street names are real words or proper names. If the transcribed street name is nonsensical phonetic text, list plausible real street-name alternatives that SOUND like it (street_alternatives, with suffix, no house numbers) — consider suffix mishears too (Trail/Terrace/Trace, Court/Cove, Lane/Drive).
 4. Do not invent an address the caller did not say; alternatives are re-hearings of what they DID say.
 
+NAME RULES:
+1. Report a name ONLY when a speaker actually spelled it out letter by letter (a run of single letters, or letters with phonetic markers such as "B as in boy"). A name merely said aloud is not a spelling — omit it.
+2. raw_spoken is the spelling evidence verbatim. spelled_value is the name those letters make, joined and capitalized the way the letters spell it. Use only the letters spelled; never invent, complete or "fix" a name.
+3. field is "first_name" or "last_name".
+4. whose is "caller" ONLY when the spelling is of the CALLER's OWN name (the person speaking, not the Waves agent). Use "other" for anyone else the caller mentions (a buyer, tenant, spouse, parent, neighbor, a business contact) and whenever you are unsure whose name it is.
+5. If the caller spells the same field two different ways, return both entries with honest confidences.
+
 Return ONLY JSON with this exact shape (empty arrays when nothing was dictated):
 {
   "emails": [
@@ -140,6 +157,9 @@ Return ONLY JSON with this exact shape (empty arrays when nothing was dictated):
       "needs_confirmation": true,
       "confirmation_question": ""
     }
+  ],
+  "names": [
+    { "raw_spoken": "", "spelled_value": "", "field": "first_name or last_name", "whose": "caller or other", "confidence": 0.0 }
   ]
 }`;
 }
@@ -198,7 +218,7 @@ function sanitizeEmailCandidates(candidates) {
 
 /**
  * One structured decoder pass over the call's transcripts.
- * Returns { emails, addresses } (sanitized shape) or null on any failure.
+ * Returns { emails, addresses, names } (sanitized shape) or null on any failure.
  */
 async function decodeDictatedContacts({ transcript, contactPassTranscript = null, deps = {} } = {}) {
   if (!ENABLED() || !String(transcript || '').trim()) return null;
@@ -228,11 +248,125 @@ async function decodeDictatedContacts({ transcript, contactPassTranscript = null
       needs_confirmation: a?.needs_confirmation !== false,
       confirmation_question: String(a?.confirmation_question || '').slice(0, 300),
     }));
-    return { emails, addresses };
+    return { emails, addresses, names: sanitizeNameEntries(parsed.names) };
   } catch (err) {
     logger.warn(`[contact-dictation] decoder failed open: ${err.message}`);
     return null;
   }
+}
+
+// ── Spelled names ────────────────────────────────────────────────────────────
+
+const NAME_FIELDS = ['first_name', 'last_name'];
+const SPELLED_NAME_RE = /^\p{L}[\p{L}'’ -]{0,48}\p{L}$/u;
+
+// Title-case a spelling the model returned in one case ("SEROV", "serov");
+// a mixed-case value ("McLoughlin") is the model's reading of the letters and
+// stays as is.
+function caseSpelledName(value) {
+  if (value !== value.toUpperCase() && value !== value.toLowerCase()) return value;
+  return value.toLowerCase().replace(/(^|[\s'’-])(\p{L})/gu, (_m, sep, ch) => sep + ch.toUpperCase());
+}
+
+/**
+ * Filter decoder name entries to the shape the name policy trusts: a real
+ * letters-only value, field first_name|last_name, whose "caller" only when the
+ * model said so (anything else is "other"), confidence clamped to [0,1].
+ */
+function sanitizeNameEntries(entries) {
+  const out = [];
+  for (const n of (Array.isArray(entries) ? entries : []).slice(0, 6)) {
+    const spelled = String(n?.spelled_value || '').trim().replace(/\s+/g, ' ');
+    if (!NAME_FIELDS.includes(n?.field) || !SPELLED_NAME_RE.test(spelled)) continue;
+    out.push({
+      raw_spoken: String(n?.raw_spoken || '').slice(0, 300),
+      spelled_value: caseSpelledName(spelled),
+      field: n.field,
+      whose: n?.whose === 'caller' ? 'caller' : 'other',
+      confidence: Math.max(0, Math.min(1, Number(n?.confidence) || 0)),
+    });
+  }
+  return out;
+}
+
+const nameKey = (v) => String(v || '').toLowerCase().replace(/[^\p{L}]/gu, '');
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_v, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// "Same name, misheard": at most 2 edits, and never more than a third of the
+// longer name — one swapped vowel (1) or a dropped-and-swapped leading sound
+// (2) pass for a name of six or more letters; Lee/Li does not.
+function sameNameMisheard(current, spelled) {
+  const a = nameKey(current);
+  const b = nameKey(spelled);
+  if (!a || !b) return false;
+  return editDistance(a, b) <= Math.min(2, Math.floor(Math.max(a.length, b.length) / 3));
+}
+
+// The one value the caller spelled for a field, or null: only entries the
+// model marked whose:"caller" count, two caller spellings that disagree cancel
+// each other, and the surviving value needs ADOPT_CONFIDENCE.
+function callerSpelledName(dictation, field) {
+  const entries = (dictation?.names || []).filter((n) => n.whose === 'caller' && n.field === field);
+  if (new Set(entries.map((n) => nameKey(n.spelled_value))).size !== 1) return null;
+  const best = entries.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+  return best.confidence >= ADOPT_CONFIDENCE ? best.spelled_value : null;
+}
+
+/**
+ * Pure name policy. `current` is { first_name, last_name } as extracted.
+ * Returns only the fields to change: the caller's spelled value replaces an
+ * EMPTY name, or one that is the same name misheard (or the same letters in
+ * the wrong case). A name that is not close to the spelling is left alone —
+ * the spelling may be of someone else's name that the model mislabeled, and
+ * the decoder's own confidence is not enough to overwrite a different name.
+ */
+function applyNameDictationPolicy({ current = {}, dictation = null } = {}) {
+  const changes = {};
+  for (const field of NAME_FIELDS) {
+    const spelled = callerSpelledName(dictation, field);
+    if (!spelled) continue;
+    const existing = String(current[field] || '').trim();
+    if (existing === spelled) continue;
+    if (!existing || sameNameMisheard(existing, spelled)) changes[field] = spelled;
+  }
+  return changes;
+}
+
+/**
+ * Apply the name policy to a V2 extraction's `caller` block in place (split
+ * fields and name_full). Returns the changes made ({} when none). Secondary
+ * contacts live elsewhere in the extraction and are never touched.
+ */
+function applyNameDictationToV2Caller(caller, dictation) {
+  if (!caller || typeof caller !== 'object') return {};
+  const tokens = String(caller.name_full || '').trim().split(/\s+/).filter(Boolean);
+  // A two-or-more-token name_full speaks for both parts when the split fields
+  // are empty (extraction-compat derives them the same way).
+  const current = {
+    first_name: caller.first_name || (tokens.length > 1 ? tokens[0] : null),
+    last_name: caller.last_name || (tokens.length > 1 ? tokens[tokens.length - 1] : null),
+  };
+  const changes = applyNameDictationPolicy({ current, dictation });
+  for (const [field, value] of Object.entries(changes)) {
+    caller[field] = value;
+    if (!tokens.length) continue;
+    const idx = tokens.length > 1 ? (field === 'first_name' ? 0 : tokens.length - 1)
+      : (sameNameMisheard(tokens[0], value) ? 0 : -1);
+    if (idx >= 0) tokens[idx] = value;
+  }
+  if (Object.keys(changes).length && tokens.length) caller.name_full = tokens.join(' ');
+  return changes;
 }
 
 /**
@@ -286,7 +420,10 @@ module.exports = {
   detectContactDictationSignals,
   decodeDictatedContacts,
   applyEmailDictationPolicy,
+  applyNameDictationPolicy,
+  applyNameDictationToV2Caller,
   sanitizeEmailCandidates,
+  sanitizeNameEntries,
   buildDecoderPrompt,
   CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
   ADOPT_CONFIDENCE,

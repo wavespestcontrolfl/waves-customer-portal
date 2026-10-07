@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, applyNameDictationPolicy, applyNameDictationToV2Caller, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -11073,6 +11073,32 @@ const CallRecordingProcessor = {
         contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
       }
       if (contactDictation) {
+        // A last/first name the CALLER spelled out letter by letter beats the
+        // misheard word. The decoder model judged whose name each spelling is;
+        // the policy only replaces an empty or near-identical (misheard) name,
+        // in the V1 record and the V2 caller, before the customer/lead
+        // upserts and the candidate staging read either. An existing
+        // customer's row is never written here: the corrected value reaches it
+        // only as a staged candidate through the GATE_CONTACT_CORRECTION lane
+        // and its own gates. Secondary contacts are never touched.
+        const v1NameChanges = applyNameDictationPolicy({ current: extracted, dictation: contactDictation });
+        const v2NameChanges = (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction))
+          ? applyNameDictationToV2Caller(v2Result.extraction.caller, contactDictation)
+          : {};
+        if (Object.keys(v1NameChanges).length) Object.assign(extracted, v1NameChanges);
+        if (Object.keys(v1NameChanges).length || Object.keys(v2NameChanges).length) {
+          // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
+          logger.info(`[call-proc-dictation] Applied caller-spelled name field(s) for ${maskSid(callSid)}: ${[...new Set([...Object.keys(v1NameChanges), ...Object.keys(v2NameChanges)])].join(', ')}`);
+        }
+        if (Object.keys(v2NameChanges).length) {
+          // The canonical V2 blob was serialized to ai_extraction_enriched
+          // right after extraction — re-persist it (token-fenced, best
+          // effort) so blob readers see the spelled name too.
+          await db('call_log').where({ id: call.id })
+            .where('processing_token', procToken)
+            .update({ ai_extraction_enriched: JSON.stringify(v2Result.extraction) })
+            .catch((e) => logger.warn(`[call-proc-dictation] enriched-blob re-persist after spelled-name adoption failed: ${e.code || e.name || 'db_error'}`));
+        }
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
         dictationEmailPayload = emailDecision.payload;
         if (emailDecision.adopt) {

@@ -4257,3 +4257,54 @@ describe('round-61 hardening', () => {
     expect(res.applied.map((a) => a.field)).toContain('email');
   });
 });
+
+// A surname the caller spelled out: the call-recording processor's dictation
+// decoder corrects the V2 caller name BEFORE candidate staging, and the
+// corrected value then rides this lane like any other call-stated name. The
+// lane's gates are unchanged; these tests pin what it does with a spelled
+// surname so nobody expects more (or less) of it.
+describe('runCallContactCorrection — surname the caller spelled out', () => {
+  const { buildCustomerFieldCandidates } = require('../services/call-field-candidates');
+
+  const stagedFrom = (quote) => buildCustomerFieldCandidates({
+    callId: CALL_ID,
+    customerId: CUSTOMER_ID,
+    extraction: {},
+    v2Extraction: {
+      meta: { schema_version: '1.20.0' },
+      // Post-decoder value (heard "Rivers", spelled R-I-V-E-R-S-O-N).
+      caller: { first_name: null, last_name: 'Riverson' },
+      confidence: { caller_identity: 0.95 },
+      evidence: [{ field_path: '/caller/last_name', quote }],
+    },
+  }).filter((r) => r.field_name === 'last_name')
+    .map((r, i) => ({ id: `staged-${i}`, ...r }));
+
+  const run = async (quote, callerLine) => {
+    const knex = makeStubKnex({
+      customers: [baseCustomer()],
+      call_log: [callLogRow({ transcription: ['Agent: can you spell that?', `Caller: ${callerLine}`].join('\n') })],
+      customer_field_candidates: stagedFrom(quote),
+      agent_decisions: [],
+    });
+    const res = await runCallContactCorrection({ callId: CALL_ID, customerId: CUSTOMER_ID, knex });
+    return { res, knex };
+  };
+
+  it('does NOT auto-apply a bare spelling: no error claim, and the letters never say the name', async () => {
+    const line = 'my last name is spelled R-I-V-E-R-S-O-N';
+    const { res, knex } = await run(line, line);
+    expect(res.applied).toEqual([]);
+    expect(res.reason).toBe('no_candidates');
+    expect(knex._data.customers[0].last_name).toBe('Riverz');
+    expect(knex._data.customer_field_candidates[0].status).toBe('pending');
+  });
+
+  it('auto-applies once the caller says the stored name is wrong and says the name on the same line', async () => {
+    const line = 'my last name is misspelled, it is Riverson, R-I-V-E-R-S-O-N';
+    const { res, knex } = await run(line, line);
+    expect(res.applied).toEqual([{ field: 'last_name', oldValue: 'Riverz', newValue: 'Riverson', quote: line }]);
+    expect(knex._data.customers[0].last_name).toBe('Riverson');
+    expect(knex._data.customer_field_candidates[0].status).toBe('auto_applied');
+  });
+});

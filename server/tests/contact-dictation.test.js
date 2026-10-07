@@ -7,6 +7,9 @@ const {
   detectContactDictationSignals,
   decodeDictatedContacts,
   applyEmailDictationPolicy,
+  applyNameDictationPolicy,
+  applyNameDictationToV2Caller,
+  sanitizeNameEntries,
   sanitizeEmailCandidates,
   buildDecoderPrompt,
   CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
@@ -21,6 +24,15 @@ describe('detectContactDictationSignals', () => {
   test('address dictation phrases', () => {
     expect(detectContactDictationSignals('Service address is 5039 C. Phone Trail. Lakewood Ranch').address).toBe(true);
     expect(detectContactDictationSignals('what is your zip code').address).toBe(true);
+  });
+  test('spelled-name phrases trip the name signal; ordinary talk does not', () => {
+    expect(detectContactDictationSignals('Caller: Varnum, V-A-R-N-U-M.').name).toBe(true);
+    expect(detectContactDictationSignals('Caller: V A R N U M.').name).toBe(true);
+    expect(detectContactDictationSignals('Caller: the last name is spelled differently').name).toBe(true);
+    expect(detectContactDictationSignals('Caller: V as in Victor, A, R.').name).toBe(true);
+    expect(detectContactDictationSignals('Caller: I like in-ground sprinklers and I like pizza.').name).toBe(false);
+    expect(detectContactDictationSignals('Caller: can you come on the 14-15 or 3-4-5 weekend').name).toBe(false);
+    expect(detectContactDictationSignals('Caller: Varnum, V-A-R-N-U-M.').any).toBe(true);
   });
   test('no signals on ordinary conversation', () => {
     const out = detectContactDictationSignals('are you coming today? the tech said noon');
@@ -246,5 +258,149 @@ describe('applyEmailDictationPolicy — risk-flagged candidates are never adopte
     });
     expect(out.adopt).toBeNull();
     expect(out.payload.email_candidates).toHaveLength(1);
+  });
+});
+
+describe('spelled-name decoding', () => {
+  const entry = (over = {}) => ({
+    raw_spoken: 'Caller: Orlmeyer, O-R-L-M-E-Y-E-R',
+    spelled_value: 'Orlmeyer',
+    field: 'last_name',
+    whose: 'caller',
+    confidence: 0.92,
+    ...over,
+  });
+  const dictation = (...names) => ({ emails: [], addresses: [], names: sanitizeNameEntries(names) });
+
+  test('decodeDictatedContacts returns sanitized names and keeps emails/addresses', async () => {
+    const out = await decodeDictatedContacts({
+      transcript: 'Caller: Varnum, V-A-R-N-U-M.',
+      deps: {
+        fetchResponse: async (prompt) => {
+          expect(prompt).toMatch(/NAME RULES/);
+          expect(prompt).toMatch(/"names"/);
+          return JSON.stringify({
+            emails: [],
+            addresses: [],
+            names: [
+              { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'VARNUM', field: 'last_name', whose: 'caller', confidence: 0.9 },
+              { raw_spoken: 'x', spelled_value: 'Q', field: 'last_name', whose: 'caller', confidence: 0.9 }, // too short
+              { raw_spoken: 'x', spelled_value: 'Bad<script>', field: 'last_name', whose: 'caller', confidence: 0.9 },
+              { raw_spoken: 'x', spelled_value: 'Tobias', field: 'nickname', whose: 'caller', confidence: 0.9 },
+              { raw_spoken: 'x', spelled_value: 'Tobias', field: 'first_name', whose: 'someone', confidence: 9 },
+            ],
+          });
+        },
+      },
+    });
+    expect(out.names).toEqual([
+      { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.9 },
+      { raw_spoken: 'x', spelled_value: 'Tobias', field: 'first_name', whose: 'other', confidence: 1 },
+    ]);
+  });
+
+  test('a missing names section decodes to an empty list', async () => {
+    const out = await decodeDictatedContacts({
+      transcript: 'Caller: hello there',
+      deps: { fetchResponse: async () => JSON.stringify({ emails: [], addresses: [] }) },
+    });
+    expect(out.names).toEqual([]);
+  });
+
+  test.each([
+    ['one swapped vowel', 'McDermond', 'McDarmond'],
+    ['one swapped letter', 'Varnum', 'Varnim'],
+    ['two edits on a long name', 'Orlmeyer', 'Earlmeyer'],
+    ['same letters, wrong case', 'McDermond', 'Mcdermond'],
+  ])('replaces the misheard caller surname: %s', (_label, spelled, heard) => {
+    const out = applyNameDictationPolicy({
+      current: { first_name: 'Quentrell', last_name: heard },
+      dictation: dictation(entry({ spelled_value: spelled })),
+    });
+    expect(out).toEqual({ last_name: spelled });
+  });
+
+  test('fills an empty name and handles a first name', () => {
+    expect(applyNameDictationPolicy({
+      current: { first_name: null, last_name: '' },
+      dictation: dictation(entry({ spelled_value: 'Varnum' }), entry({ spelled_value: 'Quentrell', field: 'first_name' })),
+    })).toEqual({ first_name: 'Quentrell', last_name: 'Varnum' });
+  });
+
+  test('leaves a name that is not close to the spelling (a different name stays)', () => {
+    expect(applyNameDictationPolicy({
+      current: { first_name: 'Quentrell', last_name: 'Smith' },
+      dictation: dictation(entry({ spelled_value: 'Varnum' })),
+    })).toEqual({});
+  });
+
+  test('leaves an already-correct name alone', () => {
+    expect(applyNameDictationPolicy({
+      current: { last_name: 'Varnum' },
+      dictation: dictation(entry({ spelled_value: 'Varnum' })),
+    })).toEqual({});
+  });
+
+  test('never applies a spelling the model assigned to someone else', () => {
+    expect(applyNameDictationPolicy({
+      current: { last_name: 'Varnim' },
+      dictation: dictation(entry({ spelled_value: 'Varnum', whose: 'other' })),
+    })).toEqual({});
+  });
+
+  test('never applies below the adopt confidence', () => {
+    expect(applyNameDictationPolicy({
+      current: { last_name: 'Varnim' },
+      dictation: dictation(entry({ spelled_value: 'Varnum', confidence: 0.6 })),
+    })).toEqual({});
+  });
+
+  test('never applies when two caller spellings of one field disagree', () => {
+    expect(applyNameDictationPolicy({
+      current: { last_name: 'Varnim' },
+      dictation: dictation(entry({ spelled_value: 'Varnum' }), entry({ spelled_value: 'Varnem', confidence: 0.5 })),
+    })).toEqual({});
+    // A spelling labeled "other" for the same field is a different person, not a disagreement.
+    expect(applyNameDictationPolicy({
+      current: { last_name: 'Varnim' },
+      dictation: dictation(entry({ spelled_value: 'Varnum' }), entry({ spelled_value: 'Thornquist', whose: 'other' })),
+    })).toEqual({ last_name: 'Varnum' });
+  });
+
+  test('inert without a names section', () => {
+    expect(applyNameDictationPolicy({ current: { last_name: 'Varnim' }, dictation: null })).toEqual({});
+    expect(applyNameDictationPolicy({ current: { last_name: 'Varnim' }, dictation: { emails: [], addresses: [] } })).toEqual({});
+  });
+
+  describe('V2 caller block', () => {
+    test('rewrites split fields and name_full; never touches secondary contacts', () => {
+      const extraction = {
+        caller: { first_name: 'Quentrell', last_name: 'Varnim', name_full: 'Quentrell Varnim' },
+        secondary_contacts: [{ first_name: 'Odalys', last_name: 'Varnim', name_full: 'Odalys Varnim' }],
+      };
+      const changes = applyNameDictationToV2Caller(extraction.caller, dictation(entry({ spelled_value: 'Varnum' })));
+      expect(changes).toEqual({ last_name: 'Varnum' });
+      expect(extraction.caller).toEqual({ first_name: 'Quentrell', last_name: 'Varnum', name_full: 'Quentrell Varnum' });
+      expect(extraction.secondary_contacts[0]).toEqual({ first_name: 'Odalys', last_name: 'Varnim', name_full: 'Odalys Varnim' });
+    });
+
+    test('derives the misheard surname from name_full when the split fields are empty', () => {
+      const caller = { first_name: null, last_name: null, name_full: 'Quentrell Varnim' };
+      applyNameDictationToV2Caller(caller, dictation(entry({ spelled_value: 'Varnum' })));
+      expect(caller).toEqual({ first_name: null, last_name: 'Varnum', name_full: 'Quentrell Varnum' });
+    });
+
+    test('a single-token name_full is replaced only when it is the same name misheard', () => {
+      const near = { first_name: null, last_name: 'Varnim', name_full: 'Varnim' };
+      applyNameDictationToV2Caller(near, dictation(entry({ spelled_value: 'Varnum' })));
+      expect(near.name_full).toBe('Varnum');
+      const far = { first_name: 'Odalys', last_name: null, name_full: 'Odalys' };
+      applyNameDictationToV2Caller(far, dictation(entry({ spelled_value: 'Varnum' })));
+      expect(far).toEqual({ first_name: 'Odalys', last_name: 'Varnum', name_full: 'Odalys' });
+    });
+
+    test('tolerates a missing caller', () => {
+      expect(applyNameDictationToV2Caller(null, dictation(entry()))).toEqual({});
+    });
   });
 });
