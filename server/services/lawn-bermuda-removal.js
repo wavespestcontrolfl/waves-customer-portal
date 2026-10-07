@@ -236,7 +236,16 @@ async function stepOffered(knex, serviceId) {
   if (!visit) return false;
   const ids = await stepProductIds(knex);
   if (!ids.tagged) return false;
-  return !(await capViolation(knex, visit, [{ id: ids.recognition }, { id: ids.fusilade }]));
+  if (await capViolation(knex, visit, [{ id: ids.recognition }, { id: ids.fusilade }])) return false;
+  // The serving window's staged step rows must be linked to active catalog products, as the projection requires.
+  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
+  const { loadV13RowsForMonth } = require('./waveguard-plan-engine');
+  const rows = await loadV13RowsForMonth(knex, profileTrack(profile), visitMonthOf(visit), { includeBermudaRemoval: true })
+    .catch((err) => { if (err.code === 'lawn_v13_protocol_missing') return new Map(); throw err; });
+  const linked = [...rows.values()].filter((row) => row?.gates?.bermudaRemoval === true && row.productId);
+  if (linked.length !== 3) return false;
+  const catalog = await knex('products_catalog').whereIn('id', linked.map((row) => row.productId)).select('id', 'active');
+  return stepLinesAvailable(linked.map((row) => ({ product: catalog.find((c) => String(c.id) === String(row.productId)) || null })), rows);
 }
 
 // A visit with the property its step is judged for, whether or not the visit carries the
@@ -522,6 +531,10 @@ const EXCLUDED_CULTIVAR_WARNING = {
 const addTestPatchNote = (items) => items.map((item) => (isStepLine(item)
   ? { ...item, gateNotes: [...(item.gateNotes || []), { key: 'testPatchFirst', severity: 'required', text: TEST_PATCH_NOTE }] } : item));
 
+// The three step lines can be applied only when each has an active catalog product LINKED to a
+// staged row of the serving window. One rule, for the projection and for stepOffered.
+const stepLinesAvailable = (members, rows) => members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
+
 // The ONE decision about whether the step stands, for the plan, the tank sheet and the
 // completion actions alike. `items` carry the three marked step lines among the visit's
 // own; `rows` is the serving v13 window's staged rows by product id; `probeLimits(items)`
@@ -544,7 +557,7 @@ async function projectBermudaStep(items, { knex, rows, probeLimits, testPatch = 
   // The probe gets the staged rows, so a step line's planned rate counts in the year's total.
   const found = probe.length ? await probeLimits(probe, rows) : null;
   const capped = found ? found.capped.size > 0 : false;
-  const usable = ids.tagged && !capped && members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
+  const usable = ids.tagged && !capped && stepLinesAvailable(members, rows);
   const settled = settleStep(items, usable);
   const noted = withRowGateNotes(settled.items, rows);
   return { ...settled, items: testPatch ? addTestPatchNote(noted) : noted, limitWarnings: found?.warnings || [] };

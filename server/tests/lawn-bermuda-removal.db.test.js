@@ -850,6 +850,26 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await stepOffered(knex, g.visit.id)).toBe(false);
     });
 
+    test('stepOffered needs the staged rows linked to ACTIVE catalog products for all three lines: an inactive surfactant or an unlinked row is not offered (Fast Complete stays eligible)', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      expect(await stepOffered(knex, f.visit.id)).toBe(true);
+      try {
+        await knex('products_catalog').where({ id: nis.id }).update({ active: false });
+        expect(await stepOffered(knex, f.visit.id)).toBe(false);
+      } finally {
+        await knex('products_catalog').where({ id: nis.id }).update({ active: true });
+      }
+      const staged = await knex('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: NIS }).select('id', 'product_id');
+      try {
+        await knex('lawn_protocol_products').whereIn('id', staged.map((r) => r.id)).update({ product_id: null });
+        expect(await stepOffered(knex, f.visit.id)).toBe(false);
+      } finally {
+        await knex('lawn_protocol_products').whereIn('id', staged.map((r) => r.id)).update({ product_id: nis.id });
+      }
+      expect(await stepOffered(knex, f.visit.id)).toBe(true);
+    });
+
     test('stepOffered: an unconfigured program (a tagged row missing) is not offered', async () => {
       setGates();
       const saved = await knex('product_limits').where({ match_value: 'bermuda_removal', product_id: fus.id, limit_type: 'min_interval_days' });
@@ -1349,7 +1369,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       }
     });
 
-    test('every other product keeps whole-customer history, property named or not', async () => {
+    test('every other product is outside the bermuda program: its history is scoped by main\'s rule (the treated property when named, the whole customer when not), never by this program\'s', async () => {
       setGates();
       const { f, other, ledger } = await twoProperties();
       const celsius = await knex('products_catalog').where({ name: 'Celsius WG' }).first();
@@ -1357,8 +1377,12 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await knex('product_limits').insert({ product_id: celsius.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 2, severity: 'hard_block', description: 'Celsius cap' });
       await ledger(other.id, '2026-03-01', celsius);
       await ledger(other.id, '2026-04-20', celsius);
-      const result = await limits.checkLimits(f.customerId, celsius.id, '2026-06-20', knex, { propertyId: f.property.id });
-      expect(result.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      // No property named: the customer's whole year counts.
+      const whole = await limits.checkLimits(f.customerId, celsius.id, '2026-06-20', knex, {});
+      expect(whole.blocks.map((b) => b.type)).toEqual(['annual_max_apps']);
+      // The other property's sprays are not this property's (the shared treated-property scope).
+      const scoped = await limits.checkLimits(f.customerId, celsius.id, '2026-06-20', knex, { propertyId: f.property.id });
+      expect(scoped.blocks).toEqual([]);
     });
   });
 

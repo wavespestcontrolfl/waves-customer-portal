@@ -47,6 +47,21 @@ const DEDUPE_FAMILY = {
 const containerPricesAnything = (container, collectors, setupOpts) => collectors.mapped(container, setupOpts).length > 0
   || collectors.raw(container, setupOpts).length > 0;
 
+// What a discarded duplicate hands to the line retained in its place, as groups of fields that move
+// together when the retained line lacks the first one: its own persisted cost, the usage-table
+// multipliers, the visit count. The CURRENT container's raw line also hands over a stored bermuda
+// removal cost (an older container's is stale and never transfers).
+const OLDER_TRANSFER = [['explicitCogsCost'], ['cogsServiceTypes', 'cogsServiceTypeFixedMultipliers'], ['visitsPerYear']];
+const CURRENT_TRANSFER = [...OLDER_TRANSFER, ['bermudaRemovalStored']];
+function transferMetadata(retained, line, groups) {
+  for (const [lead, ...rest] of groups) {
+    if (retained[lead] !== undefined || line[lead] === undefined) continue;
+    for (const field of [lead, ...rest]) retained[field] = line[field];
+  }
+  // Quoted fields merge, the retained line's own winning.
+  if (line.quoted) retained.quoted = { ...line.quoted, ...(retained.quoted || {}) };
+}
+
 // The priced lines of an estimate and the container they came from, in one call.
 //
 //   collectors.mapped(container, setupOpts)  the container's structured recurring and one-time lines
@@ -89,7 +104,7 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
   rawLines.forEach(remember);
   const mappedServiceKeys = new Set(rawLines.map(priceKey));
   const serverRepriced = String(pricingAuthority || '').toUpperCase() === 'SERVER' && !!data.result && data.result !== data.engineResult;
-  const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false, current = false } = {}) => {
+  const merge = (extra, { consumeOnlyMappedServices = false, consumeOnly = false, transfer = OLDER_TRANSFER } = {}) => {
     const survivors = [];
     for (const line of extra) {
       const entries = covered.get(priceKey(line)) || [];
@@ -97,16 +112,7 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
       if (matchIdx < 0 && (consumeOnly || (consumeOnlyMappedServices && mappedServiceKeys.has(priceKey(line))))) continue;
       if (matchIdx >= 0) {
         const [{ line: retained }] = entries.splice(matchIdx, 1);
-        if (retained.explicitCogsCost === undefined && line.explicitCogsCost !== undefined) retained.explicitCogsCost = line.explicitCogsCost;
-        if (!retained.cogsServiceTypes && line.cogsServiceTypes) {
-          retained.cogsServiceTypes = line.cogsServiceTypes;
-          retained.cogsServiceTypeFixedMultipliers = line.cogsServiceTypeFixedMultipliers;
-        }
-        if (retained.visitsPerYear === undefined && line.visitsPerYear !== undefined) retained.visitsPerYear = line.visitsPerYear;
-        // A stored bermuda removal cost on the CURRENT container's own raw lawn line is the line's cost; an older
-        // container's is stale and never transfers.
-        if (current && retained.bermudaRemovalStored === undefined && line.bermudaRemovalStored !== undefined) retained.bermudaRemovalStored = line.bermudaRemovalStored;
-        if (line.quoted) retained.quoted = { ...line.quoted, ...(retained.quoted || {}) };
+        transferMetadata(retained, line, transfer);
         continue;
       }
       survivors.push(line);
@@ -115,7 +121,7 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
     // Intra-container siblings never dedupe against each other: they join the covered set only for LATER containers.
     survivors.forEach(remember);
   };
-  merge(collectors.raw(result, setupOpts), { current: true });
+  merge(collectors.raw(result, setupOpts), { transfer: CURRENT_TRANSFER });
   // The current container's raw lines are priced services too: an older container's row for the same
   // service and cadence is a stale revision of them, never an extra.
   rawLines.forEach((line) => mappedServiceKeys.add(priceKey(line)));
