@@ -386,3 +386,31 @@ describe('persisted marker + stale unit ask', () => {
     expect(src).toContain('whole-structure unit waiver failed open (hold stands)');
   });
 });
+
+// Card-only companion (owner 2026-10-07): the advisory "which unit?" card is
+// skipped for a whole-building service, commercial jobs included; the address
+// hold itself is the waiver's business above and is unchanged.
+describe('callIsWholeStructureService (unit card skip)', () => {
+  const { callIsWholeStructureService } = require('../services/call-recording-processor')._test;
+  const { dropUnneededCallCards } = require('../services/call-triage-flags');
+  const run = (extracted, v2Extraction = null, transcription = '') => callIsWholeStructureService({ extracted, v2Extraction, transcription, services: CATALOG });
+
+  test('a commercial slab pre-treat counts as whole-structure', () => {
+    const extracted = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run(extracted, { property: { property_type: 'commercial' } })).toBe(true);
+  });
+
+  test('interior pest work, a condo, or condo/apartment wording does not', () => {
+    expect(run({ matched_service: 'General Pest Control', requested_service: 'roaches inside' })).toBe(false);
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    expect(run(slab, { property: { property_type: 'condo' } })).toBe(false);
+    expect(run(slab, null, 'the slab for the new apartment building')).toBe(false);
+  });
+
+  test('the card filter drops only missing_unit_number when told the service is whole-structure', () => {
+    const ext = { scheduling: { status: 'requested' }, caller: {}, service_request: { service_intent: 'preventative_one_time' } };
+    expect(dropUnneededCallCards(['missing_unit_number', 'commercial_requires_quote'], ext, { wholeStructureService: true }).flags)
+      .toEqual(['commercial_requires_quote']);
+    expect(dropUnneededCallCards(['missing_unit_number'], ext).flags).toEqual(['missing_unit_number']);
+  });
+});

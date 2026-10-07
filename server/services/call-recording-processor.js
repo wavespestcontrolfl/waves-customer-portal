@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, isWholeStructureService, UNIT_LEVEL_WORDING_RE } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -6931,6 +6931,28 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   return out;
 }
 
+// Card-only companion to the waiver above (owner 2026-10-07): true when EVERY
+// view of the call's service resolves to a whole-structure catalog row (slab
+// pre-treat, trenching, WDO inspection), the property is not typed as a condo
+// or apartment, and nothing on the call says condo/apartment. Commercial jobs
+// count — a new-construction slab has no unit. Used only to skip the advisory
+// missing_unit_number card; it never changes an address hold.
+function callIsWholeStructureService({ extracted = {}, v2Extraction = null, transcription = '', services = [] } = {}) {
+  const propertyType = String(v2Extraction?.property?.property_type || '').toLowerCase();
+  if (propertyType === 'condo' || propertyType === 'apartment') return false;
+  const views = [extracted];
+  const finalView = v2BookingServiceView(extracted, v2Extraction);
+  if (finalView) views.push(finalView);
+  return views.every((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    if (!isWholeStructureService({ serviceKey: row?.service_key || null })) return false;
+    return !UNIT_LEVEL_WORDING_RE.test([transcription, view.call_summary, view.requested_service].filter(Boolean).join(' '));
+  });
+}
+
 // Business whole-building unit waiver for one call
 // (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT; caller checks the gate). No
 // service allowlist: the owner's ruling (2026-10-06) is about the ADDRESS, a
@@ -11551,7 +11573,11 @@ const CallRecordingProcessor = {
           // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
           // cards only; finalFlags, the route decision and the routing
           // verdict keep every flag.
-          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, {
+            canonicalStreet: extracted?.address_line1,
+            wholeStructureService: finalFlags.includes('missing_unit_number')
+              && callIsWholeStructureService({ extracted, v2Extraction, transcription, services: bookableCallServices }),
+          }).dropped);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier
@@ -23395,6 +23421,7 @@ CallRecordingProcessor._test = {
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
+  callIsWholeStructureService,
   businessWholeBuildingUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,

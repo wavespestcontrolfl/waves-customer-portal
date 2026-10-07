@@ -753,7 +753,7 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
+function dropUnneededCallCards(flags, extraction, { canonicalStreet = null, wholeStructureService = false } = {}) {
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set();
   const has = (f) => list.includes(f);
@@ -777,6 +777,13 @@ function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {
         || (WDO_ARRANGER_RELATIONSHIPS.has(relationship) && isWdoInspectionRequest(extraction?.service_request || {})))) {
     dropped.add('caller_not_authorized');
   }
+  // A whole-building service (slab pre-treat, trenching, WDO inspection —
+  // isWholeStructureService) has no unit to ask about, commercial jobs
+  // included (owner 2026-10-07): the advisory "which unit?" card is skipped.
+  // The caller decides wholeStructureService (every view of the call's
+  // service resolves to the allowlist, no condo/apartment wording); any
+  // address hold on the booking is unchanged.
+  if (wholeStructureService) dropped.add('missing_unit_number');
   const kept = list.filter((f) => !dropped.has(f));
   return { flags: kept, dropped: list.filter((f) => dropped.has(f)) };
 }
@@ -3253,6 +3260,7 @@ module.exports = {
   reconstructWaivedAddressValidation,
   serviceMayForceAssessment,
   isWholeStructureService,
+  UNIT_LEVEL_WORDING_RE,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,
   recordCarriesUnit,
