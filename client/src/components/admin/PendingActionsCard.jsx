@@ -342,9 +342,11 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     }
   };
 
+  // A refreshed host list can also carry a follow-up card: its entry is the
+  // authoritative one (a receipt from another tab), shown once, under its source.
+  const hostById = new Map(actions.map((a) => [a.id, a]));
   const withFollowUps = (action) => [action,
-    ...followUps.filter((f) => f.afterId === action.id).flatMap((f) => withFollowUps(f.action))];
-  // A refreshed host list can also carry a follow-up card: show each id once.
+    ...followUps.filter((f) => f.afterId === action.id).flatMap((f) => withFollowUps(hostById.get(f.action.id) || f.action))];
   const seen = new Set();
   const shown = actions.flatMap(withFollowUps).filter((a) => !seen.has(a.id) && seen.add(a.id));
 

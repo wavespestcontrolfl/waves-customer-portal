@@ -288,3 +288,14 @@ test('a follow-up card that the host list also carries after a refresh renders o
   view.rerender(<PendingActionsCard actions={[PICKER, NEXT_CARD]} variant="light" />);
   expect(screen.getAllByRole('button', { name: 'Confirm' })).toHaveLength(1);
 });
+
+test('a refreshed host entry for a follow-up card wins: its settled receipt replaces the cached pending card', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ success: true, outcome: 'completed', pendingAction: NEXT_CARD })));
+  const view = render(<PendingActionsCard actions={[PICKER]} variant="light" />);
+  fireEvent.click(screen.getAllByRole('radio')[1]);
+  fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+  expect(await screen.findByText('Product chosen. Confirm the new card below.')).toBeInTheDocument();
+  view.rerender(<PendingActionsCard actions={[PICKER, { ...NEXT_CARD, receipt: { outcome: 'canceled', result: null } }]} variant="light" />);
+  expect(screen.getByText('Cancelled')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+});
