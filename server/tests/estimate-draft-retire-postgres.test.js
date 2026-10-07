@@ -192,6 +192,18 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(sameDoor);
   });
 
+  test('an unlinked lead is advanced to the sent estimate when it is the single contact match', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(90), customer_phone: '+12025550177' });
+    const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10), customer_phone: '+12025550177' });
+    const leadId = randomUUID();
+    await mockPg('leads').insert({ id: leadId, estimate_id: draft, status: 'new', phone: '+12025550177', first_name: 'Fixture', last_name: 'Retire', created_at: minutesAgo(120) });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    const lead = await mockPg('leads').where({ id: leadId }).first();
+    expect(lead.estimate_id).toBe(sent);
+    expect(lead.status).toBe('estimate_sent');
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();

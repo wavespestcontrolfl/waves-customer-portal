@@ -136,6 +136,19 @@ async function retireOneDraft(trx, pair) {
   if (leads.length) {
     await trx('leads').whereIn('id', leads.map((l) => l.id)).where({ estimate_id: row.id })
       .update({ estimate_id: null, updated_at: trx.fn.now() });
+    // Replay the send for the now-unlinked lead the way the send backfill
+    // does (scripts/backfill-estimate-sent-lead-status.js): the canonical
+    // resolver links and advances it only when it is the sent estimate's
+    // single unambiguous open lead, as of the send time. Lead state only; it
+    // sends nothing.
+    await require('./lead-estimate-link').markLinkedLeadEstimateSent({
+      estimateId: pair.sent_id,
+      sendMethod: 'backfill',
+      performedBy: 'estimate-draft-retire',
+      database: trx,
+      originatingNotAfter: pair.sent_at,
+      respondedAt: pair.sent_at,
+    });
   }
   await trx('notifications')
     .whereRaw("metadata->>'estimateId' = ?", [String(row.id)])
