@@ -350,13 +350,15 @@ function laneAndTier({ customer, converts, tierAfter, totalAfter, pinnedLegacyRo
   return { laneBefore, laneAfter, tierBefore, tierAfter };
 }
 
-// Visits already booked from this estimate (its booking link), the rows the
-// converter's reservation path starts from.
-async function bookedFromEstimate(estimateId) {
+// Visits already booked from this estimate (its booking link) send the
+// converter down its reservation path, which can add visits for the other
+// services and rewrite the booked ones — more than this card can show yet.
+// Same predicate as the converter's reservation lookup (any status).
+async function bookedRefusal(estimateId) {
   const rows = await db('scheduled_services').where({ source_estimate_id: estimateId }).whereNotNull('customer_id')
-    .whereNull('reservation_expires_at').whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
-    .orderBy('scheduled_date', 'asc').select('id', 'scheduled_date', 'service_type');
-  return rows.map((r) => ({ id: String(r.id), date: dateOnly(r.scheduled_date), service: r.service_type || null }));
+    .whereNull('reservation_expires_at').orderBy('scheduled_date', 'asc').select('id', 'scheduled_date');
+  if (!rows.length) return null;
+  return refuse(`${rows.length} visit(s) are already linked to this estimate (first ${dateOnly(rows[0].scheduled_date)}). Accepting it can add and change visits that this card cannot show yet; use Mark accepted on the estimate page.`, 'booked_from_estimate');
 }
 
 // ── Card lines (authorization-contract.js pushes them as they are) ──
@@ -430,17 +432,10 @@ async function planAccept(input) {
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
   const { commercialOnly, commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = await activation(estimateData, customerId);
-  const blocked = converts ? conversionRefusal(estimate, estimateData, tier) : null;
+  const blocked = converts && (conversionRefusal(estimate, estimateData, tier) || await bookedRefusal(estimate.id));
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
-  // Visits already booked from this estimate send the converter down its
-  // reservation path, which can add visits for the other services and rewrite
-  // the booked ones — more than this card can show yet.
-  const booked = converts ? await bookedFromEstimate(estimate.id) : [];
-  if (booked.length) {
-    return refuse(`${booked.length} visit(s) are already booked from this estimate (first ${booked[0].date}). Accepting it can add and change visits that this card cannot show yet; use Mark accepted on the estimate page.`, 'booked_from_estimate');
-  }
   const { collectTermiteFacts, autosendGateOn } = require('../termite-program-agreement');
   const termiteProgram = { has_program: !!collectTermiteFacts(estimateData)?.hasProgram, autosend: autosendGateOn() };
   const messages = customerMessages({ customer, prefs, converts, commercialOnly, lane: lt.laneAfter, termiteProgram });

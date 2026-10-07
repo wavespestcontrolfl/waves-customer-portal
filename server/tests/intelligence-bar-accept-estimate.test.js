@@ -185,10 +185,12 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
   });
 
   test('an estimate with visits already booked from it is refused (the reservation path can add and change visits)', async () => {
-    seed({ booked: [{ id: 'svc-1', scheduled_date: '2026-10-14', service_type: 'Pest Control' }] });
+    // A cancelled linked visit counts too: the converter's reservation lookup
+    // does not filter by status.
+    seed({ booked: [{ id: 'svc-1', scheduled_date: '2026-10-14', status: 'cancelled' }] });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('booked_from_estimate');
-    expect(result.error).toMatch(/1 visit\(s\) are already booked from this estimate \(first 2026-10-14\)/);
+    expect(result.error).toMatch(/1 visit\(s\) are already linked to this estimate \(first 2026-10-14\)/);
   });
 
   test('a termite program estimate says whether the agreement goes to the customer', async () => {
