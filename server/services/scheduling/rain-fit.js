@@ -26,8 +26,11 @@ const RAIN_OK = /assess|estimate|inspect|\bwdo\b|wood[- ]?destroy|interior/i;
 // jobs (Codex #6102 r2).
 const RODENT = /rodent|\brats?\b|\bmice\b|\bmouse\b|trap/i;
 const RODENT_CHECK = /check|monitor|inspect/i;
-// Words that put a service outside whatever else it says.
-const OUTDOOR = /exterior|exclu|mesh|seal|remediat/i;
+// Words that put a service outside whatever else it says. "Accepted
+// estimate" is the placeholder line for a sold quote whose work is unknown
+// (admin-customers scheduleLinesFromEstimate): treatment work, not an
+// estimate visit (Codex #6102 r4).
+const OUTDOOR = /exterior|exclu|mesh|seal|remediat|accepted/i;
 
 function rainOkService(name) {
   if (OUTDOOR.test(name)) return false;

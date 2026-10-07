@@ -39,6 +39,7 @@ describe('rainFitFor', () => {
     [['Rodent Wire Mesh Exclusion'], 'avoid'],
     [['Rodent Trapping'], 'avoid'],
     [['Interior + Exterior Pest'], 'avoid'],
+    [['Accepted estimate'], 'avoid'],
     [['Interior Pest Only'], 'prefer'],
     [['WDO Inspection', 'General Pest Control'], 'avoid'],
     [[], 'neutral'],
