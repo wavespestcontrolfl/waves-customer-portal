@@ -287,7 +287,7 @@ function productFacts(app = {}) {
 // product: the sheet then carries only its facts, so the answer cannot wander
 // into the other products. Matched on the whole normalized name, or on its
 // first word when that word is a real name (4+ letters) said as a whole word.
-function productsNamedIn(question, products) {
+function productsNamedIn(question, products, fullText = question) {
   const q = ` ${normalizeKey(question)} `;
   if (!q.trim()) return [];
   // A full-name match wins; the first-word fallback ("Why was Alpine used?")
@@ -301,7 +301,12 @@ function productsNamedIn(question, products) {
   if (exact.length) return exact;
   const byFirst = products.filter((product) => {
     const first = normalizeKey(product.name).split(' ')[0];
-    return first.length >= 4 && q.includes(` ${first} `);
+    if (first.length < 4 || !q.includes(` ${first} `)) return false;
+    // "Bifen XTS" is not "Bifen I/T": a variant token after the shared first
+    // word names another product (Codex P1 #5964 r68).
+    const after = new RegExp(`\\b${first}\\s+([A-Za-z0-9/+-]+)`, 'i').exec(String(fullText));
+    const variant = after && /^(?:[A-Z0-9][A-Z0-9/+-]*|\d[\w/+-]*|Pro|Plus|Max|Gold|Select|Ultra|Xtra|Extra)$/.test(after[1]) ? normalizeKey(after[1]) : '';
+    return !variant || normalizeKey(product.name).split(' ').includes(variant);
   });
   return byFirst.length === 1 ? byFirst : [];
 }
@@ -2392,17 +2397,21 @@ function defaultCallModel(payload, options) {
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
 const SCHEDULE_QUESTION = /\b(?:when\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)\s+(?:is|will\s+be)|(?:service|visit|appointment|treatment)\s+date|date\s+of\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|appointment|treatment)|(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?<!\bdid\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back|in|into|inside))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?<!\b(?:did|when)\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit(?:ing)?\b|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
+// Next-visit intents in other words (Codex P1 #5964 r68).
+const NEXT_VISIT_QUESTION = /\b(?:due\s+back|return\s+(?:date|visit|trip)|future\s+(?:visit|service|treatment|appointment)|revisit|\b(?:you|y['’]?all|we|tech\w*|technician|someone|somebody|waves|team|crew)\s+(?:\w+\s+)?(?:come|coming|be)\s+back|next\s+(?:visit|service|treatment|appointment|time\s+you)|follow[\s-]?up\s+(?:visit|date|appointment)|another\s+(?:visit|treatment|service|appointment)|see\s+you\s+again|return\s+to)\b/i;
 // Passive booking questions: "Is another treatment booked?" (Codex P1 #5964 r47).
 const BOOKING_QUESTION = /\b(?:is|are|was|were|has|have|do|does|did)\s+(?:there\s+)?(?:another|a|any|my|our|the\s+next|(?:a|the)\s+follow[\s-]?up|more|a\s+second|a\s+return)\s+(?:\w+\s+)?(?:treatments?|visits?|services?|appointments?)\s+(?:\w+\s+)?(?:booked|scheduled|set\s+up|lined\s+up|planned|arranged|confirmed|reserved|coming)\b|\b(?:another|next|follow[\s-]?up|return|second)\s+(?:\w+\s+)?(?:treatment|visit|service|appointment)\s+(?:\w+\s+)?(?:booked|scheduled|planned|coming)\b|\bany\s+(?:more|other|upcoming|future)\s+(?:treatments?|visits?|services?|appointments?)\b/i;
 function asksAboutSchedule(question) {
   const text = String(question == null ? '' : question);
-  return SCHEDULE_QUESTION.test(text) || BOOKING_QUESTION.test(text);
+  return SCHEDULE_QUESTION.test(text) || BOOKING_QUESTION.test(text) || NEXT_VISIT_QUESTION.test(text);
 }
 
 // "Can I mow now?", "Is it necessary to fertilize?": a care decision the
 // model has no ground for keeps the fixed answer (Codex P1 #5964 r57).
 const CARE_VERB_Q = '(?:mow\\w*|water\\w*|irrigat\\w*|fertiliz\\w*|spray\\w*|seed\\w*|overseed\\w*|aerat\\w*|trim\\w*|prun\\w*|cut\\w*|weed\\w*|rak\\w*|sod\\w*|dethatch\\w*|edg(?:e|ing)|plant\\w*|sprinkler\\w*)';
 const CARE_PERMISSION_QUESTION = new RegExp(`\\b${CARE_VERB_Q}\\b[^?.!]*\\b(?:ok(?:ay)?|fine|allowed|alright|all\\s+right|safe|problem|issue|good\\s+idea|bad\\s+idea|permitted|necessary|needed|time|wait|too\\s+(?:soon|early|late))\\b|\\b(?:can|could|may|should|shall|would|will|do|does|is|are|when)\\b[^?.!]{0,40}\\b${CARE_VERB_Q}\\b[^.!]*\\?`, 'i');
+const LAWN_SIZE_QUESTION = /\bhow\s+(?:big|large|much\s+(?:lawn|turf|grass|yard))\b|\b(?:lawn|turf|yard|property)\s+size\b|\bsize\s+of\s+(?:my|the|our)\b|\bsquare\s+f(?:ee|oo)t(?:age)?\b|\bsq\.?\s*ft\b|\bacres?\b|\bacreage\b/i;
+const PRODUCT_LOCATION_QUESTION = /\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
@@ -2425,7 +2434,7 @@ function asksAboutUnrecordedProduct(question, data = {}) {
   const text = String(question || '');
   const identityNames = [...text.matchAll(IDENTITY_PRODUCT_QUESTION_RE)].map((m) => m[1] || m[2])
     .filter((name) => !GENERIC_PRODUCT_WORDS.has(name.split(/\s+/)[0].toLowerCase()));
-  if (identityNames.some((name) => !productsNamedIn(name, asArray(data.applications).map(productFacts).filter(Boolean)).length)) return true;
+  if (identityNames.some((name) => !productsNamedIn(name, asArray(data.applications).map(productFacts).filter(Boolean), text).length)) return true;
   // Every passive mention and every product it lists ("Were Alpine WSG and
   // Roundup applied?") (Codex P1 #5964 r31).
   const recordedProducts = asArray(data.applications).map(productFacts).filter(Boolean);
@@ -2433,7 +2442,7 @@ function asksAboutUnrecordedProduct(question, data = {}) {
     .flatMap((m) => m[1].split(/\s*(?:,|\band\b|\bor\b|\/)\s*/i))
     .map((part) => part.trim())
     .filter((part) => part && !GENERIC_PRODUCT_WORDS.has(part.split(/\s+/)[0].toLowerCase()) && !APPLIED_GENERIC_WORDS.has(part.split(/\s+/)[0].toLowerCase()));
-  if (passiveNames.some((part) => !productsNamedIn(part, recordedProducts).length)) return true;
+  if (passiveNames.some((part) => !productsNamedIn(part, recordedProducts, text).length)) return true;
   // Every active mention too ("Did you use Alpine WSG? Did you spray
   // Roundup?") (Codex P1 #5964 r33).
   return [...text.matchAll(new RegExp(PRODUCT_QUESTION_RE.source, 'gi'))].some((m) => {
@@ -2441,7 +2450,7 @@ function asksAboutUnrecordedProduct(question, data = {}) {
     return named.split(/\s*(?:,|\bor\b|\band\b|\bnor\b|\/)\s*/i)
       .map((part) => part.trim())
       .filter((part) => part && !GENERIC_PRODUCT_WORDS.has(part.split(/\s+/)[0].toLowerCase()))
-      .some((part) => !productsNamedIn(part, recordedProducts).length);
+      .some((part) => !productsNamedIn(part, recordedProducts, text).length);
   });
 }
 
@@ -2459,6 +2468,12 @@ function fixedAnswerTopic(topic, question, data = {}) {
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   if (FIXED_TOPICS.has(topic)) return topic;
   if (PHOTO_QUESTION.test(question)) return 'photos';
+  // The page draws a product's zones from zone ids the sheet does not carry,
+  // so "where was it applied?" keeps the fixed answer (Codex P1 #5964 r68).
+  if (data.serviceLine !== 'pest' && PRODUCT_LOCATION_QUESTION.test(question)) return 'product_location';
+  // Lawn size: footage never reaches an answer (owner writer rules), so the
+  // fixed answer gives it (Codex P1 #5964 r68).
+  if (LAWN_SIZE_QUESTION.test(question)) return 'lawn_size';
   // A displayed mowing hold is a label interval: a mowing question keeps the
   // fixed answer while one shows (Codex P1 #5964 r65).
   if (data.reportV2?.banner?.mowHold && /\b(?:mow\w*|cut(?:ting)?\s+(?:the\s+)?(?:grass|lawn)|banner|hold)\b/i.test(question)) return 'mow_hold';

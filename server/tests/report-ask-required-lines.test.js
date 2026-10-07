@@ -2411,3 +2411,23 @@ describe('answer screen, Codex round 67', () => {
     expect(facts.areas_serviced).toBeUndefined();
   });
 });
+
+describe('answer screen, Codex round 68', () => {
+  test.each(['Are you due back?', 'What is the return date?', 'Is there a future visit?', 'Will the tech revisit?'])('a next-visit question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', question)).toBe('next_visit');
+  });
+
+  test('a product-location question on a lawn report keeps the fixed answer', () => {
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', 'Which zones were treated?')).toBe('product_location');
+  });
+
+  test('a lawn-size question keeps the fixed answer', () => {
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', 'How big is my lawn?')).toBe('lawn_size');
+  });
+
+  test('a variant of a recorded product is not the recorded product', () => {
+    const data = lawnData({ applications: [{ product: { name: 'Bifen I/T' } }] });
+    expect(ruleAnswerReason(data, [], 'applied', 'Was Bifen XTS applied?')).toBe('unrecorded_product');
+    expect(ruleAnswerReason(data, [], 'applied', 'Why was Bifen used?')).toBeNull();
+  });
+});
