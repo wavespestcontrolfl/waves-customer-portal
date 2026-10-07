@@ -7,6 +7,7 @@ const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps
 const restore = require('../models/migrations/20261007172000_lawn_v13_celsius_cap_v13_only');
 const gateOnly = require('../models/migrations/20261007174000_lawn_v13_count_caps_v13_only');
 const protocolRows = require('../models/migrations/20261007175000_lawn_v13_count_caps_protocol_rows');
+const propertyIdMigration = require('../models/migrations/20261007178000_property_application_history_property_id');
 const clampMigration = require('../models/migrations/20261007177000_lawn_v13_cap_clamp_and_kb_dismiss');
 const { DIMENSION } = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const { submittedProductLimitFindings } = require('../services/complete-scheduled-service');
@@ -65,7 +66,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
     for (const table of ['technicians', 'products_catalog', 'product_aliases', 'lawn_protocol_product_substitutions',
       'equipment_systems', 'equipment_calibrations', 'municipality_ordinances', 'property_nutrient_ledger',
       'service_products', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_gates',
-      'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'lawn_protocol_audit_log', 'product_limits', 'property_application_history']) {
+      'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'lawn_protocol_audit_log', 'audit_log', 'product_limits', 'property_application_history']) {
       await clone(table);
     }
     await product('Tetrino Insecticide', { category: 'insecticide', default_rate_per_1000: 0.367, rate_unit: 'fl oz', inventory_unit: 'fl oz' });
@@ -784,6 +785,95 @@ describeDb('v13 count caps through PostgreSQL', () => {
           expect(product.annualCounter.maxApplications).toBe(2);
         }
       });
+    });
+  });
+
+  describe('the treated property is frozen on the ledger (20261007178000)', () => {
+    const applicationLimits = require('../services/application-limits');
+    let capped;
+    beforeAll(async () => {
+      capped = await product('Frozen-property fixture');
+      await knex('product_limits').insert({ product_id: capped.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 2, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' });
+    });
+    async function lawns() {
+      const f = await fixture(knex);
+      const [other] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      return { f, a: f.property.id, b: other.id };
+    }
+    // One completed visit + ledger row at `visitProperty`, the ledger row frozen to `frozen` (null = a legacy row).
+    async function applied(f, date, visitProperty, frozen) {
+      const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: visitProperty, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+      await knex('property_application_history').insert({ customer_id: f.customerId, product_id: capped.id, application_date: date, application_rate: 1, rate_unit: 'oz', service_record_id: record.id, property_id: frozen });
+      return visit;
+    }
+    const blocks = async (f, propertyId) => (await applicationLimits.checkLimits(f.customerId, capped.id, new Date('2026-06-10T16:00:00Z'), knex, propertyId ? { propertyId } : {})).blocks;
+
+    test('an address correction on the visit after completion does not move the history: it stays at the property it was applied to', async () => {
+      const { f, a, b } = await lawns();
+      const v1 = await applied(f, '2026-02-02', a, a);
+      const v2 = await applied(f, '2026-03-16', a, a);
+      expect(await blocks(f, a)).toHaveLength(1);
+      expect(await blocks(f, b)).toEqual([]);
+      // Staff correct both visits' property to B afterwards.
+      await knex('scheduled_services').whereIn('id', [v1.id, v2.id]).update({ property_id: b });
+      expect(await blocks(f, a)).toHaveLength(1);
+      expect(await blocks(f, b)).toEqual([]);
+      // The same for a caller with no property: the busiest lawn is still A's 2.
+      expect(await blocks(f)).toEqual([expect.objectContaining({ current: 2, max: 2 })]);
+      expect(await applicationLimits.annualCountFor(knex, await knex('property_application_history').where({ customer_id: f.customerId }), {})).toBe(2);
+    });
+
+    test('a legacy row with no frozen property falls back to its visit\'s property (and moves with it); a row with neither still counts everywhere', async () => {
+      const { f, a, b } = await lawns();
+      const v1 = await applied(f, '2026-02-02', a, null);
+      await applied(f, '2026-03-16', a, null);
+      expect(await blocks(f, a)).toHaveLength(1);
+      expect(await blocks(f, b)).toEqual([]);
+      await knex('scheduled_services').where({ id: v1.id }).update({ property_id: b });
+      expect(await blocks(f, a)).toEqual([]); // the legacy fallback follows the visit, as before this change
+      const g = await lawns();
+      await knex('property_application_history').insert({ customer_id: g.f.customerId, product_id: capped.id, application_date: '2026-02-02', application_rate: 1, rate_unit: 'oz' });
+      await applied(g.f, '2026-03-16', g.a, g.a);
+      expect(await blocks(g.f, g.b)).toHaveLength(0);
+      expect(await blocks(g.f, g.a)).toHaveLength(1);
+    });
+
+    test('the compliance writer freezes the visit\'s property on the ledger row at completion; a later correction never rewrites it', async () => {
+      const ComplianceService = require('../services/compliance');
+      const { f, a, b } = await lawns();
+      const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: a, scheduled_date: '2026-06-10', service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: '2026-06-10', service_type: 'Lawn fixture' }).returning('*');
+      await knex('service_products').insert({ service_record_id: record.id, product_id: capped.id, product_name: capped.name, total_amount: 1, amount_unit: 'oz' });
+      await ComplianceService.createComplianceRecords(record.id, { trx: knex });
+      const [row] = await knex('property_application_history').where({ service_record_id: record.id });
+      expect(row.property_id).toBe(a);
+      await knex('scheduled_services').where({ id: visit.id }).update({ property_id: b });
+      await ComplianceService.createComplianceRecords(record.id, { trx: knex }); // a retry
+      expect((await knex('property_application_history').where({ service_record_id: record.id }))).toEqual([expect.objectContaining({ id: row.id, property_id: a })]);
+      // A record with no visit stays unplaced.
+      const [loose] = await knex('service_records').insert({ customer_id: f.customerId, service_date: '2026-06-11', service_type: 'Lawn fixture' }).returning('*');
+      await knex('service_products').insert({ service_record_id: loose.id, product_id: capped.id, product_name: capped.name, total_amount: 1, amount_unit: 'oz' });
+      await ComplianceService.createComplianceRecords(loose.id, { trx: knex });
+      expect((await knex('property_application_history').where({ service_record_id: loose.id }))[0].property_id).toBeNull();
+    });
+
+    test('the migration backfills legacy rows once from the visit (rows with no visit or no property stay unplaced), audits the count, and a second run changes nothing', async () => {
+      const { f, a } = await lawns();
+      await applied(f, '2026-02-02', a, null);
+      await applied(f, '2026-03-16', null, null); // a visit with no property
+      await knex('property_application_history').insert({ customer_id: f.customerId, product_id: capped.id, application_date: '2026-04-02', application_rate: 1, rate_unit: 'oz' }); // no visit
+      await knex('audit_log').del();
+      await propertyIdMigration.up(knex);
+      const rows = await knex('property_application_history').where({ customer_id: f.customerId }).orderBy('application_date');
+      expect(rows.map((r) => r.property_id)).toEqual([a, null, null]);
+      const events = await knex('audit_log').where({ action: 'property_application_history.property_id_backfill' });
+      expect(events).toHaveLength(1);
+      expect(events[0].metadata.rowsBackfilled).toBeGreaterThanOrEqual(1);
+      await knex('audit_log').del();
+      await propertyIdMigration.up(knex);
+      expect(await knex('audit_log').where({ action: 'property_application_history.property_id_backfill' })).toHaveLength(0);
+      expect((await knex('property_application_history').where({ customer_id: f.customerId }).orderBy('application_date')).map((r) => r.property_id)).toEqual([a, null, null]);
     });
   });
 

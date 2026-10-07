@@ -151,6 +151,8 @@ postgres('closeout: a hard product count limit flags, never refuses', () => {
       const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
       expect(await mockPg('service_products').where({ service_record_id: record.id })).toHaveLength(1);
       expect(await recordedLedger(f)).toHaveLength(3);
+      // The ledger row of this application carries the visit's property, frozen at completion.
+      expect(await recordedLedger(f).where({ service_record_id: record.id }).first()).toMatchObject({ property_id: f.propertyId });
       // One office notification, carrying the finding.
       const rows = await bells(f);
       expect(rows).toHaveLength(1);

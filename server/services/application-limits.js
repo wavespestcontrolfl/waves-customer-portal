@@ -56,10 +56,18 @@ function sizingNote(unsized, estimated) {
 // elsewhere, so it still counts. No option, no change.
 function scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId } = {}, table) {
   if (propertyId) {
+    // The row's treated property is the one frozen on the ledger when it was written (an address
+    // correction on the visit later must not move it). A row placed elsewhere is out; a legacy row
+    // with no frozen property falls back to its visit's property, and one with no property at all
+    // cannot be proven elsewhere, so it still counts.
+    query.where(function placedHereOrUnplaced() {
+      this.whereNull(`${table}.property_id`).orWhere(`${table}.property_id`, propertyId);
+    });
     query.whereNotExists(function elsewhere() {
       this.select(database.raw('1')).from('service_records as sr_scope')
         .join('scheduled_services as ss_scope', 'sr_scope.scheduled_service_id', 'ss_scope.id')
         .whereRaw('sr_scope.id = ??.service_record_id', [table])
+        .whereRaw('??.property_id is null', [table])
         .whereNotNull('ss_scope.property_id')
         .whereNot('ss_scope.property_id', propertyId);
     });
@@ -388,14 +396,17 @@ class ApplicationLimitChecker {
   // The per-lawn yearly count of already-loaded history rows (see checkLimits).
   async annualCountFor(database, history, opts = {}) {
     if (opts.propertyId || history.length < 2) return history.length;
-    const recordIds = [...new Set(history.map((row) => row.service_record_id).filter(Boolean))];
-    const placed = recordIds.length
+    // The frozen ledger property first; a legacy row without one falls back to its visit's property.
+    const legacyRecordIds = [...new Set(history.filter((row) => !row.property_id).map((row) => row.service_record_id).filter(Boolean))];
+    const placed = legacyRecordIds.length
       ? await database('service_records as sr_prop')
         .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
-        .whereIn('sr_prop.id', recordIds).select('sr_prop.id as record_id', 'ss_prop.property_id')
+        .whereIn('sr_prop.id', legacyRecordIds).select('sr_prop.id as record_id', 'ss_prop.property_id')
       : [];
     const propertyOf = new Map((placed || []).map((row) => [String(row.record_id), row.property_id]));
-    return worstPropertyCount(history.map((row) => ({ treated_property_id: row.service_record_id ? propertyOf.get(String(row.service_record_id)) || null : null })));
+    return worstPropertyCount(history.map((row) => ({
+      treated_property_id: row.property_id || (row.service_record_id ? propertyOf.get(String(row.service_record_id)) || null : null),
+    })));
   }
 
   // The closeout audit of one recorded application, whatever order the visits were recorded in

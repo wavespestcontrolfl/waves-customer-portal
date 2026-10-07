@@ -68,6 +68,10 @@ function areaTreatedSqft(sp) {
 // were lowercased.
 const { worstPropertyCount } = require('../utils/property-counts');
 
+// The treated property of a ledger row: the one frozen on the row when it was written; a legacy row
+// without one falls back to its visit's property (null = unplaced, counted at every property).
+const placeOnTheLedgerProperty = (rows) => rows.map((row) => ({ ...row, treated_property_id: row.property_id || row.visit_property_id || null }));
+
 const isProductCountRow = (limit) => limit.limit_type === 'annual_max_apps' && limit.match_type === 'product';
 
 // Every product_limits row (hard ones only when asked) with the product name, as the summaries read
@@ -175,6 +179,14 @@ const ComplianceService = {
       ? await k('technicians').where({ id: sr.technician_id }).first()
       : null;
 
+    // The treated property, frozen on the ledger at this moment: a later address correction on the
+    // visit must not move the application to another lawn (per-lawn caps read this column). A record
+    // with no visit, or a visit with no property, stays unplaced (NULL).
+    const visit = sr.scheduled_service_id
+      ? await k('scheduled_services').where({ id: sr.scheduled_service_id }).first('property_id')
+      : null;
+    const treatedPropertyId = visit?.property_id || null;
+
     // Rows already ledgered for this record. New-style rows are identified
     // by service_product_id; legacy rows (NULL there) by catalog product.
     const existingRows = await k('property_application_history')
@@ -221,6 +233,7 @@ const ComplianceService = {
         customer_id: sr.customer_id,
         service_record_id: serviceRecordId,
         service_product_id: sp.id,
+        property_id: treatedPropertyId,
         product_id: productId,
         technician_id: sr.technician_id,
         application_date: sr.service_date || etDateString(),
@@ -453,7 +466,8 @@ const ComplianceService = {
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
       .leftJoin('service_records as sr_prop', 'property_application_history.service_record_id', 'sr_prop.id')
       .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
-      .select('property_application_history.*', 'products_catalog.name as product_name', 'ss_prop.property_id as treated_property_id');
+      .select('property_application_history.*', 'products_catalog.name as product_name', 'ss_prop.property_id as visit_property_id')
+      .then(placeOnTheLedgerProperty);
 
     // Get all product limits, the v13 caps applied while the gate is on.
     const limits = await limitRowsWithV13Caps();
@@ -593,7 +607,8 @@ const ComplianceService = {
           .where({ 'pah.product_id': limit.product_id })
           .where('pah.application_date', '>=', yearStart)
           .whereNull('pah.retracted_at')
-          .select('pah.customer_id', 'ss_prop.property_id as treated_property_id');
+          .select('pah.customer_id', 'ss_prop.property_id as visit_property_id')
+          .then(placeOnTheLedgerProperty);
         const byCustomer = new Map();
         for (const row of rows) {
           const key = String(row.customer_id);

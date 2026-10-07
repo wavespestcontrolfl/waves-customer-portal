@@ -133,6 +133,18 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     }
   });
 
+  test('the summaries read the property frozen on the ledger row: moving the visit to another property afterwards does not move the count', async () => {
+    const customerId = await customerWithTwoProperties([0, 0]);
+    const [a, b] = (await db('customer_properties').where({ customer_id: customerId }).orderBy('is_primary', 'desc')).map((p) => p.id);
+    await db('property_application_history').where({ customer_id: customerId }).update({ property_id: a });
+    await db('scheduled_services').where({ customer_id: customerId }).update({ property_id: b });
+    expect(await row(customerId)).toMatchObject({ currentUsage: 2, status: 'exceeded' });
+    // A legacy row (no frozen property) follows its visit: with the visits on B and one frozen at A, the busiest lawn is 1.
+    const [one] = await db('property_application_history').where({ customer_id: customerId }).orderBy('id').select('id');
+    await db('property_application_history').where({ id: one.id }).update({ property_id: null });
+    expect(await row(customerId)).toMatchObject({ currentUsage: 1, status: 'warning' });
+  });
+
   test('getDashboard: three customers with one application each never trip a per-lawn cap of 3 on the company total; two at one lawn of 3 does warn', async () => {
     const [capped] = await db('products_catalog').insert({ name: `Count cap dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
     made.products.push(capped.id);
