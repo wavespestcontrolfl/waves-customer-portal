@@ -1665,9 +1665,27 @@ function deniesRecordedFindings(text, facts) {
     && !SAYS_INSIDE.test(clause) && !SAYS_OUTSIDE.test(clause));
 }
 
+// The customer's recorded concern may not be denied: "No, you did not report
+// ants" when the concern names ants (Codex P1 #5964 r49).
+const CONCERN_VERB = /\b(?:report\w*|mention\w*|tell|told|said|say|note\w*|ask\w*|concern\w*|complain\w*|flag\w*|raise\w*|bring|brought|call\w*\s+about)\b/i;
+function deniesConcern(text, facts) {
+  const concern = String(facts?.customer_concern || '').toLowerCase();
+  if (!concern) return false;
+  const concernTerms = new Set(stemmedTerms(concern).split(' ').filter((term) => term.length > 2));
+  return clausesOf(text).some((clause) => {
+    const lower = clause.toLowerCase();
+    // "Did not mention" is a denial here: the concern is on the report.
+    if (!(NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower)) || /\b(?:whether|unclear|not\s+sure|don['’]?t\s+know|can['’]?t\s+confirm|cannot\s+confirm)\b/.test(lower)) return false;
+    if (!/\b(?:you|your)\b/.test(lower) || !CONCERN_VERB.test(lower)) return false;
+    return stemmedTerms(lower).split(' ').some((term) => term.length > 2 && concernTerms.has(term) && !CONCERN_STOP.has(term));
+  });
+}
+const CONCERN_STOP = new Set('the and you your did not was were have has had any about report reported mention mentioned'.split(' '));
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['denies_concern', (text, { facts }) => deniesConcern(text, facts)],
   ['denies_ingredient', (text, { facts }) => deniesRecordedIngredient(text, facts)],
   ['denies_findings', (text, { facts }) => deniesRecordedFindings(text, facts)],
   ['service_kind', (text, { facts, data }) => contradictsServiceKind(text, facts, data)],

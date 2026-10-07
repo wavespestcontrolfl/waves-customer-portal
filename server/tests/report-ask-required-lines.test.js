@@ -1851,3 +1851,18 @@ describe('answer screen, Codex round 48', () => {
     expect(ask('Alpine WSG contains dinotefuran.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 49', () => {
+  const data = pestData({ applications: [], customerConcern: 'Ants seen in the kitchen.' });
+  const question = 'Did I report ants?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['No, you did not report ants.', 'You did not mention ants in the kitchen.'])('the recorded concern may not be denied: %s', (answer) => {
+    expect(ask(answer)).toBe('denies_concern');
+  });
+
+  test('the recorded concern passes', () => {
+    expect(ask('Yes, you reported ants in the kitchen.')).toBeNull();
+  });
+});
