@@ -2312,3 +2312,10 @@ describe('answer screen, Codex round 63', () => {
     expect(ask('Your grass is St. Augustine Floratam.')).toBeNull();
   });
 });
+
+test('a trend starting point grounds only a past claim (pre-push audit)', () => {
+  const data = lawnData({ lawnAssessment: { scores: { overallScore: 82 } }, reportV2: { aftercare: {}, trends: { overall: [{ label: 'Aug', value: 50 }, { label: 'Oct', value: 82 }] } } });
+  const facts = buildReportAskFacts({ data });
+  expect(screenAskAnswer('Your current overall score is 50 out of 100.', { question: 'q', data, facts })).toBe('unstated_number');
+  expect(screenAskAnswer('Your overall score went from 50 out of 100 to 82 out of 100.', { question: 'q', data, facts })).toBeNull();
+});

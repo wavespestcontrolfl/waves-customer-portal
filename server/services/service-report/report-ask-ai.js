@@ -1215,6 +1215,7 @@ const RANGE_TAIL_RE = /^\s*(?:to|-|–|and)\s*\d+(?:\.\d+)?/i;
 
 const PRESSURE_WORDS = /\b(?:pressure|gauge|score|rating|level|index)\b/i;
 
+const PAST_CLAIM_RE = /\b(?:from|was|were|started|began|earlier|previous(?:ly)?|last\s+(?:month|visit|time|season)|ago|before|back\s+in|used\s+to|in\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*)\b/i;
 const TIME_OR_COUNT_NOUNS = new Set(['day', 'week', 'month', 'year', 'hour', 'minut', 'minute', 'visit', 'treatment', 'application', 'time', 'nest', 'mound', 'station', 'spot', 'area', 'plant', 'palm', 'tree', 'shrub', 'room', 'bed', 'zone', 'gallon', 'pound', 'bag']);
 
 function numberIsKnown(value, after, sentence, known) {
@@ -1237,7 +1238,11 @@ function numberIsKnown(value, after, sentence, known) {
   // may only repeat a number the report's own text states (Codex P1 r12).
   const rowArea = (fact) => (/\.diagnosis\.([a-z0-9_]+)\./.exec(fact.key) || [])[1];
   const fitsRow = (fact) => !rowArea(fact) || rowArea(fact).split('_').filter((word) => word.length > 3).some((word) => normalizeKey(sentence).includes(word.replace(/s$/, '')));
-  known = known.filter(fitsRow);
+  // A trend's starting point grounds only a claim about the past: "your current
+  // score is 50" may not borrow the 50 the trend began at (pre-push audit,
+  // #5964).
+  const pastClaim = PAST_CLAIM_RE.test(sentence);
+  known = known.filter((fact) => fitsRow(fact) && (pastClaim || !/\.trends\.[^.]+\.from\./.test(fact.key)));
   if (!kind) {
     // A number from report text grounds only a claim about the same thing:
     // "4 inches" in a section is no "4 nests" (Codex P1 #5964 r26).
