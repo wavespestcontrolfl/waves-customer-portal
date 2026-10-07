@@ -17,7 +17,7 @@ const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-
 const { buildTreatmentSummary } = require('./treatment-summary');
 const featureGates = require('../../config/feature-gates');
 const { lawnReportLeadLive } = featureGates;
-const { buildProgramLine } = require('./lawn-program-line');
+const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { filterByCardStatus } = require('./lawn-photo-findings');
@@ -753,6 +753,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     ? buildProgramLine({ month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
+  // GATE_LAWN_PROGRAM_DETAIL: undefined unless live beside a program line, so
+  // the key serializes away and the gate-off payload is byte-identical.
+  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine });
 
   const snapshot = {
     overallScore,
@@ -762,6 +765,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     rootCause,
     seasonalNote,
     ...(programLine ? { seasonalNoteSource: 'program' } : {}),
+    seasonalDetail,
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).
