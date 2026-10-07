@@ -951,6 +951,14 @@ function leaksTargetList(text, {
     data?.customerConcern, facts?.customer_concern, facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
     facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines,
   ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
+  // What the customer reported is not what we found: "We found ants" needs
+  // the visit's own record, not the concern alone (Codex P1 #5964 r50).
+  const visitOnly = stemmedTerms([
+    facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
+    facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines,
+  ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
+  if (splitSentences(text).some((sentence) => FINDING_CLAIM.test(sentence) && !UNCERTAIN_RE.test(sentence)
+    && terms.some((label) => stemmedTerms(sentence).includes(label) && !visitOnly.includes(label)))) return true;
   // Any sentence that is not a "no" or a "not sure" affirms it: "The symptoms
   // indicate root rot", "It treats termites" (Codex P1s #5964 r39).
   // "Is not labeled for termites" is a claim too; only "the report does not
@@ -958,6 +966,7 @@ function leaksTargetList(text, {
   return splitSentences(text).some((sentence) => !UNCERTAIN_RE.test(sentence)
     && terms.some((label) => stemmedTerms(sentence).includes(label) && !inFacts.includes(label)));
 }
+const FINDING_CLAIM = /\b(?:we|i|our\s+tech\w*|the\s+tech\w*|your\s+tech\w*|technician|crew|team)\s+(?:\w+\s+){0,2}?(?:found|find|saw|spott\w*|observ\w*|noted|discover\w*|confirm\w*|identif\w*|detect\w*|located|turned\s+up)\b|\b(?:was|were|been|got)\s+(?:\w+\s+)?(?:found|seen|spotted|observed|noted|discovered|confirmed|identified|detected|located)\b/i;
 const UNCERTAIN_RE = /\b(?:(?:does|do|did)\s*n['’]?o?t\s+(?:say|show|list|mention|record|note|include|name|confirm|cover)|(?:is|are|was|were)\s*n['’]?o?t\s+(?:listed|recorded|noted|mentioned|shown|named|on\s+(?:the|this|your)\s+report)|not\s+(?:on|in)\s+(?:the|this|your)\s+report|no\s+(?:record|mention|note)|can['’]?t\s+(?:confirm|tell|say)|cannot\s+(?:confirm|tell|say)|unable\s+to|unclear|unknown|don['’]?t\s+know|not\s+sure|whether|if)\b/i;
 const NOT_CONFIRMED_RE = /\b(?:no|not|never|none|without|doesn['’]?t|does\s+not|didn['’]?t|did\s+not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|can['’]?t|cannot|unable|unclear|unknown|don['’]?t\s+know|whether|if)\b/i;
 

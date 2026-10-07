@@ -1866,3 +1866,14 @@ describe('answer screen, Codex round 49', () => {
     expect(ask('Yes, you reported ants in the kitchen.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 50', () => {
+  test('a concern is not a finding', () => {
+    const data = pestData({ applications: [], customerConcern: 'Ants reported in the kitchen.' });
+    const question = 'What did you find?';
+    const facts = buildReportAskFacts({ question, data });
+    const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+    expect(ask('We found ants in the kitchen.')).toBe('target_list');
+    expect(ask('You reported ants in the kitchen.')).toBeNull();
+  });
+});
