@@ -1159,23 +1159,27 @@ async function lawnVisitsPerYear(knex, service) {
     ?? stated(service.service_type);
 }
 
-// An explicit bahia lawn: bahia as the grass type, as the track key, or in the legacy free text
-// (read only when no profile is recorded).
-function explicitBahia(profile, legacyGrass, profileRecorded) {
-  const bahia = [normalizeGrassType(profile?.grass_type), String(profile?.track_key || '').trim().toLowerCase(), profileRecorded ? null : normalizeGrassType(legacyGrass)].includes('bahia');
-  return bahia ? 'bahia' : null;
+// What a visit's lawn record says about its grass, read once: whether a profile records a grass or
+// track, whether anything does (the legacy free text counts when no profile is recorded), and
+// whether the record names bahia (the grass type, the track key, or that legacy text), which GATE_LAWN_V13
+// has no program for. Bahia in ANY recorded field wins over another field's track.
+function recordedGrassFacts(profile, legacyGrass) {
+  const profileRecorded = [profile?.track_key, profile?.grass_type].some((value) => String(value || '').trim());
+  const named = [normalizeGrassType(profile?.grass_type), String(profile?.track_key || '').trim().toLowerCase(), profileRecorded ? null : normalizeGrassType(legacyGrass)];
+  return {
+    profileRecorded,
+    recorded: profileRecorded || String(legacyGrass || '').trim(),
+    noProgram: lawnV13NoProgramGrass(named.includes('bahia') ? 'bahia' : null),
+  };
 }
 
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
-  const profileRecorded = [profile?.track_key, profile?.grass_type]
-    .some((value) => String(value || '').trim());
-  const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const { profileRecorded, recorded, noProgram } = recordedGrassFacts(profile, legacyGrass);
   const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
-  const grass = explicitBahia(profile, legacyGrass, profileRecorded);
   // GATE_LAWN_V13: any recorded field that says bahia ends the lookup here, before another
   // recorded value (a conflicting track key or grass type) can pick a track. Only this
   // result carries the flag; every other keeps its old shape.
-  if (lawnV13NoProgramGrass(grass)) return { trackKey: null, track: null, month, visit: null, v13NoProgram: true };
+  if (noProgram) return { trackKey: null, track: null, month, visit: null, v13NoProgram: true };
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
