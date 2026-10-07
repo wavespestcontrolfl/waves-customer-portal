@@ -11,8 +11,13 @@
  *
  * What this writes: one product-level annual_max_apps row (hard_block, value 2) per product,
  * inserted by explicit product id ONLY where that product has no annual_max_apps row at all.
- * An existing row (an admin's, or the older Celsius row that says 3) is never changed: the
- * migration logs it and moves on. application-limits.js counts the history by property
+ * An existing row (an admin's) is never changed: the migration logs it and moves on.
+ *
+ * One exception, Celsius (owner 2026-10-06, "I approve all changes": 2 a year, not 3). The
+ * compliance seed (20260401000020) wrote a Celsius row of 3. That row is lowered to 2 only
+ * while it still equals the seed row exactly (value 3, unit, severity and description); any
+ * other value or description is an admin edit and is left and logged. The lowered row gets
+ * its own description, which is how down() knows it wrote it. application-limits.js counts the history by property
  * (#6103), so a customer's second property starts its own count.
  *
  * Each product id is resolved once: exact catalog name (active rows first), else an exact
@@ -21,8 +26,9 @@
  *
  * No price, catalog or protocol field is touched. Idempotent: a second run writes nothing.
  *
- * down() deletes only the rows this wrote: a row goes only while every field still equals
- * what was written (match_type, limit_type, value, unit, severity and the exact description).
+ * down() deletes only the rows this inserted, and restores the Celsius seed row (value 3, seed
+ * description) only while it still holds the lowered values and description. A row goes only
+ * while every field still equals what was written.
  */
 
 const LABEL = 'owner 2026-10-06';
@@ -53,6 +59,21 @@ const CAPS = [
     description: `Blindside Herbicide: max 2 applications per year (${LABEL}).`,
   },
 ];
+
+// The row 20260401000020 seeded for Celsius, and what it becomes (owner 2026-10-06).
+const CELSIUS_SEED = {
+  match_type: 'product',
+  limit_type: 'annual_max_apps',
+  limit_value: 3,
+  limit_unit: 'applications',
+  severity: 'hard_block',
+  description: 'Celsius WG: max 3 applications per year per property. Exceeding voids warranty and risks turf damage.',
+};
+const CELSIUS_LOWERED = {
+  ...CELSIUS_SEED,
+  limit_value: 2,
+  description: `Celsius WG: max 2 passes per spot per year (${LABEL}; lowered from 3).`,
+};
 
 const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
@@ -95,6 +116,15 @@ exports.up = async function up(knex) {
     const existing = await knex('product_limits')
       .where({ product_id: productId, limit_type: 'annual_max_apps' })
       .select('id', 'match_type', 'limit_value', 'severity');
+    if (existing.length === 1 && cap.name === 'Celsius WG') {
+      const [only] = existing;
+      const matchesSeed = await knex('product_limits')
+        .where({ id: only.id, product_id: productId, ...CELSIUS_SEED }).first('id');
+      if (matchesSeed) {
+        await knex('product_limits').where({ id: only.id, ...CELSIUS_SEED }).update({ ...pick(CELSIUS_LOWERED), updated_at: knex.fn.now() });
+        continue;
+      }
+    }
     if (existing.length) {
       console.log(`[lawn-v13-count-caps] ${cap.name} already has annual_max_apps: ${existing.map((r) => `${r.match_type} ${Number(r.limit_value)} ${r.severity}`).join('; ')} (owner value is ${cap.limit_value}); left as is`);
       continue;
@@ -103,8 +133,18 @@ exports.up = async function up(knex) {
   }
 };
 
+// The columns an update writes (never the key columns).
+function pick(spec) {
+  return { limit_value: spec.limit_value, description: spec.description };
+}
+
 exports.down = async function down(knex) {
   if (!(await hasTables(knex))) return;
+  // The lowered Celsius row goes back to the seed row, only while it still equals what up wrote.
+  await knex('product_limits')
+    .whereNotNull('product_id')
+    .where(CELSIUS_LOWERED)
+    .update({ ...pick(CELSIUS_SEED), updated_at: knex.fn.now() });
   for (const cap of CAPS) {
     // The description is unique to this migration; every other field must still equal what was written.
     await knex('product_limits')
@@ -122,4 +162,6 @@ exports.down = async function down(knex) {
 };
 
 exports.CAPS = CAPS;
+exports.CELSIUS_SEED = CELSIUS_SEED;
+exports.CELSIUS_LOWERED = CELSIUS_LOWERED;
 exports.resolveProductId = resolveProductId;

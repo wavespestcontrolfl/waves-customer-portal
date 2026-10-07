@@ -168,6 +168,75 @@ describeDb('v13 count caps through PostgreSQL', () => {
       await migration.down(knex);
       expect((await allLimits()).map((r) => r.id).sort()).toEqual([admin.id, interval.id].sort());
     });
+
+    describe('the Celsius seed row (3 -> 2, owner 2026-10-06)', () => {
+      const { CELSIUS_SEED, CELSIUS_LOWERED } = migration;
+      const seed = (changes = {}) => knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...CELSIUS_SEED, ...changes }).returning('*').then(([row]) => row);
+      const fields = (row) => ({ product_id: row.product_id, match_type: row.match_type, limit_type: row.limit_type, limit_value: Number(row.limit_value), limit_unit: row.limit_unit, severity: row.severity, description: row.description });
+
+      test('the row that still equals the seed is lowered to 2 in place (same id, same unit and severity); no second Celsius row is added', async () => {
+        const before = await seed();
+        await migration.up(knex);
+        const rows = await limitsOf(CELSIUS);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].id).toBe(before.id);
+        expect(fields(rows[0])).toEqual({ ...fields(before), limit_value: 2, description: CELSIUS_LOWERED.description });
+        expect(await allLimits()).toHaveLength(4);
+      });
+
+      test.each([
+        ['another value', { limit_value: 4 }],
+        ['an edited description', { description: 'Celsius WG: max 3 applications per year. Admin note.' }],
+        ['a softer severity', { severity: 'warning' }],
+        ['another unit', { limit_unit: 'apps' }],
+      ])('an admin-edited row (%s) is left exactly as it is and logged', async (_label, changes) => {
+        const before = await seed(changes);
+        await migration.up(knex);
+        expect(await limitsOf(CELSIUS)).toEqual([before]);
+        expect(console.log.mock.calls.flat().join('\n')).toMatch(/Celsius WG already has annual_max_apps/);
+      });
+
+      test('a second up changes nothing more', async () => {
+        await seed();
+        await migration.up(knex);
+        const once = await allLimits();
+        await migration.up(knex);
+        expect(await allLimits()).toEqual(once);
+      });
+
+      test('down restores 3 and the seed description while the row still holds the lowered values; up again lowers it', async () => {
+        const before = await seed();
+        await migration.up(knex);
+        await migration.down(knex);
+        const [restored] = await limitsOf(CELSIUS);
+        expect(restored.id).toBe(before.id);
+        expect(fields(restored)).toEqual(fields(before));
+        expect(await allLimits()).toHaveLength(1);
+        await migration.up(knex);
+        expect(Number((await limitsOf(CELSIUS))[0].limit_value)).toBe(2);
+      });
+
+      test('down leaves the row alone once someone edited it after the deploy (value or description)', async () => {
+        await seed();
+        await migration.up(knex);
+        await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 1 });
+        await migration.down(knex);
+        expect(Number((await limitsOf(CELSIUS))[0].limit_value)).toBe(1);
+        expect((await limitsOf(CELSIUS))[0].description).toBe(CELSIUS_LOWERED.description);
+
+        await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 2, description: 'admin rewrote this' });
+        await migration.down(knex);
+        expect((await limitsOf(CELSIUS))[0]).toMatchObject({ description: 'admin rewrote this' });
+        expect(Number((await limitsOf(CELSIUS))[0].limit_value)).toBe(2);
+      });
+
+      test('a Celsius row this inserted (no seed row) is deleted by down, never "restored" to 3', async () => {
+        await migration.up(knex);
+        expect(await limitsOf(CELSIUS)).toHaveLength(1);
+        await migration.down(knex);
+        expect(await limitsOf(CELSIUS)).toHaveLength(0);
+      });
+    });
   });
 
   describe('through the plan: the count is the treated property\'s', () => {
