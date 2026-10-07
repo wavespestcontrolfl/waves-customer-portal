@@ -2708,10 +2708,13 @@ unchanged. NO MODEL writes it: at completion (`finalizeLawnReportSynthesis`,
 `lawn-report-write-gate.js`, in the awaited step before the report email is queued)
 code picks sentences from closed phrase tables (`lawn-visit-summary.js`) using the
 report's own facts: product CATEGORIES (never names, rates or actives), the area
-reads, the technician-kept photo findings by their own symptom label (hedged when
-the confidence is low or unknown, and only while the report's card for that topic
-shows a concern), the visit's frozen water-in step with its exact inches and hours
-(hours rounded down from the frozen deadline; a hold, or a hold before a water-in,
+reads, the technician-kept PHOTO findings (the "What the photos showed" selector;
+technician-added details have no photo provenance and never count) by their own
+symptom label (hedged when the confidence is low or unknown, or when the technician
+marked it undeterminable from the photos, and only while the report's card for that
+topic shows a concern), the visit's frozen water-in step with its exact inches and hours
+(hours rounded down from the frozen deadline, up to the watering rule's own 168-hour
+maximum; a hold, or a hold before a water-in,
 sends the reader to the report's own watering note and states no amounts), and the
 topics for the next visit.
 The technician note, the program line, the headline and rain are not inputs. It
@@ -2724,7 +2727,11 @@ recap. Any miss, an unreadable record or a degraded product read leaves the gene
 recap exactly as it was. The SMS and email keep the short `customerRecap`. The PDF
 cache signature gains `:vs=<hash of the text>` only while the gate is live AND a
 frozen entry exists, so a PDF cached before the summary existed is never served after
-it, and a visit with none keeps its key. No token, eligibility, privacy, rate-limit or
+it, and a visit with none keeps its key. At read time the watering sentence is
+dropped once the frozen instruction's `expiresAt` has passed (the live banner's own
+end), the rest of the paragraph unchanged and still checked against the frozen
+slots; no known expiry (a hold that waits for the treatment to dry) keeps it. The
+PDF signature follows the text as read, so it changes at expiry. No token, eligibility, privacy, rate-limit or
 header change; no new route.
 
 `GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,

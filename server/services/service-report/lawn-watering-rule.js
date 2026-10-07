@@ -208,6 +208,8 @@ function resolveWateringRule(row) {
 }
 
 module.exports = {
+  MAX_HOURS,
+  MAX_INCHES,
   MODES,
   SOURCES,
   validateRule,

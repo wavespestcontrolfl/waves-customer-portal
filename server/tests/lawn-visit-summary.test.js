@@ -253,21 +253,33 @@ describe('watering comes from the frozen instruction only', () => {
   const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z' };
 
   test('hours are the frozen deadline rounded DOWN, never up', () => {
-    expect(wateringFacts(instruction)).toEqual({ state: 'water_in', inches: 0.5, hours: 24 });
+    expect(wateringFacts(instruction)).toMatchObject({ state: 'water_in', inches: 0.5, hours: 24 });
     // 23 h 30 min left: 23, not 24.
-    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-07T14:10:00Z' })).toEqual({ state: 'water_in', inches: 0.5, hours: 23 });
+    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-07T14:10:00Z' })).toMatchObject({ state: 'water_in', inches: 0.5, hours: 23 });
     // A same-day cap shortens the window.
-    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T23:59:00Z' })).toEqual({ state: 'water_in', inches: 0.5, hours: 9 });
+    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T23:59:00Z' })).toMatchObject({ state: 'water_in', inches: 0.5, hours: 9 });
     // Under an hour, an unreadable deadline or no inches: no step (the banner owns it).
     expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T15:20:00Z' })).toBeNull();
     expect(wateringFacts({ ...instruction, waterInBy: null })).toBeNull();
     expect(wateringFacts({ ...instruction, waterInInches: null })).toBeNull();
   });
 
+  test('the watering rule\'s own maximum window is honored: 96 h and 168 h keep their step, 169 h does not', () => {
+    const at = '2026-10-06T14:00:00Z';
+    const by = (h) => new Date(Date.parse(at) + h * 3600000).toISOString();
+    const facts = (h) => summary.normalizeFacts({ watering: wateringFacts({ ...instruction, completedAt: at, waterInBy: by(h) }) }).watering;
+    expect(facts(96)).toMatchObject({ state: 'water_in', inches: 0.5, hours: 96 });
+    expect(facts(168).hours).toBe(168);
+    expect(facts(169)).toBeNull();
+    const text = summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], watering: facts(96) }).paragraph;
+    expect(text).toContain('Please water the treated lawn in with 0.5 inches of water within 96 hours of today’s visit.');
+    expect(require('../services/service-report/lawn-watering-rule').MAX_HOURS).toBe(168);
+  });
+
   test('hold has no numbers; none, null and an unknown state give no step', () => {
-    expect(wateringFacts({ state: 'hold' })).toEqual({ state: 'hold' });
+    expect(wateringFacts({ state: 'hold' })).toMatchObject({ state: 'hold' });
     // A hold before a water-in carries its own release condition in the report's note: no amounts here.
-    expect(wateringFacts({ state: 'hold_then_water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z', holdUntil: '2026-10-06T20:00:00Z' })).toEqual({ state: 'hold_then_water_in' });
+    expect(wateringFacts({ state: 'hold_then_water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z', holdUntil: '2026-10-06T20:00:00Z' })).toMatchObject({ state: 'hold_then_water_in' });
     expect(wateringFacts({ state: 'none' })).toBeNull();
     expect(wateringFacts({ state: null })).toBeNull();
     expect(wateringFacts(null)).toBeNull();
@@ -278,8 +290,8 @@ describe('watering comes from the frozen instruction only', () => {
     expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0, hours: 24 } }).watering).toBeNull();
     expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 9, hours: 24 } }).watering).toBeNull();
     expect(summary.normalizeFacts({ watering: { state: 'bogus' } }).watering).toBeNull();
-    expect(summary.normalizeFacts({ watering: { state: 'hold' } }).watering).toEqual({ state: 'hold', inches: null, hours: null });
-    expect(summary.normalizeFacts({ watering: { state: 'hold_then_water_in', inches: 0.5, hours: 24 } }).watering).toEqual({ state: 'hold_then_water_in', inches: null, hours: null });
+    expect(summary.normalizeFacts({ watering: { state: 'hold' } }).watering).toMatchObject({ state: 'hold', inches: null, hours: null });
+    expect(summary.normalizeFacts({ watering: { state: 'hold_then_water_in', inches: 0.5, hours: 24 } }).watering).toMatchObject({ state: 'hold_then_water_in', inches: null, hours: null });
     // A fractional hour from a hand-built fact floors.
     expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0.5, hours: 23.9 } }).watering.hours).toBe(23);
   });
@@ -425,9 +437,9 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
     expect(facts).toEqual({
       season: 'fall',
       applied: [{ kind: 'fertilizer', alsoFeeds: false }],
-      findings: [{ label: 'thinning turf', confidence: 'low' }],
+      findings: [{ label: 'thinning turf', confidence: 'low', canDetermine: true }],
       areas: [{ key: 'coverage', status: 'watch' }, { key: 'color_vigor', status: 'strong' }],
-      watering: { state: 'water_in', inches: 0.5, hours: 24 },
+      watering: { state: 'water_in', inches: 0.5, hours: 24, expiresAt: null },
       watchNext: ['weeds'],
     });
     const json = JSON.stringify(facts);
@@ -444,6 +456,41 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
       + 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. '
       + 'At the next visit we will look at weeds and thin areas.');
     expectOwnerRules(paragraph);
+  });
+
+  describe('photo findings only (Codex r3)', () => {
+    const knexWithRun = (run) => (table) => {
+      const q = { where: () => q };
+      q.first = async () => (table === 'lawn_assessments' ? { id: 77, customer_id: 9, confirmed_by_tech: true } : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', ...run });
+      return q;
+    };
+    const gather = (run) => gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction: null, knex: knexWithRun(run) });
+
+    test('a technician-added detail has no photo provenance and never becomes "In the photos we noticed"', async () => {
+      const facts = await gather({
+        reviewed_findings: [{ label: 'thinning turf', confidence: 'low', keep: true }],
+        added_details: [{ label: 'weed pressure', confidence: 'high' }, { label: 'color stress', confidence: 'high' }],
+      });
+      expect(facts.findings.map((f) => f.label)).toEqual(['thinning turf']);
+      const added = await gather({ reviewed_findings: [], added_details: [{ label: 'thinning turf', confidence: 'high' }] });
+      expect(added.findings).toEqual([]);
+      // A finding the technician unchecked is not kept either.
+      expect((await gather({ reviewed_findings: [{ label: 'thinning turf', confidence: 'high', keep: false }], added_details: [] })).findings).toEqual([]);
+    });
+
+    test('a finding the photos could not determine is always hedged, whatever its confidence', async () => {
+      const facts = await gather({ reviewed_findings: [{ label: 'thinning turf', confidence: 'high', can_determine: false, keep: true }], added_details: [] });
+      expect(facts.findings).toEqual([{ label: 'thinning turf', confidence: 'high', canDetermine: false }]);
+      expect(summary.composeVisitSummary({ ...facts, applied: [{ kind: 'fertilizer', name: 'a' }] }).paragraph).toContain('we noticed what may be some thinning turf');
+      // The same finding, determinable and high confidence, speaks plainly.
+      const plain = await gather({ reviewed_findings: [{ label: 'thinning turf', confidence: 'high', keep: true }], added_details: [] });
+      expect(summary.composeVisitSummary({ ...plain, applied: [{ kind: 'fertilizer', name: 'a' }] }).paragraph).toContain('we noticed some thinning turf');
+    });
+
+    test('the same label twice keeps the more cautious read', () => {
+      const f = summary.normalizeFacts({ findings: [{ label: 'thinning turf', confidence: 'high' }, { label: 'thinning turf', confidence: 'low', canDetermine: false }] }).findings;
+      expect(f).toEqual([{ label: 'thinning turf', confidence: 'low', canDetermine: false }]);
+    });
   });
 
   test('gather then compose keeps a combination product\'s feeding (normalization is idempotent)', async () => {
@@ -521,6 +568,51 @@ describe('freeze and read-back', () => {
     const out = await summary.createAndFreezeVisitSummary({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: {}, gatherInputs: async () => { throw new Error('read failed'); }, knex: b.knex });
     expect(out.status).toBe('read_failed');
     expect(b.state.notes.lawnVisitSummary).toBeUndefined();
+  });
+
+  describe('an expired watering note is no longer commanded (Codex r3)', () => {
+    const EXPIRES = '2026-10-07T14:40:00.000Z';
+    const before = new Date('2026-10-07T10:00:00Z');
+    const after = new Date('2026-10-07T15:00:00Z');
+    const frozenWith = async (watering) => {
+      const { knex, state } = fakeKnex();
+      await freeze(knex, { ...CASES.stonewallCombinationFall.facts, watering });
+      return JSON.parse(JSON.stringify(state.notes));
+    };
+    const WATER_SENTENCE = 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. ';
+
+    test('before expiry the watering sentence shows; after it the paragraph is the same minus that sentence', async () => {
+      const notes = await frozenWith({ state: 'water_in', inches: 0.5, hours: 24, expiresAt: EXPIRES });
+      const full = CASES.stonewallCombinationFall.expected;
+      expect(summary.readFrozenVisitSummary(notes, 77, before)).toBe(full);
+      const expired = summary.readFrozenVisitSummary(notes, 77, after);
+      expect(expired).toBe(full.replace(WATER_SENTENCE, ''));
+      expect(expired).not.toMatch(/water/i);
+      expectOwnerRules(expired);
+    });
+
+    test('a hold ends the same way; with no known expiry (a drying hold) it stays', async () => {
+      const hold = await frozenWith({ state: 'hold', expiresAt: EXPIRES });
+      expect(summary.readFrozenVisitSummary(hold, 77, before)).toContain('hold off on watering');
+      expect(summary.readFrozenVisitSummary(hold, 77, after)).not.toMatch(/hold off|water/i);
+      const dry = await frozenWith({ state: 'hold', expiresAt: null });
+      expect(summary.readFrozenVisitSummary(dry, 77, after)).toContain('hold off on watering');
+    });
+
+    test('the PDF key follows what prints, and the strict guard still applies after expiry', async () => {
+      const notes = await frozenWith({ state: 'water_in', inches: 0.5, hours: 24, expiresAt: EXPIRES });
+      expect(summary.visitSummarySignature(notes, 77, before)).not.toBe(summary.visitSummarySignature(notes, 77, after));
+      expect(summary.visitSummarySignature(notes, 77, after)).toMatch(/^:tp=[0-9a-f]{8}$/);
+      notes.lawnVisitSummary['77'].text = notes.lawnVisitSummary['77'].text.replace('few weeds', 'hardly any weeds');
+      expect(summary.readFrozenVisitSummary(notes, 77, after)).toBeNull();
+    });
+
+    test('the facts carry the frozen instruction\'s expiry', () => {
+      const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: EXPIRES, expiresAt: EXPIRES };
+      expect(wateringFacts(instruction).expiresAt).toBe(EXPIRES);
+      expect(wateringFacts({ state: 'hold', expiresAt: EXPIRES }).expiresAt).toBe(EXPIRES);
+      expect(wateringFacts({ state: 'hold' }).expiresAt).toBeNull();
+    });
   });
 
   describe('the read-time guard prints nothing for an entry that no longer matches', () => {

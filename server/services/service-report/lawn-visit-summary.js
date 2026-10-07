@@ -44,10 +44,13 @@
  * Pure except the freeze's write. No gate read: callers decide.
  */
 
+const crypto = require('crypto');
 const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { lawnResultTimingViolation } = require('./report-writer-rules');
 const { CARD_FOR_LABEL, CARD_STATUSES_THAT_PRINT, PHOTO_FINDING_LABELS } = require('./lawn-photo-findings');
+// The watering rule's own limits: the frozen window and depth can never exceed them.
+const { MAX_HOURS, MAX_INCHES } = require('./lawn-watering-rule');
 
 const COMPOSER_VERSION = 'lawn_visit_summary_fixed_v1';
 const FREEZE_KEY = 'lawnVisitSummary';
@@ -178,8 +181,6 @@ const WATERING_STATES = new Set(['water_in', 'hold_then_water_in', 'hold']);
 const FINDING_LABELS = new Set(PHOTO_FINDING_LABELS);
 // An N-P-K analysis such as 15-0-15 or 18-0-10 (percent signs not required).
 const FERTILIZER_ANALYSIS_RE = /\b\d{1,2}-\d{1,2}-\d{1,2}\b/;
-const MAX_INCHES = 3;
-const MAX_HOURS = 72;
 
 const finite = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
 
@@ -194,15 +195,22 @@ function cleanApplied(p) {
   return { kind, alsoFeeds };
 }
 
+// A timestamp the facts may carry, as an ISO string, or null.
+function isoOrNull(value) {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
 function cleanWatering(w) {
   if (!w || !WATERING_STATES.has(w.state)) return null;
   // A hold, alone or before a water-in, is described by the report's own watering note: no amounts.
-  if (w.state === 'hold' || w.state === 'hold_then_water_in') return { state: w.state, inches: null, hours: null };
+  const expiresAt = isoOrNull(w.expiresAt);
+  if (w.state === 'hold' || w.state === 'hold_then_water_in') return { state: w.state, inches: null, hours: null, expiresAt };
   const inches = finite(w.inches);
   const hours = finite(w.hours);
   // A half-known step is no step: the report banner owns it.
   if (!(inches > 0 && inches <= MAX_INCHES) || !(hours >= 1 && hours <= MAX_HOURS)) return null;
-  return { state: w.state, inches: Number(inches.toFixed(2)), hours: Math.floor(hours) };
+  return { state: w.state, inches: Number(inches.toFixed(2)), hours: Math.floor(hours), expiresAt };
 }
 
 // The report's score-card key for a diagnosis row: its own key, else read from its label.
@@ -226,16 +234,20 @@ function cleanAreas(areas) {
 }
 
 function cleanFindings(findings) {
-  const seen = new Set();
-  const out = [];
+  const byLabel = new Map();
   for (const f of Array.isArray(findings) ? findings : []) {
     const label = clean(f && f.label);
-    if (!FINDING_LABELS.has(label) || seen.has(label)) continue;
-    seen.add(label);
-    const confidence = String((f && f.confidence) || '').toLowerCase();
-    out.push({ label, confidence: CONFIDENCES.has(confidence) ? confidence : 'unknown' });
+    if (!FINDING_LABELS.has(label)) continue;
+    const raw = String((f && f.confidence) || '').toLowerCase();
+    const confidence = CONFIDENCES.has(raw) ? raw : 'unknown';
+    // A finding the technician marked undeterminable from the photos is always hedged.
+    const canDetermine = !(f && f.canDetermine === false);
+    const seen = byLabel.get(label);
+    // The same label twice keeps the more cautious read of the two.
+    if (!seen) byLabel.set(label, { label, confidence, canDetermine });
+    else byLabel.set(label, { label, confidence: SURE_CONFIDENCES.has(seen.confidence) ? confidence : seen.confidence, canDetermine: seen.canDetermine && canDetermine });
   }
-  return out;
+  return [...byLabel.values()];
 }
 
 /**
@@ -281,7 +293,7 @@ function findingSlots(findings, areas) {
   return findings
     .filter((f) => CARD_STATUSES_THAT_PRINT.includes(status.get(CARD_FOR_LABEL[f.label])))
     .slice(0, MAX_FINDINGS)
-    .map((f) => ({ label: f.label, hedged: !SURE_CONFIDENCES.has(f.confidence) }));
+    .map((f) => ({ label: f.label, hedged: f.canDetermine === false || !SURE_CONFIDENCES.has(f.confidence) }));
 }
 
 function areaSlots(areas, findings) {
@@ -447,6 +459,37 @@ async function generateVisitSummary(facts) {
   return composed.ok ? { ...composed, inputsHash: engine.inputsHash(normalizeFacts(facts)) } : composed;
 }
 
+// The watering sentence is a command about the day of the visit. Once the frozen
+// instruction's expiresAt has passed, the report's banner stops showing its lines (live
+// view), so the summary stops giving the command too: the paragraph is rendered from
+// the same frozen slots without the watering slot. No known expiry (a hold that waits
+// for the treatment to dry) keeps it.
+function wateringExpired(slots, now) {
+  const ms = Date.parse(slots && slots.watering && slots.watering.expiresAt);
+  return Number.isFinite(ms) && now.getTime() > ms;
+}
+
+/**
+ * The text a render may print, or null. The frozen entry must still equal render(slots)
+ * under the current tables (the strict guard, checked against the FULL paragraph);
+ * after the watering instruction has expired the printed text is that paragraph
+ * without its watering sentence, and it passes the same screens.
+ */
+function readFrozenVisitSummary(structuredNotes, assessmentId, now = new Date()) {
+  const full = engine.readFrozenTechParagraph(structuredNotes, assessmentId);
+  if (!full) return null;
+  const { slots } = engine.storedTechParagraphFor(structuredNotes, assessmentId);
+  if (!wateringExpired(slots, now)) return full;
+  const text = render({ ...slots, watering: null });
+  return text && !textProblem(text) ? text : null;
+}
+
+/** PDF cache-key component: '' when nothing prints, else a short hash of the text as read now. */
+function visitSummarySignature(structuredNotes, assessmentId, now = new Date()) {
+  const text = readFrozenVisitSummary(structuredNotes, assessmentId, now);
+  return text ? `:tp=${crypto.createHash('sha1').update(text).digest('hex').slice(0, 8)}` : '';
+}
+
 function createAndFreezeVisitSummary(args) {
   return engine.createAndFreezeTechParagraph({ ...args, deps: { generate: generateVisitSummary, ...(args.deps || {}) } });
 }
@@ -471,8 +514,8 @@ module.exports = {
   composeVisitSummary,
   generateVisitSummary,
   createAndFreezeVisitSummary,
-  readFrozenVisitSummary: engine.readFrozenTechParagraph,
-  visitSummarySignature: engine.techParagraphSignature,
+  readFrozenVisitSummary,
+  visitSummarySignature,
   freezeVisitSummary: engine.freezeTechParagraph,
   _test: { frozenEntryProblem, textProblem, amountOf },
 };

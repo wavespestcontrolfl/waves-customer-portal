@@ -17,7 +17,8 @@
  */
 
 const { appliedFromProducts } = require('./lawn-visit-memory');
-const { keptFindings } = require('./lawn-tech-paragraph-inputs');
+const { selectPhotoFindings } = require('./lawn-photo-findings');
+const { keptRunRows } = require('./tip-library');
 const { normalizeFacts } = require('./lawn-visit-summary');
 
 // Florida seasons by visit month.
@@ -48,13 +49,14 @@ function visitMonth(record) {
 function wateringFacts(instruction) {
   if (!instruction || !['water_in', 'hold_then_water_in', 'hold'].includes(instruction.state)) return null;
   // The report's watering note owns the hold's release condition and the water-in deadline.
-  if (instruction.state === 'hold' || instruction.state === 'hold_then_water_in') return { state: instruction.state };
+  const expiresAt = instruction.expiresAt || null;
+  if (instruction.state === 'hold' || instruction.state === 'hold_then_water_in') return { state: instruction.state, expiresAt };
   const inches = Number(instruction.waterInInches);
   const at = Date.parse(instruction.completedAt);
   const by = Date.parse(instruction.waterInBy);
   if (!Number.isFinite(inches) || !(inches > 0) || !Number.isFinite(at) || !Number.isFinite(by) || by <= at) return null;
   const hours = Math.floor((by - at) / 3600000);
-  return hours >= 1 ? { state: instruction.state, inches, hours } : null;
+  return hours >= 1 ? { state: instruction.state, inches, hours, expiresAt } : null;
 }
 
 // Products as kinds only; the composer reads a name solely to spot a fertilizer analysis.
@@ -80,13 +82,19 @@ function watchTopics(reportV2) {
   return topics;
 }
 
+// The technician-kept PHOTO findings, chosen by the report's own selector for "What the
+// photos showed" (confirmed assessment, its own reviewed run, reviewed rows only, symptom
+// allowlist). Added details have no photo provenance and never come through. Each keeps its
+// read's confidence and whether the photos could determine it.
 async function readKeptFindingsFor(knex, assessmentId) {
   const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first('id', 'customer_id', 'confirmed_by_tech');
   if (!assessment) return [];
   const run = await knex('lawn_assessment_runs')
     .where({ assessment_id: assessmentId, customer_id: assessment.customer_id })
     .first('assessment_id', 'customer_id', 'reviewed_findings', 'added_details', 'reviewed_at');
-  return keptFindings(run, assessment);
+  const confidenceOf = new Map();
+  for (const row of keptRunRows(run).reviewed) if (row && !confidenceOf.has(row.label)) confidenceOf.set(row.label, row.confidence);
+  return selectPhotoFindings(run, assessment).map((f) => ({ label: f.label, confidence: confidenceOf.get(f.label), canDetermine: f.canDetermine }));
 }
 
 /**
