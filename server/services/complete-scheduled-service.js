@@ -4538,11 +4538,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // off: no refusal.
       let bermudaPairMessage;
       let bermudaLimitMessage;
+      let bermudaAreaMessage;
       try {
         // Strict reads: an error reading the account or its properties fails this attempt
         // (marked failed, nothing committed), never reads as "not requested".
         bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
         if (!bermudaPairMessage) bermudaLimitMessage = await require('./lawn-bermuda-removal').bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
+        if (!bermudaPairMessage) bermudaAreaMessage = await require('./lawn-bermuda-removal').bermudaAreaViolation(db, products, { serviceId: completionInput.serviceId });
       } catch (err) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
         throw err;
@@ -4550,6 +4552,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (bermudaPairMessage) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_pair_required'), db);
         return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
+      }
+      // A recorded step spray states its treated area (or a rate): a spot mix has no catalog-derived amount.
+      if (bermudaAreaMessage && !bermudaLimitMessage) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_area_required'), db);
+        return { status: 400, body: { error: bermudaAreaMessage, code: 'lawn_bermuda_area_required' } };
       }
       // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after
       // the last one at that property), judged the way the plan judges them.

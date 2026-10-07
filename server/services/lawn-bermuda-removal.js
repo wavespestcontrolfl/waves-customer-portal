@@ -224,6 +224,23 @@ async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
   return step.active ? visit : null;
 }
 
+// The serving window's staged bermuda rows for a step visit, and the catalog product each step line is
+// bound to by them (see stepRowBindings). A missing staged v13 protocol reads as no rows.
+async function servingStepRows(knex, visit) {
+  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
+  const { loadV13RowsForMonth } = require('./waveguard-plan-engine');
+  const rows = await loadV13RowsForMonth(knex, profileTrack(profile), visitMonthOf(visit), { includeBermudaRemoval: true })
+    .catch((err) => { if (err.code === 'lawn_v13_protocol_missing') return new Map(); throw err; });
+  return { rows, bound: stepRowBindings(rows) };
+}
+
+// Is the program consistent for this step visit: the tagged limit rows exist and their Recognition and
+// Fusilade II ids equal the herbicides the serving window links. A completion refuses otherwise.
+async function stepConfigured(knex, visit) {
+  const ids = await stepProductIds(knex);
+  return stepProgramConsistent(ids, (await servingStepRows(knex, visit)).bound);
+}
+
 // Is the bermuda removal mix OFFERED on this visit: the visit carries the step (the shared
 // step-visit check: gate, v13, a lawn visit, the step month, the account's switch or estimate, the
 // cultivar), the program's limit rows are all configured, and neither limited product is capped
@@ -238,14 +255,11 @@ async function stepOffered(knex, serviceId) {
   if (!ids.tagged) return false;
   if (await capViolation(knex, visit, [{ id: ids.recognition }, { id: ids.fusilade }])) return false;
   // The serving window's staged step rows must be linked to active catalog products, as the projection requires.
-  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
-  const { loadV13RowsForMonth } = require('./waveguard-plan-engine');
-  const rows = await loadV13RowsForMonth(knex, profileTrack(profile), visitMonthOf(visit), { includeBermudaRemoval: true })
-    .catch((err) => { if (err.code === 'lawn_v13_protocol_missing') return new Map(); throw err; });
-  const linked = [...rows.values()].filter((row) => row?.gates?.bermudaRemoval === true && row.productId);
-  if (linked.length !== 3) return false;
-  const catalog = await knex('products_catalog').whereIn('id', linked.map((row) => row.productId)).select('id', 'active');
-  return stepLinesAvailable(linked.map((row) => ({ product: catalog.find((c) => String(c.id) === String(row.productId)) || null })), rows);
+  const { rows, bound } = await servingStepRows(knex, visit);
+  if (!stepProgramConsistent(ids, bound)) return false;
+  const catalog = await knex('products_catalog').whereIn('id', Object.values(bound)).select('id', 'active');
+  const productOf = (id) => catalog.find((c) => String(c.id) === String(id)) || null;
+  return stepLinesAvailable([RECOGNITION_KEY, FUSILADE_KEY, normalize(SURFACTANT)].map((key) => ({ product: productOf(bound[key]) })), rows);
 }
 
 // A visit with the property its step is judged for, whether or not the visit carries the
@@ -346,11 +360,30 @@ function pairMessage({ recognition, fusilade, unconfigured }) {
 async function bermudaPairViolation(knex, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return null;
   const submitted = await submittedStepProducts(knex, products);
-  if (!pairMessage(submitted)) return null;
-  // One of the two alone: judged only when this visit carries the step. A completion reads
-  // the account STRICTLY: a read error fails the completion, never "not requested".
-  if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
+  if (!submitted.recognition && !submitted.fusilade) return null;
+  // Judged only when this visit carries the step. A completion reads the account STRICTLY: a read
+  // error fails the completion, never "not requested".
+  const stepVisit = await stepVisitOf(knex, serviceId, { strict: true });
+  if (!stepVisit) return null;
+  // The limits and the serving window must agree on the step's products, else it is unconfigured.
+  if (!submitted.unconfigured && !(await stepConfigured(knex, stepVisit))) return NOT_CONFIGURED_MESSAGE;
   return pairMessage(submitted);
+}
+
+// A recorded step spray needs its treated area (or a stated rate): a spot mix has no catalog-derived
+// amount, so a row that states neither says nothing about how much of the lawn was sprayed, and the
+// application history and the label-rate cap would count nothing. Refused on a step visit only, on a
+// fresh attempt only (the caller). Returns the message, or null.
+const AREA_REQUIRED_MESSAGE = 'Enter the area treated for the bermuda mix.';
+async function bermudaAreaViolation(knex, products, { serviceId } = {}) {
+  if (!bermudaRemovalLive()) return null;
+  const { recognition, fusilade } = await submittedStepProducts(knex, products);
+  const stepIds = [recognition, fusilade].filter(Boolean).map((row) => String(row.id));
+  if (!stepIds.length) return null;
+  if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
+  const positive = (value) => Number(value) > 0;
+  const missing = products.some((p) => stepIds.includes(String(p?.productId)) && !positive(p.areaValue) && !positive(p.rate));
+  return missing ? AREA_REQUIRED_MESSAGE : null;
 }
 
 // Completion check, beside the pair check (fresh attempts only): a step spray on a
@@ -366,7 +399,7 @@ async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
   if (!sprayed.length) return null;
   const visit = await stepVisitOf(knex, serviceId, { strict: true });
   if (!visit) return null;
-  if (unconfigured) return NOT_CONFIGURED_MESSAGE;
+  if (unconfigured || !(await stepConfigured(knex, visit))) return NOT_CONFIGURED_MESSAGE;
   return capViolation(knex, visit, sprayed);
 }
 
@@ -410,8 +443,9 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   const stepVisit = await stepVisitOf(trx, serviceId, { strict: true });
   // The visit carries the step as of NOW (a switch turned on after the preflight): the pair
   // rule holds here too, on the same strict reads and transaction, before any cap.
-  const pairProblem = stepVisit ? pairMessage({ recognition, fusilade, unconfigured }) : null;
-  if (pairProblem) throw Object.assign(new Error(pairProblem), { code: 'lawn_bermuda_pair_required' });
+  const inconsistent = !!stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit));
+  const pairProblem = stepVisit ? (inconsistent ? NOT_CONFIGURED_MESSAGE : pairMessage({ recognition, fusilade, unconfigured })) : null;
+  if (pairProblem) throw Object.assign(new Error(pairProblem), { code: inconsistent ? 'lawn_bermuda_limit_reached' : 'lawn_bermuda_pair_required' });
   const sprayed = recognition ? [recognition, fusilade].filter(Boolean) : (stepVisit ? [fusilade] : []);
   if (!sprayed.length) return;
   const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
@@ -531,6 +565,24 @@ const EXCLUDED_CULTIVAR_WARNING = {
 const addTestPatchNote = (items) => items.map((item) => (isStepLine(item)
   ? { ...item, gateNotes: [...(item.gateNotes || []), { key: 'testPatchFirst', severity: 'required', text: TEST_PATCH_NOTE }] } : item));
 
+// The catalog product each step line is bound to, from the serving window's STAGED rows (never the
+// exact-name matcher): { [normalized recipe name]: catalog id } over the bermuda removal rows that carry
+// a product link. An alias-named catalog product linked from its staged row is a valid member.
+function stepRowBindings(rows) {
+  const bound = {};
+  for (const row of rows.values()) {
+    if (row?.gates?.bermudaRemoval === true && row.productId) bound[normalize(row.protocolProductName || row.productName)] = String(row.productId);
+  }
+  return bound;
+}
+
+// The program is consistent only when the Recognition and Fusilade II ids on the tagged limit rows
+// EQUAL the two herbicides the serving window's rows link, and the surfactant row is linked: a
+// relinked window (other ids than the limits judge) is unconfigured, so the plan and sheet withhold the
+// step and a completion refuses.
+const stepProgramConsistent = (ids, bound) => ids.tagged
+  && bound[RECOGNITION_KEY] === ids.recognition && bound[FUSILADE_KEY] === ids.fusilade && !!bound[normalize(SURFACTANT)];
+
 // The three step lines can be applied only when each has an active catalog product LINKED to a
 // staged row of the serving window. One rule, for the projection and for stepOffered.
 const stepLinesAvailable = (members, rows) => members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
@@ -544,21 +596,30 @@ const stepLinesAvailable = (members, rows) => members.every((m) => m.product && 
 // staged row and neither limited product is capped or too soon. Then it settles (a
 // warning and no lines when nothing of it was selected, product-scoped blocks and
 // unavailable lines when some was). Returns { items, blocks, warnings }.
-async function projectBermudaStep(items, { knex, rows, probeLimits, testPatch = false }) {
-  const members = items.filter(isStepLine);
-  if (!members.length) return { items, blocks: [], warnings: [], limitWarnings: [] };
+async function projectBermudaStep(items, { knex, rows, probeLimits, productOf = () => null, testPatch = false }) {
+  if (!items.some(isStepLine)) return { items, blocks: [], warnings: [], limitWarnings: [] };
   // The limited products are Recognition and Fusilade II by catalog id (the surfactant has
   // no limits; it is held to the step by the staged row, below). Program rows missing: the
   // step is unavailable, never judged on names.
   const ids = await stepProductIds(knex);
+  // Each step line is a member by the staged row's product link, not by the exact-name matcher: its
+  // product is the catalog product the serving window's row links (the caller's own product shape).
+  const bound = stepRowBindings(rows);
+  const bind = (item) => {
+    const id = bound[normalize(String(item.raw || '').split(' \u2014 ')[0])];
+    if (!isStepLine(item) || !id || String(item.product?.id) === id) return item;
+    return { ...item, product: productOf(id) };
+  };
+  const bindable = items.map(bind);
+  const members = bindable.filter(isStepLine);
   const limited = new Set([ids.recognition, ids.fusilade].filter(Boolean));
   const probe = members.filter((m) => m.product?.id && limited.has(String(m.product.id)))
     .map((m) => ({ selected: true, bermudaStep: true, product: { id: m.product.id, name: m.product.name } }));
   // The probe gets the staged rows, so a step line's planned rate counts in the year's total.
   const found = probe.length ? await probeLimits(probe, rows) : null;
   const capped = found ? found.capped.size > 0 : false;
-  const usable = ids.tagged && !capped && stepLinesAvailable(members, rows);
-  const settled = settleStep(items, usable);
+  const usable = stepProgramConsistent(ids, bound) && !capped && stepLinesAvailable(members, rows);
+  const settled = settleStep(bindable, usable);
   const noted = withRowGateNotes(settled.items, rows);
   return { ...settled, items: testPatch ? addTestPatchNote(noted) : noted, limitWarnings: found?.warnings || [] };
 }
@@ -646,9 +707,9 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
       return {
         lines: active ? markStepLines(parseLines(addOn.secondary)) : [],
         select: (items) => (active ? selectStepAtomically(items) : items),
-        async project(items, { enabled: v13Active, rows, probeLimits }) {
+        async project(items, { enabled: v13Active, rows, probeLimits, productOf }) {
           const projected = active && v13Active
-            ? await projectBermudaStep(items, { knex, rows, probeLimits, testPatch: cultivar === 'test_patch' })
+            ? await projectBermudaStep(items, { knex, rows, probeLimits, productOf, testPatch: cultivar === 'test_patch' })
             : { items, blocks: [], warnings: [] };
           // The probe's warning-level results (the label-rate warning) join the plan's warnings under a
           // bermuda code the completion drawer forwards. A selected step is already covered by the
@@ -669,7 +730,7 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
 // while the step is off (gate, track, month, account, cultivar), so a route carries no
 // branch of its own for it. `loadRows(options)` loads the window's staged rows;
 // `probeLimits` is the route's own limit read.
-async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows, probeLimits, reportLimitWarnings = false }) {
+async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows, probeLimits, productOf, reportLimitWarnings = false }) {
   // `loadVisit` is called only when the step could apply at all (gate, track, month).
   const eligible = bermudaRemovalVisit({ trackKey, month }) && featureGates.lawnV13Live?.() === true;
   const step = eligible ? await stepForVisit(knex, await loadVisit(), { trackKey, month }) : { active: false };
@@ -688,7 +749,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
       if (!active) return { items, blocks: [], warnings: stepWarnings, warningFields: stepWarnings.length ? { warnings: stepWarnings } : {} };
       let staged = rows;
       if (!staged) staged = await loadRows(rowOptions).catch((err) => { if (err.code === 'lawn_v13_protocol_missing') return new Map(); throw err; });
-      const settled = await projectBermudaStep(items, { knex, rows: staged, probeLimits });
+      const settled = await projectBermudaStep(items, { knex, rows: staged, probeLimits, productOf });
       state.blocks = settled.blocks;
       state.mark = step.cultivar === 'test_patch';
       // `warningFields`: a response that carries warnings only when there are some.
@@ -714,7 +775,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
 }
 
 module.exports = {
-  stepOffered, trackForVisit, once,
+  bermudaAreaViolation, stepOffered, trackForVisit, once,
   openPlanStep,
   visitMonthOf,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,

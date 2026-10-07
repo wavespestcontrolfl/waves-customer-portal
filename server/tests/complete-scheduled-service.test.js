@@ -636,6 +636,29 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     });
   });
 
+  describe('a recorded step spray needs its treated area or a rate (fresh attempts only)', () => {
+    let area;
+    beforeEach(() => {
+      pair.mockResolvedValue(null);
+      area = jest.spyOn(removal, 'bermudaAreaViolation').mockResolvedValue('Enter the area treated for the bermuda mix.');
+    });
+    afterEach(() => area.mockRestore());
+
+    test('a fresh attempt is refused with 400 lawn_bermuda_area_required and the attempt is marked failed', async () => {
+      const completionAttempt = { id: 'fixture-attempt' };
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+      const result = await complete({ products: [] });
+      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_area_required', error: 'Enter the area treated for the bermuda mix.' } });
+      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
+    });
+
+    test('a replay never runs the area check', async () => {
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload: { success: true } });
+      await complete({ products: [] });
+      expect(area).not.toHaveBeenCalled();
+    });
+  });
+
   test('a resume of a committed completion is never refused by the check, even after the account was flagged', async () => {
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'resume', attempt: { id: 'fixture-attempt' }, releasedForResume: false });
     let result;

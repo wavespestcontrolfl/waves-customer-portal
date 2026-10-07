@@ -37,9 +37,9 @@ const CATALOG = [
 const GATES = { bermudaRemoval: true, activelyGrowingOnly: true, noRainOrIrrigationHours: 3, noMowDaysBeforeAfter: 2, skipCelsiusInBermudaArea: true };
 const ROWS = {
   f24: { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
-  rec: { productId: 'rec', applicationMode: 'spot', ratePer1000: 0.03, rateUnit: 'oz', gates: { ...GATES, tankMixWith: FUS } },
-  fus: { productId: 'fus', applicationMode: 'spot', ratePer1000: 0.55, rateUnit: 'fl oz', gates: { ...GATES, requiresProduct: 'Recognition' } },
-  nis: { productId: 'nis', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { ...GATES, concentration: '0.25% of the spray volume' } },
+  rec: { productId: 'rec', protocolProductName: REC, applicationMode: 'spot', ratePer1000: 0.03, rateUnit: 'oz', gates: { ...GATES, tankMixWith: FUS } },
+  fus: { productId: 'fus', protocolProductName: FUS, applicationMode: 'spot', ratePer1000: 0.55, rateUnit: 'fl oz', gates: { ...GATES, requiresProduct: 'Recognition' } },
+  nis: { productId: 'nis', protocolProductName: NIS, applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { ...GATES, concentration: '0.25% of the spray volume' } },
 };
 
 const SERVICE_ID = '11111111-1111-4111-8111-111111111111';
@@ -156,6 +156,38 @@ describe('the Zoysia 2(ee) note: a required gate note on the Zoysia lines only',
     for (const line of body.items.filter((item) => item.bermudaStep)) expect(noteOf(line)).toBeUndefined();
     expect(JSON.stringify(body)).not.toMatch(/2\(ee\)/);
     for (const action of (await actionsFor({})).actions.filter((a) => a.group)) expect(noteOf(action)).toBeUndefined();
+  });
+});
+
+describe('step members come from the staged rows\' product links, not the name matcher', () => {
+  const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+  const ALIAS = 'Recog 20.4 WG';
+  const actionsFor = async () => {
+    const res = { json: jest.fn(), status: jest.fn() };
+    res.status.mockReturnValue(res);
+    await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month: '4', scheduledServiceId: SERVICE_ID } }, res, jest.fn());
+    return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+  };
+  const rename = () => { CATALOG.find((p) => p.id === 'rec').name = ALIAS; };
+  afterEach(() => { CATALOG.find((p) => p.id === 'rec').name = REC; });
+
+  test('an alias-named Recognition linked from its staged row is offered on the sheet and the actions', async () => {
+    rename();
+    const sheet = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'fus' });
+    const lines = sheet.items.filter((item) => item.bermudaStep);
+    expect(lines.map((l) => l.product?.name).sort()).toEqual([ALIAS, FUS, NIS].sort());
+    expect(lines.some((l) => l.unavailable)).toBe(false);
+    const actions = (await actionsFor()).actions.filter((a) => a.group);
+    expect(actions.map((a) => a.product?.name).sort()).toEqual([ALIAS, FUS, NIS].sort());
+  });
+
+  test('tagged limit ids that differ from the window\'s linked herbicides: the step is withheld (sheet and actions)', async () => {
+    rename();
+    // The limits judge other ids than the staged rows link.
+    account.tagged = account.tagged.map((row) => (row.product_id === 'rec' ? { ...row, product_id: 'someone-else' } : row));
+    const sheet = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    expect(sheet.items.filter((item) => item.bermudaStep)).toEqual([]);
+    expect((await actionsFor()).actions.filter((a) => a.group)).toEqual([]);
   });
 });
 

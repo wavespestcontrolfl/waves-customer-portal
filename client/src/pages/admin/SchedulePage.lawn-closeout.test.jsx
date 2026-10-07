@@ -1545,6 +1545,12 @@ it('the /completion-actions fallback records every bermuda action as spot work, 
     expect(within(total.parentElement).getAllByRole('combobox')[2].value).toBe('spot_treatment');
     expect(total.value).toBe('');
   }
+  // Each group row shows the treated-area box on this path too (the server refuses a step spray with no
+  // area or rate), and typing into it keeps the row's spot shape with a sq ft unit.
+  const areas = screen.getAllByPlaceholderText('Treated sq ft');
+  expect(areas).toHaveLength(3);
+  fireEvent.change(areas[0], { target: { value: '5000' } });
+  expect(screen.getAllByPlaceholderText('Treated sq ft')[0].value).toBe('5000');
 });
 
 it('the /completion-actions warnings show in the drawer, so the reason the bermuda mix is not offered is visible', async () => {

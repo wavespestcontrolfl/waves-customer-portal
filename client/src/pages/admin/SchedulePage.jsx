@@ -17188,6 +17188,7 @@ export function CompletionPanel({
       addProduct({
         ...action.product,
         ...(action.prefillAmount === false ? { prefillAmount: false } : {}),
+        group: action.group,
         // A spot action (the bermuda removal mix, /completion-actions path) records as spot work.
         ...(action.applicationMode === "spot" ? { applicationMode: "spot", applicationMethod: action.product.applicationMethod || "spot_treatment" } : {}),
       });
@@ -17247,7 +17248,7 @@ export function CompletionPanel({
     // A spot line (the bermuda removal mix) has no catalog-derived amount: no rate, area or
     // total is suggested; the tech enters the area treated and the amount used.
     if (product.prefillAmount === false) {
-      row = { ...row, rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used." };
+      row = { ...row, rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used.", areaUnit: "sqft", ...(product.group ? { group: product.group } : {}) };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and
@@ -17584,7 +17585,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, serviceTypeForArea),
             serviceTypeForArea,
-            governed, next.propertyServiceAreaField,
+            governed || !!next.group, next.propertyServiceAreaField,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -19269,7 +19270,7 @@ export function CompletionPanel({
       const member = members.get(String(row.productId));
       if (!member || (member.prefillAmount !== false && member.applicationMode !== "spot")) return row;
       const method = member.product.applicationMethod || "spot_treatment";
-      const unit = requiredApplicationArea(method, serviceTypeForArea)?.unit || "";
+      const unit = requiredApplicationArea(method, serviceTypeForArea, true)?.unit || "sqft";
       // A typed total is the tech's actual and stays (with its manual flag); the catalog rate, the area
       // and the area default flags are cleared either way.
       const kept = row.totalAmountManual === true;
@@ -21511,7 +21512,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, serviceTypeForArea),
                           serviceTypeForArea,
-                          lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                          lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -23990,7 +23991,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, serviceTypeForArea),
                       serviceTypeForArea,
-                      lawnDefaultsEnabled, sp.propertyServiceAreaField,
+                      lawnDefaultsEnabled || !!sp.group, sp.propertyServiceAreaField,
                     );
                     if (!areaRequirement) return null;
                     return (

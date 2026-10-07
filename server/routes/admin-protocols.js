@@ -988,6 +988,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
       loadRows: (options) => loadV13RowsForMonth(db, trackKey, month, options),
       probeLimits: (probe) => v13VisitLimits(db, scheduled, probe, v13Rows),
+      productOf: (id) => products.find((p) => String(p.id) === String(id)) || null,
     });
     const conditionalLines = [...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];
     const allLines = [...baseLines, ...conditionalLines];
@@ -1234,6 +1235,7 @@ router.get('/completion-actions', async (req, res, next) => {
       parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
       loadRows: (options) => loadV13RowsForMonth(db, track, month, options),
       probeLimits: async (probe, rows) => v13VisitLimits(db, await visitOnce(), probe, rows || new Map()),
+      productOf: (id) => serializeProtocolProduct(products.find((p) => String(p.id) === String(id)) || null),
       reportLimitWarnings: true,
     });
     const actionLines = [...baseLines, ...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];

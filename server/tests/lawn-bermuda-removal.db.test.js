@@ -15,7 +15,7 @@ const programMigration = require('../models/migrations/20261006190300_lawn_bermu
 const catalogMigration = require('../models/migrations/20261006190400_lawn_bermuda_removal_catalog');
 const zoysiaNoteMigration = require('../models/migrations/20261006220600_bermuda_zoysia_2ee_note');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
-const { rateAdvisories, stepOffered, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
+const { rateAdvisories, stepOffered, bermudaAreaViolation, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 
 // An accepted estimate whose current priced result still carries the add-on on its lawn line.
 const BERMUDA_ESTIMATE = { engineRequest: { options: { bermudaSuppression: true } }, result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } };
@@ -881,6 +881,51 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         const { id, ...row } = saved[0];
         await knex('product_limits').insert(row);
       }
+    });
+
+    test('step members come from the staged rows\' product links: an alias-named Recognition that the limits and the rows agree on is offered; a window relinked away from the limits\' ids is unconfigured', async () => {
+      setGates();
+      const [aliased] = await knex('products_catalog').insert({ name: 'Recog 20.4 WG', category: 'herbicide', active: true, rate_unit: 'oz', default_rate_per_1000: 0.03, label_verified_at: new Date(), inventory_on_hand: 100, inventory_unit: 'oz' }).returning('*');
+      const stagedRec = await knex('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: REC }).select('id');
+      const recLimits = await knex('product_limits').where({ match_value: 'bermuda_removal', product_id: rec.id }).select('id');
+      try {
+        // (1) Rows and limits both point at the alias-named product: the step is offered on plan and Fast Complete.
+        await knex('lawn_protocol_products').whereIn('id', stagedRec.map((r) => r.id)).update({ product_id: aliased.id });
+        await knex('product_limits').whereIn('id', recLimits.map((r) => r.id)).update({ product_id: aliased.id });
+        const f = await lawn({ date: '2026-06-20', bermuda: true });
+        const offered = await plan(f.visit);
+        expect(optionNames(offered)).toEqual(expect.arrayContaining(['Recog 20.4 WG', FUS, NIS]));
+        expect(await stepOffered(knex, f.visit.id)).toBe(true);
+        // (2) The window is relinked away from the ids the limits judge: unconfigured.
+        await knex('lawn_protocol_products').whereIn('id', stagedRec.map((r) => r.id)).update({ product_id: rec.id });
+        const mismatch = await plan(f.visit);
+        for (const name of ['Recog 20.4 WG', REC, FUS, NIS]) expect(optionNames(mismatch)).not.toContain(name);
+        expect(await stepOffered(knex, f.visit.id)).toBe(false);
+        expect(await bermudaPairViolation(knex, submitted(aliased, fus), { serviceId: f.visit.id })).toMatch(/limits are not loaded|Fusilade II is never applied/);
+      } finally {
+        await knex('lawn_protocol_products').whereIn('id', stagedRec.map((r) => r.id)).update({ product_id: rec.id });
+        await knex('product_limits').whereIn('id', recLimits.map((r) => r.id)).update({ product_id: rec.id });
+        await knex('products_catalog').where({ id: aliased.id }).del();
+      }
+    });
+
+    test('a step spray must state its treated area or a rate: refused on a step visit only (Recognition or Fusilade II without either)', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      const entry = (item, extra = {}) => ({ productId: item.id, ...extra });
+      const MESSAGE = 'Enter the area treated for the bermuda mix.';
+      expect(await bermudaAreaViolation(knex, [entry(rec), entry(fus), entry(nis)], { serviceId: f.visit.id })).toBe(MESSAGE);
+      expect(await bermudaAreaViolation(knex, [entry(rec, { areaValue: 5000, areaUnit: 'sqft' }), entry(fus)], { serviceId: f.visit.id })).toBe(MESSAGE);
+      expect(await bermudaAreaViolation(knex, [entry(rec, { areaValue: '0' }), entry(fus, { areaValue: 5000 })], { serviceId: f.visit.id })).toBe(MESSAGE);
+      // Area or a rate on each step product, the surfactant needing neither: allowed.
+      expect(await bermudaAreaViolation(knex, [entry(rec, { areaValue: 5000 }), entry(fus, { rate: 0.55 }), entry(nis)], { serviceId: f.visit.id })).toBeNull();
+      // Not a step visit (another month, no switch, gate off), or no step product submitted: never refused.
+      const plain = await lawn({ date: '2026-06-20' });
+      expect(await bermudaAreaViolation(knex, [entry(rec), entry(fus)], { serviceId: plain.visit.id })).toBeNull();
+      expect(await bermudaAreaViolation(knex, [entry(nis)], { serviceId: f.visit.id })).toBeNull();
+      expect(await bermudaAreaViolation(knex, [], { serviceId: f.visit.id })).toBeNull();
+      setGates({ removal: false });
+      expect(await bermudaAreaViolation(knex, [entry(rec), entry(fus)], { serviceId: f.visit.id })).toBeNull();
     });
 
     test('the tagged rows missing: a mix spelled by a catalog alias or linked from the staged rows still triggers the refusal (links and aliases before names)', async () => {

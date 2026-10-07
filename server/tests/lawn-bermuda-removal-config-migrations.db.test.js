@@ -14,6 +14,7 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
   const recognitionIngredient = require('../models/migrations/20261006220400_bermuda_recognition_active_ingredient');
   const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
   const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const fusiladeRate = require('../models/migrations/20261006220700_bermuda_fusilade_default_rate_null');
   const aliasBackfill = require('../models/migrations/20261006220500_watering_rule_bermuda_removal_alias_backfill');
   const zoysiaNote = require('../models/migrations/20261006220600_bermuda_zoysia_2ee_note');
   const surfactantToken = require('../models/migrations/20261006220300_bermuda_surfactant_unit_token');
@@ -246,6 +247,54 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
         expect(await audits()).toBe(before + 1);
         await aliasBackfill.down(trx);
         expect(await ruleOf(aliased.id)).toMatchObject({ mode: 'hold', hold_hours: 3 });
+      });
+    });
+  });
+
+  describe('20261006220700 Fusilade II default rate', () => {
+    const FUS = 'Fusilade II Post Emergent Liquid Herbicide';
+    const SEEDED = 'migration:20261006220700_bermuda_fusilade_default_rate_null:seeded';
+    const REVERTED = 'migration:20261006220700_bermuda_fusilade_default_rate_null:reverted';
+
+    test('on a migrations-only database the Fusilade II catalog row has no default rate; the staged rows keep the step rate; Recognition is unchanged', async () => {
+      const fus = await db('products_catalog').where({ name: FUS }).first('default_rate_per_1000');
+      expect(fus.default_rate_per_1000).toBeNull();
+      const rec = await db('products_catalog').where({ name: 'Recognition Post Emergent Herbicide' }).first('default_rate_per_1000');
+      expect(Number(rec.default_rate_per_1000)).toBe(0.03);
+      const staged = await db('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: FUS }).select('rate_per_1000');
+      expect(staged.length).toBeGreaterThan(0);
+      expect(staged.every((r) => Number(r.rate_per_1000) === 0.55)).toBe(true);
+    });
+
+    test('nulls only a default still equal to 0.55 on the row 190400 created; append-only audit; down restores only while null', async () => {
+      await rolledBack(async (trx) => {
+        const rate = async () => (await trx('products_catalog').where({ name: FUS }).first('default_rate_per_1000')).default_rate_per_1000;
+        const events = (action) => trx('audit_log').where({ action });
+        const original = (await events(SEEDED)).length;
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: 0.55 });
+        await fusiladeRate.up(trx);
+        expect(await rate()).toBeNull();
+        expect(await events(SEEDED)).toHaveLength(original + 1);
+        await fusiladeRate.up(trx);
+        expect(await events(SEEDED)).toHaveLength(original + 1);
+        // An admin value is never nulled.
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: 0.4 });
+        await fusiladeRate.up(trx);
+        expect(Number(await rate())).toBe(0.4);
+        // Down: restores 0.55 only where still null; appends events, never rewrites.
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: null });
+        const revertedBefore = (await events(REVERTED)).length;
+        await fusiladeRate.down(trx);
+        expect(Number(await rate())).toBe(0.55);
+        expect((await events(REVERTED)).length).toBeGreaterThan(revertedBefore);
+        expect((await events(SEEDED)).length).toBe(original + 1);
+        const after = (await events(REVERTED)).length;
+        await fusiladeRate.down(trx);
+        expect((await events(REVERTED)).length).toBe(after);
+        await trx('products_catalog').where({ name: FUS }).update({ default_rate_per_1000: 0.3 });
+        await fusiladeRate.up(trx);
+        await fusiladeRate.down(trx);
+        expect(Number(await rate())).toBe(0.3);
       });
     });
   });

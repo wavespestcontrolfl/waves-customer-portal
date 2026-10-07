@@ -1942,6 +1942,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // blocks) with the cultivar's test-patch note.
   const bermudaProjection = await step.project(planItems, {
     enabled: v13Active, rows: v13Rows, probeLimits: (probe, stagedRows) => v13Limits(knex, service, serviceDate, probe, { strict, rows: stagedRows }),
+    productOf: (id) => products.find((product) => String(product.id) === String(id)) || null,
   });
   planItems = bermudaProjection.items;
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
