@@ -102,10 +102,11 @@ async function readKeptFindingsFor(knex, assessmentId) {
  * @param {object} args.data         buildReportV1Data output (reportV2, lawnAssessment)
  * @param {object} [args.instruction] the visit's frozen watering instruction
  * @param {boolean} [args.programVisit] the report's own resolveProgramVisit answer: a recurring lawn plan visit
+ * @param {boolean} [args.nextVisitBooked] the report's PROPERTY-scoped next lawn booking exists (lawnNextVisitAtProperty)
  * @param {object} args.knex
  * @returns {Promise<object|null>} normalized facts, or null when the visit cannot support a summary
  */
-async function gatherVisitSummaryFacts({ record, data, instruction = null, programVisit = false, knex }) {
+async function gatherVisitSummaryFacts({ record, data, instruction = null, programVisit = false, nextVisitBooked = false, knex }) {
   const reportV2 = data && data.reportV2;
   const lawnAssessment = data && data.lawnAssessment;
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
@@ -121,9 +122,10 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, progr
     watchNext: watchTopics(reportV2),
     // Recurring-plan promises ("each visit adds to the last one", "at the next visit") need a recurring
     // plan visit; the next-visit line also needs a real booking (the report's own scheduled next visit,
-    // never a cadence estimate).
+    // never a cadence estimate, and never another property's booking: snapshot.nextVisit is customer-wide
+    // while copy v6 is off, so the property-scoped answer is passed in).
     recurring: programVisit === true,
-    nextVisitBooked: !!(reportV2.snapshot && reportV2.snapshot.nextVisit && reportV2.snapshot.nextVisit.source === 'scheduled'),
+    nextVisitBooked: nextVisitBooked === true,
   });
 }
 

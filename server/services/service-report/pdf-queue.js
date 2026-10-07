@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, lawnVisitSummaryRenderedSignature } = require('./report-data');
 const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
@@ -225,6 +225,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // can't key a fallback PDF as final (codex P2 r15). '-tn0' matches the
   // lookup sentinel for reports that render no narrative.
   let tnRenderedSignature = '-tn0';
+  // The Visit Summary the render built, taken before reconciliation can touch the text.
+  let vsRenderedSignature = '';
   // Same contract for the cockroach program state: the store key carries the
   // state the render actually used (stamped on the payload), so a render
   // that fell closed is never stored under the lookup's correct-state key.
@@ -269,6 +271,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     cardFenceAtRender = await reserviceCardRenderFence(service, knex);
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, lawnPhotoFindings: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+    vsRenderedSignature = lawnVisitSummaryRenderedSignature(data);
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
     renderedData = data;
@@ -405,6 +408,13 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });
+    // The Visit Summary the render printed must be the one the key names (the key is derived from
+    // the same loaded row; a summary that expired its watering note since, or a row older than the
+    // render, differs). Only compared while the gate is live and the key carries a component.
+    if (require('../../config/feature-gates').lawnVisitSummaryV2Live() && canonical.pin != null && vsRenderedSignature !== (canonical.visitSummarySignature || '')) {
+      logger.warn(`[service-report-pdf] visit summary rendered differs from the key's for ${recordId} — not caching this render`);
+      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
+    }
     if (laAfter !== laSignature) {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };

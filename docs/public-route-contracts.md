@@ -2720,8 +2720,13 @@ topics for the next visit. The two recurring-plan sentences ("each visit adds to
 last one" and "At the next visit we will look at ...") print only for a recurring
 lawn plan visit, by the program line's own `resolveProgramVisit` answer (a one-time
 visit gets neither), and the next-visit sentence also needs a real scheduled next
-visit (`snapshot.nextVisit.source` `'scheduled'`, never a cadence estimate); both
-decisions freeze in the slots. When duplicate findings share a label, the
+visit AT THIS PROPERTY (the property-scoped `lawnNextVisitAtProperty` answer, never
+the customer-wide `snapshot.nextVisit` label and never a cadence estimate); both
+decisions freeze in the slots. On the PDF the document prints the whole
+`summary` for `summarySource: 'lawn_visit_summary'` (the reconciled `todaysResult` is
+only its first sentence). The PDF key's `:vs` component is derived from the service
+row the render loaded, and a render whose printed summary differs from the key's
+component is not cached. When duplicate findings share a label, the
 least-confident read wins.
 The technician note, the program line, the headline and rain are not inputs. It
 freezes first-writer-wins under `structured_notes.lawnVisitSummary[assessmentId]`

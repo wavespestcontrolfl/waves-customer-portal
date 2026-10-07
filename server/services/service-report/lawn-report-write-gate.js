@@ -73,7 +73,7 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, programVisi
       serviceRecordId: service.id,
       assessmentId,
       getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
-      gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, instruction, programVisit: programVisitOut && programVisitOut.programVisit === true, knex }),
+      gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, instruction, programVisit: programVisitOut && programVisitOut.programVisit === true, nextVisitBooked: programVisitOut && programVisitOut.nextVisitBooked === true, knex }),
       knex,
     });
     if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {

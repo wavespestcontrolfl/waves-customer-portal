@@ -106,14 +106,15 @@ describe('gate on', () => {
   test('the report\'s own recurring-plan answer reaches the facts; absent means not recurring', async () => {
     buildReportV1Data.mockImplementation(async (_record, _token, _knex, opts) => {
       opts.programVisitOut.programVisit = true;
+      opts.programVisitOut.nextVisitBooked = true;
       return { lawnAssessment: { assessmentId: 77 }, reportV2: { smsSummary: 'sms', snapshot: {} } };
     });
     await run(fakeKnex({}).knex);
-    expect(gatherVisitSummaryFacts.mock.calls[0][0].programVisit).toBe(true);
+    expect(gatherVisitSummaryFacts.mock.calls[0][0]).toMatchObject({ programVisit: true, nextVisitBooked: true });
     gatherVisitSummaryFacts.mockClear();
     buildReportV1Data.mockImplementation(async () => ({ lawnAssessment: { assessmentId: 77 }, reportV2: { smsSummary: 'sms', snapshot: {} } }));
     await run(fakeKnex({}).knex);
-    expect(gatherVisitSummaryFacts.mock.calls[0][0].programVisit).toBe(false);
+    expect(gatherVisitSummaryFacts.mock.calls[0][0]).toMatchObject({ programVisit: false, nextVisitBooked: false });
   });
 
   test('nothing to ground completes with no summary', async () => {

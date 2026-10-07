@@ -451,8 +451,7 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
   });
 
   test('the composed paragraph for that visit (recurring plan visit, next visit booked)', async () => {
-    const booked = { ...DATA, reportV2: { ...DATA.reportV2, snapshot: { ...DATA.reportV2.snapshot, nextVisit: { label: 'Oct 20', source: 'scheduled' } } } };
-    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: booked, instruction, programVisit: true, knex: fakeKnex() });
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction, programVisit: true, nextVisitBooked: true, knex: fakeKnex() });
     const { paragraph } = summary.composeVisitSummary(facts);
     expect(paragraph).toBe('Today we applied a feeding, which fits the fall season. '
       + 'Our photo read shows good color. '
@@ -499,10 +498,12 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
   });
 
   describe('recurring-plan promises (Codex r4)', () => {
-    const NEXT = { label: 'Oct 20', source: 'scheduled' };
-    const dataWith = (nextVisit) => ({ ...DATA, reportV2: { ...DATA.reportV2, snapshot: { ...DATA.reportV2.snapshot, ...(nextVisit ? { nextVisit } : {}) } } });
+    // nextVisit: the property-scoped answer the report build hands the gate (true = a scheduled booking).
+    const NEXT = true;
     const paragraphFor = async ({ programVisit, nextVisit }) => {
-      const facts = await gatherVisitSummaryFacts({ record: RECORD, data: dataWith(nextVisit), instruction: null, programVisit, knex: fakeKnex() });
+      // snapshot.nextVisit is customer-wide while copy v6 is off: it is never the source.
+      const data = { ...DATA, reportV2: { ...DATA.reportV2, snapshot: { ...DATA.reportV2.snapshot, nextVisit: { label: 'Oct 20', source: 'scheduled' } } } };
+      const facts = await gatherVisitSummaryFacts({ record: RECORD, data, instruction: null, programVisit, nextVisitBooked: nextVisit, knex: fakeKnex() });
       return { facts, text: summary.composeVisitSummary(facts).paragraph };
     };
     const RESULTS = 'each visit adds to the last one';
@@ -525,7 +526,7 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
     });
 
     test('a recurring plan visit with no booking (or only a cadence estimate) gets results but no next-visit line', async () => {
-      for (const nextVisit of [null, { label: 'Nov 3', source: 'estimated', cadenceWeeks: 6 }]) {
+      for (const nextVisit of [false, undefined]) {
         const { facts, text } = await paragraphFor({ programVisit: true, nextVisit });
         expect(facts).toMatchObject({ recurring: true, nextVisitBooked: false });
         expect(text).toContain(RESULTS);
@@ -728,6 +729,24 @@ describe('freeze and read-back', () => {
     test('an unchanged entry reads back', async () => {
       expect(read(await entryOf())).toBe(CASES.stonewallCombinationFall.expected);
     });
+  });
+});
+
+describe('the PDF path keeps the whole frozen summary (Codex r5)', () => {
+  test('reconciliation shortens todaysResult to a first sentence but leaves data.summary and its source whole', () => {
+    const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
+    const { paragraph } = composeCase('stonewallCombinationFall');
+    const data = {
+      serviceLine: 'lawn',
+      summary: paragraph,
+      summarySource: 'lawn_visit_summary',
+      reportV2: { insights: [{ category: 'damage', status: 'watch', headline: 'Stress watch' }], snapshot: {} },
+    };
+    applyLawnReportReconciliation(data, null);
+    expect(data.summary).toBe(paragraph);
+    expect(data.summarySource).toBe('lawn_visit_summary');
+    // The reconciled result is only the lead sentence: the document must print data.summary for this source.
+    expect(String(data.reportV2.todaysResult).length).toBeLessThan(paragraph.length);
   });
 });
 

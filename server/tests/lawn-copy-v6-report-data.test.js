@@ -786,3 +786,110 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
     expect(a).not.toBe(b);
   });
 });
+
+// GATE_LAWN_VISIT_SUMMARY_V2 (PROTOTYPE ONLY, Codex r5): the PDF key's ':vs' component comes from
+// the SAME service row the render loaded, never a fresh read, and the post-render check can compare
+// what the render actually printed.
+describe('GATE_LAWN_VISIT_SUMMARY_V2 PDF key follows the loaded row', () => {
+  const saved = process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+  const summary = require('../services/service-report/lawn-visit-summary');
+  const { lawnVisitSummaryRenderedSignature } = require('../services/service-report/report-data');
+  const composed = summary.composeVisitSummary({ season: 'fall', applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'weed_pressure', status: 'healthy' }] });
+  const FROZEN = { v: summary.FREEZE_VERSION, promptVersion: summary.COMPOSER_VERSION, assessmentId: 'la-cur', text: composed.paragraph, slots: composed.slots, frozenAt: '2026-09-30T18:41:00.000Z' };
+  const frozenNotes = { lawnWeekWeather: { 'la-cur': WEEK }, lawnVisitSummary: { 'la-cur': FROZEN } };
+  const bareNotes = { lawnWeekWeather: { 'la-cur': WEEK } };
+  const svc = (notes) => ({ id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30', ...(notes === undefined ? {} : { structured_notes: notes }) });
+  // The database holds `dbNotes`; the render loaded `rowNotes` (undefined = a partial cache-lookup row).
+  const canonical = (rowNotes, dbNotes) => resolveCanonicalLawnRender(svc(rowNotes), withRecords(fixtures(), { 'svc-cur': { structured_notes: dbNotes } }).knex);
+
+  beforeEach(() => {
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+  });
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_VISIT_SUMMARY_V2; else process.env.GATE_LAWN_VISIT_SUMMARY_V2 = saved; });
+
+  test('race shape: the row was loaded before the freeze, the key is computed after it: the key names what the row renders (no summary)', async () => {
+    const before = await canonical(bareNotes, bareNotes);
+    const raced = await canonical(bareNotes, frozenNotes); // db already frozen, the render's row is older
+    expect(raced.visitSummarySignature).toBe('');
+    expect(raced.signature).toBe(before.signature);
+    // A row loaded after the freeze keys the summary.
+    const after = await canonical(frozenNotes, frozenNotes);
+    expect(after.visitSummarySignature).toMatch(/^:vs=[0-9a-f]{8}$/);
+    expect(after.signature).not.toBe(before.signature);
+  });
+
+  test('a partial cache-lookup row (no structured_notes) reads the record', async () => {
+    const lookup = await canonical(undefined, frozenNotes);
+    expect(lookup.visitSummarySignature).toBe((await canonical(frozenNotes, frozenNotes)).visitSummarySignature);
+    expect((await canonical(undefined, bareNotes)).visitSummarySignature).toBe('');
+  });
+
+  test('the rendered-payload signature equals the key component only for the summary the key names', async () => {
+    const key = (await canonical(frozenNotes, frozenNotes)).visitSummarySignature;
+    expect(lawnVisitSummaryRenderedSignature({ summary: FROZEN.text, summarySource: 'lawn_visit_summary' })).toBe(key);
+    // A render that printed the generic recap (the stale row) is not the summary the key names.
+    expect(lawnVisitSummaryRenderedSignature({ summary: 'Thanks for having us out.', summarySource: 'recap' })).toBe('');
+    expect(lawnVisitSummaryRenderedSignature({ summary: 'Thanks for having us out.', summarySource: 'recap' })).not.toBe(key);
+    expect(lawnVisitSummaryRenderedSignature(null)).toBe('');
+  });
+
+  test('gate off: no component, same signature as before', async () => {
+    delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+    expect((await canonical(frozenNotes, frozenNotes)).visitSummarySignature).toBe('');
+  });
+});
+
+// Codex r5: the Visit Summary's "At the next visit" sentence needs a booking at THIS property. With
+// copy v6 off, snapshot.nextVisit is customer-wide, so the build hands the gate the property-scoped
+// answer instead (programVisitOut.nextVisitBooked), for any gate state.
+describe('programVisitOut.nextVisitBooked is property-scoped with copy v6 off', () => {
+  const ENV = ['GATE_LAWN_REPORT_COPY_V6', 'GATE_LAWN_REPORT_LEAD'];
+  const saved = {};
+  const HOME_A = { service_address_line1: '100 Test Palm Way', service_address_city: 'Bradenton', service_address_zip: '34201' };
+  const HOME_B = { service_address_line1: '9 Other Test Road', service_address_city: 'Sarasota', service_address_zip: '34231' };
+  const visit = (id, date, status, stamp) => ({ id, customer_id: CUSTOMER, scheduled_date: date, status, service_type: 'Lawn Care Treatment Program', ...stamp });
+  beforeEach(() => {
+    ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+  });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const build = async (scheduled, options = { programVisitOut: {} }) => {
+    const recs = { 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK } } } };
+    const { knex } = withRecords({ ...fixtures(), scheduled_services: scheduled }, recs);
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-p14', knex, options);
+    return { data, out: options.programVisitOut };
+  };
+
+  test('a booking only at property B: customer-wide snapshot shows it, property A is told "no next visit"', async () => {
+    const { data, out } = await build([
+      visit('ss-cur', '2026-09-30', 'completed', HOME_A),
+      visit('ss-next', '2027-01-15', 'confirmed', HOME_B),
+    ]);
+    expect(data.reportV2.snapshot.nextVisit).toMatchObject({ source: 'scheduled' }); // the legacy customer-wide label
+    expect(out.nextVisitBooked).toBe(false);
+  });
+
+  test('a booking at this property: true', async () => {
+    const { out } = await build([
+      visit('ss-cur', '2026-09-30', 'completed', HOME_A),
+      visit('ss-next', '2027-01-15', 'confirmed', HOME_A),
+    ]);
+    expect(out.nextVisitBooked).toBe(true);
+  });
+
+  test('no booking at all: false; no out-param asked: nothing extra is read or set', async () => {
+    const { out } = await build([visit('ss-cur', '2026-09-30', 'completed', HOME_A)]);
+    expect(out.nextVisitBooked).toBe(false);
+    const options = {};
+    await build([visit('ss-cur', '2026-09-30', 'completed', HOME_A), visit('ss-next', '2027-01-15', 'confirmed', HOME_A)], options);
+    expect(options).toEqual({});
+  });
+});
