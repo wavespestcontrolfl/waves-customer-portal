@@ -12536,6 +12536,45 @@ const CallRecordingProcessor = {
             holdPhone: held,
           });
           logger.info(`[call-proc] family-link caller saved as a service contact for ${maskSid(callSid)}: ${saved}`);
+          // Recipient double opt-in, the same claim + dispatch the secondary-contact path uses for a
+          // new service-contact phone (#2956): the saved number is asked for its own YES and is
+          // never texted on role alone. Skipped for a do-not-contact request (the number stays held).
+          if (saved === 'written' && !v2DoNotContact) {
+            try {
+              const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');
+              const custRow = await db('customers').where({ id: linkedCustomerId }).first();
+              if (custRow) {
+                const claims = await claimRecipientOptins({
+                  customer: custRow,
+                  contacts: [{
+                    name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' '),
+                    firstName: extracted.first_name || '',
+                    phone,
+                  }],
+                  priorPhones: [custRow.service_contact_phone, custRow.service_contact2_phone, custRow.service_contact3_phone]
+                    .filter((ph) => tenOf(ph) !== tenOf(phone)),
+                  propertyAddress: [custRow.address_line1, custRow.city].filter(Boolean).join(', '),
+                });
+                if (claims.length) {
+                  void dispatchRecipientOptins(claims, custRow)
+                    .catch((err) => logger.warn(`[call-proc] family-link opt-in dispatch failed for ${maskSid(callSid)}: ${err.message}`));
+                }
+              }
+            } catch (optErr) {
+              // Durable fail-closed, like the secondary-contact path: a blocking ask_failed row.
+              if (tenOf(phone).length === 10) {
+                await db('recipient_optin').insert({
+                  phone_key: tenOf(phone),
+                  phone_e164: String(phone || '').trim(),
+                  status: 'ask_failed',
+                  customer_id: linkedCustomerId,
+                  requested_by: 'call_pipeline',
+                  requested_at: new Date(),
+                }).onConflict(['customer_id', 'phone_key']).ignore().catch(() => {});
+              }
+              logger.warn(`[call-proc] family-link opt-in hook failed for ${maskSid(callSid)}: ${optErr.message}`);
+            }
+          }
         }
       } catch (e) {
         logger.warn(`[call-proc] family-link service contact skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);

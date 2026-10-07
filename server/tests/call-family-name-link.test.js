@@ -159,6 +159,18 @@ describe('Step 3 wiring (structural)', () => {
     expect(source).toContain("result.status === 'uncorroborated'\n                  ? 'The caller named this account but gave no matching address. Confirm before linking.'");
   });
 
+  test('the saved family contact goes through the recipient double opt-in, never texted on role alone', () => {
+    const after = source.slice(source.indexOf('family-link caller saved as a service contact'));
+    const block = after.slice(0, after.indexOf('family-link service contact skipped'));
+    expect(block).toContain("if (saved === 'written' && !v2DoNotContact) {");
+    expect(block).toContain("const { claimRecipientOptins, dispatchRecipientOptins } = require('./recipient-optin');");
+    expect(block).toContain('void dispatchRecipientOptins(claims, custRow)');
+    // fail closed: a failed claim leaves a blocking ask_failed row
+    expect(block).toContain("status: 'ask_failed'");
+    // no direct send anywhere in the family-link writer
+    expect(block).not.toMatch(/sendCustomerMessage|sendSMS|twilio/i);
+  });
+
   test('both the dictated callback number and the inbound caller ID are checked for an account', () => {
     expect(source).toContain('callerPhones: [phone, call.from_phone],');
   });
@@ -318,6 +330,29 @@ const SKIP = !process.env.DATABASE_URL;
     expect(await phoneOnAnyLiveAccount(trx, '+19415550188')).toBe(false); // a retired account does not hold a number
     expect(await phoneOnAnyLiveAccount(trx, '+19415550199')).toBe(false);
     expect((await resolveFamilyNameLink(args(await call(), { callerPhones: ['+19415550199', null] }))).status).toBe('linked');
+  });
+
+  test('the match is rechecked under the customer lock: a rename or address change after the search links nothing', async () => {
+    const mom = await customer();
+    const holder = { first_name: 'Angelina', last_name: 'Testerson' };
+    const stated = { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' };
+    const tryLink = async () => {
+      const callLogId = await call();
+      const outcome = await linkCallToCustomer({ callLogId, procToken: TOKEN, customer: { id: mom }, holder, caller: {}, statedAddress: stated, conn: trx });
+      return { outcome, row: await trx('call_log').where({ id: callLogId }).first() };
+    };
+    await trx('customers').where({ id: mom }).update({ last_name: 'Renamed' });
+    let r = await tryLink();
+    expect(r.outcome).toBe('no_longer_matches');
+    expect(r.row.customer_id).toBeNull();
+    await trx('customers').where({ id: mom }).update({ last_name: 'Testerson', address_line1: '4313 Other Dr' });
+    r = await tryLink();
+    expect(r.outcome).toBe('no_longer_matches');
+    expect(r.row.customer_id).toBeNull();
+    expect(r.row.metadata.family_name_link).toBeUndefined();
+    await trx('customers').where({ id: mom }).update({ address_line1: '100 Example Loop' });
+    r = await tryLink();
+    expect(r.outcome).toBe('linked');
   });
 
   test('a caller who is not a family member links nothing', async () => {

@@ -114,16 +114,23 @@ function statedAddressCorroborates(stated, customer) {
 // customer is re-read under a share lock so a merge or archive that retires the
 // row between the search and the write makes this a no-op, never a link to a
 // retired account. Returns 'linked' | 'customer_gone' | 'claim_lost'.
-async function linkCallToCustomer({ callLogId, procToken, customer, holder, caller, conn = db }) {
+async function linkCallToCustomer({ callLogId, procToken, customer, holder, caller, statedAddress = null, conn = db }) {
   let outcome = 'claim_lost';
   await conn.transaction(async (trx) => {
+    // The match is re-judged HERE, under the customer row lock, not trusted from the earlier
+    // read: a rename, merge or archive between the search and this write must not link the
+    // wrong or a dead account. The name and the address corroboration must still hold.
     const live = await trx('customers')
       .modify(whereLiveCustomer)
       .where({ id: customer.id })
       .forShare()
-      .first('id');
+      .first('id', 'first_name', 'last_name', 'city', 'address_line1', 'zip');
     if (!live) {
       outcome = 'customer_gone';
+      return;
+    }
+    if (fullNameKey(live) !== fullNameKey(holder) || !statedAddressCorroborates(statedAddress, live)) {
+      outcome = 'no_longer_matches';
       return;
     }
     const marker = {
@@ -212,7 +219,16 @@ async function resolveFamilyNameLink({
       candidates: [{ customer_id: String(customer.id), name: displayName(customer), city: customer.city || null }],
     };
   }
-  const outcome = await linkCallToCustomer({ callLogId, procToken, customer, holder, caller, conn });
+  const outcome = await linkCallToCustomer({ callLogId, procToken, customer, holder, caller, statedAddress, conn });
+  if (outcome === 'no_longer_matches') {
+    // Changed under us: link nothing and let the candidates card show what matches now.
+    const now = await findLiveCustomersByFullName(conn, holder);
+    return {
+      status: 'candidates',
+      holder,
+      candidates: now.slice(0, MAX_CANDIDATES).map((m) => ({ customer_id: String(m.id), name: displayName(m), city: m.city || null })),
+    };
+  }
   if (outcome !== 'linked') {
     logger.warn(`[call-family-link] link not written for call ${callLogId}: ${outcome}`);
     return { status: outcome, holder };
