@@ -782,23 +782,18 @@ function parsedCarriesLocality(parts, raw) {
 }
 
 // Does the stored line carry more than a street? A locality in the parse
-// (parsedCarriesLocality) says so, whether or not it matches the city column. A parsed ZIP counts
-// only when it equals the lead's zip column, ZIP+4 included (the parser reads any trailing
-// five digits as a ZIP, so "21 Oak Ave Apt 34236" with another zip column is
-// a bare street with a unit number). A comma segment equal to the city column
-// counts as well.
-// The five digits match in either direction: "34200" in the line and a
-// column of "34200-1234", or the reverse.
-function zipMatchesColumn(parsed, column) {
-  const five = (z) => String(z || '').trim().slice(0, 5);
-  return /^\d{5}/.test(five(parsed)) && five(parsed) === five(column);
-}
+// (parsedCarriesLocality) says so, whether or not it matches the city column.
+// A ZIP-shaped tail counts unless it is a unit number. The city column's text
+// at the tail counts as well.
 function storedIsOneLine(lead) {
   const stored = String(lead.address || '').trim();
   if (!stored) return false;
   const parts = parseRawAddress(stored);
   if (parsedCarriesLocality(parts, stored)) return true;
-  if (parts.zip && zipMatchesColumn(parts.zip, lead.zip)) return true;
+  // A ZIP-shaped tail is a locality whatever the zip column says (a legacy
+  // line may disagree with its column), unless the parser's "city" is a unit
+  // designator: "21 Oak Ave Apt 34236" is a street with a unit number.
+  if (parts.zip && !UNIT_DESIGNATORS.has(String(parts.city || '').trim().replace(/[.,#]/g, '').toLowerCase())) return true;
   // The city column's text at the tail of the line, with or without a comma
   // ("21 Oak Ave, Sarasota", "123 Broadway Sarasota"), is a locality too.
   return endsWithCity(stored, lead.city);
@@ -818,9 +813,9 @@ function endsWithCity(text, cityColumn) {
 // Does a given `address` text carry a locality (state, 5-digit ZIP, a real
 // city, or the lead's own city as its tail)? Such text is refused on a bare row: stored as a street it would
 // contradict the city and zip columns, and the bar never splits it.
-function carriesLocality(text, cityColumn) {
+function carriesLocality(text) {
   const parts = parseRawAddress(text);
-  return /^\d{5}(-\d{4})?$/.test(String(parts.zip || '')) || parsedCarriesLocality(parts, text) || endsWithCity(text, cityColumn);
+  return /^\d{5}(-\d{4})?$/.test(String(parts.zip || '')) || parsedCarriesLocality(parts, text);
 }
 
 // Applies the rule above. Returns { requested } or { error }.
@@ -828,9 +823,9 @@ function resolveLeadAddressRequest(lead, requested) {
   if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested };
   if (storedIsOneLine(lead)) return { error: ONE_LINE_REFUSAL };
   const text = requested.address;
-  // The city the row will have after this edit: the requested one, else the column.
-  const cityAfter = 'city' in requested ? requested.city : lead.city;
-  if (typeof text === 'string' && text.trim() && carriesLocality(text, cityAfter)) return { error: LOCALITY_REFUSAL };
+  // Checked against both the stored city and the one requested with it.
+  const cities = [lead.city, requested.city].filter(c => typeof c === 'string' && c.trim());
+  if (typeof text === 'string' && text.trim() && (carriesLocality(text) || cities.some(c => endsWithCity(text, c)))) return { error: LOCALITY_REFUSAL };
   return { requested };
 }
 

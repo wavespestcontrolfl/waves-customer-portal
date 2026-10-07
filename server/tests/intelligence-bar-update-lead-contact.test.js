@@ -401,6 +401,20 @@ test('a stored compound-suffix street stays editable', async () => {
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).changes).toEqual({ zip: { from: '34200', to: '34201' } });
 });
 
+test('a stored ZIP that disagrees with the zip column is still one line; a unit number is not', async () => {
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '21 Oak Ave 34201', city: 'Testville', zip: '34200' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34202' })).error).toMatch(/stored as one line/);
+  for (const address of ['21 Oak Ave Apt 34236', '21 Oak Ave, Unit 34236']) {
+    db.mockImplementation(() => chain({ first: { ...LEAD, address, city: 'Testville', zip: '34200' } }));
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34202' })).changes).toEqual({ zip: { from: '34200', to: '34202' } });
+  }
+});
+
+test('requested street text ending in the OLD city is refused even when the city changes with it', async () => {
+  db.mockImplementation(() => chain({ first: { ...ADDR_LEAD, city: 'Sarasota' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Broadway Sarasota', city: 'Bradenton' })).error).toMatch(/street alone/);
+});
+
 test('confirmed phone change does not touch the address columns in the guard', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
   const activities = chain({ insert: undefined });
