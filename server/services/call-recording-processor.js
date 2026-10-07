@@ -21350,7 +21350,15 @@ const CallRecordingProcessor = {
     // the only thing the release paths read.
     let dripHoldRecorded = null;
     let newsletterHoldRecorded = null;
-    if (customerId && extracted.email && v2EmailBlocked) {
+    if (familyNameLink) {
+      // A family-linked call is the CALLER's, on the holder's account (GATE_CALL_FAMILY_NAME_LINK):
+      // the caller's email and name are not the holder's and the caller gave no consent for them, so
+      // no first-touch drip, no hold row and no newsletter DOI for the holder from this call. The
+      // marker restores this on a reprocess.
+      logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: family-linked call`);
+      beehiivResult = { skipped: 'family_link' };
+      newsletterCandidate = null;
+    } else if (customerId && extracted.email && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
     } else if (customerId && extracted.email

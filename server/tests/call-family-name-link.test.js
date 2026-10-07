@@ -191,6 +191,30 @@ describe('Step 3 wiring (structural)', () => {
     expect(source).toContain('v2Extraction: stagingInput.v2Extraction,');
   });
 
+  test('first-touch automation (drip enrollment, hold rows, newsletter DOI) is skipped for the holder on a family link', () => {
+    const step6 = source.slice(source.indexOf('// Step 6: Enroll in the local new_lead automation sequence.'));
+    const firstBranch = step6.slice(step6.indexOf('let dripHoldRecorded = null;'), step6.indexOf('} else if (customerId && extracted.email && v2EmailBlocked) {'));
+    expect(firstBranch).toContain('if (familyNameLink) {');
+    expect(firstBranch).toContain("beehiivResult = { skipped: 'family_link' };");
+    expect(firstBranch).toContain('newsletterCandidate = null;');
+    // the enrollment, both hold-row writers and the subscribe sit behind that branch (else-if chain)
+    const chain = step6.slice(step6.indexOf('if (familyNameLink) {'), step6.indexOf('AutomationRunner.enrollCustomer'));
+    expect((chain.match(/recordFirstTouchHoldOwned/g) || []).length).toBe(2);
+    expect(chain.indexOf('if (familyNameLink) {')).toBeLessThan(chain.indexOf('recordFirstTouchHoldOwned'));
+    expect(chain).not.toMatch(/\n    if \(customerId/); // no sibling `if` that could run beside it
+  });
+
+  test('the same-call fan-out to the holder\'s saved contacts needs explicit consent, which a family link clears', () => {
+    expect(source).toContain('const extraContacts = !v2SmsConsentExplicit ? [] :');
+  });
+
+  test('the booking-link text lane treats a family-linked call as an existing customer (never created by the call)', () => {
+    const moduleSource = fs.readFileSync(require.resolve('../services/call-family-name-link'), 'utf8');
+    expect(moduleSource).not.toContain('created_customer_id');
+    const lane = fs.readFileSync(require.resolve('../services/call-booking-link-text'), 'utf8');
+    expect(lane).toContain("(call) => (customerPredatesThisCall(call) ? 'existing_customer' : null)");
+  });
+
   test('the booking backfill never copies the caller onto the holder', () => {
     expect(source).toContain('suppressCallerIdentity: !!familyNameLink');
     expect(source).toContain('const extracted = suppressCallerIdentity ? { ...extractedIn, first_name: null, last_name: null, phone: null, email: null } : extractedIn;');
