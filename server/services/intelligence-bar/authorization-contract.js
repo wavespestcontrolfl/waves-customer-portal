@@ -89,14 +89,11 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // The Stripe detach cannot be undone, and an Auto Pay-off the customer
   // is emailed about is only reversible by the customer's own consent.
   'remove_saved_payment_method',
-  // A won lead joins the next daily qualified-lead upload to Google Ads and
-  // Meta; reopening the lead later does not recall a sent conversion.
-  'convert_lead',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
 // generic one-line-per-preview-key dump.
-const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address', 'convert_lead']);
+const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address']);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
 // moves and cancellations are deliberately NOT here: their executors
@@ -170,7 +167,6 @@ const ACTION_LABELS = {
   optimize_tech_route: 'Re-optimize a technician route',
   update_lead_status: 'Change a lead status',
   update_lead_contact: 'Update lead contact details',
-  convert_lead: 'Convert a lead to a customer',
   bulk_update_leads: 'Change status on multiple leads',
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
@@ -400,23 +396,6 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', 'Estimates already made for this lead keep the address they were made with');
     }
     push('operational', "A contact-updated entry is appended to the lead's activity history; a linked customer account is NOT changed");
-  }
-  // Lead conversion (the Leads page "Convert to Customer" action): every
-  // effect leadAttribution.convertLeadToCustomer → markConverted runs.
-  if (toolName === 'convert_lead' && preview?.lead_id) {
-    push('customer', `Lead ${preview.lead_name}: status ${preview.lead_status} → won, linked to customer ${preview.customer_name}`, {
-      before: preview.lead_status, after: 'won',
-    });
-    push('customer', `The customer record for ${preview.customer_name} is not changed`);
-    push('operational', 'The lead is marked qualified and stamped converted now (an existing converted time is kept)');
-    push('operational', "If the lead has a linked ad-attribution row, its funnel stage advances toward 'booked' (never downgraded; best-effort)");
-    const estimateIds = Array.isArray(preview.estimate_ids) ? preview.estimate_ids : [];
-    push('operational', estimateIds.length
-      ? `Tries to attach ${estimateIds.length} estimate(s) for this lead to this customer (${estimateIds.map(id => String(id).slice(0, 8)).join(', ')}); if that fails, the result says so. An estimate added after this card is not attached`
-      : 'No customer-less estimates for this lead to attach');
-    push('operational', "A converted entry is appended to the lead's activity history");
-    push('operational', 'The next daily ad upload may send this lead to Google Ads and Meta as a qualified-lead conversion (when an ad click or matching email or phone is on file); a sent conversion is not recalled');
-    push('operational', 'No message is sent to the customer');
   }
   // Pinned recipient (send_sms, reply_via_sms, trigger_review_request pin a
   // phone; send_email_reply pins the email the reply goes to).

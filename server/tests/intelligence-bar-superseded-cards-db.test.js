@@ -81,6 +81,17 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     expect(await status(c.id)).toBe('pending');
   });
 
+  test('a newer address card replaces an older one for the same field; a different address part does not', async () => {
+    const change = (from, to) => ({ from, to });
+    const older = await propose('update_lead_contact', { lead_id: leadId, address: '21 Palm Ave', _approved_changes: { address: change(null, '21 Palm Ave') } }, { noTask: true, startedAt: at(-3000) });
+    const zip = await propose('update_lead_contact', { lead_id: leadId, zip: '34208', _approved_changes: { zip: change(null, '34208') } }, { noTask: true, startedAt: at(-2000) });
+    expect(await status(older.id)).toBe('pending');
+    const fix = await propose('update_lead_contact', { lead_id: leadId, address: '12 Palm Ave', _approved_changes: { address: change(null, '12 Palm Ave') } }, { noTask: true, startedAt: at(-1000) });
+    expect(await status(older.id)).toBe('cancelled');
+    expect(await status(zip.id)).toBe('pending');
+    expect(await status(fix.id)).toBe('pending');
+  });
+
   test('a lead edit is judged by the fields its card really changes, not the raw input', async () => {
     const change = (from, to) => ({ from, to });
     // The first card sends first_name (already Jay) and a new email; only the email is approved.

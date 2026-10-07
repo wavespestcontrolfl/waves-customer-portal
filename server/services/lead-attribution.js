@@ -1,4 +1,4 @@
-const { scopeToProspects, OPEN_LEAD_STATUSES, handledStatusRefusal, unlessHandledSince } = require('./lead-statuses');
+const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -177,20 +177,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // write must lose rather than overwrite its customer, codex #3834 r18 P1):
 // 0 rows ⇒ a concurrent transition wins and nothing below runs.
 // Returns whether the lead converted.
-// The amounts part of the converted history line. An explicit null for both
-// (the bar's card passes the lead's own stored values, which may be empty)
-// omits them rather than logging $0; every other caller reads as before.
-function conversionAmountsText(monthlyValue, initialServiceValue) {
-  if (monthlyValue === null && initialServiceValue === null) return '';
-  return ` Monthly: $${monthlyValue || 0}, Initial: $${initialServiceValue || 0}`;
-}
-
-// For a caller that reports its outcome (the bar's convert_lead card):
-// `onOutcome` is called with { funnel } (settleWonFunnelRow's result) and
-// { estimates: { linked: n } | { failed: true } } (the best-effort attach);
-// `onlyEstimateIds` limits the attach to the set the card showed;
-// `keepConvertedAt` keeps an existing first-win timestamp.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId, onOutcome, onlyEstimateIds, keepConvertedAt } = {}) {
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -198,7 +185,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // waveguard_tier that the quote flow already stored for lead-ROI analytics.
   const updates = {
     status: 'won',
-    converted_at: keepConvertedAt ? db.raw('COALESCE(converted_at, now())') : new Date(),
+    converted_at: new Date(),
     is_qualified: true,
     updated_at: new Date(),
   };
@@ -240,8 +227,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   }
 
   const linkedCustomer = customerId || null;
-  const report = onOutcome || (() => {});
-  report({ funnel: await settleWonFunnelRow(leadId, linkedCustomer, estimateId || null) });
+  await settleWonFunnelRow(leadId, linkedCustomer, estimateId || null);
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
@@ -252,17 +238,16 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
     try {
       const lead = await db('leads').where('id', leadId).first('id', 'estimate_id', 'phone', 'email');
       const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
-      report({ estimates: { linked: await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer, throwOnError: Boolean(onOutcome), onlyEstimateIds }) } });
+      await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer });
     } catch (err) {
       logger.warn(`[LeadAttribution] estimate→customer backfill failed for lead ${leadId}: ${err.message}`);
-      report({ estimates: { failed: true } });
     }
   }
 
   await db('lead_activities').insert({
     lead_id: leadId,
     activity_type: 'converted',
-    description: `Converted to customer${customerId ? ` (${customerId})` : ''}.${conversionAmountsText(monthlyValue, initialServiceValue)}${triggerSource ? ` [via ${triggerSource}]` : ''}`,
+    description: `Converted to customer${customerId ? ` (${customerId})` : ''}. Monthly: $${monthlyValue || 0}, Initial: $${initialServiceValue || 0}${triggerSource ? ` [via ${triggerSource}]` : ''}`,
     performed_by: 'system',
     metadata: JSON.stringify({ customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource }),
   });
@@ -270,89 +255,6 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   logger.info(`[LeadAttribution] Lead ${leadId} converted${triggerSource ? ` (${triggerSource})` : ''}`);
   return true;
 }
-
-// The manual lead → customer conversion: POST /api/admin/leads/:id/convert
-// (the Leads page "Convert to Customer" button) and the Intelligence Bar's
-// convert_lead card both run this one body. It links the lead to an EXISTING
-// customer and marks it won through markConverted; it never creates a
-// customer and sends no message. Returns { lead } or { status, error } with
-// the route's own refusals.
-// `seenStatus` / `seenUpdatedAt`: the lead as the caller showed it. Same
-// stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
-// customer's booking closed after staff loaded it is not won from that view —
-// judged here and re-asserted in the win's own UPDATE.
-// `expectedStatus` (optional, the bar's card): the win's UPDATE also requires
-// the lead to still hold the status, the version (`seenUpdatedAt`, to the
-// millisecond) and the customer link (none, or this customer) the card showed,
-// so another admin's edit or a re-link after the card matches no row (codex
-// #6099 r1). The route passes none and keeps its handled-only rule.
-// `expectedCustomerUpdatedAt` (card path, required with expectedStatus): the
-// same UPDATE also requires the target customer to be live at the version the
-// card showed (codex #6099 r2).
-// `onlyEstimateIds` (card path): the estimate set the card showed and pinned.
-// Returns { lead, estimates: { linked } | { failed: true }, funnel }.
-async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthlyValue, initialServiceValue, waveguardTier, seenStatus, seenUpdatedAt, expectedStatus, expectedCustomerUpdatedAt, onlyEstimateIds } = {}) {
-  const customerId = typeof rawCustomerId === 'string' ? rawCustomerId.trim() : rawCustomerId;
-  if (!customerId) return { status: 400, error: 'customer_id is required to convert a lead' };
-
-  const lead = await db('leads').where('id', leadId).whereNull('deleted_at').first();
-  if (!lead) return { status: 404, error: 'Lead not found' };
-
-  const customer = await db('customers').where('id', customerId).first();
-  if (!customer) return { status: 404, error: 'Customer not found' };
-
-  const refusal = handledStatusRefusal('won', seenStatus, lead.status, seenUpdatedAt, lead.updated_at);
-  if (refusal) return { status: refusal.code, error: refusal.error };
-  // The card path fails closed without the version it showed.
-  const missingPin = expectedStatus && (!seenUpdatedAt ? LEAD_CHANGED : !expectedCustomerUpdatedAt && CUSTOMER_CHANGED);
-  if (missingPin) return { status: 409, error: missingPin };
-  const handledGuard = unlessHandledSince(seenStatus, seenUpdatedAt);
-  const cardGuard = expectedStatus ? cardClaimGuard(handledGuard, { seenUpdatedAt, customerId, expectedCustomerUpdatedAt }) : null;
-  const outcome = { estimates: null, funnel: null };
-  const won = await markConverted(leadId, {
-    customerId,
-    monthlyValue,
-    initialServiceValue,
-    waveguardTier,
-    // Only 'handled' is excluded, unless it is the very close the page showed (any
-    // other status converts exactly as before): the claim's where() takes a callback,
-    // re-asserting it in the win's own UPDATE.
-    onlyIfIdentity: cardGuard || handledGuard,
-    ...(expectedStatus ? { onlyIfStatusIn: [expectedStatus] } : {}),
-    // Card path only: keep a hand-set first-win time; attach only the shown estimates.
-    keepConvertedAt: Boolean(expectedStatus),
-    onlyEstimateIds: expectedStatus ? (onlyEstimateIds || []) : undefined,
-    onOutcome: (part) => Object.assign(outcome, part),
-  });
-  if (won === false && expectedStatus) {
-    return { status: 409, error: (await customerMovedSince(customerId, expectedCustomerUpdatedAt)) ? CUSTOMER_CHANGED : LEAD_CHANGED };
-  }
-  if (won === false) return { status: 409, error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' };
-  const updatedLead = await db('leads').where('id', leadId).first();
-  return { lead: updatedLead, ...outcome };
-}
-const LEAD_CHANGED = 'The lead changed since the card was shown — nothing was converted.';
-const msIso = (v) => new Date(v).toISOString();
-
-// The card path's extra claim conditions, in the win's own UPDATE: the lead
-// at the version the card showed, linked to no customer or this one, and the
-// target customer live at the version the card showed.
-function cardClaimGuard(handledGuard, { seenUpdatedAt, customerId, expectedCustomerUpdatedAt }) {
-  return (q) => {
-    handledGuard(q);
-    q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [msIso(seenUpdatedAt)]);
-    q.where((w) => w.whereNull('customer_id').orWhere('customer_id', customerId));
-    q.whereExists(db('customers').select(db.raw('1')).where('customers.id', customerId).whereNull('customers.deleted_at')
-      .whereRaw("date_trunc('milliseconds', customers.updated_at) = ?::timestamptz", [msIso(expectedCustomerUpdatedAt)]));
-  };
-}
-
-// After a refused card claim: name the customer when it is gone or moved.
-async function customerMovedSince(customerId, expectedCustomerUpdatedAt) {
-  const now = await db('customers').where('id', customerId).first('updated_at', 'deleted_at');
-  return !now || Boolean(now.deleted_at) || !now.updated_at || msIso(now.updated_at) !== msIso(expectedCustomerUpdatedAt);
-}
-const CUSTOMER_CHANGED = 'The customer changed since the card was shown — nothing was converted.';
 
 // Where a won lead's win lands in the ad funnel — the ONE mechanism for every
 // writer of status='won' (markConverted; the admin book route, which converts
@@ -846,7 +748,6 @@ module.exports = {
   normalizePhone,
   attributeInboundContact,
   markConverted,
-  convertLeadToCustomer,
   settleWonFunnelRow,
   markLost,
   logFirstResponse,

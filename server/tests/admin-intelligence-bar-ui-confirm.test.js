@@ -1421,37 +1421,6 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
-  test('convert_lead pins the resolved lead, its status and version; the card names the lead and the customer', async () => {
-    mockExecuteTool.mockResolvedValue({
-      preview: true, lead_id: 'lead-3', lead_name: 'Testc Beta', lead_status: 'estimate_sent',
-      lead_contact: { phone: '+19415550101', email: null, address: '1 Example St' },
-      customer_id: 'cust-9', customer_name: 'Testc Beta',
-      customer_record: { phone: '+19415550101', email: null, address: null },
-      _version: 'v1', _lead_updated_at: '2026-10-06T14:00:00.123Z', _customer_updated_at: '2026-10-06T15:00:00.456Z', estimate_ids: ['est-a'],
-    });
-    scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'convert_lead', input: { lead_name: 'Beta', customer_id: 'cust-9' } }],
-      [{ type: 'text', text: 'Proposed.' }],
-    ]);
-
-    await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'convert Beta to a customer', context: 'leads' });
-      expect(mockExecuteTool.mock.calls[0][1].confirmed).toBe(false);
-      const stored = mockCreatePendingAction.mock.calls[0][0];
-      expect(stored.params).toMatchObject({
-        lead_id: 'lead-3', customer_id: 'cust-9',
-        _expected_status: 'estimate_sent', _expected_updated_at: '2026-10-06T14:00:00.123Z',
-        _expected_customer_updated_at: '2026-10-06T15:00:00.456Z',
-        _approved_estimate_ids: ['est-a'],
-      });
-      expect(stored.params.lead_name).toBeUndefined();
-      expect(body.pendingActions[0].params).toEqual({
-        lead: 'Testc Beta (estimate_sent) — +19415550101 · 1 Example St',
-        customer: 'Testc Beta — +19415550101',
-      });
-    });
-  });
-
   test('bulk_update_leads: dry-run runs at proposal, stored params carry dry_run:false + the pinned id set', async () => {
     mockPreviewBulkLeadUpdate.mockResolvedValue({
       all_names: ['lead a', 'lead b', 'lead c'].slice(0, 3), dry_run: true,

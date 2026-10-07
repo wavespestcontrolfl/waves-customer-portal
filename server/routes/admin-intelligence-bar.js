@@ -1068,14 +1068,6 @@ function confirmationDisplayParams(toolName, params, preview) {
       ])),
     };
   }
-  if (toolName === 'convert_lead' && preview?.lead_id) {
-    // The lead and the existing customer it becomes, by name — never raw ids.
-    const contact = (c) => [c?.phone, c?.email, c?.address].filter(Boolean).join(' · ') || 'no contact details on file';
-    return {
-      lead: `${preview.lead_name} (${preview.lead_status}) — ${contact(preview.lead_contact)}`,
-      customer: `${preview.customer_name} — ${contact(preview.customer_record)}`,
-    };
-  }
   if (toolName === 'bulk_update_leads') {
     // Curated card: the pinned id list is authoritative but unreadable —
     // show the count + sample the operator is approving, never a raw array.
@@ -1191,17 +1183,6 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // after the fingerprint check (pre-push P1). `_`-prefixed: never
       // shown, ignored by the unconfirmed fingerprint re-run.
       params._approved_changes = preview.changes;
-    }
-    if (toolUse.name === 'convert_lead' && preview?.lead_id) {
-      // Pin the resolved lead and the state the card shows: the confirmed run
-      // passes them as the "seen" lead, and the win's UPDATE refuses a lead
-      // that moved after the card (same rule as the Leads page button).
-      params.lead_id = String(preview.lead_id);
-      delete params.lead_name;
-      params._expected_status = preview.lead_status;
-      params._expected_updated_at = preview._lead_updated_at || null;
-      params._expected_customer_updated_at = preview._customer_updated_at || null;
-      params._approved_estimate_ids = Array.isArray(preview.estimate_ids) ? preview.estimate_ids : [];
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
@@ -2381,7 +2362,6 @@ LEADS CAPABILITIES:
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
 - Fix a lead's contact details — first/last name, phone, email, street address, city, zip (update_lead_contact; shows before → after, then the confirmation card)
-- Convert a lead to an existing customer — the "Convert to Customer" button (convert_lead; create the customer first with create_customer when there is none)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost

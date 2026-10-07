@@ -1266,24 +1266,29 @@ async function findCustomerLinkedLeadsByContact(database, phone, email) {
 // with this lead's id in `estimate_data.lead_id` (the public-quote mirror).
 // Always guarded to `customer_id IS NULL` so an estimate tied to another
 // customer is never re-homed. Best-effort: a failure here never breaks the
-// conversion. Returns the number of estimates attached. `throwOnError`: a
-// caller that reports the outcome (the bar's convert_lead card) gets the
-// error instead of a 0 that reads like "nothing to attach". `onlyEstimateIds`:
-// attach only these (the set a confirmation card showed); an estimate that
-// became eligible later is left alone.
-async function linkLeadEstimatesToCustomer({ database = db, lead, customerId, throwOnError = false, onlyEstimateIds = null } = {}) {
+// conversion. Returns the number of estimates attached.
+async function linkLeadEstimatesToCustomer({ database = db, lead, customerId } = {}) {
   if (!customerId || !lead) return 0;
   try {
-    const allowed = onlyEstimateIds ? new Set(onlyEstimateIds.map(String)) : null;
-    // Primary: the lead's FK-linked estimate, updated directly (guarded to unowned).
+    // Primary: the lead's FK-linked estimate — deterministic, zero ambiguity.
     if (lead.estimate_id) {
-      if (allowed && !allowed.has(String(lead.estimate_id))) return 0;
       return await database('estimates')
         .where({ id: lead.estimate_id })
         .whereNull('customer_id')
         .update({ customer_id: customerId, updated_at: new Date() });
     }
-    const ids = (await leadEstimateIdsToLink({ database, lead })).filter((id) => !allowed || allowed.has(id));
+    // Fallback: estimates explicitly mirroring THIS lead's id in estimate_data
+    // (public-quote leads stamp `estimate_data.lead_id`, not `leads.estimate_id`).
+    // estimate_data is stored as JSON text, so prefilter with a LIKE on the
+    // lead-id substring (a UUID — no LIKE metacharacters) and confirm the exact
+    // value in JS. No phone/email matching — precise lead-id only.
+    const tagged = await database('estimates')
+      .whereNull('customer_id')
+      .whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`])
+      .select('id', 'estimate_data');
+    const ids = tagged
+      .filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id)
+      .map((e) => e.id);
     if (!ids.length) return 0;
     return await database('estimates')
       .whereIn('id', ids)
@@ -1291,34 +1296,8 @@ async function linkLeadEstimatesToCustomer({ database = db, lead, customerId, th
       .update({ customer_id: customerId, updated_at: new Date() });
   } catch (err) {
     logger.warn(`[lead-estimate-link] backfill estimate.customer_id failed for lead ${lead?.id} → customer ${customerId}: ${err.message}`);
-    if (throwOnError) throw err;
     return 0;
   }
-}
-
-// The estimates linkLeadEstimatesToCustomer would attach for this lead (ids,
-// sorted), still customer-less. Read-only: the bar's convert_lead card shows
-// and pins this set.
-async function leadEstimateIdsToLink({ database = db, lead } = {}) {
-  if (!lead) return [];
-  // Primary: the lead's FK-linked estimate — deterministic, zero ambiguity.
-  if (lead.estimate_id) {
-    const row = await database('estimates').where({ id: lead.estimate_id }).whereNull('customer_id').first('id');
-    return row ? [String(row.id)] : [];
-  }
-  // Fallback: estimates explicitly mirroring THIS lead's id in estimate_data
-  // (public-quote leads stamp `estimate_data.lead_id`, not `leads.estimate_id`).
-  // estimate_data is stored as JSON text, so prefilter with a LIKE on the
-  // lead-id substring (a UUID — no LIKE metacharacters) and confirm the exact
-  // value in JS. No phone/email matching — precise lead-id only.
-  const tagged = await database('estimates')
-    .whereNull('customer_id')
-    .whereRaw('estimate_data::text LIKE ?', [`%${lead.id}%`])
-    .select('id', 'estimate_data');
-  return tagged
-    .filter((e) => parseEstimateData(e.estimate_data)?.lead_id === lead.id)
-    .map((e) => String(e.id))
-    .sort();
 }
 
 // Customer-link match — an OPEN lead already attached to the EXACT customer the
@@ -2202,7 +2181,6 @@ async function attributeSelfBooking({
 
 module.exports = {
   attachLeadToEstimate,
-  leadEstimateIdsToLink,
   assertLeadCanAttachEstimate,
   leadMatchesEstimateContact,
   // The same contact normalization the lead-match rule uses, for callers that

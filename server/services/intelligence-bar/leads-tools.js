@@ -170,22 +170,6 @@ ALWAYS show the operator the before → after values and get approval before sav
       },
     },
   },
-  {
-    name: 'convert_lead',
-    description: `Convert one lead to a customer: links the lead to an EXISTING customer record and marks the lead won — the same action as the Leads page "Convert to Customer" button. It never creates a customer: if the person is not a customer yet, use create_customer first (its own card), then call this with the new customer's id. Refused only when the conversion is already complete (the lead is linked to a customer AND has a converted time) or the lead is linked to a different customer; a lead marked won by hand with no customer linked can be linked here.
-Side effects (all shown on the card): lead status → won, marked qualified, converted time set now unless the lead already has one; the lead's customer-less estimates shown on the card are attached to this customer (one added later is not); a converted entry in the lead's history; the ad-attribution funnel row (if any) advances to booked; the lead becomes eligible for the next daily qualified-lead conversion upload to Google Ads and Meta. No message is sent to the customer.
-Use for: "convert the Henderson lead to a customer", "make lead #42 a customer so I can send the estimate"
-Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card. Call ONCE per intended action — never retry, never claim completion.`,
-    input_schema: {
-      type: 'object',
-      properties: {
-        lead_id: { type: 'string', format: 'uuid' },
-        lead_name: { type: 'string', description: 'Find the lead by name (partial match, active leads only) when lead_id is unknown' },
-        customer_id: { type: 'string', format: 'uuid', description: 'The existing customer this lead becomes (from query_customers or a create_customer result)' },
-      },
-      required: ['customer_id'],
-    },
-  },
 ];
 
 
@@ -204,7 +188,6 @@ async function executeLeadsTool(toolName, input, actionContext = {}) {
       case 'update_lead_status': return await updateLeadStatus(input);
       case 'bulk_update_leads': return await bulkUpdateLeads(input);
       case 'update_lead_contact': return await updateLeadContact(input);
-      case 'convert_lead': return await convertLead(input);
       default: return { error: `Unknown leads tool: ${toolName}` };
     }
   } catch (err) {
@@ -857,137 +840,6 @@ async function updateLeadContact(input) {
     success: true,
     ...preview,
     updated_fields: Object.keys(changes),
-  };
-}
-
-// ─── CONVERT TO CUSTOMER (two-step write) ───────────────────────
-//
-// The Leads page "Convert to Customer" action (POST /api/admin/leads/:id/
-// convert) as a card: both run leadAttribution.convertLeadToCustomer. Without
-// `confirmed` it resolves the lead and the existing customer and returns what
-// the card shows; nothing is written. The route pins the previewed lead id,
-// status and version; the confirmed run passes them as the "seen" lead, so the
-// win's own UPDATE refuses a lead that moved after the card was shown.
-
-const leadDisplayName = (row) => `${row.first_name || ''} ${row.last_name || ''}`.trim() || '(no name)';
-const addressLine = (parts) => parts.map(p => (p === null || p === undefined ? '' : String(p).trim())).filter(Boolean).join(', ') || null;
-
-function convertPreview(lead, customer, estimateIds) {
-  return {
-    lead_id: lead.id,
-    lead_name: leadDisplayName(lead),
-    lead_status: lead.status,
-    lead_contact: {
-      phone: lead.phone || null,
-      email: lead.email || null,
-      address: addressLine([lead.address, lead.city, lead.zip]),
-    },
-    customer_id: customer.id,
-    customer_name: leadDisplayName(customer),
-    customer_record: {
-      phone: customer.phone || null,
-      email: customer.email || null,
-      // Unit/suite included: two units at one street address are different customers.
-      // (Leads have no unit column; their address is a single line.)
-      address: addressLine([customer.address_line1, customer.address_line2, customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')]),
-    },
-    // Lead and customer versions bind the card (the two-step fingerprint
-    // hashes `_version`): an edit to either after the card was shown refuses.
-    _version: [lead.updated_at, customer.updated_at].map(v => (v ? new Date(v).toISOString() : '')).join('|'),
-    // The route pins this as the "seen" lead version (see the handled rule).
-    _lead_updated_at: lead.updated_at ? new Date(lead.updated_at).toISOString() : null,
-    // ...and this as the customer version the conversion UPDATE re-asserts.
-    _customer_updated_at: customer.updated_at ? new Date(customer.updated_at).toISOString() : null,
-    // The customer-less estimates the conversion would attach (sorted ids).
-    // The route pins this set; the confirmed attach is limited to it.
-    estimate_ids: estimateIds,
-  };
-}
-
-async function convertLead(input) {
-  const lead = await resolveLeadForUpdate(input);
-  if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
-  if (lead.error) return lead;
-  const leadName = leadDisplayName(lead);
-  const customerId = typeof input.customer_id === 'string' ? input.customer_id.trim() : '';
-  if (!customerId) {
-    return { error: 'customer_id is required — find the customer with query_customers, or create one with create_customer first, then convert.' };
-  }
-  const customer = await db('customers').where('id', customerId).whereNull('deleted_at').first();
-  if (!customer) return { error: 'Customer not found', code: 'target_not_found' };
-  const customerName = leadDisplayName(customer);
-  if (lead.customer_id && String(lead.customer_id).toLowerCase() !== String(customer.id).toLowerCase()) {
-    return {
-      error: `Lead ${leadName} is already linked to a different customer. Change that link on the Leads page first.`,
-      code: 'target_relationship_mismatch',
-    };
-  }
-  // Already converted = the relationship is complete (linked and stamped). A
-  // lead marked won by hand with no customer link still gets its card.
-  if (lead.customer_id && lead.converted_at) {
-    return { error: `Lead ${leadName} is already converted to this customer. Nothing to do.`, code: 'already_converted' };
-  }
-
-  const { leadEstimateIdsToLink } = require('../lead-estimate-link');
-  const preview = convertPreview(lead, customer, await leadEstimateIdsToLink({ lead }));
-
-  if (input.confirmed !== true) {
-    return {
-      preview: true,
-      ...preview,
-      note: 'PREVIEW ONLY — nothing was saved. Links this lead to the existing customer record and marks the lead won; the customer record is not changed and no message is sent. After the operator approves, this commits via the confirmation card.',
-    };
-  }
-
-  // The route pins the status and version the card showed; without them this
-  // is not an approved card.
-  const pinnedEstimates = input._approved_estimate_ids;
-  if (!input._expected_status || !input._expected_customer_updated_at || !Array.isArray(pinnedEstimates)) {
-    return { error: 'This conversion has no approved card. Rebuild the confirmation card.', preview_changed: true };
-  }
-  const result = await leadAttribution.convertLeadToCustomer(lead.id, {
-    customerId: customer.id,
-    seenStatus: input._expected_status,
-    seenUpdatedAt: input._expected_updated_at || null,
-    expectedStatus: input._expected_status,
-    expectedCustomerUpdatedAt: input._expected_customer_updated_at,
-    // The lead's own stored amounts ride through (an empty one stays empty),
-    // so the history entry matches the row instead of logging $0.
-    monthlyValue: lead.monthly_value,
-    initialServiceValue: lead.initial_service_value,
-    onlyEstimateIds: pinnedEstimates,
-  });
-  if (result.error) {
-    return result.status === 409 ? { error: result.error, preview_changed: true } : { error: result.error };
-  }
-
-  logger.info(`[intelligence-bar:leads] Converted lead ${lead.id} to customer ${customer.id}`);
-  return {
-    success: true,
-    lead_id: lead.id,
-    lead_name: leadName,
-    old_status: lead.status,
-    new_status: 'won',
-    customer_id: customer.id,
-    customer_name: customerName,
-    ...await conversionOutcome(result, lead, pinnedEstimates),
-  };
-}
-
-// The best-effort estimate attach, reported: a failure is a warning (a
-// partial outcome), never a clean Done.
-async function conversionOutcome({ estimates, funnel }, lead, pinnedEstimates) {
-  const warnings = [];
-  if (estimates?.failed) warnings.push("Converted, but the lead's estimates were not attached — attach them from the estimate page.");
-  // Same bridge warning as the lead-status tools: never a silent Done.
-  if (funnel?.reason === 'error') warnings.push("Converted, but mirroring it onto the lead's ad-attribution funnel row failed — attribution reporting may lag this conversion.");
-  // An estimate that became eligible after the card was not attached.
-  const { leadEstimateIdsToLink } = require('../lead-estimate-link');
-  const skipped = estimates?.failed ? [] : (await leadEstimateIdsToLink({ lead })).filter(id => !pinnedEstimates.includes(id));
-  return {
-    estimates_attached: estimates?.linked || 0,
-    ...(skipped.length ? { estimates_not_attached: `${skipped.length} estimate(s) added after the card were not attached` } : {}),
-    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
   };
 }
 
