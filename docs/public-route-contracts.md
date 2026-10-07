@@ -2209,6 +2209,7 @@ privacy, and rate-limit guards are unchanged.
 Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
 Lawn report payload cleanup (lawn report rebuild P6): the `/api/reports/:token/data` lawn `reportV2` no longer carries `snapshot.mainWatch` or the top-level `seasonalNote` (the web hero and PDF never rendered either; `snapshot.seasonalNote`, which the hero renders, and `trends.seasonalNote` are unchanged), and `reportV2.photoSummary` is `null` instead of the stock “No additional observations from the photo review.” placeholder so no empty-evidence sentence prints under the photos or in the PDF. The lawn narrative model no longer writes `mainWatch` or `treatmentSummary`; older frozen payloads and cached narratives that still carry those keys are tolerated (extra keys are ignored). No token, eligibility, privacy or rate-limit change; `LAWN_RENDER_STRATEGY` and `SERVICE_REPORT_PDF_STORAGE_VERSION` bumped so cached renders re-key.
 Lawn result-timing copy (lawn report rebuild P16, owner 2026-10-03): on the `/api/reports/:token/data` lawn `reportV2` (and the PDF and report-email renders that share `buildReportV1Data`) no hand-written lawn copy states an unsourced result timeline. The seasonal dormancy explanation on the color diagnosis card (`diagnosis[].customerExplanation` / `explanation` when `seasonal` is true) now comes from the approved `seasonal_dip` expectation row in `server/config/lawn-expectations.js` ("...often returns as nights warm", no count) instead of "should green back up as it warms"; while the row is not `approved` it falls back to the same sentence without the promise. The cross-season notes (`progressionNote`, `trends.seasonalNote`, and the progress engine's in-process `seasonalLine`) carry the same hedge ("...and color often returns as nights warm" / "...often returns as nights warm") in place of "greens back up" / "recovers as it warms"; all three copy sites ask one shared check (`approvedSeasonalDipRow` in `lawn-seasonality.js`, read at call time), and while the row is not `approved` the notes end at "...in the cooler months." with no returns clause. The gated lawn re-service `expectation` (GATE_RESERVICE_REPORT_COPY, lawn treated outcome) no longer says "two to three weeks" or "after three weeks"; it reads "Lawn treatments take time to show, and how fast depends on the problem and the weather. Contact us if the problem areas are not improving." These apply with or without the lawn gates, so gate-off lawn output changes by those sentences only. `LAWN_RENDER_STRATEGY` was bumped to `p9-lawn-seasonal-timing-20261003` (now `p10-...`, see the lead section) so cached lawn PDFs and renders re-key once (`SERVICE_REPORT_PDF_STORAGE_VERSION` is unchanged: the lawn signature already feeds the PDF key). No token, eligibility, privacy or rate-limit change.
+Lawn field rules (v13, owner 2026-10-06 and 2026-10-07): on the `/api/reports/:token/data` lawn payload (and the PDF and report-email renders that share `buildReportV1Data`) three things change. (1) The program line (`reportV2` / `snapshot` program copy, `PROGRAM_LINES_V13`) reads "... where it fits the property" for the June micronutrient-and-barrier claim and the August and September micronutrient claims (North Port holds the Nutra-TECH pass June to September until the city confirms), and the November line no longer says "sedge" ("... plus spot treatment for large patch where needed"; Dismiss is retired). April keeps "a light feeding". (2) Frozen Acelepryn caterpillar aftercare: when a v13 completion applies Acelepryn and the applied protocol row carries `delayWateringOrMowingHours`, the completion freezes a 24-hour hold into that product's internal report facts (`approved_report_product_facts.wateringRule` `{ mode: 'hold', hold_hours: 24, source: 'label' }` and `mowHoldDays: 1`) ONLY when a recorded application target is a caterpillar pest (caterpillar, armyworm, sod webworm, looper, cutworm or grassworm) and the catalog carries no watering rule of its own. The watering instruction the report builds and freezes (`wateringInstruction`, `aftercare` lines, `mowHold`) then says to skip turf watering and hold off mowing for 24 hours ("Skip your turf watering until ...", "Mowing: hold off until ..., 1 day after today's treatment."). A grub, billbug or other target, or no recorded target, adds nothing, so grub use keeps its water-in advice; both facts stay server-internal (never on `data.applications[].product`) and older frozen records are unchanged. (3) `LAWN_RENDER_STRATEGY` is `p10-lawn-field-rules-20261007` (was `p10-lawn-report-consistency-20261005`) so cached lawn PDFs and renders re-key once; `SERVICE_REPORT_PDF_STORAGE_VERSION` is unchanged (the lawn signature already feeds the PDF key). No token, eligibility, privacy, rate-limit or key-set change.
 Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
 `moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
@@ -2524,7 +2525,7 @@ clean-visit finding row ("No lawn issues observed this visit", category
 needs-attention insight or snapshot, the same condition that raises
 `todays_result_overclaims_clear`; a truly clean visit still prints it.
 `LAWN_RENDER_STRATEGY` is `p10-lawn-report-consistency-20261005` for these
-changes, so cached lawn PDFs re-key once. While the gate is live,
+changes (now `p10-lawn-field-rules-20261007`, see "Lawn field rules" above), so cached lawn PDFs re-key once. While the gate is live,
 `snapshot.nextVisit` (the lead's "Next visit" line) is the next lawn booking AT
 THIS REPORT'S PROPERTY (`report-data.js` `lawnNextVisitAtProperty`, the shared
 same-line / same-property scan): a booking at another of the customer's homes is
@@ -2710,6 +2711,49 @@ we applied today" as "From your technician", and the PDF (`ServiceReportDocument
 prints the same text; the SMS and email summaries are unchanged. The PDF cache
 signature gains `:tp=<hash of the text>` only while the gate is live AND a whole
 frozen entry exists.
+
+`GATE_LAWN_VISIT_SUMMARY_V2` (dark, strict opt-in, exactly `'true'`, read at call
+time) controls ONLY the freeze at completion (no new summaries while it is off; a
+rollback leaves frozen ones in place). A render, the PDF and the PDF cache key depend
+only on the record, so every pod, browser and renderer agrees during a rollout: the
+`/api/reports/:token/data` payload changes ONE existing lawn field, not the shape, for
+a visit whose record carries a whole frozen summary, whatever the gate says. `summary`
+carries the frozen lawn Visit Summary (fixed sentences, at most 6) in place of the
+generic completion recap (`structured_notes.customerRecap`), and `summarySource` is
+`'lawn_visit_summary'` instead of `'recap'`. No key is added, and no query parameter.
+It applies only to a lawn report with a confirmed assessment, and the tech-reviewed AI
+report, which still wins, is unchanged. NO MODEL writes it: at completion
+(`finalizeLawnReportSynthesis`, `lawn-report-write-gate.js`, in the awaited step before
+the report email is queued) code picks sentences from closed phrase tables
+(`lawn-visit-summary.js`) using the report's own facts: product CATEGORIES (never
+names, rates or actives), the area reads (`strong` and `healthy` stay distinct
+phrases), the technician-kept PHOTO findings (the "What the photos showed" selector;
+technician-added details have no photo provenance and never count) by their own symptom
+label (hedged when the confidence is low or unknown, or when the technician marked it
+undeterminable from the photos, and only while the report's card for that topic shows a
+concern; duplicate labels keep the least-confident read), and, for a recurring lawn plan
+visit only (the program line's own `resolveProgramVisit` answer; a one-time visit gets
+neither), the fixed results sentence ("each visit adds to the last one") and, when a
+real scheduled next visit exists AT THIS PROPERTY (the property-scoped
+`lawnNextVisitAtProperty` answer, never the customer-wide `snapshot.nextVisit` label
+and never a cadence estimate), "At the next visit we will look at ..."; both decisions
+freeze in the slots. There is NO watering sentence: the report's watering banner owns the
+watering step, with its own timing and expiry. The technician note, the program line,
+the headline and rain are not inputs. It freezes first-writer-wins under
+`structured_notes.lawnVisitSummary[assessmentId]` (its own top-level key) as
+`{ text, slots }`; a render only reads it, from the record the build already loaded, so
+`/api/reports/:token/ask` gains no read. At read time the text must equal what the
+current tables render from the stored slots and pass the customer-copy and
+result-timing screens; a frozen text that no longer does prints the recap. Any miss, an
+unreadable record or a degraded product read leaves the generic recap exactly as it
+was. The SMS and email keep the short `customerRecap`. On the PDF the document prints
+the whole `summary` for `summarySource: 'lawn_visit_summary'` (the reconciled
+`todaysResult` is only its first sentence). The PDF cache signature carries
+`:vs=<hash of the frozen text>` whenever a whole frozen summary exists (whatever the gate
+says), derived from the service row the render loaded, so a PDF cached before the summary
+existed is never served after it, and a visit with none keeps its key. Every paragraph is
+at most six one-sentence parts. No token, eligibility, privacy, rate-limit or header
+change; no new route.
 
 `GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
 sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color

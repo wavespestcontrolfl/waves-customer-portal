@@ -148,6 +148,8 @@ const JOB_EFFECTS = {
 
 const BILLING_TOOL_NAMES = new Set([
   'save_customer_estimate',
+  // Changes what each listed visit will bill.
+  'reprice_future_visits',
   'request_instant_payout',
   'request_standard_payout',
   'cancel_pending_payout',
@@ -221,7 +223,12 @@ const ACTION_LABELS = {
   set_growthbook_feature_environment: 'Enable or disable a GrowthBook feature in one environment',
   remove_saved_payment_method: 'Remove a saved payment method',
   correct_invoice_address: 'Correct the address printed on an invoice',
+  reprice_future_visits: 'Change the price of upcoming visits',
 };
+
+// reprice_future_visits' card lines come from its own preview (one line per
+// visit, old -> new), never the generic one-line-per-preview-key dump.
+CURATED_PREVIEW_TOOL_NAMES.add('reprice_future_visits');
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
 // Stripe: the DB merge may still be undoable, but that cancellation is
@@ -759,6 +766,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   if (toolName === 'bulk_update_customers' && Array.isArray(preview?.all_customer_names) && preview.all_customer_names.length) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
+  }
+  // reprice_future_visits: each visit that changes (date, service, old price ->
+  // new price), each visit left alone and why, and that no customer message is
+  // sent (reprice-visits-tools.js cardLines).
+  if (toolName === 'reprice_future_visits' && Array.isArray(preview?.visits)) {
+    for (const line of require('./reprice-visits-tools').cardLines(preview)) push(line.kind, line.text);
   }
   // repair_closeout: one effect per planned step (server-owned labels), plus
   // the open items the confirm will NOT touch — never a flattened dump of

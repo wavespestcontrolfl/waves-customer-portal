@@ -13,6 +13,7 @@ const {
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
 const { invoiceActionsLive } = require('./invoice-action-tools');
+const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -25,6 +26,7 @@ const MODULES = [
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
   ['closeout-repair-tools', 'CLOSEOUT_REPAIR_TOOLS', 'executeCloseoutRepairTool'],
   ['receipt-resend-tools', 'RECEIPT_RESEND_TOOLS', 'executeReceiptResendTool'],
+  ['reprice-visits-tools', 'REPRICE_VISITS_TOOLS', 'executeRepriceVisitsTool'],
   ['dashboard-tools', 'DASHBOARD_TOOLS', 'executeDashboardTool'],
   ['seo-tools', 'SEO_TOOLS', 'executeSeoTool'],
   ['procurement-tools', 'PROCUREMENT_TOOLS', 'executeProcurementTool'],
@@ -117,14 +119,21 @@ const DISCOVERY_TOOL = {
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
 const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
 
+// Actions offered only while their own gate reads on (read at call time).
+const GATED_ACTIONS = {
+  reprice_future_visits: () => repriceVisitsLive(),
+  search_ib_history: () => threadsEnabled(),
+  merge_customers: () => mergeCustomersEnabled(),
+  send_invoice: () => invoiceActionsLive(),
+  charge_invoice: () => invoiceActionsLive(),
+};
+
 function allowed(action, { role, context, fullAccess } = {}) {
   if (!action) return false;
   if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
   if (context === 'tech') return action.role === 'technician_or_admin';
-  if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
-  if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
-  if ((action.id === 'send_invoice' || action.id === 'charge_invoice') && !invoiceActionsLive()) return false;
+  if (GATED_ACTIONS[action.id] && !GATED_ACTIONS[action.id]()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
   if (action.id === 'create_agent_estimate_draft' && context !== 'agent_estimate') return false;
@@ -194,6 +203,8 @@ function initialTools(context, scope) {
   // send_invoice / charge_invoice (domain customers) also ride the Invoices / Revenue page and dashboard (owner 2026-10-07).
   if (context === 'revenue' || context === 'dashboard') ['send_invoice', 'charge_invoice'].forEach((n) => common.add(n));
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
+  // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
+  if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];
