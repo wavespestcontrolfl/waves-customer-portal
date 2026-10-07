@@ -67,7 +67,7 @@ const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../service
 const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
-const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
+const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled, deleteDuplicateCustomerEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
   UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
   FULL_ACCESS_TWO_STEP_TOOL_NAMES, OUTSIDE_WRITE_TOOL_NAMES,
@@ -220,6 +220,7 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  'delete_duplicate_customer', // mirrors requireAdmin DELETE /api/admin/customers/:id
   // Billing readers show invoices, balances and payment evidence: admin only,
   // like the requireAdmin invoice routes they mirror.
   ...BILLING_READER_TOOLS.map(t => t.name),
@@ -787,6 +788,7 @@ function pinnedRecipientDisplay(params, preview) {
 }
 
 const PINNED_DISPLAY_BUILDERS = {
+  delete_duplicate_customer: (params, preview) => (preview?.preview === true && preview.card ? preview.card : null),
   trigger_review_request: pinnedRecipientDisplay,
   reply_via_sms: pinnedRecipientDisplay,
   send_sms: pinnedRecipientDisplay,
@@ -2602,7 +2604,7 @@ function getToolsForContext(context, isAdmin = false, fullAccess = false) {
     // below) — never offered without full access, whatever module it rides.
     .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
     .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
-  return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
+  return (mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers')).filter(t => deleteDuplicateCustomerEnabled() || t.name !== 'delete_duplicate_customer');
 }
 
 function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
@@ -2902,6 +2904,7 @@ IMAGE ATTACHMENTS:
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
+- Duplicate customer records (when these tools are available): merge_customers folds a duplicate with ANY history into the real record; delete_duplicate_customer only soft-deletes a record that holds nothing at all. Prefer merge_customers when unsure.
 - You CAN search SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log. Follow continuation offsets for older messages; get_call_log with call_id reads the full transcript in pages. Never treat a page or transcript excerpt as complete history.
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)

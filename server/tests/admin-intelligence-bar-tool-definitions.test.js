@@ -228,6 +228,26 @@ describe('tool definitions handed to the model', () => {
     }
   });
 
+  test('GATE_IB_DELETE_CUSTOMER: delete_duplicate_customer is handed to the model only while the gate is exactly true', async () => {
+    const original = process.env.GATE_IB_DELETE_CUSTOMER;
+    try {
+      for (const value of [undefined, '1']) {
+        if (value === undefined) delete process.env.GATE_IB_DELETE_CUSTOMER; else process.env.GATE_IB_DELETE_CUSTOMER = value;
+        jest.clearAllMocks();
+        scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+        await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'customers' })).status).toBe(200); });
+        expect(mockMessagesCreate.mock.calls[0][0].tools.map((t) => t.name)).not.toContain('delete_duplicate_customer');
+      }
+      jest.clearAllMocks();
+      process.env.GATE_IB_DELETE_CUSTOMER = 'true';
+      scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+      await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'customers' })).status).toBe(200); });
+      expect(mockMessagesCreate.mock.calls[0][0].tools.map((t) => t.name)).toContain('delete_duplicate_customer');
+    } finally {
+      if (original === undefined) delete process.env.GATE_IB_DELETE_CUSTOMER; else process.env.GATE_IB_DELETE_CUSTOMER = original;
+    }
+  });
+
   test('billing readers (W9) are handed to admin tokens only, never to a technician token', async () => {
     const billing = ['get_customer_invoices', 'get_invoice_detail'];
     scriptModelTurns([[{ type: 'text', text: 'OK' }]]);

@@ -132,6 +132,42 @@ describe('DELETE /admin/customers/:id (archive)', () => {
   });
 });
 
+// The Intelligence Bar's delete_duplicate_customer runs the SAME handler
+// without an HTTP request (owner ruling 2026-10-07): same writes, same
+// relink, same audit row, the operator as the actor.
+describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
+  beforeEach(() => { mockState.customer = { id: 'cust-1', email: 'Household@Example.com', deleted_at: null }; });
+
+  test('resolves the reply the route sends and makes the same writes + audit as DELETE /:id', async () => {
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9', userAgent: 'intelligence-bar:delete_duplicate_customer' } }))
+      .resolves.toEqual({ status: 200, json: { success: true } });
+    expect(mockState.updates).toEqual([
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: expect.objectContaining({ autopay_enabled: false, next_charge_date: null }) }),
+      expect.objectContaining({ table: 'payment_methods', viaTrx: true, patch: { autopay_enabled: false } }),
+      expect.objectContaining({ table: 'payments', viaTrx: true, patch: { next_retry_at: null } }),
+      expect.objectContaining({ table: 'customers', viaTrx: true, where: { id: 'cust-1' }, patch: { deleted_at: expect.any(Date) } }),
+    ]);
+    expect(relinkSubscribersFromArchivedCustomer).toHaveBeenCalledWith(mockTrx, 'cust-1');
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'customer.archive', resource_id: 'cust-1', actor_id: 'admin-9', critical: true, trx: mockTrx,
+      user_agent: 'intelligence-bar:delete_duplicate_customer',
+    }));
+  });
+
+  test('a missing or already-deleted customer resolves the route\'s 404, writing nothing', async () => {
+    mockState.customer = null;
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' } }))
+      .resolves.toEqual({ status: 404, json: { error: 'Customer not found' } });
+    expect(mockState.updates).toEqual([]);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('an error the handler passes to next() rejects', async () => {
+    relinkSubscribersFromArchivedCustomer.mockRejectedValueOnce(new Error('relink exploded'));
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: {} })).rejects.toThrow('relink exploded');
+  });
+});
+
 describe('PATCH /admin/customers/:id/restore', () => {
   beforeEach(() => { mockState.customer = { id: 'cust-1', email: 'Household@Example.com', deleted_at: new Date('2026-08-01') }; });
 

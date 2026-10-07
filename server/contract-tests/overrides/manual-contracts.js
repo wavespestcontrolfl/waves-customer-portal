@@ -42,6 +42,23 @@ module.exports = {
   queue_for_adam:     { sideEffects: true, reason: 'inserts lead_agent_responses queue rows' },
   save_lead_response_report: { sideEffects: true, reason: 'inserts lead_agent_responses report rows (write path swallowed its own failure during smoke)' },
 
+  // delete_duplicate_customer's own queries live in
+  // services/duplicate-customer-delete.js, not the registered
+  // customer-lifecycle-tools.js source; the emptiness readers it calls are
+  // customer-dedupe.js's (loserAutoBlockers, previewMergeEffects). The
+  // confirmed run soft-deletes a customer, so smoke never fires it.
+  delete_duplicate_customer: {
+    tables: ['customers', 'customer_properties', 'customer_plan_rates', 'field_credit_allocations'],
+    columns: {
+      customers: ['id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at', 'created_at', 'updated_at', 'waveguard_tier', 'account_credits'],
+      customer_properties: ['customer_id', 'is_primary'],
+      customer_plan_rates: ['customer_id'],
+      field_credit_allocations: ['customer_id'],
+    },
+    sideEffects: true,
+    reason: 'queries live in services/duplicate-customer-delete.js; the confirmed run soft-deletes a customer',
+  },
+
   // The tool's queries live in estimate-detail.js rather than the
   // registered estimate-tools.js source path. Cover its row, provenance,
   // membership, acceptance, and composer dependencies here.

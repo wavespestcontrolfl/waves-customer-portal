@@ -73,9 +73,11 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  process.env.GATE_IB_DELETE_CUSTOMER = 'true';
 });
 afterAll(() => {
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
+  delete process.env.GATE_IB_DELETE_CUSTOMER;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -149,6 +151,7 @@ const WRITE_TWO_STEP = [
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'delete_duplicate_customer',
   'repair_closeout',
   'resend_receipt',
   'remove_saved_payment_method',
@@ -602,6 +605,14 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
       ],
     }],
+    // delete_duplicate_customer reads the stub (its own seed) and the merge
+    // engine's emptiness readers (spied below — their SQL is covered by
+    // customer-dedupe.test.js).
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'delete_duplicate_customer', {
+      customer_id: '00000000-0000-0000-0000-00000000e001',
+    }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000e001', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null, version: 'v1', created_on: '2026-10-01' }],
+    }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
     // duplicate check needs it to be missing), so it carries its own seed —
     // merged on top of SEED for this call only.
@@ -843,6 +854,11 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // DB — install this row's token env vars + a fetch mock that answers its
     // calls in order, and restore both afterward so nothing leaks to the
     // next row (or to another suite requiring the same cached module).
+    const dedupeReaders = toolName === 'delete_duplicate_customer'
+      ? [
+        jest.spyOn(require('../services/customer-dedupe'), 'loserAutoBlockers').mockResolvedValue([]),
+        jest.spyOn(require('../services/customer-dedupe'), 'previewMergeEffects').mockResolvedValue({ moving: { total_rows: 0 } }),
+      ] : [];
     const outsideFixture = OUTSIDE_WRITE_FIXTURES[toolName];
     const savedEnv = {};
     const savedFetch = global.fetch;
@@ -860,6 +876,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
+      dedupeReaders.forEach((spy) => spy.mockRestore());
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {

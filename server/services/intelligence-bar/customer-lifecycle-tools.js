@@ -20,6 +20,11 @@
  * archive_customer (retire a record outright) was split out of this module:
  * it ships separately on a shared archive service with the DELETE
  * /api/admin/customers/:id route and cancellation-eligibility as a blocker.
+ *
+ * delete_duplicate_customer (owner ruling 2026-10-07): the narrow case —
+ * soft-delete ONE record that holds nothing, through that same DELETE
+ * handler. The emptiness checks and the commit live in
+ * services/duplicate-customer-delete.js; the tool, its gate and dispatch here.
  */
 
 const db = require('../../models/db');
@@ -374,6 +379,27 @@ async function mergeCustomers(input, actionContext = {}) {
   return commitMergeCustomers(winnerId, loserId, actionContext, approved, approvedEffects);
 }
 
+// ─── delete_duplicate_customer ──────────────────────────────────────────
+
+// Default-off capability gate (owner ruling 2026-10-07), strict 'true', read
+// at call time. Enforced in the same three places as merge_customers: the
+// legacy tool list, the platform registry, and the executor below.
+function deleteDuplicateCustomerEnabled() {
+  return require('../../config/feature-gates').ibDeleteCustomerLive();
+}
+
+async function deleteDuplicateCustomer(input, actionContext = {}) {
+  if (!deleteDuplicateCustomerEnabled()) {
+    return { error: 'Deleting a duplicate customer from the Intelligence Bar is not enabled (GATE_IB_DELETE_CUSTOMER) — use merge_customers or the customer page.', code: 'gate_off' };
+  }
+  const customerId = input.customer_id == null ? null : String(input.customer_id).trim().toLowerCase();
+  if (!customerId) return { error: 'customer_id is required' };
+  const { previewDeleteDuplicateCustomer, commitDeleteDuplicateCustomer } = require('../duplicate-customer-delete');
+  // Only the server-derived context confirms (never a model-supplied field).
+  if (actionContext.confirmed !== true) return previewDeleteDuplicateCustomer(customerId);
+  return commitDeleteDuplicateCustomer(customerId, actionContext);
+}
+
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────
 
 const CUSTOMER_LIFECYCLE_TOOLS = [
@@ -394,12 +420,27 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
       additionalProperties: false,
     },
   },
+  {
+    name: 'delete_duplicate_customer',
+    description: `Soft-delete ONE empty duplicate customer record, such as an "Unknown" stub that shares a real customer's phone. Only for a record that holds nothing: no visits, service records, invoices, payments, saved cards or Stripe profile, estimates, leads, calls, texts or emails, plan rates, monthly rate or plan, portal login, referral or credit balance, and no saved property beyond one auto-created primary.
+Prefer merge_customers whenever the duplicate has ANY history — this tool refuses such a record and names what it found.
+The first call returns a PREVIEW card naming the record, the real customer that shares its phone or email (unchanged), and each check. Nothing changes until the operator confirms. The record can be restored afterward. No customer message is sent.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_id: { type: 'string', format: 'uuid', description: 'The empty duplicate record to delete (never the real customer)' },
+      },
+      required: ['customer_id'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 async function executeCustomerLifecycleTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'merge_customers': return await mergeCustomers(input, actionContext);
+      case 'delete_duplicate_customer': return await deleteDuplicateCustomer(input, actionContext);
       default:
         return { error: `Unknown tool: ${toolName}` };
     }
@@ -412,6 +453,7 @@ async function executeCustomerLifecycleTool(toolName, input, actionContext = {})
 module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   mergeCustomersEnabled,
+  deleteDuplicateCustomerEnabled,
   executeCustomerLifecycleTool,
   // exported for tests
   _test: { customerName },

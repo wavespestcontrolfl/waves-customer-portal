@@ -7038,6 +7038,9 @@ module.exports = {
   findSameNameGroups,
   SAME_NAME_KIND,
   duplicatePairEligibility,
+  // The "not a shell" blocker list — the IB delete_duplicate_customer
+  // emptiness check reads the same list the auto-merge refuses on.
+  loserAutoBlockers,
   executeMerge,
   lockSeriesCreateForMerge,
   runAutoMergeSweep,
