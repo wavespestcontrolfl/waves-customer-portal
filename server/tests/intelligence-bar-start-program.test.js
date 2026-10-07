@@ -336,6 +336,10 @@ describe('commit', () => {
       primaryLinePrice: null, estimatedPrice: null,
     });
     expect(actor).toEqual({ technicianId: TECH_ID, technicianName: 'Sam Tech' });
+    expect(createScheduleBooking.mock.calls[0][0].creditFreeCard).toBe(true);
+    // The handler queues its texts after it replies: queued, never "sent".
+    expect(result.message).toContain('Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).');
+    expect(result.message).not.toMatch(/\bsent per\b|confirmation sent/);
     const customerUpdate = writes.find((w) => w.table === 'customers' && w.op === 'update');
     expect(customerUpdate.data).toMatchObject({ waveguard_tier: 'Silver', waveguard_tier_source: 'manual', monthly_rate: 102.66 });
     expect(PlanRateLedger.setLineForScalarWrite).toHaveBeenCalledWith(expect.anything(), CUSTOMER_ID,
@@ -444,6 +448,23 @@ describe('commit', () => {
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result.preview_changed).toBe(true);
     expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the handler finds a credit recorded after the card: refused, nothing booked, preview_changed', async () => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'This customer now has an open inspection credit the card did not show. Nothing was booked.', code: 'INSPECTION_CREDIT_CHANGED' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code: 'INSPECTION_CREDIT_CHANGED', preview_changed: true, nothing_changed: true });
+    expect(writes).toEqual([]);
+    expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+  });
+
+  test('a first-ever recurring customer: the receipt says the welcome is queued', async () => {
+    Welcome.isNewRecurringSignupCandidate.mockResolvedValue(true);
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.message).toContain('Welcome text and welcome email queued for about 1 hour from now (a failure is logged).');
   });
 
   test('a changed plan-sync prediction after the card refuses with preview_changed', async () => {

@@ -33,10 +33,16 @@ jest.mock('../sockets', () => ({
 jest.mock('../services/inspection-credit', () => ({
   ...jest.requireActual('../services/inspection-credit'),
   redeemInspectionCreditForBooking: jest.fn().mockResolvedValue(undefined),
+  markBookingForInspectionCredit: jest.fn().mockResolvedValue(undefined),
+  lockInspectionCreditCustomer: jest.fn().mockResolvedValue(undefined),
+  projectRedeemableOfferAmount: jest.fn().mockResolvedValue(0),
 }));
 
 const db = require('../models/db');
-const { redeemInspectionCreditForBooking } = require('../services/inspection-credit');
+const {
+  redeemInspectionCreditForBooking, markBookingForInspectionCredit, lockInspectionCreditCustomer,
+  projectRedeemableOfferAmount, CREDIT_FREE_CARD_EVENT_SOURCE,
+} = require('../services/inspection-credit');
 const { createScheduleBooking } = require('../routes/admin-schedule');
 
 const SVC = {
@@ -133,6 +139,31 @@ describe('createScheduleBooking runs the POST / handler', () => {
     expect(result.json.recurringCreated).toBe(1);
     expect(inserts.map((d) => [d.customer_id, d.scheduled_date])).toEqual([['cust-1', '2099-07-03']]);
     expect(redeemInspectionCreditForBooking).toHaveBeenCalledWith(expect.objectContaining({ createdBy: 'admin:Test Admin' }));
+  });
+
+  test('the Schedule screen path takes no credit lock and stamps the ordinary booking source', async () => {
+    const result = await createScheduleBooking({ body: oneOff, actor });
+    expect(result.status).toBe(201);
+    expect(lockInspectionCreditCustomer).not.toHaveBeenCalled();
+    expect(projectRedeemableOfferAmount).not.toHaveBeenCalled();
+    expect(markBookingForInspectionCredit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ source: 'admin_schedule' }));
+  });
+
+  test('creditFreeCard: re-checks credit under the credit lock and stamps the booking credit-free', async () => {
+    const result = await createScheduleBooking({ body: oneOff, actor, creditFreeCard: true });
+    expect(result.status).toBe(201);
+    expect(lockInspectionCreditCustomer).toHaveBeenCalledWith(expect.anything(), 'cust-1');
+    expect(projectRedeemableOfferAmount).toHaveBeenCalledWith('cust-1', expect.objectContaining({ includePaused: true }));
+    expect(markBookingForInspectionCredit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ source: CREDIT_FREE_CARD_EVENT_SOURCE }));
+  });
+
+  test('creditFreeCard: an offer recorded since the card refuses and books nothing', async () => {
+    projectRedeemableOfferAmount.mockResolvedValueOnce(25);
+    const result = await createScheduleBooking({ body: oneOff, actor, creditFreeCard: true });
+    expect(result.status).toBe(409);
+    expect(result.json.code).toBe('INSPECTION_CREDIT_CHANGED');
+    expect(inserts).toEqual([]);
+    expect(markBookingForInspectionCredit).not.toHaveBeenCalled();
   });
 
   test('an error the handler passes to next() rejects', async () => {

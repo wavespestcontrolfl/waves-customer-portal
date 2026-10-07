@@ -8626,6 +8626,19 @@ async function scheduleCreateHandler(req, res, next) {
       // the same lock in the same position, so the #3011 customer-row →
       // series-advisory order below is unchanged relative to it.
       await lockCustomerComms(trx, customerId);
+      // Intelligence Bar start_program (a card that promised no inspection
+      // credit, set only by createScheduleBooking's creditFreeCard): the
+      // credit lock and locked re-projection create_appointment runs, in the
+      // same comms -> credit -> customer-row order. An offer recorded since
+      // the card aborts the booking. The Schedule screen never sets it.
+      if (req.creditFreeCard === true) {
+        const InspectionCreditLock = require('../services/inspection-credit');
+        await InspectionCreditLock.lockInspectionCreditCustomer(trx, customerId);
+        const projectedCredit = await InspectionCreditLock.projectRedeemableOfferAmount(customerId, { dbh: trx, includePaused: true });
+        if ((Number(projectedCredit?.amount ?? projectedCredit) || 0) > 0) {
+          throw Object.assign(httpError(409, 'This customer now has an open inspection credit the card did not show. Nothing was booked.'), { code: 'INSPECTION_CREDIT_CHANGED' });
+        }
+      }
       // Phone-agent double-booking backstop: the call pipeline inserts its
       // booking under this same customer lock, so re-checking here — not
       // only in the preflight above, before the slow pricing reads — sees
@@ -8909,7 +8922,11 @@ async function scheduleCreateHandler(req, res, next) {
       await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
         customerId,
         scheduledServiceId: svc.id,
-        source: 'admin_schedule',
+        // A credit-free card booking (checked under the credit lock above)
+        // stamps the source the redeem paths never mint against.
+        source: req.creditFreeCard === true
+          ? require('../services/inspection-credit').CREDIT_FREE_CARD_EVENT_SOURCE
+          : 'admin_schedule',
       });
 
       // Consultation-outcomes reconciliation (round 10 fast path — see the
@@ -9862,9 +9879,12 @@ async function scheduleCreateHandler(req, res, next) {
 // prime (as router.use above does, failures ignored), then the handler with
 // the only request fields it reads, and resolves the reply it would send:
 // { status, json }. An error the handler passes to next() rejects.
-async function createScheduleBooking({ body, actor }) {
+// creditFreeCard: the caller's card promised no inspection credit; the
+// handler re-checks that under the credit lock and stamps the booking event
+// credit-free (create_appointment's mechanism).
+async function createScheduleBooking({ body, actor, creditFreeCard = false }) {
   await primePercentDiscountExclusions().catch(() => {});
-  const req = { body, technicianId: actor.technicianId, technician: { name: actor.technicianName } };
+  const req = { body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true };
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,

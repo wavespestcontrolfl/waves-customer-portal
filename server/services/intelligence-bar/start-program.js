@@ -683,7 +683,9 @@ async function bookSeries(plan, actionContext) {
   const { createScheduleBooking } = require('../../routes/admin-schedule');
   let booking;
   try {
-    booking = await createScheduleBooking({ body: scheduleBody(plan), actor: await actorFor(actionContext) });
+    // creditFreeCard: the card showed no inspection credit; the handler
+    // re-checks under the credit lock and stamps the booking credit-free.
+    booking = await createScheduleBooking({ body: scheduleBody(plan), actor: await actorFor(actionContext), creditFreeCard: true });
   } catch (err) {
     logger.error(`[intelligence-bar] start_program booking threw for customer ${plan.customerId}: ${err.message}`);
     return { result: {
@@ -696,10 +698,23 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
+      ...(body.code === 'INSPECTION_CREDIT_CHANGED' ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }
   return booking;
+}
+
+// The handler queues its texts after it replies (setImmediate), so the
+// receipt says queued, never sent.
+function receiptTexts(plan) {
+  const confirmation = plan.sendTexts
+    ? ' Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).'
+    : ' No booking confirmation (send texts was off).';
+  const welcome = plan.welcomeCandidate
+    ? ' Welcome text and welcome email queued for about 1 hour from now (a failure is logged).'
+    : '';
+  return `${confirmation}${welcome}`;
 }
 
 async function commitProgram(input, actionContext) {
@@ -754,7 +769,7 @@ async function commitProgram(input, actionContext) {
     monthly_bill: { before: plan.bill.totalBefore, after: plan.bill.totalAfter },
     ...(warnings.length ? { booking_warnings: warnings } : {}),
     next_step: `Offer to optimize ${plan.tech.name}'s route on ${plan.firstDate} with optimize_tech_route (its own card).`,
-    message: `Program started: ${created.recurringCreated} visit(s) booked, first on ${dateLabel(plan.firstDate)}; tier ${plan.tier}; monthly bill ${money(plan.bill.totalBefore)} -> ${money(plan.bill.totalAfter)}.${plan.sendTexts ? ' Booking confirmation sent per their settings.' : ' No booking confirmation sent.'}`,
+    message: `Program started: ${created.recurringCreated} visit(s) booked, first on ${dateLabel(plan.firstDate)}; tier ${plan.tier}; monthly bill ${money(plan.bill.totalBefore)} -> ${money(plan.bill.totalAfter)}.${receiptTexts(plan)}`,
   };
 }
 
