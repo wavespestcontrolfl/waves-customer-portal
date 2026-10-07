@@ -35,6 +35,15 @@ function collectProductIds(sections) {
   return ids;
 }
 
+// A group field can name several groups: "3 + 11", "3/11", "11, 3", "28+3A" (a mixed product such as
+// Headway: FRAC 3 and 11). Every comparison is by set intersection, so a group is in the set or not.
+const GROUP_SPLIT = /\s*(?:[+/,;&]|\band\b)\s*/i;
+function groupSet(value) {
+  return String(value ?? '').split(GROUP_SPLIT).map((part) => part.trim()).filter(Boolean);
+}
+const groupInValue = (value, group) => groupSet(value).some((member) => member.toLowerCase() === String(group).toLowerCase());
+const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 function productGroups(product) {
   const groups = [
     ['moa', product?.moa_group],
@@ -42,7 +51,7 @@ function productGroups(product) {
     ['irac', product?.irac_group],
     ['hrac', product?.hrac_group],
     ['hrac', product?.hrac_group_secondary],
-  ].filter(([, value]) => value);
+  ].filter(([, value]) => value).flatMap(([type, value]) => groupSet(value).map((member) => [type, member]));
   const seen = new Set();
   return groups.filter(([type, value]) => {
     const key = `${type}:${value}`;
@@ -67,6 +76,8 @@ async function latestComparableGroupApplication(knex, customerId, product, group
     .where('sr.service_date', '<', serviceDate)
     .where(function () {
       this.where(`pc.${groupColumn}`, groupValue);
+      // A mixed product's field holds several groups ("3 + 11"): the group is one token of the value.
+      this.orWhereRaw('?? ~* ?', [`pc.${groupColumn}`, `(^|[^0-9a-z])${escapeRegex(groupValue)}($|[^0-9a-z])`]);
       if (groupType === 'hrac') this.orWhere('pc.hrac_group_secondary', groupValue);
       if (groupType === 'moa') this.orWhere('sp.moa_group', groupValue);
     })
@@ -214,7 +225,7 @@ async function repeatGroupFindings(knex, { customerId, propertyId, product, inpu
   const findings = [];
   for (const [groupType, groupValue] of productGroups(product)) {
     const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict });
-    if (!last || !lastApplicationGroups(last, groupType).some((lastGroup) => String(lastGroup || '') === String(groupValue))) continue;
+    if (!last || !lastApplicationGroups(last, groupType).some((lastGroup) => groupInValue(lastGroup, groupValue))) continue;
     if (await rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict })) continue;
     findings.push(repeatGroupFinding({ product, input, groupType, groupValue, last }));
   }

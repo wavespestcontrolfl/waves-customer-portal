@@ -107,7 +107,9 @@ describe('1b. Talak on mole crickets: a frozen water-in replaces the 24-hour hol
     const wet = withApplicationWaterIn(facts, { inches: 0.5, targets: ['Mole crickets'] });
     expect(wet.wateringRule).toMatchObject({ mode: 'water_in', water_in_inches: 0.5, water_in_by_hours: 1, source: 'label' });
     expect(wet.wateringRule.label_note).toBe('Label: water in right after application with up to 0.5 inch of water (mole cricket use).');
-    expect(wet.mowHoldDays).toBeNull();
+    // Only the watering changes: the label's 1-day mowing hold stays (the catalog's own value, else 1 day).
+    expect(wet.mowHoldDays).toBe(1);
+    expect(withApplicationWaterIn({ ...facts, mowHoldDays: 2 }, { inches: 0.5, targets: ['Mole crickets'] }).mowHoldDays).toBe(2);
     for (const targets of [['Mole cricket nymphs'], ['mole-crickets'], ['Chinch bugs', 'Mole crickets']]) {
       expect(withApplicationWaterIn(facts, { inches: 0.5, targets }).wateringRule.mode).toBe('water_in');
     }
@@ -172,10 +174,13 @@ describe('3. spot disease lines from the kit', () => {
   });
 });
 
-describe('4. Arena S.E. (Florida Only) is the Arena row: same EPA number, same cap', () => {
-  test('the recipe names the S.E. row everywhere and never the old name', () => {
-    expect(JSON.stringify(v13)).not.toContain('Arena 50 WDG');
-    for (const m of [4, 5, 6]) expect(lineFor(m, matrix.ARENA_NEW)).toHaveLength(1);
+describe('4. Arena keeps its name; SiteOne\'s Arena S.E. (Florida only) is the same product (EPA 59639-152)', () => {
+  test('the recipe names "Arena 50 WDG" and says the SiteOne jug is the S.E. packaging', () => {
+    expect(JSON.stringify(v13)).not.toContain('Arena S.E. 50 WDG Insecticide');
+    for (const m of [4, 5, 6]) {
+      const [line] = lineFor(m, matrix.ARENA_OLD);
+      expect(line).toMatch(/^Arena 50 WDG \u2014 chinch bugs .* \(SiteOne: Arena S\.E\., Florida only\)$/);
+    }
     expect(matrix.ARENA_EPA).toBe('59639-152');
     expect(matrix.ARENA_NEW).toBe('Arena S.E. 50 WDG Insecticide 2.5 lb. (Florida Only)');
   });
@@ -244,6 +249,17 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
     expect(prohibited.lawnProhibitedProductBlock({ name })).toBeNull();
   });
 
+  test('residential lawns only: a commercial or business property is not blocked, residential and unknown are', () => {
+    const ronstar = { name: 'Ronstar G' };
+    for (const propertyType of ['commercial', 'business', 'Commercial', ' business ']) expect(prohibited.lawnProhibitedProductBlock(ronstar, { propertyType })).toBeNull();
+    for (const propertyType of ['residential', 'home', '', null, undefined]) expect(prohibited.lawnProhibitedProductBlock(ronstar, { propertyType })).toMatchObject({ code: 'lawn_product_not_for_home_lawns' });
+  });
+
+  test('the closeout check skips a commercial property without reading the catalog', async () => {
+    const database = () => { throw new Error('no database read expected'); };
+    expect(await prohibited.lawnProhibitedProductBlocks(database, [{ productName: 'Ronstar G' }], { propertyType: 'commercial' })).toEqual([]);
+  });
+
   test('the closeout check reads the catalog rows of the submitted ids and any free-text name', async () => {
     const database = () => ({ whereIn: () => ({ select: async () => [{ id: 'r1', name: 'Ronstar G', active_ingredient: 'Oxadiazon' }, { id: 'd1', name: 'Dylox 6.2 G Granular Insecticide' }] }) });
     const blocks = await prohibited.lawnProhibitedProductBlocks(database, [{ productId: 'r1' }, { productId: 'd1' }, { productName: 'ronstar from the truck' }]);
@@ -262,7 +278,7 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const gate = source.indexOf("claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn' && Array.isArray(products)");
     expect(gate).toBeGreaterThan(source.indexOf('return ({ status: 422, body: internalOnlyProductsBlock });'));
-    expect(source.slice(gate, gate + 700)).toContain('lawnProhibitedProductBlocks(db, products)');
+    expect(source.slice(gate, gate + 700)).toContain('lawnProhibitedProductBlocks(db, products, { propertyType: svc.property_type })');
     expect(source.slice(gate, gate + 900)).toContain('status: 400, body: lawnProhibitedProductsBlockPayload(prohibited)');
   });
 
@@ -280,6 +296,28 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
       expect(found.blocks[0]).toMatchObject({ code: 'lawn_v13_annual_limit', productName: 'Ronstar G' });
       expect(found.blocks[0].message).toMatch(/oxadiazon.*not for use on home lawns/);
     } finally {
+      if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate;
+    }
+  });
+
+  test('the plan lets commercial turf through (the customer\'s property_type, read when the row lacks it)', async () => {
+    const savedGate = process.env.GATE_LAWN_V13;
+    process.env.GATE_LAWN_V13 = 'true';
+    const limits = require('../services/application-limits');
+    const spy = jest.spyOn(limits, 'checkLimits').mockResolvedValue({ blocks: [], warnings: [] });
+    try {
+      const items = [{ selected: true, product: { id: 'ron', name: 'Ronstar G' } }];
+      const visit = { scheduled_date: '2026-10-07', customer_id: 'c', id: 'v' };
+      const customers = (propertyType) => () => ({ where: () => ({ first: async () => ({ property_type: propertyType }) }) });
+      const run = (knex, service) => engine.v13VisitLimits(knex, service, items, new Map());
+      expect((await run(customers('commercial'), visit)).capped.size).toBe(0);
+      expect((await run(customers('residential'), visit)).capped.get('ron')).toHaveLength(1);
+      // The plan's own row carries property_type: no read.
+      const noRead = () => { throw new Error('no database read expected'); };
+      expect((await run(noRead, { ...visit, property_type: 'business' })).capped.size).toBe(0);
+      expect((await run(noRead, { ...visit, property_type: 'residential' })).capped.get('ron')).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
       if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate;
     }
   });

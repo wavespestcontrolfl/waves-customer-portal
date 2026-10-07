@@ -168,7 +168,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION, matrixMigration.ARENA_NEW];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -299,10 +299,9 @@ describe('staged migration 20261005120000', () => {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
       // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
-      // 20261007180000 renames the Arena row, turns the April Artavia row into Headway, and adds its own rows.
+      // 20261007180000 turns the April Artavia row into Headway and adds its own rows (Arena keeps its name: 20261007181000 undoes the rename).
       const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey);
-      const after = (name) => (name === matrixMigration.ARENA_OLD ? matrixMigration.ARENA_NEW
-        : (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name));
+      const after = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
       const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0])), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
       const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name)];
       const visit = visitFor(month);
@@ -352,7 +351,7 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
     // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row.
-    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), matrixMigration.ARENA_NEW];
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name)];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));

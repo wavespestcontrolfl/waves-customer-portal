@@ -29,6 +29,11 @@ class FakeQuery {
           this.groupFilters.push({ column, value });
           return grouped;
         },
+        // The mixed-group token match: orWhereRaw('?? ~* ?', [column, regex]).
+        orWhereRaw: (_sql, [column, regex]) => {
+          this.groupFilters.push({ column, regex });
+          return grouped;
+        },
       };
       args[0].call(grouped);
       return this;
@@ -108,7 +113,9 @@ class FakeQuery {
 
   matchesGroupedResistanceFilter(row) {
     if (!this.groupFilters.length) return true;
-    return this.groupFilters.some(({ column, value }) => String(valueForColumn(row, column) || '') === String(value));
+    return this.groupFilters.some(({ column, value, regex }) => (regex
+      ? new RegExp(regex, 'i').test(String(valueForColumn(row, column) || ''))
+      : String(valueForColumn(row, column) || '') === String(value)));
   }
 }
 
@@ -293,25 +300,41 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([ARTAVIA], [other], { productId: 'base', targets: ['Take-all'] })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
     });
 
-    test('Artavia then Headway is the planned take-all pair: the Headway pass is exempt on the same evidence and spacing; Headway first, a third pass or other targets are not', async () => {
-      const HEADWAY = { id: 'base', name: 'Headway Fungicide', category: 'fungicide', frac_group: '11' };
-      const first = (date, name = 'Artavia 2 SC (Azoxy)', targets = ['Take-all']) => prior({ service_date: date, product_name: name, product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets });
+    test('a mixed-group field is a set: "3 + 11", "3/11", "11, 3" and "28+3A" compare by intersection', async () => {
+      const groups = (frac) => ({ id: 'base', name: 'Mixed', category: 'fungicide', frac_group: frac });
+      const last = prior({ service_date: '2026-05-13', product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11' });
+      for (const frac of ['3 + 11', '3/11', '11, 3', '11', '3 and 11']) {
+        expect({ frac, codes: repeats(await run([groups(frac)], [last], { productId: 'base' })).map((b) => b.code) }).toEqual({ frac, codes: ['fungicide_frac_rotation_approval'] });
+      }
+      // No shared member: no repeat. "13" is not "3", "3A" is not "3".
+      for (const frac of ['3', '3 + 7', '13', '3A + 7']) {
+        expect({ frac, codes: repeats(await run([groups(frac)], [prior({ ...last, catalog_group: '11', frac_group: '11' })], { productId: 'base' })).map((b) => b.code) }).toEqual({ frac, codes: [] });
+      }
+      // The earlier application can be the mixed one: Headway (3 + 11) before Artavia (11).
+      const mixedLast = prior({ service_date: '2026-05-13', product_name: 'Headway Fungicide', product_category: 'fungicide', catalog_group: '3 + 11', frac_group: '3 + 11' });
+      expect(repeats(await run([ARTAVIA], [mixedLast], { productId: 'base' })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+    });
+
+    test('Artavia (11) then Headway (3 + 11) is a repeat, and the take-all pair exemption applies on the same evidence and spacing; Headway first, a third pass or other targets are not exempt', async () => {
+      const HEADWAY = { id: 'base', name: 'Headway Fungicide', category: 'fungicide', frac_group: '3 + 11' };
+      const GROUPS = { 'Artavia 2 SC (Azoxy)': '11', 'Headway Fungicide': '3 + 11' };
+      const first = (date, name = 'Artavia 2 SC (Azoxy)', targets = ['Take-all']) => prior({ service_date: date, product_name: name, product_category: 'fungicide', catalog_group: GROUPS[name], frac_group: GROUPS[name], targets });
       const now = { productId: 'base', serviceDate: '2026-06-10', targets: ['Take-all'] };
       const codes = async (history, input = now, product = HEADWAY) => repeats(await run([product], history, input)).map((b) => b.code);
-      // Artavia 28 days before: the second pass of the pair.
+      // Not a pair (no take-all evidence on the Headway pass): the group 11 repeat is found, once.
+      expect(await codes([first('2026-05-13')], { ...now, targets: ['Gray leaf spot'] })).toEqual(['fungicide_frac_rotation_approval']);
+      // Artavia 28 days before, both for take-all: the second pass of the pair, exempt.
       expect(await codes([first('2026-05-13')])).toEqual([]);
       // Spacing 28 to 45 days: 27 and 46 days are a normal review.
       expect(await codes([first('2026-05-14')])).toEqual(['fungicide_frac_rotation_approval']);
       expect(await codes([first('2026-04-25')])).toEqual(['fungicide_frac_rotation_approval']);
-      // Evidence on both sides: no take-all target on this pass, or on the Artavia, is a normal review.
-      expect(await codes([first('2026-05-13')], { ...now, targets: ['Gray leaf spot'] })).toEqual(['fungicide_frac_rotation_approval']);
       expect(await codes([first('2026-05-13', 'Artavia 2 SC (Azoxy)', ['Large patch'])])).toEqual(['fungicide_frac_rotation_approval']);
       // A third pass (Artavia, Headway, then Headway again) or Headway as the first pass: review.
-      expect(await codes([first('2026-05-13', 'Headway Fungicide'), first('2026-04-15')])).toEqual(['fungicide_frac_rotation_approval']);
-      expect(await codes([first('2026-05-13', 'Headway Fungicide')])).toEqual(['fungicide_frac_rotation_approval']);
-      // Artavia after Headway is not the planned order.
+      // (Headway after Headway repeats both of its groups, 3 and 11: two findings.)
+      expect(await codes([first('2026-05-13', 'Headway Fungicide'), first('2026-04-15')])).toEqual(['fungicide_frac_rotation_approval', 'fungicide_frac_rotation_approval']);
+      expect(await codes([first('2026-05-13', 'Headway Fungicide')])).toEqual(['fungicide_frac_rotation_approval', 'fungicide_frac_rotation_approval']);
+      // Artavia after Headway is not the planned order; Artavia, Headway, Artavia is a third pass.
       expect(await codes([first('2026-05-13', 'Headway Fungicide')], now, ARTAVIA)).toEqual(['fungicide_frac_rotation_approval']);
-      // Artavia, Headway, then Artavia is a third pass.
       expect(await codes([first('2026-05-13', 'Headway Fungicide'), first('2026-04-15')], now, ARTAVIA)).toEqual(['fungicide_frac_rotation_approval']);
     });
 

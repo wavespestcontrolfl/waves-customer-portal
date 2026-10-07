@@ -43,13 +43,12 @@ describe('the v13 watering rules', () => {
     }
     // Stored on main by earlier label reads (20260930000001 seed).
     const matrix = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
-    // (The Arena row keeps its stored rule when 20261007180000 renames it to the Arena S.E. name.)
-    const storedOnMain = new Set(['Arena 50 WDG', matrix.ARENA_NEW, 'Celsius WG', 'Atticus Talak 7.9 F']);
+    const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F']);
     // Blindside (the v13 fallback weed spot) has its own migration.
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
     const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
     const bermuda = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
-    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name), ...matrix.WATERING.map((item) => item.name), ...matrix.FAIL_CLOSED.map((item) => item.name)]);
+    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name), ...matrix.WATERING.map((item) => item.name), ...matrix.FAIL_CLOSED.map((item) => item.name), ...require('../models/migrations/20261007181000_lawn_v13_matrix_adds_fixes').WATERING.map((item) => item.name)]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 

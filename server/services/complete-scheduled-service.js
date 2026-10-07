@@ -4672,10 +4672,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return ({ status: 422, body: internalOnlyProductsBlock });
       }
     }
-    // Oxadiazon (Ronstar) is not for home lawns: a fresh lawn closeout that lists one is refused
+    // Oxadiazon (Ronstar) is not for home lawns (commercial turf is allowed): a fresh lawn closeout that lists one is refused
     // before any write. A same-key replay or resume of a committed completion is left alone.
     if (claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn' && Array.isArray(products) && products.length) {
-      const prohibited = await lawnProhibitedProductBlocks(db, products);
+      const prohibited = await lawnProhibitedProductBlocks(db, products, { propertyType: svc.property_type });
       if (prohibited.length) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(prohibited[0].code), db);
         return ({ status: 400, body: lawnProhibitedProductsBlockPayload(prohibited) });

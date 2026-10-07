@@ -1648,6 +1648,17 @@ function v13ProposedApplication(product, row, targets) {
 // being planned, so a yearly cap shared across formulations (prodiamine, dithiopyr)
 // counts it with the season's earlier applications; the
 // visit's own earlier ledger rows are left out so a re-plan never counts it twice.
+// The Ronstar rule is for residential lawns: the visit's customer property_type (the plan's own row
+// carries it; the tank sheet's slimmer row does not, so it is read, and only for a product that matches).
+async function lawnProhibitedForVisit(knex, service, product) {
+  if (!lawnProhibitedProductBlock(product, {})) return null;
+  let propertyType = service.property_type;
+  if (propertyType === undefined && service.customer_id) {
+    propertyType = (await savepointRead(knex, (k) => k('customers').where({ id: service.customer_id }).first('property_type')).catch(() => null))?.property_type;
+  }
+  return lawnProhibitedProductBlock(product, { propertyType });
+}
+
 async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map(), targets = {} } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
@@ -1658,7 +1669,7 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     if (checked.has(id)) continue;
     checked.add(id);
     // Not for home lawns (oxadiazon / Ronstar): a hard block like any other limit, so no amount is planned.
-    const prohibited = lawnProhibitedProductBlock(item.product);
+    const prohibited = await lawnProhibitedForVisit(knex, service, item.product);
     if (prohibited) {
       capped.set(id, [{ ...prohibited }]);
       continue;
@@ -1821,7 +1832,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .select(
       'ss.*',
       'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
-      'c.waveguard_tier', 'c.lawn_type',
+      'c.waveguard_tier', 'c.lawn_type', 'c.property_type',
       ...(billingModeColumnExists ? ['c.billing_mode'] : []),
       't.name as technician_name',
     )

@@ -15,7 +15,6 @@ jest.mock('../services/lawn-protocol-operating-layer', () => ({
 }));
 
 // The application-limit reader the plan and the sheet share (v13Limits calls it per selected product).
-const ARENA = require('../models/migrations/20261007180000_lawn_v13_matrix_adds').ARENA_NEW;
 const mockCheckLimits = jest.fn();
 jest.mock('../services/application-limits', () => ({ checkLimits: (...args) => mockCheckLimits(...args) }));
 
@@ -33,7 +32,7 @@ const CATALOG = [
   { id: 'nt', name: NUTRA, aliases: [], default_rate_per_1000: 12, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'stw', name: STONEWALL, aliases: [], default_rate_per_1000: null, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'tet', name: TETRINO, aliases: [], default_rate_per_1000: 0.367, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
-  { id: 'are', name: ARENA, aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
+  { id: 'are', name: 'Arena 50 WDG', aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'cel', name: 'Celsius WG', aliases: [], default_rate_per_1000: 0.085, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
@@ -282,8 +281,8 @@ test('May Tetrino alone: its gate notes ride the item, the water-distance warnin
 });
 
 test('May Tetrino with Arena selected beside it: the plan engine\'s apply-alone rule, a block and no combined mixing order', async () => {
-  const body = await lawnMix({ month: '5', selectedConditionalProductNames: ARENA });
-  expect(body.selectedItems.map((i) => i.product.name).sort()).toEqual([ARENA, TETRINO]);
+  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG' });
+  expect(body.selectedItems.map((i) => i.product.name).sort()).toEqual(['Arena 50 WDG', TETRINO]);
   expect(body.blocks).toHaveLength(1);
   expect(body.blocks[0]).toMatchObject({ code: 'lawn_v13_apply_alone', productName: TETRINO });
   expect(body.mixingOrder).toEqual([]);
@@ -320,7 +319,7 @@ test('/completion-actions with the gate on: products carry no amounts (January N
   expect(body.note).toMatch(/amounts from the visit plan/);
   expect(JSON.stringify(body.actions)).not.toMatch(/"defaultRatePer1000":\s*[1-9]/);
   const may = await call({ month: '5' });
-  expect(may.actions.find((a) => a.product?.name === ARENA).product.defaultRatePer1000).toBeNull();
+  expect(may.actions.find((a) => a.product?.name === 'Arena 50 WDG').product.defaultRatePer1000).toBeNull();
   // Gate off: the catalog default answers as before.
   delete process.env.GATE_LAWN_V13;
   const off = await call({ month: '1', track: 'st_augustine' });
@@ -329,21 +328,21 @@ test('/completion-actions with the gate on: products carry no amounts (January N
 });
 
 test('spot rows get no quantity anywhere on the sheet: no job, planned or full-tank amount, a label-rate reference and the note', async () => {
-  const body = await lawnMix({ month: '5', selectedConditionalProductNames: `${ARENA}, Celsius WG, LESCO 90/10 Nonionic Surfactant` });
-  for (const name of [ARENA, 'Celsius WG', 'LESCO 90/10 Nonionic Surfactant']) {
+  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG, Celsius WG, LESCO 90/10 Nonionic Surfactant' });
+  for (const name of ['Arena 50 WDG', 'Celsius WG', 'LESCO 90/10 Nonionic Surfactant']) {
     const item = itemFor(body, name);
     expect(item.selected).toBe(true);
     expect({ name, mixes: [item.jobMix, item.plannedMix, item.fullTankMix, item.plannedFullTankMix] }).toEqual({ name, mixes: [null, null, null, null] });
     expect(item.spot.note).toBe('Spot: enter the area treated and the amount used.');
   }
-  expect(itemFor(body, ARENA).spot.reference).toBe('Label rate 0.29 oz per 1,000 sq ft');
+  expect(itemFor(body, 'Arena 50 WDG').spot.reference).toBe('Label rate 0.29 oz per 1,000 sq ft');
   expect(itemFor(body, 'Celsius WG').spot.reference).toBe('Label rate 0.085 oz per 1,000 sq ft');
   // The surfactant is a concentration of the tank, never a per-1,000 rate.
   expect(itemFor(body, 'LESCO 90/10 Nonionic Surfactant').spot.reference).toBe('Label concentration 0.25% v/v');
 });
 
 test('a blocked sheet withholds every quantity of the selected products, spot or not, and keeps the reason', async () => {
-  const body = await lawnMix({ month: '5', selectedConditionalProductNames: ARENA });
+  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG' });
   expect(body.blocks).toHaveLength(1);
   for (const item of body.items.filter((i) => i.selected)) {
     expect({ name: item.product?.name, mixes: [item.jobMix, item.plannedMix, item.fullTankMix, item.plannedFullTankMix] })

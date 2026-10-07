@@ -232,7 +232,7 @@ const BLINDSIDE = 'Blindside Herbicide';
 // the staged Stonewall 15-0-15 line).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION, matrixMigration.ARENA_NEW];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -442,8 +442,8 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
       ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
       : spec);
-    // 20261007180000 adds its rows (the 0-0-50 in July is the one new default), turns the April Artavia row into Headway and renames Arena.
-    const matrixName = (name) => (name === matrixMigration.ARENA_OLD ? matrixMigration.ARENA_NEW : (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name));
+    // 20261007180000 adds its rows (the 0-0-50 in July is the one new default) and turns the April Artavia row into Headway (Arena keeps its name: 20261007181000).
+    const matrixName = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
     const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => swapped(s)).map((s) => ({
       productId: idOf(matrixName(s[0])), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
@@ -750,10 +750,10 @@ describe('the material-cost audit reads the gate-aware program', () => {
     });
 
     test('a spot row is not priced: no amount, as in the plan; the whole-lawn rows around it still are', () => {
-      const withArena = [...catalog, { id: 'are', name: matrixMigration.ARENA_NEW, aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, needs_pricing: false }];
+      const withArena = [...catalog, { id: 'are', name: matrixMigration.ARENA_OLD, aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, needs_pricing: false }];
       const rows = new Map([['bermuda|May', new Map([['are', { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: {} }], ['tet', { applicationMode: 'broadcast', ratePer1000: 0.367, rateUnit: 'fl oz', gates: {} }]])]]);
       const result = auditScript.analyzeVisit({ trackKey: 'bermuda', track: v13.bermuda, visit: visitFor(5), products: withArena, options, v13Rows: rows });
-      expect(itemOf(result, matrixMigration.ARENA_NEW).mix).toBeNull();
+      expect(itemOf(result, matrixMigration.ARENA_OLD).mix).toBeNull();
       expect(itemOf(result, N.TET).mix.amount).toBeGreaterThan(0);
     });
 

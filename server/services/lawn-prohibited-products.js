@@ -8,6 +8,12 @@
 // row: a product_limits row would also block it on a Tree & Shrub visit. Matching is by name and
 // active ingredient, so a catalog row added later is covered without a migration.
 //
+// Residential only: the label bars home lawns, not commercial turf (Ronstar G is registered for
+// commercial turf and landscapes). A customer whose property_type is commercial or business is not
+// blocked; residential, an unknown type and no type are (the safe side).
+const COMMERCIAL_PROPERTY = /^(commercial|business)$/i;
+const isCommercialProperty = (propertyType) => COMMERCIAL_PROPERTY.test(String(propertyType || '').trim());
+
 // The yearly count caps, intervals and blackouts live in product_limits (application-limits.js);
 // this module only answers "may this product be on a lawn visit at all".
 
@@ -22,8 +28,9 @@ function isProhibitedOnHomeLawns(product) {
 }
 
 // null when the product is allowed, else the block the plan and the closeout show.
-function lawnProhibitedProductBlock(product) {
-  if (!isProhibitedOnHomeLawns(product)) return null;
+// `propertyType` is the customer's property_type; commercial turf is allowed.
+function lawnProhibitedProductBlock(product, { propertyType } = {}) {
+  if (!isProhibitedOnHomeLawns(product) || isCommercialProperty(propertyType)) return null;
   const name = product.name || product.display_name || product.productName || 'This product';
   return {
     code: CODE,
@@ -36,7 +43,8 @@ function lawnProhibitedProductBlock(product) {
 
 // The closeout side: the submitted products (catalog ids, and any free-text name) against the
 // catalog. Returns the blocks, [] when none.
-async function lawnProhibitedProductBlocks(database, submittedProducts = []) {
+async function lawnProhibitedProductBlocks(database, submittedProducts = [], { propertyType } = {}) {
+  if (isCommercialProperty(propertyType)) return [];
   const list = Array.isArray(submittedProducts) ? submittedProducts : [];
   const blocks = [];
   const seen = new Set();
@@ -60,4 +68,4 @@ function lawnProhibitedProductsBlockPayload(blocks) {
   };
 }
 
-module.exports = { lawnProhibitedProductsBlockPayload, CODE, isProhibitedOnHomeLawns, lawnProhibitedProductBlock, lawnProhibitedProductBlocks };
+module.exports = { isCommercialProperty, lawnProhibitedProductsBlockPayload, CODE, isProhibitedOnHomeLawns, lawnProhibitedProductBlock, lawnProhibitedProductBlocks };

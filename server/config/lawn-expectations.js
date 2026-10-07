@@ -142,8 +142,6 @@ const PRODUCT_CLASS_ENTRIES = [
   // lawn visits in the 10-02 P13 replay carried it unmapped.
   ['Talstar P', FAMILY.INSECTICIDE],
   ['Arena 50 WDG', FAMILY.INSECTICIDE],
-  // The Arena row is renamed to the Florida-only S.E. packaging (same EPA 59639-152) by 20261007180000.
-  ['Arena S.E. 50 WDG Insecticide 2.5 lb. (Florida Only)', FAMILY.INSECTICIDE],
   // Acelepryn is a preventive grub/caterpillar product: never curative.
   ['Acelepryn Xtra', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
   ['Acelepryn Insecticide', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],

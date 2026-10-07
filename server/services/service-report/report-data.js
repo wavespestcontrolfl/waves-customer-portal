@@ -284,8 +284,9 @@ function withApplicationHold(facts, { hours, targets } = {}) {
 // inches of water") against the product's 24-hour hold for its other uses (chinch bugs, caterpillars).
 // The use's recorded targets decide: a mole cricket target replaces the frozen rule with the water-in,
 // even beside another target (the water-in does not hurt the other uses); any other target or none
-// leaves the facts exactly as they were, and facts not approved for reports (null) stay null. The
-// label gives no mowing wait for this use, so none is claimed.
+// leaves the facts exactly as they were, and facts not approved for reports (null) stay null. Only the
+// WATERING instruction changes: the label's 1-day mowing hold (Talak: postpone mowing 24 hours) stays,
+// the catalog's own mow hold when it has one, else 1 day.
 const MOLE_CRICKET_TARGET = /mole[\s-]*crickets?/i;
 function withApplicationWaterIn(facts, { inches, targets } = {}) {
   const amount = Number(inches);
@@ -296,7 +297,7 @@ function withApplicationWaterIn(facts, { inches, targets } = {}) {
     label_note: `Label: water in right after application with up to ${amount} inch of water (mole cricket use).`,
   });
   if (!checked.valid) return facts;
-  return { ...facts, wateringRule: checked.rule, mowHoldDays: null };
+  return { ...facts, wateringRule: checked.rule, mowHoldDays: facts.mowHoldDays ?? 1 };
 }
 
 // frozenFacts: the completion-time { [productId]: facts|null } map from the
