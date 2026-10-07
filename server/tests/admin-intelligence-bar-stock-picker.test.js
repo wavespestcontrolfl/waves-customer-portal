@@ -24,7 +24,7 @@ const mockRecordResult = jest.fn(async () => true);
 const mockGetPendingRow = jest.fn();
 const mockRetireExpiredAction = jest.fn();
 const mockAttachThread = jest.fn(async () => 1);
-const mockFindChosenCard = jest.fn(async () => null);
+const mockFindDerivedCard = jest.fn(async () => null);
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -87,7 +87,7 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   getPendingRow: (...args) => mockGetPendingRow(...args),
   retireExpiredAction: (...args) => mockRetireExpiredAction(...args),
   attachThread: (...args) => mockAttachThread(...args),
-  findChosenCard: (...args) => mockFindChosenCard(...args),
+  findDerivedCard: (...args) => mockFindDerivedCard(...args),
   stepKey: jest.fn(() => 'step-key'),
   getActionReceipt: jest.fn(async () => null),
 }));
@@ -164,6 +164,7 @@ beforeEach(() => {
     id: NEW_ID, tool_name: toolName, summary, status: 'pending', expires_at: new Date(Date.now() + 600000).toISOString(),
   }));
   mockProductChoicesFor.mockResolvedValue(CHOICES);
+  mockFindDerivedCard.mockResolvedValue(null);
   mockExecuteProcurementTool.mockImplementation(async (name, input) => {
     if (input.product_id === PRODUCT_B) return previewFor(PRODUCT_B, 'Zentrovex 20% SC', 0, 78);
     if (input.product_id === PRODUCT_A) return previewFor(PRODUCT_A, 'Zentrovex 10% SC', 20, 98);
@@ -307,7 +308,7 @@ describe('/choose-product replay and history', () => {
 
   test('a retry after a lost response gets the card the same choice already made', async () => {
     mockGetPendingRow.mockResolvedValue(pickerRow({ status: 'confirmed', result: { success: true, chosen_product_id: PRODUCT_B } }));
-    mockFindChosenCard.mockResolvedValue({ ...nextRow, params: { product_id: PRODUCT_B, _ib_chosen_from: CHOICE_ID } });
+    mockFindDerivedCard.mockResolvedValue({ ...nextRow, params: { product_id: PRODUCT_B, _ib_chosen_from: CHOICE_ID } });
     mockClaimForConfirm.mockResolvedValue({ error: 'already_used' });
     await withServer(async (baseUrl) => {
       const replay = await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_B });
@@ -317,7 +318,7 @@ describe('/choose-product replay and history', () => {
       expect(other.status).toBe(409);
       expect(other.body.pendingAction).toBeUndefined();
     });
-    expect(mockFindChosenCard).toHaveBeenCalledWith(CHOICE_ID, 'admin-1');
+    expect(mockFindDerivedCard).toHaveBeenCalledWith('_ib_chosen_from', CHOICE_ID, 'admin-1');
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
     expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
   });
@@ -369,8 +370,24 @@ describe('/show-again', () => {
     expect(Object.keys(previewInput).some((k) => k.startsWith('_'))).toBe(false);
     const stored = mockCreatePendingAction.mock.calls[0][0].params;
     expect(stored._two_step_preview_fingerprint).not.toBe('old-print');
+    expect(stored._ib_shown_from).toBe(CHOICE_ID);
     expect(mockResolveInventoryWriteTarget).not.toHaveBeenCalled();
     expect(confirmedCalls()).toHaveLength(0);
+  });
+
+  test('a retry after a lost Show again response gets the card it already made', async () => {
+    mockGetPendingRow.mockResolvedValue({ ...expiredStock(), status: 'cancelled' });
+    mockRetireExpiredAction.mockResolvedValue(null);
+    mockFindDerivedCard.mockResolvedValue({ id: NEW_ID, tool_name: 'adjust_stock', summary: 's', contract_hash: 'hash-new',
+      contract: { action_label: 'Adjust inventory stock', effects: [] }, expires_at: new Date(Date.now() + 300000).toISOString(),
+      params: { product_id: PRODUCT_A, _ib_shown_from: CHOICE_ID } });
+    await withServer(async (baseUrl) => {
+      const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+      expect(status).toBe(200);
+      expect(body).toMatchObject({ replayed: true, pendingAction: { id: NEW_ID, contract_hash: 'hash-new' } });
+    });
+    expect(mockFindDerivedCard).toHaveBeenCalledWith('_ib_shown_from', CHOICE_ID, 'admin-1');
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
   });
 
   test('a card that is not expired, or was decided, is not shown again', async () => {

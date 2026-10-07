@@ -1918,10 +1918,6 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // A refused target leaves no card and writes nothing; the model is told so
     // in plain words, so its reply can never read as a recorded change.
     if (target.error && !productChoice) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
-    // Server pin naming the picker this card was chosen from, so a retried
-    // /choose-product finds it (findChosenCard). Set after the preview: the
-    // tool's argument schema never sees it.
-    if (reproposal?.chosenFrom) params._ib_chosen_from = reproposal.chosenFrom;
     if (!productChoice && toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
@@ -1972,6 +1968,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
+
+  // A card made from another card names its source in a server pin, so a
+  // retried /choose-product or /show-again finds it (findDerivedCard). Set
+  // after the preview: the tool's argument schema never sees it.
+  if (reproposal?.sourcePin) Object.assign(params, reproposal.sourcePin);
 
   if (task) {
     const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name })
@@ -2175,7 +2176,7 @@ async function proposeChosenProduct(req, action, productId) {
     toolUse: { name: 'adjust_stock', input: { ...input, product_id: productId } },
     req, context: action.context || null, requestStartedAt: new Date(),
     task, taskContext: task ? taskScopeFromProof(action.params?._ib_task_context) : null,
-    reproposal: { groundedTarget: { productId }, chosenFrom: String(action.id) },
+    reproposal: { groundedTarget: { productId }, sourcePin: { _ib_chosen_from: String(action.id) } },
   });
   if (proposed.failed || !proposed.clientPayload) {
     const refused = proposed.modelResult || {};
@@ -2224,7 +2225,7 @@ function cardPayload(row) {
 // product, answer with the card that choice made (found by its server pin);
 // otherwise it stays a plain "already used" refusal.
 async function replayProductChoice(id, actor, productId) {
-  const next = await PendingActions.findChosenCard(id, actor);
+  const next = await PendingActions.findDerivedCard('_ib_chosen_from', id, actor);
   if (!next || String(next.params?.product_id || '').toLowerCase() !== productId) return { status: 409, body: { error: claimErrorMessage('already_used') } };
   return { status: 200, body: { success: true, outcome: 'completed', replayed: true, chosen_product_id: productId, pendingAction: cardPayload(next) } };
 }
@@ -4558,12 +4559,18 @@ router.post('/show-again', async (req, res, next) => {
     const refusal = await showAgainRefusal(req, await PendingActions.getPendingRow(id, actor));
     if (refusal) return res.status(refusal.status).json(refusal.body);
     const retired = await PendingActions.retireExpiredAction(id, actor);
-    if (!retired) return res.status(409).json({ error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' });
+    if (!retired) {
+      // A retry after a lost response gets the card Show again already made.
+      const made = await PendingActions.findDerivedCard('_ib_shown_from', id, actor);
+      if (made) return res.json({ success: true, replayed: true, pendingAction: cardPayload(made) });
+      return res.status(409).json({ error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' });
+    }
     const input = publicCardInput(retired.params);
     const invalid = platformInputRefusal(req, retired, input);
     if (invalid) return res.status(409).json({ error: invalid.error || 'This action cannot be shown again.', code: invalid.code });
     const proposed = await proposePendingWrite({ toolUse: { name: retired.tool_name, input }, req,
-      context: retired.context || null, requestStartedAt: new Date(), reproposal: showAgainReproposal(retired) });
+      context: retired.context || null, requestStartedAt: new Date(),
+      reproposal: { ...showAgainReproposal(retired), sourcePin: { _ib_shown_from: String(id) } } });
     if (proposed.failed || !proposed.clientPayload) {
       return res.status(409).json({ error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code });
     }

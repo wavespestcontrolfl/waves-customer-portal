@@ -436,13 +436,16 @@ async function getPendingRow(id, requestedBy) {
   return row ? { ...row, params: paramsOf(row) } : null;
 }
 
-// The card a product choice made from picker card `pickerId` (its params pin
-// _ib_chosen_from). Used to replay /choose-product after a lost response; the
-// picker's own receipt never carries the new card's id, since receipts reach
-// the model and pending ids are client-only credentials.
-async function findChosenCard(pickerId, requestedBy) {
+// The card made from card `sourceId` by a product choice (_ib_chosen_from) or
+// by Show again (_ib_shown_from), from that pin in its params. Used to replay
+// the request after a lost response; the source card's receipt never carries
+// the new card's id, since receipts reach the model and pending ids are
+// client-only credentials.
+const DERIVED_PINS = new Set(['_ib_chosen_from', '_ib_shown_from']);
+async function findDerivedCard(pin, sourceId, requestedBy) {
+  if (!DERIVED_PINS.has(pin)) throw new Error('Unknown derived-card pin');
   const row = await db('ib_pending_actions').where({ requested_by: String(requestedBy) })
-    .whereRaw("params->>'_ib_chosen_from' = ?", [String(pickerId)])
+    .whereRaw('params->>? = ?', [pin, String(sourceId)])
     .orderBy('created_at', 'desc').first();
   return row ? { ...row, params: paramsOf(row) } : null;
 }
@@ -532,7 +535,7 @@ module.exports = {
   claimForConfirm,
   cancelPendingAction,
   getPendingRow,
-  findChosenCard,
+  findDerivedCard,
   retireExpiredAction,
   recordResult,
   getActionReceipt,

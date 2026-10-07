@@ -278,3 +278,13 @@ test('a lost choose response replays the same request and shows the card the ser
   expect(fetch.mock.calls[1][1].body).toBe(fetch.mock.calls[0][1].body);
   expect(screen.getByText(/on hand 0 → 78 fl_oz/)).toBeInTheDocument();
 });
+
+test('a follow-up card that the host list also carries after a refresh renders once', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ success: true, outcome: 'completed', pendingAction: NEXT_CARD })));
+  const view = render(<PendingActionsCard actions={[PICKER]} variant="light" />);
+  fireEvent.click(screen.getAllByRole('radio')[1]);
+  fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+  expect(await screen.findByText('Product chosen. Confirm the new card below.')).toBeInTheDocument();
+  view.rerender(<PendingActionsCard actions={[PICKER, NEXT_CARD]} variant="light" />);
+  expect(screen.getAllByRole('button', { name: 'Confirm' })).toHaveLength(1);
+});

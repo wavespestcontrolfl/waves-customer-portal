@@ -353,7 +353,9 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(shown.body.pendingAction.id).not.toBe(card.id);
     expect((await db('ib_pending_actions').where({ id: card.id }).first()).status).toBe('cancelled');
     expect(await onHand(ten.id)).toBe(10);
-    expect((await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id })).status).toBe(409);
+    // A retry (a lost response) gets the same new card, not a second one.
+    const retry = await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id });
+    expect(retry.body).toMatchObject({ replayed: true, pendingAction: { id: shown.body.pendingAction.id } });
     const fresh = shown.body.pendingAction;
     expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: fresh.id, contract_hash: fresh.contract_hash })).body.success).toBe(true);
     expect(await onHand(ten.id)).toBe(12);

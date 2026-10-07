@@ -344,7 +344,9 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
 
   const withFollowUps = (action) => [action,
     ...followUps.filter((f) => f.afterId === action.id).flatMap((f) => withFollowUps(f.action))];
-  const shown = actions.flatMap(withFollowUps);
+  // A refreshed host list can also carry a follow-up card: show each id once.
+  const seen = new Set();
+  const shown = actions.flatMap(withFollowUps).filter((a) => !seen.has(a.id) && seen.add(a.id));
 
   const dark = variant === "dark";
 
