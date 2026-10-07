@@ -1303,7 +1303,10 @@ function configKeyFeatureAvailable(key) {
 function configKeySubFeaturesAvailable(key) {
   const subs = CONFIG_KEY_SUB_FEATURE_GATES[key];
   if (!subs) return undefined;
-  return Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
+  const available = Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
+  // Bahia is offered as a NEW lawn plan only while the v13 program (which has no bahia track) is off.
+  if (key === 'lawn_pricing_v2') available.bahiaOffered = !require('../services/lawn-program').lawnV13NoBahiaProgram();
+  return available;
 }
 
 // The station/cartridge cost the ENGINE is pricing with right now: the
