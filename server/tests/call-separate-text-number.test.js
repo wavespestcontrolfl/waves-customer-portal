@@ -188,6 +188,8 @@ describe('processor wiring (source pins)', () => {
 
   test('an existing customer whose account phone is the ANI gets the number-keyed hold on it, so reminders skip it', () => {
     expect(src).toContain('holdAniForSwap = samePhone(linkedForText.phone, contactPhone);');
+    // decided BEFORE the best-effort card insert, so a failed insert cannot skip the hold
+    expect(src.indexOf('holdAniForSwap = samePhone(')).toBeLessThan(src.indexOf("flag: 'text_number_differs'"));
     const at = src.indexOf('if (holdAniForSwap) {');
     expect(at).toBeGreaterThan(-1);
     const section = src.slice(at, at + 700);

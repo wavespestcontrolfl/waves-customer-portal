@@ -12873,6 +12873,8 @@ const CallRecordingProcessor = {
       try {
         const linkedForText = await db('customers').where({ id: customerId }).first('phone');
         if (linkedForText && !samePhone(linkedForText.phone, callTextNumberWrites)) {
+          // Decided before the best-effort card write: a failed insert must not skip the hold.
+          holdAniForSwap = samePhone(linkedForText.phone, contactPhone);
           await db('triage_items')
             .insert(buildTriageItem({
               callLogId: call.id,
@@ -12889,7 +12891,6 @@ const CallRecordingProcessor = {
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore();
           if (!bridgeNeedsConfirmation.includes('text_number_differs')) bridgeNeedsConfirmation.push('text_number_differs');
-          holdAniForSwap = samePhone(linkedForText.phone, contactPhone);
         }
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
