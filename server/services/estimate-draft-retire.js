@@ -203,11 +203,13 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
   `))?.rows || [];
 
   // First matching send per draft (the lateral lists same-door sends first).
-  const chosen = [...new Map(pairs.filter(sameProperty).reverse().map((p) => [p.draft_id, p])).values()]
-    .slice(0, batch);
+  // No cap here: a candidate retireOneDraft keeps (accepted replacement with
+  // a lead, a row changed since the read) must not use up the batch.
+  const chosen = [...new Map(pairs.filter(sameProperty).reverse().map((p) => [p.draft_id, p])).values()];
 
   const rows = [];
   for (const pair of chosen) {
+    if (rows.length >= batch) break;
     const row = await conn.transaction((trx) => retireOneDraft(trx, pair));
     if (!row) continue;
     rows.push({ ...row, sent_id: pair.sent_id });

@@ -243,6 +243,19 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(keptDraft)).archived_at).toBeNull();
   });
 
+  test('kept candidates do not use up the batch', async () => {
+    const c = await customer();
+    const kept = await estimate(c, { createdAt: minutesAgo(90) });
+    await estimate(c, { status: 'accepted', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    await mockPg('leads').insert({ id: randomUUID(), estimate_id: kept, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+    const c2 = await customer();
+    const other = await estimate(c2, { createdAt: minutesAgo(90) });
+    await estimate(c2, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    expect((await retireDraftsReplacedBySentEstimate({ limit: 1 })).retired).toBe(1);
+    expect((await row(kept)).archived_at).toBeNull();
+    expect((await row(other)).archived_at).not.toBeNull();
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
