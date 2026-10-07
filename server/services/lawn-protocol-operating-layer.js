@@ -203,27 +203,35 @@ async function getLawnProtocolById(knex = db, id, { strict = false } = {}) {
   };
 }
 
+// The id of the protocol row an appointment was assigned from (key, and version when it has one),
+// newest match; null when that assignment can no longer be resolved.
+async function resolveAssignedProtocolId(knex, protocolKey, protocolVersion) {
+  const query = knex('lawn_protocols').where({ protocol_key: protocolKey });
+  if (protocolVersion) query.where({ version: protocolVersion });
+  const assigned = await query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc').first('id');
+  return assigned ? assigned.id : null;
+}
+
+// The window a visit is read from: the one it names, else the one for its service month.
+function windowForVisit(protocol, windowKey, month) {
+  const match = windowKey
+    ? (item) => item.window_key === windowKey
+    : (item) => Number(item.month) === Number(month);
+  return protocol.windows.find(match) || null;
+}
+
 async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false } = {}) {
   // An appointment's assigned version must not fall through to the currently
   // active protocol when that assignment can no longer be resolved.
-  if (!protocolId && protocolKey) {
-    const query = knex('lawn_protocols').where({ protocol_key: protocolKey });
-    if (protocolVersion) query.where({ version: protocolVersion });
-    const assigned = await query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc').first('id');
-    if (!assigned) return null;
-    protocolId = assigned.id;
-  }
-  const protocol = protocolId
-    ? await getLawnProtocolById(knex, protocolId, { strict })
+  const assignedId = !protocolId && protocolKey ? await resolveAssignedProtocolId(knex, protocolKey, protocolVersion) : protocolId;
+  if (!assignedId && protocolKey) return null;
+  const protocol = assignedId
+    ? await getLawnProtocolById(knex, assignedId, { strict })
     : await getActiveLawnProtocol(knex, { grassTrack, region, strict, planning });
-  if (!protocol) return null;
   // A visit pinned to the staged bahia version plans from nothing too (the rows stay for history).
-  if (planning && v13NoProgramRow(protocol)) return null;
+  if (!protocol || (planning && v13NoProgramRow(protocol))) return null;
 
-  const month = etParts(serviceDate).month;
-  const window = windowKey
-    ? protocol.windows.find((item) => item.window_key === windowKey) || null
-    : protocol.windows.find((item) => Number(item.month) === Number(month)) || null;
+  const window = windowForVisit(protocol, windowKey, etParts(serviceDate).month);
   if (!window) return { protocol, window: null, products: [], gates: protocol.gates };
 
   const productsQuery = knex('lawn_protocol_products as lpp')

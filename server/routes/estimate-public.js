@@ -23,7 +23,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
-const { UNISSUED_ESTIMATE, estimateNeverIssued } = require('../services/estimate-bahia-review');
+const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
 const {
   computeContactGaps,
@@ -20730,7 +20730,13 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const setupWaiverUnverifiedRequote = (
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   )?.setupWaiverUnverifiedRequote === true;
+  // GATE_LAWN_V13 has no bahia program: a never-issued estimate (buildPricingBundleInner marks it)
+  // holding a recurring bahia lawn plan is review-only in every stored shape, including the V1
+  // blobs whose rows are served as stored and never re-priced.
+  const bahiaLawnReview = !!estData && estData[UNISSUED_ESTIMATE] === true
+    && require('../config/feature-gates').lawnV13Live?.() === true && estimateHasBahiaLawn(estData);
   const quoteRequired = pricingBundle?.quoteRequired === true
+    || bahiaLawnReview
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
     || managerApprovalRequired
@@ -20750,6 +20756,7 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialProposal ? 'commercial_proposal' : null)
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
+        || (bahiaLawnReview ? 'lawn_v13_bahia_no_program' : null)
         || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
         || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
         || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)

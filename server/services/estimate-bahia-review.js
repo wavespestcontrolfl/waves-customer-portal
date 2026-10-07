@@ -26,20 +26,52 @@ function estimateNeverIssued(estimate) {
   return NOT_YET_ISSUED_STATUSES.has(String(estimate.status || 'draft'));
 }
 
-// Does the stored estimate data hold a recurring bahia lawn plan? Reads the stored engine inputs,
-// or, for an estimate saved as a request (profile + selected services), the request's grass type.
-function estimateHasBahiaLawn(estData) {
-  if (!estData || typeof estData !== 'object') return false;
+// Does the stored estimate data hold a recurring bahia lawn plan, in ANY shape the send path and
+// the pricing bundle accept?
+//   - engine inputs   { services: { lawn: { track } } }          (engineInputs, inputs, engineInput)
+//   - V1 form inputs  { svcLawn: true, grassType }               (inputs, result.inputs, IB drafts)
+//   - a saved request { engineRequest: { selectedServices, options.grassType } }
+//   - stored results  result.results.lawnMeta, engineResult.lineItems, recurring.services lawn rows
+const isBahia = (value) => {
+  if (value == null || value === '') return false;
   const { normalizeGrassType } = require('./pricing-engine/service-pricing');
-  const inputs = (estData.engineInputs && typeof estData.engineInputs === 'object' ? estData.engineInputs : null)
-    || (estData.inputs && typeof estData.inputs === 'object' ? estData.inputs : null);
-  if (inputs?.services?.lawn && typeof inputs.services.lawn === 'object') {
-    return normalizeGrassType(inputs.services.lawn.track) === 'bahia';
+  return normalizeGrassType(value) === 'bahia';
+};
+const isObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+const looksLikeLawnRow = (row) => isObject(row)
+  && /lawn/i.test(`${row.service || ''} ${row.serviceKey || ''} ${row.name || ''}`)
+  && !/one.?time/i.test(`${row.service || ''} ${row.serviceKey || ''}`);
+
+function inputCarrierHasBahiaLawn(carrier) {
+  if (!isObject(carrier)) return false;
+  if (isObject(carrier.services?.lawn)) return isBahia(carrier.services.lawn.track);
+  if (carrier.svcLawn === true) {
+    return [carrier.grassType, carrier.grass_type, carrier.lawnTrack, carrier.track].some(isBahia);
   }
+  return false;
+}
+
+function resultHasBahiaLawn(result) {
+  if (!isObject(result)) return false;
+  const meta = result.results?.lawnMeta || result.lawnMeta;
+  if (isObject(meta) && [meta.grassType, meta.grassName, meta.track].some(isBahia)) return true;
+  const rows = [
+    ...(Array.isArray(result.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(result.recurring?.services) ? result.recurring.services : []),
+    ...(Array.isArray(result.results?.recurring?.services) ? result.results.recurring.services : []),
+  ];
+  return rows.some((row) => looksLikeLawnRow(row) && [row.track, row.grassType, row.grassName, row.grass].some(isBahia));
+}
+
+function estimateHasBahiaLawn(estData) {
+  if (!isObject(estData)) return false;
+  if ([estData.engineInputs, estData.inputs, estData.engineInput, estData.result?.inputs].some(inputCarrierHasBahiaLawn)) return true;
   const request = estData.engineRequest;
-  if (!request || typeof request !== 'object') return false;
-  const selected = (Array.isArray(request.selectedServices) ? request.selectedServices : []).map((key) => String(key).toUpperCase());
-  return selected.includes('LAWN') && normalizeGrassType(request.options?.grassType) === 'bahia';
+  if (isObject(request)) {
+    const selected = (Array.isArray(request.selectedServices) ? request.selectedServices : []).map((key) => String(key).toUpperCase());
+    if (selected.includes('LAWN') && isBahia(request.options?.grassType)) return true;
+  }
+  return [estData.result, estData.engineResult, estData.result?.engineResult].some(resultHasBahiaLawn);
 }
 
 module.exports = { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn };

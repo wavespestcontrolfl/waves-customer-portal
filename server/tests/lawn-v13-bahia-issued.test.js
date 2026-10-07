@@ -51,6 +51,60 @@ describe('never issued, by the repo definition (sent_at / viewed_at)', () => {
   });
 });
 
+// Every stored estimate shape the send path and the pricing bundle accept.
+const V1_RESULT = (grass) => ({
+  recurring: {
+    services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 66.75, ann: 801, perTreatment: 89, visitsPerYear: 9 }],
+    monthlyTotal: 66.75, annualAfterDiscount: 801, discount: 0,
+  },
+  results: { lawnMeta: { grassType: grass, grassName: grass === 'bahia' ? 'Bahia' : 'Bermuda' }, lawn: [{ name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true }] },
+});
+const SHAPES = {
+  'engine inputs (engineInputs)': (grass) => ({ engineInputs: { ...BASE, services: { lawn: { track: grass } } } }),
+  'engine inputs (inputs)': (grass) => ({ inputs: { ...BASE, services: { lawn: { track: grass } } } }),
+  'wizard engineInput': (grass) => ({ engineInput: { ...BASE, services: { lawn: { track: grass } } } }),
+  'V1 form inputs + result': (grass) => ({ inputs: { svcLawn: true, grassType: grass, lawnFreq: '9' }, result: V1_RESULT(grass) }),
+  'V1 form inputs nested in result': (grass) => ({ result: { ...V1_RESULT(grass), inputs: { svcLawn: true, grassType: grass } } }),
+  'V1 stored result only (lawnMeta)': (grass) => ({ result: V1_RESULT(grass) }),
+  'saved request': (grass) => ({ engineRequest: { profile: BASE, selectedServices: ['LAWN'], options: { grassType: grass } } }),
+  'raw engine result': (grass) => ({ engineResult: { lineItems: [{ service: 'lawn_care', track: grass }] } }),
+};
+
+describe.each(Object.entries(SHAPES))('shape: %s', (_name, make) => {
+  test('a bahia lawn plan is recognized, other grass is not', () => {
+    expect(estimateHasBahiaLawn(make('bahia'))).toBe(true);
+    expect(estimateHasBahiaLawn(make('bermuda'))).toBe(false);
+  });
+
+  test('the send guard blocks a never-issued estimate and lets a sent one resend', () => {
+    const send = (row, grass) => router._internals.assertEstimateSendable({ id: 'e1', token: 'tok', monthly_total: 80, onetime_total: 0, ...row, estimate_data: make(grass) });
+    expect(() => send(NEVER, 'bahia')).toThrow(/Bahia lawn plans need manual review/);
+    expect(() => send(SENT, 'bahia')).not.toThrow();
+    expect(() => send(NEVER, 'bermuda')).not.toThrow();
+  });
+});
+
+describe('V1 blobs: the bundle is served from stored rows, so the review is the quote requirement', () => {
+  let bundleSeq = 0;
+  const bundle = (row, grass) => buildPricingBundle({ id: `v1-${bundleSeq += 1}`, token: 't', ...row, estimate_data: SHAPES['V1 form inputs + result'](grass) });
+
+  test('a never-issued bahia V1 draft is quote-required with the bahia reason', async () => {
+    const out = await bundle(NEVER, 'bahia');
+    expect(out.quoteRequired).toBe(true);
+    expect(out.quoteRequiredReason).toBe('lawn_v13_bahia_no_program');
+  });
+
+  test('a sent bahia V1 estimate is honored, and so is a never-issued bermuda one', async () => {
+    expect((await bundle(SENT, 'bahia')).quoteRequired).toBeFalsy();
+    expect((await bundle(NEVER, 'bermuda')).quoteRequired).toBeFalsy();
+  });
+
+  test('gate off: no review', async () => {
+    delete process.env.GATE_LAWN_V13;
+    expect((await bundle(NEVER, 'bahia')).quoteRequired).toBeFalsy();
+  });
+});
+
 describe('the send snapshot bundle', () => {
   const bundleText = async (row) => JSON.stringify(await buildPricingBundle({ id: `e-${row.status}`, token: 't', ...row, estimate_data: inputs() }));
 
