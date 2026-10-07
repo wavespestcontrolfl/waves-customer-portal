@@ -10,6 +10,7 @@ const {
   applyNameDictationPolicy,
   applyNameDictationToV2Caller,
   sanitizeNameEntries,
+  NAME_DECODER_VERSION_SUFFIX,
   sanitizeEmailCandidates,
   buildDecoderPrompt,
   CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
@@ -29,6 +30,9 @@ describe('detectContactDictationSignals', () => {
     expect(detectContactDictationSignals('Caller: Varnum, V-A-R-N-U-M.').name).toBe(true);
     expect(detectContactDictationSignals('Caller: V A R N U M.').name).toBe(true);
     expect(detectContactDictationSignals('Caller: the last name is spelled differently').name).toBe(true);
+    for (const line of ['how do you spell that', 'let me spell my name', 'can you spell it for me', 'what is the spelling']) {
+      expect(detectContactDictationSignals(`Caller: ${line}`).name).toBe(true);
+    }
     expect(detectContactDictationSignals('Caller: V as in Victor, A, R.').name).toBe(true);
     expect(detectContactDictationSignals('Caller: I like in-ground sprinklers and I like pizza.').name).toBe(false);
     expect(detectContactDictationSignals('Caller: can you come on the 14-15 or 3-4-5 weekend').name).toBe(false);
@@ -44,7 +48,7 @@ describe('detectContactDictationSignals', () => {
     for (const line of ['Caller: I need a B test on the lawn', 'Caller: I have a B plan or a c plan', 'Caller: press 1 or 2',
       'Caller: the name is Bob, a plumber', 'Caller: J. R. Smith called', 'Caller: my name is Jordan Rivers',
       'Caller: that is a-ok', 'Caller: we have a lot of ants', 'Caller: my name is Lee, a customer since 2020',
-      'Caller: I live on 5th and A street']) {
+      'Caller: I live on 5th and A street', 'Caller: we have had a dry spell', 'Caller: a cold spell is coming']) {
       expect(detectContactDictationSignals(line).name).toBe(false);
     }
   });
@@ -276,19 +280,28 @@ describe('applyEmailDictationPolicy — risk-flagged candidates are never adopte
 });
 
 describe('spelled-name decoding', () => {
-  const entry = (over = {}) => ({
-    raw_spoken: 'Caller: Orlmeyer, O-R-L-M-E-Y-E-R',
-    spelled_value: 'Orlmeyer',
-    field: 'last_name',
-    whose: 'caller',
-    confidence: 0.92,
-    ...over,
+  const spellOut = (v) => `Caller: ${v.split('').join('-').toUpperCase()}`;
+  const entry = (over = {}) => {
+    const spelled = over.spelled_value || 'Orlmeyer';
+    return {
+      raw_spoken: spellOut(spelled),
+      spelled_value: spelled,
+      field: 'last_name',
+      whose: 'caller',
+      confidence: 0.92,
+      ...over,
+    };
+  };
+  // Entries here are grounded in their own raw_spoken, as the decoder's transcript would be.
+  const dictation = (...names) => ({
+    emails: [],
+    addresses: [],
+    names: sanitizeNameEntries(names, names.map((n) => n.raw_spoken)),
   });
-  const dictation = (...names) => ({ emails: [], addresses: [], names: sanitizeNameEntries(names) });
 
-  test('decodeDictatedContacts returns sanitized names and keeps emails/addresses', async () => {
+  test('decodeDictatedContacts returns sanitized, grounded names and keeps emails/addresses', async () => {
     const out = await decodeDictatedContacts({
-      transcript: 'Caller: Varnum, V-A-R-N-U-M.',
+      transcript: 'Caller: Varnum, V-A-R-N-U-M. And my sister is Tobias, T-O-B-I-A-S.',
       deps: {
         fetchResponse: async (prompt) => {
           expect(prompt).toMatch(/NAME RULES/);
@@ -298,10 +311,10 @@ describe('spelled-name decoding', () => {
             addresses: [],
             names: [
               { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'VARNUM', field: 'last_name', whose: 'caller', confidence: 0.9 },
-              { raw_spoken: 'x', spelled_value: 'Q', field: 'last_name', whose: 'caller', confidence: 0.9 }, // too short
-              { raw_spoken: 'x', spelled_value: 'Bad<script>', field: 'last_name', whose: 'caller', confidence: 0.9 },
-              { raw_spoken: 'x', spelled_value: 'Tobias', field: 'nickname', whose: 'caller', confidence: 0.9 },
-              { raw_spoken: 'x', spelled_value: 'Tobias', field: 'first_name', whose: 'someone', confidence: 9 },
+              { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Q', field: 'last_name', whose: 'caller', confidence: 0.9 }, // too short
+              { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Bad<script>', field: 'last_name', whose: 'caller', confidence: 0.9 },
+              { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'nickname', whose: 'caller', confidence: 0.9 },
+              { raw_spoken: 'T-O-B-I-A-S', spelled_value: 'Tobias', field: 'first_name', whose: 'someone', confidence: 9 },
             ],
           });
         },
@@ -309,8 +322,29 @@ describe('spelled-name decoding', () => {
     });
     expect(out.names).toEqual([
       { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.9 },
-      { raw_spoken: 'x', spelled_value: 'Tobias', field: 'first_name', whose: 'other', confidence: 1 },
+      { raw_spoken: 'T-O-B-I-A-S', spelled_value: 'Tobias', field: 'first_name', whose: 'other', confidence: 1 },
     ]);
+  });
+
+  describe('grounding', () => {
+    const ground = (names, ...sources) => sanitizeNameEntries(names, sources);
+    const base = { spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.9 };
+
+    test('drops an entry whose raw_spoken is not in any source transcript', () => {
+      expect(ground([{ ...base, raw_spoken: 'V-A-R-N-U-M' }], 'Caller: my email is J-O-N-E-S at example dot com')).toEqual([]);
+      expect(ground([{ ...base, raw_spoken: 'V-A-R-N-U-M' }], 'Caller: x', 'Caller: spelled v-a-r-n-u-m')).toHaveLength(1);
+    });
+    test('drops an entry whose spelled letters do not make spelled_value', () => {
+      expect(ground([{ ...base, spelled_value: 'Jones', raw_spoken: 'V-A-R-N-U-M' }], 'Caller: V-A-R-N-U-M')).toEqual([]);
+      expect(ground([{ ...base, raw_spoken: 'my name is Varnum' }], 'Caller: my name is Varnum')).toEqual([]); // said, not spelled
+    });
+    test('accepts spaced letters and phonetic markers; ignores apostrophe words', () => {
+      expect(ground([{ ...base, raw_spoken: "it's V A R N U M" }], "Caller: it's V A R N U M")).toHaveLength(1);
+      expect(ground([{ ...base, raw_spoken: 'V as in Victor, A as in Adam, R, N, U, M' }], 'Caller: V as in Victor, A as in Adam, R, N, U, M')).toHaveLength(1);
+    });
+    test('without sources nothing is grounded', () => {
+      expect(sanitizeNameEntries([{ ...base, raw_spoken: 'V-A-R-N-U-M' }])).toEqual([]);
+    });
   });
 
   test('a missing names section decodes to an empty list', async () => {
@@ -445,6 +479,22 @@ describe('spelled-name decoding', () => {
       // name_full that disagrees with the present part derives nothing.
       const disagree = { first_name: 'Rita', last_name: null, name_full: 'Jane Garcia' };
       expect(applyNameDictationToV2Caller(disagree, dictation(entry({ spelled_value: 'Garcia' })))).toEqual({});
+    });
+
+    test('a name_full that disagrees with the split parts is rebuilt from two present parts', () => {
+      const caller = { first_name: 'Jon', last_name: 'Smith', name_full: 'Jane Smith' };
+      expect(applyNameDictationToV2Caller(caller, dictation(entry({ spelled_value: 'John', field: 'first_name' })))).toEqual({ first_name: 'John' });
+      expect(caller).toEqual({ first_name: 'John', last_name: 'Smith', name_full: 'John Smith' });
+    });
+
+    test('a missed rewrite with one split part leaves the whole name unchanged', () => {
+      const caller = { first_name: 'Jon', last_name: null, name_full: 'Jane Smith' };
+      expect(applyNameDictationToV2Caller(caller, dictation(entry({ spelled_value: 'John', field: 'first_name' })))).toEqual({});
+      expect(caller).toEqual({ first_name: 'Jon', last_name: null, name_full: 'Jane Smith' });
+    });
+
+    test('exports the cohort suffix', () => {
+      expect(NAME_DECODER_VERSION_SUFFIX).toBe('+namedec1');
     });
 
     test('tolerates a missing caller', () => {

@@ -55,7 +55,9 @@ const SPELLING_SIGNAL_RE = /\b(spell(ed|ing)?|letter by letter|(as|like|for) in 
 // A name spelled out letter by letter ("S-E-R-O-V", "S E R O V", "S as in
 // Sam"). Tighter than SPELLING_SIGNAL_RE on purpose: this gates a paid decoder
 // pass, and "like in the past" must not buy one.
-const NAME_SPELLING_WORD_RE = /\bspell(?:ed|ing|s)?\b/i;
+// Bare "spell" only counts in a dictation phrase: "a dry spell" must not buy a
+// paid second transcription pass and a decoder call.
+const NAME_SPELLING_WORD_RE = /\bspell(?:ed|ing)\b|\bspell\s+(?:it|that|this|my|your|the|his|her|their|our)\b|\b(?:how|to)\s+(?:(?:do|can|would|could)\s+you\s+)?spell\b/i;
 const NAME_SPELLING_LETTERS_RE = new RegExp([
   // Separated single letters: four or more in any case ("S, E, R, O, V", "v a r n u m").
   String.raw`\b(?:[A-Za-z]\s*[-.,]\s*){3,}[A-Za-z]\b`,
@@ -260,7 +262,7 @@ async function decodeDictatedContacts({ transcript, contactPassTranscript = null
       needs_confirmation: a?.needs_confirmation !== false,
       confirmation_question: String(a?.confirmation_question || '').slice(0, 300),
     }));
-    return { emails, addresses, names: sanitizeNameEntries(parsed.names) };
+    return { emails, addresses, names: sanitizeNameEntries(parsed.names, [transcript, contactPassTranscript]) };
   } catch (err) {
     logger.warn(`[contact-dictation] decoder failed open: ${err.message}`);
     return null;
@@ -270,6 +272,10 @@ async function decodeDictatedContacts({ transcript, contactPassTranscript = null
 // ── Spelled names ────────────────────────────────────────────────────────────
 
 const NAME_FIELDS = ['first_name', 'last_name'];
+// Stamped on a call's ai_extraction_prompt_version when the decoder changed the
+// caller name, so promotion-readiness and replay audits (which match the exact
+// version) do not count a decoder-modified row as the extractor's own output.
+const NAME_DECODER_VERSION_SUFFIX = '+namedec1';
 const SPELLED_NAME_RE = /^\p{L}[\p{L}'’ -]{0,48}\p{L}$/u;
 
 // Title-case a spelling the model returned in one case ("SEROV", "serov");
@@ -280,18 +286,43 @@ function caseSpelledName(value) {
   return value.toLowerCase().replace(/(^|[\s'’-])(\p{L})/gu, (_m, sep, ch) => sep + ch.toUpperCase());
 }
 
+const squash = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+// The letters a spelling actually spells: runs of single-letter tokens, with
+// "S as in Sam" reduced to its letter. Words, and apostrophe words like "it's",
+// are never single-letter tokens.
+function spelledLetterRuns(raw) {
+  const reduced = String(raw || '').replace(/\b([A-Za-z])\s+(?:as|like|for)\s+(?:in\s+)?[A-Za-z]+/gi, '$1');
+  const runs = [];
+  let run = '';
+  for (const tok of reduced.split(/[\s,.\-]+/).filter(Boolean)) {
+    if (/^[A-Za-z]$/.test(tok)) run += tok.toLowerCase();
+    else { if (run) runs.push(run); run = ''; }
+  }
+  if (run) runs.push(run);
+  return runs;
+}
+
 /**
  * Filter decoder name entries to the shape the name policy trusts: a real
  * letters-only value, field first_name|last_name, whose "caller" only when the
- * model said so (anything else is "other"), confidence clamped to [0,1].
+ * model said so (anything else is "other"), confidence clamped to [0,1] —
+ * and GROUNDED: raw_spoken must appear in a source transcript (whitespace and
+ * case normalized), and the letters it spells must equal spelled_value, or the
+ * entry is dropped (the model's label and value alone never reach a record).
  */
-function sanitizeNameEntries(entries) {
+function sanitizeNameEntries(entries, sources = []) {
+  const haystacks = (Array.isArray(sources) ? sources : []).map(squash).filter(Boolean);
   const out = [];
   for (const n of (Array.isArray(entries) ? entries : []).slice(0, 6)) {
     const spelled = String(n?.spelled_value || '').trim().replace(/\s+/g, ' ');
     if (!NAME_FIELDS.includes(n?.field) || !SPELLED_NAME_RE.test(spelled)) continue;
+    const raw = squash(n?.raw_spoken);
+    if (!raw || !haystacks.some((h) => h.includes(raw))) continue;
+    const key = spelled.toLowerCase().replace(/[^\p{L}]/gu, '');
+    if (!spelledLetterRuns(n.raw_spoken).includes(key)) continue;
     out.push({
-      raw_spoken: String(n?.raw_spoken || '').slice(0, 300),
+      raw_spoken: String(n.raw_spoken).slice(0, 300),
       spelled_value: caseSpelledName(spelled),
       field: n.field,
       whose: n?.whose === 'caller' ? 'caller' : 'other',
@@ -401,22 +432,33 @@ function applyNameDictationToV2Caller(caller, dictation) {
     if (!current[field] && tokens.length > 1) delete changes[field];
   }
   let rewritten = nameFull;
+  let missed = false;
   for (const [field, value] of Object.entries(changes)) {
     const old = current[field];
-    caller[field] = value;
     if (!rewritten) continue;
     if (old) {
       const escaped = old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-      // Anchored to the component's own end of the name ("Lee Lee" has one
-      // first name and one last name).
+      // Anchored to the component's own end of the name ("Odell Odell" has
+      // one first name and one last name).
       const anchored = field === 'first_name'
         ? new RegExp(`^${escaped}(?=\\s|$)`, 'iu')
         : new RegExp(`(?<=^|\\s)${escaped}$`, 'iu');
-      rewritten = rewritten.replace(anchored, value);
+      if (anchored.test(rewritten)) rewritten = rewritten.replace(anchored, value);
+      else missed = true;
     } else if (tokens.length === 1 && sameNameMisheard(tokens[0], value)) {
       rewritten = value;
     }
   }
+  const next = { ...caller, ...changes };
+  if (missed) {
+    // name_full disagrees with a split part it should contain. Two present
+    // split parts are the extractor's own identity, so name_full is rebuilt
+    // from them; otherwise the whole name stays exactly as it was (readers
+    // prefer name_full, and a split/full mismatch would show the stale name).
+    if (!(caller.first_name && caller.last_name)) return {};
+    rewritten = `${next.first_name} ${next.last_name}`;
+  }
+  Object.assign(caller, changes);
   if (rewritten && rewritten !== nameFull) caller.name_full = rewritten;
   return changes;
 }
@@ -474,6 +516,7 @@ module.exports = {
   applyEmailDictationPolicy,
   applyNameDictationPolicy,
   applyNameDictationToV2Caller,
+  NAME_DECODER_VERSION_SUFFIX,
   sanitizeEmailCandidates,
   sanitizeNameEntries,
   buildDecoderPrompt,
