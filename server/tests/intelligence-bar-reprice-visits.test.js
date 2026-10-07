@@ -13,6 +13,14 @@ jest.mock('../routes/admin-schedule', () => ({
   findBillingCoveredVisits: jest.fn(),
   updateVisitDetails: jest.fn(),
 }));
+// The canonical live-term reader; `mockLivePrepayTerm` stands in for its answer.
+let mockLivePrepayTerm;
+jest.mock('../services/annual-prepay-renewals', () => ({
+  coveredTermsAsOf: jest.fn(() => {
+    const q = { where: jest.fn(() => q), first: jest.fn(async () => (mockLivePrepayTerm ? { id: 'term-live' } : undefined)) };
+    return q;
+  }),
+}));
 jest.mock('../utils/datetime-et', () => ({
   ...jest.requireActual('../utils/datetime-et'),
   etDateString: jest.fn(() => '2099-03-01'),
@@ -31,6 +39,7 @@ let tables;
 function builder(table) {
   const filters = [];
   let single = false;
+  const order = [];
   const api = {
     where(a, op, b) {
       if (a && typeof a === 'object') filters.push((r) => Object.entries(a).every(([k, v]) => String(r[k]) === String(v)));
@@ -42,10 +51,16 @@ function builder(table) {
     whereIn(col, values) { filters.push((r) => values.map(String).includes(String(r[col]))); return api; },
     whereNull(col) { filters.push((r) => r[col] == null); return api; },
     select() { return api; },
-    orderBy() { return api; },
+    orderBy(col) { order.push(col); return api; },
     first() { single = true; return api; },
     then(resolve, reject) {
       const rows = (tables[table] || []).filter((r) => filters.every((f) => f(r))).map((r) => ({ ...r }));
+      const key = (r) => order.map((c) => String(r[c] ?? ''));
+      rows.sort((a, b) => {
+        const [ka, kb] = [key(a), key(b)];
+        const i = ka.findIndex((v, n) => v !== kb[n]);
+        return i < 0 ? 0 : (ka[i] < kb[i] ? -1 : 1);
+      });
       return Promise.resolve(single ? rows[0] : rows).then(resolve, reject);
     },
   };
@@ -82,7 +97,9 @@ beforeEach(() => {
     invoices: [{ scheduled_service_id: 'v-inv', invoice_number: 'WPC-2099-0001', status: 'sent' }],
     scheduled_service_addons: [],
   };
-  Schedule.findBillingCoveredVisits.mockResolvedValue(new Map());
+  mockLivePrepayTerm = false;
+  // The Schedule re-price block's own coverage reader decides an annual-term link.
+  Schedule.findBillingCoveredVisits.mockResolvedValue(new Map([['v-term', 'covered by an annual prepay term']]));
   Schedule.updateVisitDetails.mockResolvedValue({ status: 200, json: { success: true } });
 });
 
@@ -130,7 +147,7 @@ describe('the card', () => {
   });
 
   test("a visit the Schedule re-price block reports as holding money is left alone with that reason", async () => {
-    Schedule.findBillingCoveredVisits.mockResolvedValue(new Map([['v-2', 'holding a card for a late-cancel fee']]));
+    Schedule.findBillingCoveredVisits.mockResolvedValue(new Map([['v-2', 'holding a card for a late-cancel fee'], ['v-term', 'covered by an annual prepay term']]));
     const card = await preview();
     expect(card.visits.map((v) => v.id)).toEqual(['v-1']);
     expect(card.left_alone).toContainEqual(expect.objectContaining({ id: 'v-2', reason: 'holding a card for a late-cancel fee' }));
@@ -158,6 +175,32 @@ describe('the card', () => {
     expect(res).toMatchObject({ code: 'membership_lane' });
     expect(res.error).toMatch(/monthly membership \(\$89\.00 a month\).*update_customer or rate_service/);
     expect(res.preview).toBeUndefined();
+  });
+
+  test('a customer with a live annual prepay term is refused whole: the save would refresh the term', async () => {
+    mockLivePrepayTerm = true;
+    const res = await preview();
+    expect(res).toMatchObject({ code: 'annual_prepay_customer' });
+    expect(res.error).toMatch(/annual prepay term — change visit prices on the Schedule screen/);
+  });
+
+  test("a visit still linked to a voided term is eligible: the canonical coverage reader decides, not the bare link", async () => {
+    Schedule.findBillingCoveredVisits.mockResolvedValue(new Map());
+    const card = await preview();
+    expect(card.visits.map((v) => v.id)).toContain('v-term');
+  });
+
+  test('two visits on the same date and window keep one order, whatever order the rows come back in', async () => {
+    tables.scheduled_services = [
+      visit('b-2', '2099-04-01', { window_start: '09:00' }),
+      visit('b-1', '2099-04-01', { window_start: '09:00' }),
+    ];
+    const first = await preview();
+    tables.scheduled_services.reverse();
+    const second = await preview();
+    expect(first.visits.map((v) => v.id)).toEqual(['b-1', 'b-2']);
+    expect(second.visits.map((v) => v.id)).toEqual(['b-1', 'b-2']);
+    expect(second._version).toBe(first._version);
   });
 
   test('more than the cap is refused, never truncated', async () => {
@@ -201,8 +244,8 @@ describe('the confirmed run', () => {
     expect(res).toMatchObject({ success: true, messages_sent: false });
     expect(res.changed.map((v) => v.id)).toEqual(['v-1', 'v-2']);
     expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0])).toEqual([
-      { id: 'v-1', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-1:v1' },
-      { id: 'v-2', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-2:v1' },
+      { id: 'v-1', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-1:v1', approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', livePrepayTerm: false } },
+      { id: 'v-2', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-2:v1', approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', livePrepayTerm: false } },
     ]);
   });
 
@@ -252,6 +295,26 @@ describe('the confirmed run', () => {
     const res = await confirm(ask(), card._version);
     expect(res.failed_visit).toMatchObject({ id: 'v-2', code: 'preview_changed' });
     expect(Schedule.updateVisitDetails).toHaveBeenCalledTimes(1);
+  });
+
+  test('a live annual prepay term that appears during the earlier saves stops the batch', async () => {
+    const card = await preview();
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      mockLivePrepayTerm = true;
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(ask(), card._version);
+    expect(res.failed_visit).toMatchObject({ id: 'v-2', code: 'preview_changed' });
+    expect(Schedule.updateVisitDetails).toHaveBeenCalledTimes(1);
+  });
+
+  test("the save's own under-lock drift refusal reads as preview_changed", async () => {
+    Schedule.updateVisitDetails.mockRejectedValueOnce(Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+      statusCode: 409, code: 'VISIT_CHANGED_RETRY', reason: 'REPRICE_APPROVAL_DRIFT',
+    }));
+    const card = await preview();
+    const res = await confirm(ask(), card._version);
+    expect(res).toMatchObject({ preview_changed: true, code: 'preview_changed', failed_visit: { id: 'v-1' } });
   });
 
   test('a later visit invoiced during the earlier saves is not saved', async () => {

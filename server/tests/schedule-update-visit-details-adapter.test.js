@@ -81,3 +81,33 @@ describe('approvedVisitVersion binds the handler row-version CAS', () => {
     expect(outcome?.reason).not.toBe('ROW_VERSION_DRIFT');
   });
 });
+
+describe('assertApprovedRepriceState: the related state rechecked inside the save', () => {
+  const { assertApprovedRepriceState } = require('../routes/admin-schedule');
+  const Renewals = require('../services/annual-prepay-renewals');
+  const approved = { addonCount: 0, billingLane: 'per_visit', livePrepayTerm: false };
+  function fakeTrx({ addons = 0, customer = { id: 'cust-1', billing_mode: 'per_visit' }, term = null } = {}) {
+    jest.spyOn(Renewals, 'coveredTermsAsOf').mockReturnValue({ where() { return this; }, first: async () => term });
+    return (table) => {
+      const q = { where() { return q; } };
+      if (table === 'scheduled_services') q.first = async () => ({ customer_id: 'cust-1' });
+      if (table === 'customers') q.first = async () => customer;
+      if (table === 'scheduled_service_addons') q.count = async () => [{ count: String(addons) }];
+      return q;
+    };
+  }
+  afterEach(() => jest.restoreAllMocks());
+
+  test('the approved state passes', async () => {
+    await expect(assertApprovedRepriceState(fakeTrx(), 'visit-1', approved)).resolves.toBeUndefined();
+  });
+
+  test.each([
+    ['an add-on line was added', { addons: 1 }],
+    ['the customer moved to monthly membership', { customer: { id: 'cust-1', billing_mode: 'monthly_membership', monthly_rate: '89.00' } }],
+    ['a live annual prepay term appeared', { term: { id: 'term-1' } }],
+  ])('%s: refuses 409 before any write', async (_label, state) => {
+    await expect(assertApprovedRepriceState(fakeTrx(state), 'visit-1', approved))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY', reason: 'REPRICE_APPROVAL_DRIFT' });
+  });
+});

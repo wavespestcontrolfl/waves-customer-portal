@@ -22,7 +22,7 @@
  * Scope (owner): scheduled_date on or after today (ET); one customer; one service
  * family (appointment-tagger's classification). Never a visit that is completed,
  * in progress (en_route / on_site), invoiced (any invoice row), prepaid, covered
- * by an annual prepay term, a free re-service, a $0 visit, a visit with add-on
+ * by an annual prepay term (the Schedule coverage reader decides), a free re-service, a $0 visit, a visit with add-on
  * lines, a series' first (template) visit, or one the screen's re-price block reports as holding money. A
  * monthly-membership customer is refused whole: dues cover those visits, so the
  * price there is the monthly rate (update_customer / rate_service).
@@ -56,7 +56,7 @@ const REPRICE_FUTURE_VISITS_TOOL = {
   name: 'reprice_future_visits',
   description: `Change the per-visit price of ONE customer's upcoming visits for ONE service (e.g. "she is Gold now, make her future pest visits $49"). The first call returns a PREVIEW and changes nothing: each visit that changes (date, service, old price → new price), each visit left alone and why, and that no customer message is sent. The operator approves on the confirmation card. Each visit is then saved exactly as the Schedule screen's Edit appointment price edit saves it.
 Never changes a visit that is completed, in progress, invoiced, prepaid, covered by an annual prepay term, a free re-service or $0 visit, a visit with add-on lines, a plan's first (template) visit, or one holding money — those are listed on the card as left alone. At most ${MAX_VISITS} visits per card: pass through_date to split a longer schedule.
-Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
+Refused for a customer with a live annual prepay term (change those prices on the Schedule screen). Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
 new_price is the new price of each visit in dollars (the full visit price after any discount). A percentage is not accepted: ask the operator for the dollar price. Changing a WaveGuard tier never reprices visits by itself — use this tool when the operator wants the visits repriced.
 Admin-only.`,
   input_schema: {
@@ -165,6 +165,12 @@ function pickFamily(rows, service) {
   return { family: { tag: c.tag === 'general' ? `general:${names[0].toLowerCase()}` : c.tag, label: c.tag === 'general' ? names[0] : c.label, rows: named } };
 }
 
+// A live annual prepay term for the customer, by the canonical coverage reader.
+async function hasLivePrepayTerm(customerId) {
+  const { coveredTermsAsOf } = require('../annual-prepay-renewals');
+  return !!(await coveredTermsAsOf(db).where('t.customer_id', customerId).first('t.id'));
+}
+
 async function loadCustomer(customerId) {
   return db('customers').where({ id: customerId }).whereNull('deleted_at')
     .first('id', 'first_name', 'last_name', 'billing_mode', 'waveguard_tier', 'monthly_rate');
@@ -176,7 +182,10 @@ async function loadUpcomingVisits(customerId, today, through) {
     .where('scheduled_date', '>=', today)
     .select('scheduled_services.*', db.raw("(xmin::text || ':' || ctid::text) as row_version"))
     .orderBy('scheduled_date', 'asc')
-    .orderBy('window_start', 'asc');
+    .orderBy('window_start', 'asc')
+    // Stable tie-breaker: two visits on one date and window keep one order,
+    // so the card and its pinned version read the same on every re-plan.
+    .orderBy('id', 'asc');
   if (through) q.where('scheduled_date', '<=', through);
   return q;
 }
@@ -222,7 +231,6 @@ function workStateReason(row) {
 function committedReason(row, invoice) {
   if (invoice) return `invoiced (${invoice.invoice_number || 'invoice'}, ${invoice.status || 'status unknown'})`;
   if (row.prepaid_at || (row.prepaid_amount != null && Number(row.prepaid_amount) > 0)) return 'prepaid';
-  if (row.annual_prepay_term_id) return 'covered by an annual prepay term';
   return null;
 }
 
@@ -256,6 +264,12 @@ async function buildPlan(input) {
       error: `${customerName} is billed by monthly membership${Number(customer.monthly_rate) > 0 ? ` (${money(customer.monthly_rate)} a month)` : ''}: dues cover the plan visits, so they carry no per-visit price. Change the monthly rate with update_customer or rate_service instead. Nothing was changed.`,
       code: 'membership_lane',
     };
+  }
+  // The visit save refreshes the customer's live annual prepay terms from the
+  // new prices — an effect this card cannot show. Those customers stay on the
+  // Schedule screen.
+  if (await hasLivePrepayTerm(customer.id)) {
+    return { error: `${customerName} has an annual prepay term — change visit prices on the Schedule screen. Nothing was changed.`, code: 'annual_prepay_customer' };
   }
   const today = etDateString();
   if (through && through < today) return { error: 'through_date is in the past. Nothing was changed.' };
@@ -316,7 +330,8 @@ async function buildPlan(input) {
     left_alone: excludedOut,
     already_at_price: unchangedOut,
     customer_message: NO_MESSAGE,
-    _version: pinsVersion(pins, { customer_id: String(customer.id), new_price: Math.round(newPrice * 100), family: family.tag }),
+    _version: pinsVersion(pins, { customer_id: String(customer.id), new_price: Math.round(newPrice * 100), family: family.tag, lane: lane.mode, live_prepay_term: false }),
+    _lane: lane.mode,
     _pins: pins,
     _new_price: newPrice,
   };
@@ -366,13 +381,17 @@ function sameShownState(a, b) {
 // preview witness: the save refuses if it would store any other total). The
 // version just checked against the card is the save's row-version baseline:
 // a write between that check and the save's row lock refuses 409.
-function saveVisitPrice(id, newPrice, approvedVisitVersion, actionContext) {
+// approvedRepriceState is rechecked inside the save's transaction under its
+// customer and visit locks: still no add-on line, the same billing lane, still
+// no live annual prepay term.
+function saveVisitPrice(id, newPrice, approvedVisitVersion, billingLane, actionContext) {
   const { updateVisitDetails } = require('../../routes/admin-schedule');
   return updateVisitDetails({
     id,
     body: { estimatedPrice: newPrice, expectedTotal: newPrice },
     actor: { technicianId: actionContext?.technicianId || null },
     approvedVisitVersion,
+    approvedRepriceState: { addonCount: 0, billingLane, livePrepayTerm: false },
   });
 }
 
@@ -418,6 +437,7 @@ async function stillAsApproved(pin) {
   // The customer must still bill per visit: a switch to monthly membership
   // during the batch stops it (dues cover those visits).
   if (!customer || resolveBillingLane(customer).mode === 'monthly_membership') return null;
+  if (await hasLivePrepayTerm(pin.customer_id)) return null;
   return exclusionReason(row, { invoice: invoices.get(pin.id), hasAddons: addons.has(pin.id) }) ? null : now;
 }
 
@@ -430,9 +450,13 @@ async function saveOne(plan, i, actionContext) {
   }
   let reply;
   try {
-    reply = await saveVisitPrice(visit.id, plan._new_price, now.row_version, actionContext);
+    reply = await saveVisitPrice(visit.id, plan._new_price, now.row_version, plan._lane, actionContext);
   } catch (err) {
-    if (err?.statusCode && err.statusCode < 500) return { failure: { id: visit.id, date: visit.date, error: err.message, code: err.code || null } };
+    if (err?.statusCode && err.statusCode < 500) {
+      // The save's own under-lock drift checks (row version, approved state).
+      const code = err.code === 'VISIT_CHANGED_RETRY' ? 'preview_changed' : (err.code || null);
+      return { failure: { id: visit.id, date: visit.date, error: err.message, code } };
+    }
     logger.error(`[intelligence-bar:reprice-visits] save interrupted for ${visit.id}: ${err?.code || err?.name || 'error'}`);
     return { unknown: { id: visit.id, date: visit.date } };
   }
@@ -463,7 +487,12 @@ function commitResult(plan, { changed, failure, unknown }) {
       error: `The save of the ${unknown.date} visit was interrupted — it may or may not have changed. Check it on the Schedule screen. ${resultNote(changed, null, notAttempted)}`,
     };
   }
-  if (failure && !changed.length) return { ...body, error: `Nothing was changed: ${failure.date}: ${failure.error}`, code: failure.code || 'reprice_refused', failed_visit: failure };
+  if (failure && !changed.length) {
+    return {
+      ...body, error: `Nothing was changed: ${failure.date}: ${failure.error}`, code: failure.code || 'reprice_refused', failed_visit: failure,
+      ...(failure.code === 'preview_changed' ? { preview_changed: true } : {}),
+    };
+  }
   if (failure) return { ...body, partial: true, failed_visit: failure, note: resultNote(changed, failure, notAttempted) };
   return { ...body, success: true, note: resultNote(changed, null, []) };
 }
