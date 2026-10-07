@@ -28,6 +28,28 @@ const STREET_SUFFIX_CANON = {
 const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .split(/\s+/).map((w) => STREET_SUFFIX_CANON[w] || w).join(' ');
 
+// Street DIRECTIONALS, expanded the same way ("Dr E" == "Drive East"). Kept OUT
+// of canonicalizeAddress on purpose: that feeds addressKey, which is stored in
+// customer_properties.address_key under a unique index, so widening it would
+// change stored keys and need a recompute migration. The in-memory property
+// SCOPE keys (estimate-property-linkage normalizedStampedStreet) use this
+// wrapper; both sides of every scope compare run through it, so they agree.
+const DIRECTIONAL_CANON = {
+  n: 'north', s: 'south', e: 'east', w: 'west', ne: 'northeast', nw: 'northwest', se: 'southeast', sw: 'southwest',
+};
+// Directionals expand in the STREET words only. A unit identifier is data, not
+// a direction: "100 Main St Apt E" and "Apt East" are different units, so the
+// token right after a unit designator (apt/unit/ste/suite/#) is left exact.
+// A line2 is a unit by definition and goes through canonicalizeAddress alone.
+const UNIT_DESIGNATOR_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', '#']);
+const canonicalizeScopeAddress = (s) => {
+  const words = String(s || '').toLowerCase().replace(/[.,]/g, ' ').replace(/#/g, ' # ').split(/\s+/).filter(Boolean);
+  return words.map((w, i) => {
+    const canon = STREET_SUFFIX_CANON[w] || w;
+    return UNIT_DESIGNATOR_WORDS.has(words[i - 1]) ? canon : (DIRECTIONAL_CANON[canon] || canon);
+  }).join(' ');
+};
+
 /** First 5 ZIP digits, so "34205" and "34205-1234" (ZIP+4) key identically. */
 const normalizeZip = (z) => (String(z || '').match(/\d{5}/) || [''])[0];
 
@@ -113,6 +135,7 @@ module.exports = {
   normStreet,
   STREET_SUFFIX_CANON,
   canonicalizeAddress,
+  canonicalizeScopeAddress,
   normalizeZip,
   stripTrailingUnit,
   streetKey,

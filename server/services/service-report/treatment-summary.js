@@ -50,9 +50,31 @@ function buildTreatmentSummary(treatment, { noTiming = false } = {}) {
   const smartLower = (s) => String(s).split(/\s+/).map((w) => (
     /\d/.test(w) || (w.length <= 3 && /^[A-Z]+$/.test(w)) || isSymbolToken(w) ? w : w.toLowerCase()
   )).join(' ');
+  // A combination pre-emergent + fertilizer names its analysis in one of two
+  // shapes. The legacy catalog string carries it after the active
+  // ("prodiamine 0.43% + 15-0-15"): the percentage strip below would drop it
+  // and the report would name only the herbicide, so a bare N-P-K segment is
+  // pulled out first. The v13 catalog migration creates the same rows with the
+  // active alone ("Prodiamine" / "Dithiopyr") and the analysis only in the
+  // product name ("LESCO Stonewall 0.43% 15-0-15 ..."): for a pre-emergent
+  // whose active carries no analysis, read it from the name. A string with no
+  // percentage active ("24-0-11", "Nitrogen 20-0-0 + micros") is untouched.
+  const NPK_SEGMENT = /^\d{1,2}-\d{1,2}-\d{1,2}$/;
+  const NPK_IN_NAME = /(?:^|[^\d-])(\d{1,2}-\d{1,2}-\d{1,2})(?![\d-])/;
   const activeName = (p) => {
-    const active = String(p.activeIngredient || '').replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
-    return active ? smartLower(active) : p.name;
+    const raw = String(p.activeIngredient || '').trim();
+    const segments = raw.split(/\s*\+\s*/);
+    const fertilizer = segments.find((s) => NPK_SEGMENT.test(s));
+    const others = segments.filter((s) => !NPK_SEGMENT.test(s)).join(' + ');
+    const combined = fertilizer && /\d\s*%/.test(others);
+    const active = (combined ? others : raw).replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
+    if (!active) return p.name;
+    if (combined) return `${smartLower(active)} with ${fertilizer} fertilizer`;
+    if (p.kind === 'pre_emergent' && !fertilizer && !/\d{1,2}-\d{1,2}-\d{1,2}/.test(raw)) {
+      const fromName = NPK_IN_NAME.exec(String(p.name || ''));
+      if (fromName) return `${smartLower(active)} with ${fromName[1]} fertilizer`;
+    }
+    return smartLower(active);
   };
   // Every product applied the same way → say the method ONCE after the list.
   // Four "(broadcast application)" parentheticals in one sentence read as

@@ -2611,6 +2611,11 @@ function lawnReportPhotoFindingsLive() {
   return lawnReportPhotoSetLive() && typeof featureGates.lawnReportPhotoFindingsLive === 'function' && featureGates.lawnReportPhotoFindingsLive();
 }
 
+// GATE_REPORT_PLAN_RESCHEDULE: read at call time; a partial feature-gates mock (or a missing export) means off.
+function reportPlanRescheduleLive() {
+  return typeof featureGates.reportPlanRescheduleLive === 'function' && featureGates.reportPlanRescheduleLive();
+}
+
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
@@ -2731,6 +2736,15 @@ async function lawnWateringRuleStamp(service, knex) {
 }
 
 const LAWN_NEXT_VISIT_SCAN = 200;
+// The "Next visit" label: "Sunday, August 29". A date outside today's calendar
+// year also names its year ("Sunday, August 29, 2027"): the bare form hid the
+// year, so a booking a year out read as a date already gone by.
+function formatNextVisitLabel(val, todayIso) {
+  const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
+  const options = { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' };
+  if (iso.slice(0, 4) !== String(todayIso || '').slice(0, 4)) options.year = 'numeric';
+  return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', options);
+}
 // The plan cadence in weeks a lawn service type names ("every 6 weeks",
 // "monthly"...), or null: the report's estimated next visit and the PDF key
 // read the same rule.
@@ -5799,11 +5813,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // scheduled_date comes back from pg as a Date object; normalize it the
           // same way svcIso does above before slicing, or String(Date) yields
           // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
-          const fmtDate = (val) => {
-            const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
-            return new Date(`${iso}T12:00:00Z`)
-              .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
-          };
+          const fmtDate = (val) => formatNextVisitLabel(val, todayIso);
           // GATE_LAWN_REPORT_COPY_V6: the next lawn visit at THIS property
           // (lawnNextVisitAtProperty); the same visit times the v6 copy's
           // by-next-visit sentence. Gate off: the customer-wide query, as before.
@@ -6128,11 +6138,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             // scheduled_date comes back from pg as a Date object; normalize it the
             // same way svcIso does above before slicing, or String(Date) yields
             // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
-            const fmtDate = (val) => {
-              const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
-              return new Date(`${iso}T12:00:00Z`)
-                .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
-            };
+            const fmtDate = (val) => formatNextVisitLabel(val, todayIso);
             const nextRow = await knex('scheduled_services')
               .where('customer_id', service.customer_id)
               .andWhere('scheduled_date', '>', afterIso)
@@ -6676,7 +6682,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             .orderBy('id', 'asc')
             .limit(PAGE_SIZE)
             .offset(page * PAGE_SIZE)
-            .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id', 'source_estimate_id',
+            .select('id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'status', 'source_action', 'customer_confirmed', 'property_id', 'source_estimate_id',
               'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
             .catch(() => null);
 
@@ -6739,14 +6745,46 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
 
         if (matched.length) {
-          const visits = matched.map((row) => ({
-            serviceType: row.service_type || null,
-            scheduledDate: row.scheduled_date instanceof Date
-              ? row.scheduled_date.toISOString().slice(0, 10)
-              : String(row.scheduled_date).slice(0, 10),
-            windowStart: row.window_start || null,
+          // GATE_REPORT_PLAN_RESCHEDULE (owner 2026-10-06, dark): "Your plan"
+          // and "Your upcoming visits" become one section with a per-visit
+          // Reschedule button. Off = the card is byte-identical to before
+          // (no rescheduleUrl, no `merged`). On, each visit carries the
+          // self-serve reschedule link. The reschedule token is a BEARER
+          // credential, same as the report token this payload already rides
+          // on (live view only, no-store, stripped from pdf/static).
+          // reuseExisting keeps a repeat report view from minting a new
+          // short-link row each time. null when no link applies (too close
+          // to the visit, dispatch-owned pending, grouped visit, ...) and on
+          // ANY failure: the report never breaks.
+          const planReschedule = reportPlanRescheduleLive();
+          const buildRescheduleLink = planReschedule ? require('../reschedule-link').buildRescheduleLink : null;
+          const visits = await Promise.all(matched.map(async (row) => {
+            let rescheduleUrl = null;
+            if (planReschedule) {
+              try {
+                // The public reschedule page's own verdict first (codex #6088 r1/r2):
+                // an en_route / on_site visit (in progress) or an unreviewed
+                // dispatch-owned booking (source_action + customer_confirmed)
+                // would show a dead button.
+                const verdict = require('../reschedule-eligibility').eligibility(row);
+                if (verdict && verdict.ok) {
+                  const link = await buildRescheduleLink(row.id, { customerId: service.customer_id || null, reuseExisting: true });
+                  if (link && link.url && !link.tooSoonToMove) rescheduleUrl = link.url;
+                }
+              } catch { /* best-effort: no link, no button */ }
+            }
+            return {
+              serviceType: row.service_type || null,
+              scheduledDate: row.scheduled_date instanceof Date
+                ? row.scheduled_date.toISOString().slice(0, 10)
+                : String(row.scheduled_date).slice(0, 10),
+              windowStart: row.window_start || null,
+              ...(planReschedule ? { rescheduleUrl } : {}),
+            };
           }));
-          upcomingVisitsCard = { visits };
+          // `merged: true` tells the client to fold the visits into the
+          // "Your plan" section instead of the standalone card.
+          upcomingVisitsCard = planReschedule ? { visits, merged: true } : { visits };
         }
       }
     } catch { /* best-effort */ }

@@ -1183,6 +1183,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // after the fingerprint check (pre-push P1). `_`-prefixed: never
       // shown, ignored by the unconfirmed fingerprint re-run.
       params._approved_changes = preview.changes;
+      // …and the customer link the card was built on (Codex #6099 r11).
+      params._approved_customer_link = preview._customer_id ? String(preview._customer_id) : 'none';
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
@@ -2408,7 +2410,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
-- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
+- Fix a lead's contact details — first/last name, phone, email, street address, city, zip (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost

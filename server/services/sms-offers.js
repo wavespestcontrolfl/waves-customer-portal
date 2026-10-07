@@ -18,6 +18,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
+const OFFER_SOURCES = require('./sms-offer-sources');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 
 const OFFER_TTL_HOURS = 48;
@@ -26,10 +27,17 @@ const OFFER_TTL_HOURS = 48;
 // well under a year to remain unambiguous.
 const LABEL_SEARCH_DAYS = 180;
 
-// snapshot.lookup.source (sms-shadow-drafter *_OFFER_SOURCE) → what accepting
+// snapshot.lookup.source (sms-offer-sources.js) → what accepting
 // the offer would do. A snapshot with no source predates the scheduler-backed
 // offers: it is counted, and never actionable.
-const KIND_BY_SOURCE = Object.freeze({ scheduler: 'move_visit', estimate: 'book_estimate', book: 'book_new' });
+// The website-engine fallback (GATE_MULTI_TECH_TEXT_TIMES) offers a new visit for
+// a funnel service, so it is a book_new offer like /book's.
+const KIND_BY_SOURCE = Object.freeze({
+  [OFFER_SOURCES.SCHEDULER_OFFER_SOURCE]: 'move_visit',
+  [OFFER_SOURCES.ESTIMATE_OFFER_SOURCE]: 'book_estimate',
+  [OFFER_SOURCES.BOOK_OFFER_SOURCE]: 'book_new',
+  [OFFER_SOURCES.WEBSITE_OFFER_SOURCE]: 'book_new',
+});
 
 /** GATE_SMS_OFFER_LEDGER, read at call time: a flip needs no redeploy. */
 function offerLedgerLive() {
@@ -137,7 +145,7 @@ function withoutLinks(body) {
 // Which job the offer is for. Only the id its own kind commits through is
 // kept: a visit offer its visit, a new-visit offer its /book service key.
 function offerIdentity(lookup, decision) {
-  const source = lookup.source || (lookup.scheduledServiceId ? 'scheduler' : null);
+  const source = lookup.source || (lookup.scheduledServiceId ? OFFER_SOURCES.SCHEDULER_OFFER_SOURCE : null);
   const kind = KIND_BY_SOURCE[source] || 'unknown';
   return {
     customer_id: lookup.customerId || decision.customer_id || null,
@@ -216,8 +224,8 @@ async function captureOfferVisitSnapshot({ agentDecisionId, dbh = db } = {}) {
   try {
     const decision = await dbh('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot');
     const lookup = parseJson(decision?.input_snapshot)?.open_times_snapshot?.lookup || {};
-    const source = lookup.source || (lookup.scheduledServiceId ? 'scheduler' : null);
-    if (source !== 'scheduler' || !lookup.scheduledServiceId) return null;
+    const source = lookup.source || (lookup.scheduledServiceId ? OFFER_SOURCES.SCHEDULER_OFFER_SOURCE : null);
+    if (source !== OFFER_SOURCES.SCHEDULER_OFFER_SOURCE || !lookup.scheduledServiceId) return null;
     return { ...(await visitSnapshot(dbh, lookup.scheduledServiceId)), scheduled_service_id: lookup.scheduledServiceId, pre_send: true };
   } catch (err) {
     logger.warn(`[sms-offers] pre-send visit snapshot skipped: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);

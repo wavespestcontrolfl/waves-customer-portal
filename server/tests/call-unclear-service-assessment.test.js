@@ -374,9 +374,11 @@ describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () 
     // What the booking then computes from it:
     expect(resolveCallBookingPrice({ quotedPrice: booking.quoted_price, catalogRow: { ...assessRow, base_price: 0, pricing_type: 'variable' } }).price).toBeNull();
     expect(resolveCallFollowUpPlan({ extracted: booking, catalogRow: assessRow, parentDate: '2026-10-02', parentWindowStart: '10:00' })).toBeNull();
-    // ...whereas the un-patched extraction would have created both.
-    expect(resolveCallFollowUpPlan({ extracted: modelGuess, catalogRow: assessRow, parentDate: '2026-10-02', parentWindowStart: '10:00' })).not.toBeNull();
-    expect(resolveCallBookingPrice({ quotedPrice: modelGuess.quoted_price, catalogRow: assessRow }).price).toBe(189);
+    // The un-patched extraction gets neither either: an Assessment row itself
+    // never takes a quoted price or a follow-up visit (#6079), so a
+    // model-picked Assessment is as safe as a forced one.
+    expect(resolveCallFollowUpPlan({ extracted: modelGuess, catalogRow: assessRow, parentDate: '2026-10-02', parentWindowStart: '10:00' })).toBeNull();
+    expect(resolveCallBookingPrice({ quotedPrice: modelGuess.quoted_price, catalogRow: assessRow }).price).toBeNull();
   });
 });
 

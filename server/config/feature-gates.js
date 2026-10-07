@@ -19,6 +19,7 @@
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
+ *   GATE_MULTI_TECH_TEXT_TIMES=true (the lead reply agent's next-available check, the text drafter's open-times fallback and the estimate converter's first service day read the website booking engine (per technician, route-aware) instead of the old by-city engine; a lead with only a city is placed at that city's centre; read at call time via multiTechTextTimesLive(), dark by default; customer-facing; off = the old by-city engine, byte-identical)
  *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
  *   GATE_PEST_RIDES_LAWN_AT_ACCEPT=true (accepting an estimate with lawn every 6 weeks or monthly + a QUARTERLY tree & shrub rider (since 2026-10-05 pest and termite bait no longer ride: pest and lawn never share one stop; table RIDER_PAIRINGS in rider-series-preview.js) seeds the rider follow-ups on lawn visits — every 2nd 6-week visit / every 3rd monthly visit, same stop, so they group — and links the rider series to the lawn series through scheduled_services.rides_parent_id. A rider's series extension keeps riding the lawn (admin-schedule.js#rideLawnExtension, same gate). Owner ruling 2026-10-01. Off = byte-identical to today. Canonical CALL-TIME reader pestRidesLawnAtAcceptLive(). Kill switch: unset or any non-'true' value.)
  *   GATE_RIDER_PAIRS_MONTHLY_LAWN=true (second batch of ride pairs, owner ruling 2026-10-01: a MONTHLY lawn series also carries bi-monthly tree & shrub (every 2nd lawn visit; the pest and mosquito pairs were removed 2026-10-05, pest and lawn never share one stop); each pairing has its own day gaps in RIDER_PAIRINGS, rider-series-preview.js. Needs GATE_PEST_RIDES_LAWN_AT_ACCEPT and GATE_VISIT_GROUPS on. 6-week lawn hosts are unchanged (quarterly riders only). Off = byte-identical: those series walk their own cadence, and a series linked while it was on stops riding at its next extension. Canonical CALL-TIME reader riderPairsMonthlyLawnLive(), strict 'true', dark by default. Kill switch: unset.)
@@ -228,6 +229,7 @@
  *   GATE_ADMIN_MFA_ENFORCE=true (needs GATE_ADMIN_MFA: an ADMIN with no authenticator set up is held on the two-step enrollment page — every other staff route answers 403 MFA_ENROLLMENT_REQUIRED — until they finish it. Read at call time via adminMfaEnforceLive(); unset = enrollment stays optional.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
  *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
+ *   GATE_REPORT_PLAN_RESCHEDULE=true (service report, owner ruling 2026-10-06: "Your plan" and "Your upcoming visits" become one section, and each upcoming visit gets a Reschedule button that opens the customer's self-serve /reschedule link. The server adds rescheduleUrl to each visit and `merged: true` to upcomingVisitsCard; a link is reused, never minted again on each view, and is null when the visit is too close to move or the link cannot be built. Needs GATE_REPORT_UPCOMING_VISITS, which supplies the visits. Strict opt-in: exactly 'true' in every environment, read at call time via reportPlanRescheduleLive(). Ships DARK; off = the report payload and page are byte-identical to before and the two sections stay separate. Sends nothing to a customer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3898,6 +3900,11 @@ const gates = {
   // report-ask-ai.js reads GATE_REPORT_ASK_AI at call time via
   // reportAskAiLive(); this entry is for logGateStatus only.
   reportAskAi: process.env.GATE_REPORT_ASK_AI === 'true',
+  // Service report plan + upcoming visits merged, per-visit Reschedule
+  // (owner 2026-10-06). Ships DARK. report-data.js reads
+  // GATE_REPORT_PLAN_RESCHEDULE at call time via reportPlanRescheduleLive();
+  // this entry is for logGateStatus only.
+  reportPlanReschedule: process.env.GATE_REPORT_PLAN_RESCHEDULE === 'true',
   // GATE_STANDARD_WORDING_PREVIEW — the office form shows the standard
   // wording a nothing-found report keeps; read at call time via
   // standardWordingPreviewLive().
@@ -4366,6 +4373,21 @@ function seriesMoveTextCoalesceLive() {
   return process.env.GATE_SERIES_MOVE_TEXT_COALESCE === 'true';
 }
 
+// GATE_MULTI_TECH_TEXT_TIMES read at CALL time — strict `=== 'true'`, dark.
+// Multi-technician booking PR 4 (owner "go PR 4" 2026-10-06). The callers that
+// only READ appointment times — the lead reply agent's check_next_availability
+// (lead-response-tools.js), the text drafter's city-based OPEN TIMES fallback and
+// its send-time recheck (sms-shadow-drafter.js) and the estimate converter's
+// first service day (estimate-converter.js) — ask the website booking engine
+// (routes/booking.js, per technician, route-aware) through
+// services/scheduling/text-offer-times.js instead of the old by-city engine
+// (services/availability.js getAvailableSlots: no technicians, no routes). A
+// lead known only by city is placed at that city's centre. Unset = the old
+// by-city engine, byte-identical; the old path is the rollback.
+function multiTechTextTimesLive() {
+  return process.env.GATE_MULTI_TECH_TEXT_TIMES === 'true';
+}
+
 // GATE_KB_SPECIES_QA read at CALL time (server/services/knowledge/wiki-qa.js).
 // Unset = WikiQA answers from knowledge_base alone, byte-identical to before.
 function kbSpeciesQaLive() {
@@ -4711,6 +4733,13 @@ function reportBlogPostLive() {
 // text alone and makes no model call.
 function reportAskAiLive() {
   return process.env.GATE_REPORT_ASK_AI === 'true';
+}
+
+// GATE_REPORT_PLAN_RESCHEDULE read at CALL time — strict `=== 'true'`, dark in
+// every environment. On, the service report merges "Your plan" with "Your
+// upcoming visits" and each visit carries a Reschedule link.
+function reportPlanRescheduleLive() {
+  return process.env.GATE_REPORT_PLAN_RESCHEDULE === 'true';
 }
 
 // GATE_STANDARD_WORDING_PREVIEW read at CALL time — strict `=== 'true'`, dark
@@ -5939,5 +5968,9 @@ module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 module.exports.lawnV13Live = lawnV13Live;
 // GATE_LAWN_BERMUDA_REMOVAL reader, on its own line so gate PRs never conflict.
 module.exports.lawnBermudaRemovalLive = lawnBermudaRemovalLive;
+// GATE_MULTI_TECH_TEXT_TIMES reader, on its own line so gate PRs never conflict.
+module.exports.multiTechTextTimesLive = multiTechTextTimesLive;
 // GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
 module.exports.serverDictationLive = serverDictationLive;
+// GATE_REPORT_PLAN_RESCHEDULE reader, on its own line so gate PRs never conflict.
+module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
