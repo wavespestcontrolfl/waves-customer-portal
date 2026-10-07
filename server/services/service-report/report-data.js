@@ -6,6 +6,7 @@ const logger = require('../logger');
 const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
 const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
 const { buildLawnPhotoSet } = require('./lawn-photo-set');
+const { frozenCoverageDefaultsOnly, coverageVerdictStamp } = require('./lawn-coverage-verdict');
 const { buildPhotoFindings, photoFindingsSignatureState } = require('./lawn-photo-findings');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
@@ -2833,15 +2834,20 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // never be served after it. The stamp rides only while the gate is live.
   if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
   // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES drops the PDF's coverage list, map and
-  // zone legend for a lawn visit with only schematic default zones, so a PDF
-  // cached before a flip is never served after it, and the stamp leaving on
-  // rollback re-keys it back. Rides only while the gate is live (lawn only:
-  // this function returns early for other lines).
-  // The verdict also follows the customer's zone marks (codex #6089 r3): any
-  // office or technician zone write (count or newest updated_at) re-keys the
-  // cached PDF, so a PDF never keeps the old hidden/visible answer after marks
-  // are added or cleared. An unreadable read stamps a one-off key, never a stale one.
-  if (featureGates.lawnCoverageHideDefaultZonesLive()) irrigationStamp += `:covhide=1:z=${await lawnZoneMarkStamp(service, knex)}`;
+  // zone legend for a lawn visit whose coverage verdict, frozen at completion
+  // (structured_notes.lawnCoverageVerdict), says defaults only. The key reads
+  // that frozen value from the record itself (a cache-lookup caller's row is
+  // partial), never the live zone rows. The stamp rides only while the gate is
+  // live AND the frozen verdict is defaultsOnly, so a visit with no verdict (or
+  // marked zones) keeps its key; an unreadable record stamps a one-off key.
+  if (featureGates.lawnCoverageHideDefaultZonesLive()) {
+    try {
+      const row = await knex('service_records').where({ id: service.id }).first('structured_notes');
+      irrigationStamp += coverageVerdictStamp(row?.structured_notes);
+    } catch {
+      irrigationStamp += `:covhide=err${crypto.randomBytes(4).toString('hex')}`;
+    }
+  }
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
@@ -3970,38 +3976,6 @@ async function resolveRecordedProtocolVersion(knex, service) {
   return scheduled?.lawn_protocol_version || null;
 }
 
-// GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES PDF stamp: every input the coverage
-// verdict reads — the customer's active zone rows ("<count>-<newest updated_at
-// ms>") and the drift-resolution inputs (the visit's map center and the latest
-// property_geometries zoom, codex #6089 r4) — so a zone write, a re-geocode or
-// a zoom change that flips lawnCoverageHidden also re-keys the cached PDF.
-async function lawnZoneMarkStamp(service, knex) {
-  try {
-    const row = await knex('property_zones')
-      .where({ customer_id: service.customer_id, is_active: true })
-      .count({ n: '*' }).max({ newest: 'updated_at' }).first();
-    const geometry = await knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first();
-    const newest = row && row.newest ? new Date(row.newest).getTime() : 0;
-    // The center is read here from the visit's own rows (stamped visit coords,
-    // else the customer's), never from the caller's service object: the PDF
-    // cache LOOKUP passes a partial row without coordinates while the RENDER
-    // passes the full join, and both must compute the same key (pre-push P1).
-    const coords = await knex('service_records as sr')
-      .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-      .leftJoin('customers as c', 'sr.customer_id', 'c.id')
-      .where('sr.id', service.id)
-      .first(knex.raw('COALESCE(ss.lat, c.latitude) as lat'), knex.raw('COALESCE(ss.lng, c.longitude) as lng'));
-    const lat = numberOrNull(coords && coords.lat);
-    const lng = numberOrNull(coords && coords.lng);
-    const center = lat != null && lng != null ? `${lat.toFixed(6)},${lng.toFixed(6)}` : 'nc';
-    return `${Number(row && row.n) || 0}-${newest}@${center}~${Number(geometry && geometry.zoom) || 20}`;
-  } catch {
-    // A per-call key that can never match a stored PDF (codex #6089 r5): a
-    // failed read must not produce a reusable cache key.
-    return `zerr-${crypto.randomUUID()}`;
-  }
-}
-
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
   // Identity facts frozen at completion (report-identity-snapshot.js)
   // overlay the live customer/schedule/technician join; pre-snapshot
@@ -4257,8 +4231,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Every input read that feeds the lawn treatment-memory entry reports its
   // failure here (see failSoft); one entry blocks the first freeze.
   const readFailures = new Set();
-  // A failed zone or geometry read is not proof of default zones (codex #6089
-  // r5): the coverage gate then keeps the section and the render is uncacheable.
+  // Feeds ONLY the write gate's freeze (opts.lawnCoverageOut): a failed zone or
+  // geometry read is not proof of default zones, so nothing is frozen. The
+  // render never reads it.
   let coverageReadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
@@ -4319,7 +4294,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // geometry_image). Zone rows alone prove nothing: property-zones.js creates
   // rows with only stock schematic geometry and clears geometry_image without
   // deleting the row, and resolveZoneRowsImageDrift nulls untrusted marks.
-  const coverageZonesAreDefaults = !coverageReadFailed && !resolvedDbZones.some((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0);
+  // Out-param for the write gate, which freezes this verdict at completion
+  // (lawn-coverage-verdict.js). The render never decides from it.
+  if (serviceLine === 'lawn' && opts.lawnCoverageOut && typeof opts.lawnCoverageOut === 'object') {
+    opts.lawnCoverageOut.readOk = !coverageReadFailed;
+    opts.lawnCoverageOut.defaultsOnly = !resolvedDbZones.some((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0);
+  }
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
@@ -5452,8 +5432,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (owner 2026-10-06): a lawn visit with
   // only schematic default zones shows no coverage section. The lawn is
   // treated whole (the product card says "Your whole lawn").
-  const hideDefaultLawnCoverage = serviceLine === 'lawn' && coverageZonesAreDefaults
-    && featureGates.lawnCoverageHideDefaultZonesLive();
+  // The verdict is the one frozen at completion; no frozen verdict (older
+  // visits, a failed freeze) renders exactly as with the gate off.
+  const hideDefaultLawnCoverage = serviceLine === 'lawn'
+    && featureGates.lawnCoverageHideDefaultZonesLive()
+    && frozenCoverageDefaultsOnly(structured);
   const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,
@@ -7514,12 +7497,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // this flag the map-less PDF would be stored under exactly the key
     // expected after the provider recovers and the report would never
     // regain its map. Counted like an image drop: serve it, cache nothing.
-    // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (codex #6089 r5 + pre-push): a
-    // failed zone / geometry read on a lawn visit cannot prove the coverage
-    // verdict, with or without a linked assessment. Like a transient basemap
-    // miss: serve the render, store no PDF. Gate off: key absent.
-    ...(serviceLine === 'lawn' && coverageReadFailed && featureGates.lawnCoverageHideDefaultZonesLive()
-      ? { coverageTransientlyUnavailable: true } : {}),
     stationMapTransientlyUnavailable: stationMap?.available === false
       && ['satellite_unavailable', 'provider_config_unavailable', 'build_failed']
         .includes(String(stationMap?.reason || '')),

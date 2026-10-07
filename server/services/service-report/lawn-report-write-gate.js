@@ -16,6 +16,7 @@
 const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
 const { resolveWaterInForecast } = require('./lawn-watering-forecast');
+const { freezeCoverageVerdict } = require('./lawn-coverage-verdict');
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -83,7 +84,23 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     const record = joined || service;
     const token = await ensureReportToken(service.id, knex);
     const instructionOut = {};
-    const data = await buildReportV1Data(record, token, knex, { wateringInstructionOut: instructionOut }).catch(() => null);
+    const coverageOut = {};
+    const data = await buildReportV1Data(record, token, knex, { wateringInstructionOut: instructionOut, lawnCoverageOut: coverageOut }).catch(() => null);
+
+    // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES: freeze whether this visit's coverage
+    // zones are only schematic defaults, ONCE, now that the technician's zone
+    // writes for the visit are done. First writer wins, own top-level key, own
+    // guarded statement (never inside lawnReportV2, whose write below replaces
+    // the whole object). Only when the gate is live and the zone / geometry
+    // reads SUCCEEDED; a failed read freezes nothing, and a render with no
+    // frozen verdict shows coverage exactly as with the gate off. Gate off: no
+    // write. Independent of the report synthesis, so it runs before the
+    // reportV2 check.
+    if (data && featureGates.lawnCoverageHideDefaultZonesLive()
+      && coverageOut.readOk === true && typeof coverageOut.defaultsOnly === 'boolean') {
+      await freezeCoverageVerdict({ knex, serviceRecordId: service.id, defaultsOnly: coverageOut.defaultsOnly });
+    }
+
     const reportV2 = data && data.reportV2;
     if (!reportV2) return empty;
 

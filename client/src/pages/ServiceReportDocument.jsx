@@ -521,10 +521,10 @@ export default function ServiceReportDocument({ data, token }) {
   // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31): the whole pest line —
   // recurring, one-time, re-service — prints a traced map or nothing; the
   // '-ton1' PDF key suffix re-renders cached pest documents once.
-  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES: a lawn visit whose zones are only
-  // schematic defaults prints no generated map or A-D legend either (the server
-  // sets lawnCoverageHidden; the '-covhide' stamp re-keys cached PDFs). A real
-  // traced map still prints.
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES: a lawn visit whose coverage verdict,
+  // frozen at completion, says the zones were only schematic defaults prints no
+  // generated map or A-D legend either (the server sets lawnCoverageHidden; the
+  // ':covhide=1' PDF key stamp re-keys cached PDFs). A real traced map still prints.
   const schematicSuppressed = callbackSchematicSuppressed || data.pestTraceOrNothing === true
     || data.lawnCoverageHidden === true;
   const schematicSvg = schematicSuppressed

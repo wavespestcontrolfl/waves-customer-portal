@@ -2257,9 +2257,7 @@ router.get('/:token', async (req, res, next) => {
         // (Cloudflare renderer, mid-deploy bundle). Serve, cache nothing.
         const unreachablePhotos = renderImageFailures
           ?? ((renderedData?.imageResolutionFailures || 0) + await countUnreachableReportPhotos(renderedData));
-        if (renderedData?.coverageTransientlyUnavailable) {
-          logger.warn(`[reports-public] lawn coverage zones unreadable for ${service.id} — not caching this render`);
-        } else if (renderedData?.stationMapTransientlyUnavailable) {
+        if (renderedData?.stationMapTransientlyUnavailable) {
           // Same rule as pdf-queue: the key can't see a transient basemap
           // miss, so caching here would strand a map-less report (r23).
           logger.warn(`[reports-public] station map basemap transiently unavailable for ${service.id} — not caching this render`);
@@ -2369,8 +2367,8 @@ router.get('/:token/map.svg', async (req, res, next) => {
     // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31) widens the verdict to
     // the whole pest line ('-ton1'-keyed).
     // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (codex #6089 r2): a lawn report
-    // whose default-zone coverage is hidden must not keep serving that
-    // schematic A-D map here either.
+    // whose coverage is hidden by the verdict frozen at completion must not
+    // keep serving that schematic A-D map here either.
     if ((reserviceReportCopyGateOn() && data.isCallback === true && data.reserviceReport)
       || data.pestTraceOrNothing === true
       || data.lawnCoverageHidden === true) {

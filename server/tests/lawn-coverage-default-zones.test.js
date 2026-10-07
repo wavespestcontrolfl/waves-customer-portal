@@ -1,6 +1,8 @@
-// GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (owner 2026-10-06): a lawn report whose
-// coverage zones are only the schematic defaults shows no coverage section; a
-// property with technician-marked zones keeps it; gate off changes nothing.
+// GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (owner 2026-10-06): the coverage verdict
+// is FROZEN at completion (structured_notes.lawnCoverageVerdict). A render hides
+// a lawn report's coverage section only when that frozen verdict says defaults
+// only; a visit with no verdict renders exactly as with the gate off; the PDF
+// key reads the same frozen value. Nothing here reads zones live to decide.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-signed-map-images';
 const { buildReportV1Data, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
@@ -55,174 +57,171 @@ const MARKED = [{ ...ZONE, geometry_image: MARK }];
 const UNMARKED_ROWS = [{ ...ZONE, geometry_image: null }, { ...ZONE, id: 'z-b', letter: 'B', label: 'Rear perimeter', geometry_image: {} }];
 // An untrusted mark (zoom changed since capture): drift resolution clears it, so the row is a default again.
 const STALE_MARK_ROWS = [{ ...ZONE, geometry_image: { ...MARK, ref: { lat: 27.3, lng: -82.5, zoom: 18, width: 640, height: 340 } } }];
-const build = (zones, { geometries = [], service = {} } = {}) => buildReportV1Data({ ...LAWN_SERVICE, ...service }, 'token-lawn-coverage', makeKnex({
+const build = (zones, { geometries = [], service = {}, options } = {}) => buildReportV1Data({ ...LAWN_SERVICE, ...service }, 'token-lawn-coverage', makeKnex({
   property_geometries: geometries, property_zones: zones, service_findings: [], service_photos: [], service_products: [], scheduled_services: [],
-}));
+}), options);
+const verdict = (defaultsOnly) => JSON.stringify({ lawnCoverageVerdict: { v: 1, defaultsOnly, frozenAt: '2026-10-06T20:00:00.000Z' } });
+const frozen = (defaultsOnly) => ({ structured_notes: verdict(defaultsOnly) });
 
 const KEY = 'GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES';
 afterEach(() => { delete process.env[KEY]; });
 
-test('gate off: a lawn report with default zones keeps its coverage section (unchanged)', async () => {
-  const data = await build([]);
-  expect(data.serviceCoverage.enabled).toBe(true);
-  expect((data.serviceCoverage.items || []).length).toBeGreaterThan(0);
-});
-
-test('gate on: a lawn report built only from schematic default zones shows no coverage section', async () => {
-  process.env[KEY] = 'true';
-  const data = await build([]);
-  expect(data.serviceCoverage).toEqual({ enabled: false });
-});
-
-test('gate on: technician-marked lawn zones keep the coverage section', async () => {
-  process.env[KEY] = 'true';
-  const data = await build(MARKED);
-  expect(data.serviceCoverage.enabled).toBe(true);
-});
-
-test('gate on: zone rows with no technician mark are still defaults, so the section is hidden', async () => {
-  process.env[KEY] = 'true';
-  const data = await build(UNMARKED_ROWS);
-  expect(data.serviceCoverage).toEqual({ enabled: false });
-});
-
-test('gate on: a mark that drift resolution drops as untrusted leaves defaults, so the section is hidden', async () => {
-  process.env[KEY] = 'true';
-  const data = await build(STALE_MARK_ROWS, {
-    geometries: [{ customer_id: 'customer-1', version: 1, zoom: 20 }],
-    service: { customer_latitude: 27.3, customer_longitude: -82.5 },
+describe('render reads only the frozen verdict', () => {
+  test('gate off: a frozen defaultsOnly verdict changes nothing (coverage kept, no hidden key)', async () => {
+    const data = await build([], { service: frozen(true) });
+    expect(data.serviceCoverage.enabled).toBe(true);
+    expect((data.serviceCoverage.items || []).length).toBeGreaterThan(0);
+    expect(Object.prototype.hasOwnProperty.call(data, 'lawnCoverageHidden')).toBe(false);
   });
-  expect(data.serviceCoverage).toEqual({ enabled: false });
-});
 
-test('gate on: a technician mark keeps the section (the marked row is not a default)', async () => {
-  process.env[KEY] = 'true';
-  const data = await build(MARKED);
-  expect(data.serviceCoverage.enabled).toBe(true);
-  expect((data.serviceCoverage.items || []).length).toBeGreaterThan(0);
-  expect(data.lawnCoverageHidden).toBeUndefined();
-});
+  test('gate on + frozen defaultsOnly true: no coverage section, lawnCoverageHidden set', async () => {
+    process.env[KEY] = 'true';
+    const data = await build([], { service: frozen(true) });
+    expect(data.serviceCoverage).toEqual({ enabled: false });
+    expect(data.lawnCoverageHidden).toBe(true);
+  });
 
-test('PDF: gate on + defaults flags lawnCoverageHidden so the PDF prints no generated map or legend', async () => {
-  process.env[KEY] = 'true';
-  expect((await build([])).lawnCoverageHidden).toBe(true);
-  expect((await build(UNMARKED_ROWS)).lawnCoverageHidden).toBe(true);
-});
+  test('gate on + frozen defaultsOnly false: coverage kept', async () => {
+    process.env[KEY] = 'true';
+    const data = await build([], { service: frozen(false) });
+    expect(data.serviceCoverage.enabled).toBe(true);
+    expect(data).not.toHaveProperty('lawnCoverageHidden');
+  });
 
-test('PDF: gate off adds no lawnCoverageHidden key (payload unchanged)', async () => {
-  const data = await build([]);
-  expect(Object.prototype.hasOwnProperty.call(data, 'lawnCoverageHidden')).toBe(false);
-});
+  test('gate on + NO frozen verdict (older visit or failed freeze): renders exactly as gate off', async () => {
+    const off = await build([]);
+    process.env[KEY] = 'true';
+    const on = await build([]);
+    expect(on.serviceCoverage.enabled).toBe(true);
+    expect(on).not.toHaveProperty('lawnCoverageHidden');
+    expect(JSON.stringify(on.serviceCoverage)).toBe(JSON.stringify(off.serviceCoverage));
+  });
 
-test('PDF cache key: the lawn signature moves only while the gate is live (re-render on flip and on rollback)', async () => {
-  const svc = { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' };
-  const sig = async () => (await resolveCanonicalLawnRender(svc, makeKnex({}))).signature;
-  const off = await sig();
-  expect(await sig()).toBe(off);
-  process.env[KEY] = 'true';
-  const on = await sig();
-  expect(on).not.toBe(off);
-  delete process.env[KEY];
-  expect(await sig()).toBe(off);
-});
+  test('a verdict of an unknown version or shape is no verdict', async () => {
+    process.env[KEY] = 'true';
+    for (const bad of [
+      { lawnCoverageVerdict: { v: 2, defaultsOnly: true } },
+      { lawnCoverageVerdict: { v: 1, defaultsOnly: 'yes' } },
+      { lawnCoverageVerdict: 'defaults' },
+    ]) {
+      const data = await build([], { service: { structured_notes: JSON.stringify(bad) } });
+      expect(data.serviceCoverage.enabled).toBe(true);
+    }
+  });
 
-test('PDF cache key: a non-lawn service gets no stamp', async () => {
-  process.env[KEY] = 'true';
-  const svc = { id: 'svc-pest', customer_id: 'customer-1', service_line: 'pest', service_date: '2026-10-06' };
-  expect((await resolveCanonicalLawnRender(svc, makeKnex({}))).signature).toBe('');
-});
+  test('the live zone rows do NOT decide: marked zones + frozen true still hide; default zones + frozen false still show', async () => {
+    process.env[KEY] = 'true';
+    expect((await build(MARKED, { service: frozen(true) })).serviceCoverage).toEqual({ enabled: false });
+    expect((await build(UNMARKED_ROWS, { service: frozen(false) })).serviceCoverage.enabled).toBe(true);
+  });
 
-test('PDF cache key: a zone write (count or newest updated_at) re-keys the lawn PDF while the gate is live (codex #6089 r3)', async () => {
-  process.env[KEY] = 'true';
-  const svc = { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' };
-  // makeKnex has no count/max, so wrap it: property_zones answers the aggregate.
-  const withZones = (agg) => {
-    const base = makeKnex({});
-    const k = (table) => {
-      if (table === 'property_geometries') { const g = { where: () => g, orderBy: () => g, first: () => Promise.resolve({ zoom: 20 }) }; return g; }
-      if (table === 'service_records as sr') { const c = { leftJoin: () => c, where: () => c, first: () => Promise.resolve({ lat: 27.4, lng: -82.5 }) }; return c; }
-      if (table !== 'property_zones') return base(table);
-      const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.resolve(agg) };
-      return q;
-    };
-    k.raw = (sql) => sql;
-    return k;
-  };
-  const sig = async (agg) => (await resolveCanonicalLawnRender(svc, withZones(agg))).signature;
-  const none = await sig({ n: 0, newest: null });
-  const marked = await sig({ n: 1, newest: '2026-10-07T12:00:00Z' });
-  const remarked = await sig({ n: 1, newest: '2026-10-07T13:00:00Z' });
-  expect(marked).not.toBe(none);
-  expect(remarked).not.toBe(marked);
-  expect(await sig({ n: 1, newest: '2026-10-07T13:00:00Z' })).toBe(remarked);
-});
-
-test('PDF cache key: a re-geocode or a geometry zoom change re-keys the lawn PDF (drift inputs, codex #6089 r4)', async () => {
-  process.env[KEY] = 'true';
-  const knexWith = (zoom) => {
-    const base = makeKnex({});
-    return (table) => {
-      if (table === 'property_zones') { const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.resolve({ n: 1, newest: '2026-10-07T12:00:00Z' }) }; return q; }
-      if (table === 'property_geometries') { const q = { where: () => q, orderBy: () => q, first: () => Promise.resolve({ zoom }) }; return q; }
-      if (table === 'service_records as sr') { const q = { leftJoin: () => q, where: () => q, first: () => Promise.resolve({ lat: knexWith.lat, lng: -82.5 }) }; return q; }
+  test('a failed zone read after the freeze changes nothing (no live read decides)', async () => {
+    process.env[KEY] = 'true';
+    const base = makeKnex({ property_geometries: [], service_findings: [], service_photos: [], service_products: [], scheduled_services: [] });
+    const knex = (table) => {
+      if (table === 'property_zones') { const q = { where: () => q, orderBy: () => q, catch: (fn) => Promise.resolve(fn(new Error('read failed'))), then: (r, j) => Promise.reject(new Error('read failed')).then(r, j) }; return q; }
       return base(table);
     };
-  };
-  knexWith.raw = (sql) => sql;
-  // The center comes from the visit's rows, not the caller's object: a partial
-  // lookup row (no coordinates) and a full render row give the same key.
-  const sig = async (lat, zoom, partial = false) => {
-    knexWith.lat = lat;
-    const k = knexWith(zoom); k.raw = (sql) => sql;
-    const svc = partial
-      ? { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' }
-      : { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06', customer_latitude: 1, customer_longitude: 2 };
-    return (await resolveCanonicalLawnRender(svc, k)).signature;
-  };
-  expect(await sig(27.4, 20, true)).toBe(await sig(27.4, 20, false));
-  const base = await sig(27.4, 20);
-  expect(await sig(27.4, 20)).toBe(base);
-  expect(await sig(27.41, 20)).not.toBe(base);
-  expect(await sig(27.4, 19)).not.toBe(base);
+    const data = await buildReportV1Data({ ...LAWN_SERVICE, ...frozen(true) }, 'token-lawn-coverage', knex);
+    expect(data.serviceCoverage).toEqual({ enabled: false });
+    expect(data).not.toHaveProperty('coverageTransientlyUnavailable');
+  });
+
+  test('non-lawn lines ignore the verdict', async () => {
+    process.env[KEY] = 'true';
+    const data = await build([], { service: { ...frozen(true), service_line: 'pest', service_type: 'Pest Control' } });
+    expect(data).not.toHaveProperty('lawnCoverageHidden');
+  });
 });
 
-test('a failed zone read is not default zones: the section stays and nothing is hidden (codex #6089 r5)', async () => {
-  process.env[KEY] = 'true';
-  const base = makeKnex({ property_geometries: [], service_findings: [], service_photos: [], service_products: [], scheduled_services: [] });
-  const knex = (table) => {
-    if (table === 'property_zones') { const q = { where: () => q, orderBy: () => q, catch: (fn) => Promise.resolve(fn(new Error('read failed'))), then: (r, j) => Promise.reject(new Error('read failed')).then(r, j) }; return q; }
-    return base(table);
-  };
-  const data = await buildReportV1Data({ ...LAWN_SERVICE }, 'token-lawn-coverage', knex);
-  expect(data.serviceCoverage.enabled).toBe(true);
-  expect(data).not.toHaveProperty('lawnCoverageHidden');
-  // No linked assessment here: the uncacheable signal is assessment-independent.
-  expect(data.coverageTransientlyUnavailable).toBe(true);
-});
+describe('completion freeze input (opts.lawnCoverageOut)', () => {
+  const out = async (zones, extra = {}) => { const o = {}; await build(zones, { options: { lawnCoverageOut: o }, ...extra }); return o; };
 
-test('gate off: a failed zone read adds no cache flag (payload unchanged)', async () => {
-  const base = makeKnex({ property_geometries: [], service_findings: [], service_photos: [], service_products: [], scheduled_services: [] });
-  const knex = (table) => {
-    if (table === 'property_zones') { const q = { where: () => q, orderBy: () => q, catch: (fn) => Promise.resolve(fn(new Error('read failed'))), then: (r, j) => Promise.reject(new Error('read failed')).then(r, j) }; return q; }
-    return base(table);
-  };
-  const data = await buildReportV1Data({ ...LAWN_SERVICE }, 'token-lawn-coverage', knex);
-  expect(data).not.toHaveProperty('coverageTransientlyUnavailable');
-});
-
-test('a failed stamp read yields a one-off key that never matches a stored PDF (codex #6089 r5)', async () => {
-  process.env[KEY] = 'true';
-  const svc = { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' };
-  const failing = () => {
-    const base = makeKnex({});
-    const k = (table) => {
-      if (table === 'property_zones') { const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.reject(new Error('read failed')) }; return q; }
+  test('technician-marked zone: defaultsOnly false', async () => {
+    expect(await out(MARKED)).toEqual({ readOk: true, defaultsOnly: false });
+  });
+  test('no rows, or rows with no mark: defaultsOnly true', async () => {
+    expect(await out([])).toEqual({ readOk: true, defaultsOnly: true });
+    expect(await out(UNMARKED_ROWS)).toEqual({ readOk: true, defaultsOnly: true });
+  });
+  test('a mark that drift resolution drops as untrusted leaves defaults', async () => {
+    expect(await out(STALE_MARK_ROWS, {
+      geometries: [{ customer_id: 'customer-1', version: 1, zoom: 20 }],
+      service: { customer_latitude: 27.3, customer_longitude: -82.5 },
+    })).toEqual({ readOk: true, defaultsOnly: true });
+  });
+  test('a failed zone read reports readOk false so nothing is frozen', async () => {
+    const base = makeKnex({ property_geometries: [], service_findings: [], service_photos: [], service_products: [], scheduled_services: [] });
+    const knex = (table) => {
+      if (table === 'property_zones') { const q = { where: () => q, orderBy: () => q, catch: (fn) => Promise.resolve(fn(new Error('read failed'))), then: (r, j) => Promise.reject(new Error('read failed')).then(r, j) }; return q; }
       return base(table);
     };
-    k.raw = (sql) => sql;
-    return k;
-  };
-  const a = (await resolveCanonicalLawnRender(svc, failing())).signature;
-  const b = (await resolveCanonicalLawnRender(svc, failing())).signature;
-  expect(a).not.toBe(b);
+    const o = {};
+    await buildReportV1Data({ ...LAWN_SERVICE }, 'token-lawn-coverage', knex, { lawnCoverageOut: o });
+    expect(o.readOk).toBe(false);
+  });
+  test('not filled for a non-lawn line', async () => {
+    const o = {};
+    await build([], { options: { lawnCoverageOut: o }, service: { service_line: 'pest', service_type: 'Pest Control' } });
+    expect(o).toEqual({});
+  });
+});
+
+describe('PDF cache key reads the frozen verdict', () => {
+  const svc = { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' };
+  const rowsKnex = (notes) => makeKnex({ service_records: [{ id: 'svc-cur', ...(notes === undefined ? {} : { structured_notes: notes }) }] });
+  const sig = async (service, notes) => (await resolveCanonicalLawnRender(service, rowsKnex(notes))).signature;
+
+  test('gate off: the signature is byte-identical whatever the verdict says', async () => {
+    const none = await sig(svc);
+    expect(await sig(svc, verdict(true))).toBe(none);
+    expect(await sig(svc, verdict(false))).toBe(none);
+  });
+
+  test('gate on: ":covhide=1" only for a frozen defaultsOnly true; no verdict or false keeps the gate-off key', async () => {
+    const off = await sig(svc);
+    process.env[KEY] = 'true';
+    expect(await sig(svc)).toBe(off);
+    expect(await sig(svc, '{}')).toBe(off);
+    expect(await sig(svc, verdict(false))).toBe(off);
+    const hidden = await sig(svc, verdict(true));
+    expect(hidden).not.toBe(off);
+    // The stamp is hashed into the signature; only the frozen verdict moves it.
+    expect(await sig(svc, verdict(true))).toBe(hidden);
+  });
+
+  test('a partial lookup row and a full render row compute the same key', async () => {
+    process.env[KEY] = 'true';
+    const full = { ...svc, customer_latitude: 27.4, customer_longitude: -82.5, structured_notes: '{}' };
+    expect(await sig(svc, verdict(true))).toBe(await sig(full, verdict(true)));
+    expect(await sig(svc, verdict(false))).toBe(await sig(full, verdict(false)));
+  });
+
+  test('turning the gate off re-keys back (rollback)', async () => {
+    const off = await sig(svc, verdict(true));
+    process.env[KEY] = 'true';
+    const on = await sig(svc, verdict(true));
+    delete process.env[KEY];
+    expect(on).not.toBe(off);
+    expect(await sig(svc, verdict(true))).toBe(off);
+  });
+
+  test('a failed record read stamps a one-off key that never matches a stored PDF', async () => {
+    process.env[KEY] = 'true';
+    const failing = () => {
+      const base = makeKnex({});
+      return (table) => {
+        if (table === 'service_records') { const q = { where: () => q, first: () => Promise.reject(new Error('read failed')) }; return q; }
+        return base(table);
+      };
+    };
+    const a = (await resolveCanonicalLawnRender(svc, failing())).signature;
+    const b = (await resolveCanonicalLawnRender(svc, failing())).signature;
+    expect(a).not.toBe(b);
+  });
+
+  test('a non-lawn service gets no stamp', async () => {
+    process.env[KEY] = 'true';
+    expect((await resolveCanonicalLawnRender({ ...svc, service_line: 'pest' }, rowsKnex(verdict(true)))).signature).toBe('');
+  });
 });

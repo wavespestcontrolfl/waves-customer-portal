@@ -424,13 +424,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // A transient basemap miss drops the placement section without changing
     // the cache key (codex P2 #3176 r23) — treat it exactly like a dropped
     // image: serve the render, store nothing, re-render once it recovers.
-    if (renderedData?.coverageTransientlyUnavailable) {
-      logger.warn(`[service-report-pdf] lawn coverage zones unreadable for ${recordId} — serving without storing`);
-      return {
-        key: null, pdf, rendered: true, token: reportToken, uncached: true,
-        uncachedReason: 'coverage_unavailable',
-      };
-    }
     if (renderedData?.stationMapTransientlyUnavailable) {
       logger.warn(`[service-report-pdf] station map basemap transiently unavailable for ${recordId} — serving without storing`);
       return {

@@ -2386,17 +2386,25 @@ stamp while the gate is on, so gate-off PDFs are never served after the flip
 `GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES` (dark, read at call time; gate off leaves the
 payload, the PDF and every cached PDF key byte-identical) changes the lawn
 `/api/reports/:token/data` payload and the PDF that share `buildReportV1Data`
-(lawn only; no new route, token, privacy or rate-limit surface). When a lawn visit's
-coverage zones are only the schematic defaults, meaning no active `property_zones`
-row keeps a technician satellite mark (a non-empty `geometry_image`) after drift
-resolution (zone rows with no mark, or marks dropped as untrusted, count as
-defaults), the payload carries `serviceCoverage: { enabled: false }` in place of
-the A-D perimeter coverage list, and adds one optional key
-`lawnCoverageHidden: true` (absent otherwise). The PDF reads that key and prints no
-generated "Where we treated" map or A-D legend either; a real technician-traced
-treatment map still prints. While the gate is live the lawn PDF signature
-(`lawnAssessmentPdfSignature`) carries `:covhide=1:z=<active zone count>-<newest zone updated_at>@<map center>~<geometry zoom>`, so PDFs cached before a flip, or before any zone mark is added or cleared,
-re-render, and re-render again when the gate is turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
+(lawn only; no new route, token, privacy or rate-limit surface). The verdict is
+frozen at completion, not computed at render: while the gate is live the lawn
+write gate stores `structured_notes.lawnCoverageVerdict = { v: 1, defaultsOnly,
+frozenAt }` once per visit (first writer wins; nothing is stored when the zone or
+geometry read failed). `defaultsOnly` is true when no active `property_zones` row
+kept a technician satellite mark (a non-empty `geometry_image`) after drift
+resolution. When the frozen verdict says `defaultsOnly: true`, the payload carries
+`serviceCoverage: { enabled: false }` in place of the A-D perimeter coverage list,
+and adds one optional key `lawnCoverageHidden: true` (absent otherwise). A visit
+with no frozen verdict (visits completed before the flip, a failed freeze) is
+unchanged: the render reads no zone or geometry row to decide, so older visits
+keep their coverage section and a later zone write changes nothing. The PDF reads
+`lawnCoverageHidden` and prints no generated "Where we treated" map or A-D legend
+either; a real technician-traced treatment map still prints. While the gate is
+live the lawn PDF signature (`lawnAssessmentPdfSignature`) carries `:covhide=1`
+only for a record whose frozen verdict is `defaultsOnly: true` (read from the
+record's own `structured_notes`, so a partial cache-lookup row and a full render
+row key alike); PDFs cached before a flip re-render, and again when the gate is
+turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
 found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
 not served either.
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
