@@ -2712,6 +2712,49 @@ prints the same text; the SMS and email summaries are unchanged. The PDF cache
 signature gains `:tp=<hash of the text>` only while the gate is live AND a whole
 frozen entry exists.
 
+`GATE_LAWN_VISIT_SUMMARY_V2` (dark, strict opt-in, exactly `'true'`, read at call
+time) controls ONLY the freeze at completion (no new summaries while it is off; a
+rollback leaves frozen ones in place). A render, the PDF and the PDF cache key depend
+only on the record, so every pod, browser and renderer agrees during a rollout: the
+`/api/reports/:token/data` payload changes ONE existing lawn field, not the shape, for
+a visit whose record carries a whole frozen summary, whatever the gate says. `summary`
+carries the frozen lawn Visit Summary (fixed sentences, at most 6) in place of the
+generic completion recap (`structured_notes.customerRecap`), and `summarySource` is
+`'lawn_visit_summary'` instead of `'recap'`. No key is added, and no query parameter.
+It applies only to a lawn report with a confirmed assessment, and the tech-reviewed AI
+report, which still wins, is unchanged. NO MODEL writes it: at completion
+(`finalizeLawnReportSynthesis`, `lawn-report-write-gate.js`, in the awaited step before
+the report email is queued) code picks sentences from closed phrase tables
+(`lawn-visit-summary.js`) using the report's own facts: product CATEGORIES (never
+names, rates or actives), the area reads (`strong` and `healthy` stay distinct
+phrases), the technician-kept PHOTO findings (the "What the photos showed" selector;
+technician-added details have no photo provenance and never count) by their own symptom
+label (hedged when the confidence is low or unknown, or when the technician marked it
+undeterminable from the photos, and only while the report's card for that topic shows a
+concern; duplicate labels keep the least-confident read), and, for a recurring lawn plan
+visit only (the program line's own `resolveProgramVisit` answer; a one-time visit gets
+neither), the fixed results sentence ("each visit adds to the last one") and, when a
+real scheduled next visit exists AT THIS PROPERTY (the property-scoped
+`lawnNextVisitAtProperty` answer, never the customer-wide `snapshot.nextVisit` label
+and never a cadence estimate), "At the next visit we will look at ..."; both decisions
+freeze in the slots. There is NO watering sentence: the report's watering banner owns the
+watering step, with its own timing and expiry. The technician note, the program line,
+the headline and rain are not inputs. It freezes first-writer-wins under
+`structured_notes.lawnVisitSummary[assessmentId]` (its own top-level key) as
+`{ text, slots }`; a render only reads it, from the record the build already loaded, so
+`/api/reports/:token/ask` gains no read. At read time the text must equal what the
+current tables render from the stored slots and pass the customer-copy and
+result-timing screens; a frozen text that no longer does prints the recap. Any miss, an
+unreadable record or a degraded product read leaves the generic recap exactly as it
+was. The SMS and email keep the short `customerRecap`. On the PDF the document prints
+the whole `summary` for `summarySource: 'lawn_visit_summary'` (the reconciled
+`todaysResult` is only its first sentence). The PDF cache signature carries
+`:vs=<hash of the frozen text>` whenever a whole frozen summary exists (whatever the gate
+says), derived from the service row the render loaded, so a PDF cached before the summary
+existed is never served after it, and a visit with none keeps its key. Every paragraph is
+at most six one-sentence parts. No token, eligibility, privacy, rate-limit or header
+change; no new route.
+
 `GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
 sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
 claim between visits shot in different or unknown light", with six independent

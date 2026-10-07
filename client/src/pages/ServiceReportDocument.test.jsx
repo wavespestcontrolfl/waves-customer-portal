@@ -1119,6 +1119,22 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('No notable issues were found today.');
   });
 
+  it('prints the whole frozen lawn Visit Summary, not the reconciled first sentence', () => {
+    const summary = 'Today we applied a feeding, which fits the fall season. In the photos we noticed some weed pressure. Results from treatments like these build gradually, and each visit adds to the last one. At the next visit we will look at weeds.';
+    const data = {
+      ...BASE_DATA,
+      typedReport: null,
+      summary,
+      summarySource: 'lawn_visit_summary',
+      reportV2: { todaysResult: 'Today we applied a feeding, which fits the fall season.', insights: [{ headline: 'Weed watch', whatWeSaw: 'Some weeds.' }] },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain(summary);
+    // Any other source keeps the reconciled result in front of the summary, as before.
+    const other = render(<ServiceReportDocument data={{ ...data, summarySource: 'recap' }} token="tok123" />);
+    expect(other.container.textContent).not.toContain('In the photos we noticed some weed pressure');
+  });
+
   it('keeps a promised follow-up and the next-service arrival window', () => {
     const data = {
       ...BASE_DATA,

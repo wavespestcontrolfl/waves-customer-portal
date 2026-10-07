@@ -2876,6 +2876,21 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
       irrigationStamp += `:tp=err${crypto.randomBytes(4).toString('hex')}`;
     }
   }
+  // The Visit Summary (PROTOTYPE ONLY) replaces the recap text the PDF prints, so it keys the PDF
+  // the same way. A render depends only on the record's frozen text (never on the gate), so the key
+  // does too: present whenever a whole frozen summary exists, absent otherwise (a later freeze re-keys).
+  // Derived from the SAME service row the render loads (service.structured_notes); only a caller with
+  // a partial row (a cache lookup) reads the record. An unreadable record stamps random (re-render).
+  if (assessment?.id) {
+    try {
+      const notes = service.structured_notes !== undefined
+        ? service.structured_notes
+        : (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes;
+      irrigationStamp += require('./lawn-visit-summary').visitSummarySignature(notes, assessment.id).replace(':tp=', ':vs=');
+    } catch {
+      irrigationStamp += `:vs=err${crypto.randomBytes(4).toString('hex')}`;
+    }
+  }
   // "What the photos showed" (P23b) is built from this assessment's reviewed run,
   // so the key follows the run's reviewed state, and only for a visit that would
   // print the block (no block = no stamp, so such a visit keeps its key). The
@@ -5574,16 +5589,22 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // nitrogen applied (no line beats a wrong line; codex P1 pre-push).
       let nitrogenApplied = null;
       let programVisit = false;
-      if (typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()) {
+      const expectationsLive = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive();
+      if (expectationsLive) {
         nitrogenApplied = await resolveNitrogenApplied({
           applications,
           productsLoadFailed,
           loadCatalogRows: (ids) => knex('products_catalog').whereIn('id', ids).select('id', 'analysis_n', 'category', 'product_type', 'subcategory'),
         });
-        // Only a recurring lawn plan visit gets the program line: the visit's
-        // catalog service identity must be a recurring lawn plan (never the
-        // WaveGuard tier, which is a bundle discount, not a lawn program).
-        // One-time lawn jobs, callbacks and unresolved identities get null.
+      }
+      // Only a recurring lawn plan visit gets the program line: the visit's
+      // catalog service identity must be a recurring lawn plan (never the
+      // WaveGuard tier, which is a bundle discount, not a lawn program).
+      // One-time lawn jobs, callbacks and unresolved identities get null.
+      // The Visit Summary's write gate (programVisitOut) asks for the same answer
+      // with the program-line gate off, so it never invents its own.
+      const programVisitOut = opts.programVisitOut && typeof opts.programVisitOut === 'object' ? opts.programVisitOut : null;
+      if (expectationsLive || programVisitOut) {
         programVisit = await resolveProgramVisit({
           // Frozen completion identity first (a later repoint of the scheduled
           // row cannot change a permanent report); live resolution only for
@@ -5593,6 +5614,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           isCallback: !!service.is_callback,
           loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),
         });
+        if (programVisitOut) programVisitOut.programVisit = programVisit;
       }
       // GATE_LAWN_V13: the program line's v13 sentences are for a visit whose plan
       // resolved the staged v13 version only. The version the closeout recorded
@@ -5601,7 +5623,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // attributed) passes none and keeps the legacy sentences. An unreadable
       // record means no line.
       let pinnedProtocolVersion = null;
-      if (programVisit && typeof featureGates.lawnV13Live === 'function' && featureGates.lawnV13Live()) {
+      if (expectationsLive && programVisit && typeof featureGates.lawnV13Live === 'function' && featureGates.lawnV13Live()) {
         try {
           pinnedProtocolVersion = await resolveRecordedProtocolVersion(knex, service);
         // read-failure-exempt: only the program line depends on the pin; an unreadable pin drops it (old season note), no treatment-memory input.
@@ -5838,9 +5860,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // GATE_LAWN_REPORT_COPY_V6: the next lawn visit at THIS property
           // (lawnNextVisitAtProperty); the same visit times the v6 copy's
           // by-next-visit sentence. Gate off: the customer-wide query, as before.
-          const scopedNext = featureGates.lawnReportCopyV6Live()
+          const copyV6Next = featureGates.lawnReportCopyV6Live();
+          // The Visit Summary's write gate (programVisitOut) needs the PROPERTY-scoped answer with
+          // copy v6 off too: the legacy query below is customer-wide. A failed read leaves it unset.
+          const visitSummaryOut = opts.programVisitOut && typeof opts.programVisitOut === 'object' ? opts.programVisitOut : null;
+          const propertyNext = copyV6Next || visitSummaryOut
             ? await lawnNextVisitAtProperty(service, afterIso, knex, readFailures)
             : null;
+          if (visitSummaryOut && propertyNext) visitSummaryOut.nextVisitBooked = propertyNext.state === 'scheduled';
+          const scopedNext = copyV6Next ? propertyNext : null;
           const legacyNextRow = async () => {
             return knex('scheduled_services')
               .where('customer_id', service.customer_id)
@@ -6828,6 +6856,20 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
+  // The lawn Visit Summary (PROTOTYPE ONLY): a lawn visit with a frozen summary (fixed sentences written
+  // by code, no model) prints it in place of the generic completion recap (which the completion text keeps
+  // using). GATE_LAWN_VISIT_SUMMARY_V2 controls only the freeze at completion; a render shows whatever whole
+  // summary the record carries, so every pod and browser agrees during a rollout. No frozen entry, a failed
+  // read-time check or any error leaves the recap exactly as it was. The tech-reviewed AI report below still wins.
+  if (serviceLine === 'lawn' && lawnAssessment?.assessmentId) {
+    try {
+      const frozenSummary = require('./lawn-visit-summary').readFrozenVisitSummary(service.structured_notes, lawnAssessment.assessmentId);
+      if (frozenSummary) {
+        visitSummary = frozenSummary;
+        visitSummarySource = 'lawn_visit_summary';
+      }
+    } catch { /* the recap stays */ }
+  }
   // The four-section report's screened sections (GATE_REPORT_WRITER_RULES),
   // set only when that report is the summary; surfaces render them where
   // they would print exactly that text.
