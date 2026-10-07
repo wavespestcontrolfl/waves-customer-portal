@@ -640,7 +640,7 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     let area;
     beforeEach(() => {
       pair.mockResolvedValue(null);
-      area = jest.spyOn(removal, 'bermudaAreaViolation').mockResolvedValue('Enter the area treated for the bermuda mix.');
+      area = jest.spyOn(removal, 'bermudaAreaViolation').mockResolvedValue('Enter the area treated and the amount used for the bermuda mix.');
     });
     afterEach(() => area.mockRestore());
 
@@ -648,7 +648,7 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
       const result = await complete({ products: [] });
-      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_area_required', error: 'Enter the area treated for the bermuda mix.' } });
+      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_area_required', error: 'Enter the area treated and the amount used for the bermuda mix.' } });
       expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
     });
 

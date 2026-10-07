@@ -370,11 +370,12 @@ async function bermudaPairViolation(knex, products, { serviceId } = {}) {
   return pairMessage(submitted);
 }
 
-// A recorded step spray needs its treated area (or a stated rate): a spot mix has no catalog-derived
-// amount, so a row that states neither says nothing about how much of the lawn was sprayed, and the
-// application history and the label-rate cap would count nothing. Refused on a step visit only, on a
-// fresh attempt only (the caller). Returns the message, or null.
-const AREA_REQUIRED_MESSAGE = 'Enter the area treated for the bermuda mix.';
+// A recorded step spray needs a sizable amount: its treated area TOGETHER with the amount used, or a
+// stated rate with a valid unit. A spot mix has no catalog-derived amount, so an area alone (or an
+// amount alone) cannot be sized per 1,000 sq ft, and the application history and the label-rate cap
+// would count nothing. Refused on a step visit only, on a fresh attempt only (the caller). Returns
+// the message, or null.
+const AREA_REQUIRED_MESSAGE = 'Enter the area treated and the amount used for the bermuda mix.';
 async function bermudaAreaViolation(knex, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return null;
   const { recognition, fusilade } = await submittedStepProducts(knex, products);
@@ -382,7 +383,9 @@ async function bermudaAreaViolation(knex, products, { serviceId } = {}) {
   if (!stepIds.length) return null;
   if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
   const positive = (value) => Number(value) > 0;
-  const missing = products.some((p) => stepIds.includes(String(p?.productId)) && !positive(p.areaValue) && !positive(p.rate));
+  const { isValidRateUnit } = require('./inventory-units');
+  const sized = (p) => (positive(p.areaValue) && positive(p.totalAmount)) || (positive(p.rate) && isValidRateUnit(p.rateUnit));
+  const missing = products.some((p) => stepIds.includes(String(p?.productId)) && !sized(p));
   return missing ? AREA_REQUIRED_MESSAGE : null;
 }
 
@@ -554,6 +557,11 @@ function mixOrderField(items, held = false) {
     }))].map((step, index) => ({ step: index + 1, ...step })),
   };
 }
+
+const ELIGIBILITY_UNAVAILABLE_WARNING = {
+  code: 'lawn_bermuda_eligibility_unavailable', severity: 'warning',
+  message: 'Bermuda removal could not be checked for this visit; use the full form and check the account.',
+};
 
 const EXCLUDED_CULTIVAR_WARNING = {
   code: 'lawn_bermuda_cultivar_excluded', severity: 'warning',
@@ -733,11 +741,17 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
 async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows, probeLimits, productOf, reportLimitWarnings = false }) {
   // `loadVisit` is called only when the step could apply at all (gate, track, month).
   const eligible = bermudaRemovalVisit({ trackKey, month }) && featureGates.lawnV13Live?.() === true;
-  const step = eligible ? await stepForVisit(knex, await loadVisit(), { trackKey, month }) : { active: false };
+  // The account is read STRICTLY: a read error is an explicit unavailable state (no step lines and a
+  // warning), never a silently ineligible visit.
+  let unavailable = false;
+  let step = { active: false };
+  if (eligible) {
+    try { step = await stepForVisit(knex, await loadVisit(), { trackKey, month, strict: true }); } catch (err) { unavailable = true; }
+  }
   const active = step.active === true;
   const state = { blocks: [], mark: false };
   // The cultivar policy's own warning for an excluded cultivar (the step is then off).
-  const stepWarnings = step.excluded ? [EXCLUDED_CULTIVAR_WARNING] : [];
+  const stepWarnings = [...(step.excluded ? [EXCLUDED_CULTIVAR_WARNING] : []), ...(unavailable ? [ELIGIBILITY_UNAVAILABLE_WARNING] : [])];
   const rowOptions = active ? { includeBermudaRemoval: true } : undefined;
   return {
     lines: active ? markStepLines(parseLines(step.addOn.secondary, 'conditional')) : [],

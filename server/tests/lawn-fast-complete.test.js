@@ -312,6 +312,14 @@ describe('buildLawnFastContext', () => {
       expect(buildPlanForService).not.toHaveBeenCalled();
     });
 
+    test('a read error while checking the step fails closed to the full form, never an eligible sheet', async () => {
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      offered.mockRejectedValue(Object.assign(new Error('boom'), { code: 'ECONN' }));
+      const ctx = await ctxFor(PROFILE(), 'monthly_membership');
+      expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'bermuda_removal' });
+    });
+
     test('no step offered: the sheet works as before, with no needsFullForm anywhere', async () => {
       process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
       process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';

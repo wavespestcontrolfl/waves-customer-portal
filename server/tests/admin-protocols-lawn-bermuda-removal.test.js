@@ -60,12 +60,13 @@ const freshAccount = () => ({
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
 
-function readQuery(rows) {
+function readQuery(rows, fail = false) {
   const query = {};
   for (const method of ['where', 'whereNull', 'orWhereNull', 'whereIn', 'join', 'select', 'orderByRaw', 'orderBy']) query[method] = jest.fn(() => query);
-  query.first = jest.fn(async () => rows[0] || null);
-  query.catch = (onRejected) => Promise.resolve(rows).catch(onRejected);
-  query.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+  query.first = jest.fn(async () => { if (fail) throw new Error('read failed'); return rows[0] || null; });
+  const source = () => (fail ? Promise.reject(new Error('read failed')) : Promise.resolve(rows));
+  query.catch = (onRejected) => source().catch(onRejected);
+  query.then = (resolve, reject) => source().then(resolve, reject);
   return query;
 }
 
@@ -100,7 +101,7 @@ beforeEach(() => {
     if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: account.visitDate, service_type: account.serviceType, lawn_protocol_version: account.pin }] : []);
     if (table === 'customer_turf_profiles') return readQuery(account.profile ? [account.profile] : []);
     if (table === 'estimates') return readQuery(account.estimates);
-    if (table === 'customer_properties') return readQuery(account.properties);
+    if (table === 'customer_properties') return readQuery(account.properties, account.failProperties === true);
     if (table === 'product_limits') return readQuery(account.tagged);
     throw new Error(`Unexpected table: ${table}`);
   });
@@ -156,6 +157,31 @@ describe('the Zoysia 2(ee) note: a required gate note on the Zoysia lines only',
     for (const line of body.items.filter((item) => item.bermudaStep)) expect(noteOf(line)).toBeUndefined();
     expect(JSON.stringify(body)).not.toMatch(/2\(ee\)/);
     for (const action of (await actionsFor({})).actions.filter((a) => a.group)) expect(noteOf(action)).toBeUndefined();
+  });
+});
+
+describe('an error reading the account is an explicit unavailable state, never a silently ineligible visit', () => {
+  const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+  const MESSAGE = 'Bermuda removal could not be checked for this visit; use the full form and check the account.';
+  const actionsFor = async () => {
+    const res = { json: jest.fn(), status: jest.fn() };
+    res.status.mockReturnValue(res);
+    await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month: '4', scheduledServiceId: SERVICE_ID } }, res, jest.fn());
+    return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+  };
+
+  test('the sheet and the actions: no bermuda lines and the lawn_bermuda_eligibility_unavailable warning; the base mix is untouched', async () => {
+    account.failProperties = true;
+    const sheet = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    expect(sheet.items.filter((item) => item.bermudaStep)).toEqual([]);
+    expect(sheet.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'lawn_bermuda_eligibility_unavailable', message: MESSAGE })]));
+    expect(sheet.items.some((item) => item.product?.name === 'LESCO 24-0-11 with PolyPlus OPTI')).toBe(true);
+    const actions = await actionsFor();
+    expect(actions.actions.filter((a) => a.group)).toEqual([]);
+    expect(actions.warnings).toEqual([expect.objectContaining({ code: 'lawn_bermuda_eligibility_unavailable' })]);
+    // A healthy read shows no such warning.
+    account.failProperties = false;
+    expect(JSON.stringify((await lawnMix({ scheduledServiceId: SERVICE_ID })).warnings)).not.toContain('eligibility_unavailable');
   });
 });
 

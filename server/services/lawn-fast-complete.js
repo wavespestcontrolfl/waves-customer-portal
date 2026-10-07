@@ -643,7 +643,13 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   if (reason) return { ok: true, eligible: false, reason, visitType, service };
   // The bermuda removal mix is one grouped selection the quick sheet has no UI for: a visit that OFFERS it
   // (decided from the visit's step eligibility, whatever the completion defaults say) takes the full form.
-  if (await bermudaRemoval.stepOffered(knex, svc.id)) return { ok: true, eligible: false, reason: 'bermuda_removal', needsFullForm: BERMUDA_FULL_FORM_REASON, visitType, service };
+  // A read error while checking it fails CLOSED to the full form (where the warning and the account check
+  // live), never an eligible quick sheet.
+  const mixOffered = await bermudaRemoval.stepOffered(knex, svc.id).catch((err) => {
+    logger.warn(`[lawn-fast] bermuda eligibility unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return true;
+  });
+  if (mixOffered) return { ok: true, eligible: false, reason: 'bermuda_removal', needsFullForm: BERMUDA_FULL_FORM_REASON, visitType, service };
 
   const { assessmentRow, assessmentReadFailed, assessmentUnusable } = await loadAssessmentState(svc, knex, readFailures);
   const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex, readFailures) : null;

@@ -909,23 +909,30 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       }
     });
 
-    test('a step spray must state its treated area or a rate: refused on a step visit only (Recognition or Fusilade II without either)', async () => {
+    test('a step spray must state its treated area WITH the amount used, or a rate with a valid unit: refused on a step visit only', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20', bermuda: true });
       const entry = (item, extra = {}) => ({ productId: item.id, ...extra });
-      const MESSAGE = 'Enter the area treated for the bermuda mix.';
-      expect(await bermudaAreaViolation(knex, [entry(rec), entry(fus), entry(nis)], { serviceId: f.visit.id })).toBe(MESSAGE);
-      expect(await bermudaAreaViolation(knex, [entry(rec, { areaValue: 5000, areaUnit: 'sqft' }), entry(fus)], { serviceId: f.visit.id })).toBe(MESSAGE);
-      expect(await bermudaAreaViolation(knex, [entry(rec, { areaValue: '0' }), entry(fus, { areaValue: 5000 })], { serviceId: f.visit.id })).toBe(MESSAGE);
-      // Area or a rate on each step product, the surfactant needing neither: allowed.
-      expect(await bermudaAreaViolation(knex, [entry(rec, { areaValue: 5000 }), entry(fus, { rate: 0.55 }), entry(nis)], { serviceId: f.visit.id })).toBeNull();
-      // Not a step visit (another month, no switch, gate off), or no step product submitted: never refused.
+      const MESSAGE = 'Enter the area treated and the amount used for the bermuda mix.';
+      const check = (entries, visit = f.visit) => bermudaAreaViolation(knex, entries, { serviceId: visit.id });
+      // Nothing, an area alone, an amount alone, a zero, a rate with no unit or a bad unit: refused.
+      expect(await check([entry(rec), entry(fus), entry(nis)])).toBe(MESSAGE);
+      expect(await check([entry(rec, { areaValue: 5000, areaUnit: 'sqft' }), entry(fus, { areaValue: 5000 })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { totalAmount: 0.3 }), entry(fus, { totalAmount: 5.5 })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { areaValue: '0', totalAmount: 0.3 }), entry(fus, { areaValue: 5000, totalAmount: 5.5 })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03 }), entry(fus, { areaValue: 5000, totalAmount: 5.5 })])).toBe(MESSAGE);
+      expect(await check([entry(rec, { rate: 0.03, rateUnit: 'per acre' }), entry(fus, { areaValue: 5000, totalAmount: 5.5 })])).toBe(MESSAGE);
+      // The one that fails among the two names it: Fusilade II has only an area.
+      expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3 }), entry(fus, { areaValue: 5000 })])).toBe(MESSAGE);
+      // Area with the amount, or a rate with a valid unit, on each step product (the surfactant needs neither): allowed.
+      expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3 }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' }), entry(nis)])).toBeNull();
+      // Not a step visit, no step product, nothing submitted, or the gate off: never refused.
       const plain = await lawn({ date: '2026-06-20' });
-      expect(await bermudaAreaViolation(knex, [entry(rec), entry(fus)], { serviceId: plain.visit.id })).toBeNull();
-      expect(await bermudaAreaViolation(knex, [entry(nis)], { serviceId: f.visit.id })).toBeNull();
-      expect(await bermudaAreaViolation(knex, [], { serviceId: f.visit.id })).toBeNull();
+      expect(await check([entry(rec), entry(fus)], plain.visit)).toBeNull();
+      expect(await check([entry(nis)])).toBeNull();
+      expect(await check([])).toBeNull();
       setGates({ removal: false });
-      expect(await bermudaAreaViolation(knex, [entry(rec), entry(fus)], { serviceId: f.visit.id })).toBeNull();
+      expect(await check([entry(rec), entry(fus)])).toBeNull();
     });
 
     test('the tagged rows missing: a mix spelled by a catalog alias or linked from the staged rows still triggers the refusal (links and aliases before names)', async () => {
