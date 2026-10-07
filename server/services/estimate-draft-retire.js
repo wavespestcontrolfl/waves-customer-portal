@@ -189,7 +189,20 @@ async function retireOneDraft(trx, pair) {
   return row;
 }
 
-async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
+// Query errors from knex carry the bound values (street addresses) in
+// err.message; only the code and name leave this module, so no address
+// reaches the scheduler log or runExclusive's error record.
+async function retireDraftsReplacedBySentEstimate(opts = {}) {
+  try {
+    return await retireDrafts(opts);
+  } catch (err) {
+    const safe = new Error(`estimate draft retire failed: ${err?.code || err?.name || 'error'}`);
+    safe.code = err?.code;
+    throw safe;
+  }
+}
+
+async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   const batch = Math.max(1, Math.min(Number(limit) || RETIRE_BATCH_LIMIT, 1000));
   // Unqualified columns in DRAFT_ELIGIBLE_SQL resolve to the draft (the
   // subquery reads one table). Up to SENDS_PER_DRAFT real sends per draft,
