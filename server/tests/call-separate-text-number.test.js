@@ -30,6 +30,7 @@ const { flatView, callerIdDisclaimedNoteText } = require('../utils/extraction-co
 const { callbackNumberCoachingNote } = require('../services/csr/csr-coach');
 const { buildExtractionPrompt, PROMPT_VERSION } = require('../services/prompts/call-extraction-v1');
 
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const ANI = '+19415550100'; // the relay line the caller called from
 const TEXT = '+19415559876'; // the number the caller gave for texts
 
@@ -56,6 +57,7 @@ describe('aniCannotTextNumber / aniCannotTextNeedsNumber', () => {
     ['a one-digit near miss of the ANI', { ani_cannot_text: true, text_phone_e164: '+19415550101' }],
     ['an impossible area code', { ani_cannot_text: true, text_phone_e164: '+11735559876' }],
     ['too short', { ani_cannot_text: true, text_phone_e164: '+1941555' }],
+    ['one of our own lines', { ani_cannot_text: true, text_phone_e164: TWILIO_NUMBERS.getOutboundNumber() }],
   ])('%s: no usable number, the caller still needs one', (_label, caller) => {
     expect(aniCannotTextNumber(caller, { ani: ANI })).toBeNull();
     expect(aniCannotTextNeedsNumber(caller, { ani: ANI })).toBe(true);
@@ -184,10 +186,14 @@ describe('processor wiring (source pins)', () => {
     expect(src.slice(blockStart, blockEnd)).not.toMatch(/db\('customers'\)[\s\S]*\.update\(/);
   });
 
+  test('the dropped-call address text (ANI only) is card-only when the ANI cannot take texts', () => {
+    expect(src).toMatch(/genuineNewProspect && callAniCannotText\) \{\s*\/\/[^]*?smsOutcome = \{ sent: false, skipped: 'ani_cannot_text' \};/);
+  });
+
   test('the confirmation never redirects to the ANI and goes to the text number', () => {
     expect(src).toMatch(/redirectImpliedToAni = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni\s*&& smsLast10\(contactPhone\)\.length === 10 && !callAniCannotText;/);
     expect(src).toContain('const smsRecipient = callTextNumber || (redirectImpliedToAni ? contactPhone : smsPhone);');
-    expect(src).toMatch(/holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni\s*&& !callTextNumber;/);
+    expect(src).toMatch(/holdImpliedSmsLeg = \(v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni\s*&& !callTextNumber\) \|\| \(callAniCannotText && !callTextNumber\);/);
   });
 
   test('the identity-confirm card does not ask the office to save a relay ANI', () => {

@@ -1356,14 +1356,13 @@ const DISPATCH_CHECKS = [
 // identity (NANP last-10 / +digits — server/utils/phone.js), never a raw
 // string match.
 // The separate number the caller gave for texts when the line they called from cannot
-// take them (ani_cannot_text, schema 1.25.0), usable only when it is dialable, not the
-// ANI and not one of our own lines. null when the caller said nothing of the kind or
+// take them (ani_cannot_text, schema 1.25.0), usable only when aniCannotTextNumber says so
+// (dialable, not the ANI, not one of our own lines). null when the caller said nothing of the kind or
 // gave no usable number.
 function textNumberForCall(call, extraction) {
   const { resolveCallContactPhone } = require('./call-recording-processor');
   const ani = resolveCallContactPhone(call, null);
-  const number = aniCannotTextNumber(extraction?.caller, { ani });
-  return number && !TWILIO_NUMBERS.isInternalNumber(number) ? number : null;
+  return aniCannotTextNumber(extraction?.caller, { ani });
 }
 
 function consentedDestination(call, extraction, phone) {

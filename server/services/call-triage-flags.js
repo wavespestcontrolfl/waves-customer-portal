@@ -1,5 +1,6 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
@@ -98,6 +99,9 @@ function aniCannotTextNumber(caller, opts = {}) {
   const text = caller.text_phone_e164;
   if (!isDialablePhone(text)) return null;
   if (isDialablePhone(opts.ani) && sameCallbackAsAni(text, opts.ani)) return null;
+  // One of our own lines or a staff cell is never a customer's text number: the
+  // processor refuses it as a recipient, so the flag below must agree.
+  if (TWILIO_NUMBERS.isInternalNumber(text)) return null;
   const e164 = toE164(text);
   return typeof e164 === 'string' && isLikelyE164(e164) ? e164 : null;
 }

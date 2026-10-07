@@ -16400,6 +16400,10 @@ const CallRecordingProcessor = {
               smsOutcome = { sent: false, skipped: 'no_usable_ani' };
             } else if (genuineNewProspect && callbackNumberNeededHoldActive) {
               smsOutcome = { sent: false, skipped: 'callback_number_needed' };
+            } else if (genuineNewProspect && callAniCannotText) {
+              // The caller said the ANI cannot take texts (schema 1.25.0). This address
+              // request goes to the ANI only, so it is card-only here; the card opens below.
+              smsOutcome = { sent: false, skipped: 'ani_cannot_text' };
             } else if (genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true) {
               // The caller said no to texts on THIS call (owner 2026-09-30).
               // Read from the live extraction: the row may not carry it yet.
@@ -20335,8 +20339,11 @@ const CallRecordingProcessor = {
           // (A dialable ANI redirects to the caller instead — see
           // smsRecipient. Sends cleared by explicit sms_consent_given or by
           // the legacy V2-off path go to the resolved customer phone.)
-          const holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni
-            && !callTextNumber;
+          // …and a call that said the ANI cannot take texts but resolved no usable text
+          // number holds the SMS leg whatever the consent state (fail closed: the only
+          // recipient left would be the ANI or an account phone that may be the ANI).
+          const holdImpliedSmsLeg = (v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni
+            && !callTextNumber) || (callAniCannotText && !callTextNumber);
           if (scheduledServiceId && !v2SmsBlocked && holdImpliedSmsLeg) {
             logger.info(`[call-proc] Holding confirmation SMS leg for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable (email leg unaffected)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
