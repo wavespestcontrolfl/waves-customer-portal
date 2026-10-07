@@ -2736,6 +2736,15 @@ async function lawnWateringRuleStamp(service, knex) {
 }
 
 const LAWN_NEXT_VISIT_SCAN = 200;
+// The "Next visit" label: "Sunday, August 29". A date outside today's calendar
+// year also names its year ("Sunday, August 29, 2027"): the bare form hid the
+// year, so a booking a year out read as a date already gone by.
+function formatNextVisitLabel(val, todayIso) {
+  const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
+  const options = { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' };
+  if (iso.slice(0, 4) !== String(todayIso || '').slice(0, 4)) options.year = 'numeric';
+  return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', options);
+}
 // The plan cadence in weeks a lawn service type names ("every 6 weeks",
 // "monthly"...), or null: the report's estimated next visit and the PDF key
 // read the same rule.
@@ -5804,11 +5813,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // scheduled_date comes back from pg as a Date object; normalize it the
           // same way svcIso does above before slicing, or String(Date) yields
           // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
-          const fmtDate = (val) => {
-            const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
-            return new Date(`${iso}T12:00:00Z`)
-              .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
-          };
+          const fmtDate = (val) => formatNextVisitLabel(val, todayIso);
           // GATE_LAWN_REPORT_COPY_V6: the next lawn visit at THIS property
           // (lawnNextVisitAtProperty); the same visit times the v6 copy's
           // by-next-visit sentence. Gate off: the customer-wide query, as before.
@@ -6133,11 +6138,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             // scheduled_date comes back from pg as a Date object; normalize it the
             // same way svcIso does above before slicing, or String(Date) yields
             // "Wed Jul 08 2026 …" and the label renders as "Invalid Date".
-            const fmtDate = (val) => {
-              const iso = val instanceof Date ? val.toISOString().slice(0, 10) : String(val).slice(0, 10);
-              return new Date(`${iso}T12:00:00Z`)
-                .toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
-            };
+            const fmtDate = (val) => formatNextVisitLabel(val, todayIso);
             const nextRow = await knex('scheduled_services')
               .where('customer_id', service.customer_id)
               .andWhere('scheduled_date', '>', afterIso)
