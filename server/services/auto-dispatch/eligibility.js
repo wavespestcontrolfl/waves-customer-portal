@@ -190,11 +190,24 @@ function personExceptionAt(service) {
   return Number.isNaN(at.getTime()) ? null : at;
 }
 
-async function isPersonPlacedVisit(service, db) {
-  const dateStr = toDateStr(service.scheduled_date);
-  if (!service.id || !dateStr) return { placed: false };
-  if (service.recurring_dispatch_due_date && !service.window_start) return { placed: false };
+// opts.refresh: re-read the row's own staff lock and date-exception columns
+// through `db` first (the apply-time move guard holds a pre-transaction
+// snapshot; an edit-screen change lands only in those columns).
+async function refreshedPlacementRow(service, db) {
+  const fresh = await db('scheduled_services').where({ id: service.id })
+    .first('auto_dispatch_locked', 'auto_dispatch_excluded', 'date_exception', 'date_exception_source', 'date_exception_at');
+  return fresh ? { ...service, ...fresh } : service;
+}
+
+async function isPersonPlacedVisit(input, db, opts = {}) {
+  const dateStr = toDateStr(input.scheduled_date);
+  if (!input.id || !dateStr) return { placed: false };
+  if (input.recurring_dispatch_due_date && !input.window_start) return { placed: false };
   try {
+    const service = opts.refresh ? await refreshedPlacementRow(input, db) : input;
+    if (service.auto_dispatch_locked === true || service.auto_dispatch_excluded === true) {
+      return { placed: true, reason_code: 'MANUALLY_LOCKED', reason_description: 'Locked from auto-dispatch by staff' };
+    }
     // The newest placement's rows, chosen entirely in SQL: created_at has
     // microsecond precision and a JS Date keeps only milliseconds, so the
     // timestamp must never round-trip through JS as a key (Codex #6055 r5).

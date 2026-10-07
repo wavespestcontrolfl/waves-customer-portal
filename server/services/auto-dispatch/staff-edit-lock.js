@@ -1,0 +1,39 @@
+/**
+ * Staff edit-screen placement → auto-dispatch lock.
+ *
+ * PUT /:id/update-details writes a visit's date and window straight to the row:
+ * no rebooker, no reschedule_log row, and a date-exception stamp only when the
+ * date moves. So the person-placed guard (eligibility.isPersonPlacedVisit) cannot
+ * see a staff window-only edit, and the nightly auto-dispatch run could move a
+ * time staff just chose (known limit of #6055). The edit now sets the visit's
+ * own auto_dispatch_locked flag instead — the existing staff lock every
+ * auto-dispatch path already honors (eligibility MANUALLY_LOCKED, apply.js
+ * re-read) and staff can clear on the auto-dispatch screen. No reschedule_log
+ * row is written, so the ~20 readers of that table see no change.
+ *
+ * Pure: decides from the row before the edit and the update about to be written.
+ */
+const { toDateStr } = require('./dates');
+
+const LIVE_STATUSES = new Set(['pending', 'confirmed']);
+const hhmm = (t) => (t == null || t === '' ? null : String(t).slice(0, 5));
+
+// True when this edit puts a live recurring child occurrence on a slot a person
+// chose: its date or its window actually changes. A same-slot save, a field-only
+// edit, a cleared window (unplacing) and non-recurring / template / terminal rows
+// never lock.
+function staffEditLocksVisit(before, updates) {
+  if (!before || !updates) return false;
+  if (before.is_recurring !== true || before.recurring_parent_id == null) return false;
+  if (!LIVE_STATUSES.has(String(updates.status || before.status || ''))) return false;
+  const dateChanged = updates.scheduled_date !== undefined
+    && toDateStr(updates.scheduled_date) !== toDateStr(before.scheduled_date);
+  const startChanged = updates.window_start !== undefined && hhmm(updates.window_start) !== hhmm(before.window_start);
+  const endChanged = updates.window_end !== undefined && hhmm(updates.window_end) !== hhmm(before.window_end);
+  if (!dateChanged && !startChanged && !endChanged) return false;
+  const landsWithoutWindow = updates.window_start === null
+    || (updates.window_start === undefined && before.window_start == null);
+  return !landsWithoutWindow;
+}
+
+module.exports = { staffEditLocksVisit };
