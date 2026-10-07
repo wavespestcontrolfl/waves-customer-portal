@@ -65,6 +65,20 @@ function areaTreatedSqft(sp) {
 // instead, so it never counts. The category is compared case-insensitively:
 // older history rows copied "Fertilizer" from the catalog before categories
 // were lowercased.
+// The per-lawn count an annual_max_apps cap is judged on: the busiest treated property's
+// applications, plus every application that cannot be placed at a property (application-limits
+// counts those at any property, since it cannot prove they happened elsewhere).
+function worstPropertyCount(apps = []) {
+  let unplaced = 0;
+  const byProperty = new Map();
+  for (const app of apps) {
+    const property = app && app.treated_property_id;
+    if (!property) unplaced += 1;
+    else byProperty.set(String(property), (byProperty.get(String(property)) || 0) + 1);
+  }
+  return unplaced + Math.max(0, ...byProperty.values());
+}
+
 function isNitrogenApplication(app = {}) {
   const category = String(app.category || '').trim().toLowerCase();
   if (category === 'lawn') return true;
@@ -378,12 +392,16 @@ const ComplianceService = {
     const customerCounty = inferCountyFromZipInternal(customer.zip) || applicationLimits.getCounty(customer);
 
     // Get all applications this year for the customer
+    // treated_property_id: the property the application's visit was booked at, by the same
+    // join application-limits scopes its history with (null = the row cannot be placed).
     const apps = await db('property_application_history')
-      .where({ customer_id: customerId })
-      .where('application_date', '>=', yearStart)
+      .where({ 'property_application_history.customer_id': customerId })
+      .where('property_application_history.application_date', '>=', yearStart)
       .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
-      .select('property_application_history.*', 'products_catalog.name as product_name');
+      .leftJoin('service_records as sr_prop', 'property_application_history.service_record_id', 'sr_prop.id')
+      .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
+      .select('property_application_history.*', 'products_catalog.name as product_name', 'ss_prop.property_id as treated_property_id');
 
     // Get all product limits
     const limits = await db('product_limits');
@@ -403,6 +421,9 @@ const ComplianceService = {
       let current = matchingApps.length;
 
       if (limit.limit_type === 'annual_max_apps') {
+        // The count is per lawn (the treated property), the way application-limits enforces it:
+        // the busiest property, plus any application that cannot be placed at one.
+        current = worstPropertyCount(matchingApps);
         if (current >= limit.limit_value) status = 'exceeded';
         else if (current >= limit.limit_value - 1) status = 'warning';
       } else if (limit.limit_type === 'seasonal_blackout' && limit.season_start && limit.season_end) {
@@ -549,12 +570,23 @@ const ComplianceService = {
     let warningCount = 0;
     for (const limit of limits) {
       if (limit.limit_type === 'annual_max_apps' && limit.product_id) {
-        const [usage] = await db('property_application_history')
-          .where({ product_id: limit.product_id })
-          .where('application_date', '>=', yearStart)
-          .whereNull('retracted_at')
-          .count('* as count');
-        if (parseInt(usage.count) >= limit.limit_value - 1) warningCount++;
+        // annual_max_apps is a per-lawn cap: judge each customer's busiest property, never the
+        // company-wide total of the product.
+        const rows = await db('property_application_history as pah')
+          .leftJoin('service_records as sr_prop', 'pah.service_record_id', 'sr_prop.id')
+          .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
+          .where({ 'pah.product_id': limit.product_id })
+          .where('pah.application_date', '>=', yearStart)
+          .whereNull('pah.retracted_at')
+          .select('pah.customer_id', 'ss_prop.property_id as treated_property_id');
+        const byCustomer = new Map();
+        for (const row of rows) {
+          const key = String(row.customer_id);
+          if (!byCustomer.has(key)) byCustomer.set(key, []);
+          byCustomer.get(key).push(row);
+        }
+        const near = [...byCustomer.values()].some((customerRows) => worstPropertyCount(customerRows) >= Number(limit.limit_value) - 1);
+        if (near) warningCount++;
       }
     }
 
@@ -616,4 +648,5 @@ module.exports = ComplianceService;
 // Exported for testing — verifies ZIP→county inference is unchanged after the
 // shared-array extraction.
 module.exports.inferCountyFromZipInternal = inferCountyFromZipInternal;
+module.exports.worstPropertyCount = worstPropertyCount;
 module.exports.isNitrogenApplication = isNitrogenApplication;

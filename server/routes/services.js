@@ -160,7 +160,8 @@ router.get('/stats/summary', async (req, res, next) => {
     res.json({
       servicesYTD: parseInt(servicesYTD.count),
       celsiusApplicationsThisYear: parseInt(celsiusApps.count),
-      celsiusMaxPerYear: 2,
+      // 2 under the v13 lawn program, 3 before it (GATE_LAWN_V13 off keeps the old cap).
+      celsiusMaxPerYear: require('../config/feature-gates').lawnV13Live() ? 2 : 3,
       thatch: {
         current: latestThatch ? parseFloat(latestThatch.thatch_measurement) : null,
         initial: firstThatch ? parseFloat(firstThatch.thatch_measurement) : null,

@@ -209,7 +209,7 @@ Priorities:
 Internal protocol points that should drive logic but not dominate customer copy:
 
 - apply Prodiamine Visit 1 by January 15 where applicable
-- maximum two Celsius applications per property per year
+- maximum three Celsius applications per property per year
 - K-Flow rotation in June and September, magnesium/calcium in August
 - explicit nitrogen rate control
 - soil-test branching for phosphorus and potassium

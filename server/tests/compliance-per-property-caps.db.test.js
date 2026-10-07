@@ -1,0 +1,87 @@
+// The compliance summaries judge annual_max_apps per lawn (the treated property), the way
+// application-limits enforces it, so a customer with two properties, or a company with many
+// customers, is never reported as over a per-lawn cap on a total. Runs on the migrated test
+// database with synthetic rows, removed afterwards.
+const { randomUUID } = require('crypto');
+const db = require('../models/db');
+const ComplianceService = require('../services/compliance');
+const { fixture } = require('./helpers/lawn-history-db');
+
+const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
+
+describe('worstPropertyCount (no database)', () => {
+  const { worstPropertyCount } = ComplianceService;
+  test('the busiest property plus every unplaced application', () => {
+    expect(worstPropertyCount([])).toBe(0);
+    expect(worstPropertyCount([{ treated_property_id: 'a' }, { treated_property_id: 'a' }, { treated_property_id: 'b' }])).toBe(2);
+    expect(worstPropertyCount([{ treated_property_id: 'a' }, { treated_property_id: 'b' }])).toBe(1);
+    expect(worstPropertyCount([{ treated_property_id: 'a' }, { treated_property_id: null }, { treated_property_id: 'b' }])).toBe(2);
+    expect(worstPropertyCount([{ treated_property_id: null }, { treated_property_id: undefined }])).toBe(2);
+  });
+});
+
+describeDb('compliance summaries: annual_max_apps is per lawn', () => {
+  const made = { customers: [], products: [], limits: [], records: [] };
+  let product;
+  let limit;
+
+  async function customerWithTwoProperties(applicationsAt, forProduct = product) {
+    const f = await fixture(db);
+    made.customers.push(f.customerId);
+    const [propertyB] = await db('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+    const properties = [f.property.id, propertyB.id];
+    const today = new Date().toISOString().slice(0, 10);
+    for (const index of applicationsAt) {
+      const [visit] = await db('scheduled_services').insert({ customer_id: f.customerId, property_id: properties[index], scheduled_date: today, service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await db('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: today, service_type: 'Lawn fixture' }).returning('*');
+      made.records.push(record.id);
+      await db('property_application_history').insert({ customer_id: f.customerId, product_id: forProduct.id, application_date: today, application_rate: 0.1, rate_unit: 'oz', service_record_id: record.id });
+    }
+    return f.customerId;
+  }
+  const row = async (customerId) => (await ComplianceService.getProductLimits(customerId)).limits.find((l) => l.limitId === limit.id);
+
+  beforeAll(async () => {
+    [product] = await db('products_catalog').insert({ name: `Count cap fixture ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
+    made.products.push(product.id);
+    [limit] = await db('product_limits').insert({ product_id: product.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 2, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' }).returning('*');
+    made.limits.push(limit.id);
+  });
+  afterAll(async () => {
+    await db('property_application_history').whereIn('customer_id', made.customers).del();
+    await db('service_records').whereIn('id', made.records).del();
+    await db('scheduled_services').whereIn('customer_id', made.customers).del();
+    await db('customer_properties').whereIn('customer_id', made.customers).del();
+    await db('customers').whereIn('id', made.customers).del();
+    await db('product_limits').whereIn('id', made.limits).del();
+    await db('products_catalog').whereIn('id', made.products).del();
+    await db.destroy();
+  });
+
+  test('getProductLimits: one application at each of two properties is 1 of 2 per lawn, not 2 of 2', async () => {
+    const customerId = await customerWithTwoProperties([0, 1]);
+    expect(await row(customerId)).toMatchObject({ currentUsage: 1, status: 'warning' });
+  });
+
+  test('getProductLimits: two at one property reaches the cap; three applications over two properties count the busiest lawn (2)', async () => {
+    const atCap = await customerWithTwoProperties([0, 0]);
+    expect(await row(atCap)).toMatchObject({ currentUsage: 2, status: 'exceeded' });
+    const spread = await customerWithTwoProperties([0, 1, 0]);
+    expect(await row(spread)).toMatchObject({ currentUsage: 2, status: 'exceeded' });
+    const oneEach = await customerWithTwoProperties([1]);
+    expect(await row(oneEach)).toMatchObject({ currentUsage: 1, status: 'warning' });
+  });
+
+  test('getDashboard: three customers with one application each never trip a per-lawn cap of 3 on the company total; two at one lawn of 3 does warn', async () => {
+    const [capped] = await db('products_catalog').insert({ name: `Count cap dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
+    made.products.push(capped.id);
+    const [cap3] = await db('product_limits').insert({ product_id: capped.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 3, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' }).returning('*');
+    made.limits.push(cap3.id);
+    const before = (await ComplianceService.getDashboard()).warningCount;
+    for (let i = 0; i < 3; i += 1) await customerWithTwoProperties([i % 2], capped);
+    // 3 applications company-wide against a cap of 3 per lawn: the company total is not the lawn's count.
+    expect((await ComplianceService.getDashboard()).warningCount).toBe(before);
+    await customerWithTwoProperties([0, 0], capped);
+    expect((await ComplianceService.getDashboard()).warningCount).toBe(before + 1);
+  });
+});

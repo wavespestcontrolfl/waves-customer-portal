@@ -1934,8 +1934,19 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
 // rows out (a retry never counts itself). Lawn visits under GATE_LAWN_V13 only: the caps are v13
 // recipe rules. A failed read never blocks a closeout (the savepoint keeps the transaction usable).
 // Returns the first hard block as a 422 body, or null.
+//
+// `lock: true` (the closeout's record transaction, right before the compliance-ledger rows are
+// written) first takes one transaction-scoped advisory lock per property + product + year, in
+// sorted order, so two closeouts that would both pass on the same history are serialized: the
+// second reads the first's committed ledger rows and is refused. The lock key is also the key
+// style of the other closeout locks (hashtextextended of a text key).
 const HARD_COUNT_LIMIT_TYPES = new Set(['annual_max_apps', 'min_interval_days']);
-async function submittedProductLimitBlockPayload({ svc, products = [], serviceDate = null, database = db } = {}) {
+function applicationLimitLockKey(svc, productId, serviceDate) {
+  const day = serviceDate || svc.scheduled_date || etDateString();
+  const year = (day instanceof Date ? etDateString(day) : String(day)).slice(0, 4);
+  return `application-limit:${svc.property_id || `customer-${svc.customer_id}`}:${productId}:${year}`;
+}
+async function submittedProductLimitBlockPayload({ svc, products = [], serviceDate = null, database = db, lock = false } = {}) {
   if (!svc || !Array.isArray(products)) return null;
   if (require('../config/feature-gates').lawnV13Live?.() !== true) return null;
   if (detectServiceLine(svc.service_type) !== 'lawn') return null;
@@ -1943,6 +1954,10 @@ async function submittedProductLimitBlockPayload({ svc, products = [], serviceDa
   if (!ids.length) return null;
   const LimitChecker = require('../services/application-limits');
   const checkDate = toETNoonServiceDate(serviceDate || svc.scheduled_date);
+  if (lock && database.isTransaction) {
+    const keys = [...new Set(ids.map((productId) => applicationLimitLockKey(svc, productId, serviceDate)))].sort();
+    for (const key of keys) await database.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+  }
   for (const productId of ids) {
     let result;
     try {
@@ -7858,6 +7873,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Incomplete visits are included on purpose — any product logged
         // was physically applied regardless of the visit outcome.
         if (insertedServiceProducts.length) {
+          // The authoritative hard-limit check (annual_max_apps / min_interval_days), serialized with
+          // the ledger write by a property + product + year lock held to commit: two closeouts that
+          // would both pass on the same history cannot both write. The earlier check at the claim is
+          // only a cheap early refusal.
+          if (!issuedInvoiceCloseout) {
+            const raced = await submittedProductLimitBlockPayload({
+              svc,
+              products: insertedServiceProducts.map((row) => ({ productId: row.product_id })),
+              serviceDate: completionServiceDate,
+              database: trx,
+              lock: true,
+            });
+            if (raced) throw Object.assign(new Error(raced.error), { code: 'application_limit_reached', isOperational: true, limitBlock: raced });
+          }
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
         }
@@ -8360,6 +8389,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             error: 'This visit was reclassified or reassigned while its invoice was being issued — the visit stays open.',
             code: 'issued_visit_identity_changed',
           } });
+        }
+        if (err && err.code === 'application_limit_reached' && err.limitBlock) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 422, body: err.limitBlock });
         }
         if (err && err.code === 'project_required_completion' && issuedInvoiceCloseout) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
@@ -15367,6 +15400,7 @@ module.exports = {
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
   submittedProductLimitBlockPayload,
+  applicationLimitLockKey,
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,

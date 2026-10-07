@@ -25417,8 +25417,8 @@ const PRODUCT_DESCRIPTIONS = {
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
   "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
   speedzone: "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
-  "celsius wg": "selective weed killer for warm-season grass (max 3x/year)",
-  celsius: "selective weed killer for warm-season grass (max 3x/year)",
+  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
+  celsius: "selective weed killer for warm-season grass (max 2x/year)",
   "k-flow 0-0-25":
     "potassium that strengthens roots against drought and disease",
   "k-flow": "potassium that strengthens roots against drought and disease",

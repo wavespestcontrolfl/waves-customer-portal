@@ -29,6 +29,7 @@
 const {
   ENGINE_VERSION,
   CELSIUS_YTD_CAP,
+  celsiusYtdCap,
   MAX_LINE_WORDS,
   PRODUCT_CLASS,
   PRODUCT_ROWS,
@@ -229,7 +230,8 @@ const ROW_OUTPUT_KEYS = [
 function materializeRow(base, { causes, gapDays, celsiusYtdCount }) {
   const row = applyIssueOverrides(base, causes);
   // At the Celsius year-to-date cap the second-application line swaps.
-  const capped = Boolean(row.secondApp) && celsiusYtdCount >= row.secondApp.cap;
+  // Only the Celsius row carries a cap; its value follows the v13 kill switch (celsiusYtdCap).
+  const capped = Boolean(row.secondApp) && row.secondApp.cap != null && celsiusYtdCount >= celsiusYtdCap();
   const byNextVisit = nextVisitView(row, gapDays);
   const contactTrigger = lineAllowed(row.contactTrigger) ? row.contactTrigger : null;
   // Keyed so P14's writer can SELECT a sentence by (row id, key) and print its

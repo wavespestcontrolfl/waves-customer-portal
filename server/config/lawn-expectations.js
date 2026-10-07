@@ -34,11 +34,17 @@ const { LAWN_TARGET_SUGGESTIONS } = require('./treatment-target-vocabulary');
 
 const ENGINE_VERSION = 'lawn_expectations_v1';
 
-// Celsius WG cap: 2 applications per property per year (owner 2026-10-06; the
-// product_limits row and the v13 recipe say the same). The caller passes
-// the year-to-date count INCLUDING any application on this visit; at the cap
-// the second-application line swaps to the "different product" line.
+// Celsius WG cap per property per year: 2 under the v13 lawn program (owner 2026-10-06; the
+// product_limits row and the v13 recipe say the same), 3 before it (server/config/protocols.json
+// lawn notes, "CELSIUS CAP"; GATE_LAWN_V13 off). CELSIUS_YTD_CAP is the v13 value;
+// celsiusYtdCap() is the one reader that follows the gate. The caller passes the year-to-date
+// count INCLUDING any application on this visit; at the cap the second-application line swaps
+// to the "different product" line.
 const CELSIUS_YTD_CAP = 2;
+const CELSIUS_YTD_CAP_LEGACY = 3;
+function celsiusYtdCap() {
+  return require('./feature-gates').lawnV13Live() ? CELSIUS_YTD_CAP : CELSIUS_YTD_CAP_LEGACY;
+}
 
 const MAX_LINE_WORDS = 33;
 
@@ -899,6 +905,8 @@ for (const rows of [PRODUCT_ROWS, ISSUE_ROWS]) {
 module.exports = {
   ENGINE_VERSION,
   CELSIUS_YTD_CAP,
+  CELSIUS_YTD_CAP_LEGACY,
+  celsiusYtdCap,
   MAX_LINE_WORDS,
   FAMILY,
   PRODUCT_CLASS,
