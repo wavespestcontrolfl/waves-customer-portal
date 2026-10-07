@@ -407,6 +407,28 @@ postgres('scheduled_services PUT /:id/update-details — add-on discount catalog
     expect(afterAssign.technician_id).toBe(technicianId);
   });
 
+  // updateVisitDetails (the Intelligence Bar's reprice_future_visits, owner
+  // ruling 2026-10-07): the visit version the caller checked against its card
+  // is the row-version CAS baseline, so a write AFTER that check — even one
+  // that lands before this save's own plan read — is refused under the lock.
+  test('updateVisitDetails: a write after the approved version refuses 409 and writes nothing; the current version saves the price', async () => {
+    const version = async () => (await trx('scheduled_services').where({ id: visitId })
+      .first(trx.raw("(xmin::text || ':' || ctid::text) as row_version"))).row_version;
+    const approved = await version();
+    await trx('scheduled_services').where({ id: visitId }).update({ internal_notes: 'written by another operator' });
+    const actor = { technicianId: null };
+    const refused = await router.updateVisitDetails({ id: visitId, body: { estimatedPrice: 49, expectedTotal: 49 }, actor, approvedVisitVersion: approved })
+      .then(() => null, (err) => err);
+    expect(refused).toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT' });
+    expect(Number((await trx('scheduled_services').where({ id: visitId }).first()).estimated_price)).toBe(100);
+
+    const saved = await router.updateVisitDetails({ id: visitId, body: { estimatedPrice: 49, expectedTotal: 49 }, actor, approvedVisitVersion: await version() });
+    expect(saved).toEqual({ status: 200, json: expect.objectContaining({ success: true }) });
+    const row = await trx('scheduled_services').where({ id: visitId }).first();
+    expect(Number(row.estimated_price)).toBe(49);
+    expect(Number(row.primary_line_price)).toBe(49);
+  });
+
   test('a NEW 20%-off-capped-at-$5 add-on discount on an unmarked visit saves capped at $5, never the raw uncapped $20', async () => {
     const { statusCode } = await put(visitId, {
       primaryLinePrice: 100,

@@ -138,19 +138,19 @@ function pickFamily(rows, service) {
     byTag.get(c.tag).rows.push(row);
   }
   const offered = [...byTag.values()].map((f) => `${f.label} (${f.rows.length})`).join(', ') || 'none';
-  let matched;
-  if (asked.tag !== 'general' && byTag.has(asked.tag)) {
-    matched = [byTag.get(asked.tag)];
-  } else {
-    const needle = service.toLowerCase();
-    const tags = new Set(rows.filter((r) => String(r.service_type || '').toLowerCase().includes(needle)).map((r) => classify(r.service_type).tag));
-    matched = [...tags].map((t) => byTag.get(t));
+  // A recognized family takes its whole bucket. Otherwise only the visits whose
+  // name contains the words — never the rest of their bucket ('general' holds
+  // every unrecognized service) — and those must name one service.
+  if (asked.tag !== 'general' && byTag.has(asked.tag)) return { family: byTag.get(asked.tag) };
+  const needle = service.toLowerCase();
+  const named = rows.filter((r) => String(r.service_type || '').toLowerCase().includes(needle));
+  const names = [...new Set(named.map((r) => String(r.service_type).trim()))];
+  if (!named.length) return { error: `This customer has no upcoming "${service}" visits. Upcoming services: ${offered}. Nothing was changed.` };
+  if (new Set(named.map((r) => classify(r.service_type).tag)).size > 1 || (classify(named[0].service_type).tag === 'general' && names.length > 1)) {
+    return { error: `"${service}" matches more than one service: ${names.join(', ')}. Name one. Nothing was changed.` };
   }
-  if (matched.length === 0) return { error: `This customer has no upcoming "${service}" visits. Upcoming services: ${offered}. Nothing was changed.` };
-  if (matched.length > 1) {
-    return { error: `"${service}" matches more than one service: ${matched.map((f) => f.label).join(', ')}. Name one. Nothing was changed.` };
-  }
-  return { family: matched[0] };
+  const c = classify(named[0].service_type);
+  return { family: { tag: c.tag === 'general' ? `general:${names[0].toLowerCase()}` : c.tag, label: c.tag === 'general' ? names[0] : c.label, rows: named } };
 }
 
 async function loadCustomer(customerId) {
@@ -330,13 +330,16 @@ function sameShownState(a, b) {
 
 // The Schedule screen's visit edit, with the body its price-only edit sends
 // (estimatedPrice) plus the total the card showed (expectedTotal — the screen's
-// preview witness: the save refuses if it would store any other total).
-function saveVisitPrice(id, newPrice, actionContext) {
+// preview witness: the save refuses if it would store any other total). The
+// version just checked against the card is the save's row-version baseline:
+// a write between that check and the save's row lock refuses 409.
+function saveVisitPrice(id, newPrice, approvedVisitVersion, actionContext) {
   const { updateVisitDetails } = require('../../routes/admin-schedule');
   return updateVisitDetails({
     id,
     body: { estimatedPrice: newPrice, expectedTotal: newPrice },
     actor: { technicianId: actionContext?.technicianId || null },
+    approvedVisitVersion,
   });
 }
 
@@ -369,13 +372,15 @@ async function verifiedPlan(input) {
 // One visit's save: 'changed', a refusal (`failure`), or an unknown outcome.
 async function saveOne(plan, i, actionContext) {
   const visit = plan.visits[i];
-  // Right before its own save, the visit must still be what the card showed.
-  if (i > 0 && !sameShownState(plan._pins[i], await readPin(visit.id))) {
+  // Right before its own save, the visit must still be what the card showed;
+  // the version read here is the one the save's row lock must still find.
+  const now = await readPin(visit.id);
+  if (!sameShownState(plan._pins[i], now)) {
     return { failure: { id: visit.id, date: visit.date, error: 'this visit changed after the card was shown.', code: 'preview_changed' } };
   }
   let reply;
   try {
-    reply = await saveVisitPrice(visit.id, plan._new_price, actionContext);
+    reply = await saveVisitPrice(visit.id, plan._new_price, now.row_version, actionContext);
   } catch (err) {
     if (err?.statusCode && err.statusCode < 500) return { failure: { id: visit.id, date: visit.date, error: err.message, code: err.code || null } };
     logger.error(`[intelligence-bar:reprice-visits] save interrupted for ${visit.id}: ${err?.code || err?.name || 'error'}`);

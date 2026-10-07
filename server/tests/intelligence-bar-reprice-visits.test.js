@@ -165,6 +165,16 @@ describe('the card', () => {
     expect(Schedule.updateVisitDetails).not.toHaveBeenCalled();
   });
 
+  test('words naming an unrecognized service take only the visits with that name, not every other unrecognized one', async () => {
+    tables.scheduled_services.push(
+      visit('v-rod', '2099-03-20', { service_type: 'Rodent Control' }),
+      visit('v-odd', '2099-03-22', { service_type: 'Gutter Cleaning' }),
+    );
+    const card = await preview({ service: 'rodent' });
+    expect(card.service_label).toBe('Rodent Control');
+    expect(card.visits.map((v) => v.id)).toEqual(['v-rod']);
+  });
+
   test('gate off: refuses the preview and the commit, changing nothing', async () => {
     delete process.env.GATE_IB_REPRICE_VISITS;
     expect(await preview()).toMatchObject({ code: 'gate_off' });
@@ -180,8 +190,8 @@ describe('the confirmed run', () => {
     expect(res).toMatchObject({ success: true, messages_sent: false });
     expect(res.changed.map((v) => v.id)).toEqual(['v-1', 'v-2']);
     expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0])).toEqual([
-      { id: 'v-1', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' } },
-      { id: 'v-2', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' } },
+      { id: 'v-1', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-1:v1' },
+      { id: 'v-2', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-2:v1' },
     ]);
   });
 
@@ -191,6 +201,18 @@ describe('the confirmed run', () => {
     const res = await confirm(ask(), card._version);
     expect(res.preview_changed).toBe(true);
     expect(Schedule.updateVisitDetails).not.toHaveBeenCalled();
+  });
+
+  test('between saves the version the save must still find is the one just checked', async () => {
+    const card = await preview();
+    // visit 1's own save moves visit 2's row version (a post-commit effect) but not what the card showed
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      tables.scheduled_services[1].row_version = 'v-2:v2';
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(ask(), card._version);
+    expect(res.success).toBe(true);
+    expect(Schedule.updateVisitDetails.mock.calls[1][0].approvedVisitVersion).toBe('v-2:v2');
   });
 
   test('a row version that moved (any write to a listed visit) refuses with preview_changed', async () => {

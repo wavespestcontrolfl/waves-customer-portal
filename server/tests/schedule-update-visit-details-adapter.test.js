@@ -67,3 +67,17 @@ describe('updateVisitDetails runs the PUT /:id/update-details handler', () => {
     await expect(updateVisitDetails({ id: 'visit-1', body: { estimatedPrice: 49 }, actor })).rejects.toThrow('db down');
   });
 });
+
+describe('approvedVisitVersion binds the handler row-version CAS', () => {
+  test('a save whose plan has no version to compare refuses 409 instead of writing unchecked', async () => {
+    const err = await updateVisitDetails({ id: 'visit-1', body: { estimatedPrice: 49 }, actor, approvedVisitVersion: '1:(0,1)' })
+      .then(() => null, (e) => e);
+    expect(err).toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT' });
+  });
+
+  test('the HTTP route never sets it: the same body without it does not take that refusal', async () => {
+    const outcome = await updateVisitDetails({ id: 'visit-1', body: { estimatedPrice: 49 }, actor })
+      .then((r) => r, (e) => e);
+    expect(outcome?.reason).not.toBe('ROW_VERSION_DRIFT');
+  });
+});

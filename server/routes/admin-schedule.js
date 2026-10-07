@@ -13621,6 +13621,17 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       clearAddonDiscountsOnPriceEdit = financialPlan.clearAddonDiscountsOnPriceEdit;
       expectedAddonRowIds = financialPlan.expectedAddonRowIds;
       financialCasSnapshot = financialPlan.financialCasSnapshot;
+      // updateVisitDetails only (never an HTTP field): the visit version the
+      // caller approved replaces the planner's own read as the row-version CAS
+      // baseline, so a write after that approval is drift under the lock too.
+      if (req.approvedVisitVersion) {
+        if (!financialCasSnapshot?.versions) {
+          throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+            statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
+          });
+        }
+        financialCasSnapshot.versions.parent = String(req.approvedVisitVersion);
+      }
       // Codex pre-push audit P1 (round 4 on #4657, :13181): the re-service/
       // is_callback classification AND its reServiceConversionZeroPrice
       // decision (zeroing the visit + every add-on for an eligible free
@@ -16812,9 +16823,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
 // does, failures ignored), then the handler with the only request fields it
 // reads (params.id, body, technicianId, techRole), and resolves the reply it
 // would send: { status, json }. An error the handler passes to next() rejects.
-async function updateVisitDetails({ id, body, actor }) {
+// approvedVisitVersion (the visit's xmin:ctid the caller checked) becomes the
+// handler's row-version CAS baseline: any write since then refuses 409
+// VISIT_CHANGED_RETRY under the visit's row lock.
+async function updateVisitDetails({ id, body, actor, approvedVisitVersion = null }) {
   await primePercentDiscountExclusions().catch(() => {});
-  const req = { params: { id }, body, technicianId: actor.technicianId, techRole: 'admin' };
+  const req = { params: { id }, body, technicianId: actor.technicianId, techRole: 'admin', approvedVisitVersion };
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
