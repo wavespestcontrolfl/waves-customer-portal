@@ -291,36 +291,37 @@ async function activation(estimateData, customerId) {
   const Converter = require('../estimate-converter');
   const { legacyRodentRowPredicateFor } = require('../billing-cadence');
   const isLegacyRodentRow = legacyRodentRowPredicateFor(estimateData);
-  const services = Converter.foldTermiteRentalIntoBait(Converter.recurringServicesFromEstimateData(estimateData))
-    .filter((svc) => !isLegacyRodentRow(svc));
+  const recurring = Converter.recurringServicesFromEstimateData(estimateData);
+  // A pinned pre-realignment rodent-only plan is the legacy monthly-dues
+  // product: the converter stamps it monthly_membership, not per_application.
+  const pinnedLegacyRodentOnlyPlan = Converter.isPinnedLegacyRodentOnlyPlan(recurring, isLegacyRodentRow);
+  const services = Converter.foldTermiteRentalIntoBait(recurring).filter((svc) => !isLegacyRodentRow(svc));
   const keys = Converter.tierQualifyingRecurringServiceKeys(services);
   const commercialOnly = keys.length === 0
     && services.some((svc) => String(Converter.recurringServiceKey(svc) || '').startsWith('commercial_'));
-  if (commercialOnly) return { commercialOnly, tier: 'Commercial' };
+  if (commercialOnly) return { commercialOnly, pinnedLegacyRodentOnlyPlan, tier: 'Commercial' };
   let prior = [];
   if (keys.length) {
     prior = Converter.priorQualifyingKeysFromSnapshot(estimateData)
       || await require('../waveguard-existing-services').loadExistingQualifyingServiceKeys(db, customerId).catch(() => []);
   }
   const { tier } = Converter.determineTier(Converter.combinedTierQualifyingCount(keys, prior), services.length > 0);
-  return { commercialOnly, tier: tier === 'none' ? null : tier };
+  return { commercialOnly, pinnedLegacyRodentOnlyPlan, tier: tier === 'none' ? null : tier };
 }
 
-// Billing lane and tier after the accept (estimate-converter's own lane rule).
-function laneAndTier({ customer, converts, tierAfter, totalAfter }) {
-  const Converter = require('../estimate-converter');
+// Billing lane and tier after the accept: the billing_mode the converter
+// stamps (keep a current monthly member's lane; a pinned legacy rodent-only
+// plan goes on monthly dues; everyone else per application), read through
+// resolveBillingLane with the activated tier and the new monthly total.
+function laneAndTier({ customer, converts, tierAfter, totalAfter, pinnedLegacyRodentOnlyPlan }) {
   const { customerPreservesMonthlyMembership } = require('../billing-cadence');
   const { resolveBillingLane } = require('../billing-lane');
   const laneBefore = Number(customer.monthly_rate) > 0 || customer.billing_mode ? resolveBillingLane(customer).mode : null;
   const tierBefore = customer.waveguard_tier || null;
   if (!converts) return { laneBefore, laneAfter: laneBefore, tierBefore, tierAfter: tierBefore };
-  const laneAfter = Converter.acceptedBillingLaneForConversion({
-    billingTerm: 'standard',
-    preservesExistingMembership: customerPreservesMonthlyMembership(customer),
-    customerBillingMode: customer.billing_mode || null,
-    waveguardTier: tierAfter,
-    monthlyRate: totalAfter,
-  });
+  let stamped = pinnedLegacyRodentOnlyPlan ? 'monthly_membership' : 'per_application';
+  if (customerPreservesMonthlyMembership(customer)) stamped = customer.billing_mode || null;
+  const laneAfter = resolveBillingLane({ billing_mode: stamped, waveguard_tier: tierAfter, monthly_rate: totalAfter }).mode;
   return { laneBefore, laneAfter, tierBefore, tierAfter };
 }
 
@@ -404,9 +405,9 @@ async function planAccept(input) {
   // Mark accepted runs the converter only for a recurring monthly total
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
-  const { commercialOnly, tier } = await activation(estimateData, customerId);
+  const { commercialOnly, tier, pinnedLegacyRodentOnlyPlan } = await activation(estimateData, customerId);
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
-  const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after });
+  const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
   const booked = converts ? await bookedFromEstimate(estimate.id) : [];
   const { collectTermiteFacts, autosendGateOn } = require('../termite-program-agreement');
   const termiteProgram = { has_program: !!collectTermiteFacts(estimateData)?.hasProgram, autosend: autosendGateOn() };

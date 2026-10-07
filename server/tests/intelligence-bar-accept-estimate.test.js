@@ -134,6 +134,19 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(card(preview).notifies_customer).toBe(false);
   });
 
+  test('a pinned legacy rodent-only plan goes on monthly dues, as the converter stamps it', async () => {
+    seed({
+      estimate: {
+        monthly_total: 49,
+        estimate_data: { recurring: { services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', legacyPinnedReplay: true, monthly: 49 }] } },
+      },
+      customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
+      ledger: [],
+    });
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines).toContain('Billing lane: none → monthly membership dues');
+  });
+
   test('the tier is the one the accept activates, not only what the quote says', async () => {
     // A legacy quote still says Silver, but with the live lawn plan the accept
     // counts three services and activates Gold; the card says Gold.
