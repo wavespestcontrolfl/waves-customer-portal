@@ -232,11 +232,19 @@ function stampRequestStart(params, requestStartedAt) {
 const replacedStepKey = id => paramsHash('ib-replaced-step', String(id));
 const isReplacedStep = row => row.step_key === replacedStepKey(row.id);
 const isExpiredUndecided = row => row.status === 'pending' && new Date(row.expires_at).getTime() <= Date.now();
+// The task's steps a continuation retires: every expired undecided card, and
+// the product picker an expired chosen card came from (_ib_chosen_from). That
+// choice never led to a write, so the continuation offers the picker afresh
+// instead of finding the used one as the step's outcome. Returns their ids.
 async function retireExpiredSteps(trx, rows) {
-  for (const row of rows.filter(r => !isReplacedStep(r))) {
-    await trx('ib_pending_actions').where({ id: row.id, status: 'pending' }).where('expires_at', '<=', trx.fn.now())
+  const expired = rows.filter(isExpiredUndecided);
+  const pickerIds = new Set(expired.map(row => paramsOf(row)._ib_chosen_from).filter(Boolean).map(String));
+  const retired = [...expired, ...rows.filter(row => pickerIds.has(String(row.id)))];
+  for (const row of retired.filter(r => !isReplacedStep(r))) {
+    await trx('ib_pending_actions').where({ id: row.id, task_id: row.task_id })
       .update({ step_key: replacedStepKey(row.id), updated_at: trx.fn.now() });
   }
+  return new Set(retired.map(row => row.id));
 }
 
 // Locks the running task and reads this actor's earlier cards of the task.
@@ -247,9 +255,8 @@ async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, s
     .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
   if (!task) throw new Error('Task execution was superseded');
   const rows = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
-  const expired = rows.filter(isExpiredUndecided);
-  await retireExpiredSteps(trx, expired);
-  const previous = rows.filter(row => !expired.includes(row));
+  const retired = await retireExpiredSteps(trx, rows);
+  const previous = rows.filter(row => !retired.has(row.id));
   const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
     || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
   if (existing) return existing;

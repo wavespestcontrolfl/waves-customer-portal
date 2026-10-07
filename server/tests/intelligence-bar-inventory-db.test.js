@@ -422,6 +422,30 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(await onHand(row.id)).toBe(12);
   }, 40000);
 
+  test('a chosen card that expired continues as a fresh picker in the same task', async () => {
+    const prefix = `ResumeQA${crypto.randomUUID().slice(0, 8)}`;
+    const ten = await product({ name: `${prefix} 10% SC` });
+    await product({ name: `${prefix} 20% SC` });
+    const input = { product_name: prefix, movement_type: 'restock', quantity: 2, unit: 'lb' };
+    const proposed = await propose('adjust_stock', input, `We got 2 lb of ${prefix}`);
+    const picker = proposed.body.pendingActions[0];
+    const taskId = proposed.body.taskId;
+    const chosen = (await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: ten.id })).body.pendingAction;
+    await db('ib_pending_actions').where({ id: chosen.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(toolCall('discover_capabilities', { query: 'adjust stock' }, 'discover-3'))
+      .mockResolvedValueOnce(toolCall('adjust_stock', input, 'inventory-3'))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Pick the product again.' }], usage: {} });
+    expect((await api(`/api/admin/intelligence-bar/tasks/${taskId}/resume`, { session_id: sessionId })).status).toBe(200);
+    const after = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    expect(after.body.pendingActions).toHaveLength(1);
+    const fresh = after.body.pendingActions[0];
+    expect([picker.id, chosen.id]).not.toContain(fresh.id);
+    expect(fresh.contract.product_choices.map((c) => c.product_id)).toContain(ten.id);
+    expect(after.body.receipts.map((r) => r.id)).not.toContain(picker.id);
+    expect(await onHand(ten.id)).toBe(10);
+  }, 40000);
+
   test('a stock change after confirm preflight is refused under the product lock', async () => {
     const row = await product();
     const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' }, `Add 2 lb of ${row.name} that arrived`);
