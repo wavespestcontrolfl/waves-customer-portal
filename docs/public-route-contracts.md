@@ -2710,8 +2710,10 @@ code picks sentences from closed phrase tables (`lawn-visit-summary.js`) using t
 report's own facts: product CATEGORIES (never names, rates or actives), the area
 reads, the technician-kept photo findings by their own symptom label (hedged when
 the confidence is low or unknown, and only while the report's card for that topic
-shows a concern), the visit's frozen watering step with its exact inches and hours
-(hours rounded down from the frozen deadline), and the topics for the next visit.
+shows a concern), the visit's frozen water-in step with its exact inches and hours
+(hours rounded down from the frozen deadline; a hold, or a hold before a water-in,
+sends the reader to the report's own watering note and states no amounts), and the
+topics for the next visit.
 The technician note, the program line, the headline and rain are not inputs. It
 freezes first-writer-wins under `structured_notes.lawnVisitSummary[assessmentId]`
 (its own top-level key) as `{ text, slots }`; a render only reads it, from the record

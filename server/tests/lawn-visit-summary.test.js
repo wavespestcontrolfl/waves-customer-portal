@@ -80,13 +80,13 @@ const CASES = {
       applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }, { name: 'Micro blend', kind: 'supplement' }],
       areas: areas({ color_vigor: 'needs_attention', coverage: 'watch' }),
       findings: [{ label: 'color and nutrient stress', confidence: 'low' }, { label: 'thinning turf', confidence: 'unknown' }],
-      watering: { state: 'hold_then_water_in', inches: 0.75, hours: 24 },
+      watering: { state: 'hold_then_water_in' },
       watchNext: [],
     },
     expected: 'Today we applied a feeding and a micronutrient and color boost, which fits the fall season. '
       + 'In the photos we noticed what may be some color and nutrient stress and what may be some thinning turf. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please hold off on watering the treated lawn at first, then water it in with 0.75 inches of water within 24 hours of today’s visit. '
+      + 'Please follow the watering note in this report: hold off first, then water the treatment in when it says. '
       + 'At the next visit we will look at thin areas and lawn color.',
   },
   noFindingsNoWatering: {
@@ -266,6 +266,8 @@ describe('watering comes from the frozen instruction only', () => {
 
   test('hold has no numbers; none, null and an unknown state give no step', () => {
     expect(wateringFacts({ state: 'hold' })).toEqual({ state: 'hold' });
+    // A hold before a water-in carries its own release condition in the report's note: no amounts here.
+    expect(wateringFacts({ state: 'hold_then_water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z', holdUntil: '2026-10-06T20:00:00Z' })).toEqual({ state: 'hold_then_water_in' });
     expect(wateringFacts({ state: 'none' })).toBeNull();
     expect(wateringFacts({ state: null })).toBeNull();
     expect(wateringFacts(null)).toBeNull();
@@ -277,6 +279,7 @@ describe('watering comes from the frozen instruction only', () => {
     expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 9, hours: 24 } }).watering).toBeNull();
     expect(summary.normalizeFacts({ watering: { state: 'bogus' } }).watering).toBeNull();
     expect(summary.normalizeFacts({ watering: { state: 'hold' } }).watering).toEqual({ state: 'hold', inches: null, hours: null });
+    expect(summary.normalizeFacts({ watering: { state: 'hold_then_water_in', inches: 0.5, hours: 24 } }).watering).toEqual({ state: 'hold_then_water_in', inches: null, hours: null });
     // A fractional hour from a hand-built fact floors.
     expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0.5, hours: 23.9 } }).watering.hours).toBe(23);
   });
@@ -290,9 +293,12 @@ describe('watering comes from the frozen instruction only', () => {
     expect(hold).toMatch(/hold off on watering/);
     expect(hold).not.toMatch(/\d/);
     expect(hold).not.toMatch(/water (?:it )?in/);
+    // Hold then water in: the frozen hold's release condition and the deadline live in the report's
+    // note, so the sentence defers to it, in order, with no amount, hour or clock time of its own.
     const both = t({ state: 'hold_then_water_in', inches: 1, hours: 24 });
-    expect(both.indexOf('hold off')).toBeGreaterThan(-1);
-    expect(both.indexOf('hold off')).toBeLessThan(both.indexOf('water it in with 1 inch'));
+    expect(both).toContain('Please follow the watering note in this report: hold off first, then water the treatment in when it says.');
+    expect(both).not.toMatch(/\d|within|at first/);
+    expect(both.indexOf('hold off')).toBeLessThan(both.indexOf('water the treatment in'));
     // No instruction: no watering sentence at all.
     expect(t(null)).not.toMatch(/water/i);
   });
@@ -343,7 +349,7 @@ describe('the closed tables', () => {
     for (const [inches, hours] of [[0.25, 1], [0.5, 24], [1, 12], [1.5, 72]]) {
       for (const text of [
         T.WATERING_SENTENCE.water_in(`${inches} ${inches === 1 ? 'inch' : 'inches'}`, `${hours} ${hours === 1 ? 'hour' : 'hours'}`),
-        T.WATERING_SENTENCE.hold_then_water_in(`${inches} inches`, `${hours} hours`),
+        T.WATERING_SENTENCE.hold_then_water_in(),
         T.WATERING_SENTENCE.hold(),
       ]) {
         expect(customerCopyViolations(text)).toEqual([]);
@@ -359,7 +365,7 @@ describe('the closed tables', () => {
       applied: ['combo_insecticide', 'supplement', 'herbicide', 'fungicide'],
       areas: [{ key: 'weed_pressure', band: 'needs_attention' }, { key: 'coverage', band: 'needs_attention' }, { key: 'color_vigor', band: 'needs_attention' }, { key: 'damage_disease_signals', band: 'needs_attention' }],
       findings: [{ label: 'color and nutrient stress', hedged: true }, { label: 'a lawn condition we are monitoring', hedged: true }, { label: 'general lawn stress', hedged: true }],
-      watering: { state: 'hold_then_water_in', inches: 1.5, hours: 72 },
+      watering: { state: 'hold_then_water_in' },
       watch: ['weeds', 'thin', 'color'],
     };
     const text = summary.render(slots);
@@ -438,6 +444,28 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
       + 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. '
       + 'At the next visit we will look at weeds and thin areas.');
     expectOwnerRules(paragraph);
+  });
+
+  test('gather then compose keeps a combination product\'s feeding (normalization is idempotent)', async () => {
+    const data = { ...DATA, reportV2: { ...DATA.reportV2, treatment: { products: [{ name: 'Stonewall 0.43% + 15-0-15', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent' }] } } };
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data, instruction, knex: fakeKnex() });
+    expect(facts.applied).toEqual([{ kind: 'pre_emergent', alsoFeeds: true }]);
+    expect(summary.normalizeFacts(summary.normalizeFacts(facts))).toEqual(facts);
+    expect(summary.composeVisitSummary(facts).paragraph).toContain('Today we applied a feeding with a pre-emergent weed barrier, which fits the fall season.');
+  });
+
+  test('a failed product read writes nothing, with the watering gate off (no instruction, no productsLoadFailed)', async () => {
+    const degraded = { ...DATA, lawnAssessment: { assessmentId: 77, productsReadFailed: true } };
+    expect(await gatherVisitSummaryFacts({ record: RECORD, data: degraded, instruction: null, knex: fakeKnex() })).toBeNull();
+    // Through the completion step: nothing frozen.
+    const notes = { current: {} };
+    const knex = Object.assign(() => ({ where: () => ({ first: async () => ({ structured_notes: notes.current }) }) }), { raw: () => ({}) });
+    const out = await summary.createAndFreezeVisitSummary({
+      serviceRecordId: 's1', assessmentId: 77, structuredNotes: {}, knex,
+      gatherInputs: () => gatherVisitSummaryFacts({ record: RECORD, data: degraded, instruction: null, knex: fakeKnex() }),
+    });
+    expect(out.status).toBe('no_inputs');
+    expect(out.entry).toBeUndefined();
   });
 
   test('a degraded report read, a missing assessment or a missing report writes no summary', async () => {

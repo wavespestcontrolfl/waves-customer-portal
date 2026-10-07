@@ -47,7 +47,8 @@ function visitMonth(record) {
  */
 function wateringFacts(instruction) {
   if (!instruction || !['water_in', 'hold_then_water_in', 'hold'].includes(instruction.state)) return null;
-  if (instruction.state === 'hold') return { state: 'hold' };
+  // The report's watering note owns the hold's release condition and the water-in deadline.
+  if (instruction.state === 'hold' || instruction.state === 'hold_then_water_in') return { state: instruction.state };
   const inches = Number(instruction.waterInInches);
   const at = Date.parse(instruction.completedAt);
   const by = Date.parse(instruction.waterInBy);
@@ -101,7 +102,8 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, knex 
   const lawnAssessment = data && data.lawnAssessment;
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
   if (!reportV2 || assessmentId == null || !record) return null;
-  if (lawnAssessment.lawnCopyV6Unfrozen === true) return null; // a degraded report read writes no summary
+  // A degraded report read or a failed product read writes no summary, with or without the watering gate.
+  if (lawnAssessment.lawnCopyV6Unfrozen === true || lawnAssessment.productsReadFailed === true) return null;
   return normalizeFacts({
     season: seasonOf(visitMonth(record)),
     applied: appliedFacts(reportV2),

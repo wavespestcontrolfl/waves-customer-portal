@@ -165,7 +165,9 @@ const SENTENCE = Object.freeze({
 // The watering step, by the frozen instruction's state. The only sentences with digits.
 const WATERING_SENTENCE = Object.freeze({
   water_in: (inches, hours) => `Please water the treated lawn in with ${inches} of water within ${hours} of today’s visit.`,
-  hold_then_water_in: (inches, hours) => `Please hold off on watering the treated lawn at first, then water it in with ${inches} of water within ${hours} of today’s visit.`,
+  // The frozen hold has its own release condition (a clock time and/or "not before dry")
+  // and the water-in deadline counts from the visit, so the note owns both: no amounts here.
+  hold_then_water_in: () => 'Please follow the watering note in this report: hold off first, then water the treatment in when it says.',
   hold: () => 'Please hold off on watering the treated lawn for now. The watering note in this report says when to start again.',
 });
 
@@ -186,14 +188,16 @@ const finite = (v) => (v === null || v === undefined || v === '' || !Number.isFi
 function cleanApplied(p) {
   if (!p || !clean(p.name || p.kind)) return null;
   const kind = Object.prototype.hasOwnProperty.call(CATEGORY_BY_KIND, p.kind) ? p.kind : 'other';
+  // Idempotent: an already-normalized { kind, alsoFeeds } (its name and active are gone) keeps its flag.
   const alsoFeeds = kind !== 'fertilizer' && kind !== 'supplement'
-    && FERTILIZER_ANALYSIS_RE.test(`${clean(p.activeIngredient)} ${clean(p.name)}`);
+    && (p.alsoFeeds === true || FERTILIZER_ANALYSIS_RE.test(`${clean(p.activeIngredient)} ${clean(p.name)}`));
   return { kind, alsoFeeds };
 }
 
 function cleanWatering(w) {
   if (!w || !WATERING_STATES.has(w.state)) return null;
-  if (w.state === 'hold') return { state: 'hold', inches: null, hours: null };
+  // A hold, alone or before a water-in, is described by the report's own watering note: no amounts.
+  if (w.state === 'hold' || w.state === 'hold_then_water_in') return { state: w.state, inches: null, hours: null };
   const inches = finite(w.inches);
   const hours = finite(w.hours);
   // A half-known step is no step: the report banner owns it.
@@ -353,7 +357,7 @@ function findingsSentence(slots) {
 function wateringSentence(slots) {
   const w = slots.watering;
   if (!w || !Object.hasOwn(WATERING_SENTENCE, w.state)) return null;
-  if (w.state === 'hold') return WATERING_SENTENCE.hold();
+  if (w.state === 'hold' || w.state === 'hold_then_water_in') return WATERING_SENTENCE[w.state]();
   const amount = amountOf(w.inches, w.hours);
   return amount ? WATERING_SENTENCE[w.state](amount.inches, amount.hours) : null;
 }
