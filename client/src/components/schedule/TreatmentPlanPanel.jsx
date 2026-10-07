@@ -326,8 +326,8 @@ export default function TreatmentPlanPanel({ service, onClose }) {
                     <div key={`${step.step}-${step.productId}`} className="flex gap-3 border-hairline border-zinc-200 rounded-sm p-3">
                       <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">{step.step}</div>
                       <div className="min-w-0">
-                        <div className="text-13 font-medium text-zinc-900">{step.productName}</div>
-                        <div className="text-12 text-ink-secondary leading-snug mt-1">{step.instruction}</div>
+                        <div className="text-14 font-medium text-zinc-900">{step.productName}</div>
+                        <div className="text-14 text-ink-secondary leading-snug mt-1">{step.instruction}</div>
                       </div>
                     </div>
                   ))}

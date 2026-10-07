@@ -886,8 +886,8 @@ export function ProtocolMixCard({
                   {step.step}
                 </div>
                 <div>
-                  <div className="text-13 font-medium text-zinc-900">{step.productName}</div>
-                  <div className="text-12 text-ink-secondary leading-normal mt-1">{step.instruction}</div>
+                  <div className="text-14 font-medium text-zinc-900">{step.productName}</div>
+                  <div className="text-14 text-ink-secondary leading-normal mt-1">{step.instruction}</div>
                 </div>
               </div>
             ))}

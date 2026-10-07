@@ -115,6 +115,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   // GATE_LAWN_BERMUDA_REMOVAL: the server says the switch is available only
   // while the gate is on (the key is absent otherwise).
   const [bermudaRemovalAvailable, setBermudaRemovalAvailable] = useState(false);
+  const bermudaRemovalEligibleGrass = ["st_augustine", "zoysia"].includes(turfProfile?.grass_type);
   const [bermudaRemovalSaving, setBermudaRemovalSaving] = useState(false);
   // The county field was EDITED in this session. The save re-sends every
   // loaded field, so the server needs an explicit signal that the county
@@ -1068,19 +1069,22 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   />
                 ))}
               </fieldset>
-              {bermudaRemovalAvailable &&
-                ["st_augustine", "zoysia"].includes(turfProfile.grass_type) && (
+              {bermudaRemovalAvailable && (bermudaRemovalEligibleGrass || turfProfile.bermuda_removal === true) && (
                   <div className="mb-3">
                     <Checkbox
                       label="Bermuda removal add-on (April and June spot spray)"
                       checked={turfProfile.bermuda_removal === true}
                       disabled={bermudaRemovalSaving || !turfProfile.id}
-                      onChange={(e) => saveBermudaRemoval(e.target.checked)}
+                      // Turning it ON is only for St. Augustine and Zoysia; an already-enabled switch on any
+                      // other grass stays visible so an admin can turn it OFF (the server allows that).
+                      onChange={(e) => { if (!e.target.checked || bermudaRemovalEligibleGrass) saveBermudaRemoval(e.target.checked); }}
                     />
                     <div className="mt-1 text-ui-caption text-ink-secondary">
-                      {turfProfile.id
-                        ? "Saves at once. St. Augustine and Zoysia only."
-                        : "Save the turf profile first."}
+                      {!turfProfile.id
+                        ? "Save the turf profile first."
+                        : bermudaRemovalEligibleGrass
+                          ? "Saves at once. St. Augustine and Zoysia only."
+                          : "On for a grass this add-on does not cover. Turn it off."}
                     </div>
                   </div>
                 )}{" "}

@@ -17478,17 +17478,23 @@ export function CompletionPanel({
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
-    // Products that share a completion group (the bermuda removal mix) come off together.
-    const group = protocolActions.find((a) => a.group && a.product?.id === productId)?.group;
-    const removedIds = new Set([productId, ...(group
+    // Products that share a completion group (the bermuda removal mix) come off together. The group is the
+    // ROW's own persisted id (a restored draft has it before any protocol action loads), else the loaded
+    // action's; the members are every row with that group plus the loaded actions' products.
+    const group = selectedProducts.find((p) => p.productId === productId)?.group
+      || protocolActions.find((a) => a.group && a.product?.id === productId)?.group;
+    const members = group ? selectedProducts.filter((p) => p.group === group) : [];
+    const removedIds = new Set([productId, ...members.map((p) => p.productId), ...(group
       ? protocolActions.filter((a) => a.group === group && a.product?.id).map((a) => a.product.id)
       : [])]);
-    // The group's chips go with its products: the labels, scopes and [Protocol] note
-    // lines handleProtocolActionSelect added for each member.
+    // The group's chips go with its products: the labels, scopes and [Protocol] note lines
+    // handleProtocolActionSelect added for each member (a member's label is its product name).
     if (group) {
-      for (const member of protocolActions.filter((a) => a.group === group)) {
-        removeSelectedLabel("protocol", String(member.note || member.label || member.raw || "Completed protocol item"));
-      }
+      const labels = new Set([
+        ...members.map((p) => String(p.name)),
+        ...protocolActions.filter((a) => a.group === group).map((a) => String(a.note || a.label || a.raw || "Completed protocol item")),
+      ]);
+      for (const label of labels) removeSelectedLabel("protocol", label);
     }
     setSelectedProducts((prev) =>
       promoteTankOwner(prev.filter((p) => !removedIds.has(p.productId))),
@@ -17499,10 +17505,13 @@ export function CompletionPanel({
   // every product row, the same as removing one of its product rows.
   function removeSelectionPill(kind, label) {
     if (generating) return;
-    const member = kind === "protocol"
+    // A pill of a group row: found by the row's own group and name first (works before the actions load).
+    const row = kind === "protocol" ? selectedProducts.find((p) => p.group && String(p.name) === label) : null;
+    const member = kind === "protocol" && !row
       ? protocolActions.find((a) => a.group && String(a.note || a.label || a.raw || "Completed protocol item") === label)
       : null;
-    const groupProductId = member && protocolActions.find((a) => a.group === member.group && a.product?.id)?.product.id;
+    const groupProductId = row?.productId
+      || (member && protocolActions.find((a) => a.group === member.group && a.product?.id)?.product.id);
     if (groupProductId) removeProduct(groupProductId);
     else if (member) {
       for (const mate of protocolActions.filter((a) => a.group === member.group)) {

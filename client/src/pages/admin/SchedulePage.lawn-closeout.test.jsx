@@ -1628,6 +1628,31 @@ it.each([[false], [true]])('a group member added by hand BEFORE the group is app
   expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
 });
 
+it('a restored group row comes off with its whole group before any protocol action has loaded (the row\'s own persisted group)', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', applicationMode: 'spot', prefillAmount: false, group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  const catalogRows = [...catalog, ...mix.map(({ applicationMethod, applicationMode, prefillAmount, group, ...row }) => row)];
+  const view = render(<CompletionPanel service={service} products={catalogRows} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  // The draft persists each row's group.
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts.filter((p) => p.group === 'bermuda_removal')).toHaveLength(3));
+  view.unmount();
+  // Reopen with the actions list not available: the restored rows are all there is.
+  optionalOptions = [];
+  failActions = true;
+  render(<CompletionPanel service={service} products={catalogRows} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  expect(screen.queryByRole('option', { name: 'Mix rec' })).toBeNull();
+  // Removing ONE restored group row removes the other two and the group's labels.
+  fireEvent.click(screen.getAllByRole('button', { name: /remove/i }).at(-1));
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  expect(screen.getByPlaceholderText(/Notes about this service/).value).not.toMatch(/Mix (rec|fus|nis)/);
+});
+
 it('the bermuda removal mix options go on together and come off together', async () => {
   enableDefaults();
   const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));

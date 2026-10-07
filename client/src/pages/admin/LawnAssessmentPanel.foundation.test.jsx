@@ -242,12 +242,29 @@ it.each(["st_augustine", "zoysia"])("shows the bermuda removal switch for %s and
 
 it.each([
   ["gate off (no availability flag)", { available: false, grass: "zoysia" }],
-  ["Bermuda grass", { available: true, grass: "bermuda" }],
-  ["Bahia grass", { available: true, grass: "bahia" }],
+  ["Bermuda grass, switch off", { available: true, grass: "bermuda" }],
+  ["Bahia grass, switch off", { available: true, grass: "bahia" }],
+  ["gate off with the switch already on", { available: false, grass: "zoysia", bermuda: true }],
 ])("hides the bermuda removal switch: %s", async (_label, options) => {
   vi.stubGlobal("fetch", bermudaProfileFetch(options));
   render(<LawnAssessmentPanel embedded />);
   fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
   await screen.findByRole("heading", { name: /Turf Profile/ });
   expect(screen.queryByLabelText(/Bermuda removal add-on/)).toBeNull();
+});
+
+it.each(["bermuda", "bahia"])("an already-enabled bermuda removal switch stays visible on %s so an admin can turn it off; it cannot be turned on there", async (grass) => {
+  vi.stubGlobal("fetch", bermudaProfileFetch({ available: true, grass, bermuda: true }));
+  render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
+  const box = await screen.findByLabelText(/Bermuda removal add-on/);
+  expect(box.checked).toBe(true);
+  expect(screen.getByText(/does not cover/)).toBeTruthy();
+  fireEvent.click(box);
+  await waitFor(() => {
+    const call = fetch.mock.calls.find(([url]) => String(url).endsWith("/turf-profile/bermuda-removal"));
+    expect(call).toBeTruthy();
+    expect(JSON.parse(call[1].body)).toEqual({ enabled: false });
+  });
+  await waitFor(() => expect(screen.queryByLabelText(/Bermuda removal add-on/)).toBeNull());
 });
