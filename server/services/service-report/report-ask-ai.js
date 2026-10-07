@@ -1023,17 +1023,25 @@ function ungroundedFinding(text, terms, visitOnly, findings = []) {
   });
 }
 
+// What the visit itself recorded, without product wording.
+function visitRecordParts(facts, requiredLines) {
+  return [facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
+    facts?.lawn_report, facts?.tree_shrub_report, requiredLines];
+}
+
 function leaksTargetList(text, {
   question, data, facts, requiredLines,
 }) {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for, product.active_ingredient]);
-  const visitParts = [facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
-    facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines];
+  const recordParts = visitRecordParts(facts, requiredLines);
+  const visitParts = [...recordParts, approvedWording];
   const allowed = factText([question, data.customerConcern, ...visitParts]);
   const shaped = (text.match(PEST_SHAPE_RE) || []).map((term) => stemmedTerms(term));
   const terms = [...targetLabelsOf(data), ...PEST_TERMS, ...shaped];
   if (terms.some((label) => sentenceNames(text, label) && !allowed.includes(label))) return true;
-  if (ungroundedFinding(text, terms, factText(visitParts), asArray(facts?.findings))) return true;
+  // Product wording says what a product is for, not what the visit found
+  // (Codex P1 #5964 r66).
+  if (ungroundedFinding(text, terms, factText(recordParts), asArray(facts?.findings))) return true;
   // A term only the question names may be repeated, never confirmed: "Is this
   // root rot?" -> "Yes, your lawn has root rot" (Codex P1s #5964 r37, r39).
   // Only "the report does not say" style uncertainty may repeat it; "is not

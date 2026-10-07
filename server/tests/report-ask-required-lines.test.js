@@ -2376,3 +2376,15 @@ describe('answer screen, Codex round 65', () => {
     expect(ask('Your overall score is 65 out of 100.')).toBe('unstated_number');
   });
 });
+
+describe('answer screen, Codex round 66', () => {
+  test('product wording is not evidence of a visit finding', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG', report_copy: { how_it_works: 'Alpine WSG slows ants and roaches at entry points.' } }, applicationArea: 'Outside' }] });
+    const question = 'What did you find?';
+    const facts = buildReportAskFacts({ question, data });
+    const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+    expect(ask('We found ants during the visit.')).toBe('target_list');
+    expect(ask('The technician observed roaches at the entry points.')).toBe('target_list');
+    expect(ask('Alpine WSG slows ants and roaches at entry points.')).toBeNull();
+  });
+});
