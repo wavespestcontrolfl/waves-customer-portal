@@ -228,6 +228,7 @@
  *   GATE_ADMIN_MFA_ENFORCE=true (needs GATE_ADMIN_MFA: an ADMIN with no authenticator set up is held on the two-step enrollment page — every other staff route answers 403 MFA_ENROLLMENT_REQUIRED — until they finish it. Read at call time via adminMfaEnforceLive(); unset = enrollment stays optional.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
  *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
+ *   GATE_REPORT_PLAN_RESCHEDULE=true (service report, owner ruling 2026-10-06: "Your plan" and "Your upcoming visits" become one section, and each upcoming visit gets a Reschedule button that opens the customer's self-serve /reschedule link. The server adds rescheduleUrl to each visit and `merged: true` to upcomingVisitsCard; a link is reused, never minted again on each view, and is null when the visit is too close to move or the link cannot be built. Needs GATE_REPORT_UPCOMING_VISITS, which supplies the visits. Strict opt-in: exactly 'true' in every environment, read at call time via reportPlanRescheduleLive(). Ships DARK; off = the report payload and page are byte-identical to before and the two sections stay separate. Sends nothing to a customer.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -3898,6 +3899,11 @@ const gates = {
   // report-ask-ai.js reads GATE_REPORT_ASK_AI at call time via
   // reportAskAiLive(); this entry is for logGateStatus only.
   reportAskAi: process.env.GATE_REPORT_ASK_AI === 'true',
+  // Service report plan + upcoming visits merged, per-visit Reschedule
+  // (owner 2026-10-06). Ships DARK. report-data.js reads
+  // GATE_REPORT_PLAN_RESCHEDULE at call time via reportPlanRescheduleLive();
+  // this entry is for logGateStatus only.
+  reportPlanReschedule: process.env.GATE_REPORT_PLAN_RESCHEDULE === 'true',
   // GATE_STANDARD_WORDING_PREVIEW — the office form shows the standard
   // wording a nothing-found report keeps; read at call time via
   // standardWordingPreviewLive().
@@ -4701,6 +4707,13 @@ function reportBlogPostLive() {
 // text alone and makes no model call.
 function reportAskAiLive() {
   return process.env.GATE_REPORT_ASK_AI === 'true';
+}
+
+// GATE_REPORT_PLAN_RESCHEDULE read at CALL time — strict `=== 'true'`, dark in
+// every environment. On, the service report merges "Your plan" with "Your
+// upcoming visits" and each visit carries a Reschedule link.
+function reportPlanRescheduleLive() {
+  return process.env.GATE_REPORT_PLAN_RESCHEDULE === 'true';
 }
 
 // GATE_STANDARD_WORDING_PREVIEW read at CALL time — strict `=== 'true'`, dark
@@ -5922,3 +5935,5 @@ module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 module.exports.lawnV13Live = lawnV13Live;
 // GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
 module.exports.serverDictationLive = serverDictationLive;
+// GATE_REPORT_PLAN_RESCHEDULE reader, on its own line so gate PRs never conflict.
+module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;

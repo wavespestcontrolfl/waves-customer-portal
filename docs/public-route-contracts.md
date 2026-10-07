@@ -2077,6 +2077,20 @@ round-5 P2, the same `composeOffers`/`planSummary` shape): `/api/reports/:token/
 is the only caller that opts in; the `/ask` Q&A build (which still needs
 `mode: 'live'` for its own `nextAppointment` context) neither reads nor pays
 for the card's paged scheduled_services scan.
+With `GATE_REPORT_PLAN_RESCHEDULE` also on (owner 2026-10-06; dark, strict `true`,
+read at call time) the card also carries `merged: true` and each visit carries
+`rescheduleUrl`: the visit's
+self-serve `/reschedule/:token` short link from `buildRescheduleLink(id,
+{ customerId, reuseExisting: true })`, or `null` when no link applies
+(`url` empty, `tooSoonToMove`, dispatch-owned pending, grouped visit) or the
+mint throws — a failure never breaks the report. The reschedule token is a
+bearer credential, as the report token already is; the field lives only in
+this live, no-store payload and is dropped with the rest of the card by
+`stripLiveOnlyScheduleFields` for pdf/static/sms_preview. The client hides the
+Reschedule button when it is `null`, and (only when `merged === true`) folds
+this card into the "Your plan" section (title "Your upcoming visits" when
+there is no plan summary). Gate off: neither field is present and the two
+sections stay separate, byte-identical to before.
 Lists every one of the customer's upcoming scheduled visits across ANY
 program (pest, lawn, tree & shrub, mosquito, termite, rodent, …), not just
 the report's own service line (`nextAppointment` above is unchanged and
