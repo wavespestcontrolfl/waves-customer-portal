@@ -775,6 +775,13 @@ async function updateLeadContact(input) {
   if (Object.keys(changes).length === 0) {
     return { error: `Lead ${leadName} already has those contact details — nothing to change.` };
   }
+  // A legacy lead may hold the whole address in `address` ("100 Main St,
+  // Sarasota, FL 34201"); estimate and inspection readers append city/zip to
+  // it, so a city- or ZIP-only edit would print two localities. Change the
+  // street line in the same request instead (Codex #6099 r5).
+  if ((changes.city || changes.zip) && !changes.address && String(lead.address || '').includes(',')) {
+    return { error: `Lead ${leadName}'s address line holds a full address ("${lead.address}"). Change address, city and zip together so they agree. Nothing was proposed.` };
+  }
 
   const preview = {
     lead_id: lead.id,
