@@ -374,6 +374,19 @@ test('a state other than FL beside a unit token is a locality, requested or stor
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).error).toMatch(/stored as one line/);
 });
 
+test('the city column at the tail of a comma-free line is one line; FL before another unit word is a locality', async () => {
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '123 Broadway Sarasota', city: 'Sarasota', zip: '34200' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton' })).error).toMatch(/stored as one line/);
+  db.mockImplementation(() => chain({ first: ADDR_LEAD }));
+  for (const address of ['12 Oak Ave, Florida Apt 4', '12 Oak Ave, FL Unit 4']) {
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address })).error).toMatch(/street alone/);
+  }
+  // Real floor notation still passes as street text.
+  for (const address of ['123 Main St, Fl 2', '123 Main St Fl B', '123 Main St Fl. 12']) {
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address })).changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
+  }
+});
+
 test('confirmed phone change does not touch the address columns in the guard', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
   const activities = chain({ insert: undefined });
