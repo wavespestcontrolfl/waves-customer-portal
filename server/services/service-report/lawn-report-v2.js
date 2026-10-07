@@ -755,7 +755,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
   // GATE_LAWN_PROGRAM_DETAIL: undefined unless live beside a program line, so
   // the key serializes away and the gate-off payload is byte-identical.
-  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine, aftercare, water });
+  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine });
 
   const snapshot = {
     overallScore,

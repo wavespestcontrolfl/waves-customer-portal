@@ -2425,20 +2425,15 @@ print `seasonalNote`, so its content and cache signature are unchanged.
 effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above
 and `GATE_LAWN_REPORT_LEAD` is on, because only the lead layout mounts it; gate
 off leaves the lawn payload unchanged, key for key) adds one key to the lawn
-report payload: `reportV2.snapshot.seasonalDetail` = `{ whyNow, whatYouSee,
-watering[], monthName }`, present only beside `seasonalNoteSource: "program"` (lawn only;
+report payload: `reportV2.snapshot.seasonalDetail` = `{ whyNow, whatYouSee }`, present only beside `seasonalNoteSource: "program"` (lawn only;
 no new route, token, privacy or rate-limit surface). The text is static copy
 for the visit month from `lawn-program-line.js` `PROGRAM_DETAIL_V13`, written
 from the same v13 month step by category: never a product, brand, active
 ingredient or rate, and a conditional step (the weed barrier) keeps the "where
-it fits the property" qualifier. `watering[]` is seasonal tips only, never an amount, and is
-EMPTY whenever the report carries any watering direction of its own: the visit's
-label aftercare (`reportV2.aftercare` water-in required or not neutral) or a
-"Water This Week" card (`reportV2.water`, with its calculated target or weekly
-plan), so the report never shows two watering directions. The card titles the
-tips "Watering in {monthName}" (the visit's month), so a report reopened in a
-later season does not read as current advice. Conditional steps (the weed barrier, the May sunny-turf insect
-treatment) keep "where it fits the property". The lead layout's "This time of year" card renders the three parts
+it fits the property" qualifier. No watering advice rides here: every lawn report already carries the Water
+This Week card and the visit's label aftercare, which own the watering
+direction. Conditional steps (the weed barrier, the May sunny-turf insect
+treatment) keep "where it fits the property". The lead layout's "This time of year" card renders the two parts
 under the sentence; no other client reads the key.
 
 `GATE_LAWN_VISIT_MEMORY` (dark; gate off leaves the lawn payload unchanged, key

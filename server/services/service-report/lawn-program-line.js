@@ -217,97 +217,69 @@ function buildProgramLine({ month = null, applications = [], nitrogenApplied = n
 
 // GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06: "add more detail here ... use the
 // labels, seasonality"): under the v13 month sentence, why this month's step
-// fits the season, what the customer will see, and seasonal watering guidance.
-// Each line restates the v13 month step (server/config/lawn-protocol-v13.json)
-// by category, never a product name or rate, plus Southwest Florida seasons:
-// dry season Nov-May, rainy season Jun-Sep, summer nitrogen limits Jun-Sep.
-// Watering here is general seasonal guidance only; a product's own water-in
-// or hold step comes from its label rule in the report's watering section.
-const DRY = 'Water only when the lawn shows thirst (blades fold or footprints stay), early in the morning, on your county\u2019s allowed watering days.';
-const RAIN = 'Summer rain usually covers the lawn. Turn irrigation down or off in weeks with regular rain, and water only when the lawn shows thirst. Extra water now invites fungus.';
-const MONTH_NAMES = Object.freeze(['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']);
+// fits the season and what the customer will see. Each line restates the v13
+// month step (server/config/lawn-protocol-v13.json) by category, never a
+// product name or rate, plus Southwest Florida seasons: dry season Nov-May,
+// rainy season Jun-Sep, summer nitrogen limits Jun-Sep.
 const PROGRAM_DETAIL_V13 = Object.freeze({
   1: Object.freeze({
     whyNow: 'January is the coolest stretch of the year. Winter weeds are sprouting while the grass grows slowly, so a weed barrier goes down where it fits the property and a micronutrient feeding keeps the color up without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
     whatYouSee: 'Color holds steady and growth stays slow, so mowing is light. A few weeds that sprouted earlier may still show; we spot treat them.',
-    watering: [DRY, 'In cool weather the lawn needs water less often than in spring.'],
   }),
   2: Object.freeze({
     whyNow: 'As the days lengthen in February, the lawn starts to green up. A feeding supports that green-up, and we spot treat weeds while they are small.',
     whatYouSee: 'Green-up builds as the weather warms, and mowing picks up toward the end of the month.',
-    watering: [DRY],
   }),
   3: Object.freeze({
     whyNow: 'In March the soil warms and summer weeds such as crabgrass start to sprout. The spring weed barrier goes down now where it fits the property, ahead of them, with a micronutrient feeding for color. Spring is also when the root disease take-all can show, so mapped trouble areas get a treatment.',
     whatYouSee: 'The weed barrier is invisible: it works by stopping new weeds before they start. Color deepens and growth speeds up.',
-    watering: [DRY],
   }),
   4: Object.freeze({
     whyNow: 'April warms quickly and the grass is growing hard, so it gets a light feeding. Chinch bugs start to wake up in hot, sunny spots, and we check for them and treat where we find them.',
     whatYouSee: 'Thicker, faster growth and weekly mowing. Dry, yellowing patches in sunny areas near pavement are worth telling us about.',
-    watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
   }),
   5: Object.freeze({
     whyNow: 'May, before the rains, is peak season for chinch bugs and other lawn insects in hot, sunny turf. The sunny turf gets an insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
     whatYouSee: 'The lawn should hold its color through the dry heat. Spots that stay yellow after watering are worth telling us about.',
-    watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
   }),
   6: Object.freeze({
     whyNow: 'The rainy season starts in June, and local summer fertilizer rules limit nitrogen until fall. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds where it fits the property. Heat and rain bring gray leaf spot and chinch bugs, which we spot treat.',
     whatYouSee: 'Color from the micronutrients shows without extra top growth. Growth is fast with the rain, so mowing stays weekly.',
-    watering: [RAIN],
   }),
   7: Object.freeze({
     whyNow: 'July is a scouting visit. Summer fertilizer limits mean no whole-lawn feeding, so we inspect the whole lawn and treat problem spots only, such as caterpillars, leaf spot or chinch bugs.',
     whatYouSee: 'Summer rain keeps the lawn growing. Chewed or ragged patches can mean caterpillars and are worth telling us about.',
-    watering: [RAIN],
   }),
   8: Object.freeze({
     whyNow: 'Late summer heat and rain continue. A micronutrient feeding keeps the color up, and we treat leaf spot or caterpillar spots where we find them.',
     whatYouSee: 'Steady color through the heat, with fast growth and weekly mowing.',
-    watering: [RAIN],
   }),
   9: Object.freeze({
     whyNow: 'September is the end of the rainy season. A micronutrient feeding keeps the color up, mapped take-all areas get a fall treatment, and we watch for caterpillars.',
     whatYouSee: 'Growth starts to slow as the month goes on.',
-    watering: [RAIN, 'As the rains taper off, turn irrigation back up only as the lawn needs it.'],
   }),
   10: Object.freeze({
     whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The fall feeding goes down now, with a weed barrier where it fits the property, so the barrier is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
     whatYouSee: 'The feeding greens the lawn as it settles in. Growth slows as the days get shorter, so you will mow less. The weed barrier is invisible: it works by stopping new weeds before they start.',
-    watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
   }),
   11: Object.freeze({
     whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, mapped large patch areas are treated, and we treat sedge where it shows up.',
     whatYouSee: 'Growth slows and color holds.',
-    watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
   }),
   12: Object.freeze({
     whyNow: 'December brings cooler spells. A light feeding keeps the color up, and we treat any large patch and weed spots.',
     whatYouSee: 'Slow growth and light mowing through the holidays.',
-    watering: [DRY, 'In cool weather the lawn needs water less often than in spring.'],
   }),
 });
 
 // The month's detail, only beside a v13 program line (same visits, same month)
-// and only while GATE_LAWN_PROGRAM_DETAIL is live. When the visit carries its
-// own label aftercare (a water-in or a hold) or a weather-derived weekly water
-// plan, the seasonal watering lines step
-// aside so the report never gives two watering directions (codex #6091 r1).
-function buildProgramDetail({ month, programLine, aftercare = null, water = null } = {}) {
+// and only while GATE_LAWN_PROGRAM_DETAIL is live. Watering advice is not part
+// of it: every lawn report already carries the Water This Week card and the
+// visit's label aftercare, which own the watering direction (codex #6091 r5).
+function buildProgramDetail({ month, programLine } = {}) {
   if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return undefined;
   const detail = PROGRAM_DETAIL_V13[Number(month)];
-  if (!detail) return undefined;
-  const weekPlan = water && water.weekPlan;
-  // Any watering card the report shows (the "Water This Week" card with its
-  // calculated target, a weekly plan) or the visit's own label aftercare owns
-  // the watering direction; the seasonal tips appear only when none does, and
-  // never carry an amount (codex #6091 r2, r4).
-  const visitWatering = !!(water || weekPlan || (aftercare && (aftercare.waterInRequired || aftercare.neutral === false)));
-  // monthName titles the watering tips ("Watering in October") so a report
-  // reopened in a later season reads as the visit's season, not today's.
-  const monthName = MONTH_NAMES[Number(month)];
-  return { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee, watering: visitWatering ? [] : detail.watering, monthName };
+  return detail ? { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee } : undefined;
 }
 
 module.exports = {

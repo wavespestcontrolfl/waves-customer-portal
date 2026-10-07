@@ -331,16 +331,14 @@ describe('LawnReportV2Section lead mode', () => {
 
 describe('program detail (GATE_LAWN_PROGRAM_DETAIL)', () => {
   const PROGRAM = 'In October the program focuses on the fall feeding with iron, plus fall disease prevention where the lawn needs it and a thatch check.';
-  const DETAIL = { whyNow: 'Soil cools and winter weeds start to sprout.', whatYouSee: 'Growth slows as the days get shorter.', watering: ['Water only when the lawn shows thirst.', 'Water in the morning only.'], monthName: 'October' };
+  const DETAIL = { whyNow: 'Soil cools and winter weeds start to sprout.', whatYouSee: 'Growth slows as the days get shorter.' };
 
-  it('renders why now, what you will see and the watering lines under the program line', () => {
+  it('renders why now and what you will see under the program line', () => {
     render(<LawnReportV2Section data={payload({ snapshot: { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program', seasonalDetail: DETAIL } })} />);
     expect(screen.getByText('Why now')).toBeInTheDocument();
     expect(screen.getByText(DETAIL.whyNow)).toBeInTheDocument();
     expect(screen.getByText('What you will see')).toBeInTheDocument();
-    expect(screen.getByText('Watering in October')).toBeInTheDocument();
     expect(screen.getByText(DETAIL.whyNow).style.fontSize).toBe('16px');
-    for (const line of DETAIL.watering) expect(screen.getByText(line)).toBeInTheDocument();
   });
 
   it('without seasonalDetail the card is the program line alone', () => {
