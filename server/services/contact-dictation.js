@@ -272,11 +272,6 @@ async function decodeDictatedContacts({ transcript, contactPassTranscript = null
 // ── Spelled names ────────────────────────────────────────────────────────────
 
 const NAME_FIELDS = ['first_name', 'last_name'];
-// Cohort marker stamped into call_log.ai_validation.name_dictation when the
-// decoder changed the caller name (the prompt-version column is varchar(30) and
-// full). The promotion-readiness audit leaves marked rows out of the extractor's
-// own cohort: their caller identity is the decoder's, not the extractor's.
-const NAME_DICTATION_MARKER = Object.freeze({ applied: true, version: 'namedec1' });
 const SPELLED_NAME_RE = /^\p{L}[\p{L}'’ -]{0,48}\p{L}$/u;
 
 // Title-case a spelling the model returned in one case ("SEROV", "serov");
@@ -316,17 +311,18 @@ const EMAIL_WORDING_RE = /e-?mail|@|\bdot\b|\bat\b[^\n]{0,25}\b(?:dot|gmail|yaho
 function spelledAfterNameWording(raw, sources) {
   const flat = (v) => String(v || '').toLowerCase().replace(/[ \t]+/g, ' ');
   const needle = flat(raw).trim().replace(/\s*\n\s*/g, ' ');
-  for (const src of sources) {
+  // Every occurrence in every source counts: the same spelling can appear
+  // bare in one transcript and after name wording in the other.
+  return sources.some((src) => {
     const text = flat(src);
-    const at = text.indexOf(needle);
-    if (at < 0) continue;
-    const turn = text.slice(text.lastIndexOf('\n', at) + 1, at + needle.length);
-    const wording = [...turn.matchAll(NAME_WORDING_RE)].pop();
-    if (!wording) return false;
-    const tail = turn.slice(wording.index + wording[0].length);
-    return tail.length <= 100 && !/[?!]/.test(tail) && !EMAIL_WORDING_RE.test(turn.slice(wording.index));
-  }
-  return false;
+    for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) {
+      const turn = text.slice(text.lastIndexOf('\n', at) + 1, at + needle.length);
+      const wording = [...turn.matchAll(NAME_WORDING_RE)].pop();
+      const tail = wording ? turn.slice(wording.index + wording[0].length) : '';
+      if (wording && tail.length <= 100 && !/[?!]/.test(tail) && !EMAIL_WORDING_RE.test(turn.slice(wording.index))) return true;
+    }
+    return false;
+  });
 }
 
 /**
@@ -393,7 +389,12 @@ function callerSpelledName(dictation, field) {
   if (new Set(entries.map((n) => nameKey(n.spelled_value))).size !== 1) return null;
   const best = entries.reduce((a, b) => (b.confidence > a.confidence ? b : a));
   return best.confidence >= ADOPT_CONFIDENCE
-    ? { value: best.spelled_value, nameContext: entries.some((n) => n.name_context === true) }
+    ? {
+      value: best.spelled_value,
+      confidence: best.confidence,
+      quote: best.raw_spoken,
+      nameContext: entries.some((n) => n.name_context === true),
+    }
     : null;
 }
 
@@ -415,71 +416,6 @@ function applyNameDictationPolicy({ current = {}, dictation = null } = {}) {
     if (!spelled || existing === spelled.value) continue;
     if (existing ? sameNameMisheard(existing, spelled.value) : spelled.nameContext) changes[field] = spelled.value;
   }
-  return changes;
-}
-
-/**
- * Apply the name policy to a V2 extraction's `caller` block in place (split
- * fields and name_full). Returns the changes made ({} when none). Secondary
- * contacts live elsewhere in the extraction and are never touched.
- *
- * name_full is rewritten by replacing the WHOLE old component ("De Silvo" in
- * "Test De Silvo"), never a token position. A missing split part is derived
- * from name_full by removing the known part (as extraction-compat does);
- * with no split value at all, only a two-token name_full speaks for them.
- */
-function applyNameDictationToV2Caller(caller, dictation) {
-  if (!(caller instanceof Object)) return {};
-  const wordsOf = (v) => String(v || '').trim().split(/\s+/).filter(Boolean);
-  const same = (a, b) => a.join(' ').toLowerCase() === b.join(' ').toLowerCase();
-  const tokens = wordsOf(caller.name_full);
-  const nameFull = tokens.join(' ');
-  // Same whole-token derivation as the V2 adoption in extraction-compat: a
-  // present split part stays authoritative for its own slot, and the missing
-  // part is what remains of name_full once that part is removed from its own
-  // end ("Mary Ann" + "Mary Ann Smyth" -> last "Smyth"). A name_full that
-  // disagrees with the present part derives nothing.
-  const known = NAME_FIELDS.filter((f) => caller[f]);
-  const derived = {};
-  if (known.length === 1) {
-    const part = wordsOf(caller[known[0]]);
-    const at = known[0] === 'first_name' ? 0 : tokens.length - part.length;
-    if (tokens.length > part.length && same(tokens.slice(at, at + part.length), part)) {
-      derived[NAME_FIELDS.find((f) => f !== known[0])] = tokens.filter((_t, i) => i < at || i >= at + part.length).join(' ');
-    }
-  } else if (!known.length && tokens.length === 2) {
-    [derived.first_name, derived.last_name] = tokens;
-  }
-  const current = Object.fromEntries(NAME_FIELDS.map((f) => [f, caller[f] || derived[f] || null]));
-  // A name_full whose parts cannot be told apart (three tokens, no split
-  // value) would disagree with a filled-in split field: leave that part alone.
-  const changes = Object.fromEntries(Object.entries(applyNameDictationPolicy({ current, dictation }))
-    .filter(([f]) => current[f] || tokens.length < 2));
-  let rewritten = nameFull;
-  const misses = [];
-  for (const [field, value] of Object.entries(changes)) {
-    // The component being replaced: the known one, or a lone-token name_full
-    // that is the same name misheard.
-    const old = [current[field], tokens.length === 1 && tokens[0]]
-      .find((v, i) => v && (i === 0 || sameNameMisheard(v, value)));
-    if (!old || !nameFull) continue;
-    const escaped = old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-    // Anchored to the component's own end of the name ("Odell Odell" has one
-    // first name and one last name).
-    const anchored = new RegExp(field === 'first_name' ? `^${escaped}(?=\\s|$)` : `(?<=^|\\s)${escaped}$`, 'iu');
-    if (!anchored.test(rewritten)) misses.push(field);
-    rewritten = rewritten.replace(anchored, value);
-  }
-  // name_full needs rebuilding when it disagrees with a split part it should
-  // contain, or when a missing part is filled in beside it. Two present split
-  // parts are the extractor's own identity, so name_full is rebuilt from them;
-  // otherwise the whole name stays exactly as it was (readers prefer
-  // name_full, and a split/full mismatch would show the stale name).
-  const rebuild = misses.length > 0 || (nameFull && Object.keys(changes).some((f) => !current[f]));
-  if (rebuild && !NAME_FIELDS.every((f) => changes[f] || caller[f])) return {};
-  Object.assign(caller, changes);
-  const next = rebuild ? NAME_FIELDS.map((f) => caller[f]).join(' ') : rewritten;
-  if (next !== nameFull) caller.name_full = next;
   return changes;
 }
 
@@ -535,8 +471,7 @@ module.exports = {
   decodeDictatedContacts,
   applyEmailDictationPolicy,
   applyNameDictationPolicy,
-  applyNameDictationToV2Caller,
-  NAME_DICTATION_MARKER,
+  callerSpelledName,
   sanitizeEmailCandidates,
   sanitizeNameEntries,
   buildDecoderPrompt,

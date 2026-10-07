@@ -104,10 +104,6 @@ function contactPhoneForCall(row) {
   return resolveCallContactPhone(row);
 }
 
-// Rows whose caller name the spelled-name decoder changed carry
-// ai_validation.name_dictation.applied (contact-dictation NAME_DICTATION_MARKER).
-const DECODER_MODIFIED_EXCLUSION_SQL = "COALESCE(ai_validation->'name_dictation'->>'applied', '') <> 'true'";
-
 async function main({ aps = false, apsPass = null } = {}) {
   const db = dbConn();
   if (aps) console.log('\n=== -aps cohort (agent-proposed-slot prompt; same checks, only its own rows) ===');
@@ -140,9 +136,6 @@ async function main({ aps = false, apsPass = null } = {}) {
   const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
-    // A row whose caller name the spelled-name decoder changed (ai_validation.name_dictation,
-    // see contact-dictation NAME_DICTATION_MARKER) is the decoder's identity, not this extractor's.
-    .whereRaw(DECODER_MODIFIED_EXCLUSION_SQL)
     .whereIn('ai_extraction_prompt_version', aps ? [apsCohortVersion(liveCatalogNames)] : [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
@@ -565,4 +558,4 @@ if (require.main === module) {
   runReadiness().catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { contactPhoneForCall, apsCohortVersion, runReadiness, DECODER_MODIFIED_EXCLUSION_SQL };
+module.exports = { contactPhoneForCall, apsCohortVersion, runReadiness };

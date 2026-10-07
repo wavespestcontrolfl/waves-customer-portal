@@ -74,7 +74,11 @@ function confidenceForField(v2Extraction, field) {
   return null;
 }
 
-function buildCustomerFieldCandidates({ callId, customerId = null, extraction, v2Extraction = null }) {
+// nameOverrides: { first_name|last_name: { value, confidence, quote } } — a name the
+// contact-dictation decoder took from the caller's own spelling. It replaces the
+// extractor's (misheard) value for that field and is graded on the DECODER's
+// confidence under its own provenance, not the extractor's caller_identity score.
+function buildCustomerFieldCandidates({ callId, customerId = null, extraction, v2Extraction = null, nameOverrides = {} }) {
   if (!callId || !extraction) return [];
   const hasV2 = isV2Extraction(v2Extraction);
   const flat = flatView(hasV2 ? v2Extraction : extraction);
@@ -82,7 +86,8 @@ function buildCustomerFieldCandidates({ callId, customerId = null, extraction, v
 
   return CANDIDATE_FIELDS
     .map((field) => {
-      const value = flat[field];
+      const override = nameOverrides?.[field] || null;
+      const value = override ? override.value : flat[field];
       if (value === null || value === undefined || value === '') return null;
       const evidence = hasV2 ? findEvidence(v2Extraction, field) : null;
 
@@ -93,10 +98,10 @@ function buildCustomerFieldCandidates({ callId, customerId = null, extraction, v
         extracted_value: String(value),
         enriched_value: String(value),
         final_recommended_value: String(value),
-        evidence_quote: evidence?.quote || null,
-        source,
-        confidence: confidenceForField(v2Extraction, field),
-        reason_code: evidence ? 'evidence_pinned' : 'observed_only',
+        evidence_quote: evidence?.quote || override?.quote || null,
+        source: override ? 'contact_dictation' : source,
+        confidence: override ? override.confidence : confidenceForField(v2Extraction, field),
+        reason_code: override ? 'spelled_out' : (evidence ? 'evidence_pinned' : 'observed_only'),
         status: 'pending',
       };
     })

@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, applyNameDictationPolicy, applyNameDictationToV2Caller, NAME_DICTATION_MARKER, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, applyNameDictationPolicy, callerSpelledName, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -10280,10 +10280,10 @@ const CallRecordingProcessor = {
     // did not render (or route on a block the prompt never carried).
     const assessmentLaneActive = commercialAssessmentBookingActive(call);
     const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });
-    // Set when the spelled-name policy changed the V2 caller name: stamped into
-    // ai_validation (the version column is varchar(30), full) so the promotion-readiness
-    // audit can leave decoder-modified rows out of the extractor's own cohort.
-    let nameDictationApplied = false;
+    // Caller-spelled names the decoder applied to the V1/flat record, by field, with the
+    // decoder's own confidence and quote: the candidate staging carries them (the V2
+    // extraction is never rewritten, so its caller_identity confidence does not apply).
+    const spelledNameOverrides = {};
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -11079,37 +11079,21 @@ const CallRecordingProcessor = {
       if (contactDictation) {
         // A last/first name the CALLER spelled out letter by letter beats the
         // misheard word. The decoder model judged whose name each spelling is;
-        // the policy only replaces an empty or near-identical (misheard) name,
-        // in the V1 record and the V2 caller, before the customer/lead
-        // upserts and the candidate staging read either. An existing
-        // customer's row is never written here: the corrected value reaches it
-        // only as a staged candidate through the GATE_CONTACT_CORRECTION lane
-        // and its own gates. Secondary contacts are never touched.
-        const v1NameChanges = applyNameDictationPolicy({ current: extracted, dictation: contactDictation });
-        const v2NameChanges = (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction))
-          ? applyNameDictationToV2Caller(v2Result.extraction.caller, contactDictation)
-          : {};
-        if (Object.keys(v1NameChanges).length) Object.assign(extracted, v1NameChanges);
-        if (Object.keys(v1NameChanges).length || Object.keys(v2NameChanges).length) {
-          // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
-          logger.info(`[call-proc-dictation] Applied caller-spelled name field(s) for ${maskSid(callSid)}: ${[...new Set([...Object.keys(v1NameChanges), ...Object.keys(v2NameChanges)])].join(', ')}`);
+        // the policy only replaces an empty (name-context) or near-identical
+        // (misheard) name, in the V1/flat record only, so a NEW customer/lead
+        // is created with the spelled name. The V2 extraction is never touched.
+        // An existing customer's row is never written here: the spelled value
+        // reaches it only as a staged candidate (decoder confidence + quote)
+        // through the GATE_CONTACT_CORRECTION lane and its own gates.
+        // Secondary contacts are never touched.
+        const nameChanges = applyNameDictationPolicy({ current: extracted, dictation: contactDictation });
+        for (const [field, value] of Object.entries(nameChanges)) {
+          const spelled = callerSpelledName(contactDictation, field);
+          extracted[field] = value;
+          spelledNameOverrides[field] = { value, confidence: spelled.confidence, quote: spelled.quote };
         }
-        if (Object.keys(v2NameChanges).length) {
-          // The canonical V2 blob was serialized to ai_extraction_enriched
-          // right after extraction — re-persist it (token-fenced, best
-          // effort) so blob readers see the spelled name too.
-          // The decoder changed identity the extractor produced, so the row
-          // carries a cohort marker in ai_validation (merged here; the final
-          // validation write below includes it too).
-          nameDictationApplied = true;
-          await db('call_log').where({ id: call.id })
-            .where('processing_token', procToken)
-            .update({
-              ai_extraction_enriched: JSON.stringify(v2Result.extraction),
-              ai_validation: db.raw("COALESCE(ai_validation, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ name_dictation: NAME_DICTATION_MARKER })]),
-            })
-            .catch((e) => logger.warn(`[call-proc-dictation] enriched-blob re-persist after spelled-name adoption failed: ${e.code || e.name || 'db_error'}`));
-        }
+        // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
+        if (Object.keys(nameChanges).length) logger.info(`[call-proc-dictation] Applied caller-spelled name field(s) for ${maskSid(callSid)}: ${Object.keys(nameChanges).join(', ')}`);
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
         dictationEmailPayload = emailDecision.payload;
         if (emailDecision.adopt) {
@@ -14474,6 +14458,9 @@ const CallRecordingProcessor = {
       customerId: customerId || call.customer_id || null,
       extraction: extracted,
       v2Extraction: v2ExtractionForAudit,
+      // Caller-spelled names the decoder applied: staged with the decoder's confidence and
+      // provenance in place of the V2 caller_identity confidence.
+      nameOverrides: spelledNameOverrides,
       // Token-fences the value-keyed dedupe's relink of pending rows: a
       // stale pass that lost its claim must not rewrite a candidate's
       // linkage after the owning pass relinked it (codex #3413 r18).
@@ -22029,8 +22016,6 @@ const CallRecordingProcessor = {
         // the offline audits mirror the live lane (codex #4685 r2 P1).
         on_file_address_validation: knownCaller?.onFileAddressVerdict || null,
         errors: v2Result.errors || null,
-        // Cohort marker (see nameDictationApplied): the audits skip decoder-modified rows.
-        ...(nameDictationApplied ? { name_dictation: NAME_DICTATION_MARKER } : {}),
         generated_at: new Date().toISOString(),
       };
 
