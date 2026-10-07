@@ -16829,7 +16829,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
 // approvedVisitVersion (the visit's xmin:ctid the caller checked) becomes the
 // handler's row-version CAS baseline: any write since then refuses 409
 // VISIT_CHANGED_RETRY under the visit's row lock. approvedRepriceState
-// ({ addonCount, billingLane, livePrepayTerm }) covers the related records
+// ({ addonCount, billingLane, refreshablePrepayTerm }) covers the related records
 // that version does not: see assertApprovedRepriceState.
 async function updateVisitDetails({ id, body, actor, approvedVisitVersion = null, approvedRepriceState = null }) {
   await primePercentDiscountExclusions().catch(() => {});
@@ -16846,7 +16846,8 @@ async function updateVisitDetails({ id, body, actor, approvedVisitVersion = null
 
 // The related state an updateVisitDetails caller approved — the visit's add-on
 // line count, the customer's resolved billing lane, and whether the customer
-// has a live annual prepay term (coveredTermsAsOf) — read inside the save's
+// has an annual prepay term this save's refresh would process
+// (refreshableTermsForCustomer) — read inside the save's
 // transaction after its customer, visit and add-on row locks. Any difference
 // refuses 409 VISIT_CHANGED_RETRY (REPRICE_APPROVAL_DRIFT) before any write.
 async function assertApprovedRepriceState(trx, id, approved) {
@@ -16855,12 +16856,12 @@ async function assertApprovedRepriceState(trx, id, approved) {
     ? await trx('customers').where({ id: visit.customer_id }).first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate')
     : null;
   const [addons] = await trx('scheduled_service_addons').where({ scheduled_service_id: id }).count('* as count');
-  const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
-  const term = customer ? await coveredTermsAsOf(trx).where('t.customer_id', customer.id).first('t.id') : null;
+  const { refreshableTermsForCustomer } = require('../services/annual-prepay-renewals');
+  const terms = customer ? await refreshableTermsForCustomer(customer.id, trx) : [];
   const drifted = !customer
     || Number(addons?.count || 0) !== Number(approved.addonCount)
     || resolveBillingLane(customer).mode !== approved.billingLane
-    || !!term !== (approved.livePrepayTerm === true);
+    || terms.length > 0 !== (approved.refreshablePrepayTerm === true);
   if (drifted) {
     throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
       statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'REPRICE_APPROVAL_DRIFT',

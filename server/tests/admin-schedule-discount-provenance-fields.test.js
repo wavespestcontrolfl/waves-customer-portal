@@ -434,6 +434,13 @@ postgres('scheduled_services PUT /:id/update-details — add-on discount catalog
   test.each([
     ['an add-on line added after the approval', (t) => t('scheduled_service_addons').insert({ scheduled_service_id: visitId, service_name: 'Mosquito Add-on', base_price: 20, estimated_price: 20 })],
     ['the customer moved to monthly membership after the approval', (t) => t('customers').where({ id: customerId }).update({ billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 89 })],
+    ['an active annual prepay term (its prepay invoice voided) the save would refresh', async (t) => {
+      const invoiceId = randomUUID();
+      await t('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'void', subtotal: 480, total: 480,
+        line_items: '[]', invoice_number: `TEST-${invoiceId.slice(0, 8)}`, token: randomUUID() });
+      await t('annual_prepay_terms').insert({ customer_id: customerId, prepay_invoice_id: invoiceId, status: 'active',
+        term_start: '2040-01-01', term_end: '2040-12-31' });
+    }],
   ])('updateVisitDetails: %s refuses 409 and writes nothing', async (_label, change) => {
     const version = (await trx('scheduled_services').where({ id: visitId })
       .first(trx.raw("(xmin::text || ':' || ctid::text) as row_version"))).row_version;
@@ -441,7 +448,7 @@ postgres('scheduled_services PUT /:id/update-details — add-on discount catalog
     const refused = await router.updateVisitDetails({
       id: visitId, body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: null },
       approvedVisitVersion: version,
-      approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', livePrepayTerm: false },
+      approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', refreshablePrepayTerm: false },
     }).then(() => null, (err) => err);
     expect(refused).toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY', reason: 'REPRICE_APPROVAL_DRIFT' });
     expect(Number((await trx('scheduled_services').where({ id: visitId }).first()).estimated_price)).toBe(100);

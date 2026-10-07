@@ -13,13 +13,11 @@ jest.mock('../routes/admin-schedule', () => ({
   findBillingCoveredVisits: jest.fn(),
   updateVisitDetails: jest.fn(),
 }));
-// The canonical live-term reader; `mockLivePrepayTerm` stands in for its answer.
-let mockLivePrepayTerm;
+// The refresh's own term selection; `mockRefreshableTerm` stands in for a term
+// it would process (e.g. an 'active' term whose prepay invoice was voided).
+let mockRefreshableTerm;
 jest.mock('../services/annual-prepay-renewals', () => ({
-  coveredTermsAsOf: jest.fn(() => {
-    const q = { where: jest.fn(() => q), first: jest.fn(async () => (mockLivePrepayTerm ? { id: 'term-live' } : undefined)) };
-    return q;
-  }),
+  refreshableTermsForCustomer: jest.fn(async () => (mockRefreshableTerm ? [mockRefreshableTerm] : [])),
 }));
 jest.mock('../utils/datetime-et', () => ({
   ...jest.requireActual('../utils/datetime-et'),
@@ -97,7 +95,7 @@ beforeEach(() => {
     invoices: [{ scheduled_service_id: 'v-inv', invoice_number: 'WPC-2099-0001', status: 'sent' }],
     scheduled_service_addons: [],
   };
-  mockLivePrepayTerm = false;
+  mockRefreshableTerm = null;
   // The Schedule re-price block's own coverage reader decides an annual-term link.
   Schedule.findBillingCoveredVisits.mockResolvedValue(new Map([['v-term', 'covered by an annual prepay term']]));
   Schedule.updateVisitDetails.mockResolvedValue({ status: 200, json: { success: true } });
@@ -177,8 +175,8 @@ describe('the card', () => {
     expect(res.preview).toBeUndefined();
   });
 
-  test('a customer with a live annual prepay term is refused whole: the save would refresh the term', async () => {
-    mockLivePrepayTerm = true;
+  test('a customer with a term the save would refresh (active, prepay invoice voided) is refused whole', async () => {
+    mockRefreshableTerm = { id: 'term-1', status: 'active', prepay_invoice_id: 'inv-void' };
     const res = await preview();
     expect(res).toMatchObject({ code: 'annual_prepay_customer' });
     expect(res.error).toMatch(/annual prepay term — change visit prices on the Schedule screen/);
@@ -201,6 +199,35 @@ describe('the card', () => {
     expect(first.visits.map((v) => v.id)).toEqual(['b-1', 'b-2']);
     expect(second.visits.map((v) => v.id)).toEqual(['b-1', 'b-2']);
     expect(second._version).toBe(first._version);
+  });
+
+  test.each([
+    ['discount_id only', { discount_id: 'disc-1' }],
+    ['line_discount_id only', { line_discount_id: 'disc-2' }],
+    ['discount_name only', { discount_name: 'Gold loyalty' }],
+    ['discount_dollars only', { discount_dollars: '5.00' }],
+    ['line_discount_amount only', { line_discount_amount: '10' }],
+  ])('a stored discount in any shape the price edit clears gets the replaced note: %s', async (_label, shape) => {
+    Object.assign(tables.scheduled_services[0], shape);
+    const card = await preview();
+    expect(card.visits.find((v) => v.id === 'v-1').discount_note).toMatch(/discount stamp is replaced/);
+  });
+
+  test('zero-dollar discount amounts alone are not a stamp', async () => {
+    Object.assign(tables.scheduled_services[0], { discount_dollars: '0.00', line_discount_dollars: 0 });
+    const card = await preview();
+    expect(card.visits.find((v) => v.id === 'v-1').discount_note).toBeUndefined();
+  });
+
+  test.each(['2027-02-29', '2026-13-01'])('an impossible through_date (%s) is refused with the documented error', async (date) => {
+    const res = await preview({ through_date: date });
+    expect(res.error).toBe('through_date must be a real calendar date (YYYY-MM-DD).');
+    expect(res.preview).toBeUndefined();
+  });
+
+  test('through_date declares format date', () => {
+    const tool = require('../services/intelligence-bar/reprice-visits-tools').REPRICE_VISITS_TOOLS[0];
+    expect(tool.input_schema.properties.through_date.format).toBe('date');
   });
 
   test('more than the cap is refused, never truncated', async () => {
@@ -244,8 +271,8 @@ describe('the confirmed run', () => {
     expect(res).toMatchObject({ success: true, messages_sent: false });
     expect(res.changed.map((v) => v.id)).toEqual(['v-1', 'v-2']);
     expect(Schedule.updateVisitDetails.mock.calls.map((c) => c[0])).toEqual([
-      { id: 'v-1', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-1:v1', approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', livePrepayTerm: false } },
-      { id: 'v-2', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-2:v1', approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', livePrepayTerm: false } },
+      { id: 'v-1', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-1:v1', approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', refreshablePrepayTerm: false } },
+      { id: 'v-2', body: { estimatedPrice: 49, expectedTotal: 49 }, actor: { technicianId: 'staff-1' }, approvedVisitVersion: 'v-2:v1', approvedRepriceState: { addonCount: 0, billingLane: 'per_visit', refreshablePrepayTerm: false } },
     ]);
   });
 
@@ -300,7 +327,7 @@ describe('the confirmed run', () => {
   test('a live annual prepay term that appears during the earlier saves stops the batch', async () => {
     const card = await preview();
     Schedule.updateVisitDetails.mockImplementationOnce(async () => {
-      mockLivePrepayTerm = true;
+      mockRefreshableTerm = { id: 'term-1', status: 'active', prepay_invoice_id: 'inv-void' };
       return { status: 200, json: { success: true } };
     });
     const res = await confirm(ask(), card._version);

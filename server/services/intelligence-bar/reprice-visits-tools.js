@@ -37,7 +37,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, validCalendarDate } = require('../../utils/datetime-et');
 const { resolveBillingLane } = require('../billing-lane');
 const { dateOnly } = require('../visit-groups');
 const { ibRepriceVisitsLive } = require('../../config/feature-gates');
@@ -48,7 +48,24 @@ const OPEN_STATUSES = new Set(['pending', 'confirmed']);
 // Not upcoming visits at all — left out of the card without a line.
 const GONE_STATUSES = new Set(['cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled']);
 const IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Every stored discount field the Schedule price edit clears on a visit with no
+// add-on lines (admin-schedule.js computeSingleServiceEstimatedPricePlan and
+// clearAppointmentDiscountCatalogFields): any one of them set means the card
+// must say the stamp is replaced. Identity / name / scope fields count when
+// present; amount fields count when non-zero.
+const STORED_DISCOUNT_FIELDS = [
+  'discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars', 'discount_max_dollars',
+  'discount_service_key_filter', 'discount_service_category_filter',
+  'line_discount_id', 'line_discount_name', 'line_discount_type', 'line_discount_amount', 'line_discount_dollars',
+];
+
+function hasStoredDiscount(row) {
+  return STORED_DISCOUNT_FIELDS.some((field) => {
+    const value = row[field];
+    if (value == null || value === '') return false;
+    return /(amount|dollars)$/.test(field) ? Number(value) !== 0 : true;
+  });
+}
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const NO_MESSAGE = 'No customer message is sent.';
 
@@ -56,7 +73,7 @@ const REPRICE_FUTURE_VISITS_TOOL = {
   name: 'reprice_future_visits',
   description: `Change the per-visit price of ONE customer's upcoming visits for ONE service (e.g. "she is Gold now, make her future pest visits $49"). The first call returns a PREVIEW and changes nothing: each visit that changes (date, service, old price → new price), each visit left alone and why, and that no customer message is sent. The operator approves on the confirmation card. Each visit is then saved exactly as the Schedule screen's Edit appointment price edit saves it.
 Never changes a visit that is completed, in progress, invoiced, prepaid, covered by an annual prepay term, a free re-service or $0 visit, a visit with add-on lines, a plan's first (template) visit, or one holding money — those are listed on the card as left alone. At most ${MAX_VISITS} visits per card: pass through_date to split a longer schedule.
-Refused for a customer with a live annual prepay term (change those prices on the Schedule screen). Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
+Refused for a customer with an annual prepay term (change those prices on the Schedule screen). Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
 new_price is the new price of each visit in dollars (the full visit price after any discount). A percentage is not accepted: ask the operator for the dollar price. Changing a WaveGuard tier never reprices visits by itself — use this tool when the operator wants the visits repriced.
 Admin-only.`,
   input_schema: {
@@ -65,7 +82,7 @@ Admin-only.`,
       customer_id: { type: 'string', format: 'uuid', description: 'The customer whose upcoming visits change' },
       service: { type: 'string', description: 'The service whose visits change, as the operator said it (e.g. "pest", "lawn", "mosquito", "tree and shrub")' },
       new_price: { type: 'number', description: 'The new price of EACH visit in dollars, above 0' },
-      through_date: { type: 'string', description: 'Optional last visit date to include (YYYY-MM-DD)' },
+      through_date: { type: 'string', format: 'date', description: 'Optional last visit date to include (YYYY-MM-DD)' },
     },
     required: ['customer_id', 'service', 'new_price'],
   },
@@ -135,7 +152,7 @@ function parseInput(input) {
   if (Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) return { error: 'Give the new price in whole cents.' };
   if (price > 10000) return { error: 'That price is above $10,000 a visit. Check the amount.' };
   const through = input.through_date == null || input.through_date === '' ? null : String(input.through_date).trim();
-  if (through && !DATE_RE.test(through)) return { error: 'through_date must be YYYY-MM-DD.' };
+  if (through && !validCalendarDate(through)) return { error: 'through_date must be a real calendar date (YYYY-MM-DD).' };
   return { service, newPrice: Math.round(price * 100) / 100, through };
 }
 
@@ -165,10 +182,11 @@ function pickFamily(rows, service) {
   return { family: { tag: c.tag === 'general' ? `general:${names[0].toLowerCase()}` : c.tag, label: c.tag === 'general' ? names[0] : c.label, rows: named } };
 }
 
-// A live annual prepay term for the customer, by the canonical coverage reader.
-async function hasLivePrepayTerm(customerId) {
-  const { coveredTermsAsOf } = require('../annual-prepay-renewals');
-  return !!(await coveredTermsAsOf(db).where('t.customer_id', customerId).first('t.id'));
+// An annual prepay term the visit save's term refresh would process — that
+// refresh's own selection (refreshableTermsForCustomer), not a narrower one.
+async function hasRefreshablePrepayTerm(customerId) {
+  const { refreshableTermsForCustomer } = require('../annual-prepay-renewals');
+  return (await refreshableTermsForCustomer(customerId, db)).length > 0;
 }
 
 async function loadCustomer(customerId) {
@@ -265,10 +283,10 @@ async function buildPlan(input) {
       code: 'membership_lane',
     };
   }
-  // The visit save refreshes the customer's live annual prepay terms from the
+  // The visit save refreshes the customer's annual prepay terms from the
   // new prices — an effect this card cannot show. Those customers stay on the
   // Schedule screen.
-  if (await hasLivePrepayTerm(customer.id)) {
+  if (await hasRefreshablePrepayTerm(customer.id)) {
     return { error: `${customerName} has an annual prepay term — change visit prices on the Schedule screen. Nothing was changed.`, code: 'annual_prepay_customer' };
   }
   const today = etDateString();
@@ -325,12 +343,12 @@ async function buildPlan(input) {
       ...line(row),
       old_price: priceText(row.estimated_price),
       new_price: money(newPrice),
-      ...(row.discount_type || row.line_discount_type ? { discount_note: 'its discount stamp is replaced: the new price is the full visit price' } : {}),
+      ...(hasStoredDiscount(row) ? { discount_note: 'its discount stamp is replaced: the new price is the full visit price' } : {}),
     })),
     left_alone: excludedOut,
     already_at_price: unchangedOut,
     customer_message: NO_MESSAGE,
-    _version: pinsVersion(pins, { customer_id: String(customer.id), new_price: Math.round(newPrice * 100), family: family.tag, lane: lane.mode, live_prepay_term: false }),
+    _version: pinsVersion(pins, { customer_id: String(customer.id), new_price: Math.round(newPrice * 100), family: family.tag, lane: lane.mode, refreshable_prepay_term: false }),
     _lane: lane.mode,
     _pins: pins,
     _new_price: newPrice,
@@ -383,7 +401,7 @@ function sameShownState(a, b) {
 // a write between that check and the save's row lock refuses 409.
 // approvedRepriceState is rechecked inside the save's transaction under its
 // customer and visit locks: still no add-on line, the same billing lane, still
-// no live annual prepay term.
+// no annual prepay term the save's refresh would process.
 function saveVisitPrice(id, newPrice, approvedVisitVersion, billingLane, actionContext) {
   const { updateVisitDetails } = require('../../routes/admin-schedule');
   return updateVisitDetails({
@@ -391,7 +409,7 @@ function saveVisitPrice(id, newPrice, approvedVisitVersion, billingLane, actionC
     body: { estimatedPrice: newPrice, expectedTotal: newPrice },
     actor: { technicianId: actionContext?.technicianId || null },
     approvedVisitVersion,
-    approvedRepriceState: { addonCount: 0, billingLane, livePrepayTerm: false },
+    approvedRepriceState: { addonCount: 0, billingLane, refreshablePrepayTerm: false },
   });
 }
 
@@ -437,7 +455,7 @@ async function stillAsApproved(pin) {
   // The customer must still bill per visit: a switch to monthly membership
   // during the batch stops it (dues cover those visits).
   if (!customer || resolveBillingLane(customer).mode === 'monthly_membership') return null;
-  if (await hasLivePrepayTerm(pin.customer_id)) return null;
+  if (await hasRefreshablePrepayTerm(pin.customer_id)) return null;
   return exclusionReason(row, { invoice: invoices.get(pin.id), hasAddons: addons.has(pin.id) }) ? null : now;
 }
 
