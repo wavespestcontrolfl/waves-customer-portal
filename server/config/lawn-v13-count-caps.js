@@ -127,6 +127,27 @@ async function applyV13CountCaps(database, product, limits, productId = product?
   return withEntryCaps(await v13CapEntryFor(database, productId, product?.name), limits, productId);
 }
 
+// The cap figures a staged protocol row advertises (gates.annualMaxApps, annual_counter.maxApplications),
+// clamped to the entry's cap: min(row figure, cap), never raised, never added. A stale row cannot show
+// the field more than the app enforces. Returns the product itself when nothing changes.
+function withEntryCapMetadata(entry, product) {
+  if (!entry || !product) return product;
+  const clamp = (value) => (typeof value === 'number' && Number.isFinite(value) && value > entry.cap ? entry.cap : value);
+  const gates = product.gates && typeof product.gates === 'object' ? product.gates : null;
+  const counter = product.annual_counter && typeof product.annual_counter === 'object' ? product.annual_counter : null;
+  const gateValue = gates ? clamp(gates.annualMaxApps) : undefined;
+  const counterValue = counter ? clamp(counter.maxApplications) : undefined;
+  const gateChanged = gates && gateValue !== gates.annualMaxApps;
+  const counterChanged = counter && counterValue !== counter.maxApplications;
+  if (!gateChanged && !counterChanged) return product;
+  return {
+    ...product,
+    ...(gateChanged ? { gates: { ...gates, annualMaxApps: gateValue } } : {}),
+    ...(counterChanged ? { annual_counter: { ...counter, maxApplications: counterValue } } : {}),
+  };
+}
+
 module.exports = {
+  withEntryCapMetadata,
   V13_COUNT_CAPS, v13CountCapFor, v13CapEntryFor, capIdMap, resetV13CapIdentity, withEntryCaps, applyV13CountCaps, syntheticCountLimit,
 };

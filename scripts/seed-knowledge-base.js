@@ -161,7 +161,7 @@ Label maximum: 3 applications per year per property. Waves lawn program (v13): m
 - Do NOT apply if the property has received 2 applications this calendar year under the v13 program, or 3 under the label, regardless of who applied them
 
 ## Alternatives After Cap
-- Dismiss NXT (sulfentrazone + prodiamine) — different MOA, no annual cap concern
+- Dismiss NXT (sulfentrazone + prodiamine) — retired: do not reorder. Use up existing stock on green kyllinga under 85°F only; it is not an alternative after the Celsius cap
 - Certainty (sulfosulfuron) — good for sedge pressure; under v13 it is capped at 2 applications per lawn per year and goes with Celsius, so it does not replace a capped Celsius pass
 - Recognition + Fusilade II tank mix — bermudagrass suppression in St. Augustine (bermudagrass ONLY — bahiagrass is not in the 2026 Fusilade II weed table; NEVER Fusilade alone over St. Augustine; see the Recognition + Fusilade II article)`,
       // Correction (2026-08-07): the alternatives list pointed at Fusilade II

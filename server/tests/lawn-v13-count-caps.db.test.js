@@ -7,6 +7,7 @@ const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps
 const restore = require('../models/migrations/20261007172000_lawn_v13_celsius_cap_v13_only');
 const gateOnly = require('../models/migrations/20261007174000_lawn_v13_count_caps_v13_only');
 const protocolRows = require('../models/migrations/20261007175000_lawn_v13_count_caps_protocol_rows');
+const clampMigration = require('../models/migrations/20261007177000_lawn_v13_cap_clamp_and_kb_dismiss');
 const { DIMENSION } = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const { submittedProductLimitFindings } = require('../services/complete-scheduled-service');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -719,6 +720,57 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(after[CERTAINTY].gates.annualMaxApps).toBeUndefined();
         expect(after[CERTAINTY].gates.tankMixWith).toBe('Celsius WG');
         expect(await auditRows()).toHaveLength(0);
+      });
+
+      describe('a row that already advertises more than the cap (20261007177000)', () => {
+        const clampAudits = () => knex('lawn_protocol_audit_log').where({ action: 'v13_count_caps_protocol_rows_clamped' });
+        const byName = async () => Object.fromEntries((await rowsOf()).map((r) => [r.product_name, r]));
+        async function stale() {
+          await protocolRows.up(knex);
+          await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: CELSIUS }).update({ gates: JSON.stringify({ annualMaxApps: 3 }), annual_counter: JSON.stringify({ counter: 'celsius_oz_per_1000', maxApplications: 4 }) });
+          await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: ARENA }).update({ gates: JSON.stringify({ trigger: 'chinch', annualMaxApps: 1 }) });
+        }
+
+        test('clamps to min(existing, 2): 3 and 4 become 2, a 1 stays 1, nothing is raised, other keys stay; audited; idempotent', async () => {
+          await stale();
+          await clampMigration.up(knex);
+          const rows = await byName();
+          expect(rows[CELSIUS].gates).toEqual({ annualMaxApps: 2 });
+          expect(rows[CELSIUS].annual_counter).toEqual({ counter: 'celsius_oz_per_1000', maxApplications: 2 });
+          expect(rows[ARENA].gates).toEqual({ trigger: 'chinch', annualMaxApps: 1 });
+          expect(rows[CERTAINTY].gates.annualMaxApps).toBe(2);
+          expect((await clampAudits())).toHaveLength(1);
+          await clampMigration.up(knex);
+          expect((await clampAudits())).toHaveLength(1);
+        });
+
+        test('down restores only a value it changed that is still 2; one edited since stays', async () => {
+          await stale();
+          await clampMigration.up(knex);
+          await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: CELSIUS }).update({ annual_counter: JSON.stringify({ counter: 'celsius_oz_per_1000', maxApplications: 1 }) });
+          await clampMigration.down(knex);
+          const rows = await byName();
+          expect(rows[CELSIUS].gates.annualMaxApps).toBe(3);
+          expect(rows[CELSIUS].annual_counter.maxApplications).toBe(1);
+          expect(rows[CERTAINTY].gates.annualMaxApps).toBe(2);
+          expect(await clampAudits()).toHaveLength(0);
+        });
+
+        test('every reader renders the effective cap even before the migration: the window context and its summary show min(row, 2) under v13, the stored row with the gate off', async () => {
+          await stale();
+          const { protocol } = await getProtocolWindowContext(knex, { serviceDate: new Date('2026-05-12T16:00:00Z'), grassTrack: 'bermuda', region: 'swfl', planning: true });
+          const capped = (summary) => Object.fromEntries(summary.products.filter((p) => NAMES.includes(p.protocolProductName)).map((p) => [p.protocolProductName, p]));
+          process.env.GATE_LAWN_V13 = 'true';
+          resetV13CapIdentity();
+          const on = capped(summarizeProtocolContext(await getProtocolWindowContext(knex, { protocolId: protocol.id, serviceDate: new Date('2026-05-12T16:00:00Z') })));
+          expect(on[CELSIUS].gates.annualMaxApps).toBe(2);
+          expect(on[CELSIUS].annualCounter.maxApplications).toBe(2);
+          expect(on[ARENA].gates.annualMaxApps).toBe(1);
+          delete process.env.GATE_LAWN_V13;
+          const off = capped(summarizeProtocolContext(await getProtocolWindowContext(knex, { protocolId: protocol.id, serviceDate: new Date('2026-05-12T16:00:00Z') })));
+          expect(off[CELSIUS].gates.annualMaxApps).toBe(3);
+          expect(off[CELSIUS].annualCounter.maxApplications).toBe(4);
+        });
       });
 
       test('the lawn/window summary (what GET /api/admin/protocols/lawn/window returns) carries the cap metadata', async () => {
