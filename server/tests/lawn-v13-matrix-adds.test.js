@@ -135,6 +135,30 @@ describe('1b. Talak on mole crickets: a frozen water-in replaces the 24-hour hol
     expect(withApplicationWaterIn(acel, { inches: 0.5, targets: ['caterpillars'] })).toBe(acel);
   });
 
+  test('the water-in is immediate: the rule carries water_in_immediately and the customer text prints no clock time', () => {
+    const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+    const { validateRule } = require('../services/service-report/lawn-watering-rule');
+    const wet = withApplicationWaterIn(base(), { inches: 0.5, targets: ['Mole crickets'] });
+    expect(wet.wateringRule).toMatchObject({ mode: 'water_in', water_in_inches: 0.5, water_in_immediately: true });
+    expect(validateRule({ ...wet.wateringRule, water_in_immediately: 'yes' }).valid).toBe(false);
+    expect(validateRule({ ...wet.wateringRule, water_in_immediately: false }).rule.water_in_immediately).toBeUndefined();
+    const completedAt = '2026-07-14T14:00:00.000Z';
+    const out = buildWateringInstruction({ rules: [{ name: N.TAL, rule: wet.wateringRule }], completedAt });
+    expect(out.state).toBe('water_in');
+    expect(out.lines[0]).toBe('Water in right after application (up to 0.5 inch).');
+    expect(out.lines.join(' ')).not.toMatch(/\bby\b|\d{1,2}(:\d{2})? ?(AM|PM)|today|tonight|hour/i);
+    expect(out.lines[out.lines.length - 1]).toBe('Run it even if it is not your usual day.');
+    // The ordinary water-in still prints its deadline.
+    const plain = buildWateringInstruction({ rules: [{ name: 'x', rule: { ...wet.wateringRule, water_in_immediately: undefined, water_in_by_hours: 24 } }], completedAt });
+    expect(plain.lines[0]).toMatch(/^Water in today’s treatment by /);
+    // A visit that mixes an immediate and a timed water-in keeps the timed text.
+    const mixed = buildWateringInstruction({ rules: [{ name: N.TAL, rule: wet.wateringRule }, { name: 'x', rule: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' } }], completedAt });
+    expect(mixed.lines[0]).toMatch(/^Water in today’s treatment by /);
+    // The mow hold stays beside it (the label's one day).
+    const mow = buildWateringInstruction({ rules: [{ name: N.TAL, rule: wet.wateringRule, mowHoldDays: wet.mowHoldDays }], completedAt });
+    expect(mow.mowHold).toBeTruthy();
+  });
+
   test('the plan note says what the gate does', () => {
     expect(engine.v13GateNotes({ moleCricketWaterInInches: 0.5 })).toEqual([{ key: 'moleCricketWaterInInches', severity: 'note', text: 'Mole cricket nymph use: water in right after application with up to 0.5 inch (label); the 24-hour hold does not apply to this use.' }]);
   });

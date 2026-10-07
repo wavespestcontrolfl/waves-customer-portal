@@ -6,7 +6,7 @@
 // .post_application_watering and frozen into the completion product facts:
 //
 //   { mode: 'hold' | 'water_in' | 'none',
-//     hold_hours, water_in_inches, water_in_by_hours, water_in_same_day,
+//     hold_hours, water_in_inches, water_in_by_hours, water_in_same_day, water_in_immediately,
 //     source: 'label' | 'owner' | 'default',
 //     label_note, verified_at, verified_by }
 //
@@ -18,7 +18,7 @@
 const MODES = ['hold', 'water_in', 'none'];
 const SOURCES = ['label', 'owner', 'default'];
 const RULE_KEYS = [
-  'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours', 'water_in_same_day',
+  'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours', 'water_in_same_day', 'water_in_immediately',
   'source', 'label_note', 'verified_at', 'verified_by',
 ];
 
@@ -77,7 +77,16 @@ function validateWaterInFields(value, errors) {
   if (value.water_in_same_day != null && typeof value.water_in_same_day !== 'boolean') {
     errors.push('water_in_same_day must be true or false when present');
   }
-  return { water_in_inches: inches, water_in_by_hours: byHours, ...(value.water_in_same_day === true ? { water_in_same_day: true } : {}) };
+  // A label that says water in "immediately" (Talak on mole crickets): no clock deadline is printed.
+  // water_in_by_hours stays as the internal bound (expiry, forecast), never as text.
+  if (value.water_in_immediately != null && typeof value.water_in_immediately !== 'boolean') {
+    errors.push('water_in_immediately must be true or false when present');
+  }
+  return {
+    water_in_inches: inches, water_in_by_hours: byHours,
+    ...(value.water_in_same_day === true ? { water_in_same_day: true } : {}),
+    ...(value.water_in_immediately === true ? { water_in_immediately: true } : {}),
+  };
 }
 
 function validateVerifiedAt(value, errors) {
