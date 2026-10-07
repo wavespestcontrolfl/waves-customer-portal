@@ -56,7 +56,19 @@ const SPELLING_SIGNAL_RE = /\b(spell(ed|ing)?|letter by letter|(as|like|for) in 
 // Sam"). Tighter than SPELLING_SIGNAL_RE on purpose: this gates a paid decoder
 // pass, and "like in the past" must not buy one.
 const NAME_SPELLING_WORD_RE = /\bspell(?:ed|ing|s)?\b/i;
-const NAME_SPELLING_LETTERS_RE = /\b(?:[A-Za-z]\s*[-.,]\s*){3,}[A-Za-z]\b|\b(?:[A-Z]\s+){3,}[A-Z]\b|\b[A-Za-z]\s+as\s+in\s+[A-Za-z]{3,}\b|\b[A-Z]\s+for\s+[A-Z][a-z]{2,}\b/;
+const NAME_SPELLING_LETTERS_RE = new RegExp([
+  // Separated single letters: four or more in any case ("S, E, R, O, V", "v a r n u m").
+  String.raw`\b(?:[A-Za-z]\s*[-.,]\s*){3,}[A-Za-z]\b`,
+  String.raw`\b(?:[A-Za-z] ){3,}[A-Za-z]\b`,
+  // Three letters need a stronger shape: capitals ("L-E-E", "L, E, E") or a hyphenated run.
+  String.raw`\b(?:[A-Z]\s*[-.,]\s*){2,}[A-Z]\b`,
+  String.raw`\b(?:[a-z]-){2,}[a-z]\b`,
+  // Phonetic markers.
+  String.raw`\b[A-Za-z]\s+as\s+in\s+[A-Za-z]{3,}\b`,
+  String.raw`\b[A-Z]\s+for\s+[A-Z][a-z]{2,}\b`,
+  // Two or more separated single letters shortly after the word "name" ("last name is l e e").
+  String.raw`\b[Nn]ame\b[^.?!\n]{0,40}?\b(?:[A-Za-z][\s,-]+)+[A-Za-z]\b(?![A-Za-z'’])`,
+].join('|'), '');
 // Suffix coverage for the service area's street vocabulary — Fruitville ROAD,
 // Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
 // dictation-focused second STT pass never ran for those calls. The common
@@ -349,15 +361,35 @@ function applyNameDictationPolicy({ current = {}, dictation = null } = {}) {
  * contacts live elsewhere in the extraction and are never touched.
  *
  * name_full is rewritten by replacing the WHOLE old component ("De Silvo" in
- * "Test De Silvo"), never a token position. With no split value to name the
- * old component, only an unambiguous two-token name_full speaks for the
- * split fields (extraction-compat derives them the same way).
+ * "Test De Silvo"), never a token position. A missing split part is derived
+ * from name_full by removing the known part (as extraction-compat does);
+ * with no split value at all, only a two-token name_full speaks for them.
  */
 function applyNameDictationToV2Caller(caller, dictation) {
   if (!caller || typeof caller !== 'object') return {};
   const nameFull = String(caller.name_full || '').trim();
   const tokens = nameFull.split(/\s+/).filter(Boolean);
-  const derived = tokens.length === 2 ? { first_name: tokens[0], last_name: tokens[1] } : {};
+  const lower = (arr) => arr.join(' ').toLowerCase();
+  const wordsOf = (v) => String(v || '').trim().split(/\s+/).filter(Boolean);
+  // Same whole-token derivation as the V2 adoption in extraction-compat: a
+  // present split part stays authoritative for its own slot, and the missing
+  // part is what remains of name_full once that part is removed from its own
+  // end ("Mary Ann" + "Mary Ann Smyth" -> last "Smyth"). A name_full that
+  // disagrees with the present part derives nothing.
+  const derived = {};
+  if (caller.first_name && !caller.last_name) {
+    const first = wordsOf(caller.first_name);
+    if (tokens.length > first.length && lower(tokens.slice(0, first.length)) === lower(first)) {
+      derived.last_name = tokens.slice(first.length).join(' ');
+    }
+  } else if (!caller.first_name && caller.last_name) {
+    const last = wordsOf(caller.last_name);
+    if (tokens.length > last.length && lower(tokens.slice(-last.length)) === lower(last)) {
+      derived.first_name = tokens.slice(0, tokens.length - last.length).join(' ');
+    }
+  } else if (!caller.first_name && !caller.last_name && tokens.length === 2) {
+    [derived.first_name, derived.last_name] = tokens;
+  }
   const current = {
     first_name: caller.first_name || derived.first_name || null,
     last_name: caller.last_name || derived.last_name || null,

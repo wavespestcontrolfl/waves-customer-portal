@@ -34,6 +34,20 @@ describe('detectContactDictationSignals', () => {
     expect(detectContactDictationSignals('Caller: can you come on the 14-15 or 3-4-5 weekend').name).toBe(false);
     expect(detectContactDictationSignals('Caller: Varnum, V-A-R-N-U-M.').any).toBe(true);
   });
+  test('lowercase spaced runs and short spelled names trip the name signal', () => {
+    for (const line of ['Caller: v a r n u m', 'Caller: L-E-E', 'Caller: l-e-e', 'Caller: my last name is l e e',
+      'Caller: Smith, S, M, I, T, H', 'Caller: my last name is L E']) {
+      expect(detectContactDictationSignals(line).name).toBe(true);
+    }
+  });
+  test('ordinary sentences do not trip the name signal', () => {
+    for (const line of ['Caller: I need a B test on the lawn', 'Caller: I have a B plan or a c plan', 'Caller: press 1 or 2',
+      'Caller: the name is Bob, a plumber', 'Caller: J. R. Smith called', 'Caller: my name is Jordan Rivers',
+      'Caller: that is a-ok', 'Caller: we have a lot of ants', 'Caller: my name is Lee, a customer since 2020',
+      'Caller: I live on 5th and A street']) {
+      expect(detectContactDictationSignals(line).name).toBe(false);
+    }
+  });
   test('no signals on ordinary conversation', () => {
     const out = detectContactDictationSignals('are you coming today? the tech said noon');
     expect(out.any).toBe(false);
@@ -419,6 +433,18 @@ describe('spelled-name decoding', () => {
       const leeFirst = { first_name: 'Odell', last_name: 'Odell', name_full: 'Odell Odell' };
       applyNameDictationToV2Caller(leeFirst, dictation(entry({ spelled_value: 'Odele', field: 'first_name' })));
       expect(leeFirst).toEqual({ first_name: 'Odele', last_name: 'Odell', name_full: 'Odele Odell' });
+    });
+
+    test('derives the missing part from a compound name_full by removing the known part', () => {
+      const firstOnly = { first_name: 'Mary Ann', last_name: null, name_full: 'Mary Ann Smyth' };
+      expect(applyNameDictationToV2Caller(firstOnly, dictation(entry({ spelled_value: 'Smith' })))).toEqual({ last_name: 'Smith' });
+      expect(firstOnly).toEqual({ first_name: 'Mary Ann', last_name: 'Smith', name_full: 'Mary Ann Smith' });
+      const lastOnly = { first_name: null, last_name: 'De Silvo', name_full: 'Mary Ann De Silvo' };
+      expect(applyNameDictationToV2Caller(lastOnly, dictation(entry({ spelled_value: 'Maryanne', field: 'first_name' })))).toEqual({ first_name: 'Maryanne' });
+      expect(lastOnly.name_full).toBe('Maryanne De Silvo');
+      // name_full that disagrees with the present part derives nothing.
+      const disagree = { first_name: 'Rita', last_name: null, name_full: 'Jane Garcia' };
+      expect(applyNameDictationToV2Caller(disagree, dictation(entry({ spelled_value: 'Garcia' })))).toEqual({});
     });
 
     test('tolerates a missing caller', () => {
