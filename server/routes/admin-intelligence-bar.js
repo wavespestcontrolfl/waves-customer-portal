@@ -4164,6 +4164,7 @@ async function commitPendingAction(req, { id, contractHash }) {
         // customer versions + the disclosed effects fingerprint) ride to
         // the executor so it validates the APPROVED snapshot under its own
         // locks — never a freshly sampled one.
+        if (action.tool_name === 'delete_duplicate_customer' && livePreview?._version) execParams._approved_version = String(livePreview._version);
         if (action.tool_name === 'merge_customers' && livePreview?.winner_version && livePreview?.loser_version) {
           execParams._approved_versions = { winner: String(livePreview.winner_version), loser: String(livePreview.loser_version) };
           if (typeof livePreview.effects_fingerprint === 'string') execParams._approved_effects = livePreview.effects_fingerprint;

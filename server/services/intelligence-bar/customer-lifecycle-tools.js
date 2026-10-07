@@ -397,7 +397,10 @@ async function deleteDuplicateCustomer(input, actionContext = {}) {
   const { previewDeleteDuplicateCustomer, commitDeleteDuplicateCustomer } = require('../duplicate-customer-delete');
   // Only the server-derived context confirms (never a model-supplied field).
   if (actionContext.confirmed !== true) return previewDeleteDuplicateCustomer(customerId);
-  return commitDeleteDuplicateCustomer(customerId, actionContext);
+  // The approved card's record version (route pin from the fingerprint-
+  // verified preview), re-asserted under the archive's row lock.
+  const approvedVersion = typeof input._approved_version === 'string' && input._approved_version ? input._approved_version : null;
+  return commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion);
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────

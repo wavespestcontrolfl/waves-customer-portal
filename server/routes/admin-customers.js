@@ -5195,6 +5195,7 @@ async function customerArchiveHandler(req, res, next) {
     try {
       relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
         await trx('customers').where({ id: req.params.id }).forUpdate().first();
+        if (req.archivePrecheck) await req.archivePrecheck(trx);
         const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {
           const err = new Error('customer_still_billing_or_scheduled');
@@ -5244,9 +5245,13 @@ async function customerArchiveHandler(req, res, next) {
 // It runs the handler with the only request fields it reads (params.id,
 // technicianId, ip, user-agent) and a capture response, and resolves the
 // reply it would send: { status, json }. An error passed to next() rejects.
-// Restore stays PATCH /:id/restore below.
-async function archiveCustomerAsAdmin({ customerId, actor = {} }) {
+// `precheck(trx)`, when given, runs inside the archive transaction right
+// after the customer row lock and before any write; a throw rolls the
+// archive back and rejects (the bar re-checks "still empty" there). HTTP
+// requests never carry it. Restore stays PATCH /:id/restore below.
+async function archiveCustomerAsAdmin({ customerId, actor = {}, precheck = null }) {
   const req = {
+    archivePrecheck: precheck,
     params: { id: customerId },
     technicianId: actor.technicianId || null,
     ip: null,

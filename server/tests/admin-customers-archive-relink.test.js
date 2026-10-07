@@ -162,6 +162,27 @@ describe('archiveCustomerAsAdmin (the DELETE /:id handler, no HTTP)', () => {
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
+  test('precheck runs inside the archive transaction after the row lock; a throw rolls back before any write', async () => {
+    const precheck = jest.fn(async (trx) => {
+      expect(trx).toBe(mockTrx);
+      throw Object.assign(new Error('no longer empty'), { previewChanged: true });
+    });
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' }, precheck }))
+      .rejects.toMatchObject({ message: 'no longer empty', previewChanged: true });
+    expect(precheck).toHaveBeenCalledTimes(1);
+    expect(mockState.updates).toEqual([]);
+    expect(relinkSubscribersFromArchivedCustomer).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('a passing precheck lets the same archive run', async () => {
+    const precheck = jest.fn(async () => {});
+    await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: { technicianId: 'admin-9' }, precheck }))
+      .resolves.toEqual({ status: 200, json: { success: true } });
+    expect(precheck).toHaveBeenCalledWith(mockTrx);
+    expect(mockState.updates.at(-1)).toEqual(expect.objectContaining({ table: 'customers', patch: { deleted_at: expect.any(Date) } }));
+  });
+
   test('an error the handler passes to next() rejects', async () => {
     relinkSubscribersFromArchivedCustomer.mockRejectedValueOnce(new Error('relink exploded'));
     await expect(router.archiveCustomerAsAdmin({ customerId: 'cust-1', actor: {} })).rejects.toThrow('relink exploded');

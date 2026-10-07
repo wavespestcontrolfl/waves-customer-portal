@@ -45,8 +45,8 @@ module.exports = {
   // delete_duplicate_customer's own queries live in
   // services/duplicate-customer-delete.js, not the registered
   // customer-lifecycle-tools.js source; the emptiness readers it calls are
-  // customer-dedupe.js's (loserAutoBlockers, previewMergeEffects). The
-  // confirmed run soft-deletes a customer, so smoke never fires it.
+  // customer-dedupe.js's (loserAutoBlockers, previewMergeEffects). Smoke runs
+  // only the unconfirmed preview (two-step), which writes nothing.
   delete_duplicate_customer: {
     tables: ['customers', 'customer_properties', 'customer_plan_rates', 'field_credit_allocations'],
     columns: {
@@ -55,8 +55,7 @@ module.exports = {
       customer_plan_rates: ['customer_id'],
       field_credit_allocations: ['customer_id'],
     },
-    sideEffects: true,
-    reason: 'queries live in services/duplicate-customer-delete.js; the confirmed run soft-deletes a customer',
+    reason: 'queries live in services/duplicate-customer-delete.js, outside the registered tool module',
   },
 
   // The tool's queries live in estimate-detail.js rather than the

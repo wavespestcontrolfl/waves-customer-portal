@@ -80,7 +80,13 @@ beforeEach(() => {
   mockLoserAutoBlockers.mockResolvedValue([]);
   // One auto-created primary property and the nightly health score: allowed.
   mockPreviewMergeEffects.mockResolvedValue({ moving: { customer_properties: 1, customer_health_scores: 1, total_rows: 2 }, referral: { loser_enrolled: false } });
-  mockArchiveCustomerAsAdmin.mockResolvedValue({ status: 200, json: { success: true } });
+  // The real adapter runs `precheck` inside the archive transaction before
+  // any write (proven in admin-customers-archive-relink.test.js); here the
+  // transaction is the db mock and a precheck throw rejects, writing nothing.
+  mockArchiveCustomerAsAdmin.mockImplementation(async ({ precheck }) => {
+    if (precheck) await precheck(db);
+    return { status: 200, json: { success: true } };
+  });
 });
 afterAll(() => { delete process.env.GATE_IB_DELETE_CUSTOMER; });
 
@@ -186,29 +192,43 @@ describe('refuses any record that is not empty, naming what it found and pointin
 });
 
 describe('commit', () => {
-  test('confirmed: re-checks, then runs the customer page delete handler with the stub id and the operator', async () => {
+  test('confirmed: runs the customer page delete handler with the stub id, the operator, and the locked re-check', async () => {
     const result = await commit();
     expect(mockArchiveCustomerAsAdmin).toHaveBeenCalledTimes(1);
     expect(mockArchiveCustomerAsAdmin).toHaveBeenCalledWith({
       customerId: STUB_ID,
       actor: { technicianId: 'admin-7', userAgent: 'intelligence-bar:delete_duplicate_customer' },
+      precheck: expect.any(Function),
     });
     expect(result).toMatchObject({ success: true, customer_id: STUB_ID, deleted: true, customer_message: 'No customer message is sent' });
     expect(result.restore).toMatch(/restore/);
-    // The re-check ran before the delete.
-    expect(mockPreviewMergeEffects.mock.invocationCallOrder[0]).toBeLessThan(mockArchiveCustomerAsAdmin.mock.invocationCallOrder[0]);
+    // The emptiness readers ran on the archive transaction (the precheck's conn).
+    expect(mockLoserAutoBlockers).toHaveBeenCalledWith(db, expect.objectContaining({ id: STUB_ID }));
+    expect(mockPreviewMergeEffects).toHaveBeenCalledWith(db, STUB_ID, STUB_ID);
   });
 
-  test('history appeared after the card: preview_changed, nothing deleted', async () => {
+  test('history landed before the lock: the locked re-check throws, preview_changed, nothing deleted', async () => {
     mockPreviewMergeEffects.mockResolvedValue({ moving: { sms_log: 1, total_rows: 1 } });
-    expect(await commit()).toMatchObject({ code: 'not_empty', preview_changed: true });
-    expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
+    mockArchiveCustomerAsAdmin.mockImplementationOnce(async ({ precheck }) => {
+      await precheck(db);
+      throw new Error('unreachable: the delete must not run');
+    });
+    const result = await commit();
+    expect(result).toMatchObject({ code: 'not_empty', preview_changed: true });
+    expect(result.error).toMatch(/1 sms_log/);
   });
 
-  test('deleted elsewhere after the card: preview_changed, nothing deleted', async () => {
+  test('the record version moved after the card: preview_changed (the route pins _approved_version)', async () => {
+    const result = await run({ customer_id: STUB_ID, _approved_version: '2026-09-30 08:00:00+00' }, { confirmed: true, technicianId: 'admin-7' });
+    expect(result).toMatchObject({ code: 'version_changed', preview_changed: true });
+    // The approved version itself passes.
+    expect(await run({ customer_id: STUB_ID, _approved_version: baseStub().version }, { confirmed: true, technicianId: 'admin-7' }))
+      .toMatchObject({ success: true });
+  });
+
+  test('deleted elsewhere after the card: preview_changed', async () => {
     db.__state.stub = { ...baseStub(), deleted_at: new Date() };
-    expect(await commit()).toMatchObject({ preview_changed: true });
-    expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
+    expect(await commit()).toMatchObject({ code: 'record_unavailable', preview_changed: true });
   });
 
   test("the route's own refusal is relayed (409 still billing); a 404 reads as preview_changed", async () => {
@@ -216,6 +236,11 @@ describe('commit', () => {
     expect(await commit()).toEqual({ error: 'This customer still has an active prepay term. Cancel the plan before archiving.' });
     mockArchiveCustomerAsAdmin.mockResolvedValueOnce({ status: 404, json: { error: 'Customer not found' } });
     expect(await commit()).toEqual({ error: 'Customer not found', preview_changed: true });
+  });
+
+  test('an unrelated failure in the delete surfaces as a tool error', async () => {
+    mockArchiveCustomerAsAdmin.mockRejectedValueOnce(new Error('relink exploded'));
+    expect(await commit()).toEqual({ error: 'relink exploded' });
   });
 
   test('a model-supplied confirmed field never commits', async () => {
@@ -279,6 +304,8 @@ describe('wiring', () => {
     expect(adminOnly).toContain("'delete_duplicate_customer'");
     expect(src).toMatch(/filter\(t => deleteDuplicateCustomerEnabled\(\) \|\| t\.name !== 'delete_duplicate_customer'\)/);
     expect(src).toMatch(/delete_duplicate_customer: \(params, preview\) => \(preview\?\.preview === true && preview\.card \? preview\.card : null\)/);
+    // The fingerprint-verified preview's record version rides to the executor.
+    expect(src).toContain("if (action.tool_name === 'delete_duplicate_customer' && livePreview?._version) execParams._approved_version = String(livePreview._version);");
   });
 
   test('the canonical delete and its restore route exist; the adapter runs the named delete handler', () => {
@@ -286,6 +313,8 @@ describe('wiring', () => {
     expect(src).toContain("router.delete('/:id', requireAdmin, customerArchiveHandler);");
     expect(src).toContain("router.patch('/:id/restore', requireAdmin, async (req, res, next) => {");
     expect(src).toMatch(/async function archiveCustomerAsAdmin\([\s\S]*?customerArchiveHandler\(req, res, reject\)/);
+    // The precheck runs right after the archive's row lock, before any write.
+    expect(src).toContain("await trx('customers').where({ id: req.params.id }).forUpdate().first();\n        if (req.archivePrecheck) await req.archivePrecheck(trx);");
     expect(src).toContain('router.archiveCustomerAsAdmin = archiveCustomerAsAdmin;');
   });
 

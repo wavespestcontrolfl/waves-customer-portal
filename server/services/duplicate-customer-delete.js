@@ -33,8 +33,9 @@
  * Two-step (WRITE_TWO_STEP_TOOL_NAMES): an unconfirmed call is
  * mutation-free and returns the card. The preview carries the stub's
  * version (`_version`) and every check result, so the route's fingerprint
- * pin refuses Confirm when either changed. The executor then re-reads the
- * checks once more right before the delete.
+ * pin refuses Confirm when either changed. The commit then re-checks the
+ * approved version and every check INSIDE the archive transaction, under
+ * the customer row lock, before any write.
  */
 
 const db = require('../models/db');
@@ -109,8 +110,8 @@ function customerName(row) {
   return `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed customer';
 }
 
-async function loadStub(customerId) {
-  return db('customers').where({ id: customerId })
+async function loadStub(customerId, conn = db) {
+  return conn('customers').where({ id: customerId })
     .select('*', db.raw('updated_at::text AS version'), db.raw("to_char(created_at, 'YYYY-MM-DD') AS created_on"))
     .first();
 }
@@ -144,9 +145,9 @@ async function findLiveTwins(stub) {
   });
 }
 
-async function countTable(table, customerId) {
+async function countTable(table, customerId, conn = db) {
   try {
-    const row = await db(table).where({ customer_id: customerId }).count({ n: '*' }).first();
+    const row = await conn(table).where({ customer_id: customerId }).count({ n: '*' }).first();
     return Number(row?.n || 0);
   } catch (err) {
     logger.warn(`[intelligence-bar] delete_duplicate_customer: count failed for ${table}: ${err.message}`);
@@ -157,15 +158,16 @@ async function countTable(table, customerId) {
 // Every check's result for one customer. `found` maps a check key to the
 // list of things found ("2 scheduled_services", "a portal login"); an empty
 // list is a clean check. A count that could not be read is "could not be
-// checked" — it blocks, like a found row (fail closed).
-async function readEmptiness(stub) {
+// checked" — it blocks, like a found row (fail closed). `conn` is the
+// archive transaction on the commit's locked re-check.
+async function readEmptiness(stub, conn = db) {
   const { loserAutoBlockers, previewMergeEffects } = require('./customer-dedupe');
   const { hasMembership } = require('./membership-state');
   const found = Object.fromEntries(CHECKS.map((c) => [c.key, []]));
   const add = (key, text) => { if (!found[key].includes(text)) found[key].push(text); };
   const countText = (table, n) => (n === 'unknown' ? `${table} (could not be checked)` : `${n} ${table}`);
 
-  const blockers = await loserAutoBlockers(db, stub);
+  const blockers = await loserAutoBlockers(conn, stub);
   for (const blocker of blockers) {
     const label = BLOCKER_LABELS[blocker];
     if (label) {
@@ -178,13 +180,14 @@ async function readEmptiness(stub) {
     }
   }
 
-  const { moving } = await previewMergeEffects(db, stub.id, stub.id);
+  const { moving } = await previewMergeEffects(conn, stub.id, stub.id);
   for (const [key, n] of Object.entries(moving || {})) {
+    // fk_sweep: 'unknown' (the table list itself failed) lands in `other`
+    // as "could not be checked", like any unreadable count.
     if (key === 'total_rows') continue;
-    if (key === 'fk_sweep') { add('other', 'linked tables (could not be checked)'); continue; }
     if (DERIVED_TABLES.has(key)) continue;
     if (key === 'customer_properties' && n === 1) {
-      const primary = await db('customer_properties').where({ customer_id: stub.id, is_primary: true }).count({ n: '*' }).first();
+      const primary = await conn('customer_properties').where({ customer_id: stub.id, is_primary: true }).count({ n: '*' }).first();
       if (Number(primary?.n || 0) === 1) continue;
     }
     // A table the blocker list already named reads once, with its count.
@@ -195,7 +198,7 @@ async function readEmptiness(stub) {
 
   // Tables the merge sweep skips on purpose (its own ledgers).
   for (const table of ['customer_plan_rates', 'field_credit_allocations']) {
-    const n = await countTable(table, stub.id);
+    const n = await countTable(table, stub.id, conn);
     if (n !== 0) add(categoryFor(table), countText(table, n));
   }
 
@@ -203,6 +206,17 @@ async function readEmptiness(stub) {
   if (Number(stub.account_credits || 0) > 0) add('referral_credit', `$${Number(stub.account_credits).toFixed(2)} account credit`);
 
   return found;
+}
+
+function notEmptyRefusal(found) {
+  const blocking = CHECKS.filter((c) => found[c.key].length);
+  if (!blocking.length) return null;
+  const named = blocking.map((c) => `${c.label}: ${found[c.key].join(', ')}`).join('; ');
+  return {
+    error: `This record is not empty, so the bar will not delete it. Found — ${named}. Use merge_customers to fold it into the real customer (that moves its history), or delete it from the customer page after review.`,
+    code: 'not_empty',
+    found: Object.fromEntries(blocking.map((c) => [c.key, found[c.key]])),
+  };
 }
 
 const RESTORE_LINE = 'Restorable: the admin restore route (PATCH /api/admin/customers/:id/restore) brings it back. The customer page has no Restore button yet.';
@@ -213,16 +227,8 @@ async function previewDeleteDuplicateCustomer(customerId) {
   if (!stub) return { error: 'customer_id does not match a customer', code: 'record_unavailable' };
   if (stub.deleted_at) return { error: 'This customer is already deleted — nothing to do.', code: 'record_unavailable' };
 
-  const found = await readEmptiness(stub);
-  const blocking = CHECKS.filter((c) => found[c.key].length);
-  if (blocking.length) {
-    const named = blocking.map((c) => `${c.label}: ${found[c.key].join(', ')}`).join('; ');
-    return {
-      error: `This record is not empty, so the bar will not delete it. Found — ${named}. Use merge_customers to fold it into the real customer (that moves its history), or delete it from the customer page after review.`,
-      code: 'not_empty',
-      found: Object.fromEntries(blocking.map((c) => [c.key, found[c.key]])),
-    };
-  }
+  const refusal = notEmptyRefusal(await readEmptiness(stub));
+  if (refusal) return refusal;
 
   const twins = await findLiveTwins(stub);
   const checks = Object.fromEntries(CHECKS.map((c) => [c.label, 'none']));
@@ -251,17 +257,37 @@ async function previewDeleteDuplicateCustomer(customerId) {
   };
 }
 
-async function commitDeleteDuplicateCustomer(customerId, actionContext) {
-  // The route already re-ran the preview and matched its fingerprint (the
-  // version and every check). One more read right before the delete keeps
-  // the window short; any refusal now means the record changed.
-  const fresh = await previewDeleteDuplicateCustomer(customerId);
-  if (fresh.error) return { error: fresh.error, code: fresh.code, preview_changed: true };
+// The decisive check runs INSIDE the archive transaction, after the
+// customer row lock and before any write (archiveCustomerAsAdmin's
+// precheck): the record must still be live, still at the approved version
+// (the card's `_version`, pinned by the route), and still empty. A throw
+// rolls the archive back. Writers that add history rows do not take the
+// customer row lock, so a row that commits after this read attaches to a
+// soft-deleted, restorable record — the same as against the page's delete.
+async function commitDeleteDuplicateCustomer(customerId, actionContext, approvedVersion = null) {
+  const changed = (error, code) => Object.assign(new Error(error), { previewChanged: true, code });
+  const precheck = async (trx) => {
+    const row = await loadStub(customerId, trx);
+    if (!row || row.deleted_at) throw changed('This customer is already deleted or no longer exists.', 'record_unavailable');
+    if (approvedVersion && String(row.version) !== String(approvedVersion)) {
+      throw changed('This customer record changed after the card was shown. Ask again for a fresh card.', 'version_changed');
+    }
+    const refusal = notEmptyRefusal(await readEmptiness(row, trx));
+    if (refusal) throw changed(refusal.error, refusal.code);
+  };
   const { archiveCustomerAsAdmin } = require('../routes/admin-customers');
-  const { status, json } = await archiveCustomerAsAdmin({
-    customerId,
-    actor: { technicianId: actionContext.technicianId || null, userAgent: 'intelligence-bar:delete_duplicate_customer' },
-  });
+  let reply;
+  try {
+    reply = await archiveCustomerAsAdmin({
+      customerId,
+      actor: { technicianId: actionContext.technicianId || null, userAgent: 'intelligence-bar:delete_duplicate_customer' },
+      precheck,
+    });
+  } catch (err) {
+    if (err && err.previewChanged) return { error: err.message, code: err.code, preview_changed: true };
+    throw err;
+  }
+  const { status, json } = reply;
   if (status === 200 && json?.success) {
     logger.info(`[intelligence-bar] delete_duplicate_customer soft-deleted customer ${customerId}`);
     return { success: true, customer_id: customerId, deleted: true, restore: RESTORE_LINE, customer_message: NO_MESSAGE_LINE };
