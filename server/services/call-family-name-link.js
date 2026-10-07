@@ -110,6 +110,8 @@ async function linkCallToCustomer({ callLogId, procToken, customer, holder, call
     const marker = {
       customer_id: String(customer.id),
       holder_name: displayName(holder),
+      holder_first_name: holder.first_name,
+      holder_last_name: holder.last_name,
       caller_name: displayName(caller) || null,
     };
     const linked = await trx('call_log')

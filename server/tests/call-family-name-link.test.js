@@ -114,8 +114,19 @@ describe('Step 3 wiring (structural)', () => {
     expect(source).toContain('procToken,\n          callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property');
   });
 
-  test('the caller is saved through the one slot writer, on the inbound number only', () => {
-    expect(source).toMatch(/!isOutboundCall\(call\) && phone && samePhone\(phone, call\.from_phone\)\)\s*{\s*const saved = await persistCallSecondaryContact\(linkedCustomerId/);
+  test('the caller is saved through the one slot writer, on the inbound number only, never clearing the account consent stamp', () => {
+    expect(source).toMatch(/!isOutboundCall\(call\) && phone && samePhone\(phone, call\.from_phone\)\)/);
+    expect(source).toMatch(/persistCallSecondaryContact\(linkedCustomerId, \{[\s\S]*?\}, \{\s*smsConsentExplicit: consentGiven,\s*keepConsentStamp: !consentGiven,\s*holdPhone: held,/);
+  });
+
+  test('canonical V2 output is trusted only in primary mode, for the link and for the retry', () => {
+    expect(source).toContain('!callExtractionV2PrimaryEnabled()) return null;');
+    expect(source).toContain('callFamilyNameLinkLive() && callExtractionV2PrimaryEnabled()');
+  });
+
+  test('the holder exclusion uses the structured name, so a two-word first name keys the same', () => {
+    expect(fullNameKey({ first_name: 'Mary Ann', last_name: 'Testerson' })).toBe('mary ann|testerson');
+    expect(source).toContain('holderKey: fullNameKey(holder)');
   });
 });
 

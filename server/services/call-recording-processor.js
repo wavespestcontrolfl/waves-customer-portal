@@ -12463,14 +12463,12 @@ const CallRecordingProcessor = {
     // contact steps below so the named account holder is never filed as a contact on their own
     // account. The matching and the token-fenced link live in call-family-name-link.js.
     let familyNameLink = null;
-    const finishFamilyNameLink = async (linkedCustomerId, holderName) => {
-      const { fullNameKey } = require('./call-family-name-link');
-      const holderParts = String(holderName || '').trim().split(/\s+/);
-      familyNameLink = {
-        customerId: linkedCustomerId,
-        holderName,
-        holderKey: fullNameKey({ first_name: holderParts[0], last_name: holderParts.slice(1).join(' ') }),
-      };
+    const finishFamilyNameLink = async (linkedCustomerId, holder) => {
+      const { fullNameKey, displayName } = require('./call-family-name-link');
+      const holderName = displayName(holder);
+      // The structured name, never a re-split display name: "Mary Ann" + "Testerson" must key
+      // the same here as in the secondary-contact exclusion checks below.
+      familyNameLink = { customerId: linkedCustomerId, holderName, holderKey: fullNameKey(holder) };
       const callerName = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null;
       // One-step undo for the office: the card names the account, the caller and the reason.
       await db('triage_items')
@@ -12491,14 +12489,41 @@ const CallRecordingProcessor = {
         .catch((triageErr) => logger.warn(`[call-proc] family-link card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
       // The caller joins the account as a service contact through the one slot writer. Only
       // the inbound number the caller is actually on: a dictated number is never texted here.
+      // Same consent rules as the on-site contact flow: explicit SMS consent on the call
+      // stamps it; without it the new phone is HELD out of every text until its own YES, and
+      // the account's existing consent stamp (other people's consent) is kept, never cleared.
       try {
         if (!isOutboundCall(call) && phone && samePhone(phone, call.from_phone)) {
+          const tenOf = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+          const consentGiven = v2SmsConsentExplicit === true;
+          let held = false;
+          if (!consentGiven && tenOf(phone).length === 10) {
+            const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+            const before = await db('customers').where({ id: linkedCustomerId }).first();
+            const knownKeys = [before?.phone, ...SERVICE_CONTACT_SLOTS.map((slot) => before?.[slot.phone])].map(tenOf).filter(Boolean);
+            const confirmed = await db('recipient_optin').where({ customer_id: linkedCustomerId, phone_key: tenOf(phone) }).first('status');
+            if (!knownKeys.includes(tenOf(phone)) && confirmed?.status !== 'confirmed') {
+              await db('recipient_optin').insert({
+                phone_key: tenOf(phone),
+                phone_e164: String(phone || '').trim(),
+                status: 'ask_failed',
+                customer_id: linkedCustomerId,
+                requested_by: 'call_pipeline',
+                requested_at: new Date(),
+              }).onConflict(['customer_id', 'phone_key']).ignore();
+              held = true;
+            }
+          }
           const saved = await persistCallSecondaryContact(linkedCustomerId, {
             first_name: extracted.first_name || null,
             last_name: extracted.last_name || null,
             phone,
             role: 'family_member',
             wants_notifications: true,
+          }, {
+            smsConsentExplicit: consentGiven,
+            keepConsentStamp: !consentGiven,
+            holdPhone: held,
           });
           logger.info(`[call-proc] family-link caller saved as a service contact for ${maskSid(callSid)}: ${saved}`);
         }
@@ -12510,7 +12535,8 @@ const CallRecordingProcessor = {
     // Fail-open: any error leaves the call exactly as it was without the gate.
     const tryFamilyNameLink = async () => {
       try {
-        if (!require('../config/feature-gates').callFamilyNameLinkLive()) return null;
+        // Canonical writes trust V2 only in primary mode (shadow mode populates the extraction too).
+        if (!require('../config/feature-gates').callFamilyNameLinkLive() || !callExtractionV2PrimaryEnabled()) return null;
         const { resolveFamilyNameLink, displayName } = require('./call-family-name-link');
         const result = await resolveFamilyNameLink({
           callLogId: call.id,
@@ -12541,7 +12567,7 @@ const CallRecordingProcessor = {
         }
         if (result.status !== 'linked') return null;
         logger.info(`[call-proc] Linked call ${maskSid(callSid)} to customer ${result.customer.id} by the spoken family account-holder name`);
-        await finishFamilyNameLink(result.customer.id, displayName(result.holder));
+        await finishFamilyNameLink(result.customer.id, result.holder);
         return result.customer;
       } catch (e) {
         logger.warn(`[call-proc] family name link skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
@@ -12828,10 +12854,14 @@ const CallRecordingProcessor = {
     // A pass that wrote the family link and crashed before its card or contact write: the call
     // row carries the marker, so a retry finishes the (idempotent) card and contact writes.
     if (!familyNameLink && customerId && !explicitUnlink
-        && require('../config/feature-gates').callFamilyNameLinkLive()
-        && String(call.metadata?.family_name_link?.customer_id || '') === String(customerId)) {
+        && require('../config/feature-gates').callFamilyNameLinkLive() && callExtractionV2PrimaryEnabled()
+        && String(call.metadata?.family_name_link?.customer_id || '') === String(customerId)
+        && call.metadata.family_name_link.holder_first_name && call.metadata.family_name_link.holder_last_name) {
       try {
-        await finishFamilyNameLink(customerId, call.metadata.family_name_link.holder_name || '');
+        await finishFamilyNameLink(customerId, {
+          first_name: call.metadata.family_name_link.holder_first_name,
+          last_name: call.metadata.family_name_link.holder_last_name,
+        });
       } catch (e) {
         logger.warn(`[call-proc] family link resume skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
       }
