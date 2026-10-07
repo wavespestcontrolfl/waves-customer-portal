@@ -1010,11 +1010,13 @@ function headlineWords(quote, rawQuote, description, redact) {
   const compose = require('./admin-alert-compose');
   const raw = matchedSlice(rawQuote, description);
   const slice = raw && redact(raw).replace(/\s+/g, ' ').trim();
-  // Sentence punctuation means the slice is not one plain phrase. A period
-  // inside a word (an email address, 2.5) is not a sentence break; one
-  // followed by a space, the end, or a capital ("receipt.Then") is. A URL
-  // still falls back: the alert rules forbid paths in alert text.
-  if (slice && !/[!?。！？]|\.(\s|$|\p{Lu})/u.test(slice) && !compose.breaksAlertRules(slice)) return slice;
+  // Sentence punctuation means the slice is not one plain phrase. Only a
+  // period INSIDE a word is allowed (between a letter or digit and a lowercase
+  // letter or digit: an email address, 2.5); every other period, and any
+  // ! ? or CJK sentence ender, is a break. A URL still falls back: the alert
+  // rules forbid paths in alert text.
+  const inWordPeriod = /(?<=[\p{L}\p{N}])\.(?=[\p{Ll}\p{N}])/gu;
+  if (slice && !/[.!?。！？]/u.test(slice.replace(inWordPeriod, '')) && !compose.breaksAlertRules(slice)) return slice;
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }
 

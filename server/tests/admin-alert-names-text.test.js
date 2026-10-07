@@ -215,6 +215,9 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     // no space after the stop, next sentence capitalized: still a break
     await ring({ row: { kind: 'other', description: 'mail the receipt.Then call', evidence: [{ quote: 'Okay. I will mail the receipt.Then call' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // a period before a closing quote is a break too
+    await ring({ row: { kind: 'other', description: 'Tell her “I mailed it.” Then call her', evidence: [{ quote: 'Okay. Tell her “I mailed it.” Then call her' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
     // a URL is a path the alert rules forbid: the headline keeps the first sentence
     await ring({ row: { kind: 'other', description: 'visit https://example.com/help', evidence: [{ quote: 'Sure. I will visit https://example.com/help later' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “Sure” (Sep 29) — nothing on record shows it done.');
