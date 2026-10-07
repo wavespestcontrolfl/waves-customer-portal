@@ -35,7 +35,7 @@
  */
 const db = require('../../models/db');
 const BillingModeRules = require('../billing-mode-rules');
-const { resolveBillingLane, completionInvoiceAmount } = require('../billing-lane');
+const { resolveBillingLane, predictCompletionBilling } = require('../billing-lane');
 
 const BILLING_EDIT_FIELDS = ['billing_mode', 'per_application_fee'];
 // decimal(10,2) — migration 20260709000010.
@@ -164,26 +164,29 @@ async function billingEditRefusal(dbh, customerId, row, fields) {
   return null;
 }
 
-// Upcoming visits under the per-application rule, counted with the completion
-// path's own amount rule (billing-lane.js completionInvoiceAmount): a visit's
-// own price wins, else the fee; callbacks, free visit types and $0 bill nothing.
+// Upcoming visits under the per-application rule, each predicted with the
+// completion path's own rules (billing-lane.js predictCompletionBilling, the
+// per_application lane with the card's fee): a visit's own price wins, else
+// the fee; a prepayment is netted and covers the visit only when it covers the
+// whole amount; callbacks, free visit types and $0 bill nothing.
 async function perApplicationVisitCounts(dbh, customerId, fee) {
   const { etDateString } = require('../../utils/datetime-et');
-  const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
   const rows = await dbh('scheduled_services')
     .where({ customer_id: customerId })
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString())
-    .select('estimated_price', 'primary_line_price', 'prepaid_amount', 'is_callback', 'service_type')
+    .select('estimated_price', 'primary_line_price', 'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type')
     .limit(200);
-  const counts = { fee: 0, own: 0, none: 0, prepaid: 0 };
+  const counts = { fee: 0, own: 0, partly: 0, prepaid: 0, none: 0 };
   for (const r of rows) {
-    if (Number(r.prepaid_amount) > 0) { counts.prepaid += 1; continue; }
-    const amount = isAlwaysFreeServiceType(r.service_type) ? 0 : completionInvoiceAmount({
-      estimatedPrice: r.estimated_price, isCallback: !!r.is_callback, perApplicationBilling: true,
-      perApplicationFee: fee, monthlyRate: 0, billingMode: 'per_application', primaryLinePrice: r.primary_line_price,
+    const p = predictCompletionBilling({
+      lane: 'per_application', billingMode: 'per_application', perApplicationFee: fee, monthlyRate: 0,
+      estimatedPrice: r.estimated_price, primaryLinePrice: r.primary_line_price, isCallback: !!r.is_callback,
+      serviceType: r.service_type, prepaidAmount: r.prepaid_amount, prepaidMethod: r.prepaid_method,
     });
-    if (amount === 0) counts.none += 1;
+    if (p.kind === 'prepaid') counts.prepaid += 1;
+    else if (!(p.amount > 0)) counts.none += 1;
+    else if (p.grossAmount > p.amount) counts.partly += 1;
     else if (Number(r.estimated_price) > 0) counts.own += 1;
     else counts.fee += 1;
   }
@@ -209,8 +212,9 @@ async function nextVisitLines(dbh, customerId, row, fields) {
     const parts = [
       c.fee && `${plural(c.fee, 'visit', 'visits')} at ${money(after.per_application_fee)}`,
       c.own && `${plural(c.own, 'visit', 'visits')} at its own price`,
+      c.partly && `${plural(c.partly, 'visit is', 'visits are')} partly prepaid (the rest is charged)`,
       c.none && `${plural(c.none, 'visit bills', 'visits bill')} nothing`,
-      c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} already prepaid`,
+      c.prepaid && `${plural(c.prepaid, 'visit is', 'visits are')} fully prepaid`,
     ].filter(Boolean);
     lines.push(parts.length ? `Upcoming visits now on the schedule: ${parts.join(', ')}.` : 'No upcoming visits are on the schedule.');
   } else if (laneAfter === 'monthly_membership') {
