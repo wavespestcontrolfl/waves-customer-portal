@@ -2840,7 +2840,7 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // The verdict also follows the customer's zone marks (codex #6089 r3): any
   // office or technician zone write (count or newest updated_at) re-keys the
   // cached PDF, so a PDF never keeps the old hidden/visible answer after marks
-  // are added or cleared. An unreadable zone read stamps 'zerr', never a stale key.
+  // are added or cleared. An unreadable read stamps a one-off key, never a stale one.
   if (featureGates.lawnCoverageHideDefaultZonesLive()) irrigationStamp += `:covhide=1:z=${await lawnZoneMarkStamp(service, knex)}`;
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
@@ -3996,7 +3996,9 @@ async function lawnZoneMarkStamp(service, knex) {
     const center = lat != null && lng != null ? `${lat.toFixed(6)},${lng.toFixed(6)}` : 'nc';
     return `${Number(row && row.n) || 0}-${newest}@${center}~${Number(geometry && geometry.zoom) || 20}`;
   } catch {
-    return 'zerr';
+    // A per-call key that can never match a stored PDF (codex #6089 r5): a
+    // failed read must not produce a reusable cache key.
+    return `zerr-${crypto.randomUUID()}`;
   }
 }
 
@@ -4255,10 +4257,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Every input read that feeds the lawn treatment-memory entry reports its
   // failure here (see failSoft); one entry blocks the first freeze.
   const readFailures = new Set();
+  // A failed zone or geometry read is not proof of default zones (codex #6089
+  // r5): the coverage gate then keeps the section and the render is uncacheable.
+  let coverageReadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
-    knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
-    knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
+    knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => { coverageReadFailed = true; return null; }),
+    knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => { coverageReadFailed = true; return []; }),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
@@ -4314,7 +4319,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // geometry_image). Zone rows alone prove nothing: property-zones.js creates
   // rows with only stock schematic geometry and clears geometry_image without
   // deleting the row, and resolveZoneRowsImageDrift nulls untrusted marks.
-  const coverageZonesAreDefaults = !resolvedDbZones.some((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0);
+  const coverageZonesAreDefaults = !coverageReadFailed && !resolvedDbZones.some((zone) => Object.keys(parseJsonObject(zone.geometry_image)).length > 0);
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
@@ -5449,6 +5454,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // treated whole (the product card says "Your whole lawn").
   const hideDefaultLawnCoverage = serviceLine === 'lawn' && coverageZonesAreDefaults
     && featureGates.lawnCoverageHideDefaultZonesLive();
+  if (serviceLine === 'lawn' && coverageReadFailed && lawnAssessment && featureGates.lawnCoverageHideDefaultZonesLive()) {
+    lawnAssessment.weekWeatherUncacheable = true;
+  }
   const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,

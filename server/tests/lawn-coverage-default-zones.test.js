@@ -185,3 +185,32 @@ test('PDF cache key: a re-geocode or a geometry zoom change re-keys the lawn PDF
   expect(await sig(27.41, 20)).not.toBe(base);
   expect(await sig(27.4, 19)).not.toBe(base);
 });
+
+test('a failed zone read is not default zones: the section stays and nothing is hidden (codex #6089 r5)', async () => {
+  process.env[KEY] = 'true';
+  const base = makeKnex({ property_geometries: [], service_findings: [], service_photos: [], service_products: [], scheduled_services: [] });
+  const knex = (table) => {
+    if (table === 'property_zones') { const q = { where: () => q, orderBy: () => q, catch: (fn) => Promise.resolve(fn(new Error('read failed'))), then: (r, j) => Promise.reject(new Error('read failed')).then(r, j) }; return q; }
+    return base(table);
+  };
+  const data = await buildReportV1Data({ ...LAWN_SERVICE }, 'token-lawn-coverage', knex);
+  expect(data.serviceCoverage.enabled).toBe(true);
+  expect(data).not.toHaveProperty('lawnCoverageHidden');
+});
+
+test('a failed stamp read yields a one-off key that never matches a stored PDF (codex #6089 r5)', async () => {
+  process.env[KEY] = 'true';
+  const svc = { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' };
+  const failing = () => {
+    const base = makeKnex({});
+    const k = (table) => {
+      if (table === 'property_zones') { const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.reject(new Error('read failed')) }; return q; }
+      return base(table);
+    };
+    k.raw = (sql) => sql;
+    return k;
+  };
+  const a = (await resolveCanonicalLawnRender(svc, failing())).signature;
+  const b = (await resolveCanonicalLawnRender(svc, failing())).signature;
+  expect(a).not.toBe(b);
+});
