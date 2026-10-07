@@ -88,10 +88,16 @@ describe('the approved recipients reach each send leg (source contract)', () => 
     expect(fn.slice(0, fn.indexOf('let packetClaim')).match(/^\s+expectedRecipients, refusalOnly,$/gm)).toHaveLength(2);
   });
 
-  test('refusalOnly: a hold refusal is not requeued as a later scheduled send', () => {
+  test('refusalOnly: a held text is never queued for later and a hold refusal is never requeued as a scheduled send', () => {
     const src = require('fs').readFileSync(require.resolve('../services/invoice.js'), 'utf8');
-    const fn = src.slice(src.indexOf('  async sendViaSMSAndEmail('));
+    const fn = src.slice(src.indexOf('  async sendViaSMSAndEmail('), src.indexOf('  async sendViaSMSAndEmail(') + 60000);
     expect(fn).toContain('if (restored && !allowClaimed && !refusalOnly && (sms.code === "COLLECTION_HOLD_DEFER" || email.code === "COLLECTION_HOLD_DEFER")) {');
+    // The one deferred-text enqueue in the wrapper (entry point invoice_send_deferred) sits behind !refusalOnly.
+    const gate = fn.indexOf('&& !refusalOnly\n      && REPLAY_HOLD_CODES.includes(sms.code)');
+    const insert = fn.indexOf('await db("sms_log").insert({');
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(insert);
+    expect(fn.indexOf('await db("sms_log").insert({', insert + 1)).toBe(-1);
   });
 
   test('refusalOnly: a terminal visit at send is held for review, never voided, on both void paths', () => {

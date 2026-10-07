@@ -8206,7 +8206,10 @@ const InvoiceService = {
     // never receives it. The queued row replays the exact rendered body at
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
+    // A refusal-only send (the Intelligence Bar) never queues a later text:
+    // that replay would run outside its approval (recipient, total).
     if (!allowClaimed
+      && !refusalOnly
       && REPLAY_HOLD_CODES.includes(sms.code)
       && sms.deliveryOutcome !== "uncertain"
       && sms.deferred
