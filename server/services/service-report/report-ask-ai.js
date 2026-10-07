@@ -1642,9 +1642,34 @@ function contradictsServiceKind(text, facts, data) {
   });
 }
 
+// A recorded active ingredient may not be denied: "Alpine WSG does not
+// contain dinotefuran" (Codex P1 #5964 r48).
+function deniesRecordedIngredient(text, facts) {
+  const products = asArray(facts?.products).filter((product) => product.active_ingredient);
+  if (!products.length) return false;
+  return clausesOf(text).some((clause) => {
+    const lower = clause.toLowerCase();
+    if (!(NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower)) || UNCERTAIN_RE.test(lower)) return false;
+    const named = products.filter((product) => mentions(clause, product));
+    return (named.length ? named : products).some((product) => String(product.active_ingredient).toLowerCase()
+      .split(/[^a-z0-9-]+/).filter((word) => word.length > 3).some((word) => lower.includes(word)));
+  });
+}
+
+// Recorded findings may not be denied: "The report has no findings" when it
+// has some (Codex P1 #5964 r48).
+const NO_FINDINGS_RE = /\b(?:no|zero|without)\s+(?:\w+\s+)?(?:findings?|issues?|problems?|activity|signs?)\b|\b(?:nothing|none)\s+(?:was\s+|were\s+)?(?:found|noted|seen|recorded|observed|listed|reported)\b|\b(?:found|noted|saw|observed)\s+nothing\b|\b(?:didn['’]?t|did\s+not)\s+(?:find|note|see|observe|record)\s+(?:anything|any)\b/i;
+function deniesRecordedFindings(text, facts) {
+  if (!asArray(facts?.findings).length) return false;
+  return clausesOf(text).some((clause) => NO_FINDINGS_RE.test(clause) && !UNCERTAIN_RE.test(clause)
+    && !SAYS_INSIDE.test(clause) && !SAYS_OUTSIDE.test(clause));
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['denies_ingredient', (text, { facts }) => deniesRecordedIngredient(text, facts)],
+  ['denies_findings', (text, { facts }) => deniesRecordedFindings(text, facts)],
   ['service_kind', (text, { facts, data }) => contradictsServiceKind(text, facts, data)],
   ['trend_claim', (text, { facts }) => contradictsTrend(text, facts)],
   ['denies_application', (text, { facts }) => deniesRecordedApplication(text, facts)],

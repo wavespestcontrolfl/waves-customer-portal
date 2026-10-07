@@ -1829,3 +1829,25 @@ describe('answer screen, Codex round 47', () => {
     expect(ruleAnswerReason({ serviceLine: 'pest' }, [], 'applied', 'Is another treatment booked?')).toBe('next_visit');
   });
 });
+
+describe('answer screen, Codex round 48', () => {
+  const data = pestData({
+    applications: [{ product: { name: 'Alpine WSG', activeIngredient: 'dinotefuran' }, applicationArea: 'Outside' }],
+    findings: [{ title: 'Ant trail', customerCopy: 'Active ant trail along the lanai.' }],
+  });
+  const question = 'What is in Alpine WSG?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['Alpine WSG does not contain dinotefuran.', 'Alpine WSG contains no dinotefuran.', 'Dinotefuran is not the active ingredient in Alpine WSG.'])('a recorded ingredient may not be denied: %s', (answer) => {
+    expect(ask(answer)).toBe('denies_ingredient');
+  });
+
+  test.each(['The report has no findings.', 'There are no findings on the report.', 'Your report lists no findings.'])('recorded findings may not be denied: %s', (answer) => {
+    expect(ask(answer)).toBe('denies_findings');
+  });
+
+  test('the recorded ingredient passes', () => {
+    expect(ask('Alpine WSG contains dinotefuran.')).toBeNull();
+  });
+});
