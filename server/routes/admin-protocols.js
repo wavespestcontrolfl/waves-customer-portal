@@ -29,6 +29,7 @@ const {
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
+const { fertilizerSafetyRules } = require('../services/lawn-fertilizer-safety');
 const jobCard = require('../services/job-card');
 const featureGates = require('../config/feature-gates');
 
@@ -227,6 +228,7 @@ function protocolSopSlug(protocol, window) {
 function renderWindowSopMarkdown({ protocol, window, products = [], gates = [] }) {
   const defaultProducts = products.filter((product) => product.default_in_plan);
   const conditionalProducts = products.filter((product) => !product.default_in_plan);
+  const safetyRules = fertilizerSafetyRules(products);
   const applicableGates = gates.filter((gate) => {
     const logic = gate.logic || {};
     const months = Array.isArray(logic.months) ? logic.months : [];
@@ -266,6 +268,7 @@ function renderWindowSopMarkdown({ protocol, window, products = [], gates = [] }
     '## Product Restrictions',
     markdownList(applicableGates, (gate) => `${gate.title}: ${gate.rule_text}`),
     '',
+    ...(safetyRules.length ? ['## Fertilizer Safety', markdownList(safetyRules), ''] : []),
     '## Customer Note Templates',
     markdownList(window.customer_note_templates),
     '',

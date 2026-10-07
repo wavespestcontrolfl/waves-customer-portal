@@ -46,6 +46,11 @@ class FakeQuery {
     return this;
   }
 
+  whereNull(column) {
+    this.filters.push({ column, op: 'null' });
+    return this;
+  }
+
   whereIn(column, values) {
     this.filters.push({ column, op: 'in', value: values });
     return this;
@@ -94,6 +99,7 @@ class FakeQuery {
   matchesFilters(row) {
     return this.filters.every(({ column, op, value }) => {
       const rowValue = valueForColumn(row, column);
+      if (op === 'null') return rowValue == null;
       if (op === 'in') return value.map(String).includes(String(rowValue));
       if (op === '<') return String(rowValue) < String(value);
       return String(rowValue) === String(value);
@@ -107,7 +113,7 @@ class FakeQuery {
 }
 
 function valueForColumn(row, column) {
-  const key = String(column).replace(/^(pc|sp|sr)\./, '');
+  const key = String(column).replace(/^(pc|sp|sr|ss)\./, '');
   const aliases = {
     customer_id: row.customer_id,
     status: row.status,
@@ -244,8 +250,8 @@ describe('waveguard approval engine', () => {
   });
 
   describe('the repeat-group rule keeps two named exemptions: Group 3 pre-emergents and the take-all Artavia pair (owner 2026-10-06)', () => {
-    const run = (productsCatalog, priorApplications, input, plan = basePlan()) => evaluateWaveGuardManagerApprovals(fakeKnex({ productsCatalog, priorApplications }), {
-      customerId: 'customer-1', service: { service_type: 'Lawn Care' }, plan, serviceDate: input.serviceDate || '2026-06-10', products: [input],
+    const run = (productsCatalog, priorApplications, input, plan = basePlan(), service = { service_type: 'Lawn Care' }) => evaluateWaveGuardManagerApprovals(fakeKnex({ productsCatalog, priorApplications }), {
+      customerId: 'customer-1', service, plan, serviceDate: input.serviceDate || '2026-06-10', products: [input],
     });
     const prior = (changes) => ({ customer_id: 'customer-1', status: 'completed', product_category: 'herbicide', ...changes });
     const repeats = (result) => result.blocks.filter((block) => /^repeat_|rotation_approval$/.test(block.code));
@@ -300,6 +306,22 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([ARTAVIA], [artavia('2026-05-13'), artavia('2025-10-01')], now))).toEqual([]);
       // An earlier Artavia with no take-all target is not a take-all application.
       expect(repeats(await run([ARTAVIA], [artavia('2026-05-13'), artavia('2026-04-11', ['Large patch'])], now))).toEqual([]);
+    });
+
+    test('the pair is counted at the visit\'s own property: another property\'s spray never satisfies it', async () => {
+      const artavia = (date, property_id) => prior({ service_date: date, product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets: ['Take-all'], property_id });
+      const now = { productId: 'base', serviceDate: '2026-06-10', targets: ['Take-all'] };
+      const at = (property) => ({ service_type: 'Lawn Care', property_id: property });
+      const codes = async (history, service) => repeats(await run([ARTAVIA], history, now, basePlan(), service)).map((b) => b.code);
+      // Property A's first spray makes property A's second the pair, and property B's first spray is a normal review.
+      expect(await codes([artavia('2026-05-13', 'A')], at('A'))).toEqual([]);
+      expect(await codes([artavia('2026-05-13', 'A')], at('B'))).toEqual(['fungicide_frac_rotation_approval']);
+      // Another property's spray does not turn this property's second into a "third".
+      expect(await codes([artavia('2026-05-13', 'A'), artavia('2026-04-11', 'B')], at('A'))).toEqual([]);
+      // A history row that names no property satisfies a visit with a property no more than a visit with none does the reverse.
+      expect(await codes([artavia('2026-05-13', undefined)], at('A'))).toEqual(['fungicide_frac_rotation_approval']);
+      expect(await codes([artavia('2026-05-13', undefined)], { service_type: 'Lawn Care' })).toEqual([]);
+      expect(await codes([artavia('2026-05-13', 'A')], { service_type: 'Lawn Care' })).toEqual(['fungicide_frac_rotation_approval']);
     });
 
     test('every other same-group repeat behaves as on main, whatever targets were recorded; the finding keeps what was read', async () => {

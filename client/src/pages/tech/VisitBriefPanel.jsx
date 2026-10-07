@@ -791,6 +791,7 @@ function BriefGuidanceSection({ brief, service, showType }) {
   const companions = Array.isArray(guidance?.companions) ? guidance.companions : [];
   const fixed = lawn && Array.isArray(lawn.products) ? lawn.products.filter((p) => p?.name) : [];
   const conditional = lawn && Array.isArray(lawn.conditional_products) ? lawn.conditional_products.filter((p) => p?.name) : [];
+  const held = lawn && Array.isArray(lawn.held_products) ? lawn.held_products.filter((p) => p?.name) : [];
   const protocolGates = lawn && Array.isArray(lawn.protocol_gates) ? lawn.protocol_gates.filter((g) => g?.title || g?.ruleText) : [];
   // priorities/watch_items are THIS visit's action items and quirks (the
   // brief schema's definition) — they belong here, not under Last visit.
@@ -798,7 +799,7 @@ function BriefGuidanceSection({ brief, service, showType }) {
   const watchItems = Array.isArray(brief.watch_items) ? brief.watch_items.filter(Boolean) : [];
   const hasContent = brief.open_scope || brief.customer_context
     || priorities.length || watchItems.length
-    || fixed.length || conditional.length || protocolGates.length
+    || fixed.length || conditional.length || held.length || protocolGates.length
     || historyProducts.length || companions.length || lawnUnavailable;
   if (!hasContent) return null;
   return (
@@ -824,6 +825,11 @@ function BriefGuidanceSection({ brief, service, showType }) {
       {protocolGates.map((g, i) => (
         <p key={`g${i}`} style={{ ...factRowStyle, color: DARK.amber }}>
           ⚠ {g.title || 'Protocol gate'}{g.ruleText ? ` — ${g.ruleText}` : ''}
+        </p>
+      ))}
+      {held.map((p, i) => (
+        <p key={`h${i}`} style={{ ...factRowStyle, color: DARK.amber }}>
+          ⚠ {p.message || `${p.name}: do not apply this product at this visit.`}
         </p>
       ))}
       {fixed.map((p, i) => <p key={`f${i}`} style={factRowStyle}>• {productLine(p)}</p>)}

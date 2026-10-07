@@ -2284,6 +2284,7 @@ module.exports = {
   v13SelectionBlocks,
   v13LineState,
   holdNorthPortProducts,
+  v13NorthPortHold,
   loadVisitCity,
   v13NorthPortReferenceWarnings,
   v13HoldWarnings,

@@ -115,9 +115,13 @@ function productIsPreEmergent(product, plan) {
 // The customer's take-all Artavia applications in the season window before this one (completed
 // visits only, the same product, a take-all target recorded). A failed read throws when strict, else
 // reads as none, so no exemption.
-async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict = false } = {}) {
+// Scoped to the visit's property: a spray at another of the customer's properties is not this
+// property's pair. A visit with no property counts only history that also names none.
+async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict = false, propertyId = null } = {}) {
   const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
+    .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+    .modify((query) => (propertyId ? query.where('ss.property_id', propertyId) : query.whereNull('ss.property_id')))
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
@@ -129,19 +133,19 @@ async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { s
   return rows.filter((row) => today - dayNumber(row.service_date) <= TAKE_ALL_SEASON_DAYS && hasTakeAllTarget(row.targets));
 }
 
-async function isTakeAllPair(knex, { customerId, product, last, input, serviceDate, strict }) {
+async function isTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) {
   if (!/\bartavia\b/.test(normalizeText(product.name)) || normalizeText(last.product_name) !== normalizeText(product.name)) return false;
   if (!hasTakeAllTarget(input.targets) || !hasTakeAllTarget(last.targets)) return false;
-  const history = await takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict });
+  const history = await takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict, propertyId });
   if (history.length !== 1) return false;
   const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
   return apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
     && dayNumber(history[0].service_date) === dayNumber(last.service_date);
 }
 
-async function rotationExemption(knex, { customerId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) {
+async function rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) {
   if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
-  return await isTakeAllPair(knex, { customerId, product, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
+  return await isTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
 }
 
 function latestAssessmentStressed(plan) {
@@ -199,12 +203,12 @@ function repeatGroupFinding({ product, input, groupType, groupValue, last }) {
 
 // The repeat-group (rotation) review of one applied product: for each of its groups, the latest
 // comparable application, the named exemptions, and the finding.
-async function repeatGroupFindings(knex, { customerId, product, input, plan, serviceDate, strict }) {
+async function repeatGroupFindings(knex, { customerId, propertyId, product, input, plan, serviceDate, strict }) {
   const findings = [];
   for (const [groupType, groupValue] of productGroups(product)) {
     const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict });
     if (!last || !lastApplicationGroups(last, groupType).some((lastGroup) => String(lastGroup || '') === String(groupValue))) continue;
-    if (await rotationExemption(knex, { customerId, product, plan, groupType, groupValue, last, input, serviceDate, strict })) continue;
+    if (await rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict })) continue;
     findings.push(repeatGroupFinding({ product, input, groupType, groupValue, last }));
   }
   return findings;
@@ -290,7 +294,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
       });
     }
 
-    blocks.push(...await repeatGroupFindings(knex, { customerId, product, input, plan, serviceDate, strict }));
+    blocks.push(...await repeatGroupFindings(knex, { customerId, propertyId: service?.property_id || null, product, input, plan, serviceDate, strict }));
   }
 
   const turfProfile = await savepointRead(knex, (k) => k('customer_turf_profiles')
