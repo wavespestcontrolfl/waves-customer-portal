@@ -375,7 +375,12 @@ function applyNameDictationToV2Caller(caller, dictation) {
     if (!rewritten) continue;
     if (old) {
       const escaped = old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-      rewritten = rewritten.replace(new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, 'iu'), `$1${value}`);
+      // Anchored to the component's own end of the name ("Lee Lee" has one
+      // first name and one last name).
+      const anchored = field === 'first_name'
+        ? new RegExp(`^${escaped}(?=\\s|$)`, 'iu')
+        : new RegExp(`(?<=^|\\s)${escaped}$`, 'iu');
+      rewritten = rewritten.replace(anchored, value);
     } else if (tokens.length === 1 && sameNameMisheard(tokens[0], value)) {
       rewritten = value;
     }
