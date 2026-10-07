@@ -319,16 +319,19 @@ async function activation(estimateData, customerId) {
   const pinnedLegacyRodentOnlyPlan = Converter.isPinnedLegacyRodentOnlyPlan(recurring, isLegacyRodentRow);
   const services = Converter.foldTermiteRentalIntoBait(recurring).filter((svc) => !isLegacyRodentRow(svc));
   const keys = Converter.tierQualifyingRecurringServiceKeys(services);
-  const commercialOnly = keys.length === 0
-    && services.some((svc) => String(Converter.recurringServiceKey(svc) || '').startsWith('commercial_'));
-  if (commercialOnly) return { commercialOnly, pinnedLegacyRodentOnlyPlan, tier: 'Commercial' };
+  const hasCommercialRecurring = services.some((svc) => String(Converter.recurringServiceKey(svc) || '').startsWith('commercial_'));
+  const commercialOnly = keys.length === 0 && hasCommercialRecurring;
+  // A commercial recurring line or a priced commercial one-time line stamps
+  // the customer commercial (converter and one-time accept alike).
+  const commercialStamp = hasCommercialRecurring || Converter.estimateHasCommercialOneTime(estimateData);
+  if (commercialOnly) return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, tier: 'Commercial' };
   let prior = [];
   if (keys.length) {
     prior = Converter.priorQualifyingKeysFromSnapshot(estimateData)
       || await require('../waveguard-existing-services').loadExistingQualifyingServiceKeys(db, customerId).catch(() => []);
   }
   const { tier } = Converter.determineTier(Converter.combinedTierQualifyingCount(keys, prior), services.length > 0);
-  return { commercialOnly, pinnedLegacyRodentOnlyPlan, tier: tier === 'none' ? null : tier };
+  return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, tier: tier === 'none' ? null : tier };
 }
 
 // Billing lane and tier after the accept: the billing_mode the converter
@@ -394,6 +397,11 @@ function cardLines(preview) {
     ...serviceAndBillLines(preview),
     beforeAfterLine('Billing lane', preview.billing_lane, ''),
     beforeAfterLine('Tier', preview.tier, ''),
+    ...(preview.property_type.before === preview.property_type.after ? [] : [{
+      kind: 'billing',
+      label: `Property type: ${preview.property_type.before || 'not set'} → commercial (later invoices charge sales tax on taxable commercial services)`,
+      before: preview.property_type.before, after: preview.property_type.after,
+    }]),
     { kind: 'billing', label: 'No setup invoice, no charge and no receipt now' },
     {
       kind: 'operational',
@@ -427,7 +435,7 @@ async function planAccept(input) {
   // Mark accepted runs the converter only for a recurring monthly total
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
-  const { commercialOnly, tier, pinnedLegacyRodentOnlyPlan } = await activation(estimateData, customerId);
+  const { commercialOnly, commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = await activation(estimateData, customerId);
   const blocked = converts ? conversionRefusal(estimate, estimateData, tier) : null;
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
@@ -451,6 +459,10 @@ async function planAccept(input) {
     },
     billing_lane: { before: lt.laneBefore && laneLabel(lt.laneBefore), after: lt.laneAfter && laneLabel(lt.laneAfter) },
     tier: { before: lt.tierBefore, after: lt.tierAfter },
+    property_type: {
+      before: customer.property_type || null,
+      after: commercialStamp && customer.property_type !== 'commercial' ? 'commercial' : (customer.property_type || null),
+    },
     visits: { booked_from_estimate: booked, books_new: false },
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),

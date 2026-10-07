@@ -134,6 +134,18 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(card(preview).notifies_customer).toBe(false);
   });
 
+  test('a commercial one-time estimate discloses the commercial property stamp', async () => {
+    seed({
+      estimate: {
+        monthly_total: 0, onetime_total: 640,
+        estimate_data: { result: { oneTime: { items: [{ service: 'commercial_trenching', name: 'Commercial Trenching', price: 640, isCommercial: true, commercialPricingMode: 'auto_estimate' }] } } },
+      },
+      customer: { property_type: 'residential' },
+    });
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines).toContain('Property type: residential → commercial (later invoices charge sales tax on taxable commercial services)');
+  });
+
   test('a pinned legacy rodent-only plan goes on monthly dues, as the converter stamps it', async () => {
     seed({
       estimate: {
