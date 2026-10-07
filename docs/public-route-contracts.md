@@ -2544,7 +2544,9 @@ and the PDF print, carries up to 8 photos too (6 with the gate off). The web
 report captions a photo with `zoneLabel` when present. The lawn PDF
 cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
 PDFs in both directions. Nothing else in the payload changes, and with the gate
-off the payload and the signature are byte-identical to before.
+off the payload and the signature are byte-identical to before. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
+found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
+not served either.
 
 `GATE_LAWN_REPORT_PHOTO_SET` (dark): for a lawn visit captured under the shot
 list (`lawn_assessments.photos[].photoVocabulary` is `shot_list_v1`; a visit
