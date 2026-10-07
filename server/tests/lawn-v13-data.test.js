@@ -42,7 +42,7 @@ describe('the v13 recipe', () => {
       expect(v13[grass].safety_rules.length).toBeGreaterThan(0);
       for (const visit of v13[grass].visits) {
         // April alone carries the 9x plan step (cadenceVariants); every other visit is the plain shape.
-        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : [])].sort());
+        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(['Apr', 'Jul'].includes(visit.month) ? ['cadenceVariants'] : [])].sort());
         expect(Object.values(visit.tiers)).toEqual([true, true, true, true]);
       }
     }
@@ -99,10 +99,10 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
   const april = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
   const { visitForCadence } = require('../services/lawn-program');
 
-  test('April carries one 9x variant naming the Dimension 0.21% catalog row the fix migration inserts; no other visit has one', () => {
+  test('April carries a 9x variant naming the Dimension 0.21% catalog row the fix migration inserts, July one scout-only 9x variant (20261007185000); no other visit has one', () => {
     for (const grass of GRASSES) {
       const variants = v13[grass].visits.filter((v) => v.cadenceVariants);
-      expect(variants.map((v) => v.month)).toEqual(['Apr']);
+      expect(variants.map((v) => v.month)).toEqual(['Apr', 'Jul']);
       expect(Object.keys(variants[0].cadenceVariants)).toEqual(['9']);
       const [line, ...rest] = lines(variants[0].cadenceVariants['9'].primary);
       expect(rest).toEqual([]);

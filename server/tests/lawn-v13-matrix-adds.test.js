@@ -179,6 +179,51 @@ describe('6. July potash on the 12x plan', () => {
   });
 });
 
+describe('6b. July potash is a 12-visit-plan step: a 9-visit lawn with a July appointment plans no potash', () => {
+  const { visitForCadence, unknownCadenceWarning } = require('../services/lawn-program');
+  const wholeLawn = (visit) => lines(visit.primary).filter((l) => l.includes(' \u2014 ')).map(nameOf);
+
+  test('the July visit carries a scout-only 9x variant on every track', () => {
+    for (const track of TRACKS) {
+      const july = v13[track].visits.find((v) => v.month === 'Jul');
+      expect(july.cadenceVariants).toEqual({ 9: { primary: 'Scout visit: inspect the whole lawn and treat spots only' } });
+    }
+    expect(visitFor(7).notes).toMatch(/if a 9-visit lawn has one, it keeps the scout step with no potash/);
+  });
+
+  test('12 visits a year: the 0-0-50; 9 visits: no whole-lawn product; the plan engine reads the step the same way', () => {
+    const july = visitFor(7);
+    expect(wholeLawn(visitForCadence(july, 12).visit)).toEqual([matrix.SOP]);
+    const nine = visitForCadence(july, 9);
+    expect(nine.branch).toBe('9');
+    expect(wholeLawn(nine.visit)).toEqual([]);
+    expect(nine.visit.primary).not.toMatch(/0-0-50/);
+    const parsed = engine.parseProtocolLines(nine.visit.primary, 'base', { exactName: true });
+    expect(parsed.map((line) => line.scope)).toEqual(['INSPECTION_ONLY']);
+    // The 9x secondary lines (spot products) are the visit's own.
+    expect(nine.visit.secondary).toBe(july.secondary);
+  });
+
+  test('the plan engine\'s own step picker (visitForPlan) gives a 9-visit lawn no potash and a 12-visit lawn the potash', async () => {
+    const july = visitFor(7);
+    const service = { id: 's', customer_id: 'c' };
+    const nine = await engine.visitForPlan(null, july, service, 9);
+    expect(wholeLawn(nine.visit)).toEqual([]);
+    expect(nine.warnings).toEqual([]);
+    const twelve = await engine.visitForPlan(null, july, service, 12);
+    expect(wholeLawn(twelve.visit)).toEqual([matrix.SOP]);
+  });
+
+  test('a lawn whose plan is not on file keeps the 12x step and the warning says there is no product on the 9x step', () => {
+    const unknown = visitForCadence(visitFor(7), null);
+    expect(wholeLawn(unknown.visit)).toEqual([matrix.SOP]);
+    expect(unknown.unknownCadence).toEqual({ variantProducts: [], cadences: ['9'] });
+    expect(unknownCadenceWarning(unknown.unknownCadence).message).toMatch(/On a 9x plan, this visit has no whole-lawn product\.$/);
+    // April still names its product.
+    expect(unknownCadenceWarning(visitForCadence(visitFor(4), null).unknownCadence).message).toMatch(/use LESCO Dimension 0\.21%/);
+  });
+});
+
 describe('7. Advion fire ant bait: an optional add-on in April and October (both spreader visits)', () => {
   test('a secondary line only, priced by the office, 1.5 lb per acre', () => {
     for (const m of [4, 10]) {
@@ -296,8 +341,46 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
     expect(await type(tables({ customer: { property_type: 'residential' } }), { customerId: 'c', fallback: 'commercial' })).toBe('commercial');
     expect(await type(tables({ customer: { property_type: 'commercial' } }), { customerId: 'c' })).toBe('commercial');
     expect(await type(tables({}), {})).toBeUndefined();
-    const broken = () => { throw new Error('boom'); };
-    expect(await type(broken, { propertyId: 'p', customerId: 'c' })).toBeUndefined();
+  });
+
+  test('a FAILED property read fails closed and is logged; an absent one is only absent', async () => {
+    const logger = require('../services/logger');
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const broken = () => { throw new Error('boom'); };
+      // The linked property read fails while the customer\'s own type is commercial: NOT the commercial answer.
+      expect(await prohibited.treatedPropertyType(broken, { propertyId: 'p', customerId: 'c', fallback: 'commercial' })).toBe('residential');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('customer_properties property type read failed'));
+      // The customer read fails: closed too.
+      const onlyCustomerFails = (table) => (table === 'customers' ? broken() : { where: () => ({ first: async () => undefined }) });
+      expect(await prohibited.treatedPropertyType(onlyCustomerFails, { propertyId: 'p', customerId: 'c' })).toBe('residential');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('customers property type read failed'));
+      // Ronstar stays blocked on both, and commercial is still allowed when the reads succeed.
+      expect(prohibited.lawnProhibitedProductBlock({ name: 'Ronstar G' }, { propertyType: 'residential' })).toMatchObject({ code: 'lawn_product_not_for_home_lawns' });
+      // An absent row (no throw, no type) is absent: the fallback decides.
+      const absent = () => ({ where: () => ({ first: async () => undefined }) });
+      expect(await prohibited.treatedPropertyType(absent, { propertyId: 'p', customerId: 'c', fallback: 'commercial' })).toBe('commercial');
+      expect(await prohibited.treatedPropertyType(absent, { propertyId: 'p', customerId: 'c' })).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('the plan blocks Ronstar when the linked property read fails, even beside a commercial customer', async () => {
+    const savedGate = process.env.GATE_LAWN_V13;
+    process.env.GATE_LAWN_V13 = 'true';
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
+    const spy = jest.spyOn(require('../services/application-limits'), 'checkLimits').mockResolvedValue({ blocks: [], warnings: [] });
+    try {
+      const items = [{ selected: true, product: { id: 'ron', name: 'Ronstar G' } }];
+      const broken = () => { throw new Error('boom'); };
+      const visit = { scheduled_date: '2026-10-07', customer_id: 'c', id: 'v', property_id: 'p', property_type: 'commercial' };
+      expect((await engine.v13VisitLimits(broken, visit, items, new Map())).capped.get('ron')).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      warn.mockRestore();
+      if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate;
+    }
   });
 
   test('the plan judges the linked property: commercial lot beside a residential customer passes, the reverse is blocked', async () => {

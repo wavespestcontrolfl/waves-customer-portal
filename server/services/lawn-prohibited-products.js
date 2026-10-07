@@ -61,17 +61,27 @@ async function lawnProhibitedProductBlocks(database, submittedProducts = [], { p
 // The property type of the TREATED property: the visit's linked customer_properties row when the
 // visit has one and the row says (a customer can own a home and a commercial lot), else the
 // customer's own property_type (`fallback`, already on the visit's row, or read by `customerId`).
-// undefined when nothing says; a failed read says nothing (the caller then treats it as residential).
+// undefined when nothing says (no row, no type): an ABSENT answer, the caller treats it as residential.
+// A FAILED read is not an absent one: the linked property may be the residential one while the customer's
+// own type is commercial, so a failed read fails closed ('residential': Ronstar stays blocked) and is logged.
+const FAILED_READ_TYPE = 'residential';
 async function treatedPropertyType(database, { propertyId, customerId, fallback } = {}) {
   const { savepointRead } = require('../utils/savepoint-read');
-  const read = (query) => savepointRead(database, query).catch(() => null);
+  const failed = (table, err) => {
+    require('./logger').warn(`[lawn-prohibited-products] ${table} property type read failed (treated as residential): ${err.message}`);
+    return FAILED_READ_TYPE;
+  };
   if (propertyId) {
-    const property = await read((k) => k('customer_properties').where({ id: propertyId }).first('property_type'));
-    if (property?.property_type) return property.property_type;
+    try {
+      const property = await savepointRead(database, (k) => k('customer_properties').where({ id: propertyId }).first('property_type'));
+      if (property?.property_type) return property.property_type;
+    } catch (err) { return failed('customer_properties', err); }
   }
   if (fallback !== undefined) return fallback;
   if (!customerId) return undefined;
-  return (await read((k) => k('customers').where({ id: customerId }).first('property_type')))?.property_type;
+  try {
+    return (await savepointRead(database, (k) => k('customers').where({ id: customerId }).first('property_type')))?.property_type;
+  } catch (err) { return failed('customers', err); }
 }
 
 // The 400 body a fresh lawn closeout returns for those blocks.

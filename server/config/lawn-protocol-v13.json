@@ -135,7 +135,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit."
+        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit; if a 9-visit lawn has one, it keeps the scout step with no potash.",
+        "cadenceVariants": {
+          "9": {
+            "primary": "Scout visit: inspect the whole lawn and treat spots only"
+          }
+        }
       },
       {
         "visit": 8,
@@ -340,7 +345,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit."
+        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit; if a 9-visit lawn has one, it keeps the scout step with no potash.",
+        "cadenceVariants": {
+          "9": {
+            "primary": "Scout visit: inspect the whole lawn and treat spots only"
+          }
+        }
       },
       {
         "visit": 8,
@@ -545,7 +555,12 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit."
+        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit; if a 9-visit lawn has one, it keeps the scout step with no potash.",
+        "cadenceVariants": {
+          "9": {
+            "primary": "Scout visit: inspect the whole lawn and treat spots only"
+          }
+        }
       },
       {
         "visit": 8,
