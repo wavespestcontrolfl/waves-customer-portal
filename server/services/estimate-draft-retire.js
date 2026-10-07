@@ -140,8 +140,10 @@ async function retireOneDraft(trx, pair) {
     // does (scripts/backfill-estimate-sent-lead-status.js): the canonical
     // resolver links and advances it only when it is the sent estimate's
     // single unambiguous open lead, as of the send time. Lead state only; it
-    // sends nothing.
-    await require('./lead-estimate-link').markLinkedLeadEstimateSent({
+    // sends nothing. Skipped when a lead already owns the sent estimate: that
+    // send is accounted for, and a replay would only re-record it there.
+    const sentOwned = await trx('leads').where({ estimate_id: pair.sent_id }).first('id');
+    if (!sentOwned) await require('./lead-estimate-link').markLinkedLeadEstimateSent({
       estimateId: pair.sent_id,
       sendMethod: 'backfill',
       performedBy: 'estimate-draft-retire',

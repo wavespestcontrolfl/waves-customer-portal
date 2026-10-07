@@ -204,6 +204,20 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect(lead.status).toBe('estimate_sent');
   });
 
+  test('no replay when a lead already owns the sent estimate', async () => {
+    const { autoDraft, sent } = await sentAfterTwoDrafts();
+    const draftLead = randomUUID();
+    const sentLead = randomUUID();
+    await mockPg('leads').insert([
+      { id: draftLead, estimate_id: autoDraft, status: 'new', first_name: 'Fixture', last_name: 'Retire' },
+      { id: sentLead, estimate_id: sent, status: 'estimate_sent', first_name: 'Fixture', last_name: 'Retire' },
+    ]);
+    const before = await mockPg('lead_activities').where({ lead_id: sentLead }).count('* as n').first();
+    await retireDraftsReplacedBySentEstimate();
+    expect((await mockPg('leads').where({ id: draftLead }).first()).estimate_id).toBeNull();
+    expect((await mockPg('lead_activities').where({ lead_id: sentLead }).count('* as n').first()).n).toBe(before.n);
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
