@@ -172,12 +172,15 @@ async function billPlan({ estimate, estimateData, customer, monthlyRate }) {
 function startedServices(estimateData, slices) {
   const { acceptedRecurringBillingLines } = PlanRateLedger;
   const { serviceFamilyKeyForAdoption } = require('../../routes/estimate-public');
-  const { visitsPerYearForRecurringService } = require('../estimate-converter');
+  const { visitsPerYearForRecurringService, acceptedPestSelectionVisits } = require('../estimate-converter');
+  // The accepted pest cadence outranks a stale line count (the converter's
+  // acceptedPestSelectionVisits doctrine); other services keep their own.
+  const acceptedPlanFrequency = estimateData.customerSelection?.frequency || null;
   const byFamily = new Map();
   for (const line of acceptedRecurringBillingLines(estimateData)) {
     const family = PlanRateLedger.boundedFamilyKey(serviceFamilyKeyForAdoption(line) || PlanRateLedger.UNATTRIBUTED);
     const name = line.name || line.serviceName || line.service_name || line.displayName || line.label || String(line.service || '').replace(/_/g, ' ') || 'Service';
-    const visits = visitsPerYearForRecurringService(line || {});
+    const visits = acceptedPestSelectionVisits(line, acceptedPlanFrequency) ?? visitsPerYearForRecurringService(line || {});
     const entry = byFamily.get(family) || { family, service: lineLabel(family), names: [], visits_per_year: null };
     if (!entry.names.includes(name)) entry.names.push(name);
     if (visits != null && visits > 0) entry.visits_per_year = (entry.visits_per_year || 0) + visits;

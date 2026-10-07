@@ -183,6 +183,22 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(lines).toContain('Bills $147.00 per application (about $49.00 a month)');
   });
 
+  test('a pest line accepted monthly shows the accepted 12 visits a year, not its stale quote-time 4', async () => {
+    seed({
+      estimate: {
+        monthly_total: 49, annual_total: 588,
+        estimate_data: {
+          customerSelection: { frequency: 'monthly' },
+          recurring: { services: [{ name: 'Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] },
+        },
+      },
+      customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
+      ledger: [],
+    });
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines.find((l) => l.startsWith('Starts Pest control'))).toMatch(/: 12 visits a year,/);
+  });
+
   test('a single-service plan whose per-visit charge the converter cannot resolve is refused, not carded', async () => {
     seed({
       estimate: {
