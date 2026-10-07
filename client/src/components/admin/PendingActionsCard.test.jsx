@@ -299,3 +299,17 @@ test('a refreshed host entry for a follow-up card wins: its settled receipt repl
   expect(screen.getByText('Cancelled')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
 });
+
+test('Show again cannot be sent twice while its request is in flight', async () => {
+  let release;
+  const fetch = vi.fn(() => new Promise((resolve) => { release = () => resolve(response({ success: true, pendingAction: NEXT_CARD })); }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Show again' }));
+  const busy = await screen.findByRole('button', { name: 'Showing again…' });
+  expect(busy).toBeDisabled();
+  fireEvent.click(busy);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  release();
+  expect(await screen.findByText('Shown again below.')).toBeInTheDocument();
+});

@@ -81,6 +81,17 @@ function detailIsNeutral(body, state) {
     && !(body?.warning || body?.result?.warning || body?.result?.error) && Boolean(body?.result?.message);
 }
 
+function countdownLabel(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// The server's shortlist on a "choose the product" card, or null.
+function productChoicesOf(action) {
+  const choices = action.contract?.product_choices;
+  return Array.isArray(choices) ? choices : null;
+}
+
 function groupEffects(effects) {
   const groups = new Map();
   for (const e of effects || []) {
@@ -157,6 +168,127 @@ function ContractView({ contract, dark, showApproval = true }) {
   );
 }
 
+// An expired card that was never decided: the server can propose it afresh.
+function ExpiredControls({ dark, reshowing, onShowAgain }) {
+  return (
+    <div style={dark ? { display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" } : undefined}
+      className={dark ? undefined : "flex flex-col gap-2 items-start"}>
+      <div
+        style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
+        className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}
+      >
+        Expired — this proposal is no longer confirmable.
+      </div>
+      <button
+        type="button"
+        disabled={reshowing}
+        onClick={onShowAgain}
+        style={dark ? {
+          background: "transparent", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8,
+          padding: "7px 16px", fontSize: 14, minHeight: 44,
+          cursor: reshowing ? "wait" : "pointer", opacity: reshowing ? 0.6 : 1,
+        } : undefined}
+        className={dark ? undefined : "min-h-11 bg-white text-zinc-900 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60"}
+      >
+        {reshowing ? "Showing again…" : "Show again"}
+      </button>
+    </div>
+  );
+}
+
+// One shortlist row: name, size, on hand before -> after; an unfit product
+// shows why and cannot be picked.
+function ProductChoiceRow({ dark, actionId, choice, picked, busy, onPick }) {
+  const onHand = choice.on_hand == null ? "not counted yet" : `${choice.on_hand} ${choice.unit || ""}`.trimEnd();
+  const after = choice.stock_after == null ? null : `${choice.stock_after} ${choice.unit || ""}`.trimEnd();
+  return (
+    <label
+      style={dark ? {
+        display: "flex", alignItems: "flex-start", gap: 8, minHeight: 44, padding: "6px 0", fontSize: 14,
+        color: choice.selectable ? D.text : D.muted, cursor: choice.selectable ? "pointer" : "default",
+      } : undefined}
+      className={dark ? undefined : `flex items-start gap-2 min-h-11 py-1.5 text-[14px] ${choice.selectable ? "text-zinc-900 cursor-pointer" : "text-zinc-500"}`}>
+      <input
+        type="radio"
+        name={`product-choice-${actionId}`}
+        value={choice.product_id}
+        disabled={!choice.selectable || busy}
+        checked={picked === choice.product_id}
+        onChange={() => onPick(choice.product_id)}
+        style={dark ? { marginTop: 3, width: 18, height: 18 } : undefined}
+        className={dark ? undefined : "mt-0.5 h-[18px] w-[18px]"}
+      />
+      <span>
+        <span style={dark ? { fontWeight: 500 } : undefined} className={dark ? undefined : "font-medium"}>{choice.name}</span>
+        {choice.container_size ? ` · ${choice.container_size}` : ""}
+        {` · on hand ${onHand}`}
+        {choice.selectable && after ? ` → ${after}` : ""}
+        {!choice.selectable && choice.reason ? ` · ${choice.reason}` : ""}
+      </span>
+    </label>
+  );
+}
+
+// A "choose the product" card (owner 2026-10-07): the server's shortlist, a
+// pick, and "Use this product". Nothing is written here; the server answers
+// with a normal card for the picked product.
+function ProductPickerControls({ dark, actionId, choices, picked, busy, status, touchFriendly, remaining, onPick, onChoose, onCancel }) {
+  return (
+    <div style={dark ? { display: "flex", flexDirection: "column", gap: 8 } : undefined} className={dark ? undefined : "flex flex-col gap-2"}>
+      {remaining !== null && (
+        <div style={dark ? { fontSize: 14, color: D.muted } : undefined} className={dark ? undefined : "text-[14px] text-zinc-500"}>
+          {countdownLabel(remaining)}
+        </div>
+      )}
+      <fieldset style={dark ? { border: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 } : undefined}
+        className={dark ? undefined : "border-0 m-0 p-0 flex flex-col gap-1"}>
+        <legend style={dark ? { fontSize: 14, color: D.text, marginBottom: 4 } : undefined}
+          className={dark ? undefined : "text-[14px] text-zinc-900 mb-1"}>
+          Which product?
+        </legend>
+        {choices.map((choice) => (
+          <ProductChoiceRow key={choice.product_id} dark={dark} actionId={actionId} choice={choice} picked={picked} busy={busy} onPick={onPick} />
+        ))}
+      </fieldset>
+      <PickerButtons dark={dark} picked={picked} busy={busy} status={status} touchFriendly={touchFriendly} onChoose={onChoose} onCancel={onCancel} />
+    </div>
+  );
+}
+
+// "Use this product" (enabled once a product is picked) and Cancel.
+function PickerButtons({ dark, picked, busy, status, touchFriendly, onChoose, onCancel }) {
+  return (
+    <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
+      <button
+        type="button"
+        disabled={busy || !picked}
+        onClick={onChoose}
+        style={dark ? {
+          background: D.green, color: D.white, border: "none", borderRadius: 8,
+          padding: "7px 16px", fontSize: 14, fontWeight: 500,
+          cursor: busy ? "wait" : picked ? "pointer" : "not-allowed", opacity: busy || !picked ? 0.6 : 1,
+        } : undefined}
+        className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
+      >
+        {status === "choosing" ? "Choosing…" : "Use this product"}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onCancel}
+        style={dark ? {
+          background: "transparent", color: D.muted, border: `1px solid ${D.border}`,
+          borderRadius: 8, padding: "7px 16px", fontSize: 14,
+          cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
+        } : undefined}
+        className={dark ? undefined : `bg-white text-zinc-600 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
+      >
+        {status === "cancelling" ? "Cancelling…" : "Cancel"}
+      </button>
+    </div>
+  );
+}
+
 export default function PendingActionsCard({ actions, variant = "dark", onResolved, touchFriendly = false }) {
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
@@ -169,6 +301,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const inFlightRef = useRef(new Set());
   // The product picked on a "choose the product" card, per card id.
   const [pickedById, setPickedById] = useState({});
+  // Expired cards whose Show again request is in flight.
+  const [reshowingById, setReshowingById] = useState({});
   // Cards the server made from this list (a chosen product, Show again):
   // { afterId, action }, rendered right after the card they came from.
   const [followUps, setFollowUps] = useState([]);
@@ -211,10 +345,6 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const msLeft = (action) => (
     deadlineById[action.id] != null ? deadlineById[action.id] - now : null
   );
-  const countdownLabel = (ms) => {
-    const s = Math.max(0, Math.floor(ms / 1000));
-    return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  };
 
   const setStatus = (id, status, error, neutral = false) => {
     setStatusById((prev) => ({ ...prev, [id]: status }));
@@ -327,7 +457,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const showAgain = async (action) => {
     if (inFlightRef.current.has(action.id)) return;
     inFlightRef.current.add(action.id);
-    setStatus(action.id, "reshowing");
+    setReshowingById((previous) => ({ ...previous, [action.id]: true }));
     try {
       const body = await adminFetch("/admin/intelligence-bar/show-again", {
         method: "POST",
@@ -339,6 +469,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       setStatus(action.id, "expired", err.message || "This card could not be shown again. Ask again instead.");
     } finally {
       inFlightRef.current.delete(action.id);
+      setReshowingById((previous) => ({ ...previous, [action.id]: false }));
     }
   };
 
@@ -390,12 +521,12 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
           ? Boolean(neutralById[action.id])
           : !action.resolvedWarning && detailIsNeutral(receiptBody, status);
         const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown", "chosen", "reshown"].includes(status);
-        const busy = ["confirming", "cancelling", "choosing", "reshowing"].includes(status);
+        const busy = ["confirming", "cancelling", "choosing"].includes(status);
         const remaining = msLeft(action);
-        const expired = status === 'expired' || status === 'reshowing'
+        const expired = status === 'expired'
           || (!settled && !busy && remaining !== null && remaining <= 0);
         // The server's shortlist; only a selectable product can be picked.
-        const choices = Array.isArray(action.contract?.product_choices) ? action.contract.product_choices : null;
+        const choices = productChoicesOf(action);
         const picked = pickedById[action.id];
         // A card minted as preview-only before the switches' commit path
         // deployed is never confirmable (the server refuses it too).
@@ -478,28 +609,12 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             )}
 
             {expired ? (
-              <div style={dark ? { display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" } : undefined}
-                className={dark ? undefined : "flex flex-col gap-2 items-start"}>
-                <div
-                  style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
-                  className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}
-                >
-                  Expired — this proposal is no longer confirmable.
-                </div>
-                <button
-                  type="button"
-                  disabled={status === "reshowing"}
-                  onClick={() => showAgain(action)}
-                  style={dark ? {
-                    background: "transparent", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8,
-                    padding: "7px 16px", fontSize: 14, minHeight: 44,
-                    cursor: status === "reshowing" ? "wait" : "pointer", opacity: status === "reshowing" ? 0.6 : 1,
-                  } : undefined}
-                  className={dark ? undefined : "min-h-11 bg-white text-zinc-900 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60"}
-                >
-                  {status === "reshowing" ? "Showing again…" : "Show again"}
-                </button>
-              </div>
+              <ExpiredControls dark={dark} reshowing={reshowingById[action.id] === true} onShowAgain={() => showAgain(action)} />
+            ) : !settled && choices ? (
+              <ProductPickerControls dark={dark} actionId={action.id} choices={choices} picked={picked} busy={busy} status={status}
+                touchFriendly={touchFriendly} remaining={remaining}
+                onPick={(productId) => setPickedById((previous) => ({ ...previous, [action.id]: productId }))}
+                onChoose={() => chooseProduct(action)} onCancel={() => decide(action, "cancel")} />
             ) : !settled ? (
               <div style={dark ? { display: "flex", flexDirection: "column", gap: 8 } : undefined} className={dark ? undefined : "flex flex-col gap-2"}>
                 {remaining !== null && (
@@ -518,60 +633,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                     This card was made as a preview only and can&apos;t be applied. Ask again for a fresh card.
                   </div>
                 )}
-                {choices && (
-                  <fieldset style={dark ? { border: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 } : undefined}
-                    className={dark ? undefined : "border-0 m-0 p-0 flex flex-col gap-1"}>
-                    <legend style={dark ? { fontSize: 14, color: D.text, marginBottom: 4 } : undefined}
-                      className={dark ? undefined : "text-[14px] text-zinc-900 mb-1"}>
-                      Which product?
-                    </legend>
-                    {choices.map((choice) => {
-                      const onHand = choice.on_hand == null ? "not counted yet" : `${choice.on_hand} ${choice.unit || ""}`.trimEnd();
-                      const after = choice.stock_after == null ? null : `${choice.stock_after} ${choice.unit || ""}`.trimEnd();
-                      return (
-                        <label key={choice.product_id}
-                          style={dark ? {
-                            display: "flex", alignItems: "flex-start", gap: 8, minHeight: 44, padding: "6px 0", fontSize: 14,
-                            color: choice.selectable ? D.text : D.muted, cursor: choice.selectable ? "pointer" : "default",
-                          } : undefined}
-                          className={dark ? undefined : `flex items-start gap-2 min-h-11 py-1.5 text-[14px] ${choice.selectable ? "text-zinc-900 cursor-pointer" : "text-zinc-500"}`}>
-                          <input
-                            type="radio"
-                            name={`product-choice-${action.id}`}
-                            value={choice.product_id}
-                            disabled={!choice.selectable || busy}
-                            checked={picked === choice.product_id}
-                            onChange={() => setPickedById((previous) => ({ ...previous, [action.id]: choice.product_id }))}
-                            style={dark ? { marginTop: 3, width: 18, height: 18 } : undefined}
-                            className={dark ? undefined : "mt-0.5 h-[18px] w-[18px]"}
-                          />
-                          <span>
-                            <span style={dark ? { fontWeight: 500 } : undefined} className={dark ? undefined : "font-medium"}>{choice.name}</span>
-                            {choice.container_size ? ` · ${choice.container_size}` : ""}
-                            {` · on hand ${onHand}`}
-                            {choice.selectable && after ? ` → ${after}` : ""}
-                            {!choice.selectable && choice.reason ? ` · ${choice.reason}` : ""}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </fieldset>
-                )}
               <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
-                {choices && <button
-                  type="button"
-                  disabled={busy || !picked}
-                  onClick={() => chooseProduct(action)}
-                  style={dark ? {
-                    background: D.green, color: D.white, border: "none", borderRadius: 8,
-                    padding: "7px 16px", fontSize: 14, fontWeight: 500,
-                    cursor: busy ? "wait" : picked ? "pointer" : "not-allowed", opacity: busy || !picked ? 0.6 : 1,
-                  } : undefined}
-                  className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
-                >
-                  {status === "choosing" ? "Choosing…" : "Use this product"}
-                </button>}
-                {!previewOnly && !choices && <button
+                {!previewOnly && <button
                   type="button"
                   disabled={busy}
                   onClick={() => decide(action, "confirm")}

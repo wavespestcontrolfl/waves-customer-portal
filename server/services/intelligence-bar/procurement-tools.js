@@ -19,6 +19,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const inventory = require('../inventory-operations');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 const { analysesIn } = require('../../utils/fertilizer-analysis');
+const { isToolFailure } = require('./outcomes');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -1769,6 +1770,75 @@ async function productChoicesFor({ input = {}, prompt = null, previewProductName
   return choices.some((choice) => choice.selectable) ? { phrase, choices } : null;
 }
 
+// ─── STOCK PROPOSAL TARGET (the route's one call per stock card) ───
+
+const NOT_WRITTEN = ' Nothing was written and no confirmation card was created.';
+// Refusals that mean "which product?" — the only ones the picker replaces.
+const PRODUCT_IDENTITY_REFUSALS = new Set(['product_ambiguous', 'product_not_found',
+  'target_clarification_required', 'target_relationship_mismatch']);
+const PICKER_NOTE = 'Nothing was written. The card lists the products that could match and the operator picks one, then confirms a second card that shows the exact before and after. Do NOT retry this tool, do NOT pick a product yourself, and do NOT claim stock changed; tell the operator to pick the product on the card.';
+
+// The "choose the product" card body: its stored params (the shortlist is
+// pinned in _ib_product_choices), its preview, its display line and the
+// model note. null when the operator's words give no shortlist (the caller
+// keeps its refusal), or a { failed } refusal.
+async function productChoiceCard({ params, prompt = null, previewProductName = null, seedIds = [] }) {
+  const picked = await productChoicesFor({ input: params, prompt, previewProductName, seedIds });
+  if (!picked) return null;
+  if (picked.error) return { failed: true, modelResult: picked };
+  const stored = {};
+  for (const key of ['product_name', 'movement_type', 'quantity', 'set_total', 'unit', 'lot_number', 'reason', 'note']) {
+    if (params[key] !== undefined) stored[key] = params[key];
+  }
+  if (!stored.product_name && picked.phrase) stored.product_name = picked.phrase;
+  // Only the products the card lets the operator pick can ever be chosen.
+  stored._ib_product_choices = picked.choices.filter((choice) => choice.selectable).map((choice) => choice.product_id);
+  return {
+    params: stored,
+    preview: { preview: true, choose_product: true, tool: 'adjust_stock', movement_type: params.movement_type || null,
+      entered_quantity: params.set_total ?? params.quantity ?? null, entered_unit: params.unit || null,
+      product_choices: picked.choices },
+    displayParams: { product_words: picked.phrase || '(not stated)' },
+    note: PICKER_NOTE,
+  };
+}
+
+// A product-identity refusal of adjust_stock becomes a picker card when the
+// operator's words qualify (productChoicesFor); otherwise null.
+async function offerProductChoice(toolName, refusal, params, prompt, previewProductName = null) {
+  if (toolName !== 'adjust_stock' || !PRODUCT_IDENTITY_REFUSALS.has(refusal.code)) return null;
+  const card = await productChoiceCard({ params, prompt, previewProductName });
+  if (!card) return null;
+  return card.failed ? card : { productChoice: card };
+}
+
+// A re-proposal's target is the one the server stored or listed (a picked
+// product, a Show again card): the fresh preview must resolve to it exactly.
+function groundedStockTarget(toolName, preview, grounded) {
+  const same = (a, b) => a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase();
+  const mismatch = { failed: true, modelResult: { error: `This product no longer matches the earlier card.${NOT_WRITTEN}`, code: 'target_relationship_mismatch' } };
+  if (toolName === 'update_restock_request') {
+    return same(preview?.request?.id, grounded.requestId) ? { productId: preview?.product?.id, requestId: preview.request.id } : mismatch;
+  }
+  return same(preview?.product?.id, grounded.productId) ? { productId: preview.product.id } : mismatch;
+}
+
+// What a stock write proposal acts on, from its (possibly failed) preview:
+//   { productId, requestId? }  the target to pin;
+//   { productChoice }          a "choose the product" card instead (adjust_stock);
+//   { failed, modelResult }    a refusal: no card, nothing written.
+// `grounded` (a re-proposal) skips every reading of operator text.
+async function stockProposalTarget({ toolName, params, preview, prompt, pageData, actorId, threadId, threadSeq, grounded = null }) {
+  if (grounded) return isToolFailure(preview) ? { failed: true, modelResult: preview } : groundedStockTarget(toolName, preview, grounded);
+  if (isToolFailure(preview)) return (await offerProductChoice(toolName, preview, params, prompt)) || { failed: true, modelResult: preview };
+  const target = await resolveInventoryWriteTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq });
+  if (!target.error) return target;
+  // A refused target leaves no card and writes nothing; the model is told so
+  // in plain words, so its reply can never read as a recorded change.
+  return (await offerProductChoice(toolName, target, params, prompt, preview?.product?.name || null))
+    || { failed: true, modelResult: { ...target, error: `${target.error}${NOT_WRITTEN}` } };
+}
+
 async function queryStock(input) {
   const { search, category, low_stock_only, untracked_only, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 50, 200);
@@ -1980,4 +2050,5 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT };
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT,
+  productChoiceCard, stockProposalTarget };

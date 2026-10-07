@@ -300,6 +300,25 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(picker.contract.product_choices.map((c) => c.product_id).sort()).toEqual([ten.id, twenty.id].sort());
     const forged = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: outsider.id });
     expect(forged).toMatchObject({ status: 409, body: { code: 'product_not_offered' } });
+    // A failure while making the new card rolls the claim back (Codex #6111 r2):
+    // a refusal in the preview, then an insert error. The picker stays usable.
+    const inventory = require('../services/inventory-operations');
+    const previewSpy = jest.spyOn(inventory, 'previewStockAdjustment')
+      .mockRejectedValueOnce(Object.assign(new Error('Synthetic preview failure'), { isOperational: true, statusCode: 409, code: 'preview_changed' }));
+    let refused;
+    try {
+      refused = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
+    } finally { previewSpy.mockRestore(); }
+    expect(refused.status).toBe(409);
+    const insertSpy = jest.spyOn(require('../services/intelligence-bar/pending-actions'), 'createPendingAction')
+      .mockRejectedValueOnce(new Error('Synthetic insert failure'));
+    let broken;
+    try {
+      broken = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
+    } finally { insertSpy.mockRestore(); }
+    expect(broken.status).toBe(500);
+    expect(await db('ib_pending_actions').where({ id: picker.id }).first()).toMatchObject({ status: 'pending', result: null });
+    expect(await db('ib_pending_actions').whereRaw("params->>'_ib_chosen_from' = ?", [picker.id])).toHaveLength(0);
     const chosen = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
     expect([chosen.status, chosen.body.error]).toEqual([200, undefined]);
     for (const row of [ten, twenty, outsider]) {

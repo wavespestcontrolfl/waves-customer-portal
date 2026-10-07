@@ -30,7 +30,11 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
 })));
 
-jest.mock('../models/db', () => jest.fn(() => ({ insert: mockDbInsert })));
+// db.transaction runs its callback with a stand-in trx; the pending-action
+// store is mocked, so the trx is only threaded through.
+jest.mock('../models/db', () => Object.assign(jest.fn(() => ({ insert: mockDbInsert })), {
+  transaction: async (fn) => fn({ isTrx: true }),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   getBreaker: jest.fn(() => ({
@@ -55,15 +59,15 @@ jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], exec
 // Real tool definitions; the preview and the target rule are scripted so the
 // test watches only what the route does with their answers.
 const mockExecuteProcurementTool = jest.fn();
-const mockResolveInventoryWriteTarget = jest.fn();
-const mockProductChoicesFor = jest.fn();
+const mockStockTarget = jest.fn();
+const mockChoiceCard = jest.fn();
 jest.mock('../services/intelligence-bar/procurement-tools', () => {
   const actual = jest.requireActual('../services/intelligence-bar/procurement-tools');
   return {
     PROCUREMENT_TOOLS: actual.PROCUREMENT_TOOLS,
     executeProcurementTool: (...args) => mockExecuteProcurementTool(...args),
-    resolveInventoryWriteTarget: (...args) => mockResolveInventoryWriteTarget(...args),
-    productChoicesFor: (...args) => mockProductChoicesFor(...args),
+    stockProposalTarget: (...args) => mockStockTarget(...args),
+    productChoiceCard: (...args) => mockChoiceCard(...args),
   };
 });
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
@@ -132,6 +136,8 @@ function scriptModelTurns(turns) {
   for (const content of turns) mockMessagesCreate.mockResolvedValueOnce({ content });
 }
 
+const modelSaw = () => mockMessagesCreate.mock.calls.map(([request]) => JSON.stringify(request.messages)).join('\n');
+
 async function post(baseUrl, path, body) {
   const res = await fetch(`${baseUrl}/admin/intelligence-bar/${path}`, {
     method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -143,14 +149,19 @@ const previewFor = (id, name, before, after) => ({
   preview: true, tool: 'adjust_stock', product: { id, name }, movement_type: 'restock',
   stock_before: before, change: after - before, stock_after: after, unit: 'fl_oz', entered_quantity: 78, entered_unit: 'fl_oz', _version: `v-${id}`,
 });
-const CHOICES = {
-  phrase: 'zentrovex',
-  choices: [
-    { product_id: PRODUCT_A, name: 'Zentrovex 10% SC', container_size: '78 fl oz', unit: 'fl_oz', on_hand: 20, stock_after: 98, selectable: true },
-    { product_id: PRODUCT_B, name: 'Zentrovex 20% SC', container_size: '1 gal', unit: 'fl_oz', on_hand: 0, stock_after: 78, selectable: true },
-  ],
-};
 const MOVEMENT = { movement_type: 'restock', quantity: 78, unit: 'fl_oz' };
+// The stock layer's picker card (procurement-tools productChoiceCard shape;
+// its own decisions are covered in intelligence-bar-stock-product-choices).
+const PICKER_CARD = {
+  params: { product_name: 'Zentrovex', ...MOVEMENT, _ib_product_choices: [PRODUCT_A, PRODUCT_B] },
+  preview: { preview: true, choose_product: true, tool: 'adjust_stock', movement_type: 'restock', entered_quantity: 78, entered_unit: 'fl_oz',
+    product_choices: [
+      { product_id: PRODUCT_A, name: 'Zentrovex 10% SC', container_size: '78 fl oz', unit: 'fl_oz', on_hand: 20, stock_after: 98, selectable: true },
+      { product_id: PRODUCT_B, name: 'Zentrovex 20% SC', container_size: '1 gal', unit: 'fl_oz', on_hand: 0, stock_after: 78, selectable: true },
+    ] },
+  displayParams: { product_words: 'Zentrovex' },
+  note: 'Nothing was written. Pick the product on the card.',
+};
 const adjustByName = { type: 'tool_use', id: 'tu_adjust', name: 'adjust_stock', input: { product_name: 'Zentrovex', ...MOVEMENT } };
 const pickerRow = (overrides = {}) => ({
   id: CHOICE_ID, tool_name: 'adjust_stock', status: 'pending', context: 'procurement', contract_hash: 'hash-choice',
@@ -163,7 +174,12 @@ beforeEach(() => {
   mockCreatePendingAction.mockImplementation(async ({ toolName, summary }) => ({
     id: NEW_ID, tool_name: toolName, summary, status: 'pending', expires_at: new Date(Date.now() + 600000).toISOString(),
   }));
-  mockProductChoicesFor.mockResolvedValue(CHOICES);
+  mockChoiceCard.mockResolvedValue(PICKER_CARD);
+  // A re-proposal is grounded on the stored product; /query cards get a picker.
+  mockStockTarget.mockImplementation(async ({ grounded, preview }) => {
+    if (!grounded) return { productChoice: PICKER_CARD };
+    return preview.error ? { failed: true, modelResult: preview } : { productId: grounded.productId };
+  });
   mockFindDerivedCard.mockResolvedValue(null);
   mockExecuteProcurementTool.mockImplementation(async (name, input) => {
     if (input.product_id === PRODUCT_B) return previewFor(PRODUCT_B, 'Zentrovex 20% SC', 0, 78);
@@ -173,10 +189,10 @@ beforeEach(() => {
 });
 
 describe('the picker card', () => {
-  test('an ambiguous product phrase becomes a choose-the-product card with the shortlist pinned server-side', async () => {
+  test('a picker from the stock layer becomes a choose-the-product card with the shortlist pinned server-side', async () => {
     scriptModelTurns([[adjustByName], [{ type: 'text', text: 'Pick the product on the card.' }]]);
     await withServer(async (baseUrl) => {
-      const { status, body } = await post(baseUrl, 'query', { prompt: 'Add 78 oz of Zentrovex', context: 'procurement', pageData: { route: '/admin/inventory' } });
+      const { status, body } = await post(baseUrl, 'query', { prompt: 'We got 78 oz of Zentrovex', context: 'procurement', pageData: { route: '/admin/inventory' } });
       expect(status).toBe(200);
       expect(body.pendingActions).toHaveLength(1);
       const card = body.pendingActions[0];
@@ -190,41 +206,32 @@ describe('the picker card', () => {
       expect(stored.contract.product_choices).toHaveLength(2);
       expect(card.params._ib_product_choices).toBeUndefined();
     });
-    expect(mockProductChoicesFor).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'Add 78 oz of Zentrovex' }));
+    // The failed preview went to the stock layer with the operator's own words.
+    expect(mockStockTarget).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'We got 78 oz of Zentrovex',
+      preview: expect.objectContaining({ code: 'product_ambiguous' }) }));
+    expect(modelSaw()).toContain('Pick the product on the card.');
     expect(confirmedCalls()).toHaveLength(0);
   });
 
-  test('a target the operator words do not establish becomes a picker seeded from the preview product name', async () => {
-    mockResolveInventoryWriteTarget.mockResolvedValue({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
-    scriptModelTurns([[{ ...adjustByName, input: { product_id: PRODUCT_A, ...MOVEMENT } }], [{ type: 'text', text: 'Pick one.' }]]);
-    await withServer(async (baseUrl) => {
-      const { body } = await post(baseUrl, 'query', { prompt: 'Add 78 oz of Zentrovex', context: 'procurement', pageData: { route: '/admin/inventory' } });
-      expect(body.pendingActions).toHaveLength(1);
-      expect(body.pendingActions[0].contract.product_choices).toHaveLength(2);
-    });
-    expect(mockProductChoicesFor).toHaveBeenCalledWith(expect.objectContaining({ previewProductName: 'Zentrovex 10% SC' }));
-    expect(mockCreatePendingAction.mock.calls[0][0].params.product_id).toBeUndefined();
-  });
-
-  test('when no shortlist can be built the refusal stays as it was: no card', async () => {
-    mockProductChoicesFor.mockResolvedValue(null);
+  test('a stock-layer refusal leaves no card', async () => {
+    mockStockTarget.mockResolvedValue({ failed: true, modelResult: { error: 'Choose the exact product. Nothing was written and no confirmation card was created.', code: 'target_clarification_required' } });
     scriptModelTurns([[adjustByName], [{ type: 'text', text: 'Which product?' }]]);
     await withServer(async (baseUrl) => {
-      const { body } = await post(baseUrl, 'query', { prompt: 'Add 78 oz of Zentrovex', context: 'procurement', pageData: { route: '/admin/inventory' } });
+      const { body } = await post(baseUrl, 'query', { prompt: 'Order 78 oz of Zentrovex', context: 'procurement', pageData: { route: '/admin/inventory' } });
       expect(body.pendingActions || []).toEqual([]);
     });
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(modelSaw()).toContain('"is_error":true');
   });
 
-  test('a single exact product keeps the normal card and never asks for a shortlist', async () => {
-    mockResolveInventoryWriteTarget.mockResolvedValue({ productId: PRODUCT_A });
+  test('a single exact product keeps the normal card', async () => {
+    mockStockTarget.mockResolvedValue({ productId: PRODUCT_A });
     scriptModelTurns([[{ ...adjustByName, input: { product_id: PRODUCT_A, ...MOVEMENT } }], [{ type: 'text', text: 'Confirm it.' }]]);
     await withServer(async (baseUrl) => {
       const { body } = await post(baseUrl, 'query', { prompt: 'Add 78 oz of Zentrovex 10% SC', context: 'procurement', pageData: { route: '/admin/inventory' } });
       expect(body.pendingActions[0].contract.product_choices).toBeUndefined();
       expect(body.pendingActions[0].contract.effects.map((e) => e.label)).toContain('Zentrovex 10% SC: restock 78 fl_oz; on hand 20 → 98 fl_oz');
     });
-    expect(mockProductChoicesFor).not.toHaveBeenCalled();
     expect(mockCreatePendingAction.mock.calls[0][0].params.product_id).toBe(PRODUCT_A);
   });
 
@@ -250,15 +257,19 @@ describe('/choose-product', () => {
       expect(body.pendingAction.contract.effects.map((e) => e.label)).toContain('Zentrovex 20% SC: restock 78 fl_oz; on hand 0 → 78 fl_oz');
       expect(body.pendingAction.contract.product_choices).toBeUndefined();
     });
-    expect(mockClaimForConfirm).toHaveBeenCalledWith(CHOICE_ID, 'admin-1', { contractHash: 'hash-choice' });
+    expect(mockClaimForConfirm).toHaveBeenCalledWith(CHOICE_ID, 'admin-1', expect.objectContaining({ contractHash: 'hash-choice' }));
     const proposed = mockCreatePendingAction.mock.calls[0][0];
     expect(proposed.params).toMatchObject({ product_id: PRODUCT_B, ...MOVEMENT });
     expect(proposed.params.product_name).toBeUndefined();
     expect(proposed.params._ib_product_choices).toBeUndefined();
-    // The pick is the grounding: no free-text resolution runs on it.
-    expect(mockResolveInventoryWriteTarget).not.toHaveBeenCalled();
+    // The pick is the grounding: the stock layer gets the stored product, no free text.
+    expect(mockStockTarget).toHaveBeenCalledWith(expect.objectContaining({ grounded: { productId: PRODUCT_B } }));
+    // The claim and the new card share one transaction.
+    expect(mockClaimForConfirm.mock.calls[0][2]).toMatchObject({ trx: { isTrx: true } });
+    expect(proposed.trx).toEqual({ isTrx: true });
     expect(confirmedCalls()).toHaveLength(0);
-    expect(mockRecordResult).toHaveBeenCalledWith(CHOICE_ID, expect.objectContaining({ success: true, written: false, chosen_product_id: PRODUCT_B }));
+    expect(mockRecordResult).toHaveBeenCalledWith(CHOICE_ID, expect.objectContaining({ success: true, written: false, chosen_product_id: PRODUCT_B }),
+      { database: { isTrx: true } });
     // The receipt reaches the model on task resume: it never carries the new card's id.
     expect(JSON.stringify(mockRecordResult.mock.calls)).not.toContain(NEW_ID);
     expect(proposed.params._ib_chosen_from).toBe(CHOICE_ID);
@@ -277,6 +288,20 @@ describe('/choose-product', () => {
     expect(mockClaimForConfirm).not.toHaveBeenCalled();
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
     expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
+  });
+
+  test('a refusal while making the new card rolls the choice back: nothing is recorded and the card stays usable', async () => {
+    mockGetPendingRow.mockResolvedValue(pickerRow());
+    mockClaimForConfirm.mockResolvedValue({ action: { ...pickerRow(), status: 'confirmed' } });
+    mockExecuteProcurementTool.mockResolvedValueOnce({ error: 'Cannot convert fl_oz to lb', code: 'invalid_input' });
+    await withServer(async (baseUrl) => {
+      const { status, body } = await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_A });
+      expect(status).toBe(409);
+      expect(body.error).toBe('Cannot convert fl_oz to lb');
+    });
+    expect(mockRecordResult).not.toHaveBeenCalled();
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(mockAttachThread).not.toHaveBeenCalled();
   });
 
   test('an unlisted id names the reason', async () => {
@@ -371,7 +396,7 @@ describe('/show-again', () => {
     const stored = mockCreatePendingAction.mock.calls[0][0].params;
     expect(stored._two_step_preview_fingerprint).not.toBe('old-print');
     expect(stored._ib_shown_from).toBe(CHOICE_ID);
-    expect(mockResolveInventoryWriteTarget).not.toHaveBeenCalled();
+    expect(mockStockTarget).toHaveBeenCalledWith(expect.objectContaining({ grounded: { productId: PRODUCT_A, requestId: null } }));
     expect(confirmedCalls()).toHaveLength(0);
   });
 
@@ -412,7 +437,7 @@ describe('/show-again', () => {
       expect(body.error).toBe('Product not found');
     });
     // A re-proposal never turns into a picker on its own.
-    expect(mockProductChoicesFor).not.toHaveBeenCalled();
+    expect(mockChoiceCard).not.toHaveBeenCalled();
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
   });
 
@@ -424,7 +449,8 @@ describe('/show-again', () => {
       expect(status).toBe(200);
       expect(body.pendingAction.contract.product_choices).toHaveLength(2);
     });
-    expect(mockProductChoicesFor).toHaveBeenCalledWith(expect.objectContaining({ seedIds: [PRODUCT_A, PRODUCT_B], prompt: null }));
+    expect(mockChoiceCard).toHaveBeenCalledWith(expect.objectContaining({ seedIds: [PRODUCT_A, PRODUCT_B] }));
+    expect(mockChoiceCard.mock.calls[0][0].prompt).toBeUndefined();
     expect(mockCreatePendingAction.mock.calls[0][0].params._ib_product_choices).toEqual([PRODUCT_A, PRODUCT_B]);
     expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
   });

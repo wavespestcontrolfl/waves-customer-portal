@@ -326,7 +326,8 @@ async function applySupersession(trx, row, { toolName, params }) {
 // inheritedTask: the card replaces a task card the operator just used (a
 // product picker). It joins that task as its own step so the task waits for
 // its outcome, without a running task lease (no model round is running).
-async function createPendingAction({ toolName, params, requestedBy, taskId, requestStartedAt = null, inheritedTask = false, ...card }) {
+// trx: store inside the caller's transaction (a product choice).
+async function createPendingAction({ toolName, params, requestedBy, taskId, requestStartedAt = null, inheritedTask = false, trx = null, ...card }) {
   const intent = intentKey(toolName, params);
   if (intent) params = stampRequestStart(params, requestStartedAt);
   const persist = async trx => {
@@ -341,6 +342,7 @@ async function createPendingAction({ toolName, params, requestedBy, taskId, requ
     if (result === row) logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
     return result;
   };
+  if (trx) return persist(trx);
   return taskId || intent ? db.transaction(persist) : persist(db);
 }
 
@@ -362,17 +364,20 @@ async function forTask(taskId, requestedBy) {
  * not_found | actor_mismatch | already_used | cancelled | expired |
  * hash_mismatch | contract_mismatch
  */
-async function claimForConfirm(id, requestedBy, { contractHash = null } = {}) {
+// `trx`: claim inside the caller's transaction (a product choice), so a later
+// failure in that transaction puts the card back.
+async function claimForConfirm(id, requestedBy, { contractHash = null, trx = null } = {}) {
   const echoed = contractHash ? String(contractHash) : null;
+  const q = trx || db;
   // A card for an intent with a supersede rule claims under the intent lock and
   // is refused when a NEWER card for the same intent exists (any status). Every
   // other card takes the single-statement claim below, unchanged.
-  const peek = await db('ib_pending_actions').where({ id }).first('tool_name', 'params', 'requested_by', 'status', 'expires_at');
+  const peek = await q('ib_pending_actions').where({ id }).first('tool_name', 'params', 'requested_by', 'status', 'expires_at');
   const key = peek && peek.status === 'pending' && String(peek.requested_by) === String(requestedBy)
     && new Date(peek.expires_at).getTime() > Date.now() ? intentKey(peek.tool_name, paramsOf(peek)) : null;
-  if (!key) return claimRow(db, id, requestedBy, echoed);
+  if (!key) return claimRow(q, id, requestedBy, echoed);
   const rule = SUPERSEDE_RULES[peek.tool_name];
-  return db.transaction(async (trx) => {
+  return q.transaction(async (trx) => {
     await lockIntent(trx, requestedBy, peek.tool_name, key);
     const siblings = await intentSiblings(trx, id, peek.tool_name, key);
     if (siblings.some(sib => sib.newer && rule.covers(sib.params, paramsOf(peek)))) {
