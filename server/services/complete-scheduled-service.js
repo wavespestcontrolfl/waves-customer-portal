@@ -1939,8 +1939,8 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
 // `lock: true` (the closeout's record transaction, right before the compliance-ledger rows are
 // written) first takes transaction-scoped advisory locks, in sorted order, so two closeouts that
 // would both pass on the same history are serialized: the second reads the first's committed
-// ledger rows and is refused. Two keys per product: property + product + year (the yearly count
-// reads the calendar year) and property + product (a minimum interval reads the latest earlier
+// ledger rows and is refused. Two keys per product: customer + product + year (the yearly count
+// reads the calendar year) and customer + product (a minimum interval reads the latest earlier
 // application whatever its year, so a December and a January closeout must meet on one key).
 // The keys use the style of the other closeout locks (hashtextextended of a text key).
 //
@@ -1960,14 +1960,19 @@ const applicationLimitBlockStatus = (payload) => {
   if (payload && payload.code === APPLICATION_LIMIT_TOO_MANY_CODE) return 400;
   return 422;
 };
+// The lock scope is the CUSTOMER, not the property: the history query counts an application whose
+// property is unknown (a legacy visit with no property, a ledger row with no visit) against every
+// property of the customer, so a property-linked closeout and a null-property one for the same
+// product must meet on one key. Closeouts of one customer and product are rare, so the wider
+// scope costs nothing in practice.
 function applicationLimitLockKey(svc, productId, serviceDate) {
   const day = serviceDate || svc.scheduled_date || etDateString();
   const year = (day instanceof Date ? etDateString(day) : String(day)).slice(0, 4);
-  return `application-limit:${svc.property_id || `customer-${svc.customer_id}`}:${productId}:${year}`;
+  return `application-limit:customer-${svc.customer_id}:${productId}:${year}`;
 }
 // The minimum interval's key: no year, so a December and a January closeout serialize.
 function applicationLimitIntervalLockKey(svc, productId) {
-  return `application-limit:${svc.property_id || `customer-${svc.customer_id}`}:${productId}`;
+  return `application-limit:customer-${svc.customer_id}:${productId}`;
 }
 async function submittedProductLimitBlockPayload({ svc, products = [], serviceDate = null, database = db, lock = false } = {}) {
   if (!svc || !Array.isArray(products)) return null;
@@ -7937,7 +7942,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // was physically applied regardless of the visit outcome.
         if (insertedServiceProducts.length) {
           // The authoritative hard-limit check (annual_max_apps / min_interval_days), serialized with
-          // the ledger write by a property + product + year lock held to commit: two closeouts that
+          // the ledger write by a customer + product (+ year) lock held to commit: two closeouts that
           // would both pass on the same history cannot both write. The earlier check at the claim is
           // only a cheap early refusal.
           if (!issuedInvoiceCloseout) {

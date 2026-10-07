@@ -428,7 +428,33 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(results.map((r) => r.status)).toEqual([200, 200]);
       });
 
-      test('the lock is per property: the same product at another property of the customer is not held up or refused', async () => {
+      test('a property-linked closeout and a null-property one for the same customer and product (1 prior) meet on one lock: one 200, one 422', async () => {
+        const { visitA } = await raced(CELSIUS);
+        const [legacy] = await knex('scheduled_services').insert({ customer_id: visitA.customer_id, property_id: null, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
+        const results = await Promise.all([
+          closeout(visitA, visitA.customer_id, CELSIUS, { lock: true }),
+          closeout(legacy, visitA.customer_id, CELSIUS, { lock: true }),
+        ]);
+        expect(results.map((r) => r.status).sort()).toEqual([200, 422]);
+        // Opposite start order: the null-property closeout first.
+        const other = await raced(CELSIUS);
+        const [legacy2] = await knex('scheduled_services').insert({ customer_id: other.visitA.customer_id, property_id: null, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
+        const reversed = await Promise.all([
+          closeout(legacy2, other.visitA.customer_id, CELSIUS, { lock: true }),
+          closeout(other.visitA, other.visitA.customer_id, CELSIUS, { lock: true }),
+        ]);
+        expect(reversed.map((r) => r.status).sort()).toEqual([200, 422]);
+        // Control: unlocked, both pass and the year holds 3.
+        const control = await raced(CELSIUS);
+        const [legacy3] = await knex('scheduled_services').insert({ customer_id: control.visitA.customer_id, property_id: null, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
+        const unlocked = await Promise.all([
+          closeout(control.visitA, control.visitA.customer_id, CELSIUS, { lock: false }),
+          closeout(legacy3, control.visitA.customer_id, CELSIUS, { lock: false }),
+        ]);
+        expect(unlocked.map((r) => r.status)).toEqual([200, 200]);
+      });
+
+      test('the same product at another property of the customer is judged on its own history (not refused), though the closeouts queue on the customer lock', async () => {
         const { visitA } = await raced(CELSIUS);
         const [propertyB] = await knex('customer_properties').insert({ customer_id: visitA.customer_id, address_line1: '300 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
         const [visitB] = await knex('scheduled_services').insert({ customer_id: visitA.customer_id, property_id: propertyB.id, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
@@ -485,15 +511,16 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(unlocked.map((r) => r.status)).toEqual([200, 200]);
       });
 
-      test('lock keys differ by property, product and year; the interval key has no year', () => {
+      test('lock keys are customer + product (+ year); the interval key has no year; the property does not enter the key', () => {
         const { applicationLimitIntervalLockKey } = require('../services/complete-scheduled-service');
-        expect(applicationLimitIntervalLockKey({ property_id: 'p1', customer_id: 'c1' }, 'prod')).toBe('application-limit:p1:prod');
+        expect(applicationLimitIntervalLockKey({ property_id: 'p1', customer_id: 'c1' }, 'prod')).toBe('application-limit:customer-c1:prod');
         expect(applicationLimitIntervalLockKey({ property_id: null, customer_id: 'c1' }, 'prod')).toBe('application-limit:customer-c1:prod');
         const { applicationLimitLockKey } = require('../services/complete-scheduled-service');
         const svc = { property_id: 'p1', customer_id: 'c1' };
         const key = applicationLimitLockKey(svc, 'prod', '2026-05-12');
-        expect(key).toBe('application-limit:p1:prod:2026');
-        expect(applicationLimitLockKey({ ...svc, property_id: 'p2' }, 'prod', '2026-05-12')).not.toBe(key);
+        expect(key).toBe('application-limit:customer-c1:prod:2026');
+        expect(applicationLimitLockKey({ ...svc, property_id: 'p2' }, 'prod', '2026-05-12')).toBe(key);
+        expect(applicationLimitLockKey({ ...svc, customer_id: 'c2' }, 'prod', '2026-05-12')).not.toBe(key);
         expect(applicationLimitLockKey(svc, 'other', '2026-05-12')).not.toBe(key);
         expect(applicationLimitLockKey(svc, 'prod', '2027-01-02')).not.toBe(key);
         expect(applicationLimitLockKey({ property_id: null, customer_id: 'c1' }, 'prod', '2026-05-12')).toBe('application-limit:customer-c1:prod:2026');
