@@ -863,6 +863,22 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('billing', `${prefix}Turns off Auto Pay on the customer and on every saved payment method, clears the next charge date and any armed failed-payment retry, and sets active to false (any active in this request is ignored) — ${refusalClause} if a future or in-progress visit or an ongoing recurring plan, an active prepay term, or an unpaid annual-prepay invoice is still on file; an already-churned customer whose billing is already off is not re-checked — only saved-method Auto Pay and armed retries are repaired`);
     }
   }
+  // A monthly-rate edit shows the whole bill, line by line (owner 2026-10-06):
+  // monthly_rate is every service's monthly price summed, so "$41.33 →
+  // $60.33" alone hid that a pest plan was being replaced by a lawn price.
+  if (toolName === 'update_customer' && preview?.rate_change) {
+    const rc = preview.rate_change;
+    const { money } = require('./rate-change');
+    for (const line of rc.lines || []) {
+      push('billing', `${line.label}: ${money(line.before)} → ${money(line.after)} a month${line.after === 0 && line.before > 0 ? ' (drops off the bill)' : ''}`, {
+        before: money(line.before), after: money(line.after),
+      });
+    }
+    push('billing', `Monthly bill total: ${money(rc.total_before)} → ${money(rc.total_after)}${rc.replaces_whole_bill ? ' (replaces the whole bill)' : ''}`, {
+      before: money(rc.total_before), after: money(rc.total_after),
+    });
+    push('billing', 'No price-change notice is sent to the customer');
+  }
   // Billing-lane stamp (#3140): the executors stamp billing_mode
   // 'monthly_membership' on any affected row the update leaves with a
   // membership tier + positive monthly rate and no billing lane, and notify

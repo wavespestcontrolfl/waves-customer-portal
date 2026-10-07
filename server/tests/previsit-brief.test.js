@@ -822,7 +822,24 @@ describe('lawn bounded product section', () => {
       { severity: 'block', type: 'annual_max_apps', message: 'Annual max applications reached (2/2)' },
     ]);
     expect(demoted.trigger).toBe('Annual max applications reached (2/2)');
-    expect(mockCheckLimits).toHaveBeenCalledWith('cust-1', 'prod-pro', expect.any(Date));
+    expect(mockCheckLimits).toHaveBeenCalledWith('cust-1', 'prod-pro', expect.any(Date), undefined, { propertyId: null, excludeScheduledServiceId: 'svc-1' });
+  });
+
+  test('the limit check is scoped to the scheduled visit\'s property and leaves the visit\'s own ledger rows out', async () => {
+    mockSummarize.mockReturnValue({
+      window: { key: 'oct', month: 10, title: 'October window', visitType: 'granular', goal: 'Fall feeding' },
+      products: [
+        { productId: 'prod-dim', productName: 'Dimension fixture', role: 'fall_pre_emergent_nutrition', applicationMode: 'granular', ratePer1000: 4.04, rateUnit: 'lb', defaultInPlan: true },
+      ],
+    });
+    mockCheckLimits.mockResolvedValue({ allowed: true, warnings: [], blocks: [] });
+    const state = useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service', property_id: 'prop-A' }],
+    }));
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(storedBrief(state)).toBeTruthy();
+    expect(mockCheckLimits).toHaveBeenCalledWith('cust-1', 'prod-dim', expect.any(Date), undefined, { propertyId: 'prop-A', excludeScheduledServiceId: 'svc-1' });
   });
 
   test('a limit-checker outage aborts generation instead of hashing a limit-blind fixed list', async () => {

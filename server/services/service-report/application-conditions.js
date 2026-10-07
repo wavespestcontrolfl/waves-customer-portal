@@ -201,6 +201,10 @@ function normalizeForecastPayload(payload) {
       humidity_pct: roundedNumber(rh[i]),
       wind_mph: roundedNumber(wind[i], 1),
       wind_gust_mph: roundedNumber(gust[i], 1),
+      // Unrounded readings, for callers that test a label limit with a strict
+      // comparison (exactReadings); dropped from the returned rows otherwise.
+      temperature_raw_f: finiteNumber(temp[i]),
+      wind_raw_mph: finiteNumber(wind[i]),
     });
   });
   const c = payload?.current;
@@ -275,7 +279,9 @@ function usablePropertyPoint(lat, lon) {
   return lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
 }
 
-function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal = false }) {
+function sliceForecast(entry, cached, {
+  fromMs, toMs, keyLat, keyLon, exactTotal = false, exactReadings = false,
+}) {
   // Instantaneous readings (temperature, humidity, wind) are the hour stamps in [from, to).
   const rows = entry.hourly.filter((r) => r.ms >= fromMs && r.ms < toMs);
   // Open-Meteo's hourly `precipitation` is "sum of the preceding hour": the value
@@ -309,7 +315,16 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal
     longitude: keyLon,
     window: { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() },
     current: entry.current,
-    hourly: rows.map(({ ms, precipitation_raw_in, ...rest }) => ({ ...rest, at: new Date(ms).toISOString() })),  
+    hourly: rows.map(({
+      ms, precipitation_raw_in, temperature_raw_f, wind_raw_mph, ...rest
+    }) => ({
+      ...rest,
+      // Opt-in (exactReadings): unrounded temperature and wind, so a reading
+      // just past a label limit (10.04 mph vs a 10 mph max) is not rounded
+      // onto it and passed by a strict comparison.
+      ...(exactReadings ? { temperature_f_exact: temperature_raw_f, wind_mph_exact: wind_raw_mph } : {}),
+      at: new Date(ms).toISOString(),
+    })),  
     precipitationInTotal: complete ? roundedNumber(total, 2) : null,
     // Opt-in (exactTotal): the same total, summed from the unrounded readings
     // and not rounded, for a threshold test. Absent otherwise, so every
@@ -340,6 +355,7 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal
 // always fetch, the result is still cached for others).
 async function fetchPropertyForecast({
   latitude, longitude, from, to, timeoutMs = FORECAST_TIMEOUT_MS, maxAgeMs = FORECAST_CACHE_TTL_MS, now, exactTotal = false,
+  exactReadings = false,
 } = {}) {
   try {
     const lat = toCoordinate(latitude);
@@ -360,7 +376,9 @@ async function fetchPropertyForecast({
     const keyLon = Number(lon.toFixed(FORECAST_KEY_DECIMALS));
     const key = `${keyLat.toFixed(FORECAST_KEY_DECIMALS)},${keyLon.toFixed(FORECAST_KEY_DECIMALS)}|${standard ? 'std' : `${startDate}..${endDate}`}`;
 
-    const slice = (entry, cached) => sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal });
+    const slice = (entry, cached) => sliceForecast(entry, cached, {
+      fromMs, toMs, keyLat, keyLon, exactTotal, exactReadings,
+    });
 
     const hit = _forecastCache.get(key);
     if (hit && maxAgeMs > 0 && nowMs - hit.fetchedAtMs < maxAgeMs && nowMs >= hit.fetchedAtMs

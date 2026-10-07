@@ -1578,16 +1578,29 @@ const V13_UNAVAILABLE = {
   capped: 'An application limit is reached for this product, so no amount is planned.',
 };
 
+// The application a v13 line plans, for the limit reader: the row's stated rate, else (a lb_n /
+// lb_k nutrition row, the 9x April Dimension step) the rate its nutrient target derives, the
+// amount the plan itself will quote. null for a row with neither, which counts nothing.
+function v13ProposedApplication(product, row, targets) {
+  if (!row) return null;
+  if (Number(row.ratePer1000) > 0) return { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit };
+  if (!/^lb_[nk]/i.test(String(row.rateUnit || ''))) return null;
+  const derived = productRatePer1000(product, { ...targets, ...v13RateOptions(row) });
+  const fromTarget = derived.source === 'target_n_analysis' || derived.source === 'target_k_analysis';
+  return fromTarget && derived.rate > 0 ? { ratePer1000: derived.rate, unit: derived.unit } : null;
+}
+
 // product_limits (annual caps, minimum intervals, blackouts) through the one
 // application-limits reader the completion path uses, over the customer's own
 // application history, for each SELECTED product: the hard blocks per product id
 // (`capped`: no amount) and the warning-level findings (`warnings`: a minimum
 // interval, an approaching cap; the dose stays). A failed read fails closed
 // (strict throws; otherwise the product reads as capped). The line's own staged
-// rate is the application being planned, so a yearly cap shared across
-// formulations (prodiamine) counts it with the season's earlier applications; the
+// rate (a lb_n row: the rate its visit's nutrient target derives) is the application
+// being planned, so a yearly cap shared across formulations (prodiamine, dithiopyr)
+// counts it with the season's earlier applications; the
 // visit's own earlier ledger rows are left out so a re-plan never counts it twice.
-async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map() } = {}) {
+async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map(), targets = {} } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
   const warnings = [];
@@ -1597,7 +1610,7 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     if (checked.has(id)) continue;
     checked.add(id);
     const row = rows.get(id);
-    const proposed = Number(row?.ratePer1000) > 0 ? { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit } : null;
+    const proposed = v13ProposedApplication(item.product, row, targets);
     const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
       .catch((err) => {
         if (strict) throw err;
@@ -1633,9 +1646,9 @@ async function loadVisitForPlan(knex, id, scope = (q) => q) {
 
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
 // block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
-async function v13VisitLimits(knex, service, items, rows) {
+async function v13VisitLimits(knex, service, items, rows, targets = {}) {
   if (!service || featureGates.lawnV13Live?.() !== true) return { capped: new Map(), warnings: [], blocks: [] };
-  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows });
+  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets });
   return { ...found, blocks: v13LineNotices([], found.capped, new Set()).blocks };
 }
 
@@ -1860,7 +1873,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows }) : { capped: new Map(), warnings: [] };
+  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
   const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
