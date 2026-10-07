@@ -383,7 +383,8 @@ const CHAIN_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|
 // #5964 r55).
 // A word credential after an opening phrase: "the side gate opens with
 // SUNSET" (Codex P2 #5964 r56).
-const ACCESS_PHRASE = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\b[^.?!]{0,20}?\b(?:opens?|unlocks?|opened|unlocked)\s+(?:with|using|by)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+){0,3})/gi;
+const ACCESS_PHRASE = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\b[^.?!]{0,20}?\b(?:opens?|unlocks?|opened|unlocked)\s+(?:with|using|by)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+)*)/gi;
+const ACCESS_WORD_IS = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\s+(?:word|code|password|passcode|combo|combination|pin)\s+(?:is|was|=|:)\s+)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+)*)/gi;
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
@@ -425,7 +426,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_PHRASE, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -961,12 +962,19 @@ const sentenceNames = (sentence, label) => stemmedTerms(sentence).includes(label
 // "We found ants" needs the visit's own record, not the concern alone (Codex
 // P1 #5964 r50), and its place must be there too: ants found in the kitchen
 // are no ants found in the attic (Codex P1 #5964 r51).
-function ungroundedFinding(text, terms, visitOnly) {
+function ungroundedFinding(text, terms, visitOnly, findings = []) {
+  // Each recorded finding on its own, so one finding's place cannot ground
+  // another's pest (Codex P1 #5964 r59).
+  const records = findings.map((finding) => stemmedTerms(`${finding?.title || ''} ${finding?.detail || ''}`));
   return splitSentences(text).some((sentence) => {
     if (!FINDING_CLAIM.test(sentence) || UNCERTAIN_RE.test(sentence)) return false;
     const named = terms.filter((label) => sentenceNames(sentence, label));
     if (named.some((label) => !visitOnly.includes(label))) return true;
-    return named.length > 0 && (sentence.toLowerCase().match(FINDING_PLACE_RE) || []).some((place) => !visitOnly.includes(stemmedTerms(place).trim()));
+    const places = (sentence.toLowerCase().match(FINDING_PLACE_RE) || []).map((place) => stemmedTerms(place).trim());
+    if (!named.length || !places.length) return false;
+    if (places.some((place) => !visitOnly.includes(place))) return true;
+    const own = records.filter((record) => named.some((label) => record.includes(label)));
+    return own.length > 0 && !own.some((record) => places.every((place) => record.includes(place)));
   });
 }
 
@@ -980,7 +988,7 @@ function leaksTargetList(text, {
   const shaped = (text.match(PEST_SHAPE_RE) || []).map((term) => stemmedTerms(term));
   const terms = [...targetLabelsOf(data), ...PEST_TERMS, ...shaped];
   if (terms.some((label) => sentenceNames(text, label) && !allowed.includes(label))) return true;
-  if (ungroundedFinding(text, terms, factText(visitParts))) return true;
+  if (ungroundedFinding(text, terms, factText(visitParts), asArray(facts?.findings))) return true;
   // A term only the question names may be repeated, never confirmed: "Is this
   // root rot?" -> "Yes, your lawn has root rot" (Codex P1s #5964 r37, r39).
   // Only "the report does not say" style uncertainty may repeat it; "is not
@@ -1491,7 +1499,8 @@ function keepsLineCondition(sentence, requiredLines) {
 
 // Visit weather in the answer must fit weather_during_visit: no sky word the
 // sheet lacks, and rain only as the sheet records it (Codex P1 #5964 r39).
-const SKY_WORDS = ['sunny', 'cloudy', 'clouds', 'overcast', 'foggy', 'stormy', 'windy', 'breezy', 'drizzle', 'showers', 'muggy'];
+// Wind and humidity words are judged on the readings (contradictsReadings).
+const SKY_WORDS = ['sunny', 'cloudy', 'clouds', 'overcast', 'foggy', 'stormy', 'drizzle', 'showers'];
 // Only a sentence about the visit's own weather: rain over the week comes from
 // lawn_report and is grounded by the number checks.
 const VISIT_WEATHER = /\b(?:during|at|for|on)\s+(?:the|your|our|this)\s+(?:visit|service|treatment|application|spray)|\bthat\s+(?:day|morning|afternoon)|\btoday\b|\byesterday\b|\bwhile\s+(?:we|the\s+tech\w*|our\s+tech\w*|your\s+tech\w*)|\b(?:before|after|when)\s+(?:the|we|our)\s+(?:visit|service|treatment|tech\w*|sprayed|treated|came)|\b24\s+hours\b|\b(?:weather|conditions|skies|sky)\b|\bit\s+(?:was|wasn['’]?t|had|hadn['’]?t)\s+(?:\w+\s+)?(?:rain\w*|sunny|cloudy|overcast|windy|stormy|foggy|drizzl\w*)/i;
@@ -1513,8 +1522,26 @@ function contradictsWeather(text, facts) {
       if (!negated && !sheetRain) return true;
       if (negated && !sheetDry) return true;
     }
-    return false;
+    return !negated && contradictsReadings(lower, sheet);
   });
+}
+// Temperature, wind and humidity words against the readings: "freezing" at
+// 95°F, "calm" at 20 mph (Codex P1 #5964 r59).
+const COLD_WORDS = /\b(?:freezing|frigid|cold|chilly|cool|frosty|icy)\b/;
+const HOT_WORDS = /\b(?:hot|warm|heat|scorching|sweltering|balmy)\b/;
+const CALM_WORDS = /\b(?:calm|still|windless|no\s+wind|no\s+breeze)\b/;
+const WINDY_WORDS = /\b(?:windy|breezy|gusty|blustery|strong\s+winds?)\b/;
+function contradictsReadings(lower, sheet) {
+  const temp = Number((/about\s+(-?\d+)\s*°f/.exec(sheet) || [])[1]);
+  const wind = Number((/wind\s+about\s+(\d+)\s*mph/.exec(sheet) || [])[1]);
+  const humid = /\bhumid\b/.test(sheet) ? 'humid' : (/dry air/.test(sheet) ? 'dry' : null);
+  const known = (n) => Number.isFinite(n);
+  if (COLD_WORDS.test(lower) && (!known(temp) || temp >= 65)) return true;
+  if (HOT_WORDS.test(lower) && (!known(temp) || temp < 75)) return true;
+  if (CALM_WORDS.test(lower) && (!known(wind) || wind >= 10)) return true;
+  if (WINDY_WORDS.test(lower) && (!known(wind) || wind < 10)) return true;
+  if (/\b(?:humid|muggy|sticky)\b/.test(lower) && humid !== 'humid') return true;
+  return /\bdry\s+air\b/.test(lower) && humid !== 'dry';
 }
 
 // A pressure level or direction must fit pest_pressure: "Yes, pest pressure
@@ -1784,10 +1811,17 @@ function contradictsServiceKind(text, facts, data) {
   const recorded = `${facts?.service || ''} ${data?.serviceLine || ''}`.toLowerCase().replace(/_/g, ' ');
   if (!recorded.trim()) return false;
   return clausesOf(text).some((clause) => {
-    const lower = clause.toLowerCase();
-    if (!SERVICE_NOUN.test(lower) || !THIS_VISIT.test(lower) || UNCERTAIN_RE.test(lower)) return false;
-    // "a lawn service" names the visit's kind only next to the service noun.
-    const kinds = SERVICE_KINDS.filter(([, re]) => new RegExp(`${re.source}\\s+(?:\\w+\\s+)?(?:service|visit|treatment|program|plan|appointment)\\b`).test(lower));
+    // The company name is no service kind ("Waves Pest Control").
+    const lower = clause.toLowerCase().replace(/\bwaves\s+pest\s+control\b/g, 'waves');
+    if (UNCERTAIN_RE.test(lower)) return false;
+    // "a lawn service" names the visit's kind next to the service noun; "this
+    // was pest control", "today was for tree and shrub care" name it too
+    // (Codex P1 #5964 r59).
+    const nounForm = SERVICE_NOUN.test(lower) && THIS_VISIT.test(lower);
+    const copular = /\b(?:this|that|it|today|the\s+visit|your\s+visit)\s+(?:was|is)\s+(?:a\s+|an\s+|for\s+|your\s+)?/.test(lower);
+    if (!nounForm && !copular && !/\bpest\s+control\b/.test(lower)) return false;
+    const kinds = SERVICE_KINDS.filter(([, re]) => new RegExp(`${re.source}\\s+(?:\\w+\\s+)?(?:service|visit|treatment|program|plan|appointment|control|care)\\b`).test(lower)
+      || (copular && new RegExp(`(?:was|is)\\s+(?:a\\s+|an\\s+|for\\s+|your\\s+)?(?:\\w+\\s+)?${re.source}`).test(lower)));
     if (!kinds.length) return false;
     const negated = NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower);
     return kinds.some(([, re]) => (negated ? re.test(recorded) : !re.test(recorded)));
@@ -1928,7 +1962,7 @@ const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
   // The answer may not hand back an access word either (Codex P2 #5964 r56).
-  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE)].length > 0],
+  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS)].length > 0],
   ['lawn_status_claim', (text, { facts }) => contradictsLawnStatus(text, facts)],
   ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
   ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],
@@ -2144,29 +2178,19 @@ const NOT_IN_PRODUCT_NAME = '(?!(?:near|by|at|in|on|next|beside|behind|under|ove
 const INGESTED_AMOUNT = '(?:a\\s+|an\\s+|some\\s+)?(?:small\\s+|little\\s+|tiny\\s+|large\\s+|bit\\s+of\\s+)?(?:amount|bit|drops?|sips?|mouthfuls?|taste|licks?|handfuls?|dose|spoonfuls?|pieces?|chunks?|some|little|traces?)\\s+of\\s+(?:the\\s+|that\\s+|this\\s+|some\\s+)?(?:\\w+\\s+){0,2}';
 const CONTAMINATED = '(?:\\w+\\s+){0,4}?(?:contaminated|laced|mixed|covered|coated|tainted|sprayed|treated|soaked|dusted)\\s+(?:with\\s+|by\\s+|in\\s+)?(?:the\\s+|some\\s+)?(?:\\w+\\s+){0,2}';
 const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}\\s+${INGESTED_AMOUNT}${EXPOSURE_PRODUCT}\\b|\\b${EAT_VERBS}\\s+${CONTAMINATED}${EXPOSURE_PRODUCT}\\b|\\b${EAT_VERBS}\\s+(?:it|them|some|any|that|this|those|these)\\b|\\b${EAT_VERBS}(?!\\s+of\\b)\\s+${OBJECT_WORDS}(?:${NOT_IN_PRODUCT_NAME}\\w+\\s+){0,3}${EXPOSURE_PRODUCT}\\b|\\b${EXPOSURE_PRODUCT}\\s+(?:\\w+\\s+){0,2}?(?:was|were|got|gets|been|has\\s+been|have\\s+been|is|are)\\s+(?:\\w+\\s+)?${EAT_VERBS}`, 'i');
+// Fail safe (Codex security P1s #5964 r56, r59): an eating verb and a product
+// word in one sentence, with a person or pet anywhere in it and no pest as the
+// eater, get the emergency answer. "Swallowed grass from the lawn after
+// pesticide was sprayed", "got pesticide on its paws and licked them". A
+// false alarm costs one answer; a missed exposure is worse.
 function ingestsProduct(text) {
-  return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence))
-    && EXPOSURE_WORD.test(sentence) && boundToProduct(sentence)
-    && EATER_ACTS.test(sentence) && !PEST_EATING.test(sentence));
+  return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence) || EAT_VERB_RE.test(sentence))
+    && EXPOSURE_WORD.test(sentence)
+    && (EATER_ACTS.test(sentence) || EATER_IN_SENTENCE.test(sentence)) && !PEST_EATING.test(sentence));
 }
-// The noun forms ("took a bite of the bait") already name their product.
-const NOUN_INGESTION = /\b(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\s+(?:\w+\s+){0,4}?(?:bites?|mouthfuls?|sips?|tastes?|licks?|nibbles?|gulps?|swallows?|swigs?|drinks?|chunks?|pieces?)\s+(?:of|out\s+of|from)\b/i;
-function boundToProduct(sentence) {
-  if (OBJECT_BOUND_INGESTION.test(sentence) || (NOUN_INGESTION.test(sentence) && INGESTION_VERB.test(sentence))) return true;
-  // Otherwise an eating verb and a product word in one sentence still count,
-  // unless the product is named only as a time ("after the spray dried"):
-  // a missed exposure is worse than a needless safety answer (pre-push audit,
-  // #5964: "swallowed the liquid you sprayed").
-  const rest = sentence.replace(TIME_CLAUSE_RE, ' ');
-  if (EAT_VERB_RE.test(rest) && EXPOSURE_WORD.test(rest)) return true;
-  // Fail safe: an unnamed thing or a treated surface still counts when the
-  // sentence names the product anywhere ("swallowed something from the
-  // treated floor after the pesticide was sprayed") (Codex P1 #5964 r56).
-  return EAT_VERB_RE.test(rest) && EXPOSURE_WORD.test(sentence) && UNKNOWN_OBJECT_RE.test(rest);
-}
-const UNKNOWN_OBJECT_RE = /\b(?:something|anything|stuff|some|it|them|that|this)\b|\btreated\b/i;
-const TIME_CLAUSE_RE = /\b(?:after|once|when|before|until|since)\s+(?:the\s+|it\s+|that\s+|your\s+)?(?:\w+\s+){0,2}?(?:dried|dries|dry|had\s+dried|was\s+dry|were\s+dry|is\s+dry|went\s+on|was\s+applied|was\s+sprayed|was\s+done|finished)\b/gi;
-const EAT_VERB_RE = new RegExp(`\\b${EAT_VERBS}\\b`, 'i');
+const EATER_IN_SENTENCE = new RegExp(`(?:^|[^\\w])${PERSON}\\b`, 'i');
+// "Bit" stays bound to a product (Codex P1 #6038 r1): "mosquitoes bit me" is no ingestion.
+const EAT_VERB_RE = new RegExp(`\\b${EAT_VERBS.replace('|bit|bites?|biting|bitten', '')}\\b`, 'i');
 
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
@@ -2271,6 +2295,9 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
   // answer states no date and the fact sheet carries no appointment (Codex
   // P1s on #6020, #5964 and #6016).
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
+  // Re-entry is a safety instruction: the fixed answer gives it word for word
+  // (Codex security P1 #5964 r59).
+  if (topic === 'reentry') return 'reentry';
   // "What should I do?": the report's own instructions are the answer, and
   // the model has no grounding to add care steps (Codex P1 #5964 r31).
   if (topic === 'next_steps' || CARE_PERMISSION_QUESTION.test(String(question || ''))) return 'next_steps';

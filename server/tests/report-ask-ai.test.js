@@ -988,34 +988,22 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     lawnAssessment: { scores: { overallScore: 82 }, snapshot: { summary: 'Your lawn is thickening.' } },
   });
 
-  test('gate on, a lawn report, a re-entry question: AI answer only when it carries the pet precaution verbatim', async () => {
+  // Re-entry keeps the fixed answer even with the gate on: it is the safety
+  // instruction word for word (Codex security P1 #5964 r59).
+  test('gate on, a lawn report, a re-entry question: the fixed answer with the pet precaution, no model call', async () => {
     process.env.GATE_REPORT_ASK_AI = 'true';
     buildReportV1Data.mockResolvedValue(lawnReport());
     const q = 'Can my dog go back out on the lawn?';
     const rules = routeServiceReportQuestion({ question: q, data: lawnReport() }).answer;
     expect(rules).toContain(PET_LINE);
-
-    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: `Soon. ${PET_LINE}` }, provider: 'anthropic' });
     const { eventInsert } = mockDb();
     await withServer(async (baseUrl) => {
       const { status, body } = await ask(baseUrl, q);
       expect(status).toBe(200);
-      expect(body).toEqual({ answer: `Soon. ${PET_LINE}` });
-    });
-    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    // The model was handed the precaution as a required line.
-    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"required_lines"');
-    expect(dispatchWithFallback.mock.calls[0][1].text).toContain(PET_LINE);
-    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
-
-    // The same call, but the model drops the precaution: the rule answer wins.
-    jest.clearAllMocks();
-    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: 'Your dog can go out once the lawn is dry.' }, provider: 'anthropic' });
-    mockDb();
-    await withServer(async (baseUrl) => {
-      const { body } = await ask(baseUrl, q);
       expect(body).toEqual({ answer: rules });
     });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
   });
 
   test('gate on, a recorded fixed wait trips the screen: the rule answer states it, no model call', async () => {

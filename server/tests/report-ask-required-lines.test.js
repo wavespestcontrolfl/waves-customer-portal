@@ -1518,8 +1518,6 @@ describe('answer screen, Codex round 36', () => {
 
 describe('answer screen, Codex round 37', () => {
   test.each([
-    'My kids snacked outside after the spray dried. Is that okay?',
-    'The kids snacked on chips after the treatment dried.',
     'I had a bite of lunch near the bait.',
   ])('an eating verb with no product object is not an ingestion: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
@@ -2146,4 +2144,56 @@ describe('answer screen, Codex round 58', () => {
     expect(facts.findings).toHaveLength(4);
     expect(screenAskAnswer('The report does not show termite tubes.', { question, data, facts })).toBe('denies_findings');
   });
+});
+
+describe('answer screen, Codex round 59', () => {
+  test.each([
+    'John swallowed grass from the lawn after pesticide was sprayed there.',
+    'My cat got pesticide on its paws and licked them. What should I do?',
+  ])('treated-surface and grooming ingestion get the medical answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test.each(['Did the roaches quickly devour the bait?', 'Was the bait eaten?', 'Mosquitoes bit me after the spray.'])('no person eating is no ingestion: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+
+  test('a re-entry question keeps the fixed answer', () => {
+    expect(ruleAnswerReason(pestData(), [], 'reentry', 'Can my dog go out?')).toBe('reentry');
+  });
+
+  test('a long credential is masked whole, and a stated gate word too', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'The gate opens with BLUE MOON SECRET WORD ALPHA, ants by the pool. Gate word is ZEBRA.' } });
+    expect(facts.customer_concern).toBe('The gate opens with [redacted], ants by the pool. Gate word is [redacted].');
+  });
+
+  test('temperature and wind words must fit the readings', () => {
+    const data = lawnData({ conditions: { conditions: 'Sunny', temp_f: 95, wind_mph: 20, rain_24h_in: 0 }, reportV2: { aftercare: {} } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'What was the weather?', data, facts });
+    expect(ask('It was freezing during the visit.')).toBe('weather_claim');
+    expect(ask('It was calm during the visit.')).toBe('weather_claim');
+    expect(ask('It was hot and windy during the visit.')).toBeNull();
+  });
+
+  test('each finding keeps its own place', () => {
+    const data = pestData({ applications: [], findings: [{ title: 'Ant activity', detail: 'Observed in the kitchen' }, { title: 'Spider activity', detail: 'Observed in the attic' }] });
+    const question = 'What did you find?';
+    const facts = buildReportAskFacts({ question, data });
+    const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+    expect(ask('We found ants in the attic.')).toBe('target_list');
+    expect(ask('We found spiders in the kitchen.')).toBe('target_list');
+    expect(ask('We found ants in the kitchen.')).toBeNull();
+  });
+
+  test.each(['This was pest control.', 'Today was for tree and shrub care.'])('a service kind without a service noun is judged: %s', (answer) => {
+    const data = lawnData({ serviceDisplayName: 'Lawn Care', reportV2: { aftercare: {} } });
+    expect(screenAskAnswer(answer, { question: 'What service was this?', data, facts: buildReportAskFacts({ data }) })).toBe('service_kind');
+  });
+});
+
+// Reversed from round 37 on Codex security P1 #5964 r59: an eating verb and a
+// product word with a person in one sentence fail safe to the medical answer.
+test.each(['My kids snacked outside after the spray dried. Is that okay?', 'The kids snacked on chips after the treatment dried.'])('eating near a product word fails safe: %s', (question) => {
+  expect(medicalExposureAnswer(question)).toBeTruthy();
 });
