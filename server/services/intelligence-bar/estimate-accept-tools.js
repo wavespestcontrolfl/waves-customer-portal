@@ -38,7 +38,7 @@ const ESTIMATE_ACCEPT_TOOLS = [
     name: 'accept_estimate',
     description: `Mark ONE sent or viewed estimate accepted from the bar — exactly what the estimate page's "Mark accepted" does for a verbal yes. Use it when the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"); it is also how a customer's FIRST program starts. Never fake an acceptance with update_customer or create_appointment.
 The first call is a PREVIEW and changes nothing. The confirmation card shows the estimate (customer, tier, totals), each service the plan starts with its visits a year and monthly price, the monthly bill before and after line by line, the billing lane and tier change, which visits it books (none — book them on the calendar after), and every message the customer gets. Confirm marks the estimate accepted, locks its price, makes the customer an active customer, starts the plan's billing, marks a linked lead won and may email the customer a "membership started" email. No text and no invoice. It cannot be undone from the bar.
-Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and three the card cannot show yet: a termite annual plan (annual prepay only), an estimate with visits already booked from it, and a quote that also re-prices the customer's existing services. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
+Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and what the card cannot show yet: any termite program (accepted on the estimate page, where the agreement is handled), an estimate with visits already booked from it, and a quote that also re-prices the customer's existing services. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
 Use for: "Pat accepted the lawn quote", "mark her estimate accepted", "he said yes, set him up from the estimate".`,
     input_schema: {
       type: 'object',
@@ -192,22 +192,7 @@ function startedServices(estimateData, slices) {
   }));
 }
 
-// maybeCreateTermiteProgramAgreement: a commercial estimate is always handed
-// to the office to prepare by hand; otherwise it drafts the agreement (and
-// emails it only under its autosend gate), or bells the office when the
-// agreement cannot be prepared automatically.
-function termiteAgreementMessage(termiteProgram) {
-  if (termiteProgram.commercial) {
-    return { kind: 'none', will_send: false, text: 'Termite program agreement: commercial, so the office is belled to prepare it by hand; nothing is sent to the customer' };
-  }
-  // Conditional, never a definite send: the agreement goes out only if the
-  // figures, the template and the customer's email allow.
-  return termiteProgram.autosend
-    ? { kind: 'email', will_send: false, may_send: true, text: 'May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it' }
-    : { kind: 'none', will_send: false, text: 'Termite program agreement drafted for the office to send (or the office is belled to prepare it); the customer is not sent it' };
-}
-
-function customerMessages({ customer, prefs, converts, commercialOnly, lane, termiteProgram }) {
+function customerMessages({ customer, prefs, converts, commercialOnly, lane }) {
   const messages = [];
   // The sender's own recipient (account-membership-email sendTemplate).
   const email = String(require('../customer-contact').getPrimaryContact(customer).email || '').trim();
@@ -231,7 +216,6 @@ function customerMessages({ customer, prefs, converts, commercialOnly, lane, ter
     });
   }
   messages.push({ kind: 'none', will_send: false, text: 'No welcome text now (Mark accepted skips it). Booking the first visit later on the calendar may send it' });
-  if (termiteProgram.has_program) messages.push(termiteAgreementMessage(termiteProgram));
   return messages;
 }
 
@@ -264,6 +248,16 @@ function statusRefusal(estimate, label) {
     return refuse(`That ${label} is archived. Unarchive it first if the customer really accepted it.`, 'estimate_archived');
   }
   return null;
+}
+
+// Every accept of a termite program runs the agreement prep after the commit
+// (maybeCreateTermiteProgramAgreement, which can draft, email, or cancel an
+// open request). The bar does not take that on: same eligibility as the
+// agreement code (collectTermiteFacts().hasProgram; a manual accept is never a
+// one-time-mode accept).
+function termiteProgramRefusal(estimateData) {
+  if (!require('../termite-program-agreement').collectTermiteFacts(estimateData)?.hasProgram) return null;
+  return refuse('Accept termite programs on the estimate page, where the agreement is handled.', 'termite_program');
 }
 
 // Everything the estimate page itself refuses, with its own words.
@@ -373,6 +367,7 @@ async function loadTarget(input) {
   const label = `estimate ${String(estimate.token || estimate.id).slice(0, 8)}`;
   const refusal = await ownerRefusal(estimate, customerId, label)
     || statusRefusal(estimate, label)
+    || termiteProgramRefusal(estimateData)
     || await pageRefusal(estimate, estimateData);
   return refusal || { estimate, estimateData, label, customerId };
 }
@@ -422,28 +417,10 @@ function laneAndTier({ customer, converts, tierAfter, totalAfter, pinnedLegacyRo
   return { laneBefore, laneAfter, tierBefore, tierAfter };
 }
 
-function termiteProgramFor(estimate, estimateData) {
-  const Termite = require('../termite-program-agreement');
-  return {
-    has_program: !!Termite.collectTermiteFacts(estimateData)?.hasProgram,
-    commercial: Termite.isCommercialEstimate(estimate, estimateData),
-    autosend: Termite.autosendGateOn(),
-  };
-}
-
 // The refusals that need the activation facts: what the conversion would do
-// that the card cannot show, linked visits, an open termite agreement.
-async function laterRefusal({ converts, estimate, estimateData, tier, termiteProgram, customerId }) {
-  const blocked = converts && (conversionRefusal(estimate, estimateData, tier) || await bookedRefusal(estimate.id));
-  return blocked || (termiteProgram.has_program && await termiteAgreementRefusal(estimate, customerId)) || null;
-}
-
-// An open termite agreement request for this property would be cancelled
-// (with its signing link) by the accept's agreement prep — refused here.
-async function termiteAgreementRefusal(estimate, customerId) {
-  const { openTermiteAgreementsForAccept } = require('../estimate-manual-acceptance');
-  if (!(await openTermiteAgreementsForAccept(db, customerId, estimate)).length) return null;
-  return refuse('Accept this on the estimate page; it would cancel the open termite agreement and its signing link.', 'open_termite_agreement');
+// that the card cannot show, and linked visits.
+async function laterRefusal({ converts, estimate, estimateData, tier }) {
+  return (converts && (conversionRefusal(estimate, estimateData, tier) || await bookedRefusal(estimate.id))) || null;
 }
 
 // Visits already booked from this estimate (its booking link) send the
@@ -531,13 +508,12 @@ async function planAccept(input) {
   const converts = monthlyRate > 0;
   const act = await activation(estimateData, customerId);
   const { commercialOnly, commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = act;
-  const termiteProgram = termiteProgramFor(estimate, estimateData);
   const perApp = converts ? perApplicationPlan({ estimate, estimateData, customer, monthlyRate, act }) : { refusal: null, line: null };
-  const blocked = await laterRefusal({ converts, estimate, estimateData, tier, termiteProgram, customerId }) || perApp.refusal;
+  const blocked = await laterRefusal({ converts, estimate, estimateData, tier }) || perApp.refusal;
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
-  const messages = customerMessages({ customer, prefs, converts, commercialOnly, lane: lt.laneAfter, termiteProgram });
+  const messages = customerMessages({ customer, prefs, converts, commercialOnly, lane: lt.laneAfter });
 
   const preview = {
     preview: true,
@@ -570,7 +546,6 @@ async function planAccept(input) {
       customer_billing: require('../estimate-manual-acceptance').customerBillingPin(customer),
       ledger: bill ? bill.pin : null,
       no_linked_visits: converts,
-      no_open_termite_agreement: termiteProgram.has_program,
     },
     note_to_operator: 'PREVIEW ONLY — nothing was changed. Confirm runs the estimate page\'s Mark accepted.',
   };
@@ -593,7 +568,6 @@ function expectedFrom(approved) {
     customerBilling: approved.pins.customer_billing,
     ledgerPin: approved.pins.ledger,
     noLinkedVisits: approved.pins.no_linked_visits === true,
-    noOpenTermiteAgreement: approved.pins.no_open_termite_agreement === true,
   };
 }
 

@@ -536,15 +536,6 @@ function estimateLinkedVisitsQuery(conn, estimateId) {
     .whereNotNull('customer_id').whereNull('reservation_expires_at');
 }
 
-// Open termite program agreement requests this accept's agreement prep would
-// cancel (or that block it): every open request not provably at another
-// property (termite-program-agreement.js classifyExistingAgreement).
-async function openTermiteAgreementsForAccept(conn, customerId, estimate) {
-  const Termite = require('./termite-program-agreement');
-  const rows = await Termite.openProgramAgreements(customerId, conn);
-  return rows.filter((row) => Termite.classifyExistingAgreement(row, estimate) !== 'ignore');
-}
-
 // The customer billing fields the accept reads and rewrites; the converter
 // changes them without moving updated_at, so the card pins them directly.
 const CUSTOMER_BILLING_PIN_FIELDS = ['billing_mode', 'per_application_fee', 'waveguard_tier', 'pipeline_stage', 'property_type'];
@@ -568,12 +559,9 @@ async function assertExpectedCustomerBill(trx, customerId, expected) {
 }
 
 // What the card promised is still true under the locks: no visit linked to
-// the estimate since (the reservation path the card cannot show), and no
-// open termite agreement the accept would cancel.
+// the estimate since (the reservation path the card cannot show).
 async function assertExpectedNoNewWork(trx, estimate, expected) {
   if (expected.noLinkedVisits && await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) throw cardChanged();
-  if (expected.noOpenTermiteAgreement
-    && (await openTermiteAgreementsForAccept(trx, estimate.customer_id, estimate)).length > 0) throw cardChanged();
 }
 
 async function logManualAcceptance(database, {
@@ -626,7 +614,8 @@ async function markEstimateManuallyAccepted({
   // Accept-on-book links these same-customer rows after conversion commits.
   bookedAppointmentIds = [],
   // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
-  // customerId, customerVersion, ledgerPin }); null for every other caller.
+  // customerId, customerVersion, customerBilling, ledgerPin, noLinkedVisits });
+  // null for every other caller.
   expected = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
@@ -1329,7 +1318,6 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   markEstimateManuallyAccepted,
   estimateLinkedVisitsQuery,
   customerBillingPin,
-  openTermiteAgreementsForAccept,
   oneTapPurchaseRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,

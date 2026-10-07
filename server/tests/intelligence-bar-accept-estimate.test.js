@@ -262,41 +262,6 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(result.error).toMatch(/1 visit\(s\) are already linked to this estimate \(first 2026-10-14\)/);
   });
 
-  test('a termite program estimate says whether the agreement goes to the customer', async () => {
-    seed({
-      estimate: {
-        estimate_data: { recurring: { services: [{ name: 'Termite Bait Monitoring', service: 'termite_bait', visitsPerYear: 4, monthly: 35 }] } },
-        monthly_total: 35,
-      },
-    });
-    const drafted = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    expect(drafted.customer_messages).toContainEqual(expect.objectContaining({
-      will_send: false, text: 'Termite program agreement drafted for the office to send (or the office is belled to prepare it); the customer is not sent it',
-    }));
-    process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND = 'true';
-    const sent = await executeEstimateAcceptTool('accept_estimate', INPUT);
-    expect(sent.customer_messages).toContainEqual(expect.objectContaining({
-      will_send: false, may_send: true, text: 'May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it',
-    }));
-  });
-
-  test('only a definite send marks the card as contacting the customer; the autosend agreement is a "may"', async () => {
-    process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND = 'true';
-    const termite = {
-      estimate_data: { recurring: { services: [{ name: 'Termite Bait Monitoring', service: 'termite_bait', visitsPerYear: 4, monthly: 35 }] } },
-      monthly_total: 35,
-    };
-    // Membership email will go out: the card contacts the customer.
-    seed({ estimate: termite });
-    const withEmail = card(await executeEstimateAcceptTool('accept_estimate', INPUT));
-    expect(withEmail.notifies_customer).toBe(true);
-    expect(labels(withEmail)).toContain('Message: May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it');
-    // Email off: the possible agreement email alone does not set the flag.
-    seed({ estimate: termite, prefs: [{ customer_id: CUSTOMER_ID, email_enabled: false }] });
-    const onlyMaybe = card(await executeEstimateAcceptTool('accept_estimate', INPUT));
-    expect(onlyMaybe.notifies_customer).toBe(false);
-    expect(labels(onlyMaybe)).toContain('Message: May email the termite agreement (if the figures, template and email allow); otherwise the office is belled to prepare it');
-  });
 });
 
 describe('refusals before any card', () => {
@@ -318,7 +283,9 @@ describe('refusals before any card', () => {
   });
 
   test('a termite annual plan is sent to the annual prepay accept (the converter refuses it on a standard accept)', async () => {
-    seed({ estimate: { monthly_total: 25, estimate_data: { engineResult: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 300 }] } } } });
+    // A mapped annual-plan envelope the agreement walker does not read as a
+    // bait program still reaches the converter's annual-prepay-only guard.
+    seed({ estimate: { monthly_total: 25, estimate_data: { result: { results: { tmBait: { plan: 'annual_protection', monMonthly: 25 } } } } } });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
     expect(result.code).toBe('termite_annual_requires_prepay');
     expect(result.error).toMatch(/can only be accepted with annual prepay/);
@@ -343,21 +310,15 @@ describe('refusals before any card', () => {
     }
   });
 
-  test('a termite estimate is refused while an open termite agreement for the property would be cancelled', async () => {
-    seed({
-      estimate: {
-        estimate_data: { recurring: { services: [{ name: 'Termite Bait Monitoring', service: 'termite_bait', visitsPerYear: 4, monthly: 35 }] } },
-        monthly_total: 35,
-      },
-    });
-    tables.customer_contracts = [{ id: 'contract-open', customer_id: CUSTOMER_ID, status: 'sent', share_token_expires_at: null, document_variables_snapshot: {}, document_template_version_id: 'v-1' }];
-    try {
-      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
-      expect(result.code).toBe('open_termite_agreement');
-      expect(result.error).toBe('Accept this on the estimate page; it would cancel the open termite agreement and its signing link. Nothing was changed.');
-    } finally {
-      delete tables.customer_contracts;
-    }
+  test.each([
+    ['a bait monitoring plan', { recurring: { services: [{ name: 'Termite Bait Monitoring', service: 'termite_bait', visitsPerYear: 4, monthly: 35 }] } }],
+    ['a commercial termite program', { recurring: { services: [{ name: 'Commercial Termite Bait', service: 'commercial_termite_bait', visitsPerYear: 4, monthly: 60 }] } }],
+  ])('%s is refused: termite programs are accepted on the estimate page, where the agreement is handled', async (_name, estimateData) => {
+    seed({ estimate: { estimate_data: estimateData, monthly_total: 35 } });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('termite_program');
+    expect(result.error).toBe('Accept termite programs on the estimate page, where the agreement is handled. Nothing was changed.');
+    expect(writes).toEqual([]);
   });
 
   test('an estimate that belongs to another customer names its real owner', async () => {
@@ -397,7 +358,7 @@ describe('Confirm', () => {
           estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: CUSTOMER_ID,
           customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
           customerBilling: 'per_application||Bronze|active_customer|',
-          noLinkedVisits: true, noOpenTermiteAgreement: false,
+          noLinkedVisits: true,
         },
       },
       actor: { technicianId: 'tech-owner' },
