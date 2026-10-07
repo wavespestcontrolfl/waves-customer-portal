@@ -119,6 +119,17 @@ describe('Step 3 wiring (structural)', () => {
     expect(source).toMatch(/persistCallSecondaryContact\(linkedCustomerId, \{[\s\S]*?\}, \{\s*smsConsentExplicit: consentGiven,\s*keepConsentStamp: !consentGiven,\s*holdPhone: held,/);
   });
 
+  test('the protective context follows the persisted marker, not the gate, on a reprocess', () => {
+    const resume = source.slice(source.indexOf('// A call this feature linked on an earlier pass'), source.indexOf('// Pre-linked calls (call.customer_id set at ring time'));
+    expect(resume).toContain("String(call.metadata?.family_name_link?.customer_id || '') === String(customerId)");
+    expect(resume.indexOf('adoptFamilyNameLink(customerId, markedHolder)')).toBeGreaterThan(resume.indexOf('callFamilyNameLinkLive()'));
+    expect(resume.slice(0, resume.indexOf('try {'))).not.toContain('callFamilyNameLinkLive');
+  });
+
+  test('both the dictated callback number and the inbound caller ID are checked for an account', () => {
+    expect(source).toContain('callerPhones: [phone, call.from_phone],');
+  });
+
   test('canonical V2 output is trusted only in primary mode, for the link and for the retry', () => {
     expect(source).toContain('!callExtractionV2PrimaryEnabled()) return null;');
     expect(source).toContain('callFamilyNameLinkLive() && callExtractionV2PrimaryEnabled()');
@@ -130,7 +141,8 @@ describe('Step 3 wiring (structural)', () => {
   });
 
   test('the booking backfill never copies the caller onto the holder', () => {
-    expect(source).toContain('familyNameLink ? { ...extracted, first_name: null, last_name: null, phone: null, email: null } : extracted');
+    expect(source).toContain('suppressCallerIdentity: !!familyNameLink');
+    expect(source).toContain('const extracted = suppressCallerIdentity ? { ...extractedIn, first_name: null, last_name: null, phone: null, email: null } : extractedIn;');
   });
 });
 
@@ -251,12 +263,12 @@ const SKIP = !process.env.DATABASE_URL;
     await customer({ first_name: 'Slot', last_name: 'Holder', service_contact2_phone: '+19415550177' });
     await customer({ first_name: 'Gone', last_name: 'Customer', phone: '+19415550188', deleted_at: new Date() });
     const callLogId = await call();
-    const out = await resolveFamilyNameLink(args(callLogId, { callerPhone: '(941) 555-0177' }));
+    const out = await resolveFamilyNameLink(args(callLogId, { callerPhones: ['+19415550142', '(941) 555-0177'] }));
     expect(out.status).toBe('phone_on_file');
     expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
     expect(await phoneOnAnyLiveAccount(trx, '+19415550188')).toBe(false); // a retired account does not hold a number
     expect(await phoneOnAnyLiveAccount(trx, '+19415550199')).toBe(false);
-    expect((await resolveFamilyNameLink(args(await call(), { callerPhone: '+19415550199' }))).status).toBe('linked');
+    expect((await resolveFamilyNameLink(args(await call(), { callerPhones: ['+19415550199', null] }))).status).toBe('linked');
   });
 
   test('a caller who is not a family member links nothing', async () => {

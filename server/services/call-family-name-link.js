@@ -162,11 +162,13 @@ async function phoneOnAnyLiveAccount(conn, phone) {
  * The processor files the cards (it owns buildTriageItem and the card context).
  */
 async function resolveFamilyNameLink({
-  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhone = null, conn = db,
+  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhones = [], conn = db,
 }) {
   const holder = pickNamedAccountHolder({ callerRelationship, caller, secondaryContacts });
   if (!holder) return { status: 'not_applicable' };
-  if (await phoneOnAnyLiveAccount(conn, callerPhone)) return { status: 'phone_on_file', holder };
+  for (const callerPhone of callerPhones) {
+    if (await phoneOnAnyLiveAccount(conn, callerPhone)) return { status: 'phone_on_file', holder };
+  }
   const matches = await findLiveCustomersByFullName(conn, holder);
   if (matches.length !== 1) {
     return {

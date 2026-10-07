@@ -7208,8 +7208,12 @@ async function backfillLinkedCustomerFromExtraction({ customerId, existing, extr
   return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
 }
 
-async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
+async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extractedIn = {}, callerPhoneIn = null, { suppressPhone = false, suppressCallerIdentity = false } = {}) {
   if (!customerId) return customer;
+  // suppressCallerIdentity (a family-linked call, GATE_CALL_FAMILY_NAME_LINK): the caller is
+  // not the account holder, so the caller's name, number and email never fill the record.
+  const extracted = suppressCallerIdentity ? { ...extractedIn, first_name: null, last_name: null, phone: null, email: null } : extractedIn;
+  const callerPhone = suppressCallerIdentity ? null : callerPhoneIn;
   const updates = {};
   if (!customer.first_name && extracted.first_name) updates.first_name = capitalizeName(extracted.first_name);
   if (!customer.last_name && extracted.last_name) updates.last_name = capitalizeName(extracted.last_name);
@@ -12463,12 +12467,18 @@ const CallRecordingProcessor = {
     // contact steps below so the named account holder is never filed as a contact on their own
     // account. The matching and the token-fenced link live in call-family-name-link.js.
     let familyNameLink = null;
-    const finishFamilyNameLink = async (linkedCustomerId, holder) => {
+    // The protective context: the call is family-linked, so the caller's identity never fills
+    // the holder's record and the holder is never filed as a contact on their own account. It
+    // follows the PERSISTED link marker, so it holds on a reprocess whatever the gate says now.
+    // The structured name, never a re-split display name: "Mary Ann" + "Testerson" must key
+    // the same here as in the secondary-contact exclusion checks below.
+    const adoptFamilyNameLink = (linkedCustomerId, holder) => {
       const { fullNameKey, displayName } = require('./call-family-name-link');
-      const holderName = displayName(holder);
-      // The structured name, never a re-split display name: "Mary Ann" + "Testerson" must key
-      // the same here as in the secondary-contact exclusion checks below.
-      familyNameLink = { customerId: linkedCustomerId, holderName, holderKey: fullNameKey(holder) };
+      familyNameLink = { customerId: linkedCustomerId, holderName: displayName(holder), holderKey: fullNameKey(holder) };
+      return familyNameLink.holderName;
+    };
+    const finishFamilyNameLink = async (linkedCustomerId, holder) => {
+      const holderName = adoptFamilyNameLink(linkedCustomerId, holder);
       const callerName = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null;
       // One-step undo for the office: the card names the account, the caller and the reason.
       await db('triage_items')
@@ -12544,7 +12554,8 @@ const CallRecordingProcessor = {
           callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
           caller: { first_name: extracted.first_name, last_name: extracted.last_name },
           secondaryContacts: callSecondaryContacts,
-          callerPhone: phone,
+          // Both numbers: the dictated callback number AND the inbound caller ID.
+          callerPhones: [phone, call.from_phone],
         });
         if (result.status === 'candidates') {
           await db('triage_items')
@@ -12852,17 +12863,22 @@ const CallRecordingProcessor = {
       }
     }
 
-    // A pass that wrote the family link and crashed before its card or contact write: the call
-    // row carries the marker, so a retry finishes the (idempotent) card and contact writes.
+    // A call this feature linked on an earlier pass (the call row carries the marker): the
+    // protective context is restored whatever the gate says now. Only while the gate is live
+    // does a retry finish the (idempotent) card and contact writes a crash may have skipped.
     if (!familyNameLink && customerId && !explicitUnlink
-        && require('../config/feature-gates').callFamilyNameLinkLive() && callExtractionV2PrimaryEnabled()
         && String(call.metadata?.family_name_link?.customer_id || '') === String(customerId)
         && call.metadata.family_name_link.holder_first_name && call.metadata.family_name_link.holder_last_name) {
+      const markedHolder = {
+        first_name: call.metadata.family_name_link.holder_first_name,
+        last_name: call.metadata.family_name_link.holder_last_name,
+      };
       try {
-        await finishFamilyNameLink(customerId, {
-          first_name: call.metadata.family_name_link.holder_first_name,
-          last_name: call.metadata.family_name_link.holder_last_name,
-        });
+        if (require('../config/feature-gates').callFamilyNameLinkLive() && callExtractionV2PrimaryEnabled()) {
+          await finishFamilyNameLink(customerId, markedHolder);
+        } else {
+          adoptFamilyNameLink(customerId, markedHolder);
+        }
       } catch (e) {
         logger.warn(`[call-proc] family link resume skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
       }
@@ -17418,12 +17434,7 @@ const CallRecordingProcessor = {
         if (customer) {
           // A family-linked call is the CALLER's, on the account holder's record: the caller's
           // name, number and email never become the holder's (the caller is a service contact).
-          customer = await backfillCustomerFromAppointmentContact(
-            customerId, customer,
-            familyNameLink ? { ...extracted, first_name: null, last_name: null, phone: null, email: null } : extracted,
-            familyNameLink ? null : contactPhone,
-            { suppressPhone: callerPhoneUnverified || !!familyNameLink },
-          );
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified, suppressCallerIdentity: !!familyNameLink });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           // Email advisory (owner ruling 2026-07-31): file the "collect the
           // email" card whenever the email is missing — INDEPENDENT of the
