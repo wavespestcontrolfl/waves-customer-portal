@@ -241,13 +241,19 @@ function readingOrNull(value) {
 
 const PACK_OR_STRENGTH_RE = /\s+\d+(?:\.\d+)?\s*(?:%|(?:percent|fl\.?\s*oz|oz|ounces?|lbs?|pounds?|gal(?:lons?)?|qt|quarts?|pt|pints?|ml|l|liters?|kg|g)\b).*$/i;
 
+const NPK_ANALYSIS_RE = /\b\d{1,2}-\d{1,2}-\d{1,2}\b/g;
+
 function productFacts(app = {}) {
   const product = app.product || {};
   const copy = product.report_copy || {};
   // A catalog name may carry a pack size or a strength ("Dismiss 64 oz",
   // "Copper Fungicide 27.15%"); the answer screen rejects amounts, so the
   // customer-facing name stops before them (Codex P2 #5964 r13).
-  const name = cleanText(product.name || app.productName || app.product_name).replace(PACK_OR_STRENGTH_RE, '').trim();
+  // A leading or inner N-P-K analysis ("24-0-11", "LESCO 15-0-15") reads as a
+  // date to the screen, so it is dropped too (Codex P2 #5964 r52).
+  const fullName = cleanText(product.name || app.productName || app.product_name);
+  const name = fullName.replace(PACK_OR_STRENGTH_RE, '').replace(NPK_ANALYSIS_RE, ' ').replace(/\s+/g, ' ').trim()
+    || (NPK_ANALYSIS_RE.test(fullName) ? 'Fertilizer' : '');
   if (!name) return null;
   const whatItDoes = cleanText(copy.how_it_works)
     || cleanText(product.service_report_summary)
@@ -1500,12 +1506,16 @@ const TECH_NAME_STOP = new Set('we it they he she you i your our the this that o
 // A health verdict on the lawn or plants must fit the report: "Your lawn
 // health is poor" on a 92 report (Codex P1 #5964 r41). A word the report's own
 // text uses is grounded; otherwise the overall score must agree.
-const HEALTH_SUBJECT = /\b(?:lawn|grass|turf|yard|health|density|coverage|colou?r|plants?|shrubs?|trees?|hedges?|palms?|beds?|landscape)\b/i;
+const HEALTH_SUBJECT = /\b(?:lawn|grass|turf|yard|health|density|coverage|colou?r|foliage|leaves|leaf|canopy|plants?|shrubs?|trees?|hedges?|palms?|beds?|landscape)\b/i;
+// [words, lawn_assessment key, Tree & Shrub trend key] (Codex P1 #5964 r52).
 const HEALTH_DIMENSIONS = [
-  [/\b(?:density|dense|coverage|thick\w*|thin\w*|sparse|bare|patchy|fill\w*)\b/, 'density_out_of_100'],
-  [/\b(?:colou?r|green\w*|yellow\w*|brown\w*|pale)\b/, 'color_out_of_100'],
-  [/\bweeds?\b/, 'weed_cleanliness_out_of_100'],
-  [/\b(?:stress\w*|damage\w*)\b/, 'stress_damage_out_of_100'],
+  [/\b(?:density|dense|coverage|thick\w*|thin\w*|sparse|bare|patchy|fill\w*)\b/, 'density_out_of_100', null],
+  [/\b(?:foliage|leaves|leaf|canopy)\b/, null, 'foliage_out_of_100'],
+  [/\b(?:colou?r|green\w*|yellow\w*|brown\w*|pale)\b/, 'color_out_of_100', 'color_out_of_100'],
+  [/\bweeds?\b/, 'weed_cleanliness_out_of_100', null],
+  [/\b(?:pests?|insects?)\b/, null, 'pest_out_of_100'],
+  [/\b(?:water\s+stress|drought)\b/, null, 'water_stress_out_of_100'],
+  [/\b(?:stress\w*|damage\w*)\b/, 'stress_damage_out_of_100', null],
 ];
 // Clauses: a "not low; it was high" sentence is judged clause by clause
 // (Codex P1 #5964 r42).
@@ -1521,13 +1531,18 @@ function contradictsHealth(text, facts) {
   const sheetClauses = sheet.split(/[.;!?"]+|\\n/).filter(Boolean);
   return clausesOf(text).some((clause) => {
     const lower = clause.toLowerCase();
-    if (!HEALTH_SUBJECT.test(lower) || NOT_CONFIRMED_RE.test(lower)) return false;
+    if (!HEALTH_SUBJECT.test(lower) || UNCERTAIN_RE.test(lower)) return false;
+    // "Not healthy" is a bad verdict and "not poor" a good one (Codex P1 #5964 r52).
+    const negated = NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower);
     const claimed = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower));
     const sameDimension = (part) => (claimed.length ? claimed.some(([re]) => re.test(part)) : !HEALTH_DIMENSIONS.some(([re]) => re.test(part)));
     const has = (word) => sheetClauses.some((part) => new RegExp(`\\b${word}`).test(part) && sameDimension(part));
     // Each dimension is judged on its own score: "Density is excellent" on a
     // density of 20 fails even when the overall is 72 (Codex P1 #5964 r42).
-    const scores = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower)).map(([, key]) => facts?.lawn_assessment?.[key]);
+    const treeTrends = facts?.tree_shrub_report?.trends || {};
+    const scores = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower))
+      .map(([, lawnKey, treeKey]) => (lawnKey ? facts?.lawn_assessment?.[lawnKey] : null) ?? (treeKey ? treeTrends[treeKey]?.to?.value : null))
+      .filter((value) => value != null);
     // Plants, shrubs and trees take the Tree & Shrub score (Codex P1 #5964 r44).
     const plantScore = facts?.tree_shrub_report?.plant_health_score_out_of_100;
     const overall = PLANT_SUBJECT.test(lower) && plantScore != null ? [plantScore]
@@ -1537,8 +1552,13 @@ function contradictsHealth(text, facts) {
     const used = (words) => words.filter((word) => new RegExp(`\\b${word}\\b`).test(lower));
     // A score that plainly disagrees wins over any sheet wording; between the
     // bands, wording from the same dimension or the score may ground it.
-    return used(HEALTH_BAD).some((word) => (known.length ? known.some((n) => n >= 75) || (!has(word) && known.some((n) => n >= 60)) : !has(word)))
-      || used(HEALTH_GOOD).some((word) => (known.length ? known.some((n) => n < 50) || (!has(word) && known.some((n) => n < 70)) : !has(word)));
+    const bad = used(negated ? HEALTH_GOOD : HEALTH_BAD);
+    const good = used(negated ? HEALTH_BAD : HEALTH_GOOD);
+    // A negated verdict is judged on the score alone: "not healthy" is no
+    // sheet word.
+    const grounded = (word) => !negated && has(word);
+    return bad.some((word) => (known.length ? known.some((n) => n >= 75) || (!grounded(word) && known.some((n) => n >= 60)) : !grounded(word)))
+      || good.some((word) => (known.length ? known.some((n) => n < 50) || (!grounded(word) && known.some((n) => n < 70)) : !grounded(word)));
   });
 }
 

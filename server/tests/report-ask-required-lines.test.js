@@ -1914,3 +1914,20 @@ describe('answer screen, Codex round 51', () => {
     expect(screenAskAnswer(answer, { question, data, facts: buildReportAskFacts({ question, data }) })).toBe('method_claim');
   });
 });
+
+describe('answer screen, Codex round 52', () => {
+  test.each(['Your lawn is not healthy.', 'Your lawn health is not good.'])('a negated verdict against the score is rejected: %s', (answer) => {
+    const data = lawnData({ lawnAssessment: { scores: { overallScore: 92 } }, reportV2: { aftercare: {} } });
+    expect(screenAskAnswer(answer, { question: 'Is my lawn healthy?', data, facts: buildReportAskFacts({ data }) })).toBe('health_claim');
+  });
+
+  test('a Tree & Shrub component claim takes its own score', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 }, trends: { foliage: [{ label: 'Aug', value: 60 }, { label: 'Oct', value: 20 }] } } };
+    expect(screenAskAnswer('The foliage is excellent.', { question: 'How is the foliage?', data, facts: buildReportAskFacts({ data }) })).toBe('health_claim');
+  });
+
+  test('an N-P-K analysis leaves the product name', () => {
+    const data = lawnData({ applications: [{ product: { name: 'LESCO 15-0-15' } }, { product: { name: '24-0-11' } }], reportV2: { aftercare: {} } });
+    expect(buildReportAskFacts({ question: 'What was applied?', data }).products.map((product) => product.name)).toEqual(['LESCO', 'Fertilizer']);
+  });
+});
