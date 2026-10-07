@@ -345,8 +345,10 @@ describe('the fact sheet and prompt carry required lines', () => {
       const data = treeData({ insights: [{ headline: 'Scale signals to monitor', whatWeSaw: 'Possible scale on some foliage.' }] });
       const facts = buildReportAskFacts({ data });
       const ask = (answer, f) => screenAskAnswer(answer, { question: 'What did you see?', data, facts: f });
-      expect(ask('We saw some scale signals on the hedge.', facts)).toBeNull();
-      expect(ask('We saw some scale signals on the hedge.', {})).toBe('target_list');
+      expect(ask('We saw some scale signals on the foliage.', facts)).toBeNull();
+      expect(ask('We saw some scale signals on the foliage.', {})).toBe('target_list');
+      // A place the card does not name is not grounded (Codex P1 #5964 r51).
+      expect(ask('We saw some scale signals on the hedge.', facts)).toBe('target_list');
     });
   });
 
@@ -1875,5 +1877,40 @@ describe('answer screen, Codex round 50', () => {
     const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
     expect(ask('We found ants in the kitchen.')).toBe('target_list');
     expect(ask('You reported ants in the kitchen.')).toBeNull();
+  });
+});
+
+describe('answer screen, Codex round 51', () => {
+  const tree = {
+    serviceLine: 'tree_shrub',
+    applications: [],
+    reportV2: {
+      snapshot: { overallScore: 60 },
+      diagnosis: [{ key: 'ganoderma', label: 'Ganoderma conk', status: 'No', explanation: 'No conk observed' }],
+      trends: { overall: [{ label: 'Aug', value: 80 }, { label: 'Oct', value: 50 }] },
+    },
+  };
+  const treeFacts = buildReportAskFacts({ data: tree });
+  const askTree = (answer) => screenAskAnswer(answer, { question: 'How are my plants?', data: tree, facts: treeFacts });
+
+  test('a diagnosis row recorded as clear may not be affirmed', () => {
+    expect(askTree('We detected a Ganoderma conk.')).toBe('diagnosis_claim');
+    expect(askTree('No Ganoderma conk was observed.')).toBeNull();
+  });
+
+  test('a Tree & Shrub trend claim must run the recorded way', () => {
+    expect(askTree('Your plant health improved from 50 out of 100 to 80 out of 100.')).toBe('trend_claim');
+  });
+
+  test.each(['We found ants in the attic.', 'Ants were found in the garage.'])('a finding keeps its recorded place: %s', (answer) => {
+    const data = pestData({ applications: [], findings: [{ title: 'Ants', detail: 'Ants found in the kitchen.' }] });
+    const question = 'What did you find?';
+    expect(screenAskAnswer(answer, { question, data, facts: buildReportAskFacts({ question, data }) })).toBe('target_list');
+  });
+
+  test.each(['Alpine WSG was poured around the exterior.', 'Alpine WSG was brushed onto the exterior.', 'Alpine WSG was aerosolized outside.'])('a method off the record is rejected: %s', (answer) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside', method: 'Sprayed' }] });
+    const question = 'How was it applied?';
+    expect(screenAskAnswer(answer, { question, data, facts: buildReportAskFacts({ question, data }) })).toBe('method_claim');
   });
 });

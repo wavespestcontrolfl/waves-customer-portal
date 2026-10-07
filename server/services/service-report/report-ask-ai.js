@@ -959,6 +959,11 @@ function leaksTargetList(text, {
   ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
   if (splitSentences(text).some((sentence) => FINDING_CLAIM.test(sentence) && !UNCERTAIN_RE.test(sentence)
     && terms.some((label) => stemmedTerms(sentence).includes(label) && !visitOnly.includes(label)))) return true;
+  // The place of a finding must be on the visit's record too: ants found in
+  // the kitchen are no ants found in the attic (Codex P1 #5964 r51).
+  if (splitSentences(text).some((sentence) => FINDING_CLAIM.test(sentence) && !UNCERTAIN_RE.test(sentence)
+    && terms.some((label) => stemmedTerms(sentence).includes(label))
+    && (sentence.toLowerCase().match(FINDING_PLACE_RE) || []).some((place) => !visitOnly.includes(stemmedTerms(place).trim())))) return true;
   // Any sentence that is not a "no" or a "not sure" affirms it: "The symptoms
   // indicate root rot", "It treats termites" (Codex P1s #5964 r39).
   // "Is not labeled for termites" is a claim too; only "the report does not
@@ -966,6 +971,7 @@ function leaksTargetList(text, {
   return splitSentences(text).some((sentence) => !UNCERTAIN_RE.test(sentence)
     && terms.some((label) => stemmedTerms(sentence).includes(label) && !inFacts.includes(label)));
 }
+const FINDING_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathroom|bedroom|closet|pantry|laundry|cabinet|sink|baseboard|wall|ceiling|eave|soffit|vent|window|door|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|lawn|bed|tree|shrub|palm|hedge|driveway|sidewalk|basement|living\s+room|dining\s+room|office|stairs?)s?\b/g;
 const FINDING_CLAIM = /\b(?:we|i|our\s+tech\w*|the\s+tech\w*|your\s+tech\w*|technician|crew|team)\s+(?:\w+\s+){0,2}?(?:found|find|saw|spott\w*|observ\w*|noted|discover\w*|confirm\w*|identif\w*|detect\w*|located|turned\s+up)\b|\b(?:was|were|been|got)\s+(?:\w+\s+)?(?:found|seen|spotted|observed|noted|discovered|confirmed|identified|detected|located)\b/i;
 const UNCERTAIN_RE = /\b(?:(?:does|do|did)\s*n['’]?o?t\s+(?:say|show|list|mention|record|note|include|name|confirm|cover)|(?:is|are|was|were)\s*n['’]?o?t\s+(?:listed|recorded|noted|mentioned|shown|named|on\s+(?:the|this|your)\s+report)|not\s+(?:on|in)\s+(?:the|this|your)\s+report|no\s+(?:record|mention|note)|can['’]?t\s+(?:confirm|tell|say)|cannot\s+(?:confirm|tell|say)|unable\s+to|unclear|unknown|don['’]?t\s+know|not\s+sure|whether|if)\b/i;
 const NOT_CONFIRMED_RE = /\b(?:no|not|never|none|without|doesn['’]?t|does\s+not|didn['’]?t|did\s+not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|can['’]?t|cannot|unable|unclear|unknown|don['’]?t\s+know|whether|if)\b/i;
@@ -1610,14 +1616,15 @@ function deniesRecordedApplication(text, facts) {
 // to 80" on an 80 -> 50 trend fails (Codex P1 #5964 r46).
 const TREND_UP = /\b(?:improv\w*|increas\w*|ros(?:e|en)|rising|climb\w*|grew|grow(?:ing|n|s)?|went\s+up|gone\s+up|up\b|higher|better|gain\w*)\b/i;
 const TREND_DOWN = /\b(?:declin\w*|decreas\w*|dropp?\w*|fell|fall(?:en|ing|s)?|went\s+down|gone\s+down|down\b|lower|worse|slipp?\w*|los[st]\w*)\b/i;
-const TREND_KEYS = [[/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_cleanliness_out_of_100']];
+const TREND_KEYS = [[/\bfoliage\b/i, 'foliage_out_of_100'], [/\b(?:water\s+stress|drought)\b/i, 'water_stress_out_of_100'], [/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_cleanliness_out_of_100']];
 function contradictsTrend(text, facts) {
-  const trends = facts?.lawn_report?.trends;
+  // Tree & Shrub trends too (Codex P1 #5964 r51).
+  const trends = facts?.lawn_report?.trends || facts?.tree_shrub_report?.trends;
   if (!trends || typeof trends !== 'object') return false;
   return clausesOf(text).some((clause) => {
     if (NOT_CONFIRMED_RE.test(clause)) return false;
     const key = (TREND_KEYS.find(([re]) => re.test(clause)) || [])[1]
-      || (/\b(?:lawn|overall|health|score|grass|turf)\b/i.test(clause) ? 'overall_out_of_100' : null);
+      || (/\b(?:lawn|overall|health|score|grass|turf|plants?|shrubs?|trees?|palms?|hedges?|landscape)\b/i.test(clause) ? 'overall_out_of_100' : null);
     const trend = key && trends[key];
     const from = Number(trend?.from?.value);
     const to = Number(trend?.to?.value);
@@ -1691,9 +1698,53 @@ function deniesConcern(text, facts) {
 }
 const CONCERN_STOP = new Set('the and you your did not was were have has had any about report reported mention mentioned'.split(' '));
 
+// A Tree & Shrub diagnosis row's polarity must hold: "We detected a Ganoderma
+// conk" when the row says none was seen (Codex P1 #5964 r51).
+const DIAGNOSIS_CLEAR = /^(?:no|none|clear|not\s+(?:seen|observed|found|present)|absent|healthy|strong|stable|good|ok|okay)$/i;
+const DIAGNOSIS_PRESENT = /^(?:yes|present|detected|confirmed|needs\s+attention|urgent|watch|tracking|deficit)$/i;
+const DIAGNOSIS_GENERIC = new Set('disease diseases pests insects insect health plant plants tree trees shrub shrubs issue issues damage pressure stress overall color foliage'.split(' '));
+function contradictsDiagnosis(text, facts) {
+  const rows = asArray(facts?.tree_shrub_report?.diagnosis);
+  if (!rows.length) return false;
+  return clausesOf(text).some((clause) => {
+    const lower = clause.toLowerCase();
+    if (UNCERTAIN_RE.test(lower)) return false;
+    const negated = NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower);
+    // Scored rows are categories ("Disease 100"), not presence findings.
+    return rows.filter((row) => row.score_out_of_100 == null).some((row) => {
+      const words = String(row.area || '').toLowerCase().split(/[^a-z]+/).filter((word) => word.length > 3 && !DIAGNOSIS_GENERIC.has(word));
+      if (!words.length || !words.every((word) => lower.includes(word.replace(/s$/, '')))) return false;
+      const status = String(row.status || '').trim();
+      const clear = DIAGNOSIS_CLEAR.test(status) || /^\s*no\b|\bnot\s+(?:seen|observed|found|present)\b/i.test(String(row.explanation || ''));
+      const present = !clear && DIAGNOSIS_PRESENT.test(status);
+      return (clear && !negated) || (present && negated);
+    });
+  });
+}
+
+// A method verb must fit how_applied even when it is not on a known list:
+// "Alpine WSG was poured" on a sprayed record (Codex P1 #5964 r51).
+const NEUTRAL_PARTICIPLES = new Set('applied used treated placed listed recorded noted mentioned included needed required chosen selected picked labeled labelled approved designed made intended scheduled completed finished targeted aimed rated registered put done found seen observed reported based focused concentrated limited kept left allowed'.split(' '));
+const PRODUCT_VERB_RE = /\b(?:was|were|got|been|is|are)\s+(?:\w+ly\s+)?([a-z]+(?:ed|en))\b|\b(?:we|i|tech\w*|technician|crew)\s+(?:\w+ly\s+)?([a-z]+ed)\b/gi;
+function statesUnrecordedMethod(text, facts) {
+  const products = asArray(facts?.products).filter((product) => product?.name && product.how_applied);
+  if (!products.length) return false;
+  return clausesOf(text).some((clause) => {
+    const named = products.filter((product) => mentions(clause, product));
+    if (!named.length) return false;
+    const verbs = [...clause.matchAll(PRODUCT_VERB_RE)].map((m) => (m[1] || m[2]).toLowerCase()).filter((verb) => !NEUTRAL_PARTICIPLES.has(verb));
+    return verbs.some((verb) => {
+      const stem = verb.replace(/(?:ied)$/, 'y').replace(/(?:ed|en)$/, '').replace(/(.)\1$/, '$1').slice(0, 5);
+      return named.every((product) => !normalizeKey(product.how_applied).includes(stem));
+    });
+  });
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
+  ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],
   ['denies_concern', (text, { facts }) => deniesConcern(text, facts)],
   ['denies_ingredient', (text, { facts }) => deniesRecordedIngredient(text, facts)],
   ['denies_findings', (text, { facts }) => deniesRecordedFindings(text, facts)],
