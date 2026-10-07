@@ -2021,8 +2021,16 @@ function ingestsProduct(text) {
 // The noun forms ("took a bite of the bait") already name their product.
 const NOUN_INGESTION = /\b(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\s+(?:\w+\s+){0,4}?(?:bites?|mouthfuls?|sips?|tastes?|licks?|nibbles?|gulps?|swallows?|swigs?|drinks?|chunks?|pieces?)\s+(?:of|out\s+of|from)\b/i;
 function boundToProduct(sentence) {
-  return OBJECT_BOUND_INGESTION.test(sentence) || (NOUN_INGESTION.test(sentence) && INGESTION_VERB.test(sentence));
+  if (OBJECT_BOUND_INGESTION.test(sentence) || (NOUN_INGESTION.test(sentence) && INGESTION_VERB.test(sentence))) return true;
+  // Otherwise an eating verb and a product word in one sentence still count,
+  // unless the product is named only as a time ("after the spray dried"):
+  // a missed exposure is worse than a needless safety answer (pre-push audit,
+  // #5964: "swallowed the liquid you sprayed").
+  const rest = sentence.replace(TIME_CLAUSE_RE, ' ');
+  return EAT_VERB_RE.test(rest) && EXPOSURE_WORD.test(rest);
 }
+const TIME_CLAUSE_RE = /\b(?:after|once|when|before|until|since)\s+(?:the\s+|it\s+|that\s+|your\s+)?(?:\w+\s+){0,2}?(?:dried|dries|dry|had\s+dried|was\s+dry|were\s+dry|is\s+dry|went\s+on|was\s+applied|was\s+sprayed|was\s+done|finished)\b/gi;
+const EAT_VERB_RE = new RegExp(`\\b${EAT_VERBS}\\b`, 'i');
 
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');

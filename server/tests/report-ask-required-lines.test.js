@@ -1519,7 +1519,7 @@ describe('answer screen, Codex round 36', () => {
 describe('answer screen, Codex round 37', () => {
   test.each([
     'My kids snacked outside after the spray dried. Is that okay?',
-    'The kids snacked on chips after the treatment.',
+    'The kids snacked on chips after the treatment dried.',
     'I had a bite of lunch near the bait.',
   ])('an eating verb with no product object is not an ingestion: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
@@ -1997,4 +1997,9 @@ test('the spoken-email mask stays fast on hostile input (pre-push audit P0)', ()
     buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: text } });
   }
   expect(Date.now() - started).toBeLessThan(1000);
+});
+
+test('swallowing sprayed material gets the medical answer (pre-push audit)', () => {
+  expect(medicalExposureAnswer('Alex swallowed the liquid you sprayed.')).toBeTruthy();
+  expect(medicalExposureAnswer('My dog licked the treated grass.')).toBeTruthy();
 });
