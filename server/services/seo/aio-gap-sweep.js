@@ -438,7 +438,10 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
       // Durable claim before the paid call: a crash after DataForSEO accepts
       // the task leaves the row 'running', never 'pending', so it is not paid
       // for twice (recoverInterrupted settles it on a later tick).
+      // The claim itself requires the run to still be open, so a cancel that
+      // lands after runStillOpen cannot let a new paid call start.
       const claimed = await db('seo_aio_sweep_results').where({ id: row.id, status: 'pending' })
+        .whereRaw("exists (select 1 from seo_aio_sweep_runs r where r.id = ? and r.status = 'open')", [run.id])
         .update({ status: 'running', captured_at: db.fn.now() });
       if (!claimed) { inFlight -= 1; continue; }
       let update;

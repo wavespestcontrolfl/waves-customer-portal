@@ -327,6 +327,15 @@ describe('processSweepChunk', () => {
     expect(mockState.runs[0]).toMatchObject({ attempted: 1, cost_usd: 0.004 });
   });
 
+  test('the claim requires the run to still be open in the same statement', async () => {
+    openRun();
+    pendingRow('q');
+    dataforseo.request.mockResolvedValue(serp([]));
+    await sweep.processSweepChunk();
+    const claim = mockState.queries.find((x) => x.table === 'seo_aio_sweep_results' && x.update && x.update.status === 'running');
+    expect(claim.rawWheres.join(' ')).toMatch(/exists \(select 1 from seo_aio_sweep_runs r where r\.id = \? and r\.status = 'open'\)/);
+  });
+
   test('a row is claimed as running before its paid call', async () => {
     openRun();
     pendingRow('q');

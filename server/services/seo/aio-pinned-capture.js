@@ -78,7 +78,9 @@ function parseSerp(items) {
   const references = arr(aio.references).map((r) => ({
     url: r?.url || null, title: r?.title || null, domain: r?.domain || null, text: r?.text || r?.snippet || null,
   }));
-  const markdown = aio.markdown || arr(aio.items).map((e) => e?.text || '').filter(Boolean).join('\n');
+  // Without a top-level markdown, the answer is every part's text, nested
+  // components included.
+  const markdown = aio.markdown || parts.map((e) => e?.text || e?.markdown || '').filter(Boolean).join('\n');
   // Only URLs attached to an answer element prove a citation; top-level
   // references are pages Google MAY have used (same contract as
   // googleAnswerProbe in llm-mention-prober.js).
