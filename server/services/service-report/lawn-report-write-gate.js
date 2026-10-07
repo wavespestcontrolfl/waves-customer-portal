@@ -96,7 +96,10 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     // frozen verdict shows coverage exactly as with the gate off. Gate off: no
     // write. Independent of the report synthesis, so it runs before the
     // reportV2 check.
-    if (data && featureGates.lawnCoverageHideDefaultZonesLive()
+    // The joined record carries the map center drift resolution needs; a failed
+    // join falls back to the bare row, where every mark reads as trusted, so it
+    // freezes nothing (codex #6089 r7).
+    if (data && joined && featureGates.lawnCoverageHideDefaultZonesLive()
       && coverageOut.readOk === true && typeof coverageOut.defaultsOnly === 'boolean') {
       await freezeCoverageVerdict({ knex, serviceRecordId: service.id, defaultsOnly: coverageOut.defaultsOnly });
     }

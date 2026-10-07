@@ -82,6 +82,16 @@ describe('freeze at completion (write gate)', () => {
     expect(state.notes).not.toHaveProperty('lawnCoverageVerdict');
   });
 
+  test('a failed joined-record load (no map center) freezes nothing (codex #6089 r7)', async () => {
+    process.env[KEY] = 'true';
+    const { loadServiceRecordForPdf } = require('../services/service-report/pdf-queue');
+    loadServiceRecordForPdf.mockRejectedValueOnce(new Error('join failed'));
+    buildWith({ readOk: true, defaultsOnly: false });
+    const { knex, state } = fakeKnex({});
+    await run(knex);
+    expect(state.notes).not.toHaveProperty('lawnCoverageVerdict');
+  });
+
   test('gate off: no verdict statement is issued', async () => {
     buildWith({ readOk: true, defaultsOnly: true });
     const { knex, state } = fakeKnex({});
