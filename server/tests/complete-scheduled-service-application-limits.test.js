@@ -1,8 +1,7 @@
-// The closeout holds SUBMITTED products to their hard product-level count limits
-// (annual_max_apps, min_interval_days) before anything is written, so a spot product the
-// tech added by hand (Celsius, Certainty, Blindside, Arena) cannot go past its yearly count
-// just because the plan never listed it. Mocked database; the real counts are in
-// lawn-v13-count-caps.db.test.js.
+// The closeout never refuses for a hard product count limit (annual_max_apps, min_interval_days):
+// it records what was applied and FLAGS an over-limit application (or an unreadable limit) for the
+// office. Mocked database; the real counts are in lawn-v13-count-caps.db.test.js and the real
+// closeout in complete-scheduled-service-application-limits-postgres.test.js.
 process.env.JWT_SECRET = 'completion-service-test-secret';
 
 jest.mock('../models/db', () => {
@@ -31,7 +30,7 @@ jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(
 const db = require('../models/db');
 const attempts = require('../services/completion-attempts');
 const limits = require('../services/application-limits');
-const { completeScheduledService, submittedProductLimitBlockPayload, applicationLimitBlockStatus } = require('../services/complete-scheduled-service');
+const { completeScheduledService, submittedProductLimitFindings, rawProductsTooManyPayload, notifyOfficeOfLimitFindings } = require('../services/complete-scheduled-service');
 const { etDateString } = require('../utils/datetime-et');
 const completionObservationCatalog = require('../../shared/service-completion-observations.json');
 
@@ -105,104 +104,107 @@ const completePastLimits = (products) => completeScheduledService({ serviceId: S
 const passed = (result) => expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
 const applied = (productId) => ({ productId, productName: 'fixture', amount: 1, unit: 'oz' });
 
-describe('closeout: submitted products against hard count limits', () => {
-  test('a submitted product already at its yearly count refuses the completion with a 422 naming it, before any record is written', async () => {
-    const result = await complete([applied(CELSIUS_ID)]);
-    expect(result.status).toBe(422);
-    expect(result.body).toMatchObject({ code: 'application_limit_reached', productId: CELSIUS_ID, limitType: 'annual_max_apps', current: 2, max: 2 });
-    expect(result.body.error).toMatch(/Celsius WG: 2\/2 applications this year/);
-    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'fixture-attempt' }),
-      expect.objectContaining({ message: 'application_limit_reached' }),
-      db,
-    );
-    // The check is scoped to the treated property and leaves the visit's own ledger rows out.
+describe('closeout: hard count limits flag, they never refuse', () => {
+  const findings = (productIds, extra = {}) => submittedProductLimitFindings({ svc: service, productIds, database: db, ...extra });
+
+  test('a submitted product already at its yearly count does NOT refuse the closeout: it passes this point and meets the next ordinary check', async () => {
+    passed(await completePastLimits([applied(CELSIUS_ID)]));
+    expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ message: 'application_limit_reached' }), expect.anything());
+    // The limits are not even read before the products are recorded.
+    expect(checkLimits).not.toHaveBeenCalled();
+  });
+
+  test('over the yearly count: one finding that names the product and carries no removal instruction', async () => {
+    const out = await findings([CELSIUS_ID]);
+    expect(out).toEqual([{
+      code: 'application_limit_exceeded', productId: CELSIUS_ID, productName: 'Celsius WG', limitType: 'annual_max_apps', current: 2, max: 2,
+      message: 'Recorded. The office will review: Celsius WG is over its yearly application limit.',
+    }]);
+    expect(out[0].message).not.toMatch(/remove|delete/i);
+    // Scoped to the treated property, leaving the visit's own ledger rows out.
     expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(Date), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
   });
 
-  test('a default product with no limit in the way is not refused by this check', async () => {
-    passed(await completePastLimits([applied(DEFAULT_ID)]));
-    // No hard count limit row on it: the checker is never asked about it.
-    expect(checkLimits).not.toHaveBeenCalled();
-    // A default product beside a capped one is still judged on its own: the capped one refuses.
-    expect((await complete([applied(DEFAULT_ID), applied(CELSIUS_ID)])).body).toMatchObject({ code: 'application_limit_reached', productId: CELSIUS_ID });
+  test('a hard minimum interval is a finding too, worded for the interval', async () => {
+    limitedIds.add(DEFAULT_ID);
+    checkLimits.mockResolvedValue({ allowed: false, warnings: [], blocks: [{ type: 'min_interval_days', matchType: 'product', message: 'only 10 days since last app (min 60).', current: 10, max: 60 }] });
+    const out = await findings([DEFAULT_ID]);
+    expect(out).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'min_interval_days', current: 10, max: 60, message: 'Recorded. The office will review: Default fixture is over its minimum days between applications.' })]);
   });
 
-  test('a warning, an active-ingredient cap or a rate limit is not this check\'s hard count block', async () => {
+  test('a default product with no hard count limit is never asked of the checker; warnings, ingredient caps and rate limits are not findings', async () => {
+    expect(await findings([DEFAULT_ID])).toEqual([]);
+    expect(checkLimits).not.toHaveBeenCalled();
     checkLimits.mockResolvedValue({ allowed: false, warnings: [], blocks: [
       { type: 'annual_max_rate', matchType: 'active_ingredient', matchValue: 'prodiamine', message: 'cap' },
       { type: 'annual_max_rate', matchType: 'product', message: 'rate' },
     ] });
+    expect(await findings([CELSIUS_ID])).toEqual([]);
+  });
+
+  test('gate off, a non-lawn visit and an empty list read nothing', async () => {
+    delete process.env.GATE_LAWN_V13;
+    expect(await findings([CELSIUS_ID])).toEqual([]);
+    process.env.GATE_LAWN_V13 = 'true';
+    service.service_type = 'Quarterly Pest Control';
+    expect(await findings([CELSIUS_ID])).toEqual([]);
+    service.service_type = 'Every 6 Weeks Lawn Care Service';
+    expect(await findings([])).toEqual([]);
+    expect(queried).toEqual([]);
+    expect(checkLimits).not.toHaveBeenCalled();
+  });
+
+  test('a limits read that fails is a finding, never a refusal: application_limit_check_unavailable', async () => {
+    checkLimits.mockRejectedValue(new Error('read failed'));
+    expect(await findings([CELSIUS_ID])).toEqual([expect.objectContaining({
+      code: 'application_limit_check_unavailable', productId: CELSIUS_ID,
+      message: 'Recorded. The office will review: product limits could not be checked for this visit.',
+    })]);
+    // The closeout itself still passes this point.
     passed(await completePastLimits([applied(CELSIUS_ID)]));
   });
 
-  test('a hard minimum interval refuses too', async () => {
-    limitedIds.add(DEFAULT_ID);
-    checkLimits.mockResolvedValue({ allowed: false, warnings: [], blocks: [{ type: 'min_interval_days', matchType: 'product', message: 'Dimension: only 10 days since last app (min 60).', current: 10, max: 60 }] });
-    const result = await complete([applied(DEFAULT_ID)]);
-    expect(result).toMatchObject({ status: 422, body: { code: 'application_limit_reached', limitType: 'min_interval_days' } });
-  });
-
-  test('gate off, a non-lawn visit and a visit with no submitted product read no limits', async () => {
-    delete process.env.GATE_LAWN_V13;
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: [applied(CELSIUS_ID)], database: db })).toBeNull();
-    process.env.GATE_LAWN_V13 = 'true';
-    service.service_type = 'Quarterly Pest Control';
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: [applied(CELSIUS_ID)], database: db })).toBeNull();
-    service.service_type = 'Every 6 Weeks Lawn Care Service';
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: [], database: db })).toBeNull();
-    expect(checkLimits).not.toHaveBeenCalled();
-  });
-
-  test('a failed limits read fails closed: a retryable 503, the attempt marked failed, nothing written', async () => {
-    checkLimits.mockRejectedValue(new Error('read failed'));
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: [applied(CELSIUS_ID)], database: db }))
-      .toMatchObject({ code: 'application_limit_check_unavailable', productId: CELSIUS_ID, error: 'Could not check product limits — try again.' });
-    const result = await complete([applied(CELSIUS_ID)]);
-    expect(result).toMatchObject({ status: 503, body: { code: 'application_limit_check_unavailable' } });
-    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'fixture-attempt' }),
-      expect.objectContaining({ message: 'application_limit_check_unavailable' }),
-      db,
-    );
-  });
-
-  test('a reached limit stays a 422; only an unreadable limit is a 503', () => {
-    expect(applicationLimitBlockStatus({ code: 'application_limit_reached' })).toBe(422);
-    expect(applicationLimitBlockStatus({ code: 'application_limit_check_unavailable' })).toBe(503);
-  });
-
-  test('the submitted list is bounded: more than 100 distinct product ids is a 400 before any query; duplicates count once', async () => {
-    const many = Array.from({ length: 101 }, (_, i) => applied(`00000000-0000-4000-8000-${String(i + 1000).padStart(12, '0')}`));
-    const result = await complete(many);
-    expect(result).toMatchObject({ status: 400, body: { code: 'too_many_submitted_products', max: 100 } });
-    expect(checkLimits).not.toHaveBeenCalled();
-    // The helper itself reads nothing before it refuses.
-    queried.length = 0;
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: many, database: db })).toMatchObject({ code: 'too_many_submitted_products' });
-    expect(queried).toEqual([]);
-    // 100 distinct ids, each repeated: within the bound.
-    const hundred = Array.from({ length: 100 }, (_, i) => applied(`00000000-0000-4000-8000-${String(i + 2000).padStart(12, '0')}`));
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: [...hundred, ...hundred], database: db })).toBeNull();
-    expect(applicationLimitBlockStatus({ code: 'too_many_submitted_products' })).toBe(400);
+  test('a failed batch read is one unavailable finding', async () => {
+    db.mockImplementation(() => { throw new Error('synthetic outage'); });
+    expect(await findings([CELSIUS_ID])).toEqual([expect.objectContaining({ code: 'application_limit_check_unavailable' })]);
   });
 
   test('two batched reads whatever the list: unknown, malformed and duplicate ids cost no per-id query', async () => {
-    const unknown = Array.from({ length: 50 }, (_, i) => applied(`00000000-0000-4000-8000-${String(i + 3000).padStart(12, '0')}`));
-    const out = await submittedProductLimitBlockPayload({
-      svc: service,
-      products: [...unknown, applied('not-a-uuid'), applied(CELSIUS_ID), applied(CELSIUS_ID), applied(DEFAULT_ID), { productId: null }, null],
-      database: db,
-    });
-    expect(out).toMatchObject({ code: 'application_limit_reached', productId: CELSIUS_ID, productName: 'Celsius WG' });
+    const unknown = Array.from({ length: 50 }, (_, i) => `00000000-0000-4000-8000-${String(i + 3000).padStart(12, '0')}`);
+    const out = await findings([...unknown, 'not-a-uuid', CELSIUS_ID, CELSIUS_ID, DEFAULT_ID, null]);
+    expect(out).toHaveLength(1);
     expect(queried).toEqual(['products_catalog', 'product_limits']);
-    // Only the one product that carries a hard count limit reaches the checker, once.
     expect(checkLimits).toHaveBeenCalledTimes(1);
-  });
-
-  test('only unknown ids: the catalog is read once, nothing else is asked', async () => {
-    expect(await submittedProductLimitBlockPayload({ svc: service, products: [applied('00000000-0000-4000-8000-000000009999')], database: db })).toBeNull();
+    queried.length = 0;
+    expect(await findings(['00000000-0000-4000-8000-000000009999'])).toEqual([]);
     expect(queried).toEqual(['products_catalog']);
-    expect(checkLimits).not.toHaveBeenCalled();
+  });
+});
+
+describe('the raw products array is capped at the closeout entry', () => {
+  test('more than 200 entries is a 400 before the claim, a lookup or any write; 200 is fine', async () => {
+    const many = Array.from({ length: 201 }, () => applied(DEFAULT_ID));
+    expect(await complete(many)).toMatchObject({ status: 400, body: { code: 'too_many_submitted_products', max: 200 } });
+    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+    expect(queried).toEqual([]);
+    expect(rawProductsTooManyPayload(many.slice(0, 200))).toBeNull();
+    expect(rawProductsTooManyPayload(undefined)).toBeNull();
+    expect(rawProductsTooManyPayload(many)).toMatchObject({ code: 'too_many_submitted_products' });
+  });
+});
+
+describe('the office notification for a finding', () => {
+  const record = { id: 'record-1' };
+  test('one admin notification per finding, deduped per record + code + product, naming the limit; a failure never throws', async () => {
+    const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n1' });
+    const over = { code: 'application_limit_exceeded', productId: CELSIUS_ID, productName: 'Celsius WG', limitType: 'annual_max_apps', current: 2, max: 2 };
+    await notifyOfficeOfLimitFindings({ svc: service, record, findings: [over, { code: 'application_limit_check_unavailable', productId: null }] });
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify.mock.calls[0][0]).toBe('service');
+    expect(notify.mock.calls[0][2]).toMatch(/Celsius WG .* over its yearly application limit \(2 of 2 already used\)/);
+    expect(notify.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}`, link: `/admin/customers?customerId=${service.customer_id}` });
+    expect(notify.mock.calls[1][3].dedupeKey).toBe('application-limit-finding:record-1:application_limit_check_unavailable:all');
+    notify.mockRejectedValue(new Error('bell down'));
+    await expect(notifyOfficeOfLimitFindings({ svc: service, record, findings: [over] })).resolves.toBeUndefined();
   });
 });

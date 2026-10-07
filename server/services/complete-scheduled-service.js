@@ -1927,131 +1927,122 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
   };
 }
 
-// Hard product-level count limits (annual_max_apps, min_interval_days) judged on the products the
-// tech SUBMITTED, so a conditional or hand-added spot product (Celsius, Certainty, Blindside,
-// Arena) is held to its yearly count the same as a protocol default. Read through the one
-// application-limits reader, scoped to the treated property and leaving this visit's own ledger
-// rows out (a retry never counts itself). Lawn visits under GATE_LAWN_V13 only: the caps are v13
-// recipe rules. A failed read never blocks a closeout (the savepoint keeps the transaction usable).
-// Returns the first hard block as a 422 body, or null. A limits read that fails is NOT a pass: it
-// returns a 503 'application_limit_check_unavailable' body (see applicationLimitBlockStatus).
-//
-// `lock: true` (the closeout's record transaction, right before the compliance-ledger rows are
-// written) first takes transaction-scoped advisory locks, in sorted order, so two closeouts that
-// would both pass on the same history are serialized: the second reads the first's committed
-// ledger rows and is refused. Two keys per product: customer + product + year (the yearly count
-// reads the calendar year) and customer + product (a minimum interval reads the latest earlier
-// application whatever its year, so a December and a January closeout must meet on one key).
-// The keys use the style of the other closeout locks (hashtextextended of a text key).
-//
-// The submitted list is bounded (MAX_SUBMITTED_LIMIT_PRODUCTS distinct ids, else a 400), deduped
-// and read in two batched queries (the catalog rows, the products that carry a hard count limit);
-// only products with such a limit go through the checker, and an unknown id costs no query.
-const HARD_COUNT_LIMIT_TYPES = new Set(['annual_max_apps', 'min_interval_days']);
-const APPLICATION_LIMIT_UNAVAILABLE_CODE = 'application_limit_check_unavailable';
-// 503 (retryable) when the limits could not be read, 422 when a limit is reached.
-const APPLICATION_LIMIT_TOO_MANY_CODE = 'too_many_submitted_products';
-const MAX_SUBMITTED_LIMIT_PRODUCTS = 100;
-const APPLICATION_LIMIT_ERROR_CODES = new Set(['application_limit_reached', APPLICATION_LIMIT_UNAVAILABLE_CODE, APPLICATION_LIMIT_TOO_MANY_CODE]);
-const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// 503 (retryable) when the limits could not be read, 400 for an oversized list, 422 when a limit is reached.
-const applicationLimitBlockStatus = (payload) => {
-  if (payload && payload.code === APPLICATION_LIMIT_UNAVAILABLE_CODE) return 503;
-  if (payload && payload.code === APPLICATION_LIMIT_TOO_MANY_CODE) return 400;
-  return 422;
+// Hard product-level count limits (annual_max_apps, min_interval_days), judged AFTER a closeout
+// recorded its products. The plan keeps the hard block (prevention before the visit); the closeout
+// never refuses for a count or interval limit, because a product that was physically applied must
+// stay in the application ledger and the FDACS export. An over-limit application is FLAGGED for the
+// office instead (an advisory on the completion plus an admin notification), and a limits read that
+// fails is flagged too ('application_limit_check_unavailable'). Lawn visits under GATE_LAWN_V13 only.
+const HARD_COUNT_LIMIT_LABELS = {
+  annual_max_apps: 'yearly application limit',
+  min_interval_days: 'minimum days between applications',
 };
-// The lock scope is the CUSTOMER, not the property: the history query counts an application whose
-// property is unknown (a legacy visit with no property, a ledger row with no visit) against every
-// property of the customer, so a property-linked closeout and a null-property one for the same
-// product must meet on one key. Closeouts of one customer and product are rare, so the wider
-// scope costs nothing in practice.
-function applicationLimitLockKey(svc, productId, serviceDate) {
-  const day = serviceDate || svc.scheduled_date || etDateString();
-  const year = (day instanceof Date ? etDateString(day) : String(day)).slice(0, 4);
-  return `application-limit:customer-${svc.customer_id}:${productId}:${year}`;
+const MAX_RAW_SUBMITTED_PRODUCTS = 200;
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// An oversized products array is refused up front (a 400), before anything reads it.
+function rawProductsTooManyPayload(products) {
+  if (!Array.isArray(products) || products.length <= MAX_RAW_SUBMITTED_PRODUCTS) return null;
+  return {
+    error: `Too many products on one visit (${products.length}; the most allowed is ${MAX_RAW_SUBMITTED_PRODUCTS}).`,
+    code: 'too_many_submitted_products',
+    max: MAX_RAW_SUBMITTED_PRODUCTS,
+  };
 }
-// The minimum interval's key: no year, so a December and a January closeout serialize.
-function applicationLimitIntervalLockKey(svc, productId) {
-  return `application-limit:customer-${svc.customer_id}:${productId}`;
+
+function overLimitFinding(productId, productName, block) {
+  const label = HARD_COUNT_LIMIT_LABELS[block.type] || 'limit';
+  return {
+    code: 'application_limit_exceeded',
+    productId,
+    productName,
+    limitType: block.type,
+    current: block.current ?? null,
+    max: block.max ?? null,
+    message: `Recorded. The office will review: ${productName || 'a product'} is over its ${label}.`,
+  };
 }
-async function submittedProductLimitBlockPayload({ svc, products = [], serviceDate = null, database = db, lock = false } = {}) {
-  if (!svc || !Array.isArray(products)) return null;
-  if (require('../config/feature-gates').lawnV13Live?.() !== true) return null;
-  if (detectServiceLine(svc.service_type) !== 'lawn') return null;
-  const distinct = [...new Set(products.map((p) => p && p.productId).filter(Boolean).map(String))];
-  if (distinct.length > MAX_SUBMITTED_LIMIT_PRODUCTS) {
-    return {
-      error: `Too many different products on one visit (${distinct.length}; the most allowed is ${MAX_SUBMITTED_LIMIT_PRODUCTS}).`,
-      code: APPLICATION_LIMIT_TOO_MANY_CODE,
-      max: MAX_SUBMITTED_LIMIT_PRODUCTS,
-    };
+
+function limitCheckUnavailableFinding(productId = null) {
+  return {
+    code: 'application_limit_check_unavailable',
+    productId,
+    message: 'Recorded. The office will review: product limits could not be checked for this visit.',
+  };
+}
+
+// The catalog names of the given ids that carry a hard product-level count limit: two batched
+// reads whatever the list length (an unknown id costs nothing more).
+async function hardLimitedProductNames(database, ids) {
+  const rows = await savepointRead(database, (k) => k('products_catalog').whereIn('id', ids).select('id', 'name'));
+  const known = (rows || []).map((row) => String(row.id));
+  if (!known.length) return new Map();
+  const limitRows = await savepointRead(database, (k) => k('product_limits')
+    .whereIn('product_id', known)
+    .where({ match_type: 'product', severity: 'hard_block' })
+    .whereIn('limit_type', Object.keys(HARD_COUNT_LIMIT_LABELS))
+    .select('product_id'));
+  const limited = new Set((limitRows || []).map((row) => String(row.product_id)));
+  return new Map(rows.filter((row) => limited.has(String(row.id))).map((row) => [String(row.id), row.name]));
+}
+
+// The finding for one product: an over-limit one, an unavailable one when the read fails, or null.
+async function productLimitFinding({ svc, productId, productName, checkDate, database }) {
+  try {
+    const result = await savepointRead(database, (k) => require('../services/application-limits')
+      .checkLimits(svc.customer_id, productId, checkDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }));
+    const hard = (result.blocks || []).find((b) => b.matchType === 'product' && HARD_COUNT_LIMIT_LABELS[b.type]);
+    return hard ? overLimitFinding(productId, productName, hard) : null;
+  } catch (err) {
+    logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
+    return limitCheckUnavailableFinding(productId);
   }
-  // A malformed id cannot be a catalog row: skipped here, never sent to the database.
-  const candidates = distinct.filter((id) => UUID_SHAPE.test(id));
-  if (!candidates.length) return null;
-  const LimitChecker = require('../services/application-limits');
-  const checkDate = toETNoonServiceDate(serviceDate || svc.scheduled_date);
-  let names;
+}
+
+// Every finding for the products a closeout recorded (ids from its ledger rows or its submitted
+// list). Never throws: a failed batch read is one 'unavailable' finding.
+async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db } = {}) {
+  if (!svc || require('../config/feature-gates').lawnV13Live?.() !== true) return [];
+  if (detectServiceLine(svc.service_type) !== 'lawn') return [];
+  const ids = [...new Set((productIds || []).filter(Boolean).map(String))].filter((id) => UUID_SHAPE.test(id));
+  if (!ids.length) return [];
   let limited;
   try {
-    // Two batched reads, whatever the list length: the catalog rows, then which of those carry
-    // a hard product-level count limit. Fail closed like the checker read below.
-    const catalogRows = await savepointRead(database, (k) => k('products_catalog').whereIn('id', candidates).select('id', 'name'));
-    names = new Map((catalogRows || []).map((row) => [String(row.id), row.name]));
-    const known = [...names.keys()];
-    const limitRows = known.length
-      ? await savepointRead(database, (k) => k('product_limits')
-        .whereIn('product_id', known)
-        .where({ match_type: 'product', severity: 'hard_block' })
-        .whereIn('limit_type', [...HARD_COUNT_LIMIT_TYPES])
-        .select('product_id'))
-      : [];
-    limited = new Set((limitRows || []).map((row) => String(row.product_id)));
+    limited = await hardLimitedProductNames(database, ids);
   } catch (err) {
-    logger.warn('completion application limits: batch read failed, refusing the closeout (retryable)', { serviceId: svc.id, error: err?.message });
-    return { error: 'Could not check product limits — try again.', code: APPLICATION_LIMIT_UNAVAILABLE_CODE };
+    logger.warn('completion application limits: batch read failed, flagging for the office', { serviceId: svc.id, error: err?.message });
+    return [limitCheckUnavailableFinding()];
   }
-  const ids = candidates.filter((id) => limited.has(id));
-  if (!ids.length) return null;
-  if (lock && database.isTransaction) {
-    const keys = [...new Set(ids.flatMap((productId) => [
-      applicationLimitLockKey(svc, productId, serviceDate),
-      applicationLimitIntervalLockKey(svc, productId),
-    ]))].sort();
-    for (const key of keys) await database.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+  const checkDate = toETNoonServiceDate(serviceDate || svc.scheduled_date);
+  const findings = [];
+  for (const [productId, productName] of limited) {
+    const finding = await productLimitFinding({ svc, productId, productName, checkDate, database });
+    if (finding) findings.push(finding);
   }
-  for (const productId of ids) {
-    let result;
+  return findings;
+}
+
+// The office's side of a finding: one admin notification per product and finding code (deduped, so
+// a retry or a resume rings once). Never throws and never blocks the closeout.
+async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
+  const notifications = require('../services/notification-service');
+  for (const finding of findings) {
+    const over = finding.code === 'application_limit_exceeded';
+    const title = over ? 'Product over its limit — review' : 'Product limits not checked — review';
+    const body = over
+      ? `${finding.productName || 'A product'} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${finding.current} of ${finding.max} already used). Review it and report it if needed.`
+      : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
     try {
-      result = await savepointRead(database, (k) => LimitChecker.checkLimits(svc.customer_id, productId, checkDate, k, {
-        propertyId: svc.property_id || null,
-        excludeScheduledServiceId: svc.id,
-      }));
+      await notifications.notifyAdmin('service', title, body, {
+        link: `/admin/customers?customerId=${svc.customer_id}`,
+        bell: true,
+        metadata: { ...finding, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey: `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}` },
+        dedupeKey: `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}`,
+      });
     } catch (err) {
-      // Fail CLOSED, like the v13 planner: a limit that cannot be read cannot be passed. The
-      // savepoint has already rolled the failed read back, so the caller's transaction is usable
-      // (it rolls the completion back); the attempt is marked failed and the tech retries.
-      logger.warn('completion application limits: read failed, refusing the closeout (retryable)', { serviceId: svc.id, productId, error: err?.message });
-      return {
-        error: 'Could not check product limits — try again.',
-        code: APPLICATION_LIMIT_UNAVAILABLE_CODE,
-        productId,
-      };
+      logger.error(`[dispatch] application-limit finding notification failed (non-blocking): ${err.message}`);
     }
-    const hard = (result.blocks || []).find((b) => b.matchType === 'product' && HARD_COUNT_LIMIT_TYPES.has(b.type));
-    if (!hard) continue;
-    const productName = names.get(productId) || null;
-    return {
-      error: `${hard.message} Remove ${productName || 'this product'} from the products applied, or ask the office.`,
-      code: 'application_limit_reached',
-      productId,
-      productName,
-      limitType: hard.type,
-      current: hard.current ?? null,
-      max: hard.max ?? null,
-    };
   }
-  return null;
 }
 
 function completionOwnershipError({ role, actorTechnicianId, assignedTechnicianId }) {
@@ -2900,6 +2891,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // change takes too (service-photos.js lockStagedPhotoForChange).
       photoCaptionsSeen,
     } = completionInput.body;
+    // An oversized products array is refused before anything reads it (no claim, no writes).
+    const tooManyProducts = rawProductsTooManyPayload(products);
+    if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
     const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -4614,22 +4608,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           db,
         );
         return ({ status: 422, body: internalOnlyProductsBlock });
-      }
-      // Hard count limits on the submitted products, before anything is written (and so before
-      // the compliance-ledger rows exist). An issued-invoice closeout carries no application evidence.
-      const limitBlock = issuedInvoiceCloseout ? null : await submittedProductLimitBlockPayload({
-        svc,
-        products,
-        serviceDate: isBackfillCompletion ? backfillPlan.serviceDate : etDateString(),
-        database: db,
-      });
-      if (limitBlock) {
-        await CompletionAttempts.markCompletionAttemptFailed(
-          completionAttempt,
-          new Error(limitBlock.code),
-          db,
-        );
-        return ({ status: applicationLimitBlockStatus(limitBlock), body: limitBlock });
       }
     }
 
@@ -7941,20 +7919,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Incomplete visits are included on purpose — any product logged
         // was physically applied regardless of the visit outcome.
         if (insertedServiceProducts.length) {
-          // The authoritative hard-limit check (annual_max_apps / min_interval_days), serialized with
-          // the ledger write by a customer + product (+ year) lock held to commit: two closeouts that
-          // would both pass on the same history cannot both write. The earlier check at the claim is
-          // only a cheap early refusal.
-          if (!issuedInvoiceCloseout) {
-            const raced = await submittedProductLimitBlockPayload({
-              svc,
-              products: insertedServiceProducts.map((row) => ({ productId: row.product_id })),
-              serviceDate: completionServiceDate,
-              database: trx,
-              lock: true,
-            });
-            if (raced) throw Object.assign(new Error(raced.error), { code: raced.code, isOperational: true, limitBlock: raced });
-          }
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
         }
@@ -8457,10 +8421,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             error: 'This visit was reclassified or reassigned while its invoice was being issued — the visit stays open.',
             code: 'issued_visit_identity_changed',
           } });
-        }
-        if (err && err.limitBlock && APPLICATION_LIMIT_ERROR_CODES.has(err.code)) {
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
-          return ({ status: applicationLimitBlockStatus(err.limitBlock), body: err.limitBlock });
         }
         if (err && err.code === 'project_required_completion' && issuedInvoiceCloseout) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
@@ -9140,6 +9100,33 @@ async function completeScheduledService(completionInput, packetContext = null) {
       } catch (err) {
         if (packetEffects) throw err;
         logger.error(`[dispatch] shared-cap check failed (non-blocking): ${err.message}`);
+      }
+    }
+
+    // Hard count limits (yearly applications, minimum interval) on what this closeout recorded.
+    // The closeout never refuses for one: the products are already in the ledger. An over-limit
+    // application, or a limits read that failed, is flagged on the completion (tech-facing line,
+    // never an instruction to remove anything) and sent to the office as an admin notification
+    // (deduped per record, so a retry or a resume rings once). Never blocks.
+    if (record?.id && !issuedInvoiceCloseout) {
+      try {
+        const ledgeredForLimits = await db('property_application_history')
+          .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id');
+        const limitFindings = await submittedProductLimitFindings({
+          svc,
+          productIds: ledgeredForLimits.map((row) => row.product_id),
+          serviceDate: serviceDateOnly(record.service_date),
+          database: db,
+        });
+        if (limitFindings.length) {
+          applicationLimitAdvisory = {
+            advisory: true,
+            blocks: [...(applicationLimitAdvisory?.blocks || []), ...limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId }))],
+          };
+          await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
+        }
+      } catch (err) {
+        logger.error(`[dispatch] application-limit findings failed (non-blocking): ${err.message}`);
       }
     }
 
@@ -15467,10 +15454,9 @@ module.exports = {
   pestPressureConfigAllowsTechnicianRating,
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
-  submittedProductLimitBlockPayload,
-  applicationLimitLockKey,
-  applicationLimitIntervalLockKey,
-  applicationLimitBlockStatus,
+  submittedProductLimitFindings,
+  rawProductsTooManyPayload,
+  notifyOfficeOfLimitFindings,
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,

@@ -4,7 +4,7 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261007170000_lawn_v13_count_caps');
 const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps_wording');
-const { submittedProductLimitBlockPayload, applicationLimitBlockStatus } = require('../services/complete-scheduled-service');
+const { submittedProductLimitFindings } = require('../services/complete-scheduled-service');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
@@ -348,20 +348,20 @@ describeDb('v13 count caps through PostgreSQL', () => {
       expect(types(await check(customerId, '2026-02-12', { propertyId: other.id, excludeScheduledServiceId: past.id }))).toEqual([]);
     });
 
-    test('the closeout check applies the same reading: a December visit then a February closeout 50 days later is refused', async () => {
+    test('the closeout flag applies the same reading: a December visit then a February closeout 50 days later is flagged', async () => {
       process.env.GATE_LAWN_V13 = 'true';
       const f = await fixture(knex);
       const visit = await f.visit(0, { scheduled_date: '2026-02-08', service_type: 'Every 6 Weeks Lawn Care Service' });
       const [past] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: visit.property_id, scheduled_date: '2025-12-20', service_type: 'Lawn fixture' }).returning('*');
       const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: '2025-12-20', service_type: 'Lawn fixture' }).returning('*');
       await applied(f.customerId, '2025-12-20', { service_record_id: record.id });
-      expect(await submittedProductLimitBlockPayload({ svc: visit, products: [{ productId: hard.id }], serviceDate: '2026-02-08', database: knex }))
-        .toMatchObject({ code: 'application_limit_reached', limitType: 'min_interval_days', current: 50, max: 60 });
-      expect(await submittedProductLimitBlockPayload({ svc: visit, products: [{ productId: hard.id }], serviceDate: '2026-02-18', database: knex })).toBeNull();
+      const flagged = await submittedProductLimitFindings({ svc: visit, productIds: [hard.id], serviceDate: '2026-02-08', database: knex });
+      expect(flagged).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'min_interval_days', current: 50, max: 60 })]);
+      expect(await submittedProductLimitFindings({ svc: visit, productIds: [hard.id], serviceDate: '2026-02-18', database: knex })).toEqual([]);
     });
   });
 
-  describe('the closeout check against real history (submittedProductLimitBlockPayload)', () => {
+  describe('the closeout flag against real history (submittedProductLimitFindings)', () => {
     beforeAll(async () => { await knex('product_limits').del(); await migration.up(knex); });
     beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
 
@@ -377,171 +377,34 @@ describeDb('v13 count caps through PostgreSQL', () => {
       }
       return { visitA, visitB };
     }
-    const check = (visit, ...names) => submittedProductLimitBlockPayload({ svc: visit, products: names.map((n) => ({ productId: catalog[n].id })), serviceDate: '2026-05-12', database: knex });
+    const check = (visit, ...names) => submittedProductLimitFindings({ svc: visit, productIds: names.map((n) => catalog[n].id), serviceDate: '2026-05-12', database: knex });
 
-    test.each([CELSIUS, CERTAINTY, BLINDSIDE, ARENA])('%s: a 3rd application in the year at the same property is refused; at another property it is allowed', async (name) => {
+    test.each([CELSIUS, CERTAINTY, BLINDSIDE, ARENA])('%s: a 3rd application in the year at the same property is flagged; at another property it is not', async (name) => {
       const { visitA, visitB } = await setup(name, ['2026-02-02', '2026-03-16']);
-      expect(await check(visitA, name)).toMatchObject({ code: 'application_limit_reached', productId: catalog[name].id, productName: name, limitType: 'annual_max_apps', current: 2, max: 2 });
-      expect(await check(visitB, name)).toBeNull();
+      expect(await check(visitA, name)).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productId: catalog[name].id, productName: name, limitType: 'annual_max_apps', current: 2, max: 2 })]);
+      expect(await check(visitB, name)).toEqual([]);
     });
 
-    describe('two closeouts racing on the same history (the in-transaction check holds a property + product + year lock)', () => {
-      // Each closeout is one transaction: take the lock and judge the history (lock: true), pause as
-      // a real closeout does while it writes its other rows, write the ledger row, commit.
-      async function closeout(visit, customerId, productName, { lock, pauseMs = 150, date = '2026-05-12' }) {
-        const trx = await knex.transaction();
-        try {
-          const blocked = await submittedProductLimitBlockPayload({
-            svc: visit, products: [{ productId: catalog[productName].id }], serviceDate: date, database: trx, lock,
-          });
-          if (blocked) { await trx.rollback(); return { status: 422, code: blocked.code }; }
-          await new Promise((resolve) => setTimeout(resolve, pauseMs));
-          const [record] = await trx('service_records').insert({ customer_id: customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
-          await trx('property_application_history').insert({ customer_id: customerId, product_id: catalog[productName].id, application_date: date, application_rate: 0.085, rate_unit: 'oz', service_record_id: record.id });
-          await trx.commit();
-          return { status: 200 };
-        } catch (err) { await trx.rollback().catch(() => {}); throw err; }
-      }
-      async function raced(name) {
-        const { visitA } = await setup(name, ['2026-02-02']);
-        const second = (await knex('scheduled_services').insert({ customer_id: visitA.customer_id, property_id: visitA.property_id, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*'))[0];
-        return { visitA, second };
-      }
-
-      test.each([CELSIUS, ARENA])('%s with 1 prior application: one closeout succeeds, the other is refused 422', async (name) => {
-        const { visitA, second } = await raced(name);
-        const results = await Promise.all([
-          closeout(visitA, visitA.customer_id, name, { lock: true }),
-          closeout(second, visitA.customer_id, name, { lock: true }),
-        ]);
-        expect(results.map((r) => r.status).sort()).toEqual([200, 422]);
-        expect(results.find((r) => r.status === 422).code).toBe('application_limit_reached');
-        expect(await knex('property_application_history').where({ customer_id: visitA.customer_id, product_id: catalog[name].id }).count('* as n').first()).toMatchObject({ n: '2' });
-      });
-
-      test('without the lock both would pass and the year would hold 3 (why the lock exists)', async () => {
-        const { visitA, second } = await raced(CELSIUS);
-        const results = await Promise.all([
-          closeout(visitA, visitA.customer_id, CELSIUS, { lock: false }),
-          closeout(second, visitA.customer_id, CELSIUS, { lock: false }),
-        ]);
-        expect(results.map((r) => r.status)).toEqual([200, 200]);
-      });
-
-      test('a property-linked closeout and a null-property one for the same customer and product (1 prior) meet on one lock: one 200, one 422', async () => {
-        const { visitA } = await raced(CELSIUS);
-        const [legacy] = await knex('scheduled_services').insert({ customer_id: visitA.customer_id, property_id: null, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
-        const results = await Promise.all([
-          closeout(visitA, visitA.customer_id, CELSIUS, { lock: true }),
-          closeout(legacy, visitA.customer_id, CELSIUS, { lock: true }),
-        ]);
-        expect(results.map((r) => r.status).sort()).toEqual([200, 422]);
-        // Opposite start order: the null-property closeout first.
-        const other = await raced(CELSIUS);
-        const [legacy2] = await knex('scheduled_services').insert({ customer_id: other.visitA.customer_id, property_id: null, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
-        const reversed = await Promise.all([
-          closeout(legacy2, other.visitA.customer_id, CELSIUS, { lock: true }),
-          closeout(other.visitA, other.visitA.customer_id, CELSIUS, { lock: true }),
-        ]);
-        expect(reversed.map((r) => r.status).sort()).toEqual([200, 422]);
-        // Control: unlocked, both pass and the year holds 3.
-        const control = await raced(CELSIUS);
-        const [legacy3] = await knex('scheduled_services').insert({ customer_id: control.visitA.customer_id, property_id: null, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
-        const unlocked = await Promise.all([
-          closeout(control.visitA, control.visitA.customer_id, CELSIUS, { lock: false }),
-          closeout(legacy3, control.visitA.customer_id, CELSIUS, { lock: false }),
-        ]);
-        expect(unlocked.map((r) => r.status)).toEqual([200, 200]);
-      });
-
-      test('the same product at another property of the customer is judged on its own history (not refused), though the closeouts queue on the customer lock', async () => {
-        const { visitA } = await raced(CELSIUS);
-        const [propertyB] = await knex('customer_properties').insert({ customer_id: visitA.customer_id, address_line1: '300 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
-        const [visitB] = await knex('scheduled_services').insert({ customer_id: visitA.customer_id, property_id: propertyB.id, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
-        const results = await Promise.all([
-          closeout(visitA, visitA.customer_id, CELSIUS, { lock: true }),
-          closeout(visitB, visitA.customer_id, CELSIUS, { lock: true }),
-        ]);
-        expect(results.map((r) => r.status)).toEqual([200, 200]);
-      });
-
-      test('an unreadable history (a SQL error inside the locked transaction) fails closed: 503 code, the savepoint keeps the transaction usable, rolling back leaves no ledger row', async () => {
-        const { visitA } = await setup(CELSIUS, ['2026-02-02']);
-        const limitsModule = require('../services/application-limits');
-        const spy = jest.spyOn(limitsModule, 'checkLimits').mockImplementation(async (customerId, productId, date, k) => k.raw('SELECT * FROM table_that_does_not_exist'));
-        const trx = await knex.transaction();
-        try {
-          const unavailable = await submittedProductLimitBlockPayload({
-            svc: visitA, products: [{ productId: catalog[CELSIUS].id }], serviceDate: '2026-05-12', database: trx, lock: true,
-          });
-          expect(unavailable).toMatchObject({ code: 'application_limit_check_unavailable', productId: catalog[CELSIUS].id });
-          expect(applicationLimitBlockStatus(unavailable)).toBe(503);
-          // The failed read was rolled back to its savepoint: the transaction is still usable.
-          await expect(trx.raw('SELECT 1 AS ok')).resolves.toBeTruthy();
-        } finally {
-          spy.mockRestore();
-          await trx.rollback();
-        }
-        expect(await knex('property_application_history').where({ customer_id: visitA.customer_id, product_id: catalog[CELSIUS].id }).count('* as n').first()).toMatchObject({ n: '1' });
-        // With the read healthy again the same closeout is judged normally (1 prior: allowed).
-        expect(await check(visitA, CELSIUS)).toBeNull();
-      });
-
-      test('a December and a January closeout (a minimum interval spans the new year) meet on one lock: one succeeds, the other is refused', async () => {
-        const intervalProduct = await product('Interval fixture');
-        await knex('product_limits').insert({ product_id: intervalProduct.id, match_type: 'product', limit_type: 'min_interval_days', limit_value: 60, limit_unit: 'days', severity: 'hard_block', description: 'fixture' });
-        const f = await fixture(knex);
-        const visit = (date) => knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: date, service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*').then(([row]) => row);
-        const [december, january] = [await visit('2026-12-31'), await visit('2027-01-02')];
-        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: intervalProduct.id, application_date: '2026-10-15', application_rate: 1, rate_unit: 'oz' });
-        const results = await Promise.all([
-          closeout(december, f.customerId, 'Interval fixture', { lock: true, date: '2026-12-31' }),
-          closeout(january, f.customerId, 'Interval fixture', { lock: true, date: '2027-01-02' }),
-        ]);
-        expect(results.map((r) => r.status).sort()).toEqual([200, 422]);
-        // Without the lock the two years' keys would not have met: both pass.
-        const g = await fixture(knex);
-        const visitG = (date) => knex('scheduled_services').insert({ customer_id: g.customerId, property_id: g.property.id, scheduled_date: date, service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*').then(([row]) => row);
-        const [d2, j2] = [await visitG('2026-12-31'), await visitG('2027-01-02')];
-        await knex('property_application_history').insert({ customer_id: g.customerId, product_id: intervalProduct.id, application_date: '2026-10-15', application_rate: 1, rate_unit: 'oz' });
-        const unlocked = await Promise.all([
-          closeout(d2, g.customerId, 'Interval fixture', { lock: false, date: '2026-12-31' }),
-          closeout(j2, g.customerId, 'Interval fixture', { lock: false, date: '2027-01-02' }),
-        ]);
-        expect(unlocked.map((r) => r.status)).toEqual([200, 200]);
-      });
-
-      test('lock keys are customer + product (+ year); the interval key has no year; the property does not enter the key', () => {
-        const { applicationLimitIntervalLockKey } = require('../services/complete-scheduled-service');
-        expect(applicationLimitIntervalLockKey({ property_id: 'p1', customer_id: 'c1' }, 'prod')).toBe('application-limit:customer-c1:prod');
-        expect(applicationLimitIntervalLockKey({ property_id: null, customer_id: 'c1' }, 'prod')).toBe('application-limit:customer-c1:prod');
-        const { applicationLimitLockKey } = require('../services/complete-scheduled-service');
-        const svc = { property_id: 'p1', customer_id: 'c1' };
-        const key = applicationLimitLockKey(svc, 'prod', '2026-05-12');
-        expect(key).toBe('application-limit:customer-c1:prod:2026');
-        expect(applicationLimitLockKey({ ...svc, property_id: 'p2' }, 'prod', '2026-05-12')).toBe(key);
-        expect(applicationLimitLockKey({ ...svc, customer_id: 'c2' }, 'prod', '2026-05-12')).not.toBe(key);
-        expect(applicationLimitLockKey(svc, 'other', '2026-05-12')).not.toBe(key);
-        expect(applicationLimitLockKey(svc, 'prod', '2027-01-02')).not.toBe(key);
-        expect(applicationLimitLockKey({ property_id: null, customer_id: 'c1' }, 'prod', '2026-05-12')).toBe('application-limit:customer-c1:prod:2026');
-      });
-
-      test('the closeout takes the lock inside its record transaction, before the compliance-ledger rows are written', () => {
-        const source = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-        const lockedCheck = source.indexOf('database: trx,\n              lock: true,');
-        const ledgerWrite = source.indexOf('ComplianceService.createComplianceRecords(record.id, { trx })');
-        expect(lockedCheck).toBeGreaterThan(0);
-        expect(ledgerWrite).toBeGreaterThan(lockedCheck);
-      });
-    });
-
-    test('the 2nd application is allowed, and a default product with no limit row is unaffected beside a capped one', async () => {
+    test('an unreadable history (a SQL error inside a transaction) is an unavailable finding, never a throw; the savepoint keeps the transaction usable', async () => {
       const { visitA } = await setup(CELSIUS, ['2026-02-02']);
-      expect(await check(visitA, CELSIUS)).toBeNull();
+      const limitsModule = require('../services/application-limits');
+      const spy = jest.spyOn(limitsModule, 'checkLimits').mockImplementation(async (customerId, productId, date, k) => k.raw('SELECT * FROM table_that_does_not_exist'));
+      const trx = await knex.transaction();
+      try {
+        const found = await submittedProductLimitFindings({ svc: visitA, productIds: [catalog[CELSIUS].id], serviceDate: '2026-05-12', database: trx });
+        expect(found).toEqual([expect.objectContaining({ code: 'application_limit_check_unavailable', productId: catalog[CELSIUS].id })]);
+        await expect(trx.raw('SELECT 1 AS ok')).resolves.toBeTruthy();
+      } finally { spy.mockRestore(); await trx.rollback(); }
+      expect(await check(visitA, CELSIUS)).toEqual([]);
+    });
+
+    test('the 2nd application is not flagged, and a default product with no limit row is unaffected beside a capped one', async () => {
+      const { visitA } = await setup(CELSIUS, ['2026-02-02']);
+      expect(await check(visitA, CELSIUS)).toEqual([]);
       const capped = await setup(CELSIUS, ['2026-02-02', '2026-03-16']);
-      const refused = await check(capped.visitA, 'Tetrino Insecticide', CELSIUS);
-      expect(refused).toMatchObject({ productName: CELSIUS });
-      expect(await check(capped.visitA, 'Tetrino Insecticide')).toBeNull();
+      const flagged = await check(capped.visitA, 'Tetrino Insecticide', CELSIUS);
+      expect(flagged).toEqual([expect.objectContaining({ productName: CELSIUS })]);
+      expect(await check(capped.visitA, 'Tetrino Insecticide')).toEqual([]);
     });
 
     test('the visit\'s own ledger rows never count against it (a retry)', async () => {
@@ -551,7 +414,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
       for (const date of ['2026-02-02', '2026-05-12']) {
         await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[CELSIUS].id, application_date: date, application_rate: 0.085, rate_unit: 'oz', service_record_id: date === '2026-05-12' ? record.id : null });
       }
-      expect(await check(visit, CELSIUS)).toBeNull();
+      expect(await check(visit, CELSIUS)).toEqual([]);
     });
   });
 
