@@ -6941,7 +6941,10 @@ const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|
 // used whole (fails closed). A plain denial ("no suite", "it's not a unit")
 // is removed before the wording checks.
 const NEGATED_UNIT_RE = /\b(?:no|not\s+an?|isn'?t\s+an?|there'?s\s+no|without\s+an?)\s+(?:suite|unit|apartment|apt|condo|bay)s?(?:\s+numbers?)?\b/gi;
-function callerWordsForUnitCheck(transcription) {
+function callerWordsForUnitCheck(transcription, { outbound = false } = {}) {
+  // Outbound diarization has swapped Agent/Caller labels (see the agent-commit
+  // notes), so an outbound call is judged on its whole transcript.
+  if (outbound) return String(transcription || '');
   const lines = String(transcription || '').split('\n');
   if (!lines.some((l) => /^\s*(?:Agent|Caller)\s*:/i.test(l))) return String(transcription || '');
   return lines.filter((l) => /^\s*Caller\s*:/i.test(l)).join('\n');
@@ -6958,7 +6961,7 @@ const WHOLE_STRUCTURE_CATEGORIES = new Set(['wdo', 'inspection_only']);
 // or apartment, and nothing on the call says condo/apartment. Commercial jobs
 // count — a new-construction slab has no unit. Used only to skip the advisory
 // missing_unit_number card; it never changes an address hold.
-function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
+function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false, outbound = false } = {}) {
   // Same conservative views as wholeStructureUnitWaiverForCall: a call the
   // unclear-service rule may book as a Waves Assessment is not whole-structure,
   // and the V1 service as heard BEFORE V2-primary adoption must agree too.
@@ -6981,7 +6984,7 @@ function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = nu
       extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
     });
     if (!isWholeStructureService({ serviceKey: row?.service_key || null })) return false;
-    const text = [callerWordsForUnitCheck(transcription), view.requested_service, view.address_line1, view.address_line2]
+    const text = [callerWordsForUnitCheck(transcription, { outbound }), view.requested_service, view.address_line1, view.address_line2]
       .filter(Boolean).join(' ').replace(NEGATED_UNIT_RE, ' ');
     return !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
@@ -11613,6 +11616,7 @@ const CallRecordingProcessor = {
               && callIsWholeStructureService({
                 extracted, preAdoptionExtracted, v2Extraction, transcription,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+                outbound: isOutboundCall(call),
               }),
           }).dropped);
           if (unneededCards.size) {
@@ -12032,6 +12036,7 @@ const CallRecordingProcessor = {
         if (needsConfirmation.includes('missing_unit_number') && callIsWholeStructureService({
           extracted, preAdoptionExtracted, v2Extraction: v2Result?.status === 'valid' ? v2Ext : null, transcription,
           services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+          outbound: isOutboundCall(call),
         })) {
           needsConfirmation.splice(needsConfirmation.indexOf('missing_unit_number'), 1);
         }

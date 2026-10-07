@@ -425,6 +425,13 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, commercial, 'Caller: there is no unit number, it is a new lot')).toBe(true);
   });
 
+  test('an outbound call is judged on its whole transcript (labels can be swapped)', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    const swapped = 'Agent: It is suite 4 in the plaza.\nCaller: Got it, we will be there.';
+    expect(callIsWholeStructureService({ extracted: slab, v2Extraction: { property: { property_type: 'commercial' } }, transcription: swapped, services: CATALOG, outbound: true })).toBe(false);
+    expect(callIsWholeStructureService({ extracted: slab, v2Extraction: { property: { property_type: 'commercial' } }, transcription: swapped, services: CATALOG })).toBe(true);
+  });
+
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
     const wdo = { specific_service_name: 'WDO Inspection (Termite Letter)' };
     const commercial = { property: { property_type: 'commercial' } };
