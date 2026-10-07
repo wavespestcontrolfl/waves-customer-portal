@@ -2452,3 +2452,10 @@ describe('answer screen, Codex round 69', () => {
     expect(screenAskAnswer(answer, { question: 'Who was my technician?', data, facts: buildReportAskFacts({ data }) })).toBe('technician_name');
   });
 });
+
+test('a one-day rain reading never grounds a weekly total (pre-push audit)', () => {
+  const data = lawnData({ reportV2: { aftercare: {}, water: { rainInches: 1.23, explanation: 'Water card.', status: 'balanced' }, rain7d: [{ d: 'Mon', in: 0.5 }, { d: 'Wed', in: 0.73 }] } });
+  const facts = buildReportAskFacts({ data });
+  expect(screenAskAnswer('The lawn received 0.5 inches of rain over the past week.', { question: 'q', data, facts })).toBe('unstated_number');
+  expect(screenAskAnswer('The lawn received 1.23 inches of rain over the past week.', { question: 'q', data, facts })).toBeNull();
+});

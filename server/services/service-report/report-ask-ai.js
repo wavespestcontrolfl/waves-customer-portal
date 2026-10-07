@@ -1266,6 +1266,8 @@ const RANGE_TAIL_RE = /^\s*(?:to|-|–|and)\s*\d+(?:\.\d+)?/i;
 
 const PRESSURE_WORDS = /\b(?:pressure|gauge|score|rating|level|index)\b/i;
 
+const DAY_CLAIM_RE = /\b(?:on\s+(?:mon|tue|wed|thu|fri|sat|sun)\w*|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?|that\s+day|one\s+day|a\s+single\s+day|in\s+a\s+day|daily|per\s+day|each\s+day)\b/i;
+const WEEK_CLAIM_RE = /\b(?:week|weekly|7\s+days|seven\s+days|total|altogether|in\s+all)\b/i;
 const IDEAL_CLAIM_RE = /\b(?:ideal|recommended|target|range|goal|should|best|aim|between|needs?|per\s+week|a\s+week|weekly)\b/i;
 const PAST_CLAIM_RE = /\b(?:from|was|were|started|began|earlier|previous(?:ly)?|last\s+(?:month|visit|time|season)|ago|before|back\s+in|used\s+to|in\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*)\b/i;
 const TIME_OR_COUNT_NOUNS = new Set(['day', 'week', 'month', 'year', 'hour', 'minut', 'minute', 'visit', 'treatment', 'application', 'time', 'nest', 'mound', 'station', 'spot', 'area', 'plant', 'palm', 'tree', 'shrub', 'room', 'bed', 'zone', 'gallon', 'pound', 'bag']);
@@ -1299,7 +1301,10 @@ function numberIsKnown(value, after, sentence, known) {
   // (pre-push audit, #5964).
   const idealClaim = IDEAL_CLAIM_RE.test(sentence);
   known = known.filter((fact) => fitsRow(fact) && (pastClaim || !/\.trends\.[^.]+\.(?:from|readings)\./.test(fact.key))
-    && (idealClaim || !/(?:^|\.)(?:ideal_|target_)/.test(fact.key)));
+    && (idealClaim || !/(?:^|\.)(?:ideal_|target_)/.test(fact.key))
+    // A one-day rain reading grounds only a claim about a day, never a weekly
+    // total (pre-push audit, #5964).
+    && (!/\.days\./.test(fact.key) || (DAY_CLAIM_RE.test(sentence) && !WEEK_CLAIM_RE.test(sentence))));
   if (!kind) {
     // A number from report text grounds only a claim about the same thing:
     // "4 inches" in a section is no "4 nests" (Codex P1 #5964 r26).
