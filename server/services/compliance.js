@@ -3,6 +3,7 @@ const logger = require('./logger');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
+const { effectiveCountCap } = require('../config/lawn-v13-count-caps');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
 // JSON string — the writer must never throw on a malformed capture.
@@ -404,7 +405,14 @@ const ComplianceService = {
       .select('property_application_history.*', 'products_catalog.name as product_name', 'ss_prop.property_id as treated_property_id');
 
     // Get all product limits
-    const limits = await db('product_limits');
+    // The product name rides along: the v13 program's own yearly count (Celsius: 2) replaces the
+    // stored legacy value while GATE_LAWN_V13 is on, the same reading application-limits enforces.
+    const limits = (await db('product_limits')
+      .leftJoin('products_catalog', 'product_limits.product_id', 'products_catalog.id')
+      .select('product_limits.*', 'products_catalog.name as product_name'))
+      .map((limit) => (limit.limit_type === 'annual_max_apps' && limit.match_type === 'product'
+        ? { ...limit, limit_value: effectiveCountCap(limit.product_name, limit.limit_value) }
+        : limit));
 
     const results = [];
     for (const limit of limits) {
@@ -565,8 +573,13 @@ const ComplianceService = {
       .count('* as count');
 
     // Warnings: check product limits that are approaching or exceeded
-    const limits = await db('product_limits')
-      .where({ severity: 'hard_block' });
+    const limits = (await db('product_limits')
+      .leftJoin('products_catalog', 'product_limits.product_id', 'products_catalog.id')
+      .where({ 'product_limits.severity': 'hard_block' })
+      .select('product_limits.*', 'products_catalog.name as product_name'))
+      .map((limit) => (limit.limit_type === 'annual_max_apps'
+        ? { ...limit, limit_value: effectiveCountCap(limit.product_name, limit.limit_value) }
+        : limit));
     let warningCount = 0;
     for (const limit of limits) {
       if (limit.limit_type === 'annual_max_apps' && limit.product_id) {

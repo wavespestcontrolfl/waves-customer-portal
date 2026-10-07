@@ -184,7 +184,7 @@ postgres('closeout: a hard product count limit flags, never refuses', () => {
   test('a limits read that fails never blocks recording: the visit completes, the product is recorded, and the unavailable flag + notification are raised', async () => {
     const f = await seedLawnVisit({ priorApplications: 2 });
     try {
-      jest.spyOn(require('../services/application-limits'), 'checkLimits').mockRejectedValue(new Error('synthetic read failure'));
+      jest.spyOn(require('../services/application-limits'), 'auditHardCountLimits').mockRejectedValue(new Error('synthetic read failure'));
       const out = await complete(f, { products: [product(f)] });
       expect(out.status).toBe(200);
       expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: product limits could not be checked for this visit\.$/)]);

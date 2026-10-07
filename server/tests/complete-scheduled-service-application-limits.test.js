@@ -48,7 +48,7 @@ let catalogRows;
 let limitedIds;
 let queried;
 
-const celsiusBlock = { type: 'annual_max_apps', matchType: 'product', matchValue: null, message: 'Celsius WG: 2/2 applications this year — LIMIT REACHED.', current: 2, max: 2 };
+const celsiusViolation = { type: 'annual_max_apps', message: 'Celsius WG: 2/2 other applications in the year — LIMIT REACHED.', current: 2, max: 2 };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -90,8 +90,9 @@ beforeEach(() => {
     return builder;
   });
   attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
-  checkLimits = jest.spyOn(limits, 'checkLimits').mockImplementation(async (customerId, productId) => (
-    productId === CELSIUS_ID ? { allowed: false, warnings: [], blocks: [celsiusBlock] } : { allowed: true, warnings: [], blocks: [] }
+  // The closeout audit returns the violated hard limits (an array; empty = within every limit).
+  checkLimits = jest.spyOn(limits, 'auditHardCountLimits').mockImplementation(async (customerId, productId) => (
+    productId === CELSIUS_ID ? [celsiusViolation] : []
   ));
 });
 afterEach(() => { delete process.env.GATE_LAWN_V13; jest.restoreAllMocks(); });
@@ -122,24 +123,38 @@ describe('closeout: hard count limits flag, they never refuse', () => {
     }]);
     expect(out[0].message).not.toMatch(/remove|delete/i);
     // Scoped to the treated property, leaving the visit's own ledger rows out.
-    expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(Date), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
+    expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
   });
 
   test('a hard minimum interval is a finding too, worded for the interval', async () => {
     limitedIds.add(DEFAULT_ID);
-    checkLimits.mockResolvedValue({ allowed: false, warnings: [], blocks: [{ type: 'min_interval_days', matchType: 'product', message: 'only 10 days since last app (min 60).', current: 10, max: 60 }] });
+    checkLimits.mockResolvedValue([{ type: 'min_interval_days', message: 'only 10 days from another application (min 60).', current: 10, max: 60 }]);
     const out = await findings([DEFAULT_ID]);
     expect(out).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'min_interval_days', current: 10, max: 60, message: 'Recorded. The office will review: Default fixture is over its minimum days between applications.' })]);
   });
 
-  test('a default product with no hard count limit is never asked of the checker; warnings, ingredient caps and rate limits are not findings', async () => {
+  test('a default product with no hard count limit is never asked of the audit', async () => {
     expect(await findings([DEFAULT_ID])).toEqual([]);
     expect(checkLimits).not.toHaveBeenCalled();
-    checkLimits.mockResolvedValue({ allowed: false, warnings: [], blocks: [
-      { type: 'annual_max_rate', matchType: 'active_ingredient', matchValue: 'prodiamine', message: 'cap' },
-      { type: 'annual_max_rate', matchType: 'product', message: 'rate' },
-    ] });
+    // Only product-level hard count limits are audited (the audit method returns nothing else).
+    checkLimits.mockResolvedValue([]);
     expect(await findings([CELSIUS_ID])).toEqual([]);
+  });
+
+  test('EVERY violated hard limit of a product is its own finding (yearly count and minimum interval), each worded for its limit', async () => {
+    checkLimits.mockResolvedValue([
+      celsiusViolation,
+      { type: 'min_interval_days', message: 'only 19 days from another application (min 60).', current: 19, max: 60 },
+    ]);
+    const out = await findings([CELSIUS_ID]);
+    expect(out.map((f) => [f.code, f.limitType, f.current, f.max])).toEqual([
+      ['application_limit_exceeded', 'annual_max_apps', 2, 2],
+      ['application_limit_exceeded', 'min_interval_days', 19, 60],
+    ]);
+    expect(out.map((f) => f.message)).toEqual([
+      'Recorded. The office will review: Celsius WG is over its yearly application limit.',
+      'Recorded. The office will review: Celsius WG is over its minimum days between applications.',
+    ]);
   });
 
   test('gate off, a non-lawn visit and an empty list read nothing', async () => {
@@ -236,8 +251,16 @@ describe('the office notification for a finding', () => {
     expect(notify).toHaveBeenCalledTimes(2);
     expect(notify.mock.calls[0][0]).toBe('service');
     expect(notify.mock.calls[0][2]).toMatch(/Celsius WG .* over its yearly application limit \(2 of 2 already used\)/);
-    expect(notify.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}`, link: `/admin/customers?customerId=${service.customer_id}` });
-    expect(notify.mock.calls[1][3].dedupeKey).toBe('application-limit-finding:record-1:application_limit_check_unavailable:all');
+    expect(notify.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}:annual_max_apps`, link: `/admin/customers?customerId=${service.customer_id}` });
+    expect(notify.mock.calls[1][3].dedupeKey).toBe('application-limit-finding:record-1:application_limit_check_unavailable:all:all');
+    // A product over both limits rings once per limit type.
+    notify.mockClear();
+    await notifyOfficeOfLimitFindings({ svc: service, record, findings: [over, { ...over, limitType: 'min_interval_days', current: 19, max: 60 }] });
+    expect(notify.mock.calls.map((call) => call[3].dedupeKey)).toEqual([
+      `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}:annual_max_apps`,
+      `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}:min_interval_days`,
+    ]);
+    expect(notify.mock.calls[1][2]).toMatch(/minimum days between applications \(only 19 days from another application, minimum 60\)/);
     notify.mockRejectedValue(new Error('bell down'));
     await expect(notifyOfficeOfLimitFindings({ svc: service, record, findings: [over] })).resolves.toBeUndefined();
   });

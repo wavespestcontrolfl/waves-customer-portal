@@ -4,6 +4,8 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261007170000_lawn_v13_count_caps');
 const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps_wording');
+const restore = require('../models/migrations/20261007172000_lawn_v13_celsius_cap_v13_only');
+const { DIMENSION } = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const { submittedProductLimitFindings } = require('../services/complete-scheduled-service');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
@@ -60,7 +62,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
     for (const table of ['technicians', 'products_catalog', 'product_aliases', 'lawn_protocol_product_substitutions',
       'equipment_systems', 'equipment_calibrations', 'municipality_ordinances', 'property_nutrient_ledger',
       'service_products', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_gates',
-      'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'product_limits', 'property_application_history']) {
+      'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'lawn_protocol_audit_log', 'product_limits', 'property_application_history']) {
       await clone(table);
     }
     await product('Tetrino Insecticide', { category: 'insecticide', default_rate_per_1000: 0.367, rate_unit: 'fl oz', inventory_unit: 'fl oz' });
@@ -301,6 +303,175 @@ describeDb('v13 count caps through PostgreSQL', () => {
     });
   });
 
+  describe('the Celsius cap of 2 lives behind the v13 gate (20261007172000)', () => {
+    const applicationLimits = require('../services/application-limits');
+    const { effectiveCountCap } = require('../config/lawn-v13-count-caps');
+    const celsiusRows = () => limitsOf(CELSIUS);
+    const audits = () => knex('lawn_protocol_audit_log').where({ action: 'v13_celsius_cap_restore' });
+    beforeEach(async () => {
+      await knex('product_limits').del(); await knex('product_aliases').del(); await knex('lawn_protocol_audit_log').del();
+      jest.spyOn(console, 'log').mockImplementation(() => {});
+    });
+    afterEach(() => jest.restoreAllMocks());
+
+    test('the Celsius row goes back to the exact compliance-seed values and description; the other three caps are untouched; each restore is audited', async () => {
+      const [seeded] = await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED }).returning('*');
+      await migration.up(knex); await wording.up(knex);
+      const others = (await allLimits()).filter((r) => r.product_id !== catalog[CELSIUS].id);
+      expect(Number((await celsiusRows())[0].limit_value)).toBe(2);
+      await restore.up(knex);
+      const [row] = await celsiusRows();
+      expect(row.id).toBe(seeded.id);
+      expect({ match_type: row.match_type, limit_type: row.limit_type, limit_value: Number(row.limit_value), limit_unit: row.limit_unit, severity: row.severity, description: row.description }).toEqual(migration.CELSIUS_SEED);
+      expect((await allLimits()).filter((r) => r.product_id !== catalog[CELSIUS].id)).toEqual(others);
+      const logged = await audits();
+      expect(logged).toHaveLength(1);
+      expect(typeof logged[0].before_snapshot === 'string' ? JSON.parse(logged[0].before_snapshot) : logged[0].before_snapshot).toMatchObject({ limitId: seeded.id, limit_value: 2 });
+      await restore.up(knex); // idempotent
+      expect(await audits()).toHaveLength(1);
+    });
+
+    test('a Celsius row 170000 inserted (no seed existed) is restored to the seed values too', async () => {
+      await migration.up(knex); await wording.up(knex);
+      await restore.up(knex);
+      expect(Number((await celsiusRows())[0].limit_value)).toBe(3);
+      expect((await celsiusRows())[0].description).toBe(migration.CELSIUS_SEED.description);
+    });
+
+    test('an admin-edited Celsius row is never touched; down re-applies the 2 only to a row still equal to the seed, then spends its audit row', async () => {
+      await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED });
+      await migration.up(knex); await wording.up(knex);
+      await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 1 });
+      await restore.up(knex);
+      expect(Number((await celsiusRows())[0].limit_value)).toBe(1);
+      expect(await audits()).toHaveLength(0);
+      await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 2 });
+      await restore.up(knex);
+      expect(Number((await celsiusRows())[0].limit_value)).toBe(3);
+      // Edited after the restore: down leaves it.
+      await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 4 });
+      await restore.down(knex);
+      expect(Number((await celsiusRows())[0].limit_value)).toBe(4);
+      expect(await audits()).toHaveLength(0);
+      // Untouched since: down puts back the 2 and the 171000 text.
+      await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 2, description: 'Celsius WG: max 2 applications per lawn per year (owner 2026-10-06; lowered from 3).' });
+      await restore.up(knex);
+      await restore.down(knex);
+      expect(Number((await celsiusRows())[0].limit_value)).toBe(2);
+      expect((await celsiusRows())[0].description).toBe('Celsius WG: max 2 applications per lawn per year (owner 2026-10-06; lowered from 3).');
+    });
+
+    test('the override lowers Celsius only, only while the gate is on, and never raises a value', () => {
+      expect(effectiveCountCap('Celsius WG', 3, true)).toBe(2);
+      expect(effectiveCountCap('Celsius WG', 3, false)).toBe(3);
+      expect(effectiveCountCap('Celsius WG', 1, true)).toBe(1);
+      expect(effectiveCountCap('Arena 50 WDG', 3, true)).toBe(3);
+      expect(effectiveCountCap('Celsius WG', null, true)).toBeNull();
+    });
+
+    describe('with the stored row at the legacy 3', () => {
+      async function history(dates) {
+        const f = await fixture(knex);
+        for (const date of dates) await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[CELSIUS].id, application_date: date, application_rate: 0.085, rate_unit: 'oz' });
+        return f;
+      }
+      beforeEach(async () => {
+        await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED });
+        await migration.up(knex); await wording.up(knex); await restore.up(knex);
+      });
+      const check = (customerId, gate) => {
+        if (gate) process.env.GATE_LAWN_V13 = 'true'; else delete process.env.GATE_LAWN_V13;
+        return applicationLimits.checkLimits(customerId, catalog[CELSIUS].id, new Date('2026-06-10T16:00:00Z'), knex, {});
+      };
+
+      test('gate off (the pre-visit brief reads checkLimits): the 3rd Celsius application is allowed, the 4th is blocked', async () => {
+        const two = await history(['2026-02-02', '2026-03-16']);
+        expect((await check(two.customerId, false)).blocks).toEqual([]);
+        const three = await history(['2026-02-02', '2026-03-16', '2026-04-20']);
+        expect((await check(three.customerId, false)).blocks.map((b) => b.max)).toEqual([3]);
+      });
+
+      test('gate on: the 3rd application is blocked at 2 (the stored 3 is lowered by the v13 override)', async () => {
+        const two = await history(['2026-02-02', '2026-03-16']);
+        const blocks = (await check(two.customerId, true)).blocks;
+        expect(blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', current: 2, max: 2 })]);
+      });
+
+      test('the closeout finds it at the 3rd and not at the 2nd, gate on', async () => {
+        process.env.GATE_LAWN_V13 = 'true';
+        const f = await fixture(knex);
+        const visit = await f.visit(0, { scheduled_date: '2026-06-10', service_type: 'Every 6 Weeks Lawn Care Service' });
+        const record = async (date) => {
+          const [past] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: visit.property_id, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+          const [rec] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+          await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[CELSIUS].id, application_date: date, application_rate: 0.085, rate_unit: 'oz', service_record_id: rec.id });
+        };
+        await record('2026-02-02');
+        expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[CELSIUS].id], serviceDate: '2026-06-10', database: knex })).toEqual([]);
+        await record('2026-03-16');
+        expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[CELSIUS].id], serviceDate: '2026-06-10', database: knex }))
+          .toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'annual_max_apps', current: 2, max: 2 })]);
+        // Gate off: no v13 closeout flag at all.
+        delete process.env.GATE_LAWN_V13;
+        expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[CELSIUS].id], serviceDate: '2026-06-10', database: knex })).toEqual([]);
+      });
+    });
+  });
+
+  describe('the closeout audit covers the whole cap year and both sides of a minimum interval', () => {
+    let both;
+    beforeAll(async () => {
+      both = await product(DIMENSION, { category: 'fertilizer', active_ingredient: 'Dithiopyr' });
+      await knex('product_limits').insert([
+        { product_id: both.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 3, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' },
+        { product_id: both.id, match_type: 'product', limit_type: 'min_interval_days', limit_value: 60, limit_unit: 'days', severity: 'hard_block', description: 'fixture' },
+      ]);
+    });
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+    const applied = (customerId, date, extra = {}) => knex('property_application_history').insert({ customer_id: customerId, product_id: both.id, application_date: date, application_rate: 1, rate_unit: 'lb', ...extra });
+    const findings = async (f, date) => {
+      const visit = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: date, service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*').then(([row]) => row);
+      return submittedProductLimitFindings({ svc: visit, productIds: [both.id], serviceDate: date, database: knex });
+    };
+
+    test('a backdated June closeout with January and October already recorded is flagged (the 3rd of the year, and the later ones count)', async () => {
+      const cel = await fixture(knex);
+      await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).del();
+      await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED });
+      await knex('property_application_history').insert([
+        { customer_id: cel.customerId, product_id: catalog[CELSIUS].id, application_date: '2026-01-10', application_rate: 0.085, rate_unit: 'oz' },
+        { customer_id: cel.customerId, product_id: catalog[CELSIUS].id, application_date: '2026-10-05', application_rate: 0.085, rate_unit: 'oz' },
+      ]);
+      const visit = await knex('scheduled_services').insert({ customer_id: cel.customerId, property_id: cel.property.id, scheduled_date: '2026-06-10', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*').then(([row]) => row);
+      const out = await submittedProductLimitFindings({ svc: visit, productIds: [catalog[CELSIUS].id], serviceDate: '2026-06-10', database: knex });
+      expect(out).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'annual_max_apps', current: 2, max: 2 })]);
+      // Another calendar year does not count.
+      expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[CELSIUS].id], serviceDate: '2027-06-10', database: knex })).toEqual([]);
+    });
+
+    test('a backdated closeout is judged on BOTH sides of a minimum interval: an application 25 days AFTER it flags; one 61 days after does not', async () => {
+      const f = await fixture(knex);
+      await applied(f.customerId, '2026-07-05');
+      expect(await findings(f, '2026-06-10')).toEqual([expect.objectContaining({ limitType: 'min_interval_days', current: 25, max: 60 })]);
+      const g = await fixture(knex);
+      await applied(g.customerId, '2026-08-10');
+      expect(await findings(g, '2026-06-10')).toEqual([]);
+      const h = await fixture(knex);
+      await applied(h.customerId, '2025-12-20'); // across the new year, on the earlier side
+      expect(await findings(h, '2026-02-08')).toEqual([expect.objectContaining({ limitType: 'min_interval_days', current: 50 })]);
+    });
+
+    test('a product over BOTH of its limits (Dimension 0.21%: 3 a year and 60 days) is reported once per limit', async () => {
+      const f = await fixture(knex);
+      for (const date of ['2026-01-05', '2026-04-20', '2026-06-01']) await applied(f.customerId, date);
+      const out = await findings(f, '2026-06-20');
+      expect(out.map((o) => [o.code, o.limitType, o.current, o.max])).toEqual([
+        ['application_limit_exceeded', 'annual_max_apps', 3, 3],
+        ['application_limit_exceeded', 'min_interval_days', 19, 60],
+      ]);
+    });
+  });
+
   describe('the limits read across the new year (the minimum interval) and by property', () => {
     const applicationLimits = require('../services/application-limits');
     let hard;
@@ -388,7 +559,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
     test('an unreadable history (a SQL error inside a transaction) is an unavailable finding, never a throw; the savepoint keeps the transaction usable', async () => {
       const { visitA } = await setup(CELSIUS, ['2026-02-02']);
       const limitsModule = require('../services/application-limits');
-      const spy = jest.spyOn(limitsModule, 'checkLimits').mockImplementation(async (customerId, productId, date, k) => k.raw('SELECT * FROM table_that_does_not_exist'));
+      const spy = jest.spyOn(limitsModule, 'auditHardCountLimits').mockImplementation(async (customerId, productId, date, k) => k.raw('SELECT * FROM table_that_does_not_exist'));
       const trx = await knex.transaction();
       try {
         const found = await submittedProductLimitFindings({ svc: visitA, productIds: [catalog[CELSIUS].id], serviceDate: '2026-05-12', database: trx });
@@ -450,6 +621,19 @@ describeDb('v13 count caps through PostgreSQL', () => {
       expect(resultA.status).toBe('blocked');
       const resultB = await plan(visitB, name);
       expect(limitBlocks(resultB)).toEqual([]);
+    });
+
+    test('Celsius with the stored row at the legacy 3 (after 20261007172000): the plan still blocks the 3rd application under v13 (override 2) and the 2nd is allowed', async () => {
+      await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 3 });
+      try {
+        const two = await twoProperties(CELSIUS, ['2026-02-02', '2026-03-16']);
+        expect(limitBlocks(await plan(two.visitA, CELSIUS))).toHaveLength(1);
+        expect(limitBlocks(await plan(two.visitB, CELSIUS))).toEqual([]);
+        const one = await twoProperties(CELSIUS, ['2026-02-02']);
+        expect(limitBlocks(await plan(one.visitA, CELSIUS))).toEqual([]);
+      } finally {
+        await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ limit_value: 2 });
+      }
     });
 
     test('the second application in the year is still allowed', async () => {

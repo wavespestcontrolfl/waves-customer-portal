@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
+const { withV13CountCaps } = require('../config/lawn-v13-count-caps');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
 // active ingredient shared by every product that carries it (prodiamine: 65 WDG,
@@ -110,7 +111,8 @@ class ApplicationLimitChecker {
       .orderBy('application_date', 'desc').limit(10) : [];
 
     // Get applicable limits
-    const productLimits = await database('product_limits').where({ product_id: productId });
+    // The v13 program's own count cap (Celsius: 2) while GATE_LAWN_V13 is on; the stored row is the legacy value.
+    const productLimits = withV13CountCaps(product.name, await database('product_limits').where({ product_id: productId }));
     const moaLimits = product.moa_group ? await database('product_limits')
       .where({ match_type: 'moa_group', match_value: product.moa_group }) : [];
     const nitrogenLimits = this.isNitrogenFertilizer(product)
@@ -376,6 +378,53 @@ class ApplicationLimitChecker {
 
   // Accepts a true instant or a hydrated pg DATE — etCalendarDayOf keeps a
   // UTC-midnight Jan 1 as Jan 1 (etParts would read it as Dec 31 ET).
+  // The closeout audit of one recorded application, whatever order the visits were recorded in
+  // (a backdated closeout included). It judges the product-level hard_block count limits on the
+  // service date and returns EVERY violated one:
+  //   annual_max_apps  the other applications of the product in the whole calendar year of the date
+  //                    (before AND after it) already fill the cap;
+  //   min_interval_days the nearest application on EACH side of the date, in any calendar year, is
+  //                    closer than the minimum.
+  // Scoped to the treated property, the visit's own ledger rows left out, retracted rows ignored.
+  async auditHardCountLimits(customerId, productId, serviceDate, database = db, opts = {}) {
+    const product = await database('products_catalog').where({ id: productId }).first();
+    if (!product) return [];
+    const limits = withV13CountCaps(product.name, await database('product_limits')
+      .where({ product_id: productId, match_type: 'product', severity: 'hard_block' })
+      .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']));
+    if (!limits.length) return [];
+    const day = etCalendarDayOf(serviceDate);
+    const others = () => scopeHistoryToTreatment(database('property_application_history')
+      .where({ customer_id: customerId, product_id: productId }).whereNull('retracted_at'), database, opts, 'property_application_history');
+    const violations = [];
+    for (const limit of limits) {
+      const max = Number(limit.limit_value);
+      const violation = limit.limit_type === 'annual_max_apps'
+        ? await this.auditAnnualCount(others, product, day, max)
+        : await this.auditInterval(others, product, day, max);
+      if (violation) violations.push({ ...violation, limitId: limit.id, description: limit.description });
+    }
+    return violations;
+  }
+
+  async auditAnnualCount(others, product, day, max) {
+    const year = day.slice(0, 4);
+    const rows = await others().where('application_date', '>=', `${year}-01-01`).where('application_date', '<=', `${year}-12-31`).select('id');
+    if (rows.length < max) return null;
+    return { type: 'annual_max_apps', message: `${product.name}: ${rows.length}/${max} other applications in ${year} — LIMIT REACHED.`, current: rows.length, max };
+  }
+
+  async auditInterval(others, product, day, min) {
+    const before = await others().where('application_date', '<=', day).orderBy('application_date', 'desc').first('application_date');
+    const after = await others().where('application_date', '>', day).orderBy('application_date', 'asc').first('application_date');
+    const anchor = new Date(`${day}T12:00:00Z`);
+    const gaps = [before, after].filter(Boolean)
+      .map((row) => Math.abs(Math.round((anchor - new Date(`${etCalendarDayOf(row.application_date)}T12:00:00Z`)) / 86400000)));
+    if (!gaps.length || Math.min(...gaps) >= min) return null;
+    const nearest = Math.min(...gaps);
+    return { type: 'min_interval_days', message: `${product.name}: only ${nearest} days from another application (min ${min}).`, current: nearest, max: min };
+  }
+
   getYearStart(date) { return `${etCalendarDayOf(date).slice(0, 4)}-01-01`; }
 }
 

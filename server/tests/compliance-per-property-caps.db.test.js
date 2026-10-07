@@ -72,6 +72,24 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     expect(await row(oneEach)).toMatchObject({ currentUsage: 1, status: 'warning' });
   });
 
+  test('getProductLimits follows the v13 gate for Celsius: the stored row is the legacy 3, so two applications are a warning with the gate off and exceeded (cap 2) with it on', async () => {
+    const celsius = await db('products_catalog').where({ name: 'Celsius WG' }).first();
+    const stored = await db('product_limits').where({ product_id: celsius.id, limit_type: 'annual_max_apps', match_type: 'product' }).first();
+    expect(Number(stored.limit_value)).toBe(3);
+    const customerId = await customerWithTwoProperties([0, 0], celsius);
+    const saved = process.env.GATE_LAWN_V13;
+    try {
+      delete process.env.GATE_LAWN_V13;
+      const off = (await ComplianceService.getProductLimits(customerId)).limits.find((l) => l.limitId === stored.id);
+      expect(off).toMatchObject({ limitValue: '3.0000', currentUsage: 2, status: 'warning' });
+      process.env.GATE_LAWN_V13 = 'true';
+      const on = (await ComplianceService.getProductLimits(customerId)).limits.find((l) => l.limitId === stored.id);
+      expect(on).toMatchObject({ limitValue: 2, currentUsage: 2, status: 'exceeded' });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved;
+    }
+  });
+
   test('getDashboard: three customers with one application each never trip a per-lawn cap of 3 on the company total; two at one lawn of 3 does warn', async () => {
     const [capped] = await db('products_catalog').insert({ name: `Count cap dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
     made.products.push(capped.id);

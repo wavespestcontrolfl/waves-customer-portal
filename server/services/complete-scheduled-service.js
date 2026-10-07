@@ -1986,16 +1986,18 @@ async function hardLimitedProductNames(database, ids) {
   return new Map(rows.filter((row) => limited.has(String(row.id))).map((row) => [String(row.id), row.name]));
 }
 
-// The finding for one product: an over-limit one, an unavailable one when the read fails, or null.
-async function productLimitFinding({ svc, productId, productName, checkDate, database }) {
+// Every finding for one product: one per violated hard limit (the yearly count and the minimum
+// interval are reported separately), or one 'unavailable' finding when the audit read fails. The audit
+// covers the whole calendar year of the service date and the nearest applications on both sides,
+// so a backdated closeout is judged against the applications recorded after it too.
+async function productLimitFindings({ svc, productId, productName, serviceDate, database }) {
   try {
-    const result = await savepointRead(database, (k) => require('../services/application-limits')
-      .checkLimits(svc.customer_id, productId, checkDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }));
-    const hard = (result.blocks || []).find((b) => b.matchType === 'product' && HARD_COUNT_LIMIT_LABELS[b.type]);
-    return hard ? overLimitFinding(productId, productName, hard) : null;
+    const violations = await savepointRead(database, (k) => require('../services/application-limits')
+      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }));
+    return violations.map((violation) => overLimitFinding(productId, productName, violation));
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
-    return limitCheckUnavailableFinding(productId);
+    return [limitCheckUnavailableFinding(productId)];
   }
 }
 
@@ -2013,11 +2015,10 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
     logger.warn('completion application limits: batch read failed, flagging for the office', { serviceId: svc.id, error: err?.message });
     return [limitCheckUnavailableFinding()];
   }
-  const checkDate = toETNoonServiceDate(serviceDate || svc.scheduled_date);
+  const day = serviceDateOnly(serviceDate || svc.scheduled_date);
   const findings = [];
   for (const [productId, productName] of limited) {
-    const finding = await productLimitFinding({ svc, productId, productName, checkDate, database });
-    if (finding) findings.push(finding);
+    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database }));
   }
   return findings;
 }
@@ -2046,20 +2047,28 @@ async function recordedProductLimitFindings({ svc, record, database = db } = {})
 
 // The office's side of a finding: one admin notification per product and finding code (deduped, so
 // a retry or a resume rings once). Never throws and never blocks the closeout.
+const limitFigure = (finding) => (finding.limitType === 'min_interval_days'
+  ? `only ${finding.current} days from another application, minimum ${finding.max}`
+  : `${finding.current} of ${finding.max} already used`);
+
+// One bell per record, finding code, product AND limit type (a product over both its yearly count and
+// its minimum interval rings for each).
+const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}:${finding.limitType || 'all'}`;
+
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   const notifications = require('../services/notification-service');
   for (const finding of findings) {
     const over = finding.code === 'application_limit_exceeded';
     const title = over ? 'Product over its limit — review' : 'Product limits not checked — review';
     const body = over
-      ? `${finding.productName || 'A product'} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${finding.current} of ${finding.max} already used). Review it and report it if needed.`
+      ? `${finding.productName || 'A product'} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${limitFigure(finding)}). Review it and report it if needed.`
       : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
     try {
       const created = await notifications.notifyAdmin('service', title, body, {
         link: `/admin/customers?customerId=${svc.customer_id}`,
         bell: true,
-        metadata: { ...finding, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey: `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}` },
-        dedupeKey: `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}`,
+        metadata: { ...finding, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey: limitFindingDedupeKey(record, finding) },
+        dedupeKey: limitFindingDedupeKey(record, finding),
       });
       // notifyAdmin returns null (no throw) when its dedupe lock or insert fails; a deduped repeat
       // returns the standing row. The advisory on the completion stands either way.
