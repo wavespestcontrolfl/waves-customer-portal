@@ -158,9 +158,15 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
     // Freshness token for the PUT (codex #3565 gh-r44): the panel echoes the
     // move stamp it was rendered against, so a save that races a primary-
     // address change cannot confirm the former home's county/grass.
+    // lawn_v13_no_program: GATE_LAWN_V13 is on and this lawn records bahia (any spelling, in any
+    // field), so the v13 program has none for it. The server decides, so the Schedule page applies
+    // bahia precedence only when it is true and keeps its old resolution otherwise.
+    const { lawnV13NoBahiaProgram } = require('../services/lawn-program');
+    const { recordedGrassNamesBahia } = require('../services/lawn-grass-context');
     res.json({
       profile: profileForResponse(profile, req) || null,
       irrigation_home_changed_at: prefs?.irrigation_home_changed_at || null,
+      lawn_v13_no_program: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, customer.lawn_type),
       // Gate on and an admin only: tells the editor to show the bermuda removal switch.
       ...(showsBermudaRemoval(req) ? { bermudaRemovalAvailable: true } : {}),
     });

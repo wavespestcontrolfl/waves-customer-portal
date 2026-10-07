@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
+const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const router = express.Router();
 const db = require('../models/db');
@@ -665,6 +666,17 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   if (!isAuthoredProposal && estimateDataHasQuoteRequirement(estimate.estimate_data || estimate.estimateData)) {
     const err = new Error('Quote-required estimates need manual review before they can be sent to the customer.');
     err.statusCode = 400;
+    throw err;
+  }
+  // GATE_LAWN_V13 has no bahia program. A recurring bahia lawn plan that was never issued is
+  // reviewed before it goes out, even when the draft was saved before the gate went live (its
+  // stored flags are absent); an estimate already sent is honored. Staff clear it through the
+  // authored-proposal path like any other review flag.
+  if (!isAuthoredProposal && require('../config/feature-gates').lawnV13Live?.() === true && estimateNeverIssued(estimate)
+    && estimateHasBahiaLawn(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
+    const err = new Error('Bahia lawn plans need manual review before they can be sent to the customer (the lawn program has no bahia track).');
+    err.statusCode = 400;
+    err.code = 'LAWN_V13_BAHIA_REVIEW_REQUIRED';
     throw err;
   }
   if (!isAuthoredProposal && estimateDataHasBlockingLeadAutomation(estimate.estimate_data || estimate.estimateData)) {

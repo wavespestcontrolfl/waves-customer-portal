@@ -396,6 +396,9 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // strict — an outage here read as unknown_grass_track would hash
     // empty lawn guidance over a valid cached brief.
     const grass = await loadCustomerGrassContext(svc.customer_id, dbh, { strict: true });
+    // GATE_LAWN_V13: a bahia lawn has no program, so no window is shown for it, even when the
+    // visit was assigned a protocol (an assignment cannot give a bahia lawn another grass's guidance).
+    if (grass.noProgram) return { ...NO_LAWN_GUIDANCE, reason: 'lawn_v13_bahia_no_program' };
     const scheduledDay = calendarDay(svc.scheduled_date);
     const serviceDate = scheduledDay ? parseETDateTime(`${scheduledDay}T12:00`) : new Date();
 

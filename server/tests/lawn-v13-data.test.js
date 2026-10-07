@@ -20,7 +20,8 @@ const migration = require('../models/migrations/20261005120000_lawn_protocol_v13
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
-const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
+const GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
@@ -29,7 +30,7 @@ const visitFor = (month) => v13.st_augustine.visits.find((v) => v.month === MONT
 const lines = (text) => String(text || '').split('\n').filter(Boolean);
 
 describe('the v13 recipe', () => {
-  test('four tracks, one universal program, 12 months in the existing visit shape', () => {
+  test('three tracks (no bahia), one universal program, 12 months in the existing visit shape', () => {
     expect(Object.keys(v13)).toEqual(GRASSES);
     for (const grass of GRASSES) {
       // One universal program: the visits match once the optional bermuda removal

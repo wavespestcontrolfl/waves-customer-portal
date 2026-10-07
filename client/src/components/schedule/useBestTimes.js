@@ -186,7 +186,10 @@ function normalizeDay(day, scopedToTech) {
 // does not start today, the "best in the next 7 days" row gets its own
 // search from today (Codex #6045 r1/r2). Fail-open: no week row, never a
 // false one.
-async function searchSummary(search, { date, today, pickedArgs, bestRows }) {
+// `rainArgs` carries the booking's services on every best-rows request, the
+// week fallback included, so the server's rain ranking
+// (GATE_BOOKING_RAIN_RANK) classifies each one (Codex #6102 r1).
+async function searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs = {} }) {
   const back = addDays(date, -SUMMARY_BACK);
   const data = await search({
     summary: true,
@@ -195,11 +198,13 @@ async function searchSummary(search, { date, today, pickedArgs, bestRows }) {
     dateTo: addDays(date, SUMMARY_FORWARD),
     topN: 3,
     pickedDate: date,
+    ...rainArgs,
     ...pickedArgs,
   });
   if (data?.summary?.best?.week_covered !== false) return data;
   const week = await search({
     summary: true, bestRows: true, dateFrom: today, dateTo: addDays(today, WEEK_DAYS - 1), topN: 3, pickedDate: date,
+    ...rainArgs,
   }).catch(() => null);
   const weekRow = week?.summary?.best;
   if (!weekRow || weekRow.week_covered === false) return data;
@@ -362,7 +367,8 @@ export function useBestTimes({
         // A past date has no days around it to offer (the engine never
         // searches before today) — the plain hint handles it as it always has.
         if (summary && date >= today && Date.now() >= summaryUnavailableUntil) {
-          const data = await searchSummary(search, { date, today, pickedArgs, bestRows });
+          const rainArgs = bestRows && serviceTypesKey ? { serviceTypes: serviceTypesKey.split('\n') } : {};
+          const data = await searchSummary(search, { date, today, pickedArgs, bestRows, rainArgs });
           if (controller.signal.aborted) return;
           const summarized = normalizeAvailability(data, { date, scopedToTech });
           if (summarized) {

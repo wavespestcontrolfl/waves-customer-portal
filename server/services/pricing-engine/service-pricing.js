@@ -2162,6 +2162,9 @@ function priceLawnCare(property, options = {}) {
     // St. Augustine track only — the Recognition + Fusilade II 2(ee) is a
     // remove-bermuda-FROM-St.-Augustine program.
     bermudaSuppression = false,
+    // Callers that re-price something already sold (a stored estimate replay) or that are not the
+    // v13 program (the one-time anchor) skip the v13 bahia review below.
+    skipBahiaNoProgramReview = false,
   } = options;
 
   const requestedGrassType = String(track || '').trim();
@@ -2403,7 +2406,12 @@ function priceLawnCare(property, options = {}) {
   // softer signal is an open owner ruling.
   const lowConfidenceTurf = String(property.turfConfidence || '').toUpperCase() === 'LOW'
     || (Array.isArray(property.turfFlags) && property.turfFlags.includes('FIELD_VERIFY_TURF_SQFT'));
+  // GATE_LAWN_V13 has no bahia program (Celsius and Blindside are not labeled for bahiagrass), so a
+  // new bahia lawn plan is never a normal priced quote: it parks for review (owner 2026-09-30:
+  // bahia is dropped from the lawn program). The table price stays for the reviewer.
+  const bahiaNoProgram = !skipBahiaNoProgramReview && require('../lawn-program').bahiaHasNoProgram(matchedTrack);
   const manualReviewReasons = [
+    ...(bahiaNoProgram ? ['lawn_v13_bahia_no_program'] : []),
     ...(grassTypeWasDefaulted ? ['unknown_grass_type_priced_st_augustine'] : []),
     ...(lowConfidenceTurf ? ['low_confidence_turf_requires_field_verification'] : []),
   ];
@@ -2450,6 +2458,9 @@ function priceLawnCare(property, options = {}) {
     notes: [
       ...(customQuoteFlag
         ? [`Turf area exceeds ${LAWN_TABLE_MAX_SQFT.toLocaleString()} sq ft. Pricing was extrapolated and requires field verification/custom quote.`]
+        : []),
+      ...(bahiaNoProgram
+        ? ['Bahiagrass has no v13 lawn program (Celsius and Blindside are not labeled for bahiagrass). A new bahia lawn plan needs review before it is sold.']
         : []),
       ...(grassTypeWasDefaulted
         ? [`Grass type "${requestedGrassType}" is not a supported track — priced off the St. Augustine table pending review.`]
@@ -6170,6 +6181,8 @@ function priceOneTimeLawn(property, options = {}) {
   assertEnum(normalizedTreatment, Object.keys(ONE_TIME.lawn.treatmentMultipliers), 'treatmentType');
   const lawnResult = priceLawnCare(property, {
     track,
+    // The one-time anchor is not the v13 lawn program: no bahia review here.
+    skipBahiaNoProgramReview: true,
     // One-time work anchors on the STANDARD (6x) per-app — the column the
     // cadence frequency discount never moves (codex #3274 r4 P1). A
     // standalone treatment makes no frequency commitment, so deriving from
