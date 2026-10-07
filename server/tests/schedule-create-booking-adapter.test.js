@@ -196,6 +196,21 @@ describe('createScheduleBooking runs the POST / handler', () => {
     });
   });
 
+  describe('approvedBilling (Intelligence Bar start_program)', () => {
+    const billing = { payer_id: null, billing_mode: null, per_application_fee: null, waveguard_tier: null, monthly_rate: null };
+
+    test('the billing the card was built on books', async () => {
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedBilling: billing })).status).toBe(201);
+    });
+
+    test('billing that changed under the lock refuses with BILLING_CHANGED and books nothing', async () => {
+      const result = await createScheduleBooking({ body: oneOff, actor, approvedBilling: { ...billing, billing_mode: 'monthly_membership' } });
+      expect(result.status).toBe(409);
+      expect(result.json.code).toBe('BILLING_CHANGED');
+      expect(inserts).toEqual([]);
+    });
+  });
+
   describe('child overlaps (approvedOverlapFacts set)', () => {
     const { findConflictingVisits } = require('../services/scheduling/occupancy');
     const recurring = { ...oneOff, isRecurring: true, recurringPattern: 'monthly', recurringOngoing: true, createInvoice: true };

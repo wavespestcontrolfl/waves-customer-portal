@@ -755,6 +755,10 @@ async function bookSeries(plan, actionContext) {
       skipLeadConversion: true,
       // The address the card showed; the handler refuses any other anchor.
       approvedServiceAnchor: { propertyId: plan.propertyId, address: plan.serviceAddress },
+      // The billing state the card was built on (dues-covered visits); the
+      // handler re-checks it under the customer lock before any insert.
+      approvedBilling: Object.fromEntries(['payer_id', 'billing_mode', 'per_application_fee', 'waveguard_tier', 'monthly_rate']
+        .map((c) => [c, plan.customer[c] ?? null])),
     });
   } catch (err) {
     logger.error(`[intelligence-bar] start_program booking threw for customer ${plan.customerId}: ${err.message}`);
@@ -768,7 +772,7 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
-      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
+      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }

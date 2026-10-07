@@ -389,6 +389,9 @@ describe('commit', () => {
     expect(createScheduleBooking.mock.calls[0][0].approvedOverlapFacts).toEqual([]);
     expect(createScheduleBooking.mock.calls[0][0].skipLeadConversion).toBe(true);
     expect(createScheduleBooking.mock.calls[0][0].approvedServiceAnchor).toEqual({ propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' });
+    expect(createScheduleBooking.mock.calls[0][0].approvedBilling).toEqual({
+      payer_id: null, billing_mode: 'monthly_membership', per_application_fee: null, waveguard_tier: 'Bronze', monthly_rate: '41.33',
+    });
     // The handler queues its texts after it replies: queued, never "sent".
     expect(result.message).toContain('Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).');
     expect(result.message).not.toMatch(/\bsent per\b|confirmation sent/);
@@ -517,6 +520,14 @@ describe('commit', () => {
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: 'office-admin-1' });
     expect(result.preview_changed).toBe(true);
     expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the handler finds changed billing under its lock: refused, nothing booked, preview_changed', async () => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: "The customer's billing changed since the card was shown. Nothing was booked.", code: 'BILLING_CHANGED' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code: 'BILLING_CHANGED', preview_changed: true, nothing_changed: true });
+    expect(writes).toEqual([]);
   });
 
   test('the handler resolves a different service address under its lock: refused, preview_changed', async () => {

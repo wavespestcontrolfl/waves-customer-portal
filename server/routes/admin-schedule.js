@@ -8690,6 +8690,14 @@ async function scheduleCreateHandler(req, res, next) {
           err.code = 'CUSTOMER_CHANGED_RETRY';
           throw err;
         }
+        // Intelligence Bar start_program (approvedBilling, set only by
+        // createScheduleBooking): the billing state the card was built on
+        // (dues-covered visits) must still hold under this lock, or the
+        // series would book priced visits the card said carry no price.
+        if (req.approvedBilling
+          && BILLING_FINGERPRINT_COLS.some((c) => String(freshCustomer[c] ?? '') !== String(req.approvedBilling[c] ?? ''))) {
+          throw Object.assign(httpError(409, 'The customer\'s billing changed since the card was shown. Nothing was booked.'), { code: 'BILLING_CHANGED' });
+        }
         // Linked-estimate ownership revalidates under the fence too (r36):
         // a journaled estimate a merge-undo just returned would stamp the
         // restored loser's source_estimate_id onto a kept-customer visit.
@@ -9920,13 +9928,15 @@ async function scheduleCreateHandler(req, res, next) {
 // (bookingOverlapFacts facts); any other overlap refuses under the lock.
 // skipLeadConversion: no lead is marked won (and no booking promotion runs)
 // for this booking. approvedServiceAnchor: { propertyId, address } the card
-// showed; any other anchor refuses under the lock.
-async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor }) {
+// showed; any other anchor refuses under the lock. approvedBilling: the
+// billing columns (payer, lane, fee, tier, rate) the card was built on.
+async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
     body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true,
     skipLeadConversion: skipLeadConversion === true,
     ...(approvedServiceAnchor ? { approvedServiceAnchor } : {}),
+    ...(approvedBilling ? { approvedBilling } : {}),
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
   };
   return new Promise((resolve, reject) => {
