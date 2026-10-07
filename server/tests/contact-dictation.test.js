@@ -471,7 +471,7 @@ describe('spelled-name decoding', () => {
       expect(near.name_full).toBe('Varnum');
       const far = { first_name: 'Odalys', last_name: null, name_full: 'Odalys' };
       applyNameDictationToV2Caller(far, dictation(entry({ spelled_value: 'Varnum' })));
-      expect(far).toEqual({ first_name: 'Odalys', last_name: 'Varnum', name_full: 'Odalys' });
+      expect(far).toEqual({ first_name: 'Odalys', last_name: 'Varnum', name_full: 'Odalys Varnum' });
     });
 
     test('replaces a whole compound component in name_full, not a token', () => {
@@ -518,6 +518,15 @@ describe('spelled-name decoding', () => {
       const caller = { first_name: 'Jon', last_name: null, name_full: 'Jane Smith' };
       expect(applyNameDictationToV2Caller(caller, dictation(entry({ spelled_value: 'John', field: 'first_name' })))).toEqual({});
       expect(caller).toEqual({ first_name: 'Jon', last_name: null, name_full: 'Jane Smith' });
+    });
+
+    test('filling a missing part beside a one-part name_full updates name_full; with no other part nothing changes', () => {
+      const caller = { first_name: 'Quentrell', last_name: null, name_full: 'Quentrell' };
+      applyNameDictationToV2Caller(caller, dictation(entry({ spelled_value: 'Varnum' })));
+      expect(caller).toEqual({ first_name: 'Quentrell', last_name: 'Varnum', name_full: 'Quentrell Varnum' });
+      const bare = { first_name: null, last_name: null, name_full: 'Quentrell' };
+      expect(applyNameDictationToV2Caller(bare, dictation(entry({ spelled_value: 'Varnum' })))).toEqual({});
+      expect(bare).toEqual({ first_name: null, last_name: null, name_full: 'Quentrell' });
     });
 
     test('exports a JSON cohort marker', () => {

@@ -470,13 +470,15 @@ function applyNameDictationToV2Caller(caller, dictation) {
     if (!anchored.test(rewritten)) misses.push(field);
     rewritten = rewritten.replace(anchored, value);
   }
-  // name_full disagrees with a split part it should contain. Two present
-  // split parts are the extractor's own identity, so name_full is rebuilt from
-  // them; otherwise the whole name stays exactly as it was (readers prefer
+  // name_full needs rebuilding when it disagrees with a split part it should
+  // contain, or when a missing part is filled in beside it. Two present split
+  // parts are the extractor's own identity, so name_full is rebuilt from them;
+  // otherwise the whole name stays exactly as it was (readers prefer
   // name_full, and a split/full mismatch would show the stale name).
-  if (misses.length && !NAME_FIELDS.every((f) => caller[f])) return {};
+  const rebuild = misses.length > 0 || (nameFull && Object.keys(changes).some((f) => !current[f]));
+  if (rebuild && !NAME_FIELDS.every((f) => changes[f] || caller[f])) return {};
   Object.assign(caller, changes);
-  const next = misses.length ? NAME_FIELDS.map((f) => caller[f]).join(' ') : rewritten;
+  const next = rebuild ? NAME_FIELDS.map((f) => caller[f]).join(' ') : rewritten;
   if (next !== nameFull) caller.name_full = next;
   return changes;
 }
