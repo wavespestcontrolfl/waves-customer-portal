@@ -390,6 +390,17 @@ function reServiceOverrideRow({ extracted, haystack, reServices, reServiceLanes,
   return (reServices || []).find((s) => lane && s.service_key === RE_SERVICE_KEYS[lane]) || null;
 }
 
+// The Assessment pick holds against keyword rules only when it is the call's
+// one service pick: if matched_service / requested_service name a SPECIFIC
+// catalog row (e.g. a recorded pre-adoption V1 pick), the views disagree and
+// the pre-existing keyword precedence decides, as before.
+function assessmentPickHolds(pick, extracted, services) {
+  if (!isAssessmentCatalogRow(pick)) return false;
+  return ![extracted.matched_service, extracted.requested_service]
+    .map((value) => findServiceByName(services, value))
+    .some((row) => row && !isGenericCallCatalogRow(row));
+}
+
 // transcription / reServices / reServiceLanes / coarseServiceLabel may be
 // absent: the haystack drops empty parts and reServiceOverrideRow treats
 // missing lists and labels as none.
@@ -437,7 +448,7 @@ function resolveCallBookingCatalogService({
   // "rodent" in a pest + rodent + termite plan quote must not turn it into a
   // one-time rodent job (2026-10-05 call a12fd5ef). It stays generic above
   // only so the re-service override may still replace it.
-  const keywordMayReplacePick = !isAssessmentCatalogRow(byModelPick)
+  const keywordMayReplacePick = !assessmentPickHolds(byModelPick, extracted, services)
     && (!byModelPick || isGenericCallCatalogRow(byModelPick));
   return (keywordMayReplacePick && keywordRow) || byModelPick || null;
 }
