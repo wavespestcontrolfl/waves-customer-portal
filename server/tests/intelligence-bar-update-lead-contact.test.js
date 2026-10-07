@@ -174,6 +174,35 @@ test('confirmed with the pinned diff: the WHERE re-asserts the APPROVED old valu
   expect(activities.insert).not.toHaveBeenCalled();
 });
 
+test('confirmed: the WHERE re-asserts the approved customer link, so a lead converted after the card refuses', async () => {
+  const leads = chain({ first: { ...LEAD, customer_id: 'cust-9' }, update: [] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', first_name: 'Tess', confirmed: true,
+    _approved_changes: { first_name: { from: 'Testc', to: 'Tess' } },
+    _approved_customer_link: 'none',
+  });
+  expect(leads.whereNull).toHaveBeenCalledWith('customer_id');
+  expect(res.preview_changed).toBe(true);
+  // A linked lead pins its exact customer.
+  const linked = chain({ first: { ...LEAD, customer_id: 'cust-9' }, update: [{ id: 'lead-1' }] });
+  db.mockImplementation((table) => (table === 'leads' ? linked : activities));
+  await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', first_name: 'Tess', confirmed: true,
+    _approved_changes: { first_name: { from: 'Testc', to: 'Tess' } },
+    _approved_customer_link: 'cust-9',
+  });
+  expect(linked.where).toHaveBeenCalledWith('customer_id', 'cust-9');
+});
+
+test('the preview carries the observed customer link for the route pin', async () => {
+  db.mockReturnValue(chain({ first: LEAD }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' }))._customer_id).toBeNull();
+  db.mockReturnValue(chain({ first: { ...LEAD, customer_id: 'cust-9' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' }))._customer_id).toBe('cust-9');
+});
+
 test('confirmed: a pinned diff that does not match the request is refused', async () => {
   const leads = chain({ first: LEAD, update: [{ id: 'lead-1' }] });
   db.mockReturnValue(leads);
@@ -279,6 +308,13 @@ test('the street part must be the street line only: an embedded city or ZIP is r
   expect(unit.preview).toBe(true);
 });
 
+test('a floor unit is a street line; a malformed ZIP is refused', async () => {
+  db.mockReturnValue(chain({ first: { ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St, Fl 2', city: 'Bradenton', zip: '34208' })).preview).toBe(true);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St', city: 'Bradenton', zip: '3420B' })).error).toMatch(/5-digit ZIP/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St', city: 'Bradenton', zip: '34208-1234' })).preview).toBe(true);
+});
+
 describe('address fields', () => {
   const ADDR_LEAD = { ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' };
   const NEW = { address: '12 Palm Ave', city: 'Sarasota', zip: '34201' };
@@ -327,7 +363,7 @@ describe('address fields', () => {
     const edit = (over) => executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...NEW, ...over });
     expect((await edit({ address: 'x'.repeat(256) })).error).toBe('address is too long (255 characters max).');
     expect((await edit({ city: 'x'.repeat(121) })).error).toBe('city is too long (120 characters max).');
-    expect((await edit({ zip: '1'.repeat(21) })).error).toBe('zip is too long (20 characters max).');
+    expect((await edit({ zip: '1'.repeat(21) })).error).toBe('zip must be a 5-digit ZIP (or ZIP+4). Nothing was proposed.');
   });
 
   test('the schema offers address, city and zip but no state (leads have no state column)', () => {

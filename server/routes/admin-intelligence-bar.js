@@ -1183,6 +1183,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // after the fingerprint check (pre-push P1). `_`-prefixed: never
       // shown, ignored by the unconfirmed fingerprint re-run.
       params._approved_changes = preview.changes;
+      // …and the customer link the card was built on (Codex #6099 r11).
+      params._approved_customer_link = preview._customer_id ? String(preview._customer_id) : 'none';
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no

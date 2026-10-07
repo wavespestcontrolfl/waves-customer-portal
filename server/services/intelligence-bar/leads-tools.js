@@ -671,16 +671,12 @@ async function matchBulkLeads(input) {
 // address). Leads have no state column.
 const ADDRESS_TOGETHER = 'Give the street, city and ZIP together. Nothing was proposed.';
 const asText = (text) => ({ value: text });
-// The street part is the street line only: a city or ZIP inside it would be
-// printed again beside the city/zip columns (estimate and inspection readers
-// append them). Same place evidence the customer address fan-out uses — a
-// comma alone is not enough ("1 Example Way, Apt 4B" is street + unit), and a
-// comma-free line ending in a ZIP carries locality too (Codex #6099 r10).
+// The street part is the street line only: a ZIP inside it would be printed
+// again beside the zip column (estimate and inspection readers append city
+// and zip). A ZIP is the unambiguous sign of a full line; a unit after a
+// comma ("Apt 4B", "Fl 2") is still a street line (Codex #6099 r10/r11).
 function normalizeLeadStreet(text) {
-  const { snapshotTailPlace, addressMatchKey } = require('../customer-address-fanout');
-  const tail = snapshotTailPlace(text);
-  const namesPlace = (tail && (tail.zip || addressMatchKey(tail.city))) || /\b\d{5}(?:-\d{4})?\s*$/.test(text);
-  return namesPlace
+  return /\b\d{5}(?:-\d{4})?\b/.test(text.split(',').slice(1).join(',')) || /\b\d{5}(?:-\d{4})?\s*$/.test(text)
     ? { error: 'address is the street line only — put the city and ZIP in city and zip. Nothing was proposed.' }
     : { value: text };
 }
@@ -697,7 +693,11 @@ const LEAD_FIELD_SPECS = {
   },
   address: { blank: ADDRESS_TOGETHER, normalize: normalizeLeadStreet, max: 255 },
   city: { blank: ADDRESS_TOGETHER, normalize: asText, max: 120 },
-  zip: { blank: ADDRESS_TOGETHER, normalize: asText, max: 20 },
+  zip: {
+    blank: ADDRESS_TOGETHER,
+    normalize: (text) => (/^\d{5}(?:-\d{4})?$/.test(text) ? { value: text } : { error: 'zip must be a 5-digit ZIP (or ZIP+4). Nothing was proposed.' }),
+    max: 20,
+  },
 };
 const LEAD_CONTACT_FIELDS = Object.keys(LEAD_FIELD_SPECS);
 const LEAD_ADDRESS_FIELDS = ['address', 'city', 'zip'];
@@ -814,6 +814,9 @@ async function updateLeadContact(input) {
     lead_status: lead.status,
     changes,
     ...(lead.customer_id ? { linked_customer_unchanged: true } : {}),
+    // The customer link the card was built on; the route pins it and the
+    // commit re-asserts it, so a conversion or relink in between refuses.
+    _customer_id: lead.customer_id,
     // The lead editor runs no address fan-out: an estimate keeps the address
     // it was drafted with (estimates.address is its own column).
     ...(changes.address ? { estimates_keep_address: true } : {}),
@@ -838,6 +841,10 @@ async function updateLeadContact(input) {
 
   const updatedRows = await db.transaction(async (trx) => {
     let q = trx('leads').where('id', lead.id).whereNull('deleted_at');
+    // The approved customer link (Codex #6099 r11): a lead converted or
+    // relinked after the card refuses instead of keeping a stale customer.
+    if (input._approved_customer_link === 'none') q = q.whereNull('customer_id');
+    else if (input._approved_customer_link) q = q.where('customer_id', input._approved_customer_link);
     // Re-assert every value the card showed as "from" — a concurrent edit
     // matches zero rows instead of being overwritten.
     for (const [field, { from }] of Object.entries(changes)) {
