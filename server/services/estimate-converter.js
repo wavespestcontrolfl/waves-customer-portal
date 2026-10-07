@@ -2483,6 +2483,122 @@ function recurringMixHasMembershipFeeService(recurringServices = []) {
 // per-visit charge and under-collected two thirds of every visit (validation
 // audit DATA-001, 2026-09-02) — a NULL fee makes completion say "no billable
 // amount on file — invoice manually" instead.
+// The accept's recurring scheduling units and their count (convertEstimate;
+// exported so the Intelligence Bar accept_estimate card reads the same count).
+function recurringUnitsForAccept(recurringServicesForConversion, estimateData) {
+  const supplementalCompanions = supplementalCompanionLines(estimateData);
+  // ONE initial scheduling decision for the whole accept (Codex r2 on the
+  // pest+rodent removal): the auto-schedule loop, the reservation branch,
+  // unit counting, and prepay coverage all read this same result, so the
+  // count can never disagree with what actually schedules. Only
+  // fromSupplement standalone units add to the count — a line-sourced
+  // standalone unit was already counted among the recurring lines, and
+  // the combine dedupes a line + duplicate scalar to one unit. A stamped
+  // primary-only reservation can separate retired routes after its hold is
+  // loaded below; that changes placement only, not the accepted program count.
+  const combinedSchedulingOptions = {
+    acceptFrequency: estimateData.customerSelection?.frequency || null,
+    supplementalCompanions,
+  };
+  const combinedScheduling = combineRecurringServicesForScheduling(
+    recurringServicesForConversion, combinedSchedulingOptions,
+  );
+  const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
+  // Termite bond lines are RIDERS, not units (owner 2026-07-20): the bond
+  // folds into the bait visit via its combined route, so counting it would
+  // flip a bait+bond plan to "multi-unit" and null out the whole-plan
+  // per-application fee/row price that the single combined visit must
+  // carry ($150/application = monitoring + bond, whole plan ÷ 4).
+  // (Station-rental lines are already filtered out of
+  // recurringServicesForConversion above — they are never units.)
+  const isTermiteBondLine = (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond');
+  const hasTermiteBondLine = recurringServicesForConversion.some(isTermiteBondLine);
+  const recurringUnitCount = recurringServicesForConversion.filter((svc) => !isTermiteBondLine(svc)).length
+    + supplementStandaloneUnits.length;
+  return {
+    supplementalCompanions, combinedSchedulingOptions, combinedScheduling,
+    supplementStandaloneUnits, isTermiteBondLine, hasTermiteBondLine, recurringUnitCount,
+  };
+}
+
+// The per-visit charge an accept stamps for per-application billing
+// (convertEstimate; exported so the Intelligence Bar accept_estimate card
+// shows the same amount, or refuses when it is unresolved).
+function perApplicationChargeForAccept({
+  estimate, estimateData, monthlyRate, recurringServicesForConversion, supplementStandaloneUnits, recurringUnitCount,
+}) {
+  const inferredFrequencyKey = estimateData.customerSelection?.frequency
+    || inferFrequencyKeyFromEstimateData(estimateData);
+  // Combined routing only trusts the customer's REAL accepted selection —
+  // inferFrequencyKeyFromEstimateData is a guess that can derive from a
+  // companion or unrelated line, and must never be treated as the pest
+  // plan cadence (pre-push P1). Absent a real selection, explicit line
+  // cadence decides and cadence-less pest lines don't combine.
+  const acceptedPlanFrequency = estimateData.customerSelection?.frequency || null;
+  const billingCadence = inferredFrequencyKey
+    ? resolveBillingCadence({
+        monthlyRate,
+        annualRate: parseFloat(estimate.annual_total || 0),
+        frequencyKey: inferredFrequencyKey,
+        estimateData,
+        fallbackFrequencyKey: inferredFrequencyKey,
+      })
+    : null;
+  // True per-visit charge for per_application billing. billingCadence.amount
+  // is the per-CHARGE amount at the accepted billing cadence — identical to
+  // the per-visit price only when the billing interval matches the visit
+  // cadence (quarterly pest). Tier plans present a monthly price but deliver
+  // a different visit count (tree & shrub 6x/4x, lawn ladders, mosquito
+  // seasonal); stamping the monthly rate on per-visit billing collects only
+  // visits/12 of the accepted annual (T&S audit 2026-07-18 P1). Single
+  // recurring unit only — the same gate the fee and estimated_price writers
+  // use; a standalone supplement beside it means the plan annual isn't this
+  // unit's annual, so the cadence fallback (status quo) applies.
+  // Rider-aware (codex #2915 r6): the bond is carved out of the unit
+  // count, so the "single unit" whose visits drive the per-application
+  // division is the NON-bond line set. Without this, a raw engine-backed
+  // bait+bond accept (no recurring.services for the cadence inference to
+  // read → monthly fallback) would stamp the monthly total as the
+  // per-visit fee ($50) instead of plan-annual ÷ visits ($600/4 = $150).
+  const singleRecurringUnit = riderAwareSingleRecurringUnit(
+    recurringServicesForConversion,
+    supplementStandaloneUnits.length,
+  );
+  // Pest single-unit: the accepted selection's cadence outranks the line's
+  // stale quote-time count (acceptedPestSelectionVisits doctrine above).
+  const singleRecurringUnitVisits = acceptedPestSelectionVisits(singleRecurringUnit, acceptedPlanFrequency)
+    ?? (singleRecurringUnit ? visitsPerYearForRecurringService(singleRecurringUnit) : null);
+  const perApplicationAmount = billingCadence
+    ? perApplicationChargeAmount({
+        billingCadence,
+        annualRate: parseFloat(estimate.annual_total || 0),
+        monthlyRate,
+        visitsPerYear: singleRecurringUnitVisits,
+        // Family evidence for the unknown-visits case: monthly residential
+        // pest bills its cadence amount per visit; monthly tier plans do not.
+        serviceKey: singleRecurringUnit ? recurringServiceKey(singleRecurringUnit) : null,
+      })
+    : null;
+  // A single SCHEDULING unit whose per-visit charge could not be derived —
+  // no inferable billing cadence at all, or a monthly-billed tier plan
+  // whose visit count is unknown (perApplicationChargeAmount returned
+  // null): NO downstream fallback may stand in for the visit price
+  // (validation audit DATA-001 / pre-push codex P0s — the cadence-less
+  // case bypassed a monthly-only definition, and a supplement-only plan
+  // (scalar rodent bait, whose unit comes from supplementStandaloneUnits so
+  // riderAwareSingleRecurringUnit is null) bypassed a line-based one).
+  // Keyed on recurringUnitCount — the count the fee stamp and the row
+  // price writer use. Consumers: the first-application invoice amount
+  // (allowFallback off), the customer-level fee stamp (null → park) and
+  // the established-customer add-on refusal.
+  const perApplicationUnresolved = recurringUnitCount === 1
+    && !(Number(perApplicationAmount) > 0);
+  return {
+    inferredFrequencyKey, acceptedPlanFrequency, billingCadence, singleRecurringUnit,
+    singleRecurringUnitVisits, perApplicationAmount, perApplicationUnresolved,
+  };
+}
+
 function resolveConvertedPerApplicationFee({
   pinnedLegacyRodentOnlyPlan = false,
   preservesExistingMembership = false,
@@ -5078,35 +5194,11 @@ const EstimateConverter = {
     // supports multi-service. Blocking here (not at the term-creation site
     // downstream) guarantees no partial rows are created; all three convertEstimate
     // entrypoints run inside a transaction, so a throw rolls back cleanly.
-    const supplementalCompanions = supplementalCompanionLines(estimateData);
-    // ONE initial scheduling decision for the whole accept (Codex r2 on the
-    // pest+rodent removal): the auto-schedule loop, the reservation branch,
-    // unit counting, and prepay coverage all read this same result, so the
-    // count can never disagree with what actually schedules. Only
-    // fromSupplement standalone units add to the count — a line-sourced
-    // standalone unit was already counted among the recurring lines, and
-    // the combine dedupes a line + duplicate scalar to one unit. A stamped
-    // primary-only reservation can separate retired routes after its hold is
-    // loaded below; that changes placement only, not the accepted program count.
-    const combinedSchedulingOptions = {
-      acceptFrequency: estimateData.customerSelection?.frequency || null,
-      supplementalCompanions,
-    };
-    let combinedScheduling = combineRecurringServicesForScheduling(
-      recurringServicesForConversion, combinedSchedulingOptions,
-    );
-    const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
-    // Termite bond lines are RIDERS, not units (owner 2026-07-20): the bond
-    // folds into the bait visit via its combined route, so counting it would
-    // flip a bait+bond plan to "multi-unit" and null out the whole-plan
-    // per-application fee/row price that the single combined visit must
-    // carry ($150/application = monitoring + bond, whole plan ÷ 4).
-    // (Station-rental lines are already filtered out of
-    // recurringServicesForConversion above — they are never units.)
-    const isTermiteBondLine = (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond');
-    const hasTermiteBondLine = recurringServicesForConversion.some(isTermiteBondLine);
-    const recurringUnitCount = recurringServicesForConversion.filter((svc) => !isTermiteBondLine(svc)).length
-      + supplementStandaloneUnits.length;
+    const acceptUnits = recurringUnitsForAccept(recurringServicesForConversion, estimateData);
+    const {
+      combinedSchedulingOptions, supplementStandaloneUnits, hasTermiteBondLine, recurringUnitCount,
+    } = acceptUnits;
+    let { combinedScheduling } = acceptUnits;
     // FAIL-CLOSED (same posture as the multi-service prepay guard below): an
     // annual_prepay_terms row carries ONE coverage service keyed on the
     // primary name — the combined "…+ Termite Bond Service" service_type
@@ -5204,72 +5296,11 @@ const EstimateConverter = {
     // opened for it (owner ruling 2026-09-01) — its conversion is REFUSED
     // before any billing state is written (assertLegacyMonthlyTermite-
     // Convertible; GH codex P0 r2/r3 on #3751).
-    const inferredFrequencyKey = estimateData.customerSelection?.frequency
-      || inferFrequencyKeyFromEstimateData(estimateData);
-    // Combined routing only trusts the customer's REAL accepted selection —
-    // inferFrequencyKeyFromEstimateData is a guess that can derive from a
-    // companion or unrelated line, and must never be treated as the pest
-    // plan cadence (pre-push P1). Absent a real selection, explicit line
-    // cadence decides and cadence-less pest lines don't combine.
-    const acceptedPlanFrequency = estimateData.customerSelection?.frequency || null;
-    const billingCadence = inferredFrequencyKey
-      ? resolveBillingCadence({
-          monthlyRate,
-          annualRate: parseFloat(estimate.annual_total || 0),
-          frequencyKey: inferredFrequencyKey,
-          estimateData,
-          fallbackFrequencyKey: inferredFrequencyKey,
-        })
-      : null;
-    // True per-visit charge for per_application billing. billingCadence.amount
-    // is the per-CHARGE amount at the accepted billing cadence — identical to
-    // the per-visit price only when the billing interval matches the visit
-    // cadence (quarterly pest). Tier plans present a monthly price but deliver
-    // a different visit count (tree & shrub 6x/4x, lawn ladders, mosquito
-    // seasonal); stamping the monthly rate on per-visit billing collects only
-    // visits/12 of the accepted annual (T&S audit 2026-07-18 P1). Single
-    // recurring unit only — the same gate the fee and estimated_price writers
-    // use; a standalone supplement beside it means the plan annual isn't this
-    // unit's annual, so the cadence fallback (status quo) applies.
-    // Rider-aware (codex #2915 r6): the bond is carved out of the unit
-    // count, so the "single unit" whose visits drive the per-application
-    // division is the NON-bond line set. Without this, a raw engine-backed
-    // bait+bond accept (no recurring.services for the cadence inference to
-    // read → monthly fallback) would stamp the monthly total as the
-    // per-visit fee ($50) instead of plan-annual ÷ visits ($600/4 = $150).
-    const singleRecurringUnit = riderAwareSingleRecurringUnit(
-      recurringServicesForConversion,
-      supplementStandaloneUnits.length,
-    );
-    // Pest single-unit: the accepted selection's cadence outranks the line's
-    // stale quote-time count (acceptedPestSelectionVisits doctrine above).
-    const singleRecurringUnitVisits = acceptedPestSelectionVisits(singleRecurringUnit, acceptedPlanFrequency)
-      ?? (singleRecurringUnit ? visitsPerYearForRecurringService(singleRecurringUnit) : null);
-    const perApplicationAmount = billingCadence
-      ? perApplicationChargeAmount({
-          billingCadence,
-          annualRate: parseFloat(estimate.annual_total || 0),
-          monthlyRate,
-          visitsPerYear: singleRecurringUnitVisits,
-          // Family evidence for the unknown-visits case: monthly residential
-          // pest bills its cadence amount per visit; monthly tier plans do not.
-          serviceKey: singleRecurringUnit ? recurringServiceKey(singleRecurringUnit) : null,
-        })
-      : null;
-    // A single SCHEDULING unit whose per-visit charge could not be derived —
-    // no inferable billing cadence at all, or a monthly-billed tier plan
-    // whose visit count is unknown (perApplicationChargeAmount returned
-    // null): NO downstream fallback may stand in for the visit price
-    // (validation audit DATA-001 / pre-push codex P0s — the cadence-less
-    // case bypassed a monthly-only definition, and a supplement-only plan
-    // (scalar rodent bait, whose unit comes from supplementStandaloneUnits so
-    // riderAwareSingleRecurringUnit is null) bypassed a line-based one).
-    // Keyed on recurringUnitCount — the count the fee stamp and the row
-    // price writer use. Consumers: the first-application invoice amount
-    // (allowFallback off), the customer-level fee stamp (null → park) and
-    // the established-customer add-on refusal.
-    const perApplicationUnresolved = recurringUnitCount === 1
-      && !(Number(perApplicationAmount) > 0);
+    const {
+      inferredFrequencyKey, acceptedPlanFrequency, billingCadence, perApplicationAmount, perApplicationUnresolved,
+    } = perApplicationChargeForAccept({
+      estimate, estimateData, monthlyRate, recurringServicesForConversion, supplementStandaloneUnits, recurringUnitCount,
+    });
 
     // A CURRENT monthly member accepting an add-on/upgrade estimate keeps
     // their membership model — an unconditional per_application stamp would
@@ -8962,6 +8993,8 @@ module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServi
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
 module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;
+module.exports.recurringUnitsForAccept = recurringUnitsForAccept;
+module.exports.perApplicationChargeForAccept = perApplicationChargeForAccept;
 module.exports.assertPerApplicationAddOnPriced = assertPerApplicationAddOnPriced;
 module.exports.legacyFlatMonthlyTermiteUnit = legacyFlatMonthlyTermiteUnit;
 module.exports.assertLegacyMonthlyTermiteConvertible = assertLegacyMonthlyTermiteConvertible;

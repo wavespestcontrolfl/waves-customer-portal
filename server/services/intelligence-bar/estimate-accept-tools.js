@@ -206,7 +206,8 @@ function termiteAgreementMessage(termiteProgram) {
 
 function customerMessages({ customer, prefs, converts, commercialOnly, lane, termiteProgram }) {
   const messages = [];
-  const email = String(customer.email || '').trim();
+  // The sender's own recipient (account-membership-email sendTemplate).
+  const email = String(require('../customer-contact').getPrimaryContact(customer).email || '').trim();
   const emailOn = !(prefs && prefs.email_enabled === false);
   if (!converts) {
     messages.push({ kind: 'none', will_send: false, text: 'No email or text: a one-time estimate only changes status here' });
@@ -214,8 +215,10 @@ function customerMessages({ customer, prefs, converts, commercialOnly, lane, ter
     messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email: a commercial-only plan is not a WaveGuard membership' });
   } else if (lane === 'one_time') {
     messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email: the plan bills one time' });
-  } else if (!/@/.test(email)) {
+  } else if (!email) {
     messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email: no email address on file' });
+  } else if (!require('../account-membership-email').isEmailLike(email)) {
+    messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email: no email (the address on file is not a valid email)' });
   } else if (!emailOn) {
     messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email: this customer turned email messages off' });
   } else {
@@ -279,6 +282,59 @@ async function pageRefusal(estimate, estimateData) {
   return null;
 }
 
+// A frozen WaveGuard extension plan for the activated tier (the plan rows
+// applyFrozenExistingServiceExtension acts on).
+function frozenExtensionPlan(estimateData, activatedTier) {
+  const snapshot = estimateData.membershipSnapshot;
+  const plan = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
+    .some((svc) => Number(svc?.currentPerVisit) > 0 && Number(svc?.newPerVisit) > 0 && Number(svc?.perVisitSavings) > 0
+      && Array.isArray(svc?.keys) && svc.keys.length > 0);
+  return plan && String(snapshot?.tierLabel || '').trim().toLowerCase() === String(activatedTier || '').trim().toLowerCase();
+}
+
+// The per-application charge the converter stamps, from its own helpers
+// (recurringUnitsForAccept, perApplicationChargeForAccept,
+// resolveConvertedPerApplicationFee, assertPerApplicationAddOnPriced). A fee
+// the converter would leave unresolved is refused, not carded.
+function perApplicationPlan({ estimate, estimateData, customer, monthlyRate, act }) {
+  const Converter = require('../estimate-converter');
+  const { customerPreservesMonthlyMembership } = require('../billing-cadence');
+  const preserves = customerPreservesMonthlyMembership(customer);
+  if (preserves || act.pinnedLegacyRodentOnlyPlan || act.commercialOnly) return { refusal: null, line: null };
+  const units = Converter.recurringUnitsForAccept(act.services, estimateData);
+  const charge = Converter.perApplicationChargeForAccept({
+    estimate, estimateData, monthlyRate, recurringServicesForConversion: act.services,
+    supplementStandaloneUnits: units.supplementStandaloneUnits, recurringUnitCount: units.recurringUnitCount,
+  });
+  const needsReview = refuse('Accept this on the estimate page; the per-visit charge needs a manual review.', 'per_application_unresolved');
+  try {
+    Converter.assertPerApplicationAddOnPriced({ perApplicationUnresolved: charge.perApplicationUnresolved, customer, billingTerm: 'standard' });
+  } catch {
+    return { refusal: needsReview, line: null };
+  }
+  if (units.recurringUnitCount !== 1) {
+    return { refusal: null, line: 'Bills each service per application at its own visit price (no single account fee)' };
+  }
+  const stamped = Converter.resolveConvertedPerApplicationFee({ customer, recurringUnitCount: 1, perApplicationAmount: charge.perApplicationAmount });
+  if (stamped == null) return { refusal: needsReview, line: null };
+  const amount = Number(charge.perApplicationAmount) > 0 ? Number(charge.perApplicationAmount) : stamped;
+  const kept = round2(stamped) !== round2(amount) ? ` (the account fee stays ${money(stamped)})` : '';
+  return { refusal: null, line: `Bills ${money(amount)} per application (about ${money(monthlyRate)} a month)${kept}` };
+}
+
+// The converter's combined-tier review bell (tierUpgradeNotification): it
+// rings when the customer has prior qualifying services and the accept moves
+// the stored tier up, or a frozen extension plan parks for review.
+function tierReviewNotice({ estimateData, customer, act }) {
+  if (act.commercialOnly || !act.prior.length || !act.tier) return null;
+  const Converter = require('../estimate-converter');
+  if (Converter.isMembershipTierUpgrade(customer.waveguard_tier, act.tier)) {
+    return `Office notice: tier review (${customer.waveguard_tier || 'none'} → ${act.tier})`;
+  }
+  if (frozenExtensionPlan(estimateData, act.tier)) return 'Office notice: tier review (existing-service discount to apply by hand)';
+  return null;
+}
+
 // What the conversion would refuse, or change, that this card cannot show:
 // the termite annual plan is accepted with annual prepay only (the
 // converter's TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY guard), and a frozen
@@ -290,12 +346,7 @@ function conversionRefusal(estimate, estimateData, activatedTier) {
   if (!parked && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
     return refuse('The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront"). The bar does not offer annual prepay; use the estimate page\'s annual prepay accept.', 'termite_annual_requires_prepay');
   }
-  const snapshot = estimateData.membershipSnapshot;
-  const extension = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
-    .some((svc) => Number(svc?.currentPerVisit) > 0 && Number(svc?.newPerVisit) > 0 && Number(svc?.perVisitSavings) > 0
-      && Array.isArray(svc?.keys) && svc.keys.length > 0);
-  const tierMatches = String(snapshot?.tierLabel || '').trim().toLowerCase() === String(activatedTier || '').trim().toLowerCase();
-  if (extension && tierMatches && require('../../config/feature-gates').isEnabled('waveguardExtendExisting')) {
+  if (frozenExtensionPlan(estimateData, activatedTier) && require('../../config/feature-gates').isEnabled('waveguardExtendExisting')) {
     return refuse("This quote also lowers the price of the customer's existing services (WaveGuard tier extension), which re-prices booked visits and may credit prepaid ones. The bar cannot show that on a card yet; use Mark accepted on the estimate page.", 'existing_service_extension');
   }
   return null;
@@ -335,14 +386,14 @@ async function activation(estimateData, customerId) {
   // A commercial recurring line or a priced commercial one-time line stamps
   // the customer commercial (converter and one-time accept alike).
   const commercialStamp = hasCommercialRecurring || Converter.estimateHasCommercialOneTime(estimateData);
-  if (commercialOnly) return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, tier: 'Commercial' };
+  if (commercialOnly) return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, services, prior: [], tier: 'Commercial' };
   let prior = [];
   if (keys.length) {
     prior = Converter.priorQualifyingKeysFromSnapshot(estimateData)
       || await require('../waveguard-existing-services').loadExistingQualifyingServiceKeys(db, customerId).catch(() => []);
   }
   const { tier } = Converter.determineTier(Converter.combinedTierQualifyingCount(keys, prior), services.length > 0);
-  return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, tier: tier === 'none' ? null : tier };
+  return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, services, prior, tier: tier === 'none' ? null : tier };
 }
 
 // Billing lane and tier after the accept: the billing_mode the converter
@@ -416,7 +467,9 @@ function serviceAndBillLines(preview) {
   const addOn = bill.add_on ? ' (added to the existing plan)' : '';
   lines.push({ kind: 'billing', label: `Bill total: ${money(bill.total_before)} → ${money(bill.total_after)} a month${addOn}`, before: money(bill.total_before), after: money(bill.total_after) });
   if (!bill.split_by_service) lines.push({ kind: 'billing', label: 'Bill note: this accept is not split by service (grouped or other-property estimate)' });
+  if (preview.per_application) lines.push({ kind: 'billing', label: preview.per_application });
   if (bill.review_alert) lines.push({ kind: 'operational', label: 'Admin bell: plan-rate review — check the new monthly total after the accept' });
+  for (const notice of preview.office_notices) lines.push({ kind: 'operational', label: notice });
   return lines;
 }
 
@@ -466,9 +519,11 @@ async function planAccept(input) {
   // Mark accepted runs the converter only for a recurring monthly total
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
-  const { commercialOnly, commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = await activation(estimateData, customerId);
+  const act = await activation(estimateData, customerId);
+  const { commercialOnly, commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = act;
   const termiteProgram = termiteProgramFor(estimate, estimateData);
-  const blocked = await laterRefusal({ converts, estimate, estimateData, tier, termiteProgram, customerId });
+  const perApp = converts ? perApplicationPlan({ estimate, estimateData, customer, monthlyRate, act }) : { refusal: null, line: null };
+  const blocked = await laterRefusal({ converts, estimate, estimateData, tier, termiteProgram, customerId }) || perApp.refusal;
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
@@ -493,6 +548,8 @@ async function planAccept(input) {
       after: commercialStamp && customer.property_type !== 'commercial' ? 'commercial' : (customer.property_type || null),
     },
     visits: { books_new: false },
+    per_application: perApp.line,
+    office_notices: converts ? [tierReviewNotice({ estimateData, customer, act })].filter(Boolean) : [],
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),
     // Approval binds these: any change before Confirm refuses the card.

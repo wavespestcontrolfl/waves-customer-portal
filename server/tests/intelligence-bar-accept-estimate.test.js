@@ -112,6 +112,7 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       'Bill total: $55.00 → $145.00 a month (added to the existing plan)',
       'Billing lane: billed per application (each visit) → billed per application (each visit) (unchanged)',
       'Tier: Bronze → Gold',
+      'Bills each service per application at its own visit price (no single account fee)',
       'No setup invoice, no charge and no receipt now',
       'Visits: books none — book the first visit on the calendar after',
       'Message: Email "membership started" to l***@example.com right after Confirm: plan, tier, rate and services (sent once per estimate)',
@@ -157,6 +158,52 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     });
     const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
     expect(lines).toContain('Billing lane: none → monthly membership dues');
+  });
+
+  test('an address the email sender would skip is not promised an email', async () => {
+    seed({ customer: { email: 'person@example' } });
+    const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(labels(card(preview))).toContain('Message: No "membership started" email: no email (the address on file is not a valid email)');
+    expect(card(preview).notifies_customer).toBe(false);
+  });
+
+  test('a single-service plan shows the exact per-application charge the converter stamps', async () => {
+    seed({
+      estimate: {
+        monthly_total: 49, annual_total: 588,
+        estimate_data: {
+          customerSelection: { frequency: 'quarterly' },
+          recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] },
+        },
+      },
+      customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
+      ledger: [],
+    });
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines).toContain('Bills $147.00 per application (about $49.00 a month)');
+  });
+
+  test('a single-service plan whose per-visit charge the converter cannot resolve is refused, not carded', async () => {
+    seed({
+      estimate: {
+        monthly_total: 55, annual_total: 0,
+        estimate_data: { recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', monthly: 55 }] } },
+      },
+      customer: { pipeline_stage: 'lead', monthly_rate: 0, billing_mode: null, waveguard_tier: null },
+      ledger: [],
+    });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('per_application_unresolved');
+    expect(result.error).toBe('Accept this on the estimate page; the per-visit charge needs a manual review. Nothing was changed.');
+  });
+
+  test('the tier-review office notice shows when the accept raises a customer with prior services', async () => {
+    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(lines).toContain('Office notice: tier review (Bronze → Gold)');
+    // No prior qualifying services: no notice.
+    priorKeys.mockResolvedValue([]);
+    const fresh = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
+    expect(fresh.some((l) => l.startsWith('Office notice: tier review'))).toBe(false);
   });
 
   test('the tier is the one the accept activates, not only what the quote says', async () => {

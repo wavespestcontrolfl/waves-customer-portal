@@ -1163,6 +1163,8 @@ module.exports = {
   sendMembershipReactivated,
   sendPrevisitBalanceReminder,
   resolvePrevisitBalanceEmailRecipient,
+  // The sender's own address check (sendTemplate skips any other address).
+  isEmailLike,
   _private: {
     hashValue,
     itemSummary,
