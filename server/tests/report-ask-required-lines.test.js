@@ -1931,3 +1931,18 @@ describe('answer screen, Codex round 52', () => {
     expect(buildReportAskFacts({ question: 'What was applied?', data }).products.map((product) => product.name)).toEqual(['LESCO', 'Fertilizer']);
   });
 });
+
+describe('answer screen, pre-push audit on round 52', () => {
+  test.each(["We're on our way.", "We're coming soon.", 'We are coming soon.'])('a contracted arrival promise is rejected: %s', (answer) => {
+    const data = pestData({ applications: [] });
+    expect(screenAskAnswer(answer, { question: 'When are you coming?', data, facts: buildReportAskFacts({ data }) })).toBe('states_a_date');
+  });
+
+  test('a diagnosis score is grounded only by its own row', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 }, diagnosis: [{ key: 'pest_activity', label: 'Pests', score: 55 }, { key: 'disease', label: 'Disease', score: 100 }] } };
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How are the categories?', data, facts });
+    expect(ask('Disease scored 55 out of 100.')).toBe('unstated_number');
+    expect(ask('Pests scored 55 out of 100.')).toBeNull();
+  });
+});
