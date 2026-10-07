@@ -2248,3 +2248,8 @@ describe('answer screen, Codex round 60', () => {
     expect(screenAskAnswer('Enter BLUE MOON at the gate.', { question: 'q', data: pestData({ applications: [] }), facts })).toBe('access_phrase');
   });
 });
+
+test('a pet eating wins over a pest elsewhere in the sentence (pre-push audit)', () => {
+  expect(medicalExposureAnswer('My dog took a bite of bait that was gnawed by rats.')).toBeTruthy();
+  expect(medicalExposureAnswer('Did the roaches quickly devour the bait?')).toBeNull();
+});

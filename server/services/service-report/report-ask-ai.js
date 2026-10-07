@@ -2220,8 +2220,12 @@ const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}\\s+${INGESTED_AMOUNT}
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence) || EAT_VERB_RE.test(sentence))
     && EXPOSURE_WORD.test(sentence)
-    && (EATER_ACTS.test(sentence) || EATER_IN_SENTENCE.test(sentence)) && !PEST_EATING.test(sentence));
+    && (PERSON_EATS.test(sentence) || ((EATER_ACTS.test(sentence) || EATER_IN_SENTENCE.test(sentence)) && !PEST_EATING.test(sentence))));
 }
+// A person or pet right before the eating verb wins over a pest elsewhere in
+// the sentence: "My dog took a bite of bait that was gnawed by rats"
+// (pre-push audit, #5964).
+const PERSON_EATS = new RegExp(`(?:^|[^\\w])${PERSON}\\s+(?:\\w+\\s+){0,2}?${INGEST}\\b`, 'i');
 const EATER_IN_SENTENCE = new RegExp(`(?:^|[^\\w])${PERSON}\\b`, 'i');
 // "Bit" stays bound to a product (Codex P1 #6038 r1): "mosquitoes bit me" is no ingestion.
 const EAT_VERB_RE = new RegExp(`\\b${EAT_VERBS.replace('|bit|bites?|biting|bitten', '')}\\b`, 'i');
