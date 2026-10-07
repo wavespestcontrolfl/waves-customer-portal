@@ -399,6 +399,19 @@ describe('spelled-name decoding', () => {
       expect(far).toEqual({ first_name: 'Odalys', last_name: 'Varnum', name_full: 'Odalys' });
     });
 
+    test('replaces a whole compound component in name_full, not a token', () => {
+      const last = { first_name: 'Test', last_name: 'De Silvo', name_full: 'Test De Silvo' };
+      applyNameDictationToV2Caller(last, dictation(entry({ spelled_value: 'De Silva' })));
+      expect(last).toEqual({ first_name: 'Test', last_name: 'De Silva', name_full: 'Test De Silva' });
+      const first = { first_name: 'Mary Ann', last_name: 'Varnum', name_full: 'Mary Ann Varnum' };
+      applyNameDictationToV2Caller(first, dictation(entry({ spelled_value: 'Maryanne', field: 'first_name' })));
+      expect(first.name_full).toBe('Maryanne Varnum');
+      // Three tokens and no split value: the component boundary is unknown, so name_full is not guessed at.
+      const unknown = { first_name: null, last_name: null, name_full: 'Test De Silvo' };
+      expect(applyNameDictationToV2Caller(unknown, dictation(entry({ spelled_value: 'De Silva' })))).toEqual({});
+      expect(unknown).toEqual({ first_name: null, last_name: null, name_full: 'Test De Silvo' });
+    });
+
     test('tolerates a missing caller', () => {
       expect(applyNameDictationToV2Caller(null, dictation(entry()))).toEqual({});
     });

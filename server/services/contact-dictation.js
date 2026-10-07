@@ -347,25 +347,40 @@ function applyNameDictationPolicy({ current = {}, dictation = null } = {}) {
  * Apply the name policy to a V2 extraction's `caller` block in place (split
  * fields and name_full). Returns the changes made ({} when none). Secondary
  * contacts live elsewhere in the extraction and are never touched.
+ *
+ * name_full is rewritten by replacing the WHOLE old component ("De Silvo" in
+ * "Test De Silvo"), never a token position. With no split value to name the
+ * old component, only an unambiguous two-token name_full speaks for the
+ * split fields (extraction-compat derives them the same way).
  */
 function applyNameDictationToV2Caller(caller, dictation) {
   if (!caller || typeof caller !== 'object') return {};
-  const tokens = String(caller.name_full || '').trim().split(/\s+/).filter(Boolean);
-  // A two-or-more-token name_full speaks for both parts when the split fields
-  // are empty (extraction-compat derives them the same way).
+  const nameFull = String(caller.name_full || '').trim();
+  const tokens = nameFull.split(/\s+/).filter(Boolean);
+  const derived = tokens.length === 2 ? { first_name: tokens[0], last_name: tokens[1] } : {};
   const current = {
-    first_name: caller.first_name || (tokens.length > 1 ? tokens[0] : null),
-    last_name: caller.last_name || (tokens.length > 1 ? tokens[tokens.length - 1] : null),
+    first_name: caller.first_name || derived.first_name || null,
+    last_name: caller.last_name || derived.last_name || null,
   };
   const changes = applyNameDictationPolicy({ current, dictation });
-  for (const [field, value] of Object.entries(changes)) {
-    caller[field] = value;
-    if (!tokens.length) continue;
-    const idx = tokens.length > 1 ? (field === 'first_name' ? 0 : tokens.length - 1)
-      : (sameNameMisheard(tokens[0], value) ? 0 : -1);
-    if (idx >= 0) tokens[idx] = value;
+  // A name_full whose parts cannot be told apart (three tokens, no split
+  // value) would disagree with a filled-in split field: leave it all alone.
+  for (const field of Object.keys(changes)) {
+    if (!current[field] && tokens.length > 1) delete changes[field];
   }
-  if (Object.keys(changes).length && tokens.length) caller.name_full = tokens.join(' ');
+  let rewritten = nameFull;
+  for (const [field, value] of Object.entries(changes)) {
+    const old = current[field];
+    caller[field] = value;
+    if (!rewritten) continue;
+    if (old) {
+      const escaped = old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      rewritten = rewritten.replace(new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, 'iu'), `$1${value}`);
+    } else if (tokens.length === 1 && sameNameMisheard(tokens[0], value)) {
+      rewritten = value;
+    }
+  }
+  if (rewritten && rewritten !== nameFull) caller.name_full = rewritten;
   return changes;
 }
 
