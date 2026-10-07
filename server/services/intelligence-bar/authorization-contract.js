@@ -895,6 +895,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     });
     push('billing', 'No price-change notice is sent to the customer');
   }
+  // Billing type + per-application fee (owner D5 2026-10-06,
+  // billing-mode-change.js): before -> after in words, what the next visits
+  // are charged, and that no customer message is sent.
+  if (toolName === 'update_customer' && preview?.billing_change) {
+    const bc = preview.billing_change;
+    if (bc.billing_type) push('billing', `Billing type: ${bc.billing_type.before} → ${bc.billing_type.after}`, bc.billing_type);
+    if (bc.fee) push('billing', `Per-application fee: ${bc.fee.before} → ${bc.fee.after}`, bc.fee);
+    for (const line of bc.next_visits || []) push('billing', line);
+    push('billing', 'No customer message is sent');
+  }
   // Billing-lane stamp (#3140): the executors stamp billing_mode
   // 'monthly_membership' on any affected row the update leaves with a
   // membership tier + positive monthly rate and no billing lane, and notify

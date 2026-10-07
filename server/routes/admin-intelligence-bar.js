@@ -1309,7 +1309,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // then silently dropped at commit. Unknown keys refuse the proposal
       // instead, naming them so the model can correct the call.
       const { UPDATABLE_FIELDS } = require('../services/intelligence-bar/tools');
-      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS));
+      // Billing type + per-application fee: update_customer only, and only
+      // while GATE_IB_BILLING_MODE_EDIT is on (billing-mode-change.js).
+      const BillingModeChange = require('../services/intelligence-bar/billing-mode-change');
+      const billingFields = toolUse.name === 'update_customer' && BillingModeChange.billingEditLive()
+        ? BillingModeChange.BILLING_EDIT_FIELDS : [];
+      const unsupported = Object.keys(params.updates).filter((k) => !(k in UPDATABLE_FIELDS) && !billingFields.includes(k));
       if (unsupported.length) {
         return { failed: true, modelResult: { error: `These fields cannot be updated by this tool: ${unsupported.join(', ')} — nothing was proposed. Supported fields: ${Object.keys(UPDATABLE_FIELDS).join(', ')}.` } };
       }
@@ -1387,6 +1392,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           params._rate_ledger_pin = rate.pin;
         }
         if (rate?.display) preview = { ...preview, rate_change: rate.display };
+      }
+      // Billing type + per-application fee (owner D5 2026-10-06): the same
+      // rules as the customer page, a card in plain words, and the billing
+      // fields + customer version pinned (billing-mode-change.js).
+      const BillingModeChange = require('../services/intelligence-bar/billing-mode-change');
+      if (params.customer_id && BillingModeChange.hasBillingEdit(params.updates)) {
+        let billing;
+        try {
+          billing = await BillingModeChange.billingEditProposal(String(params.customer_id), params.updates);
+        } catch {
+          return { failed: true, modelResult: { error: 'Could not read this customer\'s billing — nothing was proposed. Try again in a moment.' } };
+        }
+        if (billing.error) return { failed: true, modelResult: { error: billing.error, code: billing.code } };
+        params._ib_billing_pin = billing.pin;
+        params._ib_customer_version = billing.version;
+        // A billing edit carries no notes; the task path below reuses this
+        // read's version instead of reading a newer one.
+        notesReadVersion = billing.version;
+        preview = { ...preview, billing_change: billing.display };
       }
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
