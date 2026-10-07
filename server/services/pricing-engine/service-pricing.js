@@ -2375,8 +2375,7 @@ function priceLawnCare(property, options = {}) {
   // GATE_LAWN_V13 has no bahia program (Celsius and Blindside are not labeled for bahiagrass), so a
   // new bahia lawn plan is never a normal priced quote: it parks for review (owner 2026-09-30:
   // bahia is dropped from the lawn program). The table price stays for the reviewer.
-  const bahiaNoProgram = matchedTrack === 'bahia' && !skipBahiaNoProgramReview
-    && require('../../config/feature-gates').lawnV13Live?.() === true;
+  const bahiaNoProgram = !skipBahiaNoProgramReview && require('../lawn-program').bahiaHasNoProgram(matchedTrack);
   const manualReviewReasons = [
     ...(bahiaNoProgram ? ['lawn_v13_bahia_no_program'] : []),
     ...(grassTypeWasDefaulted ? ['unknown_grass_type_priced_st_augustine'] : []),

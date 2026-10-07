@@ -7,8 +7,7 @@
  */
 
 const protocols = require('../config/protocols.json');
-const { lawnProtocols } = require('./lawn-program');
-const featureGates = require('../config/feature-gates');
+const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram, lawnV13NoBahiaProgram } = require('./lawn-program');
 
 const LAWN_TRACK_ALIASES = Object.freeze({
   a: 'st_augustine',
@@ -73,13 +72,9 @@ function availableLawnTracks() {
 // bahiagrass, and Blindside is not labeled for bahia). The bahia aliases (bahia, d, d_bahia)
 // stay for the old program, so callers are never told to ask for a track that is not there.
 const V13_NO_PROGRAM_NOTE = 'Bahiagrass has no lawn program under v13: the Celsius label says do not use it on bahiagrass and Blindside is not labeled for bahia. Plan no lawn products for it; the visit work is entered by hand.';
-function lawnV13On() {
-  return featureGates.lawnV13Live?.() === true;
-}
-
 // The note that names the lawn tracks a caller may ask for. Gate off it is the old text, word for word.
 function lawnTrackAdvice() {
-  if (lawnV13On()) {
+  if (lawnV13NoBahiaProgram()) {
     return `Specify ${availableLawnTracks().join(', ')} (legacy A/B = St. Augustine, C1 = Bermuda, C2 = Zoysia). Bahiagrass has no v13 program.`;
   }
   return 'Specify st_augustine, bermuda, zoysia, or bahia (legacy A/B = St. Augustine, C1 = Bermuda, C2 = Zoysia, D = Bahia).';
@@ -91,7 +86,7 @@ function normalizeLawnTrack(value) {
   if (lawnProtocols()?.[requested]) return requested;
   // Bahia is a real track only while the old program is live; the name still resolves to itself so
   // getProtocol can say it has no v13 program instead of calling it an unknown track.
-  return LAWN_TRACK_ALIASES[requested] || (requested === 'bahia' ? 'bahia' : null);
+  return LAWN_TRACK_ALIASES[requested] || (isBahiaGrass(requested) ? 'bahia' : null);
 }
 
 function normalizeProtocolKey(value) {
@@ -116,7 +111,7 @@ function getProtocol({ service_type: serviceType, lawn_track: lawnTrack } = {}) 
     if (track && lawnProtocols()?.[track]) {
       return { protocol: lawnProtocols()[track], track, type: 'lawn_care' };
     }
-    if (lawnV13On() && track === 'bahia') {
+    if (bahiaHasNoProgram(track)) {
       return { available_tracks: availableLawnTracks(), no_program: true, note: V13_NO_PROGRAM_NOTE };
     }
     return {

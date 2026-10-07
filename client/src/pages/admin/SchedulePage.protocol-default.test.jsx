@@ -75,8 +75,8 @@ it.each([
   [{ grass_type: 'zoysia', lawn_sqft: 5000 }, undefined, 'zoysia'],
   [null, 'Bermuda', 'bermuda'],
   [{ track_key: 'bahia', lawn_sqft: 5000 }, undefined, 'bahia'],
-  // Bahia in ANY recorded field wins over another field's track (v13 has no bahia program).
-  [{ grass_type: 'bahia', track_key: 'st_augustine', lawn_sqft: 5000 }, undefined, 'bahia'],
+  // Gate off (the server sends no lawn_v13_no_program): the old resolution, the first recorded track wins.
+  [{ grass_type: 'bahia', track_key: 'st_augustine', lawn_sqft: 5000 }, undefined, 'st_augustine'],
   [{ grass_type: 'st_augustine', track_key: 'bahia', lawn_sqft: 5000 }, undefined, 'bahia'],
 ])('loads the matching protocol for profile %j and customer type %s', async (profile, lawnType, track) => {
   const fetchMock = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('turf-profile') ? { profile } : {} }));
@@ -110,6 +110,20 @@ it('does not load a default protocol after a failed profile lookup', async () =>
   // call count: none of them may be a track-keyed protocol load.
   await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/equipment'))).toBe(true));
   expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/programs') || url.includes('/protocols/lawn-mix'))).toBe(false);
+});
+
+// GATE_LAWN_V13: the server says the lawn records bahia (any spelling, any field), so the track is bahia
+// whatever other track the profile names, and the program and mix requests ask for bahia.
+it.each([
+  [{ grass_type: 'bahia', track_key: 'st_augustine', lawn_sqft: 5000 }],
+  [{ grass_type: 'st_augustine', track_key: 'bahia', lawn_sqft: 5000 }],
+  [{ grass_type: 'zoysia', track_key: 'D', lawn_sqft: 5000 }],
+])('loads the bahia track for %j when the server reports the v13 no-program lawn', async (profile) => {
+  const fetchMock = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('turf-profile') ? { profile, lawn_v13_no_program: true } : {} }));
+  vi.stubGlobal('fetch', fetchMock);
+  render(<ProtocolPanel service={{ id: 'test-visit', customerId: 'test-property', serviceType: 'Lawn Care', lawnSqft: 5000 }} onClose={() => {}} />);
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/lawn-mix?track=bahia&'))).toBe(true));
+  expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/lawn-mix?track=st_augustine&'))).toBe(false);
 });
 
 it.each(['unknown', 'mixed'])('does not replace explicit %s turf with legacy St. Augustine', async (grass_type) => {

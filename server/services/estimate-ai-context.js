@@ -1046,10 +1046,11 @@ async function loadProtocolProductFamilies(db) {
   try {
     const query = db('lawn_protocol_products').select('product_name');
     // GATE_LAWN_V13 has no bahia program: the staged bahia rows are not a product linkage for it.
-    if (require('../config/feature-gates').lawnV13Live?.() === true) {
+    const { lawnV13NoBahiaProgram, BAHIA_TRACK, LAWN_V13_VERSION } = require('./lawn-program');
+    if (lawnV13NoBahiaProgram()) {
       query.whereNotIn('lawn_protocol_window_id', db('lawn_protocol_windows as lpw')
         .join('lawn_protocols as lp', 'lp.id', 'lpw.lawn_protocol_id')
-        .where({ 'lp.grass_track': 'bahia', 'lp.version': require('./lawn-program').LAWN_V13_VERSION })
+        .where({ 'lp.grass_track': BAHIA_TRACK, 'lp.version': LAWN_V13_VERSION })
         .select('lpw.id'));
     }
     const rows = await query.limit(1000);

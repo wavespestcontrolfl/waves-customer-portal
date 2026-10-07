@@ -13,7 +13,7 @@
  * so we do NOT synthesize legacy A/B/C1/C2/D codes here.
  */
 const db = require('./../models/db');
-const { lawnProtocols, lawnV13NoProgramGrass } = require('./lawn-program');
+const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram, lawnV13NoBahiaProgram } = require('./lawn-program');
 
 const GRASS_TYPE_LABELS = {
   st_augustine: 'St. Augustine',
@@ -62,7 +62,7 @@ function normalizeGrassType(raw) {
   if (/augustine|floratam|palmetto|seville|bitter\s*blue|citra\s*blue|provista|captiva/.test(key)) return 'st_augustine';
   if (/bermuda|celebration|tifway|tifgrand|latitude\s*36/.test(key)) return 'bermuda';
   if (/zoysia|empire|zeon|geo|jamur|palisades/.test(key)) return 'zoysia';
-  if (/bahia|argentine|pensacola/.test(key)) return 'bahia';
+  if (isBahiaGrass(key)) return 'bahia';
   if (/\bmix(ed)?\b/.test(key)) return 'mixed';
   return null;
 }
@@ -90,7 +90,7 @@ function resolveTrackKey(trackKey, grassType) {
   // GATE_LAWN_V13 has no bahia program: any recorded field naming bahia (the grass type, or the track
   // key, whichever other track the other field names) leaves the lawn with no track, the same rule
   // the plan engine applies (recordedGrassFacts), so no consumer serves another grass's program.
-  if (lawnV13NoProgramGrass(grassType) || lawnV13NoProgramGrass(String(trackKey || '').trim().toLowerCase())) return null;
+  if (bahiaHasNoProgram(grassType) || bahiaHasNoProgram(trackKey)) return null;
   const lawn = lawnProtocols();
   if (trackKey && lawn && lawn[trackKey]) return trackKey;
   if (grassType && lawn && lawn[grassType]) return grassType;
@@ -102,11 +102,7 @@ function resolveTrackKey(trackKey, grassType) {
 // and every other planning reader share, so a conflicting record reads the same everywhere.
 function recordedGrassNamesBahia(profile, legacyGrass) {
   const profileRecorded = [profile?.track_key, profile?.grass_type].some((value) => String(value || '').trim());
-  return [
-    normalizeGrassType(profile?.grass_type),
-    String(profile?.track_key || '').trim().toLowerCase(),
-    profileRecorded ? null : normalizeGrassType(legacyGrass),
-  ].includes('bahia');
+  return [profile?.grass_type, profile?.track_key, profileRecorded ? null : legacyGrass].some(isBahiaGrass);
 }
 
 function emptyContext() {
@@ -146,7 +142,7 @@ async function loadCustomerGrassContext(customerId, knex = db, { strict = false 
   return {
     // GATE_LAWN_V13 has no bahia program: planning readers show no window guidance for this lawn,
     // even when the visit is assigned a protocol (historical readers do not read this).
-    noProgram: lawnV13NoProgramGrass(recordedGrassNamesBahia(profile, customer?.lawn_type) ? 'bahia' : null),
+    noProgram: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, customer?.lawn_type),
     grassType,
     grassTypeLabel: grassTypeLabel(grassType),
     trackKey: resolveTrackKey(profile?.track_key, grassType),

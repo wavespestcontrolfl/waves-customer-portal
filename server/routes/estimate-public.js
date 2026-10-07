@@ -17818,13 +17818,17 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       }
     }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    // A line this mutation ADDS was never sold: the add rail, or the customer taking a staff-parked
+    // offer. The STAFF restore is the compensation of a send that delivered on no channel
+    // (revertLeadServiceForSend): it puts back a line the issued estimate already carried.
+    const lineIsAdded = mode === 'add' || (mode === 'restore' && staffOffered && actor !== 'staff');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
       // A line this mutation adds (the add rail, or the customer taking a staff-parked offer) was
       // never sold, so the lawn pricer's v13 bahia review still applies to it. The STAFF restore is
       // the compensation of a send that delivered on no channel (revertLeadServiceForSend): it puts
       // back a line the issued estimate already carried, so it replays as sold.
-      addedServiceKeys: mode === 'add' || (mode === 'restore' && staffOffered && actor !== 'staff') ? [serviceKey] : [],
+      addedServiceKeys: lineIsAdded ? [serviceKey] : [],
       termitePricingKnobsForRestore: mode === 'restore' && serviceKey === 'termite_bait'
         ? provenance?.termitePricingKnobs : null,
       priorQualifyingServices: priors,
@@ -17862,6 +17866,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       if (addedLineReviewOnly(reprice.rawEngineResult, serviceKey)) {
         return { status: 409, body: ({ error: 'add_unavailable' }) };
       }
+    } else if (lineIsAdded && addedLineReviewOnly(reprice.rawEngineResult, serviceKey)) {
+      // A customer taking a staff-parked offer joins the plan like an add: a line the engine could only
+      // price as review-only (a bahia lawn under GATE_LAWN_V13) is never confirmable, dry run included.
+      return { status: 409, body: ({ error: 'add_unavailable' }) };
     }
     const impact = optOutImpact({
       beforeResult, afterResult, beforeData, afterData: parsedData, label,
@@ -20736,7 +20744,7 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   // holding a recurring bahia lawn plan is review-only in every stored shape, including the V1
   // blobs whose rows are served as stored and never re-priced.
   const bahiaLawnReview = !!estData && estData[UNISSUED_ESTIMATE] === true
-    && require('../config/feature-gates').lawnV13Live?.() === true && estimateHasBahiaLawn(estData);
+    && require('../services/lawn-program').lawnV13NoBahiaProgram() && estimateHasBahiaLawn(estData);
   const quoteRequired = pricingBundle?.quoteRequired === true
     || bahiaLawnReview
     || breakdown?.quoteRequired === true

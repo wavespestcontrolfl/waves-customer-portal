@@ -39,12 +39,38 @@ function lawnProtocols() {
 // Celsius and Blindside, and both labels exclude bahiagrass, so a bahia lawn has
 // no v13 track and no fallback (lawnV13NoProgramGrass).
 const LAWN_V13_ANY_GRASS_TRACK = 'st_augustine';
-const LAWN_V13_NO_PROGRAM_GRASS = 'bahia';
-function lawnV13NoProgramGrass(grass) {
-  return featureGates.lawnV13Live?.() === true && grass === LAWN_V13_NO_PROGRAM_GRASS;
+
+// ── Bahia: the ONE alias table and the ONE gate-aware check ─────────────────
+// Every bahia test in the portal asks these two, never a literal compare: a lawn recorded as `D`,
+// `d_bahia`, Argentine or Pensacola is bahia everywhere or nowhere.
+//   isBahiaGrass(value)        - does this grass / track / lawn-text value name bahia (gate-blind)?
+//   lawnV13NoBahiaProgram()    - is the live program one that has no bahia track (GATE_LAWN_V13 on)?
+//   bahiaHasNoProgram(value)   - both: bahia under a program that has none.
+// The alias table is the pricing engine's own (GRASS_TYPE_ALIASES.bahia: D, BAHIA, bahia) plus the
+// legacy protocol codes and the free-text names a lawn type is typed as.
+const BAHIA_TRACK = 'bahia';
+const BAHIA_LEGACY_CODES = Object.freeze(['d', 'd_bahia', 'd-bahia', 'dbahia', 'd bahia']);
+const BAHIA_FREE_TEXT = /bahia|argentine|pensacola/;
+const squash = (text) => String(text).toUpperCase().replace(/[^A-Z0-9]/g, '');
+function isBahiaGrass(value) {
+  if (value == null) return false;
+  const text = String(value).trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  if (BAHIA_LEGACY_CODES.includes(lower) || BAHIA_FREE_TEXT.test(lower)) return true;
+  const { GRASS_TYPE_ALIASES } = require('./pricing-engine/constants');
+  return (GRASS_TYPE_ALIASES.bahia || []).some((alias) => squash(alias) === squash(text));
 }
+function lawnV13NoBahiaProgram() {
+  return featureGates.lawnV13Live?.() === true && !lawnProtocols()?.[BAHIA_TRACK];
+}
+function bahiaHasNoProgram(value) {
+  return lawnV13NoBahiaProgram() && isBahiaGrass(value);
+}
+// Kept as the plan engine's name for the same question.
+const lawnV13NoProgramGrass = bahiaHasNoProgram;
 function lawnV13AnyGrassTrack(grass = null) {
-  if (featureGates.lawnV13Live?.() !== true || grass === LAWN_V13_NO_PROGRAM_GRASS) return null;
+  if (featureGates.lawnV13Live?.() !== true || isBahiaGrass(grass)) return null;
   return LAWN_V13_ANY_GRASS_TRACK;
 }
 
@@ -54,17 +80,11 @@ const LAWN_TRACK_NAMES = { st_augustine: 'St. Augustine', bermuda: 'Bermuda', zo
 function lawnTrackNames() {
   return Object.keys(lawnProtocols() || {}).map((key) => LAWN_TRACK_NAMES[key] || key);
 }
-// True when the live program leaves bahiagrass without a program (v13): the copy then says the
-// office reviews bahia lawns instead of promising a bahia track.
-function lawnProgramHasNoBahia() {
-  return featureGates.lawnV13Live?.() === true && !lawnProtocols()?.bahia;
-}
-
 // The "Tracks:" lines of the pricing knowledge entry. Gate off: the one old line, word for word.
 function lawnTrackKnowledgeLines() {
   return [
     `Tracks: ${lawnTrackNames().join(' | ')}`,
-    ...(lawnProgramHasNoBahia() ? ['Bahiagrass lawns: no program (Celsius and Blindside are not labeled for bahiagrass); the office reviews each one before quoting'] : []),
+    ...(lawnV13NoBahiaProgram() ? ['Bahiagrass lawns: no program (Celsius and Blindside are not labeled for bahiagrass); the office reviews each one before quoting'] : []),
   ];
 }
 
@@ -124,4 +144,4 @@ function unknownCadenceWarning(unknownCadence) {
   };
 }
 
-module.exports = { lawnTrackKnowledgeLines, lawnTrackNames, lawnProgramHasNoBahia, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };
+module.exports = { BAHIA_TRACK, isBahiaGrass, lawnV13NoBahiaProgram, bahiaHasNoProgram, lawnTrackKnowledgeLines, lawnTrackNames, lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };

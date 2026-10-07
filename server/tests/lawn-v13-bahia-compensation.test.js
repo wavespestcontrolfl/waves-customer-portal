@@ -66,3 +66,50 @@ test('the customer taking the staff-parked offer is an addition and keeps the re
   expect(mockRecompute).toHaveBeenCalledTimes(1);
   expect(depsOfLastRecompute()).toMatchObject({ replaySavedPricingKnobs: true, addedServiceKeys: ['lawn_care'] });
 });
+
+// A customer taking a staff-parked offer joins the plan like an add: a line the engine could only
+// price as review-only (a bahia lawn under GATE_LAWN_V13) is refused, the dry run included, so no
+// confirmable price is shown. The staff compensation restore is never refused for that reason.
+describe('review-only restore of a staff-parked line', () => {
+  const recompute = (rawLine) => ({
+    recomputed: true,
+    serverResult: { recurring: { services: [
+      { service: 'pest_control', name: 'Pest Control', mo: 60, ann: 720 },
+      { service: 'lawn_care', name: 'Lawn Care', mo: 66.75, ann: 801 },
+    ] }, monthlyTotal: 126.75, annualTotal: 1521 },
+    serverTotals: { monthlyTotal: 126.75, annualTotal: 1521, onetimeTotal: 0 },
+    rawEngineResult: { lineItems: [rawLine] },
+  });
+  const REVIEW_ONLY = { service: 'lawn_care', requiresManualReview: true, requiresCustomQuote: true, manualReviewReasons: ['lawn_v13_bahia_no_program'] };
+  const PRICED = { service: 'lawn_care', requiresManualReview: false };
+
+  test.each([['dry run', true], ['commit', false]])('the customer taking the parked bahia offer is refused (%s)', async (_name, dryRun) => {
+    mockRecompute.mockResolvedValue(recompute(REVIEW_ONLY));
+    const out = await applyServiceMixChange({
+      estimate: parkedEstimate({ customer_id: 'cust-1' }),
+      body: { serviceKey: 'lawn_care', included: true, dryRun, previewBasis: dryRun ? undefined : 'x' },
+      actor: 'customer',
+    });
+    expect(out).toEqual({ status: 409, body: { error: 'add_unavailable' } });
+  });
+
+  test('a priced parked line is not refused by the review check', async () => {
+    mockRecompute.mockResolvedValue(recompute(PRICED));
+    const out = await applyServiceMixChange({
+      estimate: parkedEstimate({ customer_id: 'cust-1' }),
+      body: { serviceKey: 'lawn_care', included: true, dryRun: true },
+      actor: 'customer',
+    });
+    expect(out.body?.error).not.toBe('add_unavailable');
+  });
+
+  test('the staff compensation restore is not refused for a review-only line (it was sold)', async () => {
+    mockRecompute.mockResolvedValue(recompute(REVIEW_ONLY));
+    const out = await applyServiceMixChange({
+      estimate: parkedEstimate(),
+      body: { serviceKey: 'lawn_care', included: true, dryRun: true },
+      actor: 'staff',
+    });
+    expect(out.body?.error).not.toBe('add_unavailable');
+  });
+});

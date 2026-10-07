@@ -3,7 +3,7 @@ const { savepointRead } = require('../utils/savepoint-read');
 const { etParts } = require('../utils/datetime-et');
 const { isDeepStrictEqual } = require('node:util');
 const featureGates = require('../config/feature-gates');
-const { LAWN_V13_VERSION } = require('./lawn-program');
+const { LAWN_V13_VERSION, BAHIA_TRACK, bahiaHasNoProgram } = require('./lawn-program');
 
 // The checked-in field reference and plan matcher are released with protocol
 // product/rate/gate changes. Portal publication may update DB-owned SOP and
@@ -123,11 +123,8 @@ function normalizeGate(row) {
 // GATE_LAWN_V13: the v13 program has no bahia track (Celsius and Blindside are not labeled for
 // bahiagrass), so the staged bahia rows are never served for planning. The rows stay in the
 // database for the history that points at them; only the planning readers skip them.
-const V13_NO_PROGRAM_TRACK = 'bahia';
 function v13NoProgramRow(protocol) {
-  return featureGates.lawnV13Live?.() === true
-    && protocol?.version === LAWN_V13_VERSION
-    && protocol?.grass_track === V13_NO_PROGRAM_TRACK;
+  return protocol?.version === LAWN_V13_VERSION && bahiaHasNoProgram(protocol?.grass_track);
 }
 
 async function getActiveLawnProtocol(knex = db, filters = {}) {
@@ -148,10 +145,10 @@ async function getActiveLawnProtocol(knex = db, filters = {}) {
   // pre-gate resolution and never reads as having followed v13. Off, the query is
   // exactly the old one.
   const v13Planning = planning && featureGates.lawnV13Live?.() === true;
-  if (v13Planning && filters.grassTrack === V13_NO_PROGRAM_TRACK) return null;
+  if (v13Planning && bahiaHasNoProgram(filters.grassTrack)) return null;
   const query = knex('lawn_protocols');
   if (v13Planning) {
-    query.where({ status: 'staged', version: LAWN_V13_VERSION }).whereNot('grass_track', V13_NO_PROGRAM_TRACK);
+    query.where({ status: 'staged', version: LAWN_V13_VERSION }).whereNot('grass_track', BAHIA_TRACK);
   } else query.where({ status: 'active' });
   query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc');
 

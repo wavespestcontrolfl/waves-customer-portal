@@ -1305,7 +1305,7 @@ function configKeySubFeaturesAvailable(key) {
   if (!subs) return undefined;
   const available = Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
   // Bahia is offered as a NEW lawn plan only while the v13 program (which has no bahia track) is off.
-  if (key === 'lawn_pricing_v2') available.bahiaOffered = require('../config/feature-gates').lawnV13Live?.() !== true;
+  if (key === 'lawn_pricing_v2') available.bahiaOffered = !require('../services/lawn-program').lawnV13NoBahiaProgram();
   return available;
 }
 

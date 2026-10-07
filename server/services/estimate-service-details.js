@@ -929,8 +929,8 @@ function formatGuidePhone(raw) {
 // The "Built for your grass" row follows the live lawn program: GATE_LAWN_V13 has no bahia track, so
 // the guide stops promising one and says the office reviews bahia lawns. Gate off, the row is as written.
 function lawnTracksRowText(written) {
-  const { lawnTrackNames, lawnProgramHasNoBahia } = require('./lawn-program');
-  if (!lawnProgramHasNoBahia()) return written;
+  const { lawnTrackNames, lawnV13NoBahiaProgram } = require('./lawn-program');
+  if (!lawnV13NoBahiaProgram()) return written;
   const names = lawnTrackNames();
   const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}` : names.join('');
   return `We confirm your grass (${list}) before anything goes down, because a product that helps one grass can injure another. Bahiagrass lawns: our team reviews these before quoting`;

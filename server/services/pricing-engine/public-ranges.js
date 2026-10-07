@@ -90,8 +90,8 @@ function purchaseGateOn(key) {
 // The grass tracks the RECURRING lawn program range sweeps: with GATE_LAWN_V13 on there is no bahia
 // program, so the range no longer prices one. The one-time rows keep every bracket track.
 function recurringLawnTracks() {
-  const v13 = require('../../config/feature-gates').lawnV13Live?.() === true;
-  return Object.keys(constants.LAWN_BRACKETS).filter((track) => !(v13 && track === 'bahia'));
+  const { bahiaHasNoProgram } = require('../lawn-program');
+  return Object.keys(constants.LAWN_BRACKETS).filter((track) => !bahiaHasNoProgram(track));
 }
 
 function buildRows() {

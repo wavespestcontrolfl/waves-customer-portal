@@ -86,3 +86,38 @@ describe.each([['/lawn/active'], ['/lawn/window']])('GET %s with GATE_LAWN_V13 o
     expect(res.status).toHaveBeenCalledWith(404);
   });
 });
+
+// Every bahia spelling, in any of the three inputs, is the same no-program answer: decided on the raw
+// inputs before an unknown value defaults to St. Augustine.
+describe('completion-actions: every bahia spelling', () => {
+  const BAHIA = ['D', 'd', 'd_bahia', 'D_Bahia', 'bahia', 'BAHIA', 'bahiagrass', 'Argentine Bahia', 'Pensacola'];
+
+  test.each(BAHIA)('gate on: %s is a 404 no-program answer, in each input', async (value) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    for (const key of ['lawnType', 'grassType', 'track']) {
+      const res = await completionActions({ [key]: value });
+      expect({ key, status: res.status.mock.calls[0]?.[0] }).toEqual({ key, status: 404 });
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'lawn_v13_bahia_no_program' }));
+    }
+  });
+
+  test('gate on: bahia in ANY input wins over another input that names a track', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const res = await completionActions({ lawnType: 'zoysia', grassType: 'D' });
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test.each(['D', 'd_bahia'])('gate off: %s is the old bahia track, not St. Augustine', async (value) => {
+    const res = await completionActions({ grassType: value });
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0]).toMatchObject({ track: 'bahia' });
+  });
+
+  test('gate on: other grass is untouched', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    for (const value of ['C1', 'zoysia', 'mixed', 'A']) {
+      const res = await completionActions({ grassType: value });
+      expect({ value, status: res.status.mock.calls[0]?.[0] }).toEqual({ value, status: undefined });
+    }
+  });
+});

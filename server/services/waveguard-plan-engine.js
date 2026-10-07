@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -1168,7 +1168,7 @@ function recordedGrassFacts(profile, legacyGrass) {
   return {
     profileRecorded,
     recorded: profileRecorded || String(legacyGrass || '').trim(),
-    noProgram: lawnV13NoProgramGrass(recordedGrassNamesBahia(profile, legacyGrass) ? 'bahia' : null),
+    noProgram: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, legacyGrass),
   };
 }
 

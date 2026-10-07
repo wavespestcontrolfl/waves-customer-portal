@@ -2045,7 +2045,7 @@ function getConfirmedActionIdempotencyKey(req, params) {
 // The lawn tracks the estimate prompt names: the v13 program (GATE_LAWN_V13) has no bahia track,
 // so a bahia lawn is parked for review rather than offered as a track. Read per request.
 function lawnTracksPromptText() {
-  if (require('../config/feature-gates').lawnV13Live?.() !== true) return 'st_augustine, bermuda, zoysia, bahia';
+  if (!require('../services/lawn-program').lawnV13NoBahiaProgram()) return 'st_augustine, bermuda, zoysia, bahia';
   return 'st_augustine, bermuda, zoysia (bahia has no v13 program: a bahia lawn is parked for review, never priced as a plan)';
 }
 
