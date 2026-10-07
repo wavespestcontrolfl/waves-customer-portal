@@ -365,7 +365,7 @@ const ComplianceService = {
   },
 
   /**
-   * Check product limits for a customer (Celsius 3-app cap, nitrogen blackout, etc.)
+   * Check product limits for a customer (Celsius 2-app cap, nitrogen blackout, etc.)
    */
   async getProductLimits(customerId) {
     const customer = await db('customers').where({ id: customerId }).first();

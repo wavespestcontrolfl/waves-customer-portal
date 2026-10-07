@@ -1927,6 +1927,50 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
   };
 }
 
+// Hard product-level count limits (annual_max_apps, min_interval_days) judged on the products the
+// tech SUBMITTED, so a conditional or hand-added spot product (Celsius, Certainty, Blindside,
+// Arena) is held to its yearly count the same as a protocol default. Read through the one
+// application-limits reader, scoped to the treated property and leaving this visit's own ledger
+// rows out (a retry never counts itself). Lawn visits under GATE_LAWN_V13 only: the caps are v13
+// recipe rules. A failed read never blocks a closeout (the savepoint keeps the transaction usable).
+// Returns the first hard block as a 422 body, or null.
+const HARD_COUNT_LIMIT_TYPES = new Set(['annual_max_apps', 'min_interval_days']);
+async function submittedProductLimitBlockPayload({ svc, products = [], serviceDate = null, database = db } = {}) {
+  if (!svc || !Array.isArray(products)) return null;
+  if (require('../config/feature-gates').lawnV13Live?.() !== true) return null;
+  if (detectServiceLine(svc.service_type) !== 'lawn') return null;
+  const ids = [...new Set(products.map((p) => p && p.productId).filter(Boolean).map(String))];
+  if (!ids.length) return null;
+  const LimitChecker = require('../services/application-limits');
+  const checkDate = toETNoonServiceDate(serviceDate || svc.scheduled_date);
+  for (const productId of ids) {
+    let result;
+    try {
+      result = await savepointRead(database, (k) => LimitChecker.checkLimits(svc.customer_id, productId, checkDate, k, {
+        propertyId: svc.property_id || null,
+        excludeScheduledServiceId: svc.id,
+      }));
+    } catch (err) {
+      logger.warn('completion application limits: read failed, not blocking', { serviceId: svc.id, productId, error: err?.message });
+      continue;
+    }
+    const hard = (result.blocks || []).find((b) => b.matchType === 'product' && HARD_COUNT_LIMIT_TYPES.has(b.type));
+    if (!hard) continue;
+    const catalog = await failSoftRead(database, (k) => k('products_catalog').where({ id: productId }).first('name'), null);
+    const productName = catalog?.name || null;
+    return {
+      error: `${hard.message} Remove ${productName || 'this product'} from the products applied, or ask the office.`,
+      code: 'application_limit_reached',
+      productId,
+      productName,
+      limitType: hard.type,
+      current: hard.current ?? null,
+      max: hard.max ?? null,
+    };
+  }
+  return null;
+}
+
 function completionOwnershipError({ role, actorTechnicianId, assignedTechnicianId }) {
   if (role === 'admin') return null;
   if (
@@ -4487,6 +4531,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
           db,
         );
         return ({ status: 422, body: internalOnlyProductsBlock });
+      }
+      // Hard count limits on the submitted products, before anything is written (and so before
+      // the compliance-ledger rows exist). An issued-invoice closeout carries no application evidence.
+      const limitBlock = issuedInvoiceCloseout ? null : await submittedProductLimitBlockPayload({
+        svc,
+        products,
+        serviceDate: isBackfillCompletion ? backfillPlan.serviceDate : etDateString(),
+        database: db,
+      });
+      if (limitBlock) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error(limitBlock.code),
+          db,
+        );
+        return ({ status: 422, body: limitBlock });
       }
     }
 
@@ -15306,6 +15366,7 @@ module.exports = {
   pestPressureConfigAllowsTechnicianRating,
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
+  submittedProductLimitBlockPayload,
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,

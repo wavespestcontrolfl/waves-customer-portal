@@ -34,11 +34,11 @@ const { LAWN_TARGET_SUGGESTIONS } = require('./treatment-target-vocabulary');
 
 const ENGINE_VERSION = 'lawn_expectations_v1';
 
-// Celsius WG label/protocol cap: 3 applications per property per year
-// (server/config/protocols.json lawn notes, "CELSIUS CAP"). The caller passes
+// Celsius WG cap: 2 applications per property per year (owner 2026-10-06; the
+// product_limits row and the v13 recipe say the same). The caller passes
 // the year-to-date count INCLUDING any application on this visit; at the cap
 // the second-application line swaps to the "different product" line.
-const CELSIUS_YTD_CAP = 3;
+const CELSIUS_YTD_CAP = 2;
 
 const MAX_LINE_WORDS = 33;
 

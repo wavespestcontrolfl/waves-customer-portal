@@ -3,6 +3,8 @@
 // and enforced per property through the real plan engine. Own cloned schema; synthetic data only.
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261007170000_lawn_v13_count_caps');
+const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps_wording');
+const { submittedProductLimitBlockPayload } = require('../services/complete-scheduled-service');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
@@ -15,10 +17,10 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
 describe('the recipe text (no database)', () => {
   test('every track states the Arena, Celsius + Certainty and Blindside counts', () => {
     for (const track of Object.values(v13Recipe)) {
-      expect(track.notes.join('\n')).toContain('Arena: up to 2 applications per lawn per year, never the same area twice (label 0.4 lb clothianidin per acre per year)');
+      expect(track.notes.join('\n')).toContain('Arena: up to 2 applications per lawn per year (app-enforced); never treat the same area twice (tech rule; label 0.4 lb clothianidin per acre per year)');
       const safety = track.safety_rules.join('\n');
-      expect(safety).toContain('Celsius + Certainty: 2 passes per spot per year');
-      expect(safety).toContain('Blindside: 2 per year');
+      expect(safety).toContain('Celsius, Certainty and Blindside: up to 2 applications per lawn per year each');
+      expect(safety).not.toMatch(/per spot/);
     }
   });
 
@@ -105,6 +107,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(row.description).toContain(name);
       }
       expect((await limitsOf(ARENA))[0].description).toMatch(/never the same area twice/);
+      // The frozen 170000 text; the wording migration below rewrites it.
     });
 
     test('a product that already has an annual_max_apps row keeps it exactly (value, unit, severity, description); the other products are still added', async () => {
@@ -236,6 +239,109 @@ describeDb('v13 count caps through PostgreSQL', () => {
         await migration.down(knex);
         expect(await limitsOf(CELSIUS)).toHaveLength(0);
       });
+    });
+  });
+
+  describe('the property-wide wording (20261007171000)', () => {
+    beforeEach(async () => {
+      await knex('product_limits').del(); await knex('product_aliases').del();
+      jest.spyOn(console, 'log').mockImplementation(() => {});
+    });
+    afterEach(() => jest.restoreAllMocks());
+    const descriptions = async () => Object.fromEntries((await allLimits()).map((r) => [NAMES.find((n) => catalog[n].id === r.product_id), r.description]));
+    const fieldsOf = (r) => ({ id: r.id, product_id: r.product_id, match_type: r.match_type, limit_type: r.limit_type, limit_value: Number(r.limit_value), limit_unit: r.limit_unit, severity: r.severity });
+
+    test('rewrites only the descriptions: every row now says per lawn per year, none says per spot; Arena keeps the tech rule', async () => {
+      await migration.up(knex);
+      const before = (await allLimits()).map(fieldsOf);
+      await wording.up(knex);
+      expect((await allLimits()).map(fieldsOf)).toEqual(before);
+      const after = await descriptions();
+      for (const name of NAMES) {
+        expect(after[name]).toMatch(/max 2 applications per lawn per year/);
+        expect(after[name]).not.toMatch(/per spot|passes/);
+      }
+      expect(after[ARENA]).toMatch(/Never treat the same area twice \(tech rule, not enforced by the app\)/);
+      expect(after[ARENA]).toMatch(/0\.4 lb clothianidin per acre per year/);
+    });
+
+    test('the lowered Celsius seed row gets the property-wide text too; a second up changes nothing; down restores the 170000 text', async () => {
+      await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED });
+      await migration.up(knex);
+      const lowered = await allLimits();
+      await wording.up(knex);
+      const once = await allLimits();
+      expect(once.find((r) => r.product_id === catalog[CELSIUS].id).description).toBe('Celsius WG: max 2 applications per lawn per year (owner 2026-10-06; lowered from 3).');
+      await wording.up(knex);
+      expect(await allLimits()).toEqual(once);
+      await wording.down(knex);
+      expect((await allLimits()).map((r) => [r.id, r.description])).toEqual(lowered.map((r) => [r.id, r.description]));
+    });
+
+    test('an admin-edited row, or one with another value, is left alone; down touches only rows still holding the new text', async () => {
+      await migration.up(knex);
+      await knex('product_limits').where({ product_id: catalog[CERTAINTY].id }).update({ description: 'admin wrote this' });
+      await knex('product_limits').where({ product_id: catalog[BLINDSIDE].id }).update({ limit_value: 3 });
+      const before = await allLimits();
+      await wording.up(knex);
+      const after = await allLimits();
+      for (const name of [CERTAINTY, BLINDSIDE]) {
+        expect(after.find((r) => r.product_id === catalog[name].id)).toEqual(before.find((r) => r.product_id === catalog[name].id));
+      }
+      await knex('product_limits').where({ product_id: catalog[CELSIUS].id }).update({ description: 'admin rewrote Celsius' });
+      await wording.down(knex);
+      expect((await limitsOf(CELSIUS))[0].description).toBe('admin rewrote Celsius');
+      expect((await limitsOf(ARENA))[0].description).toBe(migration.CAPS[0].description);
+    });
+
+    test('a row an admin owns (not one of the 170000 texts) is never rewritten', async () => {
+      const [admin] = await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 2, limit_unit: 'applications', severity: 'hard_block', description: 'Celsius WG: max 2 passes per spot per year (admin).' }).returning('*');
+      await wording.up(knex);
+      expect(await limitsOf(CELSIUS)).toEqual([admin]);
+    });
+  });
+
+  describe('the closeout check against real history (submittedProductLimitBlockPayload)', () => {
+    beforeAll(async () => { await knex('product_limits').del(); await migration.up(knex); });
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+
+    async function setup(name, dates) {
+      const f = await fixture(knex);
+      const visitA = await f.visit(0, { scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' });
+      const [propertyB] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const [visitB] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: propertyB.id, scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*');
+      for (const date of dates) {
+        const [past] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: visitA.property_id, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+        const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[name].id, application_date: date, application_rate: 0.085, rate_unit: 'oz', service_record_id: record.id });
+      }
+      return { visitA, visitB };
+    }
+    const check = (visit, ...names) => submittedProductLimitBlockPayload({ svc: visit, products: names.map((n) => ({ productId: catalog[n].id })), serviceDate: '2026-05-12', database: knex });
+
+    test.each([CELSIUS, CERTAINTY, BLINDSIDE, ARENA])('%s: a 3rd application in the year at the same property is refused; at another property it is allowed', async (name) => {
+      const { visitA, visitB } = await setup(name, ['2026-02-02', '2026-03-16']);
+      expect(await check(visitA, name)).toMatchObject({ code: 'application_limit_reached', productId: catalog[name].id, productName: name, limitType: 'annual_max_apps', current: 2, max: 2 });
+      expect(await check(visitB, name)).toBeNull();
+    });
+
+    test('the 2nd application is allowed, and a default product with no limit row is unaffected beside a capped one', async () => {
+      const { visitA } = await setup(CELSIUS, ['2026-02-02']);
+      expect(await check(visitA, CELSIUS)).toBeNull();
+      const capped = await setup(CELSIUS, ['2026-02-02', '2026-03-16']);
+      const refused = await check(capped.visitA, 'Tetrino Insecticide', CELSIUS);
+      expect(refused).toMatchObject({ productName: CELSIUS });
+      expect(await check(capped.visitA, 'Tetrino Insecticide')).toBeNull();
+    });
+
+    test('the visit\'s own ledger rows never count against it (a retry)', async () => {
+      const f = await fixture(knex);
+      const visit = await f.visit(0, { scheduled_date: '2026-05-12', service_type: 'Every 6 Weeks Lawn Care Service' });
+      const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: '2026-05-12', service_type: 'Lawn fixture' }).returning('*');
+      for (const date of ['2026-02-02', '2026-05-12']) {
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[CELSIUS].id, application_date: date, application_rate: 0.085, rate_unit: 'oz', service_record_id: date === '2026-05-12' ? record.id : null });
+      }
+      expect(await check(visit, CELSIUS)).toBeNull();
     });
   });
 

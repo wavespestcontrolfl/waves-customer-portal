@@ -99,7 +99,7 @@ List service history with products applied.
 Single service detail with signed photo URLs.
 
 ### GET /services/stats/summary
-Aggregated stats: services YTD, Celsius application count (vs. 3/year cap), thatch measurements over time.
+Aggregated stats: services YTD, Celsius application count (vs. 2/year cap), thatch measurements over time.
 
 ---
 

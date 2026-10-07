@@ -160,7 +160,7 @@ router.get('/stats/summary', async (req, res, next) => {
     res.json({
       servicesYTD: parseInt(servicesYTD.count),
       celsiusApplicationsThisYear: parseInt(celsiusApps.count),
-      celsiusMaxPerYear: 3,
+      celsiusMaxPerYear: 2,
       thatch: {
         current: latestThatch ? parseFloat(latestThatch.thatch_measurement) : null,
         initial: firstThatch ? parseFloat(firstThatch.thatch_measurement) : null,

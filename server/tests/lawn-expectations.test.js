@@ -342,8 +342,8 @@ describe('buildLawnExpectations', () => {
       }
     });
 
-    it('treats an unknown count as under the cap, and the cap constant is 3', () => {
-      expect(CELSIUS_YTD_CAP).toBe(3);
+    it('treats an unknown count as under the cap, and the cap constant is 2', () => {
+      expect(CELSIUS_YTD_CAP).toBe(2);
       expect(run(null).secondApp.capped).toBe(false);
       expect(run(undefined).secondApp.capped).toBe(false);
     });

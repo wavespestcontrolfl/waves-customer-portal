@@ -12,7 +12,7 @@
       "Large patch: Artavia, then Velista. Prevent on mapped areas in October and November when the soil falls through 80 F, at 2 gal per 1,000 sq ft.",
       "Gray leaf spot: Artavia, then Gravex.",
       "Take-all: Artavia on mapped areas, two applications 28 days apart in spring and again in fall. No curative once the roots are black.",
-      "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: up to 2 applications per lawn per year, never the same area twice (label 0.4 lb clothianidin per acre per year).",
+      "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: up to 2 applications per lawn per year (app-enforced); never treat the same area twice (tech rule; label 0.4 lb clothianidin per acre per year).",
       "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
       "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
@@ -22,7 +22,7 @@
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged."
     ],
     "safety_rules": [
-      "Celsius WG: stay under the annual cap (Celsius + Certainty: 2 passes per spot per year); use Blindside after the cap (Blindside: 2 per year). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
+      "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.",
       "Dylox 6.2 G: spreader visits only, water in.",
@@ -210,7 +210,7 @@
       "Large patch: Artavia, then Velista. Prevent on mapped areas in October and November when the soil falls through 80 F, at 2 gal per 1,000 sq ft.",
       "Gray leaf spot: Artavia, then Gravex.",
       "Take-all: Artavia on mapped areas, two applications 28 days apart in spring and again in fall. No curative once the roots are black.",
-      "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: up to 2 applications per lawn per year, never the same area twice (label 0.4 lb clothianidin per acre per year).",
+      "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: up to 2 applications per lawn per year (app-enforced); never treat the same area twice (tech rule; label 0.4 lb clothianidin per acre per year).",
       "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
       "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
@@ -220,7 +220,7 @@
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged."
     ],
     "safety_rules": [
-      "Celsius WG: stay under the annual cap (Celsius + Certainty: 2 passes per spot per year); use Blindside after the cap (Blindside: 2 per year). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
+      "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.",
       "Dylox 6.2 G: spreader visits only, water in.",
@@ -408,7 +408,7 @@
       "Large patch: Artavia, then Velista. Prevent on mapped areas in October and November when the soil falls through 80 F, at 2 gal per 1,000 sq ft.",
       "Gray leaf spot: Artavia, then Gravex.",
       "Take-all: Artavia on mapped areas, two applications 28 days apart in spring and again in fall. No curative once the roots are black.",
-      "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: up to 2 applications per lawn per year, never the same area twice (label 0.4 lb clothianidin per acre per year).",
+      "Chinch bugs (20 to 25 per sq ft, 4 gal per 1,000 sq ft into the thatch): Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: up to 2 applications per lawn per year (app-enforced); never treat the same area twice (tech rule; label 0.4 lb clothianidin per acre per year).",
       "Caterpillars: Acelepryn, then bifenthrin, with a 7-day recheck. Acelepryn on caterpillars: delay watering (irrigation) or mowing for 24 hours after application.",
       "Bifenthrin: delay watering 24 hours on every use. Grubs and mole crickets: Dylox 6.2 G on spreader visits only, watered in.",
       "Weeds: Celsius plus Certainty (0.085 oz plus 0.028 oz per 1,000 sq ft, NIS 0.25%); once the Celsius annual cap is reached, Blindside Herbicide in its place. Dismiss: use up the jug on green kyllinga under 85°F; do not reorder.",
@@ -418,7 +418,7 @@
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged."
     ],
     "safety_rules": [
-      "Celsius WG: stay under the annual cap (Celsius + Certainty: 2 passes per spot per year); use Blindside after the cap (Blindside: 2 per year). Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
+      "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
       "Tetrino: sunny turf only, at least 25 ft from water, applied alone.",
       "Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours.",
       "Dylox 6.2 G: spreader visits only, water in.",
