@@ -1152,6 +1152,8 @@ const RANGE_TAIL_RE = /^\s*(?:to|-|–|and)\s*\d+(?:\.\d+)?/i;
 
 const PRESSURE_WORDS = /\b(?:pressure|gauge|score|rating|level|index)\b/i;
 
+const TIME_OR_COUNT_NOUNS = new Set(['day', 'week', 'month', 'year', 'hour', 'minut', 'minute', 'visit', 'treatment', 'application', 'time', 'nest', 'mound', 'station', 'spot', 'area', 'plant', 'palm', 'tree', 'shrub', 'room', 'bed', 'zone', 'gallon', 'pound', 'bag']);
+
 function numberIsKnown(value, after, sentence, known) {
   const unitText = after.replace(RANGE_TAIL_RE, '');
   const found = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(unitText));
@@ -1177,6 +1179,9 @@ function numberIsKnown(value, after, sentence, known) {
     // A number from report text grounds only a claim about the same thing:
     // "4 inches" in a section is no "4 nests" (Codex P1 #5964 r26).
     const noun = nounAfter(after);
+    // "82 days" is no score of 82: a time or count noun never borrows a
+    // measurement fact (pre-push audit, #5964 r53).
+    if (named.length && TIME_OR_COUNT_NOUNS.has(noun)) return known.some((fact) => fact.value === value && fact.key === '' && fact.noun === noun);
     return known.some((fact) => fact.value === value
       && (named.length ? named.every((keyRe) => keyRe.test(fact.key)) : (fact.key === '' && fact.noun === noun)));
   }

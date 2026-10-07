@@ -1983,3 +1983,10 @@ describe('answer screen, pre-push audit on round 53', () => {
     expect(medicalExposureAnswer(question)).toBeTruthy();
   });
 });
+
+test('a time or count noun does not borrow a score value (pre-push audit)', () => {
+  const data = lawnData({ lawnAssessment: { scores: { overallScore: 82 } }, reportV2: { aftercare: {} } });
+  const facts = buildReportAskFacts({ data });
+  expect(screenAskAnswer('Lawn health can take 82 days to improve.', { question: 'How long?', data, facts })).toBe('unstated_number');
+  expect(screenAskAnswer('Your lawn health score is 82 out of 100.', { question: 'How is it?', data, facts })).toBeNull();
+});
