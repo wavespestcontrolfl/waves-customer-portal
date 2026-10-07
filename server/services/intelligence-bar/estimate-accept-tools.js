@@ -268,6 +268,28 @@ async function pageRefusal(estimate, estimateData) {
   return null;
 }
 
+// What the conversion would refuse, or change, that this card cannot show:
+// the termite annual plan is accepted with annual prepay only (the
+// converter's TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY guard), and a frozen
+// WaveGuard extension re-prices the customer's existing visits and may issue
+// prepaid-difference credits (applyFrozenExistingServiceExtension).
+function conversionRefusal(estimate, estimateData, activatedTier) {
+  const { selectedTermiteAnnualPlanRows } = require('../estimate-termite-program-rows');
+  const parked = ['awaiting_signature', 'activated', 'signature_expired'].includes(estimate.annual_plan_activation_status);
+  if (!parked && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
+    return refuse('The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront"). The bar does not offer annual prepay; use the estimate page\'s annual prepay accept.', 'termite_annual_requires_prepay');
+  }
+  const snapshot = estimateData.membershipSnapshot;
+  const extension = (Array.isArray(snapshot?.existingServices) ? snapshot.existingServices : [])
+    .some((svc) => Number(svc?.currentPerVisit) > 0 && Number(svc?.newPerVisit) > 0 && Number(svc?.perVisitSavings) > 0
+      && Array.isArray(svc?.keys) && svc.keys.length > 0);
+  const tierMatches = String(snapshot?.tierLabel || '').trim().toLowerCase() === String(activatedTier || '').trim().toLowerCase();
+  if (extension && tierMatches && require('../../config/feature-gates').isEnabled('waveguardExtendExisting')) {
+    return refuse("This quote also lowers the price of the customer's existing services (WaveGuard tier extension), which re-prices booked visits and may credit prepaid ones. The bar cannot show that on a card yet; use Mark accepted on the estimate page.", 'existing_service_extension');
+  }
+  return null;
+}
+
 // The estimate, checked; or a refusal.
 async function loadTarget(input) {
   const estimateId = uuid(input?.estimate_id);
@@ -406,6 +428,8 @@ async function planAccept(input) {
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
   const { commercialOnly, tier, pinnedLegacyRodentOnlyPlan } = await activation(estimateData, customerId);
+  const blocked = converts ? conversionRefusal(estimate, estimateData, tier) : null;
+  if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
   const booked = converts ? await bookedFromEstimate(estimate.id) : [];

@@ -215,6 +215,32 @@ describe('refusals before any card', () => {
     expect(writes).toEqual([]);
   });
 
+  test('a termite annual plan is sent to the annual prepay accept (the converter refuses it on a standard accept)', async () => {
+    seed({ estimate: { monthly_total: 25, estimate_data: { engineResult: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', annual: 300 }] } } } });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('termite_annual_requires_prepay');
+    expect(result.error).toMatch(/can only be accepted with annual prepay/);
+  });
+
+  test("a quote that also re-prices the customer's existing services is refused while the extension is live", async () => {
+    const gates = require('../config/feature-gates');
+    const isEnabled = jest.spyOn(gates, 'isEnabled').mockImplementation((key) => key === 'waveguardExtendExisting');
+    try {
+      seed({
+        estimate: {
+          estimate_data: {
+            ...tables.estimates[0].estimate_data,
+            membershipSnapshot: { tierLabel: 'Gold', existingServices: [{ key: 'lawn_care', keys: ['lawn_care'], currentPerVisit: 60, newPerVisit: 54, perVisitSavings: 6 }] },
+          },
+        },
+      });
+      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(result.code).toBe('existing_service_extension');
+    } finally {
+      isEnabled.mockRestore();
+    }
+  });
+
   test('an estimate that belongs to another customer names its real owner', async () => {
     seed({ estimate: { customer_id: OTHER_CUSTOMER_ID } });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
