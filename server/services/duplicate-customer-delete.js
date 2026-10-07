@@ -129,18 +129,45 @@ const AUTO_NEIGHBORHOOD_COLUMNS = ['neighborhood_id', 'neighborhood_source', 'co
 const isBlank = (v) => v === null || v === undefined || v === false || String(v).trim() === ''
   || (typeof v === 'object' && !(v instanceof Date) && Object.keys(v).length === 0);
 
+// The exact row ensurePrimaryCore (customer-properties.js) writes from this
+// customer when it backfills the primary: same defaults, same copies.
+function backfilledPrimaryValues(customer) {
+  const props = require('./customer-properties');
+  const mirror = ['address_line1', 'city', 'zip', 'latitude', 'longitude', 'property_type', 'lawn_type',
+    'property_sqft', 'lot_sqft', 'bed_sqft', 'linear_ft_perimeter', 'palm_count', 'canopy_type'];
+  return {
+    ...Object.fromEntries(mirror.map((column) => [column, customer[column] ?? null])),
+    label: customer.profile_label || 'Primary',
+    occupancy_type: props.defaultOccupancyForContactRole(customer.contact_role),
+    relationship: props.defaultRelationshipForContactRole(customer.contact_role),
+    address_line2: customer.address_line2 || null,
+    state: customer.state || 'FL',
+    address_key: props.addressKey({ address_line1: customer.address_line1, address_line2: customer.address_line2, city: customer.city, zip: customer.zip }),
+  };
+}
+
+const sameValue = (a, b) => {
+  if (isBlank(a) && isBlank(b)) return true;
+  if (isBlank(a) || isBlank(b)) return false;
+  const na = Number(a);
+  const nb = Number(b);
+  return (Number.isFinite(na) && Number.isFinite(nb)) ? na === nb : String(a).trim() === String(b).trim();
+};
+
 // What makes a saved property more than the untouched automatic primary:
 // another source (manual, call_pipeline, self_book), not primary, inactive,
-// a label or address that differs from what the backfill copies from the
-// customer, an office neighborhood entry, or any other column with a value.
+// any backfilled column whose value differs from what the backfill writes
+// from this customer (an edited occupancy, relationship, label, address or
+// measurement — editManualProperty keeps source 'backfill'), an office
+// neighborhood entry, or any other column with a value.
 function primaryPropertyEdits(property, customer) {
-  const { addressKey } = require('./customer-properties');
   const edits = [];
   if (property.source !== 'backfill') edits.push(`source ${property.source || 'unknown'}`);
   if (property.is_primary !== true) edits.push('not the primary');
   if (property.active === false) edits.push('inactive');
-  if (property.label && ![customer.profile_label, 'Primary'].includes(property.label)) edits.push('a custom label');
-  if (property.address_key && property.address_key !== addressKey(customer)) edits.push('an edited address');
+  for (const [column, value] of Object.entries(backfilledPrimaryValues(customer))) {
+    if (!sameValue(property[column], value)) edits.push(`edited ${column}`);
+  }
   if (property.neighborhood_source && property.neighborhood_source !== 'county') edits.push('an office neighborhood entry');
   for (const [column, value] of Object.entries(property)) {
     if (AUTO_PRIMARY_COLUMNS.has(column) || AUTO_NEIGHBORHOOD_COLUMNS.includes(column)) continue;

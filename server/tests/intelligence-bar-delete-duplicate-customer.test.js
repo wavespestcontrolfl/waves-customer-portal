@@ -78,7 +78,7 @@ const twin = { id: TWIN_ID, first_name: 'Jordan', last_name: 'Sample', phone: '9
 // The untouched primary the backfill (ensurePrimaryCore) creates from the
 // customer's own address.
 const autoPrimary = () => ({
-  id: 'prop-1', customer_id: STUB_ID, label: 'Primary', occupancy_type: 'owner_occupied', relationship: 'owner', is_primary: true,
+  id: 'prop-1', customer_id: STUB_ID, label: 'Primary', occupancy_type: 'owner_occupied', relationship: null, is_primary: true,
   address_line1: '12 Sample Lane', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34208', latitude: null, longitude: null,
   property_type: null, lawn_type: null, property_sqft: null, lot_sqft: null, bed_sqft: null, linear_ft_perimeter: null, palm_count: null, canopy_type: null,
   address_key: require('../services/customer-properties').addressKey(baseStub()), source: 'backfill', active: true,
@@ -217,8 +217,11 @@ describe('refuses any record that is not empty, naming what it found and pointin
     ['a manual primary', () => { db.__state.properties = [{ ...autoPrimary(), source: 'manual' }]; }, 'Saved properties', /source manual/],
     ['a call-pipeline primary', () => { db.__state.properties = [{ ...autoPrimary(), source: 'call_pipeline' }]; }, 'Saved properties', /source call_pipeline/],
     ['a self-book primary', () => { db.__state.properties = [{ ...autoPrimary(), source: 'self_book' }]; }, 'Saved properties', /source self_book/],
-    ['a primary with a nickname', () => { db.__state.properties = [{ ...autoPrimary(), label: 'Beach house' }]; }, 'Saved properties', /a custom label/],
-    ['a primary with an edited address', () => { db.__state.properties = [{ ...autoPrimary(), address_key: 'other' }]; }, 'Saved properties', /an edited address/],
+    ['a primary with a nickname', () => { db.__state.properties = [{ ...autoPrimary(), label: 'Beach house' }]; }, 'Saved properties', /edited label/],
+    ['a primary with an edited address', () => { db.__state.properties = [{ ...autoPrimary(), address_line1: '14 Sample Lane', address_key: 'other' }]; }, 'Saved properties', /edited address_line1/],
+    ['an edited backfill primary: occupancy (editManualProperty keeps source backfill)', () => { db.__state.properties = [{ ...autoPrimary(), occupancy_type: 'rental_investment' }]; }, 'Saved properties', /edited occupancy_type/],
+    ['an edited backfill primary: relationship', () => { db.__state.properties = [{ ...autoPrimary(), relationship: 'managed_for_client' }]; }, 'Saved properties', /edited relationship/],
+    ['an edited backfill primary: a measurement', () => { db.__state.properties = [{ ...autoPrimary(), lot_sqft: 9000 }]; }, 'Saved properties', /edited lot_sqft/],
     ['a primary with operator data in another column', () => { db.__state.properties = [{ ...autoPrimary(), access_notes: 'side gate' }]; }, 'Saved properties', /access_notes/],
     ['a primary with an office neighborhood entry', () => { db.__state.properties = [{ ...autoPrimary(), neighborhood_id: 'n-1', neighborhood_source: 'office' }]; }, 'Saved properties', /office neighborhood/],
     ['CRM notes', () => { db.__state.stub.crm_notes = 'Prefers mornings'; }, 'Notes and service contacts', /crm_notes/],
