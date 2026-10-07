@@ -1789,58 +1789,24 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     });
   });
 
-  // Owner IB history 2026-10-06: the operator named a product by a short
-  // phrase ("the Guard"), the catalog search missed it, and adjust_stock was
-  // refused, so the stock was never written. The operator's own phrase now
-  // resolves when every significant word of it is a whole word of exactly one
-  // active product's name. No model-chosen id or search term is involved.
-  describe('the operator\'s short product phrase resolves word for word to one active product', () => {
+  // Short product names stay out of scope (owner direction pending): the
+  // prompts Codex raised against earlier resolvers are still refused, as on
+  // main.
+  describe('short or unknown product phrases are still refused, as on main', () => {
     const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
     const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
     const restock = product => ({ product: { id: product.id, name: product.name }, movement_type: 'restock' });
-    const propose = (prompt, preview = restock(GUARD), toolName = 'adjust_stock') => resolveInventoryWriteTarget({ toolName, prompt, preview });
-
-    test('"Add 2 gallons of the Guard to inventory" resolves to the one product whose name has "Guard"', async () => {
+    test.each([
+      'Add 2 gallons of the Guard to inventory',
+      'Add 2 gallons of Unlisted Guard Chemical to inventory',
+      'Add 2 gallons of Unlisted Chemical to inventory',
+      'request 2 gallons of the Guard',
+      'Yes',
+      'Actually use the other one',
+    ])('"%s" is refused', async (prompt) => {
       setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('Add 2 gallons of the Guard to inventory')).toEqual({ productId: GUARD.id });
-    });
-
-    test('the real "We just bought a thing of Taurus ... 78 ounces" shape still gets a card', async () => {
-      setGroundingDb({ products: [TAURUS, ALPINE] });
-      expect(await propose("We just bought a thing of Taurus as to add this to your inventory I think it's 78 ounces", restock(TAURUS))).toEqual({ productId: TAURUS.id });
-    });
-
-    test('Codex r3: a known word inside a longer unknown name is refused ("Unlisted Guard Chemical")', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('Add 2 gallons of Unlisted Guard Chemical to inventory')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('Codex r3: an amount-free reply that names nothing ("Yes", "Actually use the other one") is refused', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('Yes')).toMatchObject({ code: 'target_clarification_required' });
-      expect(await propose('Actually use the other one')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a word that two active products share stays a question', async () => {
-      const GUARD_TWO = { id: 'p-guard-2', name: 'Synthetic Guard Plus', active: true };
-      setGroundingDb({ products: [GUARD, GUARD_TWO] });
-      expect(await propose('Add 2 gallons of the Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a formulation or percent qualifier must match too ("Guard WP" never resolves to "Synthetic Guard CS")', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('Add 2 gallons of the Guard WP to inventory')).toMatchObject({ code: 'target_clarification_required' });
-      expect(await propose('Add 2 gallons of Guard 20% to inventory')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('an inactive product never resolves by phrase words', async () => {
-      setGroundingDb({ products: [{ ...GUARD, active: false }, OTHER] });
-      expect(await propose('Add 2 gallons of the Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('the phrase resolving to a different product than the preview is a mismatch', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('Add 2 gallons of the Guard to inventory', restock(OTHER))).toMatchObject({ code: 'target_relationship_mismatch' });
+      const result = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: restock(GUARD) });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
   });
 });

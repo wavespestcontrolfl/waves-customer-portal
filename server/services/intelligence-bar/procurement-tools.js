@@ -1556,38 +1556,6 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
   return null;
 }
 
-// Words that never identify a product in an operator's product phrase:
-// containers, units, amounts and fillers ("the new jug of", "some more").
-const PHRASE_FILLER_WORDS = new Set([
-  'a', 'an', 'the', 'of', 'some', 'more', 'new', 'another', 'our', 'my', 'this', 'that', 'these', 'those', 'stuff',
-  'gallon', 'gallons', 'gal', 'gals', 'oz', 'fl', 'ounce', 'ounces', 'qt', 'qts', 'quart', 'quarts', 'pint', 'pints',
-  'lb', 'lbs', 'pound', 'pounds', 'bottle', 'bottles', 'jug', 'jugs', 'bag', 'bags', 'case', 'cases', 'box', 'boxes',
-  'container', 'containers', 'can', 'cans', 'pail', 'pails', 'bucket', 'buckets', 'thing', 'things', 'unit', 'units',
-]);
-const phraseWords = text => String(text || '').toLowerCase().match(/[a-z0-9]+(?:\.[0-9]+)?%?/g) || [];
-
-// The operator's own product phrase resolves to a catalog product when every
-// significant word of the phrase appears as a whole word in that product's
-// name and exactly one ACTIVE product satisfies this ("the Guard" for
-// "Synthetic Guard CS"). A word is significant unless it is a filler,
-// container or unit word; formulation codes and anything with a digit
-// ("SC", "10%") count, so a qualifier never drops out. A phrase with an
-// unknown word ("Unlisted Guard Chemical") or a word several products share
-// resolves to nothing. Only the operator's words are read: no model-chosen
-// id or search term is involved.
-async function resolveByPhraseWords(phrase) {
-  const significant = [...new Set(phraseWords(phrase).filter(word => !PHRASE_FILLER_WORDS.has(word) && (word.length >= 2 || /\d/.test(word))))];
-  if (!significant.length) return null;
-  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
-  const matches = products.filter(product => {
-    const nameWords = new Set(phraseWords(product.name));
-    return significant.every(word => nameWords.has(word));
-  });
-  if (matches.length !== 1) return null;
-  const product = await db('products_catalog').where('id', matches[0].id).first();
-  return product ? { product } : null;
-}
-
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
@@ -1680,11 +1648,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // clarify; the free-phrasing fallback never substitutes another mention
   // ("Restock Unlisted Chemical instead of Taurus SC").
   if (deictic && !selector.product_id) return unavailable;
-  let resolved = literal || await resolveProduct(selector);
-  // A short name the catalog search does not find ("the Guard" for
-  // "Synthetic Guard CS") may still name exactly one active product word for
-  // word; a name that matched several products stays a question.
-  if (resolved.error && !resolved.candidates && !selector.product_id) resolved = await resolveByPhraseWords(name) || resolved;
+  const resolved = literal || await resolveProduct(selector);
   if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };
