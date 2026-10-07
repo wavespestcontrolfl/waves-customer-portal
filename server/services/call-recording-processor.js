@@ -12491,7 +12491,7 @@ const CallRecordingProcessor = {
             linked_customer_id: String(linkedCustomerId),
             account_holder_name: holderName,
             caller_name: callerName,
-            reason: 'The caller said they were calling for a family member and gave that person\'s full name. Exactly one live account has that name. Relink the call if this is the wrong account.',
+            reason: 'The caller said they were calling for a family member and gave that person\'s full name. Exactly one live account has that name and the caller gave the address on file for that account. Relink the call if this is the wrong account.',
           },
         }))
         .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
@@ -12556,8 +12556,16 @@ const CallRecordingProcessor = {
           secondaryContacts: callSecondaryContacts,
           // Both numbers: the dictated callback number AND the inbound caller ID.
           callerPhones: [phone, call.from_phone],
+          // The address the call stated (V2 or V1, never a hybrid): the corroboration.
+          statedAddress: v2CanonicalExtraction?.property?.service_address?.street_line_1
+            ? {
+              street_line_1: v2CanonicalExtraction.property.service_address.street_line_1,
+              city: v2CanonicalExtraction.property.service_address.city,
+              postal_code: v2CanonicalExtraction.property.service_address.postal_code,
+            }
+            : { street_line_1: extracted.address_line1, city: extracted.city, postal_code: extracted.zip },
         });
-        if (result.status === 'candidates') {
+        if (result.status === 'candidates' || result.status === 'uncorroborated') {
           await db('triage_items')
             .insert(buildTriageItem({
               callLogId: call.id,
@@ -12568,9 +12576,11 @@ const CallRecordingProcessor = {
                 account_holder_name: displayName(result.holder),
                 caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
                 candidates: result.candidates,
-                reason: result.candidates.length
-                  ? 'The caller named a family member. More than one live account has that name, so nothing was linked. Pick the right account.'
-                  : 'The caller named a family member. No live account has that name, so nothing was linked.',
+                reason: result.status === 'uncorroborated'
+                  ? 'The caller named this account but gave no matching address. Confirm before linking.'
+                  : (result.candidates.length
+                    ? 'The caller named a family member. More than one live account has that name, so nothing was linked. Pick the right account.'
+                    : 'The caller named a family member. No live account has that name, so nothing was linked.'),
               },
             }))
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))

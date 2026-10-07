@@ -28,6 +28,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
+const { sameHouseNumberStreet } = require('./call-triage-flags');
 
 // Roles the model may give the person the family caller names. A named person
 // the model tagged as an arranger, tenant, buyer, lender and so on is someone
@@ -86,7 +87,25 @@ async function findLiveCustomersByFullName(conn, holder, { limit = MAX_CANDIDATE
     .orderBy('created_at', 'asc')
     .orderBy('id', 'asc')
     .limit(limit)
-    .select('id', 'first_name', 'last_name', 'city');
+    .select('id', 'first_name', 'last_name', 'city', 'address_line1', 'zip');
+}
+
+// Corroboration (owner ruling 2026-10-07 after the PR #6110 security review): a name alone
+// proves nothing, since any caller can claim to be family and say a stranger's name. The
+// call must also STATE the service address the matched account has on file: house number and
+// street (the existing sameHouseNumberStreet key), and where the call stated a ZIP or a city
+// it must equal the account's. No stated street, or a different one, is not corroborated.
+function statedAddressCorroborates(stated, customer) {
+  const street = String((stated && stated.street_line_1) || '').trim();
+  const onFile = String((customer && customer.address_line1) || '').trim();
+  if (!street || !onFile || !sameHouseNumberStreet(street, onFile)) return false;
+  const zip5 = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+  const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
+  const statedZip = zip5(stated.postal_code);
+  if (statedZip && zip5(customer.zip) && statedZip !== zip5(customer.zip)) return false;
+  const statedCity = cityKey(stated.city);
+  if (statedCity && cityKey(customer.city) && statedCity !== cityKey(customer.city)) return false;
+  return true;
 }
 
 // Link the unlinked call to the one matched customer. Same fences as the
@@ -156,13 +175,15 @@ async function phoneOnAnyLiveAccount(conn, phone) {
  * The whole linking step. Returns
  *   { status: 'linked', customer, holder }  - call_log now carries the customer
  *   { status: 'candidates', holder, candidates } - zero or 2+ matches, nothing linked
+ *   { status: 'uncorroborated', holder, candidates } - one name match but the call stated no
+ *     matching address: nothing linked or saved, the one candidate rides the card
  *   { status: 'not_applicable' }  - no named holder
  *   { status: 'phone_on_file' }  - some live account carries the caller's number: not ours to link
  *   { status: 'customer_gone' | 'claim_lost' }
  * The processor files the cards (it owns buildTriageItem and the card context).
  */
 async function resolveFamilyNameLink({
-  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhones = [], conn = db,
+  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhones = [], statedAddress = null, conn = db,
 }) {
   const holder = pickNamedAccountHolder({ callerRelationship, caller, secondaryContacts });
   if (!holder) return { status: 'not_applicable' };
@@ -182,6 +203,15 @@ async function resolveFamilyNameLink({
     };
   }
   const customer = matches[0];
+  // One name match without a matching stated address: nothing is linked or saved. The card
+  // names the likely account so the office can confirm it.
+  if (!statedAddressCorroborates(statedAddress, customer)) {
+    return {
+      status: 'uncorroborated',
+      holder,
+      candidates: [{ customer_id: String(customer.id), name: displayName(customer), city: customer.city || null }],
+    };
+  }
   const outcome = await linkCallToCustomer({ callLogId, procToken, customer, holder, caller, conn });
   if (outcome !== 'linked') {
     logger.warn(`[call-family-link] link not written for call ${callLogId}: ${outcome}`);
@@ -199,6 +229,7 @@ module.exports = {
   pickNamedAccountHolder,
   findLiveCustomersByFullName,
   phoneOnAnyLiveAccount,
+  statedAddressCorroborates,
   linkCallToCustomer,
   resolveFamilyNameLink,
 };

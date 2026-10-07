@@ -20,7 +20,7 @@ const { randomUUID } = require('crypto');
 const gates = require('../config/feature-gates');
 const {
   pickNamedAccountHolder, normName, fullNameKey, resolveFamilyNameLink,
-  findLiveCustomersByFullName, linkCallToCustomer, phoneOnAnyLiveAccount,
+  findLiveCustomersByFullName, linkCallToCustomer, phoneOnAnyLiveAccount, statedAddressCorroborates,
 } = require('../services/call-family-name-link');
 
 const { buildTriageItem } = require('../services/call-routing-gates');
@@ -88,6 +88,25 @@ describe('pickNamedAccountHolder', () => {
   });
 });
 
+describe('statedAddressCorroborates', () => {
+  const onFile = { address_line1: '100 Example Loop', city: 'Sarasota', zip: '34240' };
+  test('same house number and street corroborates, with or without the suffix, case-insensitive', () => {
+    expect(statedAddressCorroborates({ street_line_1: '100 example loop', city: 'Sarasota', postal_code: '34240' }, onFile)).toBe(true);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example' }, onFile)).toBe(true);
+  });
+  test('no stated street, or a different house number or street, does not', () => {
+    expect(statedAddressCorroborates(null, onFile)).toBe(false);
+    expect(statedAddressCorroborates({ city: 'Sarasota' }, onFile)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '102 Example Loop' }, onFile)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '100 Other Street' }, onFile)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop' }, { address_line1: null })).toBe(false);
+  });
+  test('a stated ZIP or city that disagrees with the account does not', () => {
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', postal_code: '34202' }, onFile)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', city: 'Bradenton' }, onFile)).toBe(false);
+  });
+});
+
 describe('the two advisory cards', () => {
   test.each(['family_account_linked', 'family_account_candidates'])('%s files advisory in the customer-field lane', (flag) => {
     const item = buildTriageItem({
@@ -124,6 +143,11 @@ describe('Step 3 wiring (structural)', () => {
     expect(resume).toContain("String(call.metadata?.family_name_link?.customer_id || '') === String(customerId)");
     expect(resume.indexOf('adoptFamilyNameLink(customerId, markedHolder)')).toBeGreaterThan(resume.indexOf('callFamilyNameLinkLive()'));
     expect(resume.slice(0, resume.indexOf('try {'))).not.toContain('callFamilyNameLinkLive');
+  });
+
+  test('the stated address (V2 first, else V1, never a hybrid) rides into the link and the card says why', () => {
+    expect(source).toContain('statedAddress: v2CanonicalExtraction?.property?.service_address?.street_line_1');
+    expect(source).toContain("result.status === 'uncorroborated'\n                  ? 'The caller named this account but gave no matching address. Confirm before linking.'");
   });
 
   test('both the dictated callback number and the inbound caller ID are checked for an account', () => {
@@ -164,6 +188,8 @@ const SKIP = !process.env.DATABASE_URL;
       last_name: 'Testerson',
       phone: `+1941555${String(Math.floor(Math.random() * 9000) + 1000)}`,
       city: 'Sarasota',
+      address_line1: '100 Example Loop',
+      zip: '34240',
       pipeline_stage: 'active_customer',
       active: true,
       ...over,
@@ -179,6 +205,7 @@ const SKIP = !process.env.DATABASE_URL;
     callLogId,
     procToken: TOKEN,
     callerRelationship: 'family_member',
+    statedAddress: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' },
     caller: { first_name: 'Dana', last_name: 'Lee' },
     secondaryContacts: [{ first_name: 'Angelina', last_name: 'Testerson', role: 'family_member' }],
     conn: trx,
@@ -195,6 +222,19 @@ const SKIP = !process.env.DATABASE_URL;
     const row = await trx('call_log').where({ id: callLogId }).first();
     expect(String(row.customer_id)).toBe(String(mom));
     expect(row.metadata.family_name_link).toMatchObject({ customer_id: String(mom), holder_name: 'Angelina Testerson' });
+  });
+
+  test('one name match but no stated address, or a different one, links and saves nothing', async () => {
+    const mom = await customer();
+    for (const statedAddress of [null, { street_line_1: '' }, { street_line_1: '4313 Other Dr', city: 'Sarasota', postal_code: '34240' }]) {
+      const callLogId = await call();
+      const out = await resolveFamilyNameLink(args(callLogId, { statedAddress }));
+      expect(out.status).toBe('uncorroborated');
+      expect(out.candidates).toEqual([{ customer_id: String(mom), name: 'Angelina Testerson', city: 'Sarasota' }]);
+      const row = await trx('call_log').where({ id: callLogId }).first();
+      expect(row.customer_id).toBeNull();
+      expect(row.metadata.family_name_link).toBeUndefined();
+    }
   });
 
   test('case and whitespace differences in the stored name still match; no fuzzy match', async () => {
