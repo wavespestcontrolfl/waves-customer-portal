@@ -131,3 +131,24 @@ test('PDF cache key: a non-lawn service gets no stamp', async () => {
   const svc = { id: 'svc-pest', customer_id: 'customer-1', service_line: 'pest', service_date: '2026-10-06' };
   expect((await resolveCanonicalLawnRender(svc, makeKnex({}))).signature).toBe('');
 });
+
+test('PDF cache key: a zone write (count or newest updated_at) re-keys the lawn PDF while the gate is live (codex #6089 r3)', async () => {
+  process.env[KEY] = 'true';
+  const svc = { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' };
+  // makeKnex has no count/max, so wrap it: property_zones answers the aggregate.
+  const withZones = (agg) => {
+    const base = makeKnex({});
+    return (table) => {
+      if (table !== 'property_zones') return base(table);
+      const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.resolve(agg) };
+      return q;
+    };
+  };
+  const sig = async (agg) => (await resolveCanonicalLawnRender(svc, withZones(agg))).signature;
+  const none = await sig({ n: 0, newest: null });
+  const marked = await sig({ n: 1, newest: '2026-10-07T12:00:00Z' });
+  const remarked = await sig({ n: 1, newest: '2026-10-07T13:00:00Z' });
+  expect(marked).not.toBe(none);
+  expect(remarked).not.toBe(marked);
+  expect(await sig({ n: 1, newest: '2026-10-07T13:00:00Z' })).toBe(remarked);
+});

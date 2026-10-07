@@ -2837,7 +2837,11 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // cached before a flip is never served after it, and the stamp leaving on
   // rollback re-keys it back. Rides only while the gate is live (lawn only:
   // this function returns early for other lines).
-  if (featureGates.lawnCoverageHideDefaultZonesLive()) irrigationStamp += ':covhide=1';
+  // The verdict also follows the customer's zone marks (codex #6089 r3): any
+  // office or technician zone write (count or newest updated_at) re-keys the
+  // cached PDF, so a PDF never keeps the old hidden/visible answer after marks
+  // are added or cleared. An unreadable zone read stamps 'zerr', never a stale key.
+  if (featureGates.lawnCoverageHideDefaultZonesLive()) irrigationStamp += `:covhide=1:z=${await lawnZoneMarkStamp(service, knex)}`;
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
@@ -3964,6 +3968,20 @@ async function resolveRecordedProtocolVersion(knex, service) {
   if (!service.scheduled_service_id) return null;
   const scheduled = await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('lawn_protocol_version');
   return scheduled?.lawn_protocol_version || null;
+}
+
+// GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES PDF stamp: the customer's active zone
+// rows as "<count>-<newest updated_at ms>", so any zone write re-keys the PDF.
+async function lawnZoneMarkStamp(service, knex) {
+  try {
+    const row = await knex('property_zones')
+      .where({ customer_id: service.customer_id, is_active: true })
+      .count({ n: '*' }).max({ newest: 'updated_at' }).first();
+    const newest = row && row.newest ? new Date(row.newest).getTime() : 0;
+    return `${Number(row && row.n) || 0}-${newest}`;
+  } catch {
+    return 'zerr';
+  }
 }
 
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {

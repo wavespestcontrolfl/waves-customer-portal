@@ -2395,7 +2395,7 @@ the A-D perimeter coverage list, and adds one optional key
 `lawnCoverageHidden: true` (absent otherwise). The PDF reads that key and prints no
 generated "Where we treated" map or A-D legend either; a real technician-traced
 treatment map still prints. While the gate is live the lawn PDF signature
-(`lawnAssessmentPdfSignature`) carries `:covhide=1`, so PDFs cached before a flip
+(`lawnAssessmentPdfSignature`) carries `:covhide=1:z=<active zone count>-<newest zone updated_at>`, so PDFs cached before a flip, or before any zone mark is added or cleared,
 re-render, and re-render again when the gate is turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
 found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
 not served either.
