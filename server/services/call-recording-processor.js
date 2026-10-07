@@ -12556,14 +12556,11 @@ const CallRecordingProcessor = {
           secondaryContacts: callSecondaryContacts,
           // Both numbers: the dictated callback number AND the inbound caller ID.
           callerPhones: [phone, call.from_phone],
-          // The address the call stated (V2 or V1, never a hybrid): the corroboration.
-          statedAddress: v2CanonicalExtraction?.property?.service_address?.street_line_1
-            ? {
-              street_line_1: v2CanonicalExtraction.property.service_address.street_line_1,
-              city: v2CanonicalExtraction.property.service_address.city,
-              postal_code: v2CanonicalExtraction.property.service_address.postal_code,
-            }
-            : { street_line_1: extracted.address_line1, city: extracted.city, postal_code: extracted.zip },
+          // The corroboration: the address the caller ORIGINALLY stated, frozen before Google
+          // validation, street recovery and normalization rewrote the extraction. Never the
+          // corrected fields (a different address corrected into the account's must not pass) and
+          // never a fallback to V1 `extracted`.
+          statedAddress: v2StatedServiceAddressRaw,
         });
         if (result.status === 'candidates' || result.status === 'uncorroborated') {
           await db('triage_items')

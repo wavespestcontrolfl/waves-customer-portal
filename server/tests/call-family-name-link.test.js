@@ -145,8 +145,17 @@ describe('Step 3 wiring (structural)', () => {
     expect(resume.slice(0, resume.indexOf('try {'))).not.toContain('callFamilyNameLinkLive');
   });
 
-  test('the stated address (V2 first, else V1, never a hybrid) rides into the link and the card says why', () => {
-    expect(source).toContain('statedAddress: v2CanonicalExtraction?.property?.service_address?.street_line_1');
+  test('corroboration uses the ORIGINALLY stated address, never the validated or recovered one', () => {
+    expect(source).toContain('statedAddress: v2StatedServiceAddressRaw,');
+    const call = source.slice(source.indexOf('const result = await resolveFamilyNameLink('), source.indexOf('statedAddress: v2StatedServiceAddressRaw,') + 60)
+      .split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+    expect(call).not.toMatch(/extracted\.(address_line1|city|zip)/);
+    expect(call).not.toContain('v2CanonicalExtraction?.property');
+    // frozen before address validation rewrites the extraction
+    expect(source.indexOf('v2StatedServiceAddressRaw = rawServiceAddress ?')).toBeLessThan(source.indexOf('v2AddressValidation = await validateWithOnFileAssist'));
+  });
+
+  test('a card says why when the name matched but the address did not', () => {
     expect(source).toContain("result.status === 'uncorroborated'\n                  ? 'The caller named this account but gave no matching address. Confirm before linking.'");
   });
 
