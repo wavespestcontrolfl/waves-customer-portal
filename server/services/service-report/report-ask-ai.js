@@ -805,7 +805,8 @@ function buildReportAskFacts({
     visit_summary: sections.length || !keep(summary) ? null : summary,
     findings,
     // The serviced-area labels the report shows (Codex P1 #5964 r57).
-    areas_serviced: asArray(data.areasServiced).map((area) => cleanText(typeof area === 'string' ? area : area?.label)).filter(Boolean).slice(0, 12),
+    // The payload names them serviceAreas (pre-push audit, #5964).
+    areas_serviced: asArray(data.serviceAreas || data.areasServiced).map((area) => cleanText(typeof area === 'string' ? area : area?.label)).filter(Boolean).slice(0, 12),
     lawn_assessment: lawnAssessmentFacts(data, keep),
     tree_shrub_report: treeShrubFacts(data, keep),
     lawn_report: lawnV2Facts(data, keep),

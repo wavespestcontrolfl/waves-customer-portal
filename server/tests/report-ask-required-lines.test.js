@@ -2388,3 +2388,10 @@ describe('answer screen, Codex round 66', () => {
     expect(ask('Alpine WSG slows ants and roaches at entry points.')).toBeNull();
   });
 });
+
+test('serviced areas come from the payload field serviceAreas (pre-push audit)', () => {
+  const data = pestData({ applications: [], serviceAreas: ['Garage', 'Exterior perimeter'] });
+  const facts = buildReportAskFacts({ data });
+  expect(facts.areas_serviced).toEqual(['Garage', 'Exterior perimeter']);
+  expect(screenAskAnswer('The garage was not serviced.', { question: 'Was the garage serviced?', data, facts })).toBe('unrecorded_work');
+});
