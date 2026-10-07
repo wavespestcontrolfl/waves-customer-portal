@@ -196,6 +196,18 @@ test('a failed zone read is not default zones: the section stays and nothing is 
   const data = await buildReportV1Data({ ...LAWN_SERVICE }, 'token-lawn-coverage', knex);
   expect(data.serviceCoverage.enabled).toBe(true);
   expect(data).not.toHaveProperty('lawnCoverageHidden');
+  // No linked assessment here: the uncacheable signal is assessment-independent.
+  expect(data.coverageTransientlyUnavailable).toBe(true);
+});
+
+test('gate off: a failed zone read adds no cache flag (payload unchanged)', async () => {
+  const base = makeKnex({ property_geometries: [], service_findings: [], service_photos: [], service_products: [], scheduled_services: [] });
+  const knex = (table) => {
+    if (table === 'property_zones') { const q = { where: () => q, orderBy: () => q, catch: (fn) => Promise.resolve(fn(new Error('read failed'))), then: (r, j) => Promise.reject(new Error('read failed')).then(r, j) }; return q; }
+    return base(table);
+  };
+  const data = await buildReportV1Data({ ...LAWN_SERVICE }, 'token-lawn-coverage', knex);
+  expect(data).not.toHaveProperty('coverageTransientlyUnavailable');
 });
 
 test('a failed stamp read yields a one-off key that never matches a stored PDF (codex #6089 r5)', async () => {

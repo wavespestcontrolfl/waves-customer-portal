@@ -5454,9 +5454,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // treated whole (the product card says "Your whole lawn").
   const hideDefaultLawnCoverage = serviceLine === 'lawn' && coverageZonesAreDefaults
     && featureGates.lawnCoverageHideDefaultZonesLive();
-  if (serviceLine === 'lawn' && coverageReadFailed && lawnAssessment && featureGates.lawnCoverageHideDefaultZonesLive()) {
-    lawnAssessment.weekWeatherUncacheable = true;
-  }
   const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,
@@ -7517,6 +7514,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // this flag the map-less PDF would be stored under exactly the key
     // expected after the provider recovers and the report would never
     // regain its map. Counted like an image drop: serve it, cache nothing.
+    // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (codex #6089 r5 + pre-push): a
+    // failed zone / geometry read on a lawn visit cannot prove the coverage
+    // verdict, with or without a linked assessment. Like a transient basemap
+    // miss: serve the render, store no PDF. Gate off: key absent.
+    ...(serviceLine === 'lawn' && coverageReadFailed && featureGates.lawnCoverageHideDefaultZonesLive()
+      ? { coverageTransientlyUnavailable: true } : {}),
     stationMapTransientlyUnavailable: stationMap?.available === false
       && ['satellite_unavailable', 'provider_config_unavailable', 'build_failed']
         .includes(String(stationMap?.reason || '')),
