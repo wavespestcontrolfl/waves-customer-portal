@@ -569,6 +569,15 @@ describe('commit', () => {
     expect(result.warning).not.toContain('the tier Silver and');
   });
 
+  test('partial receipt: an equal total never marks the bill done (the lines were not written)', async () => {
+    const input = { ...BASE_INPUT, monthly: undefined, monthly_total: 41.33, reprice_lines: [{ service: 'pest_control', monthly: 20 }] };
+    const version = await approvedVersion(input);
+    createScheduleBooking.mockResolvedValue({ status: 201, json: { id: 'series-1', recurringCreated: 2, appointments: [] } });
+    const result = await run({ ...input, _verified_program_version: version }, { confirmed: true });
+    expect(result.not_done).toContain('monthly_bill');
+    expect(result.warning).toContain('the monthly bill $41.33');
+  });
+
   test('a first-ever recurring customer: the receipt says the welcome is queued', async () => {
     Welcome.isNewRecurringSignupCandidate.mockResolvedValue(true);
     const version = await approvedVersion();

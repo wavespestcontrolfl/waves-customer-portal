@@ -712,11 +712,13 @@ function partialReceipt(plan, booked, state, reason) {
   // The post-booking row decides what is still missing: the booking's plan
   // sync can already have set the requested tier.
   const tierDone = !!state && state.waveguard_tier === plan.tier && state.waveguard_tier_source === 'manual';
-  const billDone = !!state && round(state.monthly_rate) === plan.bill.totalAfter;
-  const notDone = [...(tierDone ? [] : ['waveguard_tier']), ...(billDone ? [] : ['monthly_bill'])];
+  // The bill lines are written only by this card's own transaction, which
+  // did not run or rolled back whenever this receipt is built; an equal
+  // total proves nothing about the lines, so the bill is always not done.
+  const notDone = [...(tierDone ? [] : ['waveguard_tier']), 'monthly_bill'];
   const missing = [
     !tierDone && `the tier ${plan.tier}`,
-    !billDone && `the monthly bill ${money(plan.bill.totalAfter)}`,
+    `the monthly bill ${money(plan.bill.totalAfter)}`,
   ].filter(Boolean).join(' and ');
   return {
     success: true,
@@ -725,7 +727,7 @@ function partialReceipt(plan, booked, state, reason) {
     not_done: notDone,
     customer_now: state ? { waveguard_tier: state.waveguard_tier || null, monthly_rate: round(state.monthly_rate) } : null,
     warning: `PARTLY DONE. Booked: ${booked.visits_booked} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}. ${missing ? `NOT done by this card: ${missing}. ` : ''}Now the tier is ${tierNow} and the monthly bill is ${billNow}. Reason: ${reason}.`,
-    message: `Partly done: visits booked; ${missing ? `${missing} not set` : 'the tier and bill already match'}.`,
+    message: `Partly done: visits booked; ${missing} not set.`,
   };
 }
 
