@@ -40,9 +40,9 @@ function cacheKey(lat, lng) {
 // request URLs embed location (customer lat/lng on /points, the
 // resolved grid cell on /gridpoints), and address-level PII does not
 // belong in application logs.
-async function fetchJson(url, label) {
+async function fetchJson(url, label, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -121,8 +121,8 @@ function raceDeadline(promise, ms) {
   ]).finally(() => clearTimeout(timer));
 }
 
-function fetchOpenMeteoHours(latNum, lngNum, startedAt) {
-  const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+function fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs = TOTAL_BUDGET_MS) {
+  const remaining = budgetMs - (Date.now() - startedAt);
   const key = cacheKey(latNum, lngNum);
   const pending = _backupInFlight.get(key);
   // Joining a read another lookup started still keeps THIS lookup's budget:
@@ -289,7 +289,11 @@ function parseWindMph(text) {
   return Math.max(...nums.map(Number));
 }
 
-async function getHourlyRainOutlook(lat, lng) {
+// Optional `budgetMs` / `nwsBudgetMs` (best-times ranking, Codex #6102 r2):
+// a caller with a short wait caps NWS at `nwsBudgetMs` so a slow NWS failure
+// still leaves the Open-Meteo backup time inside `budgetMs`. Defaults are
+// the plain behavior: NWS fetches at their own timeout, backup on the rest.
+async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsBudgetMs = budgetMs } = {}) {
   if (lat == null || lng == null || lat === '' || lng === '') return null;
   const latNum = Number(lat);
   const lngNum = Number(lng);
@@ -300,18 +304,25 @@ async function getHourlyRainOutlook(lat, lng) {
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS) return cached.value;
 
   const startedAt = Date.now();
-  const hours = (await nwsHourly(latNum, lngNum)) || (await fetchOpenMeteoHours(latNum, lngNum, startedAt));
+  const hours = (await nwsHourly(latNum, lngNum, startedAt + nwsBudgetMs))
+    || (await fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs));
   if (!hours) return null;
   _hourlyCache.set(key, { at: Date.now(), value: hours });
   return hours;
 }
 
-async function nwsHourly(latNum, lngNum) {
-  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
-  const hourlyUrl = points?.properties?.forecastHourly;
-  if (!hourlyUrl) return null;
+// Each NWS fetch waits at most its own timeout and never past `deadlineAt`.
+function nwsTimeout(deadlineAt) {
+  return Math.min(FETCH_TIMEOUT_MS, deadlineAt - Date.now());
+}
 
-  const forecast = await fetchJson(hourlyUrl, 'hourly forecast');
+async function nwsHourly(latNum, lngNum, deadlineAt) {
+  if (nwsTimeout(deadlineAt) <= 0) return null;
+  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup', nwsTimeout(deadlineAt));
+  const hourlyUrl = points?.properties?.forecastHourly;
+  if (!hourlyUrl || nwsTimeout(deadlineAt) <= 0) return null;
+
+  const forecast = await fetchJson(hourlyUrl, 'hourly forecast', nwsTimeout(deadlineAt));
   const periods = forecast?.properties?.periods;
   if (!Array.isArray(periods)) return null;
 

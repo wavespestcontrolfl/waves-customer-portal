@@ -12,21 +12,41 @@
  * time to dry). Only the next RAIN_DAYS dates count: Florida hourly
  * forecasts past ~3 days are too weak to move a booking.
  *
- * Pure module — no I/O.
+ * Pure rules; bookingRainFit reads the gate.
  */
 const RAIN_PCT = 60;
 const RAIN_AFTER_HOURS = 2;
 const RAIN_DAYS = 3;
 
 // A booking is rain-OK only when EVERY service in it is: one outdoor
-// service in the booking means product goes down outside.
-const RAIN_OK = /assess|estimate|inspect|\bwdo\b|wood[- ]?destroy|rodent|\brats?\b|\bmice\b|\bmouse\b|trap|interior/i;
+// service in the booking means work happens outside.
+const RAIN_OK = /assess|estimate|inspect|\bwdo\b|wood[- ]?destroy|interior/i;
+// Rodent work is rain-OK only as a check: trap checks, monitoring, an
+// inspection. Exclusion and remediation (wire mesh, sealing) are outdoor
+// jobs (Codex #6102 r2).
+const RODENT = /rodent|\brats?\b|\bmice\b|\bmouse\b|trap/i;
+const RODENT_CHECK = /check|monitor|inspect/i;
+// Words that put a service outside whatever else it says.
+const OUTDOOR = /exterior|exclu|mesh|seal|remediat/i;
+
+function rainOkService(name) {
+  if (OUTDOOR.test(name)) return false;
+  if (RAIN_OK.test(name)) return true;
+  return RODENT.test(name) && RODENT_CHECK.test(name);
+}
 
 function rainFitFor(serviceTypes) {
   const names = (Array.isArray(serviceTypes) ? serviceTypes : [serviceTypes])
     .map((s) => String(s || '').trim()).filter(Boolean);
   if (!names.length) return 'neutral';
-  return names.every((n) => RAIN_OK.test(n)) ? 'prefer' : 'avoid';
+  return names.every(rainOkService) ? 'prefer' : 'avoid';
+}
+
+// The booking's fit with the gate applied: 'neutral' (drive-only) while
+// GATE_BOOKING_RAIN_RANK is off. Read at call time.
+function bookingRainFit(serviceTypes) {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  return gateEnvValue('GATE_BOOKING_RAIN_RANK') ? rainFitFor(serviceTypes) : 'neutral';
 }
 
 function toMin(hhmm) {
@@ -70,4 +90,11 @@ function rainTier(fit, wet) {
   return wet ? 0 : 2;
 }
 
-module.exports = { rainFitFor, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+// The ranking's tier function for one forecast, or null (drive-only order)
+// when there is no forecast or the booking is neutral.
+function rainTierOf(fit, hourly, today) {
+  if (fit === 'neutral' || !hourly) return null;
+  return (chip) => rainTier(fit, isWetWindow(hourly, chip, today));
+}
+
+module.exports = { rainFitFor, bookingRainFit, rainTierOf, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };

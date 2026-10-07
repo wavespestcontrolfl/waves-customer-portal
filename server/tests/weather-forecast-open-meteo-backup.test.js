@@ -136,6 +136,22 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(global.fetch.mock.calls.filter(([url]) => isOpenMeteo(url))).toHaveLength(1);
   });
 
+  test('a caller budget caps NWS so the backup still answers in time (Codex #6102 r2)', async () => {
+    global.fetch.mockImplementation(async (url, opts) => {
+      if (isOpenMeteo(url)) return omOk([65]);
+      // NWS hangs until its (capped) timeout aborts it.
+      now += 1200;
+      return new Promise((resolve, reject) => {
+        opts.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    });
+    const started = realNow();
+    const hours = await getHourlyRainOutlook(27.47, -82.47, { budgetMs: 2500, nwsBudgetMs: 1200 });
+    expect(hours[0]).toMatchObject({ rainChance: 65, source: 'open-meteo' });
+    // NWS was given at most 1.2 s, not its own 2.5 s.
+    expect(realNow() - started).toBeLessThan(2000);
+  });
+
   test('both down: null (fail-open)', async () => {
     global.fetch.mockRejectedValue(new Error('down'));
     expect(await getHourlyRainOutlook(27.43, -82.43)).toBeNull();

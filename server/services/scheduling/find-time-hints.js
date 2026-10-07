@@ -11,7 +11,7 @@
  * enforcer).
  */
 
-const { rainFitFor, isWetWindow, rainTier } = require('./rain-fit');
+const { bookingRainFit, rainTierOf } = require('./rain-fit');
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
@@ -501,7 +501,7 @@ function pickBestRows(days, { pickedDate, today, tierOf = null }) {
   // A picked date more than two weeks out searches only the days around it,
   // so the week row has nothing to say rather than "nothing fits".
   const weekCovered = days.some((day) => day.date === today);
-  return { day: dayRow, week: weekRow, week_from: today, week_to: weekEnd, week_covered: weekCovered };
+  return { day: dayRow, week: weekRow, week_from: today, week_to: weekEnd, week_covered: weekCovered, order };
 }
 
 // Highest NWS hourly rain chance across a chip's window, or null.
@@ -541,26 +541,32 @@ function publicChip(chip) {
  * chance of rain for each chip's hour. Both lookups fail open: a chip keeps
  * the model's numbers, or shows no rain.
  */
+// The chips' forecast: NWS hourly, Open-Meteo when NWS fails. NWS gets
+// 1.2 s so a slow failure still leaves the backup time inside the 2.5 s
+// wait (Codex #6102 r2); fail open to no rain.
+const RAIN_WAIT_MS = 2500;
+const RAIN_NWS_MS = 1200;
+function boundedHourlyRain(la, ln) {
+  const { getHourlyRainOutlook } = require('../weather-forecast');
+  let timer;
+  return Promise.race([
+    getHourlyRainOutlook(la, ln, { budgetMs: RAIN_WAIT_MS, nwsBudgetMs: RAIN_NWS_MS }).catch(() => null),
+    new Promise((resolve) => { timer = setTimeout(resolve, RAIN_WAIT_MS + 100, null); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function buildBestRows(days, {
-  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes = [], deps = {},
+  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, deps = {},
 }) {
-  const rainLookup = deps.hourlyRain || (async (la, ln) => {
-    const { getHourlyRainOutlook } = require('../weather-forecast');
-    let timer;
-    return Promise.race([
-      getHourlyRainOutlook(la, ln).catch(() => null),
-      new Promise((resolve) => { timer = setTimeout(resolve, 1500, null); }),
-    ]).finally(() => clearTimeout(timer));
-  });
-  const anyHour = days.some((day) => day.hours.length);
-  // Rain ranking (GATE_BOOKING_RAIN_RANK, dark) needs the forecast BEFORE the
-  // rows are chosen; off, the forecast is read alongside the road prices.
-  const { gateEnvValue } = require('../../config/feature-gates');
-  const fit = gateEnvValue('GATE_BOOKING_RAIN_RANK') ? rainFitFor(serviceTypes) : 'neutral';
-  const early = fit !== 'neutral' && anyHour ? rainLookup(lat, lng).catch(() => null) : null;
-  const earlyHourly = early ? await early : null;
-  const tierOf = earlyHourly ? (chip) => rainTier(fit, isWetWindow(earlyHourly, chip, today)) : null;
+  const rainLookup = deps.hourlyRain || boundedHourlyRain;
+  // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
+  // the ranking. No hour on screen: no lookup (Codex #6045 r1).
+  const forecast = days.some((day) => day.hours.length) || picked?.fits === true
+    ? rainLookup(lat, lng).catch(() => null) : Promise.resolve(null);
+  const fit = bookingRainFit(serviceTypes);
+  const tierOf = rainTierOf(fit, fit === 'neutral' ? null : await forecast, today);
   const rows = pickBestRows(days, { pickedDate, today, tierOf });
+  const { order } = rows;
   // The picked hour's verdict gets the same treatment, so its sentence and
   // its own chip never disagree. Its window is the one scorePickedHour
   // scored: max(the form's end, start + duration) (Codex #6045 r1).
@@ -578,13 +584,7 @@ async function buildBestRows(days, {
   } : null;
   const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
   const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
-  // No hour on screen: no forecast lookup either (Codex #6045 r1).
-  const [priced, hourly] = await Promise.all([
-    priceChips(chips),
-    early ? earlyHourly
-      : (chips.length || anyHour ? rainLookup(lat, lng).catch(() => null) : null),
-  ]);
-  const order = tierOf ? (a, b) => tierOf(a) - tierOf(b) || byBest(a, b) : byBest;
+  const [priced, hourly] = await Promise.all([priceChips(chips), forecast]);
   const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
   const nDay = rows.day.length;
   const nWeek = rows.week.length;
