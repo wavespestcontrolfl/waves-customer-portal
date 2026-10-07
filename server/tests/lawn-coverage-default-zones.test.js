@@ -138,11 +138,15 @@ test('PDF cache key: a zone write (count or newest updated_at) re-keys the lawn 
   // makeKnex has no count/max, so wrap it: property_zones answers the aggregate.
   const withZones = (agg) => {
     const base = makeKnex({});
-    return (table) => {
+    const k = (table) => {
+      if (table === 'property_geometries') { const g = { where: () => g, orderBy: () => g, first: () => Promise.resolve({ zoom: 20 }) }; return g; }
+      if (table === 'service_records as sr') { const c = { leftJoin: () => c, where: () => c, first: () => Promise.resolve({ lat: 27.4, lng: -82.5 }) }; return c; }
       if (table !== 'property_zones') return base(table);
       const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.resolve(agg) };
       return q;
     };
+    k.raw = (sql) => sql;
+    return k;
   };
   const sig = async (agg) => (await resolveCanonicalLawnRender(svc, withZones(agg))).signature;
   const none = await sig({ n: 0, newest: null });
@@ -160,11 +164,22 @@ test('PDF cache key: a re-geocode or a geometry zoom change re-keys the lawn PDF
     return (table) => {
       if (table === 'property_zones') { const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.resolve({ n: 1, newest: '2026-10-07T12:00:00Z' }) }; return q; }
       if (table === 'property_geometries') { const q = { where: () => q, orderBy: () => q, first: () => Promise.resolve({ zoom }) }; return q; }
+      if (table === 'service_records as sr') { const q = { leftJoin: () => q, where: () => q, first: () => Promise.resolve({ lat: knexWith.lat, lng: -82.5 }) }; return q; }
       return base(table);
     };
   };
-  const svc = (lat) => ({ id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06', customer_latitude: lat, customer_longitude: -82.5 });
-  const sig = async (lat, zoom) => (await resolveCanonicalLawnRender(svc(lat), knexWith(zoom))).signature;
+  knexWith.raw = (sql) => sql;
+  // The center comes from the visit's rows, not the caller's object: a partial
+  // lookup row (no coordinates) and a full render row give the same key.
+  const sig = async (lat, zoom, partial = false) => {
+    knexWith.lat = lat;
+    const k = knexWith(zoom); k.raw = (sql) => sql;
+    const svc = partial
+      ? { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06' }
+      : { id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06', customer_latitude: 1, customer_longitude: 2 };
+    return (await resolveCanonicalLawnRender(svc, k)).signature;
+  };
+  expect(await sig(27.4, 20, true)).toBe(await sig(27.4, 20, false));
   const base = await sig(27.4, 20);
   expect(await sig(27.4, 20)).toBe(base);
   expect(await sig(27.41, 20)).not.toBe(base);

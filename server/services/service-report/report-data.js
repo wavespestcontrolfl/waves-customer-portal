@@ -3982,8 +3982,17 @@ async function lawnZoneMarkStamp(service, knex) {
       .count({ n: '*' }).max({ newest: 'updated_at' }).first();
     const geometry = await knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first();
     const newest = row && row.newest ? new Date(row.newest).getTime() : 0;
-    const lat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
-    const lng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
+    // The center is read here from the visit's own rows (stamped visit coords,
+    // else the customer's), never from the caller's service object: the PDF
+    // cache LOOKUP passes a partial row without coordinates while the RENDER
+    // passes the full join, and both must compute the same key (pre-push P1).
+    const coords = await knex('service_records as sr')
+      .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+      .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+      .where('sr.id', service.id)
+      .first(knex.raw('COALESCE(ss.lat, c.latitude) as lat'), knex.raw('COALESCE(ss.lng, c.longitude) as lng'));
+    const lat = numberOrNull(coords && coords.lat);
+    const lng = numberOrNull(coords && coords.lng);
     const center = lat != null && lng != null ? `${lat.toFixed(6)},${lng.toFixed(6)}` : 'nc';
     return `${Number(row && row.n) || 0}-${newest}@${center}~${Number(geometry && geometry.zoom) || 20}`;
   } catch {
