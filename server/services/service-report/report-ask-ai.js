@@ -1123,7 +1123,8 @@ const GENERIC_SCORE = [/\bscores?\b/i, /out_of_100|score/];
 MEASUREMENTS.push(GENERIC_SCORE);
 const SMALL_NUMBERS = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(' ');
 const TENS = 'twenty thirty forty fifty sixty seventy eighty ninety'.split(' ');
-const NUMBER_WORD_RE = new RegExp(`\\b(?:(${TENS.join('|')})(?:[\\s-](${SMALL_NUMBERS.slice(1, 10).join('|')}))?|(${SMALL_NUMBERS.join('|')})|(a\\s+hundred|one\\s+hundred))\\b`, 'gi');
+// "One hundred" is tried before "one" (pre-push audit, #5964).
+const NUMBER_WORD_RE = new RegExp(`\\b(?:(a\\s+hundred|one\\s+hundred)|(${TENS.join('|')})(?:[\\s-](${SMALL_NUMBERS.slice(1, 10).join('|')}))?|(${SMALL_NUMBERS.join('|')}))\\b`, 'gi');
 // Number words count wherever digits would ("ninety days", "twelve palms")
 // (Codex P1 #5964 r14); "zero" and "one" only before a unit or the score
 // scale, since "one product" and "no one" are prose.
@@ -1142,7 +1143,7 @@ const FRACTION_WORDS = [
 ];
 function digitsForWords(text) {
   const withFractions = FRACTION_WORDS.reduce((rest, [re, to]) => rest.replace(re, to), text);
-  return withFractions.replace(NUMBER_WORD_RE, (match, tens, unit, small, hundred, offset, whole) => {
+  return withFractions.replace(NUMBER_WORD_RE, (match, hundred, tens, unit, small, offset, whole) => {
     if (hundred) return '100';
     if (small && /^(?:zero|one)$/i.test(small) && !UNIT_AHEAD_RE.test(whole.slice(offset + match.length))) return match;
     if (small) return String(SMALL_NUMBERS.indexOf(small.toLowerCase()));

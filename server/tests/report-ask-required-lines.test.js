@@ -2197,3 +2197,10 @@ describe('answer screen, Codex round 59', () => {
 test.each(['My kids snacked outside after the spray dried. Is that okay?', 'The kids snacked on chips after the treatment dried.'])('eating near a product word fails safe: %s', (question) => {
   expect(medicalExposureAnswer(question)).toBeTruthy();
 });
+
+test('"one hundred" is read as 100, not "one" (pre-push audit)', () => {
+  const data = lawnData({ lawnAssessment: { scores: { overallScore: 82 } }, reportV2: { aftercare: {} } });
+  const facts = buildReportAskFacts({ data });
+  expect(screenAskAnswer('Your overall score is one hundred out of 100.', { question: 'q', data, facts })).toBe('unstated_number');
+  expect(screenAskAnswer('Your overall score is eighty-two out of 100.', { question: 'q', data, facts })).toBeNull();
+});
