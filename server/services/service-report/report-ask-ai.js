@@ -385,6 +385,9 @@ const CHAIN_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|
 // SUNSET" (Codex P2 #5964 r56).
 const ACCESS_PHRASE = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\b[^.?!]{0,20}?\b(?:opens?|unlocks?|opened|unlocked)\s+(?:with|using|by)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+)*)/gi;
 const ACCESS_WORD_IS = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\s+(?:word|code|password|passcode|combo|combination|pin)\s+(?:is|was|=|:)\s+)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+)*)/gi;
+// The value before the verb: "Use BLUE MOON to unlock the side gate", "Enter
+// BLUE MOON at the gate" (Codex security P2 #5964 r60).
+const ACCESS_VALUE_FIRST = /\b((?:use|enter|type|punch\s+in|key\s+in|press|dial|input|say)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)((?:[a-z0-9#*-]+\s+){0,5}?[a-z0-9#*-]+)(?=\s+(?:to|at|on|for|into)\s+(?:\w+\s+){0,3}?(?:gate|door|lock|keypad|key\s*pad|garage|lockbox|lock\s*box|box|entry)\b)/gi;
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
@@ -426,7 +429,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_VALUE_FIRST, '$1[redacted]').replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -567,7 +570,8 @@ function treeShrubFacts(data = {}, keep = () => true) {
     })).filter((card) => Object.keys(card).length),
     // The plant-group cards, the landscape water card and the trend chart the
     // page renders (TreeShrubReportV2Section.jsx) (Codex P2 #5964 r9).
-    plant_groups: asArray(v2.plantGroups).slice(0, 6).map((group) => dropEmpty({
+    // Every card the page renders (Codex P1 #5964 r60).
+    plant_groups: asArray(v2.plantGroups).slice(0, 12).map((group) => dropEmpty({
       group: cleanText(group?.label),
       status: underscoresToSpaces(group?.status),
       finding: text(group?.finding, 240),
@@ -584,6 +588,8 @@ function treeShrubWaterFacts(water, text) {
   if (!water.explanation) return null;
   return orNull(dropEmpty({
     rain_this_week_inches: inchesOf(water.rainInches),
+    // The card's total too (Codex P1 #5964 r60).
+    total_inches: inchesOf(water.totalInches),
     irrigation_inches: inchesOf(water.irrigationInches),
     watering_type: cleanText(water.irrigationType),
     status: water.status === 'unknown' ? null : cleanText(water.status),
@@ -1523,7 +1529,8 @@ function contradictsWeather(text, facts) {
       if (!negated && !sheetRain) return true;
       if (negated && !sheetDry) return true;
     }
-    return !negated && contradictsReadings(lower, sheet);
+    // A negated reading word is judged the other way (Codex P1 #5964 r60).
+    return negated ? deniesReadings(lower, sheet) : contradictsReadings(lower, sheet);
   });
 }
 // Temperature, wind and humidity words against the readings: "freezing" at
@@ -1532,6 +1539,25 @@ const COLD_WORDS = /\b(?:freezing|frigid|cold|chilly|cool|frosty|icy)\b/;
 const HOT_WORDS = /\b(?:hot|warm|heat|scorching|sweltering|balmy)\b/;
 const CALM_WORDS = /\b(?:calm|still|windless|no\s+wind|no\s+breeze)\b/;
 const WINDY_WORDS = /\b(?:windy|breezy|gusty|blustery|strong\s+winds?)\b/;
+function readingsOf(sheet) {
+  return {
+    temp: Number((/about\s+(-?\d+)\s*°f/.exec(sheet) || [])[1]),
+    wind: Number((/wind\s+about\s+(\d+)\s*mph/.exec(sheet) || [])[1]),
+    humid: /\bhumid\b/.test(sheet),
+  };
+}
+// "It was not hot" at 95°F, "not windy" at 20 mph, "not humid" when humid,
+// "not sunny" when the sky was sunny.
+function deniesReadings(lower, sheet) {
+  const { temp, wind, humid } = readingsOf(sheet);
+  // The negation must govern the reading word itself: "cloudy with no rain"
+  // denies only the rain.
+  const denied = (re) => new RegExp(`\\b(?:not|n['’]t|no|never)\\s+(?:\\w+\\s+){0,2}?(?:${re.source})`).test(lower);
+  return (denied(HOT_WORDS) && temp >= 75) || (denied(COLD_WORDS) && temp < 65)
+    || (denied(WINDY_WORDS) && wind >= 10) || (denied(CALM_WORDS) && wind < 10)
+    || (denied(/\b(?:humid|muggy|sticky)\b/) && humid)
+    || SKY_WORDS.some((word) => denied(new RegExp(`\\b${word}\\b`)) && new RegExp(`\\b${word}`).test(sheet));
+}
 function contradictsReadings(lower, sheet) {
   const temp = Number((/about\s+(-?\d+)\s*°f/.exec(sheet) || [])[1]);
   const wind = Number((/wind\s+about\s+(\d+)\s*mph/.exec(sheet) || [])[1]);
@@ -1847,7 +1873,8 @@ function deniesRecordedIngredient(text, facts) {
 // has some (Codex P1 #5964 r48).
 const NO_FINDINGS_RE = /\b(?:no|zero|without)\s+(?:\w+\s+)?(?:findings?|issues?|problems?|activity|signs?)\b|\b(?:nothing|none)\s+(?:was\s+|were\s+)?(?:found|noted|seen|recorded|observed|listed|reported)\b|\b(?:found|noted|saw|observed)\s+nothing\b|\b(?:didn['’]?t|did\s+not)\s+(?:find|note|see|observe|record)\s+(?:anything|any)\b/i;
 function deniesRecordedFindings(text, facts) {
-  const findings = asArray(facts?.findings);
+  // Plant-group cards are recorded findings too (Codex P1 #5964 r60).
+  const findings = [...asArray(facts?.findings), ...asArray(facts?.tree_shrub_report?.plant_groups).map((group) => ({ title: group.group }))];
   if (!findings.length) return false;
   // A named finding may not be denied either: "The report does not show
   // termite tubes" when it does (Codex P1 #5964 r58).
@@ -1943,6 +1970,12 @@ function contradictsWater(clause, water, negated) {
   if (negated) return (WATER_SURPLUS.test(clause) && water === 'surplus') || (NEGATED_DEFICIT.test(clause) && water === 'deficit');
   return (WATER_SURPLUS.test(clause) && water !== 'surplus') || (WATER_DEFICIT.test(clause) && water !== 'deficit');
 }
+// "Not too tall" on a too-tall gauge (Codex P1 #5964 r60).
+function deniesMowing(clause, mow) {
+  return (MOW_TALL.test(clause) && /tall|high|above/.test(mow))
+    || (MOW_SHORT.test(clause) && /short|low|below/.test(mow))
+    || (MOW_IDEAL.test(clause) && /ideal|range/.test(mow));
+}
 function contradictsMowing(clause, mow) {
   return (MOW_SHORT.test(clause) && !/short|low|below/.test(mow))
     || (MOW_TALL.test(clause) && !/tall|high|above/.test(mow))
@@ -1955,7 +1988,7 @@ function contradictsLawnStatus(text, facts) {
   return clausesOf(text).some((clause) => {
     if (UNCERTAIN_RE.test(clause)) return false;
     const negated = NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause);
-    return Boolean((water && contradictsWater(clause, water, negated)) || (mow && !negated && contradictsMowing(clause, mow)));
+    return Boolean((water && contradictsWater(clause, water, negated)) || (mow && (negated ? deniesMowing(clause, mow) : contradictsMowing(clause, mow))));
   });
 }
 
@@ -1963,7 +1996,7 @@ const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
   // The answer may not hand back an access word either (Codex P2 #5964 r56).
-  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS)].length > 0],
+  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS), ...text.matchAll(ACCESS_VALUE_FIRST)].length > 0],
   ['lawn_status_claim', (text, { facts }) => contradictsLawnStatus(text, facts)],
   ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
   ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],

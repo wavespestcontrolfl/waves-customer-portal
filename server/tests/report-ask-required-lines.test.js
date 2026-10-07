@@ -2204,3 +2204,47 @@ test('"one hundred" is read as 100, not "one" (pre-push audit)', () => {
   expect(screenAskAnswer('Your overall score is one hundred out of 100.', { question: 'q', data, facts })).toBe('unstated_number');
   expect(screenAskAnswer('Your overall score is eighty-two out of 100.', { question: 'q', data, facts })).toBeNull();
 });
+
+describe('answer screen, Codex round 60', () => {
+  const lawn = lawnData({
+    conditions: { conditions: 'Sunny', temp_f: 95, wind_mph: 20, humidity_pct: 85, rain_24h_in: 0 },
+    reportV2: { aftercare: {}, mowing: { measuredHeightInches: 5, idealMinInches: 3.5, idealMaxInches: 4, status: 'too_tall' } },
+  });
+  const lawnFacts = buildReportAskFacts({ data: lawn });
+  const askLawn = (answer) => screenAskAnswer(answer, { question: 'q', data: lawn, facts: lawnFacts });
+
+  test.each(['It was not hot during the visit.', 'It was not humid during the visit.', 'It was not windy during the visit.'])('a negated reading is judged the other way: %s', (answer) => {
+    expect(askLawn(answer)).toBe('weather_claim');
+  });
+
+  test.each(['The lawn was not too tall.', 'The lawn was not overgrown.'])('a negated mowing verdict is judged the other way: %s', (answer) => {
+    expect(askLawn(answer)).toBe('lawn_status_claim');
+  });
+
+  const tree = {
+    serviceLine: 'tree_shrub',
+    applications: [],
+    reportV2: {
+      snapshot: { overallScore: 80 },
+      water: { rainInches: 0.4, irrigationInches: 0.6, totalInches: 1, explanation: 'Balanced.', status: 'balanced' },
+      plantGroups: Array.from({ length: 8 }, (_, i) => ({ label: i === 6 ? 'Groundcover beds' : `Hedge ${i}`, status: 'healthy' })),
+    },
+  };
+  const treeFacts = buildReportAskFacts({ data: tree });
+
+  test('every plant group reaches the facts and may not be denied', () => {
+    expect(treeFacts.tree_shrub_report.plant_groups).toHaveLength(8);
+    expect(screenAskAnswer('The report does not list groundcover beds.', { question: 'q', data: tree, facts: treeFacts })).toBe('denies_findings');
+  });
+
+  test('the landscape water total is on the sheet', () => {
+    expect(treeFacts.tree_shrub_report.water.total_inches).toBe(1);
+    expect(screenAskAnswer('The landscape received 1 inch of total water.', { question: 'q', data: tree, facts: treeFacts })).toBeNull();
+  });
+
+  test('a credential before the access verb is masked and never repeated', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Use BLUE MOON to unlock the side gate. Ants by the pool.' } });
+    expect(facts.customer_concern).toBe('Use [redacted] to unlock the side gate. Ants by the pool.');
+    expect(screenAskAnswer('Enter BLUE MOON at the gate.', { question: 'q', data: pestData({ applications: [] }), facts })).toBe('access_phrase');
+  });
+});
