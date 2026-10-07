@@ -2083,3 +2083,10 @@ describe('answer screen, Codex round 56', () => {
     expect(screenAskAnswer('The side gate opens with SUNSET.', { question: 'q', data, facts })).toBe('access_phrase');
   });
 });
+
+test('the drying guidance exempts only its own clause (pre-push audit)', () => {
+  const data = lawnData({ reportV2: { aftercare: {} } });
+  const facts = buildReportAskFacts({ data });
+  expect(screenAskAnswer('Keep pets off treated areas until dry and water the lawn daily.', { question: 'q', data, facts })).toBe('own_instruction');
+  expect(screenAskAnswer('Keep kids and pets off treated areas until dry.', { question: 'q', data, facts })).toBeNull();
+});
