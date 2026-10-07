@@ -34,6 +34,7 @@ const { whereLiveCustomer } = require('./customer-stages');
 const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
+const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
 
 // Roles the model may give the person the family caller names. A named person
 // the model tagged as an arranger, tenant, buyer, lender and so on is someone
@@ -146,6 +147,14 @@ async function linkCallToCustomer({ callLogId, procToken, customer, holder, call
       outcome = 'no_longer_matches';
       return;
     }
+    // ...and the WHOLE set of live customers with that name is re-read here: exactly this one must
+    // still be the only member (a same-name customer created, renamed or restored since the
+    // search makes the match ambiguous and links nothing).
+    const sameName = await findLiveCustomersByFullName(trx, holder);
+    if (sameName.length !== 1 || String(sameName[0].id) !== String(customer.id)) {
+      outcome = 'no_longer_matches';
+      return;
+    }
     const marker = {
       customer_id: String(customer.id),
       holder_name: displayName(holder),
@@ -177,18 +186,9 @@ async function linkCallToCustomer({ callLogId, procToken, customer, holder, call
 // carries this number". The family link runs only when nothing carries it, so it never
 // competes with the phone, shared-phone, household or relink paths.
 async function phoneOnAnyLiveAccount(conn, phone) {
-  const ten = String(phone || '').replace(/\D/g, '').slice(-10);
-  if (ten.length !== 10) return false;
-  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
-  const cols = ['phone', ...SERVICE_CONTACT_SLOTS.map((slot) => slot.phone)];
-  const sql = cols
-    .map((col) => `RIGHT(regexp_replace(COALESCE(??, ''), '[^0-9]', '', 'g'), 10) = ?`)
-    .join(' OR ');
-  const row = await conn('customers')
-    .whereNull('deleted_at')
-    .whereRaw(`(${sql})`, cols.flatMap((col) => [col, ten]))
-    .first('id');
-  return !!row;
+  // The canonical identity lookup (primary phone, the three service-contact slots and
+  // secondary_phone), shared with the voice screen and the spam guard: never a narrower list.
+  return knownCallerPhoneExists(conn, phone);
 }
 
 /**
@@ -267,6 +267,7 @@ function fileCard(callLogId, flag, extraction, extraPayload, conn) {
 }
 
 const CANDIDATE_REASONS = Object.freeze({
+  conflict: 'The two readings of the call name different people as the account holder, so nothing was linked. Confirm who the caller meant.',
   candidates: 'The caller named a family member. Zero or more than one live account has that name, so nothing was linked. Pick the right account.',
   uncorroborated: 'The caller named this account but gave no matching address. Confirm before linking.',
   voicemail: 'The caller named this account in a voicemail. A voicemail never links a call to an account. Confirm before linking.',
@@ -276,18 +277,39 @@ const CANDIDATE_REASONS = Object.freeze({
 // { customer, context } (context = what the later steps need to protect the holder's record).
 // Fail-open: an error leaves the call exactly as it was without the gate.
 async function linkFamilyCall({
-  call, procToken, extracted, v2CanonicalExtraction, statedAddress, secondaryContacts, phone,
+  call, procToken, extracted, v2CanonicalExtraction, statedAddress, phone,
   v2Primary, isOutbound, conn = db,
 }) {
   try {
     if (!require('../config/feature-gates').callFamilyNameLinkLive() || !v2Primary || isOutbound) return null;
     const callerName = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null;
+    // The holder comes from the canonical V2 record only: the V2 family_member relationship and the
+    // V2 secondary contact(s). The V1 reading may only agree or stay silent: a V1 secondary contact
+    // naming a different person makes the call ambiguous.
+    const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
+    const v2Contacts = [canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)].filter(Boolean);
+    const holderV2 = pickNamedAccountHolder({
+      callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
+      caller: { first_name: extracted.first_name, last_name: extracted.last_name },
+      secondaryContacts: v2Contacts,
+    });
+    const v1Key = fullNameKey(extracted.secondary_contact);
+    if (holderV2 && v1Key && v1Key !== holderV2.key) {
+      await fileCard(call.id, 'family_account_candidates', v2CanonicalExtraction, {
+        account_holder_name: displayName(holderV2),
+        caller_name: callerName,
+        caller_phone: call.from_phone || null,
+        candidates: [],
+        reason: CANDIDATE_REASONS.conflict,
+      }, conn);
+      return null;
+    }
     const result = await resolveFamilyNameLink({
       callLogId: call.id,
       procToken,
       callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
       caller: { first_name: extracted.first_name, last_name: extracted.last_name },
-      secondaryContacts,
+      secondaryContacts: v2Contacts,
       // Both numbers: the dictated callback number AND the inbound caller ID.
       callerPhones: [phone, call.from_phone],
       statedAddress,

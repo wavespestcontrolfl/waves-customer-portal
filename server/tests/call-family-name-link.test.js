@@ -441,10 +441,13 @@ const SKIP = !process.env.DATABASE_URL;
     const base = (callRow, over = {}) => ({
       call: { id: callRow, from_phone: '+19415550101' },
       procToken: TOKEN,
-      extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: false },
-      v2CanonicalExtraction: { caller: { relationship_to_property: 'family_member' }, meta: { call_summary: 'x' } },
+      extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: false, secondary_contact: { first_name: 'Angelina', last_name: 'Testerson' } },
+      v2CanonicalExtraction: {
+        caller: { relationship_to_property: 'family_member' },
+        secondary_contact: { first_name: 'Angelina', last_name: 'Testerson', role: 'family_member' },
+        meta: { call_summary: 'x' },
+      },
       statedAddress: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' },
-      secondaryContacts: [{ first_name: 'Angelina', last_name: 'Testerson', role: 'family_member' }],
       phone: '+19415550102',
       v2Primary: true,
       isOutbound: false,
@@ -466,6 +469,29 @@ const SKIP = !process.env.DATABASE_URL;
       expect(after).toEqual(before); // no slot, no phone, no email, nothing
       expect(await trx('recipient_optin').where({ customer_id: mom })).toHaveLength(0);
     });
+    test('the holder comes from V2 only: V1 naming a different person links nothing and files the card; V1 alone is not enough', async () => {
+      await customer();
+      const conflictCall = await call();
+      const conflict = base(conflictCall);
+      conflict.extracted = { ...conflict.extracted, secondary_contact: { first_name: 'Rosa', last_name: 'Testerson' } };
+      expect(await linkFamilyCall(conflict)).toBeNull();
+      expect((await trx('call_log').where({ id: conflictCall }).first()).customer_id).toBeNull();
+      const [card] = await trx('triage_items').where({ call_log_id: conflictCall });
+      expect(card).toMatchObject({ reason_code: 'family_account_candidates' });
+      expect(card.payload.reason).toContain('name different people');
+      // V1 names the holder but V2 does not: nothing to link on
+      const v1OnlyCall = await call();
+      const v1Only = base(v1OnlyCall);
+      v1Only.v2CanonicalExtraction = { caller: { relationship_to_property: 'family_member' }, meta: { call_summary: 'x' } };
+      expect(await linkFamilyCall(v1Only)).toBeNull();
+      expect(await trx('triage_items').where({ call_log_id: v1OnlyCall })).toHaveLength(0);
+      // V1 agreeing with V2 (case and spacing aside) still links
+      const agreeCall = await call();
+      const agree = base(agreeCall);
+      agree.extracted = { ...agree.extracted, secondary_contact: { first_name: ' ANGELINA ', last_name: 'testerson' } };
+      expect(await linkFamilyCall(agree)).not.toBeNull();
+    });
+
     test('voicemail, outbound, V2 shadow mode and gate off all link nothing', async () => {
       await customer();
       for (const over of [{ extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: true } }, { isOutbound: true }, { v2Primary: false }]) {
@@ -482,6 +508,26 @@ const SKIP = !process.env.DATABASE_URL;
       expect(await linkFamilyCall(base(off))).toBeNull();
       process.env.GATE_CALL_FAMILY_NAME_LINK = 'true';
     });
+  });
+
+  test('the whole same-name set is re-read in the link transaction: a second live match since the search links nothing', async () => {
+    const mom = await customer();
+    await customer({ city: 'Bradenton' }); // a same-name customer that appeared after the search
+    const callLogId = await call();
+    const outcome = await linkCallToCustomer({
+      callLogId, procToken: TOKEN, customer: { id: mom }, holder: { first_name: 'Angelina', last_name: 'Testerson' },
+      caller: {}, statedAddress: { street_line_1: '100 Example Loop', city: 'Sarasota', postal_code: '34240' }, conn: trx,
+    });
+    expect(outcome).toBe('no_longer_matches');
+    expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+  });
+
+  test('the canonical known-caller lookup is used: a secondary_phone number is on an account', async () => {
+    await customer({ secondary_phone: '+19415550166' });
+    expect(await phoneOnAnyLiveAccount(trx, '(941) 555-0166')).toBe(true);
+    const callLogId = await call();
+    const out = await resolveFamilyNameLink(args(callLogId, { callerPhones: ['+19415550166'] }));
+    expect(out.status).toBe('phone_on_file');
   });
 
   test('a caller who is not a family member links nothing', async () => {

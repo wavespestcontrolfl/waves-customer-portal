@@ -12476,7 +12476,7 @@ const CallRecordingProcessor = {
     const tryFamilyNameLink = async () => {
       const out = await require('./call-family-name-link').linkFamilyCall({
         call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw,
-        secondaryContacts: callSecondaryContacts, phone, v2Primary: callExtractionV2PrimaryEnabled(), isOutbound: isOutboundCall(call),
+        phone, v2Primary: callExtractionV2PrimaryEnabled(), isOutbound: isOutboundCall(call),
       });
       if (!out) return null;
       adoptFamilyNameLink(out.context);
