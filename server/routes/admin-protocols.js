@@ -961,6 +961,80 @@ const lawnMixProductView = (product) => ({
   groups: Object.fromEntries(['moa', 'frac', 'irac', 'hrac'].map((group) => [group, product[`${group}_group`] || null])),
 });
 
+// The rig, derived once: carrier, tank size, the coverage one tank gives, and the equipment view.
+function lawnMixRig(calibration) {
+  const [carrier, tankCapacity] = ['carrier_gal_per_1000', 'tank_capacity_gal'].map((key) => Number((calibration || {})[key] || 0));
+  const tankCoverageSqft = carrier ? (tankCapacity / carrier) * 1000 : 0;
+  const equipment = calibration ? {
+    equipmentSystemId: calibration.equipment_system_id,
+    calibrationId: calibration.id,
+    systemName: calibration.system_name,
+    systemType: calibration.system_type,
+    carrierGalPer1000: carrier,
+    tankCapacityGal: tankCapacity || null,
+    tankCoverageSqft: tankCoverageSqft ? Math.round(tankCoverageSqft) : null,
+    expiresAt: calibration.expires_at || null,
+  } : null;
+  return { carrier, tankCoverageSqft, equipment };
+}
+
+// The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
+// selected items (as in the plan), the city hold (or, with no city resolved on the reference tab,
+// the restriction on every gated row), then the cadence and limit warnings.
+function lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
+  const warnings = [];
+  if (!calibration) {
+    warnings.push({
+      code: 'missing_calibration',
+      message: 'No active calibration was found for the selected equipment. Mix amounts require a water application rate.',
+    });
+  }
+  const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
+  if (unmatchedPricedLines.length) {
+    warnings.push({
+      code: 'unmatched_product',
+      lines: unmatchedPricedLines,
+      message: `${unmatchedPricedLines.length} priced protocol line${unmatchedPricedLines.length === 1 ? ' has' : 's have'} no product catalog match; label-rate math is unavailable for: ${unmatchedPricedLines.join(' | ')}`,
+    });
+  }
+  warnings.push(...v13SelectedGateWarnings(selectedItems));
+  warnings.push(...(municipality ? v13HoldWarnings(items) : v13NorthPortReferenceWarnings(items)));
+  warnings.push(...cadenceWarnings, ...limitCheck.warnings);
+  return warnings;
+}
+
+// The tank-sheet response. A viewer who sees no pricing gets every price stripped (codex round-3 P2:
+// ProtocolReferenceTabV2.jsx rendered the now-absent materialCostSummary as "0/N lines priced", a
+// stripped-for-role response looking identical to a genuinely-unpriced one; viewerRole lets the
+// client tell the difference and hide the Material Cost card and column instead of a fabricated zero).
+function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck }) {
+  const view = seesPricing ? (list) => list : (list) => list.map(stripLawnMixItemPricing);
+  const payload = {
+    track: { key: trackKey, name: track.name },
+    month,
+    viewerRole: seesPricing ? 'admin' : 'technician',
+    visit: {
+      visit: visit.visit,
+      objective: visit.notes,
+      primary: visit.primary,
+      secondary: visit.secondary,
+      tiers: visit.tiers,
+    },
+    equipment,
+    areaSqft,
+    materialCostSummary: seesPricing ? materialCostSummary : null,
+    items: view(items),
+    selectedItems: view(selectedItems),
+    mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.map((item) => ({
+      raw: item.raw,
+      product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
+    })), limitCheck.capped),
+    warnings,
+    blocks: [...blocks, ...limitCheck.blocks],
+  };
+  return seesPricing ? payload : deepStripPriceTokens(payload);
+}
+
 router.get('/lawn-mix', async (req, res, next) => {
   try {
     const trackKey = TRACK_MAP[req.query.track] || req.query.track || 'st_augustine';
@@ -1011,9 +1085,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // back as in the plan: not selected, no amount, the plan's warning.
     const municipality = await loadVisitCity(db, scheduled);
     const resolvedLines = holdNorthPortProducts(matchedLines, v13Rows, municipality);
-    // The rig, derived once: carrier, tank size, and the coverage one tank gives.
-    const [carrier, tankCapacity] = ['carrier_gal_per_1000', 'tank_capacity_gal'].map((key) => Number((calibration || {})[key] || 0));
-    const tankCoverageSqft = carrier ? (tankCapacity / carrier) * 1000 : 0;
+    const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
     const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, municipality };
     const areaContext = {
       plan: req.query.plan,
@@ -1081,67 +1153,12 @@ router.get('/lawn-mix', async (req, res, next) => {
       product: item.product,
       mix: item.jobMix,
     })));
-    const warnings = [];
-    if (!calibration) {
-      warnings.push({
-        code: 'missing_calibration',
-        message: 'No active calibration was found for the selected equipment. Mix amounts require a water application rate.',
-      });
-    }
-    const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
-    if (unmatchedPricedLines.length) {
-      warnings.push({
-        code: 'unmatched_product',
-        lines: unmatchedPricedLines,
-        message: `${unmatchedPricedLines.length} priced protocol line${unmatchedPricedLines.length === 1 ? ' has' : 's have'} no product catalog match; label-rate math is unavailable for: ${unmatchedPricedLines.join(' | ')}`,
-      });
-    }
+    const warnings = lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck });
 
-    // Required v13 gate notes on the selected items are warnings, as in the plan.
-    warnings.push(...v13SelectedGateWarnings(selectedItems));
-    // The city hold, or (no city resolved: the reference tab) the restriction on every gated row.
-    warnings.push(...(municipality ? v13HoldWarnings(items) : v13NorthPortReferenceWarnings(items)));
-    warnings.push(...cadenceWarnings, ...limitCheck.warnings);
-
-    const seesPricing = viewerSeesPricing(req);
-    const payload = {
-      track: { key: trackKey, name: track.name },
-      month,
-      // codex round-3 P2: ProtocolReferenceTabV2.jsx rendered the now-absent
-      // materialCostSummary as "0/N lines priced" — a stripped-for-role
-      // response looking identical to a genuinely-unpriced one. This flag
-      // lets the client tell the difference and hide the Material Cost
-      // card/column instead of showing a fabricated zero.
-      viewerRole: seesPricing ? 'admin' : 'technician',
-      visit: {
-        visit: visit.visit,
-        objective: visit.notes,
-        primary: visit.primary,
-        secondary: visit.secondary,
-        tiers: visit.tiers,
-      },
-      equipment: calibration ? {
-        equipmentSystemId: calibration.equipment_system_id,
-        calibrationId: calibration.id,
-        systemName: calibration.system_name,
-        systemType: calibration.system_type,
-        carrierGalPer1000: carrier,
-        tankCapacityGal: tankCapacity || null,
-        tankCoverageSqft: tankCoverageSqft ? Math.round(tankCoverageSqft) : null,
-        expiresAt: calibration.expires_at || null,
-      } : null,
-      areaSqft,
-      materialCostSummary: seesPricing ? materialCostSummary : null,
-      items: seesPricing ? items : items.map(stripLawnMixItemPricing),
-      selectedItems: seesPricing ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
-      mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.map((item) => ({
-        raw: item.raw,
-        product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
-      })), limitCheck.capped),
-      warnings,
-      blocks: [...blocks, ...limitCheck.blocks],
-    };
-    res.json(seesPricing ? payload : deepStripPriceTokens(payload));
+    res.json(lawnMixResponse({
+      seesPricing: viewerSeesPricing(req),
+      trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck,
+    }));
   } catch (err) { next(err); }
 });
 

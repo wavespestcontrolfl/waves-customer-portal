@@ -243,7 +243,7 @@ describe('waveguard approval engine', () => {
       .toContain('Older Celsius WG');
   });
 
-  describe('the repeat-group rule is a rotation rule for curative sequences on one target (owner 2026-10-06)', () => {
+  describe('the repeat-group rule keeps two named exemptions: Group 3 pre-emergents and the take-all Artavia pair (owner 2026-10-06)', () => {
     const run = (productsCatalog, priorApplications, input, plan = basePlan()) => evaluateWaveGuardManagerApprovals(fakeKnex({ productsCatalog, priorApplications }), {
       customerId: 'customer-1', service: { service_type: 'Lawn Care' }, plan, serviceDate: input.serviceDate || '2026-06-10', products: [input],
     });
@@ -268,33 +268,30 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([post], [last], { productId: 'base' })).map((b) => b.code)).toEqual(['repeat_hrac_group']);
     });
 
-    test('the second Artavia of the labeled take-all pair is no block; a later Artavia is', async () => {
-      const lastArtavia = (date) => prior({ service_date: date, product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', hrac_group: undefined, frac_group: '11' });
-      expect(repeats(await run([ARTAVIA], [lastArtavia('2026-05-13')], { productId: 'base', serviceDate: '2026-06-10' }))).toEqual([]);
-      const late = await run([ARTAVIA], [lastArtavia('2026-03-10')], { productId: 'base', serviceDate: '2026-06-10' });
-      expect(repeats(late).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
-      // A different product of the same group is not the pair.
-      const other = prior({ service_date: '2026-05-13', product_name: 'Another Group 11 Fungicide', product_category: 'fungicide', catalog_group: '11', frac_group: '11' });
-      expect(repeats(await run([ARTAVIA], [other], { productId: 'base' })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+    test('the second Artavia is exempt only when both applications carry take-all evidence, inside the window', async () => {
+      const lastArtavia = (date, targets) => prior({ service_date: date, product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets });
+      const pair = (date, last, now) => run([ARTAVIA], [lastArtavia(date, last)], { productId: 'base', serviceDate: '2026-06-10', targets: now });
+      expect(repeats(await pair('2026-05-13', ['Take-all root rot'], ['take-all']))).toEqual([]);
+      // No evidence on either side, or on one side only: no exemption (the rule as before).
+      for (const [last, now] of [[undefined, undefined], [['Take-all'], undefined], [undefined, ['Take-all']], [['Large patch'], ['Take-all']], [['Take-all'], ['Gray leaf spot']]]) {
+        expect(repeats(await pair('2026-05-13', last, now)).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+      }
+      // Outside the window, or a different product of the same group, still blocks.
+      expect(repeats(await pair('2026-03-10', ['Take-all'], ['Take-all'])).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+      const other = prior({ service_date: '2026-05-13', product_name: 'Another Group 11 Fungicide', product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets: ['Take-all'] });
+      expect(repeats(await run([ARTAVIA], [other], { productId: 'base', targets: ['Take-all'] })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
     });
 
-    test('a curative fungicide of the same group on the same target still blocks, and the finding keeps what was read', async () => {
-      const last = prior({ service_date: '2026-05-13', product_name: 'Older Gravex', product_category: 'fungicide', catalog_group: '7', frac_group: '7', targets: ['Gray leaf spot'] });
+    test('every other same-group repeat behaves as on main, whatever targets were recorded; the finding keeps what was read', async () => {
+      const last = prior({ service_date: '2026-05-13', product_name: 'Older Gravex', product_category: 'fungicide', catalog_group: '7', frac_group: '7', targets: ['Large patch'] });
+      for (const targets of [undefined, ['Gray leaf spot'], ['Large patch']]) {
+        const result = await run([FUNGICIDE], [last], { productId: 'base', targets });
+        expect(repeats(result).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+      }
       const result = await run([FUNGICIDE], [last], { productId: 'base', targets: ['gray leaf spot'] });
-      expect(repeats(result)).toEqual([expect.objectContaining({
-        code: 'fungicide_frac_rotation_approval',
-        evidence: { groupType: 'frac', groupValue: '7', lastProduct: 'Older Gravex', lastDate: '2026-05-13', targets: ['gray leaf spot'], lastTargets: ['gray leaf spot'] },
-      })]);
+      expect(repeats(result)[0].evidence).toEqual({ groupType: 'frac', groupValue: '7', lastProduct: 'Older Gravex', lastDate: '2026-05-13', targets: ['gray leaf spot'], lastTargets: ['large patch'] });
       const summary = managerApprovalSummary({ reasonCode: 'x' }, result.blocks, { technicianId: 't', role: 'admin' });
       expect(summary.blocks[0].evidence).toMatchObject({ groupType: 'frac', lastProduct: 'Older Gravex' });
-    });
-
-    test('a different recorded target is no repeat; no recorded target on either side keeps today\'s block', async () => {
-      const last = prior({ service_date: '2026-05-13', product_name: 'Older Gravex', product_category: 'fungicide', catalog_group: '7', frac_group: '7', targets: ['Large patch'] });
-      expect(repeats(await run([FUNGICIDE], [last], { productId: 'base', targets: ['Gray leaf spot'] }))).toEqual([]);
-      expect(repeats(await run([FUNGICIDE], [last], { productId: 'base' })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
-      const untargeted = { ...last, targets: [] };
-      expect(repeats(await run([FUNGICIDE], [untargeted], { productId: 'base', targets: ['Gray leaf spot'] })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
     });
   });
 

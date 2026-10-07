@@ -23,16 +23,15 @@ describe('recipe text', () => {
     expect(everything(grass)).not.toMatch(/November to March/);
   });
 
-  test.each(TRACKS)('%s: the chemical group rule covers curative sequences, not pre-emergents, and keeps the take-all pair', (grass) => {
+  test.each(TRACKS)('%s: the chemical group rule has two named exceptions and no target scoping', (grass) => {
     const track = v13[grass];
     const rule = track.notes.find((line) => line.startsWith('Never use the same chemical group'));
-    expect(rule).toMatch(/same target/);
-    expect(rule).toMatch(/curative fungicide, insecticide and post-emergent/);
-    expect(rule).toMatch(/not to pre-emergents: all of them are Group 3 this season/);
-    expect(rule).toMatch(/take-all Artavia pair/);
-    expect(track.notes.some((line) => /on one lawn/.test(line))).toBe(false);
+    expect(rule).toMatch(/twice in a row\. Two exceptions/);
+    expect(rule).toMatch(/Group 3 pre-emergents \(all of them are Group 3 this season/);
+    expect(rule).toMatch(/take-all Artavia pair \(two applications 28 days apart, both recorded for take-all\)/);
+    expect(JSON.stringify(track)).not.toMatch(/same target|on one lawn/);
     expect(track.safety_rules.some((line) => /Never repeat a chemical group on the next application/.test(line))).toBe(false);
-    expect(track.safety_rules.find((line) => /chemical group/.test(line))).toMatch(/Group 3 this season/);
+    expect(track.safety_rules.find((line) => /chemical group/.test(line))).toMatch(/Exceptions: Group 3 pre-emergents .* take-all Artavia pair, both recorded for take-all/);
   });
 
   test.each(TRACKS)('%s: Acelepryn carries the label wait of 24 hours for watering (irrigation) or mowing, on every line', (grass) => {

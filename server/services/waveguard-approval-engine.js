@@ -80,23 +80,25 @@ async function latestComparableGroupApplication(knex, customerId, product, group
   return rows[0] || null;
 }
 
-// The repeat-group rule is a rotation rule for curative sequences on one target (owner 2026-10-06):
+// The repeat-group rule (never the same chemical group twice in a row) has two named exemptions
+// (owner 2026-10-06); every other same-group repeat behaves as before:
 //   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
 //   take_all_artavia_pair: the labeled take-all pair is Artavia twice, about 28 days apart (up to
-//     TAKE_ALL_PAIR_MAX_DAYS between visits);
-//   different_target: both applications recorded a target and the targets share none.
-// With no target recorded on either side the rule applies as before.
+//     TAKE_ALL_PAIR_MAX_DAYS between visits), and ONLY when both applications recorded a take-all
+//     target. No target evidence, no exemption.
 const TAKE_ALL_PAIR_MAX_DAYS = 45;
+const TAKE_ALL_TARGET = /\btake all\b/;
 
 function dayNumber(value) {
   const time = Date.parse(`${String(value instanceof Date ? value.toISOString() : value || '').slice(0, 10)}T00:00:00Z`);
   return Number.isFinite(time) ? Math.round(time / 86400000) : null;
 }
 
-function targetSet(value) {
-  const list = Array.isArray(value) ? value : [];
-  return new Set(list.map(normalizeText).filter(Boolean));
+function targetList(value) {
+  return (Array.isArray(value) ? value : []).map(normalizeText).filter(Boolean);
 }
+
+const hasTakeAllTarget = (value) => targetList(value).some((target) => TAKE_ALL_TARGET.test(target));
 
 function productIsPreEmergent(product, plan) {
   const rows = plan?.protocol?.structured?.products || [];
@@ -104,15 +106,16 @@ function productIsPreEmergent(product, plan) {
     || isPreEmergent(product || {});
 }
 
+function isTakeAllPair(product, last, input, serviceDate) {
+  const apart = dayNumber(serviceDate) - dayNumber(last.service_date);
+  return /\bartavia\b/.test(normalizeText(product.name)) && normalizeText(last.product_name) === normalizeText(product.name)
+    && apart > 0 && apart <= TAKE_ALL_PAIR_MAX_DAYS
+    && hasTakeAllTarget(input.targets) && hasTakeAllTarget(last.targets);
+}
+
 function rotationExemption({ product, plan, groupType, groupValue, last, input, serviceDate }) {
   if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
-  const apart = dayNumber(serviceDate) - dayNumber(last.service_date);
-  if (/\bartavia\b/.test(normalizeText(product.name)) && normalizeText(last.product_name) === normalizeText(product.name)
-    && apart > 0 && apart <= TAKE_ALL_PAIR_MAX_DAYS) return 'take_all_artavia_pair';
-  const now = targetSet(input.targets);
-  const before = targetSet(last.targets);
-  if (now.size && before.size && ![...now].some((target) => before.has(target))) return 'different_target';
-  return null;
+  return isTakeAllPair(product, last, input, serviceDate) ? 'take_all_artavia_pair' : null;
 }
 
 function latestAssessmentStressed(plan) {
@@ -238,14 +241,14 @@ async function evaluateWaveGuardManagerApprovals(knex, {
         productName: product.name,
         message: `${product.name} repeats ${groupType.toUpperCase()} ${groupValue}; last matching application was ${last.product_name || 'unknown product'} on ${String(last.service_date).slice(0, 10)}.`,
         // What the rotation check read, kept with the finding: the group, the last application, and the
-        // targets (empty = none recorded, so the rule applied as before).
+        // targets (empty = none recorded).
         evidence: {
           groupType,
           groupValue: String(groupValue),
           lastProduct: last.product_name || null,
           lastDate: String(last.service_date).slice(0, 10),
-          targets: [...targetSet(input.targets)],
-          lastTargets: [...targetSet(last.targets)],
+          targets: targetList(input.targets),
+          lastTargets: targetList(last.targets),
         },
       });
     }
