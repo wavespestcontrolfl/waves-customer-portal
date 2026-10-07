@@ -913,10 +913,11 @@ async function resolveProduct(input) {
   if (exact.length === 1) return { product: exact[0] };
   const literal = name.replace(/[\\%_]/g, '\\$&');
   const matches = exact.length ? exact : await db('products_catalog').whereILike('name', `%${literal}%`).limit(6);
-  if (!matches.length) return { error: `Product "${name}" not found in catalog` };
+  if (!matches.length) return { error: `Product "${name}" not found in catalog`, code: 'product_not_found' };
   if (matches.length > 1) {
     return {
       error: `Multiple products match "${name}" — retry with product_id`,
+      code: 'product_ambiguous',
       candidates: matches.map(inventory.productIdentity),
     };
   }
@@ -1654,6 +1655,97 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   return { productId: resolved.product.id };
 }
 
+// ─── PRODUCT PICKER (owner 2026-10-07) ─────────────────────────
+//
+// When adjust_stock cannot tell which product the operator meant, the bar
+// never guesses: it shows a card that lists the possible products and the
+// operator picks one. Free-text guessing did not converge (#6097, four Codex
+// rounds), so this list is only a SHORTLIST. The operator's click is what
+// names the product, and the server accepts only an id it listed here.
+//
+// The shortlist comes from the OPERATOR's words, never from the model alone:
+// only the words of the model's product phrase that the operator actually
+// typed are searched, and the rest of the operator's text must be stock
+// vocabulary (the same closed-vocabulary rule productsNamedIn uses). So
+// "Email this customer: Request 2 lb of Taurus SC" or a note body never
+// produces a stock card, and a question never does either.
+const PRODUCT_CHOICE_LIMIT = 8;
+
+function adjustmentFields(input) {
+  return { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
+    unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
+}
+
+// The product ids the operator's own words point at, best first: products
+// the text names outright, then active products sharing the most of the
+// model phrase's words that the operator typed. null when the text is not a
+// plain stock instruction about a product phrase (see the note above).
+async function operatorShortlist(prompt, phraseSource) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const text = String(prompt);
+  if (!text.trim() || isNotAnInstruction(text)) return null;
+  const words = [...new Set(normalizeForMatch(phraseSource).split(' ').filter(Boolean))];
+  const present = words.filter((word) => findPhraseSpansInRawText(text, [word]).length > 0);
+  const tokens = present.filter(isCandidateToken);
+  if (!tokens.length) return null;
+  if (!isClosedVocabResidual(text, present.flatMap((word) => findPhraseSpansInRawText(text, [word])))) return null;
+  const ids = [...(await productsNamedIn(text)).named].map((id) => String(id).toLowerCase());
+  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
+  products
+    .map((p) => {
+      const nameWords = new Set(normalizeForMatch(p.name).split(' '));
+      return { id: String(p.id).toLowerCase(), name: p.name, hits: tokens.filter((t) => nameWords.has(t)).length };
+    })
+    .filter((p) => p.hits > 0)
+    .sort((a, b) => (b.hits - a.hits) || a.name.localeCompare(b.name))
+    .forEach((p) => ids.push(p.id));
+  return { phrase: present.join(' '), ids };
+}
+
+// One shortlist row with this amount's fresh before -> after. A product the
+// amount cannot fit (a unit it cannot convert, an unchanged count) is shown
+// with the reason and cannot be picked.
+async function productChoiceRow(row, fields) {
+  const base = { product_id: String(row.id).toLowerCase(), name: row.name, container_size: row.container_size || null };
+  try {
+    const preview = await inventory.previewStockAdjustment(row.id, fields);
+    return { ...base, unit: preview.unit || null, on_hand: preview.was_untracked ? null : toNumber(preview.stock_before),
+      stock_after: toNumber(preview.stock_after), selectable: true };
+  } catch (err) {
+    if (!err.isOperational) throw err;
+    return { ...base, unit: row.inventory_unit || null, on_hand: toNumber(row.inventory_on_hand),
+      stock_after: null, selectable: false, reason: String(err.message || 'This amount does not fit this product.') };
+  }
+}
+
+const MISSING_AMOUNT_REFUSAL = Object.freeze({ success: false, code: 'unit_required',
+  error: 'The amount or the unit is missing, so no stock was changed and no card was made. Ask the operator one short question for the amount and its unit, then call again with what they say. Never guess either.' });
+
+// Returns null (no picker: the caller keeps its refusal), { error, code } (a
+// refusal that names what is missing), or { phrase, choices }. `seedIds` are
+// ids a previous card already listed (Show again re-lists them with fresh
+// on-hand numbers); with seeds and no prompt, no new products are searched.
+async function productChoicesFor({ input = {}, prompt = null, previewProductName = null, seedIds = [] } = {}) {
+  let phrase = String(input.product_name || previewProductName || '').trim();
+  const ids = seedIds.map((id) => String(id).toLowerCase());
+  if (prompt != null) {
+    const found = await operatorShortlist(prompt, phrase);
+    if (!found) return null;
+    phrase = found.phrase;
+    ids.push(...found.ids);
+  }
+  const shortlist = [...new Set(ids)].slice(0, PRODUCT_CHOICE_LIMIT);
+  if (!shortlist.length) return null;
+  // The picker never builds on an assumed amount or unit (the same rule as adjustStock's own refusal).
+  if (!String(input.unit ?? '').trim() || (input.quantity == null && input.set_total == null)) return { ...MISSING_AMOUNT_REFUSAL };
+  const rows = await db('products_catalog').whereIn('id', shortlist).where({ active: true });
+  const byId = new Map(rows.map((row) => [String(row.id).toLowerCase(), row]));
+  const fields = adjustmentFields(input);
+  const choices = [];
+  for (const id of shortlist.filter((candidate) => byId.has(candidate))) choices.push(await productChoiceRow(byId.get(id), fields));
+  return choices.some((choice) => choice.selectable) ? { phrase, choices } : null;
+}
+
 async function queryStock(input) {
   const { search, category, low_stock_only, untracked_only, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 50, 200);
@@ -1865,4 +1957,4 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget };
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT };

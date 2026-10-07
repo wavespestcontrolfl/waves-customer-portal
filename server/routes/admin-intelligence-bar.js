@@ -1135,10 +1135,13 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, reproposal = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
+  // Product picker (owner 2026-10-07): set when adjust_stock becomes a
+  // "choose the product" card instead of a refusal (see productChoiceCard).
+  let productChoice = null;
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL && selectedLeadId) {
     if (params.leadId && String(params.leadId) !== String(selectedLeadId)) {
       return { failed: true, modelResult: { error: 'Draft lead does not match the Agent Estimate lead currently open.' } };
@@ -1156,9 +1159,25 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // lets ActionRegistry.execute's own allowed() check pass for an outside-
     // service write proposed by the full-access owner, and correctly refuse
     // one from anyone else even if a forged tool_use reached this far.
-    preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
-    if (isToolFailure(preview)) {
-      return { failed: true, modelResult: preview };
+    // Show again on a picker card re-lists its products with fresh numbers;
+    // there is no single product to preview yet.
+    if (toolUse.name === 'adjust_stock' && reproposal?.productChoiceSeed) {
+      productChoice = await productChoiceCard({ params, seedIds: reproposal.productChoiceSeed });
+      if (!productChoice) return { failed: true, modelResult: { error: 'None of the products on the earlier card can take this amount now. Nothing was written and no confirmation card was created.', code: 'target_clarification_required' } };
+      if (productChoice.failed) return productChoice;
+      preview = productChoice.preview;
+    } else {
+      preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
+    }
+    if (!productChoice && isToolFailure(preview)) {
+      // The operator's words named a product the catalog cannot pin to one
+      // row: offer the shortlist card instead of the refusal.
+      if (toolUse.name === 'adjust_stock' && !reproposal && PRODUCT_IDENTITY_REFUSALS.has(preview.code)) {
+        productChoice = await productChoiceCard({ params, prompt: req.body.prompt });
+        if (productChoice?.failed) return productChoice;
+      }
+      if (!productChoice) return { failed: true, modelResult: preview };
+      preview = productChoice.preview;
     }
     // An unconfigured integration ({ configured: false } — a missing token)
     // is a refusal, not a card: confirming it could only fail (Codex r1 on
@@ -1872,12 +1891,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       };
     }
   }
-  if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolUse.name)) {
+  if (!productChoice && STOCK_WRITE_TOOL_NAMES.has(toolUse.name)) {
     // actorId/threadId only feed the operator-grounding fallback (a prior
     // OPERATOR turn on the OPERATOR's OWN server-persisted thread naming the
     // preview's product) — resolveInventoryWriteTarget re-verifies thread
     // ownership and the threads gate itself before reading anything.
-    const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
+    // A re-proposal (a product the operator picked from a server-listed
+    // shortlist, or Show again on a card this actor already got) carries its
+    // target from the server's own stored row, never from the request body:
+    // the fresh preview must resolve to exactly that product and request.
+    const target = reproposal?.groundedTarget ? groundedStockTarget(toolUse.name, preview, reproposal.groundedTarget)
+      : await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
       toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
       actorId: getAdminActorId(req), threadId: req.body.thread_id,
       // The requesting tab's OWN observed thread tail (Codex round-2 P2) —
@@ -1885,10 +1909,16 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
     });
+    // The operator's words did not pin one product: offer the shortlist card.
+    if (target.error && toolUse.name === 'adjust_stock' && !reproposal && PRODUCT_IDENTITY_REFUSALS.has(target.code)) {
+      productChoice = await productChoiceCard({ params, prompt: req.body.prompt, previewProductName: preview?.product?.name || null });
+      if (productChoice?.failed) return productChoice;
+      if (productChoice) preview = productChoice.preview;
+    }
     // A refused target leaves no card and writes nothing; the model is told so
     // in plain words, so its reply can never read as a recorded change.
-    if (target.error) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
-    if (toolUse.name !== 'update_restock_request') {
+    if (target.error && !productChoice) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
+    if (!productChoice && toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
       taskContext = { ...taskContext, requestedRecords: { ...taskContext?.requestedRecords, product_id: target.productId } };
@@ -1896,6 +1926,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
+  } else if (productChoice) {
+    // A picker card never executes (commitPendingAction refuses it); its
+    // stored params ARE the shortlist and the amount, replaced wholesale.
+    for (const key of Object.keys(params)) delete params[key];
+    Object.assign(params, productChoice.params);
   } else if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
     // W0B execution pin for every other two-step write: the confirmed run
     // re-resolves its target from the stored params, so pin the resolved
@@ -1964,7 +1999,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // operator approves. Derived from the same curated display params the card
   // lists plus the proposal-time pins — never model text — then hashed; the
   // card echoes the hash on Confirm and the claim refuses any other.
-  const displayParams = confirmationDisplayParams(toolUse.name, params, preview);
+  const displayParams = productChoice ? { product_words: productChoice.phrase || '(not stated)' }
+    : confirmationDisplayParams(toolUse.name, params, preview);
   const summary = summarizeProposal(toolUse.name, params, displayParams);
   const contract = AuthorizationContract.buildContract({
     toolName: toolUse.name, params, displayParams, preview, summary,
@@ -2004,7 +2040,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       ...preview,
       ...(preview.params ? { params: Object.fromEntries(Object.entries(preview.params).filter(([key]) => !key.startsWith('_'))) } : {}),
       pending_confirmation: true,
-      note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
+      note: productChoice
+        ? 'Nothing was written. The card lists the products that could match and the operator picks one, then confirms a second card that shows the exact before and after. Do NOT retry this tool, do NOT pick a product yourself, and do NOT claim stock changed; tell the operator to pick the product on the card.'
+        : 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
     },
     clientPayload: {
       id: row.id,
@@ -2029,6 +2067,151 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     },
   };
+}
+
+// ─── PRODUCT PICKER + SHOW AGAIN (owner 2026-10-07) ─────────────
+
+const STOCK_WRITE_TOOL_NAMES = new Set(['adjust_stock', 'create_restock_request', 'update_restock_request']);
+// Refusals that mean "which product?" — the only ones the picker replaces.
+const PRODUCT_IDENTITY_REFUSALS = new Set(['product_ambiguous', 'product_not_found',
+  'target_clarification_required', 'target_relationship_mismatch']);
+
+// Builds the "choose the product" card body, or null when the operator's
+// words give no product phrase to list (the caller keeps its refusal), or a
+// { failed } refusal. The shortlist is computed and pinned here, server-side.
+async function productChoiceCard({ params, prompt = null, previewProductName = null, seedIds = [] }) {
+  const { productChoicesFor } = require('../services/intelligence-bar/procurement-tools');
+  if (typeof productChoicesFor !== 'function') return null;
+  const picked = await productChoicesFor({ input: params, prompt, previewProductName, seedIds });
+  if (!picked) return null;
+  if (picked.error) return { failed: true, modelResult: picked };
+  const stored = {};
+  for (const key of ['product_name', 'movement_type', 'quantity', 'set_total', 'unit', 'lot_number', 'reason', 'note']) {
+    if (params[key] !== undefined) stored[key] = params[key];
+  }
+  if (!stored.product_name && picked.phrase) stored.product_name = picked.phrase;
+  // Only the products the card lets the operator pick can ever be chosen.
+  stored._ib_product_choices = picked.choices.filter((choice) => choice.selectable).map((choice) => choice.product_id);
+  return {
+    phrase: picked.phrase,
+    params: stored,
+    preview: { preview: true, choose_product: true, tool: 'adjust_stock', movement_type: params.movement_type || null,
+      entered_quantity: params.set_total ?? params.quantity ?? null, entered_unit: params.unit || null,
+      product_choices: picked.choices },
+  };
+}
+
+// A re-proposal's stock target is the one the server stored or listed: the
+// fresh preview must resolve to that same product (and restock request).
+function groundedStockTarget(toolName, preview, grounded) {
+  const same = (a, b) => a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase();
+  const mismatch = { error: 'This product no longer matches the earlier card.', code: 'target_relationship_mismatch' };
+  if (toolName === 'update_restock_request') {
+    if (!same(preview?.request?.id, grounded.requestId)) return mismatch;
+    return { productId: preview?.product?.id, requestId: preview.request.id };
+  }
+  if (!same(preview?.product?.id, grounded.productId)) return mismatch;
+  return { productId: preview.product.id };
+}
+
+// The role rules /confirm-action applies, for routes that re-propose a card.
+function cardRoleRefusal(req, toolName) {
+  if (ADMIN_ONLY_TOOL_NAMES.has(toolName) && req.techRole !== 'admin') return { status: 403, error: 'Admin access required for this action' };
+  if (FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolName) && !ibFullAccess(req)) return { status: 403, error: 'This action is limited to the owner account.' };
+  if (!isToolAllowedForRole(toolName, req.techRole)) return { status: 403, error: 'This action is not available to your role' };
+  return null;
+}
+
+// The tool input a stored card was built from: every `_`-prefixed key is a
+// server pin the fresh proposal recomputes, so none is carried over.
+function publicCardInput(params) {
+  return Object.fromEntries(Object.entries(params || {}).filter(([key]) => !key.startsWith('_')));
+}
+
+const claimErrorStatus = (error) => (error === 'not_found' ? 404 : error === 'actor_mismatch' ? 403 : 409);
+const claimErrorMessage = (error) => (error === 'contract_mismatch'
+  ? 'The card no longer matches the proposed action. Ask again to get a fresh card.'
+  : `Pending action ${error.replace(/_/g, ' ')}`);
+
+// The ids a picker card offered (its server-built shortlist), or null.
+function offeredProductIds(params) {
+  const offered = params?._ib_product_choices;
+  return Array.isArray(offered) ? offered.map((v) => String(v).toLowerCase()) : null;
+}
+
+// Why /choose-product refuses before touching the card, or null.
+function pickerChoiceRefusal(req, row, productId) {
+  if (!row) return { status: 404, body: { error: 'Pending action not found' } };
+  const offered = offeredProductIds(row.params);
+  if (row.tool_name !== 'adjust_stock' || !offered) return { status: 409, body: { error: 'This card has no product to choose.', code: 'not_a_product_choice' } };
+  if (!offered.includes(productId)) {
+    logger.warn(`[intelligence-bar:pending] Product choice on ${row.id} refused: the id was not on the card`);
+    return { status: 409, body: { error: 'That product was not on this card. Nothing was written.', code: 'product_not_offered' } };
+  }
+  const role = cardRoleRefusal(req, row.tool_name);
+  return role ? { status: role.status, body: { error: role.error } } : null;
+}
+
+// The picker card is claimed: propose the normal card for the chosen product
+// and record on the picker card what happened. Writes no stock.
+async function proposeChosenProduct(req, action, productId) {
+  // The claimed row is the authority (its params hash was just verified).
+  if (!(offeredProductIds(action.params) || []).includes(productId)) {
+    const result = { success: false, blocked: true, written: false, code: 'product_not_offered', error: 'That product was not on this card. Nothing was written.' };
+    await PendingActions.recordResult(action.id, result);
+    return { status: 409, body: result };
+  }
+  const input = publicCardInput(action.params);
+  delete input.product_name;
+  const proposed = await proposePendingWrite({
+    toolUse: { name: 'adjust_stock', input: { ...input, product_id: productId } },
+    req, context: action.context || null, requestStartedAt: new Date(),
+    reproposal: { groundedTarget: { productId } },
+  });
+  if (proposed.failed || !proposed.clientPayload) {
+    const refused = proposed.modelResult || {};
+    const result = { success: false, blocked: true, written: false, code: refused.code || 'product_choice_refused',
+      error: refused.error || 'The card for this product could not be made.' };
+    await PendingActions.recordResult(action.id, result);
+    return { status: 409, body: result };
+  }
+  const name = proposed.modelResult?.product?.name || 'The product';
+  await PendingActions.recordResult(action.id, { success: true, state: 'completed', written: false, chosen_product_id: productId,
+    next_action_id: proposed.clientPayload.id,
+    note: 'No stock was changed by this card. A new card for the chosen product waits for the operator to confirm.',
+    receipt: { label: 'Product chosen', summary: `${name}. Confirm the new card to change the stock.` } });
+  logger.info(`[intelligence-bar:pending] Product chosen on ${action.id}; proposed ${proposed.clientPayload.id}`);
+  return { status: 200, body: { success: true, outcome: 'completed', chosen_product_id: productId, pendingAction: proposed.clientPayload } };
+}
+
+// Why /show-again refuses before retiring the card, or null.
+async function showAgainRefusal(req, row) {
+  if (!row) return { status: 404, body: { error: 'Pending action not found' } };
+  if (!UI_GATED_WRITE_TOOL_NAMES.has(row.tool_name)) return { status: 409, body: { error: 'This card cannot be shown again. Ask again instead.' } };
+  const role = cardRoleRefusal(req, row.tool_name);
+  if (role) return { status: role.status, body: { error: role.error } };
+  if (row.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
+    return { status: 404, body: { error: 'Agent Estimate is not enabled' } };
+  }
+  return null;
+}
+
+// Under GATE_IB_PLATFORM a proposal's input must pass the action registry for
+// this actor and context, as it did in the /query loop.
+function platformInputRefusal(req, row, input) {
+  if (!gateEnvValue('GATE_IB_PLATFORM') || req.techRole !== 'admin') return null;
+  return ActionRegistry.validateInput(row.tool_name, input, { role: req.techRole, context: row.context || null, fullAccess: ibFullAccess(req) });
+}
+
+// What a Show again re-proposal is grounded on: a picker card re-lists its own
+// products; a stock card keeps the product (and request) its row stored.
+function showAgainReproposal(row) {
+  const stored = row.params || {};
+  if (Array.isArray(stored._ib_product_choices)) return { productChoiceSeed: stored._ib_product_choices };
+  if (STOCK_WRITE_TOOL_NAMES.has(row.tool_name)) {
+    return { groundedTarget: { productId: stored.product_id || null, requestId: stored.request_id || null } };
+  }
+  return { showAgain: true };
 }
 
 function getAdminActorId(req) {
@@ -3918,6 +4101,14 @@ async function commitPendingAction(req, { id, contractHash }) {
     }
     const action = claim.action;
     claimedAction = action;
+    // A "choose the product" card names no product, so it can never run:
+    // its only way forward is /choose-product. Nothing is written here.
+    if (Array.isArray(action.params?._ib_product_choices)) {
+      const result = { success: false, blocked: true, written: false, code: 'product_choice_required',
+        error: 'Pick the product on the card first. Nothing was written. Ask again for a fresh card.' };
+      await PendingActions.recordResult(action.id, result);
+      return reply(409, result);
+    }
     // cancel_appointment dispatches only when the gate is live AND the
     // stored action carries the proposal-time frozen impact pin (PR B of
     // ib-cancel-pinned-effects). This covers: the gate off (today's
@@ -4269,6 +4460,65 @@ router.post('/confirm-action', async (req, res, next) => {
   } catch (err) {
     logger.error(`[intelligence-bar] confirm-action failed (code=${err.code || 'unknown'})`);
     next(err);
+  }
+});
+
+// Product picker, step 2 (owner 2026-10-07). The operator picked one product
+// on a "choose the product" card. The id is accepted ONLY when this card's own
+// stored shortlist lists it (the server built that list; the client cannot add
+// to it), and the card's contract hash must match what it displayed. Choosing
+// writes nothing: it uses up the picker card and proposes a normal adjust_stock
+// card for that product, with its exact before and after, which the operator
+// then confirms through /confirm-action like any other card.
+router.post('/choose-product', async (req, res, next) => {
+  try {
+    const id = String(req.body?.pending_action_id || '').trim();
+    const productId = String(req.body?.product_id || '').trim().toLowerCase();
+    if (!UUID_RE.test(id) || !UUID_RE.test(productId)) return res.status(400).json({ error: 'pending_action_id and product_id are required' });
+    if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    const actor = getAdminActorId(req);
+    // Checked before the claim, so a wrong id leaves the card usable.
+    const refusal = pickerChoiceRefusal(req, await PendingActions.getPendingRow(id, actor), productId);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
+    const claim = await PendingActions.claimForConfirm(id, actor, { contractHash: req.body.contract_hash ? String(req.body.contract_hash).trim() : null });
+    if (claim.error) return res.status(claimErrorStatus(claim.error)).json({ error: claimErrorMessage(claim.error) });
+    const chosen = await proposeChosenProduct(req, claim.action, productId);
+    return res.status(chosen.status).json(chosen.body);
+  } catch (err) {
+    logger.error(`[intelligence-bar] choose-product failed (code=${err.code || 'unknown'})`);
+    return next(err);
+  }
+});
+
+// Show again (owner 2026-10-07). A card that expired before the operator
+// confirmed or cancelled it is proposed again: the SAME tool and the same
+// input, through the full proposal (fresh preview, fresh pins, fresh contract
+// hash, the supersede rules). It never commits: the result is a new card, or
+// the same refusal a fresh proposal would get. Only the card's own actor can
+// do this, and only once per expired card (it is retired atomically first).
+router.post('/show-again', async (req, res, next) => {
+  try {
+    const id = String(req.body?.pending_action_id || '').trim();
+    if (!UUID_RE.test(id)) return res.status(400).json({ error: 'pending_action_id is required' });
+    if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
+    const actor = getAdminActorId(req);
+    const refusal = await showAgainRefusal(req, await PendingActions.getPendingRow(id, actor));
+    if (refusal) return res.status(refusal.status).json(refusal.body);
+    const retired = await PendingActions.retireExpiredAction(id, actor);
+    if (!retired) return res.status(409).json({ error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' });
+    const input = publicCardInput(retired.params);
+    const invalid = platformInputRefusal(req, retired, input);
+    if (invalid) return res.status(409).json({ error: invalid.error || 'This action cannot be shown again.', code: invalid.code });
+    const proposed = await proposePendingWrite({ toolUse: { name: retired.tool_name, input }, req,
+      context: retired.context || null, requestStartedAt: new Date(), reproposal: showAgainReproposal(retired) });
+    if (proposed.failed || !proposed.clientPayload) {
+      return res.status(409).json({ error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code });
+    }
+    logger.info(`[intelligence-bar:pending] Expired action ${id} shown again as ${proposed.clientPayload.id}`);
+    return res.json({ success: true, pendingAction: proposed.clientPayload });
+  } catch (err) {
+    logger.error(`[intelligence-bar] show-again failed (code=${err.code || 'unknown'})`);
+    return next(err);
   }
 });
 

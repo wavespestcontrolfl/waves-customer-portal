@@ -426,6 +426,26 @@ async function cancelPendingAction(id, requestedBy) {
   return { cancelled: count > 0 };
 }
 
+// One card row, actor-bound, params parsed. Server-side reads only (the
+// picker's shortlist check, Show again); never sent to the model.
+async function getPendingRow(id, requestedBy) {
+  const row = await db('ib_pending_actions').where({ id, requested_by: String(requestedBy) }).first();
+  return row ? { ...row, params: paramsOf(row) } : null;
+}
+
+// Show again (owner 2026-10-07): retires a card that expired with no decision,
+// in one statement, so one expired card is shown again at most once. Returns
+// the retired row (params parsed), or null when the card is not this actor's,
+// not expired, or was already confirmed or cancelled.
+async function retireExpiredAction(id, requestedBy) {
+  const [row] = await db('ib_pending_actions')
+    .where({ id, requested_by: String(requestedBy), status: 'pending' })
+    .where('expires_at', '<=', db.fn.now())
+    .update({ status: 'cancelled', updated_at: db.fn.now() })
+    .returning('*');
+  return row ? { ...row, params: paramsOf(row) } : null;
+}
+
 async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false } = {}) {
   try {
     const query = database('ib_pending_actions').where({ id });
@@ -497,6 +517,8 @@ module.exports = {
   intentLock,
   claimForConfirm,
   cancelPendingAction,
+  getPendingRow,
+  retireExpiredAction,
   recordResult,
   getActionReceipt,
   attachThread,

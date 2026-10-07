@@ -8,6 +8,12 @@
  * component's props/state. Never write it into conversationHistory, a
  * prompt, or anything else that reaches the model.
  *
+ * A "choose the product" card (contract.product_choices, owner 2026-10-07)
+ * lists the server's shortlist; the operator picks one and the server makes a
+ * normal card for it. An expired card offers "Show again", which asks the
+ * server to propose the same action afresh. Both render the new card right
+ * below the old one; neither ever writes anything by itself.
+ *
  * variant="dark"  — D-palette inline styles (legacy IB surfaces)
  * variant="light" — Tailwind zinc (V2 IntelligenceBarShell)
  */
@@ -161,6 +167,11 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const [neutralById, setNeutralById] = useState({});
   const [receiptById, setReceiptById] = useState({});
   const inFlightRef = useRef(new Set());
+  // The product picked on a "choose the product" card, per card id.
+  const [pickedById, setPickedById] = useState({});
+  // Cards the server made from this list (a chosen product, Show again):
+  // { afterId, action }, rendered right after the card they came from.
+  const [followUps, setFollowUps] = useState([]);
 
   // Preserve existing card outcomes and expiry across clarification turns. Countdown
   // deadlines anchor on RECEIPT TIME + the server-computed expiresInMs, so a
@@ -264,6 +275,67 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     }
   };
 
+  // A new card from the server, placed under the card it came from. Its
+  // countdown anchors on receipt time, like every other card.
+  const addFollowUp = (source, next) => {
+    if (!next?.id) return;
+    const received = Date.now();
+    setFollowUps((previous) => (previous.some((f) => f.action.id === next.id) ? previous
+      : [...previous, { afterId: source.id, action: { ...next, receivedAt: received } }]));
+    if (typeof next.expiresInMs === "number") {
+      setDeadlineById((previous) => ({ ...previous, [next.id]: received + next.expiresInMs }));
+    }
+  };
+
+  // Product picker: the server accepts only an id it listed on this card,
+  // then answers with a new card for that product (nothing is written yet).
+  const chooseProduct = async (action) => {
+    const productId = pickedById[action.id];
+    if (!productId || inFlightRef.current.has(action.id)) return;
+    inFlightRef.current.add(action.id);
+    setStatus(action.id, "choosing");
+    try {
+      const body = await adminFetch("/admin/intelligence-bar/choose-product", {
+        method: "POST",
+        body: JSON.stringify({
+          pending_action_id: action.id,
+          product_id: productId,
+          ...(action.contract_hash ? { contract_hash: action.contract_hash } : {}),
+        }),
+      });
+      setStatus(action.id, "chosen");
+      addFollowUp(action, body.pendingAction);
+    } catch (err) {
+      setStatus(action.id, undefined, err.message || "The product could not be chosen. Ask again for a fresh card.");
+    } finally {
+      inFlightRef.current.delete(action.id);
+    }
+  };
+
+  // Show again: the server proposes the same action afresh (new numbers, new
+  // card) or answers with the refusal a fresh request would get.
+  const showAgain = async (action) => {
+    if (inFlightRef.current.has(action.id)) return;
+    inFlightRef.current.add(action.id);
+    setStatus(action.id, "reshowing");
+    try {
+      const body = await adminFetch("/admin/intelligence-bar/show-again", {
+        method: "POST",
+        body: JSON.stringify({ pending_action_id: action.id }),
+      });
+      setStatus(action.id, "reshown");
+      addFollowUp(action, body.pendingAction);
+    } catch (err) {
+      setStatus(action.id, "expired", err.message || "This card could not be shown again. Ask again instead.");
+    } finally {
+      inFlightRef.current.delete(action.id);
+    }
+  };
+
+  const withFollowUps = (action) => [action,
+    ...followUps.filter((f) => f.afterId === action.id).flatMap((f) => withFollowUps(f.action))];
+  const shown = actions.flatMap(withFollowUps);
+
   const dark = variant === "dark";
 
   const statusLabel = {
@@ -274,6 +346,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     partial: "Partially completed",
     unknown: "Outcome unknown",
     cancelled: "Cancelled",
+    chosen: "Product chosen. Confirm the new card below.",
+    reshown: "Shown again below.",
   };
 
   return (
@@ -286,7 +360,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       } : undefined}
       className={dark ? undefined : "mt-2 mb-3 flex flex-col gap-2"}
     >
-      {actions.map((action) => {
+      {shown.map((action) => {
         const status = statusById[action.id] || action.resolvedStatus || (action.receipt ? receiptState(action.receipt) : undefined);
         const receiptBody = receiptById[action.id] || action.receipt;
         const receiptResult = receiptBody?.result;
@@ -301,10 +375,14 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         const detailNeutral = errorById[action.id] != null
           ? Boolean(neutralById[action.id])
           : !action.resolvedWarning && detailIsNeutral(receiptBody, status);
-        const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
-        const busy = status === "confirming" || status === "cancelling";
+        const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown", "chosen", "reshown"].includes(status);
+        const busy = ["confirming", "cancelling", "choosing", "reshowing"].includes(status);
         const remaining = msLeft(action);
-        const expired = status === 'expired' || (!settled && !busy && remaining !== null && remaining <= 0);
+        const expired = status === 'expired' || status === 'reshowing'
+          || (!settled && !busy && remaining !== null && remaining <= 0);
+        // The server's shortlist; only a selectable product can be picked.
+        const choices = Array.isArray(action.contract?.product_choices) ? action.contract.product_choices : null;
+        const picked = pickedById[action.id];
         // A card minted as preview-only before the switches' commit path
         // deployed is never confirmable (the server refuses it too).
         const previewOnly = action.contract?.preview_only === true;
@@ -386,11 +464,27 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             )}
 
             {expired ? (
-              <div
-                style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
-                className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}
-              >
-                Expired — this proposal is no longer confirmable. Ask again to re-propose it.
+              <div style={dark ? { display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" } : undefined}
+                className={dark ? undefined : "flex flex-col gap-2 items-start"}>
+                <div
+                  style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
+                  className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}
+                >
+                  Expired — this proposal is no longer confirmable.
+                </div>
+                <button
+                  type="button"
+                  disabled={status === "reshowing"}
+                  onClick={() => showAgain(action)}
+                  style={dark ? {
+                    background: "transparent", color: D.text, border: `1px solid ${D.border}`, borderRadius: 8,
+                    padding: "7px 16px", fontSize: 14, minHeight: 44,
+                    cursor: status === "reshowing" ? "wait" : "pointer", opacity: status === "reshowing" ? 0.6 : 1,
+                  } : undefined}
+                  className={dark ? undefined : "min-h-11 bg-white text-zinc-900 border border-zinc-300 rounded-sm px-4 py-1.5 text-[14px] disabled:opacity-60"}
+                >
+                  {status === "reshowing" ? "Showing again…" : "Show again"}
+                </button>
               </div>
             ) : !settled ? (
               <div style={dark ? { display: "flex", flexDirection: "column", gap: 8 } : undefined} className={dark ? undefined : "flex flex-col gap-2"}>
@@ -410,8 +504,60 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                     This card was made as a preview only and can&apos;t be applied. Ask again for a fresh card.
                   </div>
                 )}
+                {choices && (
+                  <fieldset style={dark ? { border: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 } : undefined}
+                    className={dark ? undefined : "border-0 m-0 p-0 flex flex-col gap-1"}>
+                    <legend style={dark ? { fontSize: 14, color: D.text, marginBottom: 4 } : undefined}
+                      className={dark ? undefined : "text-[14px] text-zinc-900 mb-1"}>
+                      Which product?
+                    </legend>
+                    {choices.map((choice) => {
+                      const onHand = choice.on_hand == null ? "not counted yet" : `${choice.on_hand} ${choice.unit || ""}`.trimEnd();
+                      const after = choice.stock_after == null ? null : `${choice.stock_after} ${choice.unit || ""}`.trimEnd();
+                      return (
+                        <label key={choice.product_id}
+                          style={dark ? {
+                            display: "flex", alignItems: "flex-start", gap: 8, minHeight: 44, padding: "6px 0", fontSize: 14,
+                            color: choice.selectable ? D.text : D.muted, cursor: choice.selectable ? "pointer" : "default",
+                          } : undefined}
+                          className={dark ? undefined : `flex items-start gap-2 min-h-11 py-1.5 text-[14px] ${choice.selectable ? "text-zinc-900 cursor-pointer" : "text-zinc-500"}`}>
+                          <input
+                            type="radio"
+                            name={`product-choice-${action.id}`}
+                            value={choice.product_id}
+                            disabled={!choice.selectable || busy}
+                            checked={picked === choice.product_id}
+                            onChange={() => setPickedById((previous) => ({ ...previous, [action.id]: choice.product_id }))}
+                            style={dark ? { marginTop: 3, width: 18, height: 18 } : undefined}
+                            className={dark ? undefined : "mt-0.5 h-[18px] w-[18px]"}
+                          />
+                          <span>
+                            <span style={dark ? { fontWeight: 500 } : undefined} className={dark ? undefined : "font-medium"}>{choice.name}</span>
+                            {choice.container_size ? ` · ${choice.container_size}` : ""}
+                            {` · on hand ${onHand}`}
+                            {choice.selectable && after ? ` → ${after}` : ""}
+                            {!choice.selectable && choice.reason ? ` · ${choice.reason}` : ""}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </fieldset>
+                )}
               <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
-                {!previewOnly && <button
+                {choices && <button
+                  type="button"
+                  disabled={busy || !picked}
+                  onClick={() => chooseProduct(action)}
+                  style={dark ? {
+                    background: D.green, color: D.white, border: "none", borderRadius: 8,
+                    padding: "7px 16px", fontSize: 14, fontWeight: 500,
+                    cursor: busy ? "wait" : picked ? "pointer" : "not-allowed", opacity: busy || !picked ? 0.6 : 1,
+                  } : undefined}
+                  className={dark ? undefined : `bg-zinc-900 text-white rounded-sm px-4 py-1.5 text-[14px] font-medium disabled:opacity-60 ${touchFriendly ? "min-h-11" : ""}`}
+                >
+                  {status === "choosing" ? "Choosing…" : "Use this product"}
+                </button>}
+                {!previewOnly && !choices && <button
                   type="button"
                   disabled={busy}
                   onClick={() => decide(action, "confirm")}
