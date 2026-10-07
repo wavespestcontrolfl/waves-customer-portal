@@ -38,7 +38,7 @@ const {
   protocolReferenceSyncIssues,
   lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
-const { lawnProtocols } = require('../services/lawn-program');
+const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/lawn-program');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -92,7 +92,7 @@ function lawnTrackFromInput(value) {
   const text = normalizeText(value);
   if (text.includes('bermuda')) return 'bermuda';
   if (text.includes('zoysia')) return 'zoysia';
-  if (text.includes('bahia')) return 'bahia';
+  if (isBahiaGrass(value)) return 'bahia';
   return 'st_augustine';
 }
 
@@ -1179,8 +1179,15 @@ router.get('/completion-actions', async (req, res, next) => {
 
     if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
-      track = lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track);
-      program = lawnProtocols()?.[track] || lawnProtocols()?.st_augustine;
+      // Celsius and Blindside are not labeled for bahiagrass, so under v13 a bahia lawn (any of its
+      // spellings, in any of the three inputs) gets no chips, never another grass's: decided on the raw
+      // inputs, before lawnTrackFromInput defaults an unknown value to St. Augustine.
+      const lawnInputs = [req.query.lawnType, req.query.grassType, req.query.track];
+      track = lawnTrackFromInput(lawnInputs.find(Boolean));
+      program = lawnProtocols()?.[track];
+      if (lawnInputs.some(bahiaHasNoProgram)) {
+        return res.status(404).json({ error: 'Bahiagrass has no lawn program under v13', code: 'lawn_v13_bahia_no_program' });
+      }
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
     } else {

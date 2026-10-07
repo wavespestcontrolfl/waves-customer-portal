@@ -11,6 +11,7 @@
  * enforcer).
  */
 
+const { bookingRainFit, rainTierOf, rankingNeedsForecast } = require('./rain-fit');
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
@@ -484,19 +485,23 @@ function byBest(a, b) {
     || a.start_time.localeCompare(b.start_time);
 }
 
-function pickBestRows(days, { pickedDate, today }) {
+// `tierOf` (GATE_BOOKING_RAIN_RANK) ranks by rain fit BEFORE drive: an
+// outdoor booking's wet hours sort after its dry ones, a rain-OK booking's
+// wet hours before. Absent = the drive-only order, unchanged.
+function pickBestRows(days, { pickedDate, today, tierOf = null }) {
   let weekEnd = today;
   for (let i = 1; i < WEEK_DAYS; i++) weekEnd = nextYmd(weekEnd);
   const withDate = (day) => day.hours.map((h) => ({ ...h, date: day.date }));
-  const dayRow = days.filter((day) => day.date === pickedDate).flatMap(withDate).sort(byBest).slice(0, BEST_ROW_SIZE);
+  const order = tierOf ? (a, b) => tierOf(a) - tierOf(b) || byBest(a, b) : byBest;
+  const dayRow = days.filter((day) => day.date === pickedDate).flatMap(withDate).sort(order).slice(0, BEST_ROW_SIZE);
   const weekRow = days
     .filter((day) => day.date >= today && day.date <= weekEnd && day.date !== pickedDate
       && !day.closed && day.status !== 'off')
-    .flatMap(withDate).sort(byBest).slice(0, BEST_ROW_SIZE);
+    .flatMap(withDate).sort(order).slice(0, BEST_ROW_SIZE);
   // A picked date more than two weeks out searches only the days around it,
   // so the week row has nothing to say rather than "nothing fits".
   const weekCovered = days.some((day) => day.date === today);
-  return { day: dayRow, week: weekRow, week_from: today, week_to: weekEnd, week_covered: weekCovered };
+  return { day: dayRow, week: weekRow, week_from: today, week_to: weekEnd, week_covered: weekCovered, order };
 }
 
 // Highest NWS hourly rain chance across a chip's window, or null.
@@ -536,8 +541,37 @@ function publicChip(chip) {
  * chance of rain for each chip's hour. Both lookups fail open: a chip keeps
  * the model's numbers, or shows no rain.
  */
-async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, deps = {} }) {
-  const rows = pickBestRows(days, { pickedDate, today });
+// The chips' forecast: NWS hourly, Open-Meteo when NWS fails; fail open to
+// no rain. Labels only: the 1.5 s wait the rows always had. Ranking
+// (GATE_BOOKING_RAIN_RANK, a date inside the horizon): NWS gets 1.2 s so a
+// slow failure still leaves the backup time inside a 2.5 s wait (Codex
+// #6102 r2); only then is the longer wait spent (Codex #6102 r5).
+const LABEL_WAIT_MS = 1500;
+const RANK_WAIT_MS = 2500;
+const RANK_NWS_MS = 1200;
+function boundedHourlyRain(la, ln, ranking = false) {
+  const { getHourlyRainOutlook } = require('../weather-forecast');
+  const opts = ranking ? { budgetMs: RANK_WAIT_MS, nwsBudgetMs: RANK_NWS_MS } : undefined;
+  let timer;
+  return Promise.race([
+    getHourlyRainOutlook(la, ln, opts).catch(() => null),
+    new Promise((resolve) => { timer = setTimeout(resolve, ranking ? RANK_WAIT_MS + 100 : LABEL_WAIT_MS, null); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function buildBestRows(days, {
+  pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, deps = {},
+}) {
+  const rainLookup = deps.hourlyRain || boundedHourlyRain;
+  // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
+  // the ranking. No hour on screen: no lookup (Codex #6045 r1).
+  const fit = bookingRainFit(serviceTypes);
+  const ranking = rankingNeedsForecast(fit, days, today, pickedDate);
+  const forecast = days.some((day) => day.hours.length) || picked?.fits === true
+    ? rainLookup(lat, lng, ranking).catch(() => null) : Promise.resolve(null);
+  const tierOf = rainTierOf(fit, ranking ? await forecast : null, today);
+  const rows = pickBestRows(days, { pickedDate, today, tierOf });
+  const { order } = rows;
   // The picked hour's verdict gets the same treatment, so its sentence and
   // its own chip never disagree. Its window is the one scorePickedHour
   // scored: max(the form's end, start + duration) (Codex #6045 r1).
@@ -554,20 +588,8 @@ async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null,
     ...(picked[GAP_LEGS] ? { [GAP_LEGS]: { ...picked[GAP_LEGS], durationMinutes: pickedEndMin - pickedStartMin } } : {}),
   } : null;
   const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
-  const rainLookup = deps.hourlyRain || (async (la, ln) => {
-    const { getHourlyRainOutlook } = require('../weather-forecast');
-    let timer;
-    return Promise.race([
-      getHourlyRainOutlook(la, ln).catch(() => null),
-      new Promise((resolve) => { timer = setTimeout(resolve, 1500, null); }),
-    ]).finally(() => clearTimeout(timer));
-  });
   const chips = [...rows.day, ...rows.week, ...(pickedChip ? [pickedChip] : [])];
-  // No hour on screen: no forecast lookup either (Codex #6045 r1).
-  const [priced, hourly] = await Promise.all([
-    priceChips(chips),
-    chips.length || days.some((day) => day.hours.length) ? rainLookup(lat, lng).catch(() => null) : null,
-  ]);
+  const [priced, hourly] = await Promise.all([priceChips(chips), forecast]);
   const decorate = (chip) => publicChip({ ...chip, rain_chance: rainForWindow(hourly, chip.date, chip.start_time, chip.end_time) });
   const nDay = rows.day.length;
   const nWeek = rows.week.length;
@@ -576,8 +598,8 @@ async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null,
     // The forecast, so every listed hour gets its rain, not only the chips.
     hourly,
     rows: {
-      day: priced.slice(0, nDay).sort(byBest).map(decorate),
-      week: priced.slice(nDay, nDay + nWeek).sort(byBest).map(decorate),
+      day: priced.slice(0, nDay).sort(order).map(decorate),
+      week: priced.slice(nDay, nDay + nWeek).sort(order).map(decorate),
       week_from: rows.week_from,
       week_to: rows.week_to,
       week_covered: rows.week_covered,
@@ -654,13 +676,14 @@ function withChipValues(days, rows, hourly) {
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
   rejectionsByDate, startedAt, closedDates, offDates, today, target, picked, spanMin, pickedDate, pickedEnd, bestRows = false,
+  serviceTypes = [],
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
   // Only New Appointment shows the best-times rows; other strips skip the
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {
-    pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd,
+    pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd, serviceTypes,
   }) : null;
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs > SUMMARY_SLOW_MS) {

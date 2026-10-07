@@ -1,8 +1,8 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
-const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
+const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
@@ -1159,18 +1159,34 @@ async function lawnVisitsPerYear(knex, service) {
     ?? stated(service.service_type);
 }
 
+// What a visit's lawn record says about its grass, read once: whether a profile records a grass or
+// track, whether anything does (the legacy free text counts when no profile is recorded), and
+// whether the record names bahia (the grass type, the track key, or that legacy text), which GATE_LAWN_V13
+// has no program for. Bahia in ANY recorded field wins over another field's track.
+function recordedGrassFacts(profile, legacyGrass) {
+  const profileRecorded = [profile?.track_key, profile?.grass_type].some((value) => String(value || '').trim());
+  return {
+    profileRecorded,
+    recorded: profileRecorded || String(legacyGrass || '').trim(),
+    noProgram: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, legacyGrass),
+  };
+}
+
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
-  const profileRecorded = [profile?.track_key, profile?.grass_type]
-    .some((value) => String(value || '').trim());
-  const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const { profileRecorded, recorded, noProgram } = recordedGrassFacts(profile, legacyGrass);
+  const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
+  // GATE_LAWN_V13: any recorded field that says bahia ends the lookup here, before another
+  // recorded value (a conflicting track key or grass type) can pick a track. Only this
+  // result carries the flag; every other keeps its old shape.
+  if (noProgram) return { trackKey: null, track: null, month, visit: null, v13NoProgram: true };
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
-    // free text) runs the one v13 program instead of blocking the visit.
+    // free text) runs the one v13 program instead of blocking the visit (bahia never
+    // reaches this: it returned above).
     || (recorded ? lawnV13AnyGrassTrack() : null)
     || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? lawnProtocols()?.[trackKey] : null;
-  const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
   return { trackKey, track, month, visit };
 }
@@ -1796,7 +1812,9 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
   // default gates say: a pinned older visit must be seen as pinned, never as
   // unpinned (which would resolve the staged v13 version for it).
-  const structuredProtocolContext = (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
+  // GATE_LAWN_V13: a bahia lawn has no program, so no protocol window (a pinned assignment included)
+  // is read for it; the plan blocks on lawn_v13_bahia_no_program instead.
+  const structuredProtocolContext = !calendarProtocol.v13NoProgram && (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
@@ -1971,6 +1989,13 @@ async function buildPlanForService(serviceId, options = {}) {
       code: 'missing_lawn_area',
       severity: 'block',
       message: 'Turf profile is missing lawn square footage, so mix amounts cannot be calculated.',
+    });
+  }
+  if (selection.v13NoProgram) {
+    blocks.push({
+      code: 'lawn_v13_bahia_no_program',
+      severity: 'block',
+      message: 'Bahiagrass has no v13 lawn program: Celsius and Blindside are not labeled for bahiagrass, so no suggested amounts are planned. Enter the actual work.',
     });
   }
   if (!track || !visit) {

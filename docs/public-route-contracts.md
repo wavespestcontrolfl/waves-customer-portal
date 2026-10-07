@@ -4040,6 +4040,24 @@ recurring program joined this contract then, so a direct-API caller that
 posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
 quote where it previously received a price)).
 
+Bahia lawn under `GATE_LAWN_V13` (owner 2026-10-06; the v13 program has no
+bahia track, because the Celsius label says do not use it on bahiagrass and
+Blindside is not labeled for bahia): a recurring `lawn` request whose grass
+type is bahia (`grassType` / track `bahia`, `D`) is no longer priced as a
+plan. The engine line carries the manual-review reason
+`lawn_v13_bahia_no_program` (`requiresManualReview` + the enforced
+`requiresCustomQuote`; `priceLawnCare`), and `/calculate` answers `202
+{ quote_required: true, service, reason: 'lawn_v13_bahia_no_program',
+service_interest, message }` with `message` "Your grass type needs a quick look
+from our team before we finalize lawn pricing — we'll send your exact price
+shortly." (the same copy as `unknown_grass_type_priced_st_augustine`; both
+reasons are in `RESIDENTIAL_VERIFICATION_REASONS`, so the lead is a residential
+verification, not a commercial one). The lead is captured with zero totals and
+no self-book handoff. One-time lawn requests are unchanged (not the recurring
+program), and with the gate off a bahia lawn prices exactly as before. Already
+sent estimates are not affected: a stored estimate replayed as sold keeps its
+price.
+
 Keyed quote-on-request (a catalog `serviceKey`/`service_key` whose row is
 `public_quote_selectable=true` but carries NO `PUBLIC_QUOTE_REQUESTS` entry,
 `services/public-services-menu.js`): the route skips the pricing engine

@@ -41,6 +41,7 @@ describe('lawn-grass-context', () => {
 
     const ctx = await loadCustomerGrassContext('cust-1', knex);
     expect(ctx).toEqual({
+      noProgram: false,
       grassType: 'bermuda',
       grassTypeLabel: 'Bermuda',
       trackKey: 'bermuda',
@@ -113,6 +114,7 @@ describe('lawn-grass-context', () => {
     const knex = fakeKnex({});
     const ctx = await loadCustomerGrassContext(null, knex);
     expect(ctx).toEqual({
+      noProgram: false,
       grassType: null,
       grassTypeLabel: null,
       trackKey: null,
