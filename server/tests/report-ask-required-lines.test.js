@@ -2319,3 +2319,35 @@ test('a trend starting point grounds only a past claim (pre-push audit)', () => 
   expect(screenAskAnswer('Your current overall score is 50 out of 100.', { question: 'q', data, facts })).toBe('unstated_number');
   expect(screenAskAnswer('Your overall score went from 50 out of 100 to 82 out of 100.', { question: 'q', data, facts })).toBeNull();
 });
+
+describe('answer screen, Codex round 64', () => {
+  test('every insight field the card renders is on the sheet', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 }, insights: [{ headline: 'Scale', whatWeSaw: 'Scale on hedge.', wavesAction: 'We applied horticultural oil.', whyItMatters: 'Weakens plants.' }] } };
+    expect(buildReportAskFacts({ data }).tree_shrub_report.insights[0]).toMatchObject({ waves_action: 'We applied horticultural oil.', why_it_matters: 'Weakens plants.' });
+  });
+
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside', method: 'Sprayed' }] });
+  const question = 'How was Alpine WSG applied?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['No, Alpine WSG was not one of the products.', 'Alpine WSG was not part of today’s treatment.'])('a recorded product may not be denied as a member: %s', (answer) => {
+    expect(ask(answer)).toBe('denies_application');
+  });
+
+  test.each(['The application area was the kitchen.', 'The location was inside the home.'])('a direct location must fit the record: %s', (answer) => {
+    expect(ask(answer)).toBe('scope_claim');
+  });
+
+  test.each(['The method was injection.', 'It was poured around the perimeter.'])('a noun or pronoun method must fit the record: %s', (answer) => {
+    expect(ask(answer)).toBe('method_claim');
+  });
+
+  test('the recorded method passes', () => {
+    expect(ask('It was sprayed around the outside.')).toBeNull();
+  });
+
+  test.each(['I noticed the bait was eaten.', 'We found the bait was eaten.'])('bait taken with no person eating is no exposure: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+});

@@ -591,6 +591,10 @@ function treeShrubFacts(data = {}, keep = () => true) {
     insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
       headline: text(card?.headline, 160),
       what_we_saw: text(card?.whatWeSaw, 240),
+      // Every field the card renders (Codex P1 #5964 r64).
+      why_it_matters: text(card?.whyItMatters, 240),
+      waves_action: text(card?.wavesAction, 240),
+      next_visit_plan: text(card?.nextVisitPlan, 240),
       customer_action: text(card?.customerAction, 240),
     })).filter((card) => Object.keys(card).length),
     // The plant-group cards, the landscape water card and the trend chart the
@@ -649,6 +653,10 @@ function lawnCardFacts(v2, text) {
     insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
       headline: text(card?.headline, 160),
       what_we_saw: text(card?.whatWeSaw, 240),
+      // Every field the card renders (Codex P1 #5964 r64).
+      why_it_matters: text(card?.whyItMatters, 240),
+      waves_action: text(card?.wavesAction, 240),
+      next_visit_plan: text(card?.nextVisitPlan, 240),
       customer_action: text(card?.customerAction, 240),
     })).filter((card) => Object.keys(card).length),
     diagnosis: diagnosisFacts(v2.diagnosis, text, { scored: true }),
@@ -1372,6 +1380,9 @@ function ownSentences(text, requiredLines) {
 // Coverage and receipt claims: "The application covered the kitchen",
 // "Coverage included the interior", "The kitchen received the application"
 // (Codex P1 #5964 r39).
+// "The application area was the kitchen", "The location was inside" (Codex P1
+// #5964 r64).
+const DIRECT_LOCATION_CLAIM = /\b(?:application\s+area|treatment\s+area|area\s+treated|treated\s+area|location|where\s+(?:it|we|the\s+\w+)\s+(?:went|was\s+(?:applied|used|put)))\s+(?:was|is|were|included)\b/i;
 const COVERAGE_CLAIM = /\b(?:cover(?:ed|s|ing|age)?|includ(?:ed|es|ing)|received|got|reached|went\s+(?:to|into|inside|around)|focused\s+on|targeted|concentrated\s+on)\b/i;
 const SAYS_INSIDE = /\b(?:inside|indoors?|interior|in\s+the\s+(?:home|house)|kitchen|bathrooms?|bedrooms?|living\s+room|dining\s+room|family\s+room|attic|basement|closets?|pantry|laundry|hallways?|cabinets?|baseboards?|under\s+the\s+sink|garage)\b/i;
 const SAYS_OUTSIDE = /\b(?:outside|outdoors?|exterior|perimeter|around\s+the\s+(?:home|house|outside)|yard|lawn|garden|flower\s+beds?|landscape\s+beds?|lanai|patio|pool\s+(?:cage|deck|area)|fence(?:\s+line)?|driveway|eaves|soffits?|mulch|shrubs?|hedges?|trees?|palms?|turf)\b/i;
@@ -1408,7 +1419,7 @@ function statesWrongScope(text, { facts }) {
     if (named.length) return named.some((product) => wrongPlace(sentence, String(product.applied_where || '')));
     // Noun-led treatment claims too ("The treatment took place inside") (Codex
     // P1 #5964 r33).
-    if (!APPLICATION_VERB.test(sentence) && !TREATMENT_EVENT.test(sentence) && !COVERAGE_CLAIM.test(sentence)) return false;
+    if (!APPLICATION_VERB.test(sentence) && !TREATMENT_EVENT.test(sentence) && !COVERAGE_CLAIM.test(sentence) && !DIRECT_LOCATION_CLAIM.test(sentence)) return false;
     // With no name, each place claim must fit some recorded product.
     const wheres = products.map((product) => String(product.applied_where || ''));
     return (SAYS_INSIDE.test(sentence) && !wheres.some((where) => /inside|garage|entry/.test(where)))
@@ -1817,7 +1828,7 @@ function claimsUnrecordedWork(text, facts) {
 // A recorded application may not be denied: "No, Alpine WSG was not applied"
 // (Codex P1 #5964 r45). A negation tied to a place ("not applied inside") is
 // left to the scope check.
-const NO_PRODUCT_RE = /\b(?:no|nothing|none)\b[^.?!]*\b(?:applied|used|sprayed|put\s+down|spread|treated|applications?|products?)\b|\b(?:didn['’]?t|did\s+not|wasn['’]?t|weren['’]?t|was\s+not|were\s+not|never)\s+(?:\w+\s+){0,2}?(?:appl(?:y|ied)|use[ds]?|spray(?:ed)?|treat(?:ed)?|put\s+down|spread)\b/i;
+const NO_PRODUCT_RE = /\b(?:no|nothing|none)\b[^.?!]*\b(?:applied|used|sprayed|put\s+down|spread|treated|applications?|products?)\b|\b(?:didn['’]?t|did\s+not|wasn['’]?t|weren['’]?t|was\s+not|were\s+not|never)\s+(?:\w+\s+){0,2}?(?:appl(?:y|ied)|use[ds]?|spray(?:ed)?|treat(?:ed)?|put\s+down|spread)\b|\b(?:was|were|is|are)\s*n['’]?o?t\s+(?:one\s+of|part\s+of|among|included\s+in|in|on)\s+(?:the\s+|today['’]s\s+|this\s+|your\s+)?(?:products?|treatment|application|visit|service|list)\b|\bnot\s+(?:one\s+of\s+)?(?:the\s+)?products?\s+(?:used|applied)\b/i;
 function deniesRecordedApplication(text, facts) {
   const products = asArray(facts?.products);
   if (!products.length) return false;
@@ -1980,18 +1991,25 @@ function contradictsDiagnosis(text, facts) {
 
 // A method verb must fit how_applied even when it is not on a known list:
 // "Alpine WSG was poured" on a sprayed record (Codex P1 #5964 r51).
+const METHOD_SUBJECT = /\b(?:it|this|that|the\s+(?:product|treatment|application|method|material))\b/i;
+const METHOD_NOUN_RE = /\b(?:method|technique|application\s+method|delivery)\s+(?:was|is)\s+(?:an?\s+|by\s+|through\s+|via\s+)?([a-z]+)/i;
 const NEUTRAL_PARTICIPLES = new Set('applied used treated placed listed recorded noted mentioned included needed required chosen selected picked labeled labelled approved designed made intended scheduled completed finished targeted aimed rated registered put done found seen observed reported based focused concentrated limited kept left allowed'.split(' '));
 const PRODUCT_VERB_RE = /\b(?:was|were|got|been|is|are)\s+(?:\w+ly\s+)?([a-z]+(?:ed|en))\b|\b(?:we|i|tech\w*|technician|crew)\s+(?:\w+ly\s+)?([a-z]+ed)\b/gi;
 function statesUnrecordedMethod(text, facts) {
   const products = asArray(facts?.products).filter((product) => product?.name && product.how_applied);
   if (!products.length) return false;
   return clausesOf(text).some((clause) => {
+    // "It was poured", "The method was injection": with one product, a
+    // pronoun or method noun speaks about it (Codex P1 #5964 r64).
     const named = products.filter((product) => mentions(clause, product));
-    if (!named.length) return false;
+    const target = named.length ? named : (products.length === 1 && METHOD_SUBJECT.test(clause) ? products : []);
+    if (!target.length) return false;
+    const nounMethod = (METHOD_NOUN_RE.exec(clause) || [])[1];
+    if (nounMethod && target.every((product) => !normalizeKey(product.how_applied).includes(nounMethod.toLowerCase().slice(0, 5)))) return true;
     const verbs = [...clause.matchAll(PRODUCT_VERB_RE)].map((m) => (m[1] || m[2]).toLowerCase()).filter((verb) => !NEUTRAL_PARTICIPLES.has(verb));
     return verbs.some((verb) => {
       const stem = verb.replace(/(?:ied)$/, 'y').replace(/(?:ed|en)$/, '').replace(/(.)\1$/, '$1').slice(0, 5);
-      return named.every((product) => !normalizeKey(product.how_applied).includes(stem));
+      return target.every((product) => !normalizeKey(product.how_applied).includes(stem));
     });
   });
 }
@@ -2294,12 +2312,15 @@ const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}\\s+${INGESTED_AMOUNT}
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence) || EAT_VERB_RE.test(sentence))
     && EXPOSURE_WORD.test(sentence)
-    && (PERSON_EATS.test(sentence) || ((EATER_ACTS.test(sentence) || EATER_IN_SENTENCE.test(sentence)) && !PEST_EATING.test(sentence))));
+    && (PERSON_EATS.test(sentence) || ((EATER_ACTS.test(sentence) || (EATER_IN_SENTENCE.test(sentence) && !PASSIVE_NO_EATER.test(sentence))) && !PEST_EATING.test(sentence))));
 }
 // A person or pet right before the eating verb wins over a pest elsewhere in
 // the sentence: "My dog took a bite of bait that was gnawed by rats"
 // (pre-push audit, #5964).
 const PERSON_EATS = new RegExp(`(?:^|[^\\w])${PERSON}\\s+(?:\\w+\\s+){0,2}?${INGEST}\\b`, 'i');
+// "I noticed the bait was eaten": a passive with no person after "by" is pest
+// bait being taken, not an exposure (Codex P1 #5964 r64).
+const PASSIVE_NO_EATER = new RegExp(`\\b(?:was|were|got|been|is|are)\\s+(?:\\w+\\s+)?(?:eaten|consumed|gone|taken|chewed|nibbled|gnawed|cleaned\\s+out|emptied)\\b(?![^.?!]*\\bby\\s+${PERSON})`, 'i');
 const EATER_IN_SENTENCE = new RegExp(`(?:^|[^\\w])${PERSON}\\b`, 'i');
 // "Bit" stays bound to a product (Codex P1 #6038 r1): "mosquitoes bit me" is no ingestion.
 const EAT_VERB_RE = new RegExp(`\\b${EAT_VERBS.replace('|bit|bites?|biting|bitten', '')}\\b`, 'i');
