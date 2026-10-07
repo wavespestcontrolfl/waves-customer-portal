@@ -231,7 +231,8 @@ const BLINDSIDE = 'Blindside Herbicide';
 // October's whole-lawn bag is the Dimension 0.21% 18-0-10 row (20261007120500 swaps it in for
 // the staged Stonewall 15-0-15 line).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18];
+const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION, matrixMigration.ARENA_NEW];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -420,7 +421,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     4: [migration.NAMES.F24],
     5: [migration.NAMES.TET],
     6: [migration.NAMES.NT, migration.NAMES.DIM],
-    7: [],
+    7: [matrixMigration.SOP],
     8: [migration.NAMES.NT],
     9: [migration.NAMES.NT],
     10: [DIMENSION_18],
@@ -441,9 +442,15 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
       ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
       : spec);
-    const products = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => swapped(s)).map((s) => ({
-      productId: idOf(s[0]), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
+    // 20261007180000 adds its rows (the 0-0-50 in July is the one new default), turns the April Artavia row into Headway and renames Arena.
+    const matrixName = (name) => (name === matrixMigration.ARENA_OLD ? matrixMigration.ARENA_NEW : (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name));
+    const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => swapped(s)).map((s) => ({
+      productId: idOf(matrixName(s[0])), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
+    const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey).map((spec) => ({
+      productId: idOf(spec.name), defaultInPlan: spec.defaultInPlan, gates: spec.gates, applicationMode: spec.mode, ratePer1000: spec.rate, rateUnit: spec.unit,
+    }));
+    const products = [...staged, ...added];
     const items = resolved.filter((i) => i.product).map((i) => ({ ...i, product: { id: i.product.id, name: i.product.name, active: true }, mix: { amount: 1, amountUnit: 'fl oz', treatedSqft: 4000 } }));
     return {
       serviceId: 'visit', appointmentAssignment: {},
@@ -453,7 +460,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     };
   }
 
-  test.each(V13_GRASSES)('%s: each month prefills exactly the whole-lawn products (July none)', async (grass) => {
+  test.each(V13_GRASSES)('%s: each month prefills exactly the whole-lawn products (July the potash)', async (grass) => {
     await withGateAsync('true', async () => {
       for (const month of MONTHS) {
         const result = buildLawnCompletionDefaults(planFor(grass, month), { isLawn: true, propertyId: 'p', propertyMatchesProfile: true, history: { rows: [] } });
@@ -464,10 +471,10 @@ describe('completion defaults with the v13 protocol resolved', () => {
     });
   });
 
-  test('July carries no default and no "unregistered" explanation', async () => {
+  test('July prefills the potash (the one whole-lawn tool, the inspection stays) and carries no "unregistered" explanation', async () => {
     await withGateAsync('true', async () => {
       const result = buildLawnCompletionDefaults(planFor('bermuda', 7), { isLawn: true, propertyId: 'p', propertyMatchesProfile: true, history: { rows: [] } });
-      expect(result.items).toEqual([]);
+      expect(result.items.map((i) => i.product.name)).toEqual([matrixMigration.SOP]);
       expect(result.message).toBeNull();
     });
   });
@@ -743,10 +750,10 @@ describe('the material-cost audit reads the gate-aware program', () => {
     });
 
     test('a spot row is not priced: no amount, as in the plan; the whole-lawn rows around it still are', () => {
-      const withArena = [...catalog, { id: 'are', name: 'Arena 50 WDG', aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, needs_pricing: false }];
+      const withArena = [...catalog, { id: 'are', name: matrixMigration.ARENA_NEW, aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, needs_pricing: false }];
       const rows = new Map([['bermuda|May', new Map([['are', { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: {} }], ['tet', { applicationMode: 'broadcast', ratePer1000: 0.367, rateUnit: 'fl oz', gates: {} }]])]]);
       const result = auditScript.analyzeVisit({ trackKey: 'bermuda', track: v13.bermuda, visit: visitFor(5), products: withArena, options, v13Rows: rows });
-      expect(itemOf(result, 'Arena 50 WDG').mix).toBeNull();
+      expect(itemOf(result, matrixMigration.ARENA_NEW).mix).toBeNull();
       expect(itemOf(result, N.TET).mix.amount).toBeGreaterThan(0);
     });
 

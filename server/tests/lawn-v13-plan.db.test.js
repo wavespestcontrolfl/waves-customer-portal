@@ -3,6 +3,7 @@
 // completion-default gates say. Pinned older visits and a missing staged row get
 // no calculated products and a block; the staged visit gets the row's rate and
 // its sunny-turf limit. Synthetic data only.
+const ARENA = require('../models/migrations/20261007180000_lawn_v13_matrix_adds').ARENA_NEW;
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION, visitProtocolQuery } = require('../services/lawn-program');
@@ -47,7 +48,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
       label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true,
     }).returning('*');
     await knex('products_catalog').insert({
-      name: 'Arena 50 WDG', category: 'insecticide', default_rate_per_1000: 0.29, rate_unit: 'oz',
+      name: ARENA, category: 'insecticide', default_rate_per_1000: 0.29, rate_unit: 'oz',
       label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true,
     });
     const [old] = await knex('lawn_protocols').insert({ protocol_key: KEY, version: OLD_VERSION, name: 'Fixture old', status: 'active', grass_track: 'bermuda', region: 'swfl' }).returning('*');
@@ -60,7 +61,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
       });
     }
     // Spot rows on the staged May window: backpack work the plan must never size.
-    const [arena] = await knex('products_catalog').where({ name: 'Arena 50 WDG' });
+    const [arena] = await knex('products_catalog').where({ name: ARENA });
     const [celsius] = await knex('products_catalog').insert({ name: 'Celsius WG', category: 'herbicide', default_rate_per_1000: 0.085, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*');
     const [surfactant] = await knex('products_catalog').insert({ name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', default_rate_per_1000: 0.25, rate_unit: 'fl oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true }).returning('*');
     const stagedWindow = await knex('lawn_protocol_windows').where({ lawn_protocol_id: staged.id }).first();
@@ -267,8 +268,8 @@ describeDb('the v13 plan through PostgreSQL', () => {
     test('another selected product beside the apply-alone Tetrino holds the mix: block, no combined mixing order', async () => {
       setGates();
       const visit = await plannedVisit();
-      const result = await buildPlanForService(visit.id, { db: knex, selectedConditionalProductNames: ['Arena 50 WDG'] });
-      expect(result.mixCalculator.items.map((i) => i.product.name).sort()).toEqual(['Arena 50 WDG', 'Tetrino Insecticide']);
+      const result = await buildPlanForService(visit.id, { db: knex, selectedConditionalProductNames: [ARENA] });
+      expect(result.mixCalculator.items.map((i) => i.product.name).sort()).toEqual([ARENA, 'Tetrino Insecticide']);
       expect(codes(result)).toContain('lawn_v13_apply_alone');
       expect(result.status).toBe('blocked');
       expect(result.mixingOrder).toEqual([]);
@@ -317,7 +318,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
   });
 
   describe('spot rows get no calculated quantity (the one chokepoint)', () => {
-    const SPOTS = ['Arena 50 WDG', 'Celsius WG', 'LESCO 90/10 Nonionic Surfactant'];
+    const SPOTS = [ARENA, 'Celsius WG', 'LESCO 90/10 Nonionic Surfactant'];
     const select = { selectedConditionalProductNames: SPOTS };
 
     test('selected spot products stay selectable with a label-rate reference and the note, and carry no mix', async () => {
@@ -404,7 +405,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
       setGates();
       const stagedRow = await knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
         .join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id').where({ 'l.version': LAWN_V13_VERSION, 'p.product_name': 'Tetrino Insecticide' }).first('p.id', 'p.product_id');
-      const arena = await knex('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      const arena = await knex('products_catalog').where({ name: ARENA }).first();
       await knex('lawn_protocol_products').where({ id: stagedRow.id }).update({ product_id: link === 'arena' ? arena.id : null });
       try {
         const result = await plan(await plannedVisit());

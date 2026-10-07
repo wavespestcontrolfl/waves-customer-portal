@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
 const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProhibitedProductBlock } = require('./lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -520,6 +521,7 @@ const V13_GATE_NOTES = [
   { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'Not allowed in North Port this month; skip this product.' },
   { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port holds this product from June to September until the city confirms. Do not apply it at this visit.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
+  { key: 'moleCricketWaterInInches', text: (inches) => `Mole cricket nymph use: water in right after application with up to ${inches} inch (label); the 24-hour hold does not apply to this use.` },
   { key: 'delayWateringOrMowingHours', text: (hours) => `Delay watering (irrigation) or mowing for ${hours} hours after application (label).` },
   { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
   { key: 'noWaterIn', text: () => 'Do not water this in.' },
@@ -1655,6 +1657,12 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     const id = String(item.product.id);
     if (checked.has(id)) continue;
     checked.add(id);
+    // Not for home lawns (oxadiazon / Ronstar): a hard block like any other limit, so no amount is planned.
+    const prohibited = lawnProhibitedProductBlock(item.product);
+    if (prohibited) {
+      capped.set(id, [{ ...prohibited }]);
+      continue;
+    }
     const row = rows.get(id);
     const proposed = v13ProposedApplication(item.product, row, targets);
     const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))

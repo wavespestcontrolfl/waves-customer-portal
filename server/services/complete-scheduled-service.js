@@ -71,13 +71,14 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
+const { lawnProhibitedProductBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { FIRST_VISIT_DEFAULT_RATING, confirmFirstVisitUnderLock, firstVisitDefaultRating } = require('../services/pest-pressure/first-visit');
 const { activityScaleNames } = require('../services/pest-pressure/label');
 const { pestPressureConfigAllowsTechnicianRating } = require('../services/pest-pressure/technician-rating-gate');
-const { buildCompletionAdvisory, approvedReportProductFacts, withApplicationHold } = require('../services/service-report/report-data');
+const { buildCompletionAdvisory, approvedReportProductFacts, withApplicationHold, withApplicationWaterIn } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
@@ -1299,16 +1300,21 @@ function packetPhotoUploadRequiredError(uploadResult) {
 
 // The report facts frozen per applied product at completion. A v13 protocol row that holds watering
 // and mowing after the use (Acelepryn on caterpillars, gate delayWateringOrMowingHours) freezes its
-// hold into the product's facts, so the customer's instruction carries it (grub use takes none).
+// hold into the product's facts, so the customer's instruction carries it (grub use takes none). Talak's
+// mole cricket use (gate moleCricketWaterInInches) freezes a water-in instead of the product's 24-hour hold.
 function freezeReportProductFacts({ productIds, submitted = [], catalogById, plan }) {
   const protocolRows = plan?.protocol?.structured?.products || [];
   const facts = {};
   for (const productId of productIds) {
     const use = (submitted || []).find((p) => canonicalProductId(p?.productId) === productId);
     const row = protocolRows.find((r) => canonicalProductId(r?.productId) === productId && r?.gates?.delayWateringOrMowingHours);
-    facts[productId] = withApplicationHold(
-      approvedReportProductFacts(catalogById.get(productId) || null),
-      { hours: row?.gates?.delayWateringOrMowingHours, targets: use?.targets },
+    const waterInRow = protocolRows.find((r) => canonicalProductId(r?.productId) === productId && r?.gates?.moleCricketWaterInInches);
+    facts[productId] = withApplicationWaterIn(
+      withApplicationHold(
+        approvedReportProductFacts(catalogById.get(productId) || null),
+        { hours: row?.gates?.delayWateringOrMowingHours, targets: use?.targets },
+      ),
+      { inches: waterInRow?.gates?.moleCricketWaterInInches, targets: use?.targets },
     );
   }
   return facts;
@@ -4664,6 +4670,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           db,
         );
         return ({ status: 422, body: internalOnlyProductsBlock });
+      }
+    }
+    // Oxadiazon (Ronstar) is not for home lawns: a fresh lawn closeout that lists one is refused
+    // before any write. A same-key replay or resume of a committed completion is left alone.
+    if (claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn' && Array.isArray(products) && products.length) {
+      const prohibited = await lawnProhibitedProductBlocks(db, products);
+      if (prohibited.length) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(prohibited[0].code), db);
+        return ({ status: 400, body: lawnProhibitedProductsBlockPayload(prohibited) });
       }
     }
 

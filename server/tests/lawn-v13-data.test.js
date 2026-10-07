@@ -18,6 +18,7 @@ const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixe
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
+const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 // Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
@@ -47,13 +48,15 @@ describe('the v13 recipe', () => {
     }
   });
 
-  test('what the program drops stays out (no Pennant, no July potash, no March large patch spray, no SpeedZone)', () => {
+  test('what the program drops stays out (no Pennant, no March large patch spray, no SpeedZone); July potash and Headway are in on purpose (20261007180000)', () => {
     const text = JSON.stringify(v13);
-    expect(text).not.toMatch(/pennant|k-?flow|potash|speedzone|medallion|t-storm|eagle|sedgehammer|cleary|harrell|atrazine|headway|image for southern/i);
+    expect(text).not.toMatch(/pennant|k-?flow|speedzone|medallion|t-storm|eagle|sedgehammer|cleary|harrell|atrazine|image for southern/i);
     const jul = visitFor(7);
     expect(jul.primary).toMatch(/scout visit/i);
-    expect(jul.primary).not.toMatch(/\bLESCO|Dimension|Stonewall/);
-    expect(visitFor(3).secondary).not.toMatch(/velista|gravex/i);
+    expect(jul.primary).not.toMatch(/Dimension|Stonewall|24-0-11/);
+    expect(lines(jul.primary).filter((l) => / — /.test(l)).map(nameOfLine)).toEqual([matrixMigration.SOP]);
+    // March has no large patch spray (Velista there is for rust and leaf spot only).
+    expect(visitFor(3).secondary).not.toMatch(/large patch/i);
     expect(visitFor(3).secondary).toMatch(/artavia/i);
   });
 
@@ -86,7 +89,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [matrixMigration.SOP], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
     ]);
   });
 });
@@ -165,7 +168,7 @@ describe('migration 20261007120500: the October recipe line and the staged row i
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION, matrixMigration.ARENA_NEW];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -296,8 +299,12 @@ describe('staged migration 20261005120000', () => {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
       // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
-      const whole = rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0]));
-      const spots = rowsForWindow.filter((s) => !s[6]).map((s) => s[0]);
+      // 20261007180000 renames the Arena row, turns the April Artavia row into Headway, and adds its own rows.
+      const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey);
+      const after = (name) => (name === matrixMigration.ARENA_OLD ? matrixMigration.ARENA_NEW
+        : (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name));
+      const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0])), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
+      const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name)];
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
@@ -344,7 +351,8 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
     for (const month of MONTHS) {
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
-    const specNames = fixMigration.PRODUCTS.map((p) => p.name);
+    // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row.
+    const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), matrixMigration.ARENA_NEW];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
     const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));

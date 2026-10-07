@@ -83,7 +83,9 @@ async function latestComparableGroupApplication(knex, customerId, product, group
 // The repeat-group rule (never the same chemical group twice in a row) has two named exemptions
 // (owner 2026-10-06); every other same-group repeat behaves as before:
 //   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
-//   take_all_artavia_pair: the labeled take-all pair is Artavia twice, 28 days apart (label spacing:
+//   take_all_artavia_pair: the planned take-all pair is Artavia, then Headway 28 days later (Headway adds
+//     propiconazole, group 3, to the same group 11 azoxystrobin, so group 11 repeats once: this is the
+//     named exception for it); Artavia twice, 28 days apart, stays allowed (label spacing:
 //     TAKE_ALL_PAIR_MIN_DAYS to TAKE_ALL_PAIR_MAX_DAYS between visits; an earlier repeat is a normal
 //     repeat), ONLY when both applications recorded a take-all target (no target evidence, no
 //     exemption), and ONLY for the SECOND application of the seasonal pair: exactly one take-all
@@ -94,6 +96,9 @@ const TAKE_ALL_PAIR_MAX_DAYS = 45;
 // Two spacings of 45 days at most, so a third application still sees the first.
 const TAKE_ALL_SEASON_DAYS = 90;
 const TAKE_ALL_TARGET = /\btake all\b/;
+// The pair is Artavia then Headway (or Artavia twice): the second product, and the first one, by name.
+const TAKE_ALL_SECOND = /\b(artavia|headway)\b/;
+const TAKE_ALL_FIRST = /\bartavia\b/;
 
 function dayNumber(value) {
   const time = Date.parse(`${String(value instanceof Date ? value.toISOString() : value || '').slice(0, 10)}T00:00:00Z`);
@@ -112,12 +117,12 @@ function productIsPreEmergent(product, plan) {
     || isPreEmergent(product || {});
 }
 
-// The customer's take-all Artavia applications in the season window before this one (completed
-// visits only, the same product, a take-all target recorded). A failed read throws when strict, else
+// The customer's take-all pair applications in the season window before this one (completed
+// visits only, this product or the last one's, a take-all target recorded). A failed read throws when strict, else
 // reads as none, so no exemption.
 // Scoped to the visit's property: a spray at another of the customer's properties is not this
 // property's pair. A visit with no property counts only history that also names none.
-async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict = false, propertyId = null } = {}) {
+async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate, { strict = false, propertyId = null } = {}) {
   const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
@@ -125,7 +130,7 @@ async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { s
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
-    .where('sp.product_name', product.name)
+    .whereIn('sp.product_name', productNames)
     .orderBy('sr.service_date', 'desc')
     .select('sr.service_date', 'sp.product_name', 'sp.targets'))
     .catch((err) => { if (strict) throw err; return []; });
@@ -134,10 +139,12 @@ async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { s
 }
 
 async function isTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) {
-  if (!/\bartavia\b/.test(normalizeText(product.name)) || normalizeText(last.product_name) !== normalizeText(product.name)) return false;
+  // Artavia after Artavia, or Headway after Artavia; the first of the pair is always Artavia.
+  if (!TAKE_ALL_SECOND.test(normalizeText(product.name)) || !TAKE_ALL_FIRST.test(normalizeText(last.product_name))) return false;
+  if (TAKE_ALL_FIRST.test(normalizeText(product.name)) && normalizeText(last.product_name) !== normalizeText(product.name)) return false;
   if (!hasTakeAllTarget(input.targets) || !hasTakeAllTarget(last.targets)) return false;
-  const history = await takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict, propertyId });
-  if (history.length !== 1) return false;
+  const history = await takeAllArtaviaHistory(knex, customerId, [...new Set([product.name, last.product_name])], serviceDate, { strict, propertyId });
+  if (history.length !== 1 || !TAKE_ALL_FIRST.test(normalizeText(history[0].product_name))) return false;
   const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
   return apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
     && dayNumber(history[0].service_date) === dayNumber(last.service_date);

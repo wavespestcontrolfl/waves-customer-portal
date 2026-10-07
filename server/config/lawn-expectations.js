@@ -109,6 +109,7 @@ const PRODUCT_CLASS_ENTRIES = [
   ['LESCO 0-0-18 Bio KMAG 1% Fe 1% Mg 1% Mn 2.17% S Organic Turf Granular Fertilizer', FAMILY.POTASSIUM],
   ['LESCO Elite 0-0-28', FAMILY.POTASSIUM],
   ['LESCO Elite 0-0-28 AM 7.5% Fe 6.5% Mn 9% S Turfgrass Granular Fertilizer', FAMILY.POTASSIUM],
+  ['LESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer', FAMILY.POTASSIUM],
 
   // Iron / micronutrient foliar (transient, never "behind")
   ['Chelated AM + Micros', FAMILY.IRON_MICROS],
@@ -141,6 +142,8 @@ const PRODUCT_CLASS_ENTRIES = [
   // lawn visits in the 10-02 P13 replay carried it unmapped.
   ['Talstar P', FAMILY.INSECTICIDE],
   ['Arena 50 WDG', FAMILY.INSECTICIDE],
+  // The Arena row is renamed to the Florida-only S.E. packaging (same EPA 59639-152) by 20261007180000.
+  ['Arena S.E. 50 WDG Insecticide 2.5 lb. (Florida Only)', FAMILY.INSECTICIDE],
   // Acelepryn is a preventive grub/caterpillar product: never curative.
   ['Acelepryn Xtra', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
   ['Acelepryn Insecticide', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
@@ -162,6 +165,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Tenacity Herbicide', null],
   ['Certainty Turf Herbicide', null],
   ['Blindside Herbicide', null],
+  // Fire ant bait (optional add-on the office prices): no result timing the owner has approved.
+  ['Advion Fire Ant Bait', null],
 ];
 
 function normalizeProductName(name) {

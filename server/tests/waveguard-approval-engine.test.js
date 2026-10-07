@@ -293,6 +293,28 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([ARTAVIA], [other], { productId: 'base', targets: ['Take-all'] })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
     });
 
+    test('Artavia then Headway is the planned take-all pair: the Headway pass is exempt on the same evidence and spacing; Headway first, a third pass or other targets are not', async () => {
+      const HEADWAY = { id: 'base', name: 'Headway Fungicide', category: 'fungicide', frac_group: '11' };
+      const first = (date, name = 'Artavia 2 SC (Azoxy)', targets = ['Take-all']) => prior({ service_date: date, product_name: name, product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets });
+      const now = { productId: 'base', serviceDate: '2026-06-10', targets: ['Take-all'] };
+      const codes = async (history, input = now, product = HEADWAY) => repeats(await run([product], history, input)).map((b) => b.code);
+      // Artavia 28 days before: the second pass of the pair.
+      expect(await codes([first('2026-05-13')])).toEqual([]);
+      // Spacing 28 to 45 days: 27 and 46 days are a normal review.
+      expect(await codes([first('2026-05-14')])).toEqual(['fungicide_frac_rotation_approval']);
+      expect(await codes([first('2026-04-25')])).toEqual(['fungicide_frac_rotation_approval']);
+      // Evidence on both sides: no take-all target on this pass, or on the Artavia, is a normal review.
+      expect(await codes([first('2026-05-13')], { ...now, targets: ['Gray leaf spot'] })).toEqual(['fungicide_frac_rotation_approval']);
+      expect(await codes([first('2026-05-13', 'Artavia 2 SC (Azoxy)', ['Large patch'])])).toEqual(['fungicide_frac_rotation_approval']);
+      // A third pass (Artavia, Headway, then Headway again) or Headway as the first pass: review.
+      expect(await codes([first('2026-05-13', 'Headway Fungicide'), first('2026-04-15')])).toEqual(['fungicide_frac_rotation_approval']);
+      expect(await codes([first('2026-05-13', 'Headway Fungicide')])).toEqual(['fungicide_frac_rotation_approval']);
+      // Artavia after Headway is not the planned order.
+      expect(await codes([first('2026-05-13', 'Headway Fungicide')], now, ARTAVIA)).toEqual(['fungicide_frac_rotation_approval']);
+      // Artavia, Headway, then Artavia is a third pass.
+      expect(await codes([first('2026-05-13', 'Headway Fungicide'), first('2026-04-15')], now, ARTAVIA)).toEqual(['fungicide_frac_rotation_approval']);
+    });
+
     test('only the SECOND application of the seasonal pair is exempt: a third is a normal review', async () => {
       const artavia = (date, targets = ['Take-all']) => prior({ service_date: date, product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets });
       const now = { productId: 'base', serviceDate: '2026-06-10', targets: ['Take-all'] };

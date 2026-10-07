@@ -279,6 +279,26 @@ function withApplicationHold(facts, { hours, targets } = {}) {
   return { ...facts, wateringRule: checked.rule, mowHoldDays: facts.mowHoldDays ?? normalizeMowHoldDays(Math.ceil(wait / 24)) };
 }
 
+// A v13 protocol row can also turn a product's catalog hold into a water-in for ONE use: Talak 7.9 F
+// on mole cricket nymphs (row gate moleCricketWaterInInches; label: "water immediately with up to 0.5
+// inches of water") against the product's 24-hour hold for its other uses (chinch bugs, caterpillars).
+// The use's recorded targets decide: a mole cricket target replaces the frozen rule with the water-in,
+// even beside another target (the water-in does not hurt the other uses); any other target or none
+// leaves the facts exactly as they were, and facts not approved for reports (null) stay null. The
+// label gives no mowing wait for this use, so none is claimed.
+const MOLE_CRICKET_TARGET = /mole[\s-]*crickets?/i;
+function withApplicationWaterIn(facts, { inches, targets } = {}) {
+  const amount = Number(inches);
+  if (!facts || !(amount > 0)) return facts;
+  if (!(Array.isArray(targets) ? targets : []).some((target) => MOLE_CRICKET_TARGET.test(String(target)))) return facts;
+  const checked = validateRule({
+    mode: 'water_in', water_in_inches: amount, water_in_by_hours: 1, source: 'label',
+    label_note: `Label: water in right after application with up to ${amount} inch of water (mole cricket use).`,
+  });
+  if (!checked.valid) return facts;
+  return { ...facts, wateringRule: checked.rule, mowHoldDays: null };
+}
+
 // frozenFacts: the completion-time { [productId]: facts|null } map from the
 // record's reportIdentitySnapshot. A product id PRESENT in the map (null =
 // not approved at completion) never consults the live catalog — a later
@@ -7644,6 +7664,7 @@ module.exports = {
   inferCatalogProductType,
   approvedReportProductFacts,
   withApplicationHold,
+  withApplicationWaterIn,
   attachApprovedReportProductFacts,
   completedProtocolActionLabels,
   completedProtocolActionEntries,
