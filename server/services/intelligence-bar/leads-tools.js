@@ -172,8 +172,8 @@ ALWAYS show the operator the before → after values and get approval before sav
   },
   {
     name: 'convert_lead',
-    description: `Convert one lead to a customer: links the lead to an EXISTING customer record and marks the lead won — the same action as the Leads page "Convert to Customer" button. It never creates a customer: if the person is not a customer yet, use create_customer first (its own card), then call this with the new customer's id. Refused when the lead is already won or is already linked to a different customer.
-Side effects (all shown on the card): lead status → won, converted now, marked qualified; the lead's estimates with no customer yet are attached to this customer; a converted entry in the lead's history; the ad-attribution funnel row (if any) advances to booked; the lead becomes eligible for the next daily qualified-lead conversion upload to Google Ads and Meta. No message is sent to the customer.
+    description: `Convert one lead to a customer: links the lead to an EXISTING customer record and marks the lead won — the same action as the Leads page "Convert to Customer" button. It never creates a customer: if the person is not a customer yet, use create_customer first (its own card), then call this with the new customer's id. Refused only when the conversion is already complete (the lead is linked to a customer AND has a converted time) or the lead is linked to a different customer; a lead marked won by hand with no customer linked can be linked here.
+Side effects (all shown on the card): lead status → won, marked qualified, converted time set now unless the lead already has one; the lead's customer-less estimates shown on the card are attached to this customer (one added later is not); a converted entry in the lead's history; the ad-attribution funnel row (if any) advances to booked; the lead becomes eligible for the next daily qualified-lead conversion upload to Google Ads and Meta. No message is sent to the customer.
 Use for: "convert the Henderson lead to a customer", "make lead #42 a customer so I can send the estimate"
 Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
@@ -872,7 +872,7 @@ async function updateLeadContact(input) {
 const leadDisplayName = (row) => `${row.first_name || ''} ${row.last_name || ''}`.trim() || '(no name)';
 const addressLine = (parts) => parts.map(p => (p === null || p === undefined ? '' : String(p).trim())).filter(Boolean).join(', ') || null;
 
-function convertPreview(lead, customer) {
+function convertPreview(lead, customer, estimateIds) {
   return {
     lead_id: lead.id,
     lead_name: leadDisplayName(lead),
@@ -898,6 +898,9 @@ function convertPreview(lead, customer) {
     _lead_updated_at: lead.updated_at ? new Date(lead.updated_at).toISOString() : null,
     // ...and this as the customer version the conversion UPDATE re-asserts.
     _customer_updated_at: customer.updated_at ? new Date(customer.updated_at).toISOString() : null,
+    // The customer-less estimates the conversion would attach (sorted ids).
+    // The route pins this set; the confirmed attach is limited to it.
+    estimate_ids: estimateIds,
   };
 }
 
@@ -925,7 +928,8 @@ async function convertLead(input) {
     return { error: `Lead ${leadName} is already converted to this customer. Nothing to do.`, code: 'already_converted' };
   }
 
-  const preview = convertPreview(lead, customer);
+  const { leadEstimateIdsToLink } = require('../lead-estimate-link');
+  const preview = convertPreview(lead, customer, await leadEstimateIdsToLink({ lead }));
 
   if (input.confirmed !== true) {
     return {
@@ -937,7 +941,8 @@ async function convertLead(input) {
 
   // The route pins the status and version the card showed; without them this
   // is not an approved card.
-  if (!input._expected_status || !input._expected_customer_updated_at) {
+  const pinnedEstimates = input._approved_estimate_ids;
+  if (!input._expected_status || !input._expected_customer_updated_at || !Array.isArray(pinnedEstimates)) {
     return { error: 'This conversion has no approved card. Rebuild the confirmation card.', preview_changed: true };
   }
   const result = await leadAttribution.convertLeadToCustomer(lead.id, {
@@ -950,6 +955,7 @@ async function convertLead(input) {
     // so the history entry matches the row instead of logging $0.
     monthlyValue: lead.monthly_value,
     initialServiceValue: lead.initial_service_value,
+    onlyEstimateIds: pinnedEstimates,
   });
   if (result.error) {
     return result.status === 409 ? { error: result.error, preview_changed: true } : { error: result.error };
@@ -964,15 +970,25 @@ async function convertLead(input) {
     new_status: 'won',
     customer_id: customer.id,
     customer_name: customerName,
-    ...estimateOutcome(result.estimates),
+    ...await conversionOutcome(result, lead, pinnedEstimates),
   };
 }
 
 // The best-effort estimate attach, reported: a failure is a warning (a
 // partial outcome), never a clean Done.
-function estimateOutcome(estimates) {
-  if (estimates?.failed) return { warning: "Converted, but the lead's estimates were not attached — attach them from the estimate page." };
-  return estimates?.linked ? { estimates_attached: estimates.linked } : {};
+async function conversionOutcome({ estimates, funnel }, lead, pinnedEstimates) {
+  const warnings = [];
+  if (estimates?.failed) warnings.push("Converted, but the lead's estimates were not attached — attach them from the estimate page.");
+  // Same bridge warning as the lead-status tools: never a silent Done.
+  if (funnel?.reason === 'error') warnings.push("Converted, but mirroring it onto the lead's ad-attribution funnel row failed — attribution reporting may lag this conversion.");
+  // An estimate that became eligible after the card was not attached.
+  const { leadEstimateIdsToLink } = require('../lead-estimate-link');
+  const skipped = estimates?.failed ? [] : (await leadEstimateIdsToLink({ lead })).filter(id => !pinnedEstimates.includes(id));
+  return {
+    estimates_attached: estimates?.linked || 0,
+    ...(skipped.length ? { estimates_not_attached: `${skipped.length} estimate(s) added after the card were not attached` } : {}),
+    ...(warnings.length ? { warning: warnings.join(' ') } : {}),
+  };
 }
 
 async function previewBulkLeadUpdate(input) {

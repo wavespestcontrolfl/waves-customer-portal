@@ -2846,6 +2846,20 @@ describe('linkLeadEstimatesToCustomer', () => {
     expect(ops[0].patch.customer_id).toBe('cust-9');
   });
 
+  test('onlyEstimateIds: an estimate tagged after the card is not attached; an unpinned FK estimate is left alone', async () => {
+    const taggedRows = [
+      { id: 'est-a', estimate_data: JSON.stringify({ lead_id: 'lead-2' }) },
+      { id: 'est-late', estimate_data: JSON.stringify({ lead_id: 'lead-2' }) },
+    ];
+    const { database, ops } = makeBackfillDb({ rowsUpdated: 1, taggedRows });
+    await linkLeadEstimatesToCustomer({ database, lead: { id: 'lead-2', estimate_id: null }, customerId: 'cust-9', onlyEstimateIds: ['est-a'] });
+    const update = ops.find((o) => o.patch);
+    expect(update.wheres).toContainEqual(['whereIn', 'id', ['est-a']]);
+    const fk = makeBackfillDb({ rowsUpdated: 1 });
+    expect(await linkLeadEstimatesToCustomer({ database: fk.database, lead: { id: 'lead-1', estimate_id: 'est-1' }, customerId: 'cust-9', onlyEstimateIds: [] })).toBe(0);
+    expect(fk.ops).toHaveLength(0);
+  });
+
   test('falls back to the estimate_data.lead_id mirror (exact id, not contact) when there is no FK link', async () => {
     const taggedRows = [
       { id: 'est-a', estimate_data: JSON.stringify({ lead_id: 'lead-2' }) },

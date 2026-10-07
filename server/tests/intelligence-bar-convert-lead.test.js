@@ -22,6 +22,7 @@ jest.mock('../services/lead-funnel-bridge', () => ({
 jest.mock('../services/lead-estimate-link', () => ({
   settleRepeatFunnelRow: jest.fn().mockResolvedValue(undefined),
   linkLeadEstimatesToCustomer: jest.fn().mockResolvedValue(1),
+  leadEstimateIdsToLink: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../services/lead-attribution', () => ({
   ...jest.requireActual('../services/lead-attribution'),
@@ -148,7 +149,7 @@ describe('preview (unconfirmed)', () => {
 });
 
 describe('confirmed', () => {
-  const pins = { _expected_status: 'estimate_sent', _expected_updated_at: LEAD_UPDATED.toISOString(), _expected_customer_updated_at: CUSTOMER.updated_at.toISOString() };
+  const pins = { _expected_status: 'estimate_sent', _expected_updated_at: LEAD_UPDATED.toISOString(), _expected_customer_updated_at: CUSTOMER.updated_at.toISOString(), _approved_estimate_ids: [] };
 
   test('runs the shared convert with the card\'s status and version as the seen lead', async () => {
     install();
@@ -163,10 +164,11 @@ describe('confirmed', () => {
       // The lead's own (empty) amounts ride through, never undefined → "$0".
       monthlyValue: null,
       initialServiceValue: null,
+      onlyEstimateIds: [],
     });
     expect(res).toEqual({
       success: true, lead_id: LEAD_ID, lead_name: 'Testa Lead', old_status: 'estimate_sent', new_status: 'won',
-      customer_id: CUSTOMER_ID, customer_name: 'Testa Lead',
+      customer_id: CUSTOMER_ID, customer_name: 'Testa Lead', estimates_attached: 0,
     });
   });
 
@@ -185,6 +187,43 @@ describe('confirmed', () => {
     const res = await executeLeadsTool('convert_lead', { lead_id: LEAD_ID, customer_id: CUSTOMER_ID, confirmed: true, ...pins });
     expect(res.warning).toBe("Converted, but the lead's estimates were not attached — attach them from the estimate page.");
     expect(require('../services/intelligence-bar/outcomes').executionOutcome(res)).toBe('partially_completed');
+  });
+
+  test('the preview resolves the estimate set the conversion would attach', async () => {
+    install();
+    require('../services/lead-estimate-link').leadEstimateIdsToLink.mockResolvedValueOnce(['est-a', 'est-b']);
+    const res = await executeLeadsTool('convert_lead', { lead_id: LEAD_ID, customer_id: CUSTOMER_ID });
+    expect(res.estimate_ids).toEqual(['est-a', 'est-b']);
+  });
+
+  test('an estimate added after the card is not attached, and the result says so (codex #6099 r3)', async () => {
+    install();
+    leadAttribution.convertLeadToCustomer.mockResolvedValue({ lead: {}, estimates: { linked: 1 }, funnel: { reason: 'advanced' } });
+    // The confirmed run's own preview read, then the after-commit check.
+    require('../services/lead-estimate-link').leadEstimateIdsToLink.mockResolvedValueOnce(['est-a']).mockResolvedValueOnce(['est-late']);
+    const res = await executeLeadsTool('convert_lead', { lead_id: LEAD_ID, customer_id: CUSTOMER_ID, confirmed: true, ...pins, _approved_estimate_ids: ['est-a'] });
+    expect(leadAttribution.convertLeadToCustomer.mock.calls[0][1].onlyEstimateIds).toEqual(['est-a']);
+    expect(res).toMatchObject({ success: true, estimates_attached: 1, estimates_not_attached: '1 estimate(s) added after the card were not attached' });
+    expect(res.warning).toBeUndefined();
+  });
+
+  test('a failed funnel mirror is a warning (partially_completed), independent of the estimate warning', async () => {
+    install();
+    leadAttribution.convertLeadToCustomer.mockResolvedValue({ lead: {}, estimates: { linked: 0 }, funnel: { reason: 'error' } });
+    const res = await executeLeadsTool('convert_lead', { lead_id: LEAD_ID, customer_id: CUSTOMER_ID, confirmed: true, ...pins });
+    expect(res.warning).toBe("Converted, but mirroring it onto the lead's ad-attribution funnel row failed — attribution reporting may lag this conversion.");
+    expect(require('../services/intelligence-bar/outcomes').executionOutcome(res)).toBe('partially_completed');
+    leadAttribution.convertLeadToCustomer.mockResolvedValue({ lead: {}, estimates: { failed: true }, funnel: { reason: 'error' } });
+    const both = await executeLeadsTool('convert_lead', { lead_id: LEAD_ID, customer_id: CUSTOMER_ID, confirmed: true, ...pins });
+    expect(both.warning).toMatch(/estimates were not attached.*funnel row failed/);
+  });
+
+  test('without the estimate pin it is not an approved card', async () => {
+    install();
+    const { _approved_estimate_ids: _drop, ...rest } = pins;
+    const res = await executeLeadsTool('convert_lead', { lead_id: LEAD_ID, customer_id: CUSTOMER_ID, confirmed: true, ...rest });
+    expect(res).toMatchObject({ preview_changed: true });
+    expect(leadAttribution.convertLeadToCustomer).not.toHaveBeenCalled();
   });
 
   test('without the customer version pin it is not an approved card', async () => {
@@ -274,6 +313,27 @@ describe('convertLeadToCustomer (POST /api/admin/leads/:id/convert body)', () =>
     const second = installConvert();
     await convertLeadToCustomer(LEAD_ID, { customerId: CUSTOMER_ID, seenStatus: 'estimate_sent', monthlyValue: '89.00', initialServiceValue: '149.00' });
     expect(second.activities.insert.mock.calls[0][0].description).toBe(`Converted to customer (${CUSTOMER_ID}). Monthly: $89.00, Initial: $149.00`);
+  });
+
+  test('card path keeps an existing converted time and attaches only the pinned estimates; the route re-dates and attaches all', async () => {
+    const link = require('../services/lead-estimate-link').linkLeadEstimatesToCustomer;
+    const card = { customerId: CUSTOMER_ID, seenStatus: 'won', seenUpdatedAt: LEAD_UPDATED.toISOString(), expectedStatus: 'won', expectedCustomerUpdatedAt: CUSTOMER.updated_at.toISOString() };
+    const { leads } = installConvert({ lead: { ...LEAD, status: 'won', converted_at: LEAD_UPDATED } });
+    const res = await convertLeadToCustomer(LEAD_ID, { ...card, onlyEstimateIds: ['est-a'] });
+    expect(res.funnel).toEqual({ reason: 'advanced' });
+    expect(leads.update.mock.calls[0][0].converted_at).toEqual({ sql: 'COALESCE(converted_at, now())', bindings: undefined });
+    expect(link).toHaveBeenCalledWith(expect.objectContaining({ onlyEstimateIds: ['est-a'] }));
+    // A card without the pin attaches nothing rather than everything.
+    link.mockClear();
+    installConvert();
+    await convertLeadToCustomer(LEAD_ID, { ...card, seenStatus: 'estimate_sent', expectedStatus: 'estimate_sent' });
+    expect(link).toHaveBeenCalledWith(expect.objectContaining({ onlyEstimateIds: [] }));
+    // Route path: unchanged.
+    link.mockClear();
+    const route = installConvert();
+    await convertLeadToCustomer(LEAD_ID, { customerId: CUSTOMER_ID, seenStatus: 'estimate_sent' });
+    expect(route.leads.update.mock.calls[0][0].converted_at).toEqual(expect.any(Date));
+    expect(link.mock.calls[0][0].onlyEstimateIds).toBeUndefined();
   });
 
   test('a failed estimate attach is reported, the conversion still stands', async () => {
@@ -425,13 +485,23 @@ describe('authorization contract', () => {
     expect(c.effects).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'customer', label: 'Lead Testa Lead: status estimate_sent → won, linked to customer Testa Lead', before: 'estimate_sent', after: 'won' }),
     ]));
-    for (const re of [/customer record for Testa Lead is not changed/, /converted now and marked qualified/, /funnel stage advances toward 'booked'/,
-      /Tries to attach this lead's estimates.*if that step fails, the result says so/, /converted entry is appended/, /Google Ads and Meta as a qualified-lead conversion/,
+    for (const re of [/customer record for Testa Lead is not changed/, /marked qualified and stamped converted now \(an existing converted time is kept\)/, /funnel stage advances toward 'booked'/,
+      /^No customer-less estimates for this lead to attach$/, /converted entry is appended/, /Google Ads and Meta as a qualified-lead conversion/,
       /No message is sent to the customer/, /^lead: Testa Lead \(estimate_sent\)/, /^customer: Testa Lead — /]) {
       expect(labels).toEqual(expect.arrayContaining([expect.stringMatching(re)]));
     }
     // Curated: the raw preview keys are not dumped as extra lines.
     expect(labels.some(l => /^lead id:|^customer id:/.test(l))).toBe(false);
+  });
+
+  test('the card names the estimate set it will attach (codex #6099 r3)', () => {
+    const c = buildContract({ toolName: 'convert_lead', params: {}, displayParams: {},
+      preview: { ...preview, estimate_ids: ['aaaaaaaa-1111-4111-8111-111111111111', 'bbbbbbbb-2222-4222-8222-222222222222'] } });
+    expect(c.effects.map(e => e.label)).toEqual(expect.arrayContaining([
+      'Tries to attach 2 estimate(s) for this lead to this customer (aaaaaaaa, bbbbbbbb); if that fails, the result says so. An estimate added after this card is not attached',
+    ]));
+    const other = buildContract({ toolName: 'convert_lead', params: {}, displayParams: {}, preview: { ...preview, estimate_ids: ['aaaaaaaa-1111-4111-8111-111111111111'] } });
+    expect(other.preview_fingerprint).not.toBe(c.preview_fingerprint);
   });
 
   test('the preview fingerprint binds the lead and customer versions', () => {

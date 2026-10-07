@@ -185,9 +185,12 @@ function conversionAmountsText(monthlyValue, initialServiceValue) {
   return ` Monthly: $${monthlyValue || 0}, Initial: $${initialServiceValue || 0}`;
 }
 
-// `onEstimateLink` (optional): called with { linked: n } or { failed: true }
-// for the best-effort estimate attach below, for a caller that reports it.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId, onEstimateLink } = {}) {
+// For a caller that reports its outcome (the bar's convert_lead card):
+// `onOutcome` is called with { funnel } (settleWonFunnelRow's result) and
+// { estimates: { linked: n } | { failed: true } } (the best-effort attach);
+// `onlyEstimateIds` limits the attach to the set the card showed;
+// `keepConvertedAt` keeps an existing first-win timestamp.
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId, bookingId, onOutcome, onlyEstimateIds, keepConvertedAt } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -195,7 +198,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   // waveguard_tier that the quote flow already stored for lead-ROI analytics.
   const updates = {
     status: 'won',
-    converted_at: new Date(),
+    converted_at: keepConvertedAt ? db.raw('COALESCE(converted_at, now())') : new Date(),
     is_qualified: true,
     updated_at: new Date(),
   };
@@ -237,22 +240,22 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   }
 
   const linkedCustomer = customerId || null;
-  await settleWonFunnelRow(leadId, linkedCustomer, estimateId || null);
+  const report = onOutcome || (() => {});
+  report({ funnel: await settleWonFunnelRow(leadId, linkedCustomer, estimateId || null) });
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
   // a lead estimate kept customer_id = NULL and was invisible/unbookable). Lazy
   // require breaks the lead-estimate-link ⇄ lead-attribution cycle. Best-effort:
   // a backfill miss must never break the conversion.
-  const reportEstimateLink = onEstimateLink || (() => {});
   if (linkedCustomer) {
     try {
       const lead = await db('leads').where('id', leadId).first('id', 'estimate_id', 'phone', 'email');
       const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
-      reportEstimateLink({ linked: await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer, throwOnError: Boolean(onEstimateLink) }) });
+      report({ estimates: { linked: await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer, throwOnError: Boolean(onOutcome), onlyEstimateIds }) } });
     } catch (err) {
       logger.warn(`[LeadAttribution] estimate→customer backfill failed for lead ${leadId}: ${err.message}`);
-      reportEstimateLink({ failed: true });
+      report({ estimates: { failed: true } });
     }
   }
 
@@ -286,8 +289,9 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 // `expectedCustomerUpdatedAt` (card path, required with expectedStatus): the
 // same UPDATE also requires the target customer to be live at the version the
 // card showed (codex #6099 r2).
-// Returns { lead, estimates: { linked } | { failed: true } }.
-async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthlyValue, initialServiceValue, waveguardTier, seenStatus, seenUpdatedAt, expectedStatus, expectedCustomerUpdatedAt } = {}) {
+// `onlyEstimateIds` (card path): the estimate set the card showed and pinned.
+// Returns { lead, estimates: { linked } | { failed: true }, funnel }.
+async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthlyValue, initialServiceValue, waveguardTier, seenStatus, seenUpdatedAt, expectedStatus, expectedCustomerUpdatedAt, onlyEstimateIds } = {}) {
   const customerId = typeof rawCustomerId === 'string' ? rawCustomerId.trim() : rawCustomerId;
   if (!customerId) return { status: 400, error: 'customer_id is required to convert a lead' };
 
@@ -304,7 +308,7 @@ async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthl
   if (missingPin) return { status: 409, error: missingPin };
   const handledGuard = unlessHandledSince(seenStatus, seenUpdatedAt);
   const cardGuard = expectedStatus ? cardClaimGuard(handledGuard, { seenUpdatedAt, customerId, expectedCustomerUpdatedAt }) : null;
-  let estimates = null;
+  const outcome = { estimates: null, funnel: null };
   const won = await markConverted(leadId, {
     customerId,
     monthlyValue,
@@ -315,14 +319,17 @@ async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthl
     // re-asserting it in the win's own UPDATE.
     onlyIfIdentity: cardGuard || handledGuard,
     ...(expectedStatus ? { onlyIfStatusIn: [expectedStatus] } : {}),
-    onEstimateLink: (outcome) => { estimates = outcome; },
+    // Card path only: keep a hand-set first-win time; attach only the shown estimates.
+    keepConvertedAt: Boolean(expectedStatus),
+    onlyEstimateIds: expectedStatus ? (onlyEstimateIds || []) : undefined,
+    onOutcome: (part) => Object.assign(outcome, part),
   });
   if (won === false && expectedStatus) {
     return { status: 409, error: (await customerMovedSince(customerId, expectedCustomerUpdatedAt)) ? CUSTOMER_CHANGED : LEAD_CHANGED };
   }
   if (won === false) return { status: 409, error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' };
   const updatedLead = await db('leads').where('id', leadId).first();
-  return { lead: updatedLead, estimates };
+  return { lead: updatedLead, ...outcome };
 }
 const LEAD_CHANGED = 'The lead changed since the card was shown — nothing was converted.';
 const msIso = (v) => new Date(v).toISOString();

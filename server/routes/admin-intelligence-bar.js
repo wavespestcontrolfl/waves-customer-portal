@@ -1201,6 +1201,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._expected_status = preview.lead_status;
       params._expected_updated_at = preview._lead_updated_at || null;
       params._expected_customer_updated_at = preview._customer_updated_at || null;
+      params._approved_estimate_ids = Array.isArray(preview.estimate_ids) ? preview.estimate_ids : [];
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
