@@ -287,6 +287,21 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([ARTAVIA], [other], { productId: 'base', targets: ['Take-all'] })).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
     });
 
+    test('only the SECOND application of the seasonal pair is exempt: a third is a normal review', async () => {
+      const artavia = (date, targets = ['Take-all']) => prior({ service_date: date, product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets });
+      const now = { productId: 'base', serviceDate: '2026-06-10', targets: ['Take-all'] };
+      // 2nd: one earlier take-all Artavia, 28 days back.
+      expect(repeats(await run([ARTAVIA], [artavia('2026-05-13')], now))).toEqual([]);
+      // 3rd: the 2nd is 30 days back and the 1st 60 days back, inside the season window: review.
+      expect((repeats(await run([ARTAVIA], [artavia('2026-05-11'), artavia('2026-04-11')], now))).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+      // 3rd at the far end of the spacing (45 days after the 2nd, 90 after the 1st): still a review.
+      expect((repeats(await run([ARTAVIA], [artavia('2026-04-26'), artavia('2026-03-12')], now))).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+      // An earlier pair from another season (outside the window) does not make this one a third.
+      expect(repeats(await run([ARTAVIA], [artavia('2026-05-13'), artavia('2025-10-01')], now))).toEqual([]);
+      // An earlier Artavia with no take-all target is not a take-all application.
+      expect(repeats(await run([ARTAVIA], [artavia('2026-05-13'), artavia('2026-04-11', ['Large patch'])], now))).toEqual([]);
+    });
+
     test('every other same-group repeat behaves as on main, whatever targets were recorded; the finding keeps what was read', async () => {
       const last = prior({ service_date: '2026-05-13', product_name: 'Older Gravex', product_category: 'fungicide', catalog_group: '7', frac_group: '7', targets: ['Large patch'] });
       for (const targets of [undefined, ['Gray leaf spot'], ['Large patch']]) {

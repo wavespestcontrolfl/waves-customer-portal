@@ -85,10 +85,14 @@ async function latestComparableGroupApplication(knex, customerId, product, group
 //   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
 //   take_all_artavia_pair: the labeled take-all pair is Artavia twice, 28 days apart (label spacing:
 //     TAKE_ALL_PAIR_MIN_DAYS to TAKE_ALL_PAIR_MAX_DAYS between visits; an earlier repeat is a normal
-//     repeat), and ONLY when both applications recorded a take-all
-//     target. No target evidence, no exemption.
+//     repeat), ONLY when both applications recorded a take-all target (no target evidence, no
+//     exemption), and ONLY for the SECOND application of the seasonal pair: exactly one take-all
+//     Artavia in the season window before this one, and it is the 28 to 45 day one. A third is a
+//     normal review.
 const TAKE_ALL_PAIR_MIN_DAYS = 28;
 const TAKE_ALL_PAIR_MAX_DAYS = 45;
+// Two spacings of 45 days at most, so a third application still sees the first.
+const TAKE_ALL_SEASON_DAYS = 90;
 const TAKE_ALL_TARGET = /\btake all\b/;
 
 function dayNumber(value) {
@@ -108,16 +112,36 @@ function productIsPreEmergent(product, plan) {
     || isPreEmergent(product || {});
 }
 
-function isTakeAllPair(product, last, input, serviceDate) {
-  const apart = dayNumber(serviceDate) - dayNumber(last.service_date);
-  return /\bartavia\b/.test(normalizeText(product.name)) && normalizeText(last.product_name) === normalizeText(product.name)
-    && apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
-    && hasTakeAllTarget(input.targets) && hasTakeAllTarget(last.targets);
+// The customer's take-all Artavia applications in the season window before this one (completed
+// visits only, the same product, a take-all target recorded). A failed read throws when strict, else
+// reads as none, so no exemption.
+async function takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict = false } = {}) {
+  const rows = await savepointRead(knex, (k) => k('service_products as sp')
+    .join('service_records as sr', 'sp.service_record_id', 'sr.id')
+    .where('sr.customer_id', customerId)
+    .where('sr.status', 'completed')
+    .where('sr.service_date', '<', serviceDate)
+    .where('sp.product_name', product.name)
+    .orderBy('sr.service_date', 'desc')
+    .select('sr.service_date', 'sp.product_name', 'sp.targets'))
+    .catch((err) => { if (strict) throw err; return []; });
+  const today = dayNumber(serviceDate);
+  return rows.filter((row) => today - dayNumber(row.service_date) <= TAKE_ALL_SEASON_DAYS && hasTakeAllTarget(row.targets));
 }
 
-function rotationExemption({ product, plan, groupType, groupValue, last, input, serviceDate }) {
+async function isTakeAllPair(knex, { customerId, product, last, input, serviceDate, strict }) {
+  if (!/\bartavia\b/.test(normalizeText(product.name)) || normalizeText(last.product_name) !== normalizeText(product.name)) return false;
+  if (!hasTakeAllTarget(input.targets) || !hasTakeAllTarget(last.targets)) return false;
+  const history = await takeAllArtaviaHistory(knex, customerId, product, serviceDate, { strict });
+  if (history.length !== 1) return false;
+  const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
+  return apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
+    && dayNumber(history[0].service_date) === dayNumber(last.service_date);
+}
+
+async function rotationExemption(knex, { customerId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) {
   if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
-  return isTakeAllPair(product, last, input, serviceDate) ? 'take_all_artavia_pair' : null;
+  return await isTakeAllPair(knex, { customerId, product, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
 }
 
 function latestAssessmentStressed(plan) {
@@ -180,7 +204,7 @@ async function repeatGroupFindings(knex, { customerId, product, input, plan, ser
   for (const [groupType, groupValue] of productGroups(product)) {
     const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict });
     if (!last || !lastApplicationGroups(last, groupType).some((lastGroup) => String(lastGroup || '') === String(groupValue))) continue;
-    if (rotationExemption({ product, plan, groupType, groupValue, last, input, serviceDate })) continue;
+    if (await rotationExemption(knex, { customerId, product, plan, groupType, groupValue, last, input, serviceDate, strict })) continue;
     findings.push(repeatGroupFinding({ product, input, groupType, groupValue, last }));
   }
   return findings;

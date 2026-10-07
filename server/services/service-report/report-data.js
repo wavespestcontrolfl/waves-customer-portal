@@ -262,11 +262,14 @@ function approvedReportProductFacts(catalog = {}) {
 // watering (irrigation) or mowing for 24 hours after application"; its grub use needs the opposite,
 // the water-in, so the catalog carries no rule). The completion freezes the use's hold into the
 // facts, so the report's instruction carries it. Facts with a catalog rule already keep it, a grub
-// use takes nothing, and facts of a product not approved for reports (null) stay null.
+// use takes nothing, and facts of a product not approved for reports (null) stay null. The hold needs
+// a recorded target that is a caterpillar pest (the row's trigger): a grub, billbug or other target,
+// or no recorded target, takes nothing.
+const CATERPILLAR_TARGET = /caterpillar|armyworm|webworm|looper|cutworm|grassworm/i;
 function withApplicationHold(facts, { hours, targets } = {}) {
   const wait = Number(hours);
   if (!facts || facts.wateringRule || !(wait > 0)) return facts;
-  if ((Array.isArray(targets) ? targets : []).some((target) => /grub/i.test(String(target)))) return facts;
+  if (!(Array.isArray(targets) ? targets : []).some((target) => CATERPILLAR_TARGET.test(String(target)))) return facts;
   const checked = validateRule({
     mode: 'hold', hold_hours: wait, source: 'label',
     label_note: `Label: delay watering (irrigation) or mowing for ${wait} hours after application (caterpillar use).`,

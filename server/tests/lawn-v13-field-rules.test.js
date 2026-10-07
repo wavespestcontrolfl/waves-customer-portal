@@ -205,6 +205,8 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
   test('a grub use (target says grubs) or a row with no gate is unchanged, so the water-in is not contradicted', () => {
     const base = approvedReportProductFacts(acelepryn);
     expect(withApplicationHold(base, { hours: 24, targets: ['White grubs'] })).toBe(base);
+    expect(withApplicationHold(base, { hours: 24 })).toBe(base);
+    expect(withApplicationHold(base, { hours: 24, targets: ['Billbugs'] })).toBe(base);
     expect(withApplicationHold(base, { hours: undefined, targets: ['caterpillars'] })).toBe(base);
     expect(withApplicationHold(base, {})).toBe(base);
   });
@@ -215,7 +217,13 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
     const plan = { protocol: { structured: { products: [{ productId: id, gates: { trigger: 'caterpillars', delayWateringOrMowingHours: 24 } }] } } };
     const frozen = (submitted, p = plan) => freezeReportProductFacts({ productIds: [id], submitted, catalogById, plan: p })[id];
     expect(frozen([{ productId: id, targets: ['caterpillars'] }]).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
-    expect(frozen([{ productId: id }]).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+    // No recorded target, or a target that is not a caterpillar pest, takes no hold.
+    expect(frozen([{ productId: id }]).wateringRule).toBeNull();
+    expect(frozen([{ productId: id, targets: [] }]).wateringRule).toBeNull();
+    for (const target of ['Billbugs', 'White grubs', 'Chinch bugs', 'Mole crickets']) expect(frozen([{ productId: id, targets: [target] }]).wateringRule).toBeNull();
+    for (const target of ['Armyworms', 'Sod webworm', 'Grass looper', 'Cutworms', 'Tropical sod webworm', 'Grassworms']) {
+      expect(frozen([{ productId: id, targets: ['Mole crickets', target] }]).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+    }
     // A grub use, or a plan whose row carries no hold, freezes the catalog's silence as before.
     expect(frozen([{ productId: id, targets: ['grubs'] }]).wateringRule).toBeNull();
     expect(frozen([{ productId: id, targets: ['caterpillars'] }], { protocol: { structured: { products: [{ productId: id, gates: {} }] } } }).wateringRule).toBeNull();
