@@ -348,6 +348,10 @@ describe('spelled-name decoding', () => {
       expect(ctx('Caller: my email is J-O-N-E-S at gmail dot com', 'J-O-N-E-S')).toBe(false);
       expect(ctx('Caller: my name is Bob. The email is, J-O-N-E-S, at example dot com', 'J-O-N-E-S')).toBe(false);
       expect(ctx('Caller: my name is Bob.\nCaller: ok? J-O-N-E-S', 'J-O-N-E-S')).toBe(false);
+      // Email wording AFTER the spelling, in the same turn.
+      expect(ctx('Caller: my last name is spelled J-O-N-E-S at gmail dot com', 'J-O-N-E-S')).toBe(false);
+      // ...but email wording in a later turn does not count.
+      expect(ctx('Caller: my last name is J-O-N-E-S\nCaller: and my email is x at gmail dot com', 'J-O-N-E-S')).toBe(true);
     });
     test('an empty name is NOT filled from a spelling with no name context (the J-O-N-E-S email case)', () => {
       const names = sanitizeNameEntries(

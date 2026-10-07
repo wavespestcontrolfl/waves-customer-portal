@@ -319,10 +319,15 @@ function spelledAfterNameWording(raw, sources) {
   return sources.some((src) => {
     const text = flat(src);
     for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) {
-      const turn = text.slice(text.lastIndexOf('\n', at) + 1, at + needle.length);
+      const turnStart = text.lastIndexOf('\n', at) + 1;
+      const turn = text.slice(turnStart, at + needle.length);
       const wording = [...turn.matchAll(NAME_WORDING_RE)].pop();
       const tail = wording ? turn.slice(wording.index + wording[0].length) : '';
-      if (wording && tail.length <= 100 && !/[?!]/.test(tail) && !EMAIL_WORDING_RE.test(turn.slice(wording.index))) return true;
+      // Email wording anywhere from the name wording to the END of the turn counts:
+      // "... J-O-N-E-S at gmail dot com" spells an address, whatever came before.
+      const turnEnd = text.indexOf('\n', at + needle.length);
+      const rest = text.slice(turnStart + (wording?.index ?? 0), turnEnd < 0 ? text.length : turnEnd);
+      if (wording && tail.length <= 100 && !/[?!]/.test(tail) && !EMAIL_WORDING_RE.test(rest)) return true;
     }
     return false;
   });
