@@ -2445,6 +2445,21 @@ lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
 renders a program line once as a small "This time of year" card above the
 trends, and only when `seasonalNoteSource` is `"program"`. The PDF does not
 print `seasonalNote`, so its content and cache signature are unchanged.
+`GATE_LAWN_PROGRAM_DETAIL` (dark, owner 2026-10-06; strict `'true'` only, and
+effective only while `GATE_LAWN_EXPECTATIONS` supplies the month sentence above
+and `GATE_LAWN_REPORT_LEAD` is on, because only the lead layout mounts it; gate
+off leaves the lawn payload unchanged, key for key) adds one key to the lawn
+report payload: `reportV2.snapshot.seasonalDetail` = `{ whyNow }`, present only beside `seasonalNoteSource: "program"` (lawn only;
+no new route, token, privacy or rate-limit surface). The text is static copy
+for the visit month from `lawn-program-line.js` `PROGRAM_DETAIL_V13`, written
+from the same v13 month step by category: never a product, brand, active
+ingredient or rate, and a conditional step (the weed barrier) keeps the "where
+it fits the property" qualifier. No watering advice rides here: every lawn report already carries the Water
+This Week card and the visit's label aftercare, which own the watering
+direction. Conditional steps (the weed barrier, the May sunny-turf insect
+treatment) keep "where it fits the property". The lead layout's "This time of year" card renders it
+under the sentence; no other client reads the key.
+
 `GATE_LAWN_VISIT_MEMORY` (dark; gate off leaves the lawn payload unchanged, key
 for key, and makes no read or write) adds an optional `reportV2.sinceLast` to the
 `/api/reports/:token/data` lawn payload (lawn only, never tree & shrub; no new

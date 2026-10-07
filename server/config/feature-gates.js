@@ -185,6 +185,7 @@
  *   GATE_LAWN_REPORT_LEAD=true (lawn report above-the-fold lead: derives reportV2.lead from the final reconciled strings (headline, why, progress, what we applied, your part this week, next visit) and the web report renders it in place of the snapshot hero + follow-up card; lawn only, never T&S; ships DARK, read at call time via lawnReportLeadLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the lawn program v13 focuses on this month (lawn-program-line.js PROGRAM_LINES_V13, claims proven against server/config/lawn-protocol-v13.json), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note), and only a visit whose plan resolved the staged v13 version with GATE_LAWN_V13 on: a visit with no recorded version or an older one keeps the old note (the retired per-grass sentences were removed, so no past report is rewritten); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES=true (lawn report: no Lawn Coverage section when the visit's coverage zones were only the schematic defaults (no technician-marked zone) AT COMPLETION; owner 2026-10-06; the verdict is frozen once at completion by the lawn write gate into service_records.structured_notes.lawnCoverageVerdict { v: 1, defaultsOnly, frozenAt }, first writer wins, only while the gate is live and the zone / geometry reads succeeded; a render and the PDF key (':covhide=1' only for a frozen defaultsOnly true) read that frozen value and never the live zone rows; a visit with no frozen verdict, such as an older visit, renders exactly as with the gate off; ships DARK, read at call time via lawnCoverageHideDefaultZonesLive(); off = byte-identical payload)
+ *   GATE_LAWN_PROGRAM_DETAIL=true (lawn report: under the v13 month sentence, the month's "Why now" line from lawn-program-line.js PROGRAM_DETAIL_V13: seasonal facts and the step by category, no product names, rates, watering advice or outcome timing; needs GATE_LAWN_EXPECTATIONS and GATE_LAWN_REPORT_LEAD; strict 'true' only; owner 2026-10-06; ships DARK, read at call time via lawnProgramDetailLive(); off = byte-identical payload)
  *   GATE_LAWN_VISIT_MEMORY=true (lawn report treatment memory: freezes this visit's "what we applied / what we said we would watch" entry into service_records.structured_notes.lawnVisitMemory[assessmentId], first writer wins, no migration, and attaches reportV2.sinceLast built from the PRIOR visit's frozen entry (same property, strictly earlier date); data only, no customer render yet (the progress engine and copy writer read it later); ships DARK, read at call time via lawnVisitMemoryLive(); off = no reads, no writes, byte-identical report payload; the same gate builds the server-internal progress block, in-process only and never in the payload)
  *   GATE_LAWN_RAINFAST_WATCH=true (lawn rainfast breach watch, P31, needs GATE_LAWN_VISIT_MEMORY: on the LIVE web view only, once a product's stated rainfast interval (products_catalog.rainfast_minutes; no interval = never judged) has ended plus an hour, the property's hourly weather-model rain (Open-Meteo, past hours; not a gauge) is read for the whole hours inside [completion, completion + interval]; a total of at least 0.25 inch records ONE retreatCheck item on the frozen visit memory (first writer wins, compare-and-set, never creates an entry) and adds ONE fixed sentence to the lead's Watching line (needs GATE_LAWN_REPORT_LEAD to display); any missing hour, failed fetch or missing completion time = no item and no sentence; the PDF, static builds, SMS and email never change; sends nothing to a customer; ships DARK, read at call time via lawnRainfastWatchLive(); off = byte-identical payload, no fetch, no write)
  *   GATE_LAWN_REPORT_COPY_V6=true (lawn report v6 copy: FIXED sentences from the visit's facts, no model (owner 2026-10-02): the lead's headline is the snapshot status sentence, "what we applied" the deterministic treatment summary (never the AI narrative), "watching" names the other watched issues, and "what to expect" prints owner-approved expectation rows word for word; the fields freeze into service_records.structured_notes.lawnCopyV6[assessmentId], first writer wins; while live, model-written lawn copy states no result timing (P15): the lawn technician report writer gets a RESULT TIMING rule and generate-report rejects forward timing, and the lawn "What we applied today" paragraph (treatment_narrative_v6_lawn_no_timing) and its fallback carry none; timing reaches the customer only through "What to expect"; a lawn draft that passes the pattern screen also gets one fast-model meaning check for a result promise phrased around watering (lawn-draft-timing-check.js; fails open; kill switch LAWN_DRAFT_TIMING_CHECK=off); while live the lawn report's next-visit line and the copy's by-next-visit sentence both read the next lawn booking at the report's own property (lawnNextVisitAtProperty), never another of the customer's homes; REQUIRES GATE_LAWN_REPORT_LEAD to be live too (the fields only render through reportV2.lead); lawn only; supersedes env LAWN_REPORT_V2_NARRATIVE while live; ships DARK, read at call time via lawnReportCopyV6Live(); off = byte-identical report payload, render and PDF)
@@ -4194,6 +4195,10 @@ const gates = {
   // Ships DARK. This entry is for logGateStatus only: report-data.js and the lawn
   // write gate read it at call time via lawnCoverageHideDefaultZonesLive().
   lawnCoverageHideDefaultZones: gateEnvValue('GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES'),
+  // GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06): under the v13 month sentence
+  // (GATE_LAWN_EXPECTATIONS), the month's "Why now" line. Ships DARK. This entry is for logGateStatus only:
+  // lawn-report-v2.js reads it at call time via lawnProgramDetailLive().
+  lawnProgramDetail: process.env.GATE_LAWN_PROGRAM_DETAIL === 'true',
 
   // Lawn report treatment memory (lawn report rebuild P12): the per-assessment
   // frozen "what we applied / what we said we would watch" entry in
@@ -5124,6 +5129,17 @@ function lawnCoverageHideDefaultZonesLive() {
   return gateEnvValue('GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES');
 }
 
+// GATE_LAWN_PROGRAM_DETAIL read at CALL time. Live (with GATE_LAWN_EXPECTATIONS,
+// which supplies the month sentence it sits under): snapshot.seasonalDetail
+// carries the month's whyNow line (lawn-program-line.js PROGRAM_DETAIL_V13).
+// Off = byte-identical payload.
+function lawnProgramDetailLive() {
+  // Strict 'true' only (codex #6091 r1), and only with the lead layout: the
+  // detail renders in the lead layout's "This time of year" card, which the
+  // legacy hero does not mount.
+  return process.env.GATE_LAWN_PROGRAM_DETAIL === 'true' && lawnReportLeadLive();
+}
+
 // GATE_LAWN_VISIT_MEMORY read at CALL time (same 1/true/on convention as
 // gateEnvValue). The one canonical reader for the lawn treatment memory:
 // report-data.js freezes the visit's entry and attaches reportV2.sinceLast only
@@ -5847,6 +5863,7 @@ module.exports.lawnWateringForecastLive = lawnWateringForecastLive;
 module.exports.lawnReportLeadLive = lawnReportLeadLive;
 module.exports.lawnExpectationsLive = lawnExpectationsLive;
 module.exports.lawnCoverageHideDefaultZonesLive = lawnCoverageHideDefaultZonesLive;
+module.exports.lawnProgramDetailLive = lawnProgramDetailLive;
 module.exports.lawnVisitMemoryLive = lawnVisitMemoryLive;
 // Own line (P19b) so concurrent gate PRs appending to the shared list never conflict.
 module.exports.lawnPairedRecheckLive = lawnPairedRecheckLive;

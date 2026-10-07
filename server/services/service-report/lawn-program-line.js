@@ -214,8 +214,66 @@ function buildProgramLine({ month = null, applications = [], nitrogenApplied = n
   return PROGRAM_LINES_V13[m].line;
 }
 
+
+// GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06: "add more detail here ... use the
+// labels, seasonality"): under the v13 month sentence, why this month's step
+// fits the season. Each line restates the v13
+// month step (server/config/lawn-protocol-v13.json) by category, never a
+// product name or rate, plus Southwest Florida seasons: dry season Nov-May,
+// rainy season Jun-Sep, summer nitrogen limits Jun-Sep.
+const PROGRAM_DETAIL_V13 = Object.freeze({
+  1: Object.freeze({
+    whyNow: 'January brings the coolest weather. Winter weeds are sprouting while the grass grows slowly, so a weed barrier goes down where it fits the property and a micronutrient feeding supports color without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
+  }),
+  2: Object.freeze({
+    whyNow: 'In February the lawn starts to green up as daylight increases. A feeding supports that green-up, and we spot treat weeds while they are small.',
+  }),
+  3: Object.freeze({
+    whyNow: 'In March the soil warms and summer weeds such as crabgrass start to sprout. The spring weed barrier goes down now where it fits the property, ahead of them, with a feeding. Spring is also when the root disease take-all can show, so mapped trouble areas get a treatment.',
+  }),
+  4: Object.freeze({
+    whyNow: 'April warms quickly and the grass is growing hard, so it gets a light feeding where local fertilizer rules allow. Chinch bugs start to wake up in hot, sunny spots, and we check for them and treat where we find them.',
+  }),
+  5: Object.freeze({
+    whyNow: 'May, before the rains, is peak season for chinch bugs and other lawn insects in hot, sunny turf. The sunny turf gets an insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
+  }),
+  6: Object.freeze({
+    whyNow: 'The rainy season starts in June, and local summer fertilizer rules limit nitrogen through September. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds where it fits the property. Heat and rain bring gray leaf spot and chinch bugs, which we spot treat.',
+  }),
+  7: Object.freeze({
+    whyNow: 'July is a scouting visit. Summer fertilizer limits mean no whole-lawn feeding, so we inspect the whole lawn and treat problem spots only, such as caterpillars, leaf spot or chinch bugs.',
+  }),
+  8: Object.freeze({
+    whyNow: 'Late summer heat and rain continue. A micronutrient feeding keeps the color up, and we treat leaf spot or caterpillar spots where we find them.',
+  }),
+  9: Object.freeze({
+    whyNow: 'September is the end of the rainy season. A micronutrient feeding keeps the color up, mapped take-all areas get a fall treatment, and we watch for caterpillars.',
+  }),
+  10: Object.freeze({
+    whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The fall feeding goes down now, with a weed barrier where it fits the property, so the barrier is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
+  }),
+  11: Object.freeze({
+    whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, mapped large patch areas are treated, and we treat sedge where it shows up.',
+  }),
+  12: Object.freeze({
+    whyNow: 'December brings cooler spells. A light feeding keeps the color up, and we treat any large patch and weed spots.',
+  }),
+});
+
+// The month's detail, only beside a v13 program line (same visits, same month)
+// and only while GATE_LAWN_PROGRAM_DETAIL is live. Watering advice is not part
+// of it: every lawn report already carries the Water This Week card and the
+// visit's label aftercare, which own the watering direction (codex #6091 r5).
+function buildProgramDetail({ month, programLine } = {}) {
+  if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return undefined;
+  const detail = PROGRAM_DETAIL_V13[Number(month)];
+  return detail ? { whyNow: detail.whyNow } : undefined;
+}
+
 module.exports = {
   buildProgramLine,
+  buildProgramDetail,
+  PROGRAM_DETAIL_V13,
   PROGRAM_LINES_V13,
   QUALIFIERS,
   NO_NITROGEN_MONTHS,

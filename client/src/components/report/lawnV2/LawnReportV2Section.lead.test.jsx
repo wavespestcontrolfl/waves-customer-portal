@@ -329,6 +329,26 @@ describe('LawnReportV2Section lead mode', () => {
   });
 });
 
+describe('program detail (GATE_LAWN_PROGRAM_DETAIL)', () => {
+  const PROGRAM = 'In October the program focuses on the fall feeding with iron, plus fall disease prevention where the lawn needs it and a thatch check.';
+  const DETAIL = { whyNow: 'Soil cools and winter weeds start to sprout.' };
+
+  it('renders why now under the program line', () => {
+    render(<LawnReportV2Section data={payload({ snapshot: { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program', seasonalDetail: DETAIL } })} />);
+    expect(screen.getByText('Why now')).toBeInTheDocument();
+    expect(screen.getByText(DETAIL.whyNow)).toBeInTheDocument();
+    expect(screen.queryByText('What you will see')).toBeNull();
+    expect(screen.getByText(DETAIL.whyNow).style.fontSize).toBe('16px');
+  });
+
+  it('without seasonalDetail the card is the program line alone', () => {
+    render(<LawnReportV2Section data={payload({ snapshot: { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program' } })} />);
+    expect(screen.getByText('This time of year')).toBeInTheDocument();
+    expect(screen.queryByText('Why now')).toBeNull();
+    expect(screen.queryByText(/^Watering in /)).toBeNull();
+  });
+});
+
 describe('program line (GATE_LAWN_EXPECTATIONS)', () => {
   const PROGRAM = 'In October the program focuses on the fall feeding with iron, plus fall disease prevention where the lawn needs it and a thatch check.';
   const programSnapshot = { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program' };
