@@ -415,6 +415,14 @@ test('requested street text ending in the OLD city is refused even when the city
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Broadway Sarasota', city: 'Bradenton' })).error).toMatch(/street alone/);
 });
 
+test('a street ending in another service-area city is refused as a request and is one line when stored', async () => {
+  db.mockImplementation(() => chain({ first: { ...ADDR_LEAD, city: 'Sarasota' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Broadway Bradenton' })).error).toMatch(/street alone/);
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '123 Broadway Lakewood Ranch' })).error).toMatch(/street alone/);
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '123 Broadway Bradenton', city: 'Sarasota', zip: '34200' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).error).toMatch(/stored as one line/);
+});
+
 test('confirmed phone change does not touch the address columns in the guard', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
   const activities = chain({ insert: undefined });

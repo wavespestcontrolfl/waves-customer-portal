@@ -13,6 +13,7 @@ const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funne
 const { toE164, isValidNanpNumber } = require('../../utils/phone');
 const { cleanValidEmailOrNull } = require('../../utils/intake-normalize');
 const { parseRawAddress, UNIT_DESIGNATORS, STREET_SUFFIX_ALIASES } = require('../../utils/address-normalizer');
+const { CITY_TO_LOCATION } = require('../../config/locations');
 const leadAttribution = require('../lead-attribution');
 const { scopeToProspects, unlessHandledSince } = require('../lead-statuses');
 
@@ -796,7 +797,17 @@ function storedIsOneLine(lead) {
   if (parts.zip && !UNIT_DESIGNATORS.has(String(parts.city || '').trim().replace(/[.,#]/g, '').toLowerCase())) return true;
   // The city column's text at the tail of the line, with or without a comma
   // ("21 Oak Ave, Sarasota", "123 Broadway Sarasota"), is a locality too.
-  return endsWithCity(stored, lead.city);
+  return endsWithAnyCity(stored, [lead.city]);
+}
+
+// The lead-routing city vocabulary (config/locations CITY_TO_LOCATION): the
+// one list of service-area cities the leads path already keys on.
+const SERVICE_AREA_CITIES = Object.keys(CITY_TO_LOCATION);
+
+// endsWithCity over the given cities plus every service-area city, so
+// "123 Broadway Bradenton" is a locality on a Sarasota row too.
+function endsWithAnyCity(text, cities) {
+  return [...cities, ...SERVICE_AREA_CITIES].some(c => endsWithCity(text, c));
 }
 
 // Is the city column's text the tail of the line, as a comma segment or as
@@ -823,9 +834,10 @@ function resolveLeadAddressRequest(lead, requested) {
   if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested };
   if (storedIsOneLine(lead)) return { error: ONE_LINE_REFUSAL };
   const text = requested.address;
-  // Checked against both the stored city and the one requested with it.
+  // Checked against the stored city, the one requested with it, and every
+  // service-area city.
   const cities = [lead.city, requested.city].filter(c => typeof c === 'string' && c.trim());
-  if (typeof text === 'string' && text.trim() && (carriesLocality(text) || cities.some(c => endsWithCity(text, c)))) return { error: LOCALITY_REFUSAL };
+  if (typeof text === 'string' && text.trim() && (carriesLocality(text) || endsWithAnyCity(text, cities))) return { error: LOCALITY_REFUSAL };
   return { requested };
 }
 
