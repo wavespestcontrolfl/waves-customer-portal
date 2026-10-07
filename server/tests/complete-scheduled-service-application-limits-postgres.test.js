@@ -195,6 +195,29 @@ postgres('closeout: a hard product count limit flags, never refuses', () => {
     } finally { await cleanup(f); }
   });
 
+  test('the ledger lookup failing after the record commits is the same unavailable flag: the visit is recorded, the advisory is present, one deduped bell', async () => {
+    const f = await seedLawnVisit({ priorApplications: 2 });
+    const real = mockPg;
+    // Every plain (non-transaction) read of the ledger table through the shared connection fails.
+    mockPg = new Proxy(real, {
+      apply(target, thisArg, args) {
+        if (args[0] === 'property_application_history') throw new Error('synthetic ledger lookup failure');
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    try {
+      const out = await complete(f, { products: [product(f)] });
+      mockPg = real;
+      expect(out.status).toBe(200);
+      expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: product limits could not be checked for this visit\.$/)]);
+      expect(await mockPg('scheduled_services').where({ id: f.serviceId }).first('status')).toMatchObject({ status: 'completed' });
+      expect(await recordedLedger(f)).toHaveLength(3);
+      const rows = await bells(f);
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0].metadata)).toMatch(/application_limit_check_unavailable/);
+    } finally { mockPg = real; await cleanup(f); }
+  });
+
   test('more than 200 raw products is a 400 before any write', async () => {
     const f = await seedLawnVisit({ priorApplications: 0 });
     try {

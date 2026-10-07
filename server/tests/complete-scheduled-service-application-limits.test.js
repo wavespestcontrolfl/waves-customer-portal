@@ -30,7 +30,7 @@ jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(
 const db = require('../models/db');
 const attempts = require('../services/completion-attempts');
 const limits = require('../services/application-limits');
-const { completeScheduledService, submittedProductLimitFindings, rawProductsTooManyPayload, notifyOfficeOfLimitFindings } = require('../services/complete-scheduled-service');
+const { completeScheduledService, submittedProductLimitFindings, recordedProductLimitFindings, rawProductsTooManyPayload, notifyOfficeOfLimitFindings } = require('../services/complete-scheduled-service');
 const { etDateString } = require('../utils/datetime-et');
 const completionObservationCatalog = require('../../shared/service-completion-observations.json');
 
@@ -178,6 +178,40 @@ describe('closeout: hard count limits flag, they never refuse', () => {
     queried.length = 0;
     expect(await findings(['00000000-0000-4000-8000-000000009999'])).toEqual([]);
     expect(queried).toEqual(['products_catalog']);
+  });
+});
+
+describe('the findings path never goes quiet', () => {
+  const record = { id: 'record-1', service_date: etDateString() };
+  const unavailable = [expect.objectContaining({ code: 'application_limit_check_unavailable', message: 'Recorded. The office will review: product limits could not be checked for this visit.' })];
+
+  test('a failed ledger lookup is the unavailable finding (eligible lawn visit, gate on), not a silent log', async () => {
+    const failing = jest.fn(() => { throw new Error('ledger lookup failed'); });
+    expect(await recordedProductLimitFindings({ svc: service, record, database: failing })).toEqual(unavailable);
+    expect(failing).toHaveBeenCalledWith('property_application_history');
+  });
+
+  test('a ledger lookup that returns nothing means nothing was recorded: no finding', async () => {
+    const empty = () => ({ where: () => ({ whereNull: () => ({ whereNotNull: () => ({ distinct: async () => [] }) }) }) });
+    expect(await recordedProductLimitFindings({ svc: service, record, database: empty })).toEqual([]);
+  });
+
+  test('ineligible visits stay quiet: gate off, a non-lawn visit', async () => {
+    const failing = jest.fn(() => { throw new Error('ledger lookup failed'); });
+    delete process.env.GATE_LAWN_V13;
+    expect(await recordedProductLimitFindings({ svc: service, record, database: failing })).toEqual([]);
+    process.env.GATE_LAWN_V13 = 'true';
+    service.service_type = 'Quarterly Pest Control';
+    expect(await recordedProductLimitFindings({ svc: service, record, database: failing })).toEqual([]);
+    expect(failing).not.toHaveBeenCalled();
+  });
+
+  test('a bell that is not recorded (notifyAdmin returns null) is logged, never thrown', async () => {
+    const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue(null);
+    const logger = require('../services/logger');
+    await expect(notifyOfficeOfLimitFindings({ svc: service, record, findings: [{ code: 'application_limit_check_unavailable', productId: null }] })).resolves.toBeUndefined();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/bell NOT recorded for record record-1/));
   });
 });
 

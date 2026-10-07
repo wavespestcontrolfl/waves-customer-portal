@@ -2022,6 +2022,28 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
   return findings;
 }
 
+// The findings for the products a committed closeout recorded, read from its ledger rows (so a
+// resume re-derives them). Lawn visits under GATE_LAWN_V13 only. Never throws: ANY failure on the
+// way (the ledger lookup included) is one 'unavailable' finding, so the closeout still carries the
+// flag and the office still hears about it.
+async function recordedProductLimitFindings({ svc, record, database = db } = {}) {
+  if (!svc || !record?.id) return [];
+  if (require('../config/feature-gates').lawnV13Live?.() !== true || detectServiceLine(svc.service_type) !== 'lawn') return [];
+  try {
+    const rows = await savepointRead(database, (k) => k('property_application_history')
+      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id'));
+    return await submittedProductLimitFindings({
+      svc,
+      productIds: (rows || []).map((row) => row.product_id),
+      serviceDate: serviceDateOnly(record.service_date),
+      database,
+    });
+  } catch (err) {
+    logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
+    return [limitCheckUnavailableFinding()];
+  }
+}
+
 // The office's side of a finding: one admin notification per product and finding code (deduped, so
 // a retry or a resume rings once). Never throws and never blocks the closeout.
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
@@ -2033,12 +2055,15 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       ? `${finding.productName || 'A product'} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${finding.current} of ${finding.max} already used). Review it and report it if needed.`
       : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
     try {
-      await notifications.notifyAdmin('service', title, body, {
+      const created = await notifications.notifyAdmin('service', title, body, {
         link: `/admin/customers?customerId=${svc.customer_id}`,
         bell: true,
         metadata: { ...finding, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey: `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}` },
         dedupeKey: `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}`,
       });
+      // notifyAdmin returns null (no throw) when its dedupe lock or insert fails; a deduped repeat
+      // returns the standing row. The advisory on the completion stands either way.
+      if (!created) logger.error(`[dispatch] application-limit finding bell NOT recorded for record ${record.id} (notifyAdmin returned null)`);
     } catch (err) {
       logger.error(`[dispatch] application-limit finding notification failed (non-blocking): ${err.message}`);
     }
@@ -9109,24 +9134,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // never an instruction to remove anything) and sent to the office as an admin notification
     // (deduped per record, so a retry or a resume rings once). Never blocks.
     if (record?.id && !issuedInvoiceCloseout) {
-      try {
-        const ledgeredForLimits = await db('property_application_history')
-          .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id');
-        const limitFindings = await submittedProductLimitFindings({
-          svc,
-          productIds: ledgeredForLimits.map((row) => row.product_id),
-          serviceDate: serviceDateOnly(record.service_date),
-          database: db,
-        });
-        if (limitFindings.length) {
-          applicationLimitAdvisory = {
-            advisory: true,
-            blocks: [...(applicationLimitAdvisory?.blocks || []), ...limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId }))],
-          };
-          await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
-        }
-      } catch (err) {
-        logger.error(`[dispatch] application-limit findings failed (non-blocking): ${err.message}`);
+      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db });
+      if (limitFindings.length) {
+        applicationLimitAdvisory = {
+          advisory: true,
+          blocks: [...(applicationLimitAdvisory?.blocks || []), ...limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId }))],
+        };
+        await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
       }
     }
 
@@ -15455,6 +15469,7 @@ module.exports = {
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
   submittedProductLimitFindings,
+  recordedProductLimitFindings,
   rawProductsTooManyPayload,
   notifyOfficeOfLimitFindings,
   completionOwnershipError,
