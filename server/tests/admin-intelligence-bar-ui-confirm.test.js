@@ -23,6 +23,7 @@ const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
+const mockSendSmsProposalRefusal = jest.fn(async () => null);
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
@@ -90,6 +91,7 @@ jest.mock('../services/intelligence-bar/review-tools', () => ({
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
+  sendSmsProposalRefusal: (...args) => mockSendSmsProposalRefusal(...args),
 }));
 jest.mock('../services/intelligence-bar/tax-tools', () => ({ TAX_TOOLS: [], executeTaxTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/leads-tools', () => ({
@@ -894,6 +896,52 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
       expect(body.pendingActions).toHaveLength(1);
       expect(body.pendingActions[0].params.recipient).toBe('Testa Alpha (…1234)');
+    });
+  });
+
+  test('send_sms to a number the send path will refuse: no card, the tool refusal goes back to the model (opt-out at the proposal)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'cust-9', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockSendSmsProposalRefusal.mockResolvedValueOnce({
+      success: false, error: 'Recipient has opted out of SMS (sms_enabled=false on notification_prefs)', blocked: true, code: 'SMS_OPTED_OUT',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { customer_id: 'cust-9', message: 'hi', message_type: 'manual' } }],
+      [{ type: 'text', text: 'They have opted out of texts.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text Alpha', context: 'comms' });
+      // The refusal is asked with the pinned params, after the recipient pin.
+      expect(mockSendSmsProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-9', phone: '+19415551234', message: 'hi' }));
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ blocked: true, code: 'SMS_OPTED_OUT' });
+      expect(toolResult.error).toMatch(/opted out of SMS/);
+    });
+  });
+
+  test.each([
+    ['opted-out', { success: false, error: 'Recipient has opted out of SMS (sms_enabled=false on notification_prefs)', blocked: true, code: 'SMS_OPTED_OUT' }],
+  ])('send_sms to a direct %s number with no customer: the proposal refusal still runs, no card', async (_label, refusal) => {
+    mockSendSmsProposalRefusal.mockResolvedValueOnce(refusal);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { phone: '+19415550123', message: 'hi', message_type: 'manual' } }],
+      [{ type: 'text', text: 'That number cannot be texted right now.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text 941-555-0123', context: 'comms' });
+      expect(mockResolveCommsCustomer).not.toHaveBeenCalled();
+      expect(mockSendSmsProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415550123', message: 'hi' }));
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ blocked: true, code: refusal.code });
     });
   });
 
