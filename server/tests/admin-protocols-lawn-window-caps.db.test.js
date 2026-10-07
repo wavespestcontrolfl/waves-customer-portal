@@ -42,6 +42,17 @@ describeDb('GET /lawn/window carries the v13 count caps', () => {
     }
   });
 
+  test('Blindside, the after-cap weed spot, is listed in a Celsius window as a spot row (never a default) with its cap', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const res = await windowFor('2026-05-12', 'st_augustine');
+    const names = res.body.context.products.map((p) => p.protocolProductName);
+    expect(names).toContain('Celsius WG');
+    const blindside = res.body.context.products.find((p) => p.protocolProductName === 'Blindside Herbicide');
+    expect(blindside).toMatchObject({ role: 'post_emergent_spot', applicationMode: 'spot', defaultInPlan: false });
+    expect(blindside.gates).toMatchObject({ trigger: 'celsius_annual_cap_reached', annualMaxApps: 2 });
+    expect(blindside.annualCounter.maxApplications).toBe(2);
+  });
+
   test('a product that is not capped carries none', async () => {
     process.env.GATE_LAWN_V13 = 'true';
     const res = await windowFor('2026-05-12', 'st_augustine');

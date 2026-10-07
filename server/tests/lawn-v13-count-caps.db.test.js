@@ -8,6 +8,7 @@ const restore = require('../models/migrations/20261007172000_lawn_v13_celsius_ca
 const gateOnly = require('../models/migrations/20261007174000_lawn_v13_count_caps_v13_only');
 const protocolRows = require('../models/migrations/20261007175000_lawn_v13_count_caps_protocol_rows');
 const propertyIdMigration = require('../models/migrations/20261007178000_property_application_history_property_id');
+const blindsideRowMigration = require('../models/migrations/20261007179000_lawn_v13_blindside_protocol_row');
 const clampMigration = require('../models/migrations/20261007177000_lawn_v13_cap_clamp_and_kb_dismiss');
 const { DIMENSION } = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const { submittedProductLimitFindings } = require('../services/complete-scheduled-service');
@@ -874,6 +875,120 @@ describeDb('v13 count caps through PostgreSQL', () => {
       await propertyIdMigration.up(knex);
       expect(await knex('audit_log').where({ action: 'property_application_history.property_id_backfill' })).toHaveLength(0);
       expect((await knex('property_application_history').where({ customer_id: f.customerId }).orderBy('application_date')).map((r) => r.property_id)).toEqual([a, null, null]);
+    });
+  });
+
+  describe('the shared active-ingredient cap reads the frozen property too (20261007178000)', () => {
+    const applicationLimits = require('../services/application-limits');
+    let ai;
+    beforeAll(async () => {
+      ai = await product('AI cap fixture', { active_ingredient: 'Zzzzine', rate_unit: 'oz', default_rate_per_1000: 0.5 });
+      await knex('product_limits').insert({ product_id: ai.id, match_type: 'active_ingredient', match_value: 'Zzzzine', limit_type: 'annual_max_rate', limit_value: 1, limit_unit: 'oz/1000sf/year', severity: 'hard_block', description: 'fixture' });
+    });
+    async function lawnsWithApplication(frozenToA) {
+      const f = await fixture(knex);
+      const [other] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: '2026-03-16', service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: '2026-03-16', service_type: 'Lawn fixture' }).returning('*');
+      await knex('property_application_history').insert({ customer_id: f.customerId, product_id: ai.id, application_date: '2026-03-16', application_rate: 1, rate_unit: 'oz', active_ingredient: 'Zzzzine', service_record_id: record.id, property_id: frozenToA ? f.property.id : null });
+      return { f, a: f.property.id, b: other.id, visit };
+    }
+    const blocks = async ({ f }, propertyId) => (await applicationLimits.checkLimits(f.customerId, ai.id, new Date('2026-06-10T16:00:00Z'), knex, { propertyId })).blocks.filter((b) => b.matchType === 'active_ingredient');
+
+    test('an application frozen to lawn A still counts against A (and not B) after its visit is moved to B', async () => {
+      const ctx = await lawnsWithApplication(true);
+      expect(await blocks(ctx, ctx.a)).toHaveLength(1);
+      expect(await blocks(ctx, ctx.b)).toEqual([]);
+      await knex('scheduled_services').where({ id: ctx.visit.id }).update({ property_id: ctx.b });
+      expect(await blocks(ctx, ctx.a)).toHaveLength(1);
+      expect(await blocks(ctx, ctx.b)).toEqual([]);
+    });
+
+    test('a legacy row without a frozen property falls back to its visit and moves with it', async () => {
+      const ctx = await lawnsWithApplication(false);
+      expect(await blocks(ctx, ctx.a)).toHaveLength(1);
+      expect(await blocks(ctx, ctx.b)).toEqual([]);
+      await knex('scheduled_services').where({ id: ctx.visit.id }).update({ property_id: ctx.b });
+      expect(await blocks(ctx, ctx.a)).toEqual([]);
+      expect(await blocks(ctx, ctx.b)).toHaveLength(1);
+    });
+
+    test('no treated property: the customer\'s whole history still counts', async () => {
+      const ctx = await lawnsWithApplication(true);
+      expect((await applicationLimits.checkLimits(ctx.f.customerId, ai.id, new Date('2026-06-10T16:00:00Z'), knex, {})).blocks.filter((b) => b.matchType === 'active_ingredient')).toHaveLength(1);
+    });
+  });
+
+  describe('a Blindside spot row wherever a v13 window lists Celsius (20261007179000)', () => {
+    let protocolId;
+    const blindsideRows = (windowId) => knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: BLINDSIDE });
+    const audits = () => knex('lawn_protocol_audit_log').where({ action: 'v13_blindside_protocol_row' });
+    async function windowWith(names) {
+      protocolId = protocolId || (await knex('lawn_protocols').where({ version: LAWN_V13_VERSION }).first()).id;
+      const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: protocolId, month: 9, window_key: `fixture_${names.join('_').length}_${Math.random().toString(36).slice(2, 8)}`, title: 't', visit_type: 'fixture' }).returning('*');
+      for (const [index, name] of names.entries()) {
+        await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[name].id, product_name: name, role: 'post_emergent_spot', application_mode: 'spot', default_in_plan: false, rate_unit: 'label_rate', gates: JSON.stringify({}), annual_counter: JSON.stringify({}), sort_order: index + 1 });
+      }
+      return window;
+    }
+    beforeEach(async () => { await knex('lawn_protocol_audit_log').del(); await knex('product_aliases').del(); });
+    afterEach(() => jest.restoreAllMocks());
+
+    test('inserts a spot row (never a default selection) with the cap beside Celsius where Blindside is missing; windows without Celsius and windows that already have Blindside are untouched; audited', async () => {
+      const missing = await windowWith([CELSIUS]);
+      const without = await windowWith([ARENA]);
+      const has = await windowWith([CELSIUS, BLINDSIDE]);
+      const before = await blindsideRows(has.id);
+      await blindsideRowMigration.up(knex);
+      const [row] = await blindsideRows(missing.id);
+      expect(row).toMatchObject({ product_id: catalog[BLINDSIDE].id, role: 'post_emergent_spot', application_mode: 'spot', default_in_plan: false, rate_unit: 'label_rate', sort_order: 2 });
+      expect(row.gates).toEqual({ trigger: 'celsius_annual_cap_reached', annualMaxApps: 2 });
+      expect(row.annual_counter).toEqual({ maxApplications: 2 });
+      expect(await blindsideRows(without.id)).toHaveLength(0);
+      expect(await blindsideRows(has.id)).toEqual(before);
+      expect(await audits()).toHaveLength(1);
+      await blindsideRowMigration.up(knex); // idempotent
+      expect(await blindsideRows(missing.id)).toHaveLength(1);
+      expect(await audits()).toHaveLength(1);
+    });
+
+    test('the window context lists Blindside with its cap', async () => {
+      const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
+      const window = await windowWith([CELSIUS]);
+      await blindsideRowMigration.up(knex);
+      const context = await getProtocolWindowContext(knex, { protocolId, windowKey: window.window_key, serviceDate: new Date('2026-09-10T16:00:00Z') });
+      const summary = summarizeProtocolContext(context);
+      const blindside = summary.products.find((p) => p.protocolProductName === BLINDSIDE);
+      expect(blindside).toMatchObject({ role: 'post_emergent_spot', applicationMode: 'spot', defaultInPlan: false });
+      expect(blindside.gates.annualMaxApps).toBe(2);
+      expect(blindside.annualCounter.maxApplications).toBe(2);
+    });
+
+    test('an unresolvable product is skipped with a log, never an error; an exact alias resolves', async () => {
+      const window = await windowWith([CELSIUS]);
+      jest.spyOn(console, 'log').mockImplementation(() => {});
+      await knex('products_catalog').where({ id: catalog[BLINDSIDE].id }).update({ name: 'Blindside renamed away' });
+      try {
+        await expect(blindsideRowMigration.up(knex)).resolves.toBeUndefined();
+        expect(await blindsideRows(window.id)).toHaveLength(0);
+        expect(console.log.mock.calls.flat().join('\n')).toMatch(/no catalog row or alias for Blindside Herbicide/);
+        await knex('product_aliases').insert({ product_id: catalog[BLINDSIDE].id, alias_name: BLINDSIDE });
+        await blindsideRowMigration.up(knex);
+        expect(await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id, product_id: catalog[BLINDSIDE].id })).toHaveLength(1);
+      } finally {
+        await knex('products_catalog').where({ id: catalog[BLINDSIDE].id }).update({ name: BLINDSIDE });
+      }
+    });
+
+    test('down deletes only the rows it inserted that are unchanged and not default selections', async () => {
+      const a = await windowWith([CELSIUS]);
+      const b = await windowWith([CELSIUS]);
+      await blindsideRowMigration.up(knex);
+      await knex('lawn_protocol_products').where({ lawn_protocol_window_id: b.id, product_name: BLINDSIDE }).update({ default_in_plan: true });
+      await blindsideRowMigration.down(knex);
+      expect(await blindsideRows(a.id)).toHaveLength(0);
+      expect(await blindsideRows(b.id)).toHaveLength(1);
+      expect(await audits()).toHaveLength(0);
     });
   });
 

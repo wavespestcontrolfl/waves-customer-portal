@@ -279,20 +279,9 @@ class ApplicationLimitChecker {
       })
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
         'pl.limit_value', 'pl.limit_unit', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
-    if (ctx.propertyId) {
-      // The treated property only: a row ledgered at another of the customer's properties
-      // does not count. A row whose property is unknown (no visit, or a visit with no
-      // property) cannot be proven elsewhere, so it still counts.
-      query.leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
-        .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-        .where(function sameProperty() { this.whereNull('ss.property_id').orWhere('ss.property_id', ctx.propertyId); });
-    }
-    if (ctx.excludeScheduledServiceId) {
-      query.where(function notThisVisit() {
-        this.whereNull('pah.service_record_id')
-          .orWhereNotIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: ctx.excludeScheduledServiceId }).select('id'));
-      });
-    }
+    // The treated property (the one frozen on the ledger row, a legacy row's visit property as the
+    // fallback) and the visit being planned: the same scope every other per-lawn reader uses.
+    scopeHistoryToTreatment(query, database, { propertyId: ctx.propertyId, excludeScheduledServiceId: ctx.excludeScheduledServiceId }, 'pah');
     const history = await query;
 
     let used = 0;

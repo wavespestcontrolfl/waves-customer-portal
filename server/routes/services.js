@@ -11,6 +11,7 @@ const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts } = require('../services/portal-service-history');
 const { etDateString } = require('../utils/datetime-et');
+const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
 const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
 router.use(authenticate);
@@ -160,8 +161,8 @@ router.get('/stats/summary', async (req, res, next) => {
     res.json({
       servicesYTD: parseInt(servicesYTD.count),
       celsiusApplicationsThisYear: parseInt(celsiusApps.count),
-      // 2 under the v13 lawn program, 3 before it (GATE_LAWN_V13 off keeps the old cap).
-      celsiusMaxPerYear: require('../config/feature-gates').lawnV13Live() ? 2 : 3,
+      // The one canonical reader: 2 under the v13 lawn program, 3 before it (GATE_LAWN_V13 off).
+      celsiusMaxPerYear: celsiusYtdCap(),
       thatch: {
         current: latestThatch ? parseFloat(latestThatch.thatch_measurement) : null,
         initial: firstThatch ? parseFloat(firstThatch.thatch_measurement) : null,

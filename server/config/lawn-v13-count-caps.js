@@ -147,7 +147,15 @@ function withEntryCapMetadata(entry, product) {
   };
 }
 
+// ── The Celsius yearly figure, as the report copy and the portal read it ───────────────────────────
+// CELSIUS_YTD_CAP is the v13 value, CELSIUS_YTD_CAP_LEGACY the one before v13; celsiusYtdCap() is the ONE
+// reader that follows GATE_LAWN_V13 (the service report's expectations, the portal stats route).
+const CELSIUS_YTD_CAP = V13_COUNT_CAPS.find((entry) => entry.name === 'Celsius WG').cap;
+const CELSIUS_YTD_CAP_LEGACY = 3;
+const celsiusYtdCap = () => (gateLive() ? CELSIUS_YTD_CAP : CELSIUS_YTD_CAP_LEGACY);
+
 module.exports = {
+  CELSIUS_YTD_CAP, CELSIUS_YTD_CAP_LEGACY, celsiusYtdCap,
   withEntryCapMetadata,
   V13_COUNT_CAPS, v13CountCapFor, v13CapEntryFor, capIdMap, resetV13CapIdentity, withEntryCaps, applyV13CountCaps, syntheticCountLimit,
 };
