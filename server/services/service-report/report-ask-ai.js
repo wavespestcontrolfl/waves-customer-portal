@@ -473,6 +473,23 @@ function keeperFor(data) {
 // Lawn assessment facts the rule answers (answerTrend, answerFindings,
 // answerNextSteps) read. Scores are given out of 100 (the report shows them
 // as percentages; the answer screen rejects a percent sign).
+function grassTypeOf(turf) {
+  const parts = [underscoresToSpaces(turf?.grassType || ''), cleanText(turf?.cultivar || '')].filter(Boolean);
+  return cleanText(parts.join(' ')) || null;
+}
+
+function legacyWaterFacts(water) {
+  if (!water || typeof water !== 'object') return null;
+  const irrigationShown = !water.scheduleUnconfirmed;
+  return orNull(dropEmpty({
+    rain_last_7_days_inches: inchesOf(water.rainfallInches7d),
+    rain_today_inches: inchesOf(water.rainfallInchesToday),
+    irrigation_inches_per_week: irrigationShown ? inchesOf(water.irrigationInchesPerWeek) : null,
+    total_inches_7_days: irrigationShown ? inchesOf(water.effectiveInches7d) : null,
+    target_inches_per_week: inchesOf(water.targetInchesPerWeek),
+  }));
+}
+
 function lawnAssessmentFacts(data = {}, keep = () => true) {
   const lawn = data.lawnAssessment;
   if (!lawn || typeof lawn !== 'object') return null;
@@ -499,8 +516,11 @@ function lawnAssessmentFacts(data = {}, keep = () => true) {
       .slice(0, 2)
       .map((item) => text(item, 200))
       .filter(Boolean),
+    // A legacy lawn page (no reportV2) shows the water card from waterContext
+    // (Codex P1 #5964 r62).
+    water_this_week: data.reportV2 ? null : legacyWaterFacts(lawn.waterContext),
     // The recorded turf, so a grass identity answer has ground (Codex P1 #5964 r42).
-    grass_type: cleanText([underscoresToSpaces(lawn.turfProfile?.grassType || ''), cleanText(lawn.turfProfile?.cultivar || '')].filter(Boolean).join(' ')) || null,
+    grass_type: grassTypeOf(lawn.turfProfile),
     overall_out_of_100: out100(scores.overallScore),
     density_out_of_100: out100(scores.turfDensity),
     weed_cleanliness_out_of_100: out100(scores.weedSuppression),
@@ -1612,6 +1632,10 @@ function contradictsPressure(text, facts) {
 // Who did the visit: a person named as the technician must be the recorded
 // first name (Codex P2 #5964 r40).
 const TECH_NAME_CLAIMS = [
+  // "Your technician's name is Jordan" (Codex P1 #5964 r62).
+  /\b(?:technician|tech)['’]s\s+(?:first\s+)?name\s+(?:is|was)\s+([A-Z][a-z]+)\b/g,
+  /\bname\s+of\s+(?:your|the)\s+(?:technician|tech)\s+(?:is|was)\s+([A-Z][a-z]+)\b/g,
+  /\b(?:technician|tech)\s+(?:named|called)\s+([A-Z][a-z]+)\b/g,
   /\b(?:technician|tech)\s+(?:was|is|today\s+was|named)\s+([A-Z][a-z]+)\b/g,
   /\b([A-Z][a-z]+)\s+(?:was|is)\s+(?:your|the)\s+(?:\w+\s+)?(?:technician|tech)\b/g,
   /\b([A-Z][a-z]+)\s+(?:completed|performed|did|handled|serviced|treated|visited|came\s+(?:out|by)|ran|carried\s+out|took\s+care\s+of)\b/g,
@@ -2004,16 +2028,25 @@ function contradictsLawnStatus(text, facts) {
 // r61): a pest or condition the visit's own record names may not be called
 // missing.
 const SAYS_MISSING = /\b(?:(?:does|do|did)\s*n['’]?o?t\s+(?:say|show|list|mention|record|note|include|name)|(?:is|are|was|were)\s*n['’]?o?t\s+(?:listed|recorded|noted|mentioned|shown|named|on\s+(?:the|this|your)\s+report)|no\s+(?:record|mention|note)\s+of|not\s+(?:on|in)\s+(?:the|this|your)\s+report)\b/i;
+const MEASURED_WORDS = [
+  [/\brain\w*/i, /rain/], [/\birrigat\w*|\bsprinkler/i, /irrigation/], [/\bmow\w*|\bheight\b/i, /mowing|height/],
+  [/\btotal\s+water\b|\bwater\s+total\b/i, /total/], [/\btarget\b/i, /target/],
+  [/\b(?:overall|health)\s+score\b/i, /overall|plant_health/], [/\bdensity\b/i, /density/],
+];
 function deniesRecordedTerm(text, { data, facts }) {
   const visit = factText([facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary,
     facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report]);
   const terms = [...targetLabelsOf(data), ...PEST_TERMS];
+  const keys = factNumbers(facts || {}).map((fact) => fact.key).filter(Boolean);
   return splitSentences(text).some((sentence) => {
     if (!SAYS_MISSING.test(sentence)) return false;
     // The most specific name only: "ghost ant" is not "ant".
     const named = terms.filter((label) => sentenceNames(sentence, label));
     const specific = named.filter((label) => !named.some((other) => other !== label && other.includes(label)));
-    return specific.some((label) => visit.includes(label));
+    if (specific.some((label) => visit.includes(label))) return true;
+    // A recorded measurement may not be called missing either: "does not
+    // show weekly rainfall" over a rain figure (Codex P1 #5964 r62).
+    return MEASURED_WORDS.some(([wordRe, keyRe]) => wordRe.test(sentence) && keys.some((key) => keyRe.test(key)));
   });
 }
 

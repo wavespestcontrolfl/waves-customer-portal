@@ -2275,3 +2275,25 @@ test.each([['low', 'The lawn received enough water this week.'], ['high', 'The l
   const data = lawnData({ reportV2: { aftercare: {}, water: { status, explanation: 'Water card.' } } });
   expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('lawn_status_claim');
 });
+
+describe('answer screen, Codex round 62', () => {
+  const lawn = lawnData({ reportV2: null, lawnAssessment: { scores: { overallScore: 80 }, waterContext: { rainfallInches7d: 3.27, targetInchesPerWeek: 1 } } });
+  const facts = buildReportAskFacts({ data: lawn });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'How much rain did we get?', data: lawn, facts });
+
+  test('a legacy lawn water card reaches the facts', () => {
+    expect(facts.lawn_assessment.water_this_week).toMatchObject({ rain_last_7_days_inches: 3.27, target_inches_per_week: 1 });
+    expect(ask('You received 3.27 inches of rain this week.')).toBeNull();
+  });
+
+  test('a recorded measurement may not be called missing', () => {
+    expect(ask('The report does not show weekly rainfall.')).toBe('denies_recorded_term');
+  });
+
+  test("a possessive technician name must be the recorded one", () => {
+    const data = pestData({ applications: [], technicianName: 'Alex Rivera' });
+    const pf = buildReportAskFacts({ data });
+    expect(screenAskAnswer("Your technician's name is Jordan.", { question: 'Who was my technician?', data, facts: pf })).toBe('technician_name');
+    expect(screenAskAnswer("Your technician's name is Alex.", { question: 'Who was my technician?', data, facts: pf })).toBeNull();
+  });
+});
