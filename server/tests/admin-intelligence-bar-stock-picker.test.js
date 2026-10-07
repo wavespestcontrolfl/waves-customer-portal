@@ -511,9 +511,10 @@ describe('/show-again', () => {
     const CUSTOMER = '9a0c8f1e-0000-4000-8000-0000000000c2';
     const bookingRow = () => ({ id: CHOICE_ID, tool_name: 'create_appointment', status: 'pending', context: 'schedule',
       params: { customer_id: CUSTOMER, service_type: 'Monthly Lawn Care Service', scheduled_date: '2099-01-05', price: 60.33,
-        _booking_price: 60.33, _booking_list_price: 61.33, _booking_service_id: 'svc-lawn' } });
-    const booking = (listPrice) => ({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service',
-      catalogPrice: 61.33, listPrice });
+        _booking_price: 60.33, _booking_list_price: 61.33, _booking_catalog_price: 61.33, _booking_service_id: 'svc-lawn' } });
+    // No discount: the list price and the catalog price are the same number.
+    const booking = (catalogPrice) => ({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service',
+      catalogPrice, listPrice: catalogPrice });
     beforeEach(() => {
       mockResolveCommsCustomer.mockResolvedValue({ id: CUSTOMER, first_name: 'Synthetic', last_name: 'Booker' });
       mockGetPendingRow.mockResolvedValue(bookingRow());
@@ -526,10 +527,22 @@ describe('/show-again', () => {
         const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
         expect([status, body.error]).toEqual([200, undefined]);
       });
-      expect(mockCreatePendingAction.mock.calls[0][0].params._booking_price).toBe(60.33);
+      expect(mockCreatePendingAction.mock.calls[0][0].params).toMatchObject({ _booking_price: 60.33, _booking_catalog_price: 61.33 });
     });
 
-    test('asks the price again when the catalog price changed since that card', async () => {
+    test('asks the price again for an older card with no pinned catalog price', async () => {
+      const older = bookingRow();
+      delete older.params._booking_catalog_price;
+      mockGetPendingRow.mockResolvedValue(older);
+      mockRetireExpiredAction.mockResolvedValue({ ...older, status: 'cancelled' });
+      mockIbBookingProposal.mockResolvedValue(booking(61.33));
+      await withServer(async (baseUrl) => {
+        const { body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+        expect(body.code).toBe('price_read_back');
+      });
+    });
+
+    test('asks the price again when the catalog price changed since that card (no discount)', async () => {
       mockIbBookingProposal.mockResolvedValue(booking(65));
       await withServer(async (baseUrl) => {
         const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });

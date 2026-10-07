@@ -73,8 +73,10 @@ async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {
     : { error: 'This task is already running', code: 'already_running' };
 }
 
+// An expired step never ran and is not an unresolved outcome: continuing
+// proposes it again inside the task (Codex #6111 r3), and nothing commits.
 function continuationError(task, receipts, { selectedTarget } = {}) {
-  if (receipts.some(r => !['completed', 'provider_accepted'].includes(r.outcome))) {
+  if (receipts.some(r => !['completed', 'provider_accepted', 'expired'].includes(r.outcome))) {
     return { error: 'Resolve the saved action outcomes before continuing', code: 'steps_unresolved' };
   }
   // Images are never persisted and a checkpoint holds only their text

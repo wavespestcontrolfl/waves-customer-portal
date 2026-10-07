@@ -224,6 +224,21 @@ function stampRequestStart(params, requestStartedAt) {
   return startedAt && !Number.isNaN(startedAt.getTime()) ? { ...params, [REQUEST_STAMP]: startedAt.toISOString() } : params;
 }
 
+// A task step whose card expired before anyone decided it never ran. When the
+// task continues and proposes again (Codex #6111 r3), that card is retired
+// from the task's step list: it keeps its status and expiry (it stays an
+// expired card) and gets a replaced-step key, which frees its step for the
+// fresh card and keeps it out of the task's receipts.
+const replacedStepKey = id => paramsHash('ib-replaced-step', String(id));
+const isReplacedStep = row => row.step_key === replacedStepKey(row.id);
+const isExpiredUndecided = row => row.status === 'pending' && new Date(row.expires_at).getTime() <= Date.now();
+async function retireExpiredSteps(trx, rows) {
+  for (const row of rows.filter(r => !isReplacedStep(r))) {
+    await trx('ib_pending_actions').where({ id: row.id, status: 'pending' }).where('expires_at', '<=', trx.fn.now())
+      .update({ step_key: replacedStepKey(row.id), updated_at: trx.fn.now() });
+  }
+}
+
 // Locks the running task and reads this actor's earlier cards of the task.
 // Returns the card this step already stored (a retry), or null when the step
 // is new; throws when the lease is lost or a preceding action is unresolved.
@@ -231,7 +246,10 @@ async function loadTaskStep(trx, { taskId, requestedBy, runnerToken, toolName, s
   const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
     .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
   if (!task) throw new Error('Task execution was superseded');
-  const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
+  const rows = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
+  const expired = rows.filter(isExpiredUndecided);
+  await retireExpiredSteps(trx, expired);
+  const previous = rows.filter(row => !expired.includes(row));
   const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
     || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
   if (existing) return existing;
@@ -346,8 +364,10 @@ async function createPendingAction({ toolName, params, requestedBy, taskId, requ
   return taskId || intent ? db.transaction(persist) : persist(db);
 }
 
+// The task's steps; a retired expired step (replaced by a fresh card) is not one.
 async function forTask(taskId, requestedBy) {
-  return db('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) }).orderBy('created_at');
+  const rows = await db('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) }).orderBy('created_at');
+  return rows.filter(row => !isReplacedStep(row));
 }
 
 /**

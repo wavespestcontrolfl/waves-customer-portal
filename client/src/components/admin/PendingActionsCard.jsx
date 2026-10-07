@@ -169,7 +169,17 @@ function ContractView({ contract, dark, showApproval = true }) {
 }
 
 // An expired card that was never decided: the server can propose it afresh.
-function ExpiredControls({ dark, reshowing, onShowAgain }) {
+// A task's card is proposed afresh by continuing its task instead, so it
+// points at the task's Continue action.
+function ExpiredControls({ dark, reshowing, onShowAgain, inTask }) {
+  if (inTask) {
+    return (
+      <div style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
+        className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}>
+        Expired — this proposal is no longer confirmable. Continue the request to get a fresh card.
+      </div>
+    );
+  }
   return (
     <div style={dark ? { display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" } : undefined}
       className={dark ? undefined : "flex flex-col gap-2 items-start"}>
@@ -289,7 +299,7 @@ function PickerButtons({ dark, picked, busy, status, touchFriendly, onChoose, on
   );
 }
 
-export default function PendingActionsCard({ actions, variant = "dark", onResolved, touchFriendly = false }) {
+export default function PendingActionsCard({ actions, variant = "dark", onResolved, touchFriendly = false, inTask = false }) {
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
@@ -609,7 +619,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             )}
 
             {expired ? (
-              <ExpiredControls dark={dark} reshowing={reshowingById[action.id] === true} onShowAgain={() => showAgain(action)} />
+              <ExpiredControls dark={dark} inTask={inTask} reshowing={reshowingById[action.id] === true} onShowAgain={() => showAgain(action)} />
             ) : !settled && choices ? (
               <ProductPickerControls dark={dark} actionId={action.id} choices={choices} picked={picked} busy={busy} status={status}
                 touchFriendly={touchFriendly} remaining={remaining}

@@ -390,6 +390,38 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(await onHand(ten.id)).toBe(12);
   }, 40000);
 
+  // An expired task card never ran: continuing the task proposes it again in
+  // the same task with fresh pins; the old card stays expired (Codex #6111 r3).
+  test('a task whose card expired continues and proposes a fresh card in the same task', async () => {
+    const row = await product();
+    const input = { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' };
+    const proposed = await propose('adjust_stock', input, `Add 2 lb of ${row.name} that arrived`);
+    const old = proposed.body.pendingActions[0];
+    const taskId = proposed.body.taskId;
+    expect(taskId).toBeTruthy();
+    await db('ib_pending_actions').where({ id: old.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    const before = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    expect(before.body).toMatchObject({ canContinue: true });
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(toolCall('discover_capabilities', { query: 'adjust stock' }, 'discover-2'))
+      .mockResolvedValueOnce(toolCall('adjust_stock', input, 'inventory-2'))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Confirm the fresh card.' }], usage: {} });
+    const resumed = await api(`/api/admin/intelligence-bar/tasks/${taskId}/resume`, { session_id: sessionId });
+    expect(resumed.status).toBe(200);
+    const after = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    expect(after.body.pendingActions).toHaveLength(1);
+    const fresh = after.body.pendingActions[0];
+    expect(fresh.id).not.toBe(old.id);
+    expect((await db('ib_pending_actions').where({ id: fresh.id }).first()).task_id).toBe(taskId);
+    const stale = await db('ib_pending_actions').where({ id: old.id }).first();
+    expect(stale.status).toBe('pending');
+    expect(new Date(stale.expires_at).getTime()).toBeLessThan(Date.now());
+    expect(await onHand(row.id)).toBe(10);
+    expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: old.id, contract_hash: old.contract_hash })).status).toBe(409);
+    expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: fresh.id, contract_hash: fresh.contract_hash })).body.success).toBe(true);
+    expect(await onHand(row.id)).toBe(12);
+  }, 40000);
+
   test('a stock change after confirm preflight is refused under the product lock', async () => {
     const row = await product();
     const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' }, `Add 2 lb of ${row.name} that arrived`);

@@ -1446,6 +1446,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
+      // The catalog price the read-back compared against: Show again reuses an
+      // accepted stated price only while this is unchanged.
+      params._booking_catalog_price = booking.catalogPrice;
       // Whether another visit already overlaps this time when the card is
       // built (owner 2026-10-05). The executor books through an overlap that
       // already existed (warning only) but refuses one that is NEW since
@@ -2270,9 +2273,10 @@ async function showAgainReplay(id, actor) {
 
 // Show again of a booking card: the stated price that card carried already
 // passed the price read-back (no card is made otherwise). It still counts
-// only while the price and the catalog list price are both unchanged.
+// only while the stated price and the catalog price the read-back compared
+// against (pinned on that card) are both unchanged.
 function priceAcceptedOnCard(accepted, booking) {
-  return !!accepted && Number(accepted.price) === Number(booking.price) && Number(accepted.listPrice) === Number(booking.listPrice);
+  return !!accepted && Number(accepted.price) === Number(booking.price) && Number(accepted.catalogPrice) === Number(booking.catalogPrice);
 }
 
 // Show again's fresh proposal for a retired card. A picker card re-lists its
@@ -2290,7 +2294,8 @@ async function proposeShownAgain(req, row, input, trx) {
   }
   const grounded = STOCK_WRITE_TOOL_NAMES.has(row.tool_name)
     ? { groundedTarget: { productId: stored.product_id || null, requestId: stored.request_id || null } } : {};
-  const acceptedPrice = stored._booking_price != null ? { price: stored._booking_price, listPrice: stored._booking_list_price } : null;
+  const acceptedPrice = stored._booking_price != null && stored._booking_catalog_price != null
+    ? { price: stored._booking_price, catalogPrice: stored._booking_catalog_price } : null;
   return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input }, reproposal: { ...grounded, acceptedPrice, sourcePin, trx } });
 }
 
@@ -3387,7 +3392,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
     let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...req.ibResumedTask.checkpoint] : messages;
     if (req.ibResumedTask) {
-      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
+      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. A step whose outcome is expired never ran: propose it again if it is still wanted. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
     }
     if (req.ibResumedTask && platformEnabled) {
       // Restore every tool the worker had loaded: the ones it invoked and the

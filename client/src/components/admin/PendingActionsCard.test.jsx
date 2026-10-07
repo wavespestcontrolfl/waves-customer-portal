@@ -313,3 +313,9 @@ test('Show again cannot be sent twice while its request is in flight', async () 
   release();
   expect(await screen.findByText('Shown again below.')).toBeInTheDocument();
 });
+
+test('an expired task card points to the task Continue action instead of Show again', () => {
+  render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant="light" inTask />);
+  expect(screen.getByText(/Continue the request to get a fresh card/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
+});
