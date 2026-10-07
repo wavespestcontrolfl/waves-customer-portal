@@ -396,6 +396,21 @@ const ACCESS_VALUE_FIRST = /\b((?:use|enter|type|punch\s+in|key\s+in|press|dial|
 // Verb, then device, then value: "unlock the side gate with BLUE MOON"
 // (Codex P1 #5964 r61).
 const ACCESS_VERB_DEVICE = /\b((?:unlock|open|get\s+(?:into|through|past)|access|operate)\s+(?:the\s+|your\s+)?(?:\w+\s+){0,2}?(?:gate|door|lock|keypad|key\s*pad|garage|lockbox|lock\s*box|box|entry)\s+(?:with|using|by\s+(?:entering|typing|using))\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+)*)/gi;
+// Any word order: a sentence that names an entry device and an access action
+// is access instructions and leaves whole, so no ordering can carry a
+// credential out (Codex P1 #5964 r69).
+const ACCESS_DEVICE = /\b(?:gates?|doors?|locks?|padlocks?|keypads?|key\s*pads?|garages?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|entry|entrances?)\b/i;
+const ACCESS_ACTION = /\b(?:enter|entering|type|typing|use|using|punch\w*|key\s+in|press|dial|input|codes?|combo|combination|password|passcode|pin|opens?\s+with|unlocks?\s+with|opened\s+with|word)\b/i;
+function maskAccessSentences(text) {
+  // Run last: a sentence about an entry device and an access action that
+  // still holds a capitalized word or a digit after every other redaction
+  // leaves whole.
+  return splitSentences(text).map((sentence) => {
+    const residue = sentence.replace(/\[[^\]]*\]/g, ' ').replace(/^\s*\S+/, ' ');
+    return ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence) && /\b[A-Z]{2,}\b|\d/.test(residue)
+      ? '[access details removed]' : sentence;
+  }).join(' ');
+}
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
@@ -439,7 +454,7 @@ function scrubFreeText(value, max = Infinity) {
   const { redactAccessCodes } = require('../context-aggregator');
   const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_VERB_DEVICE, '$1[redacted]').replace(ACCESS_VALUE_FIRST, '$1[redacted]').replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
-  return clipText(masked, max);
+  return clipText(maskAccessSentences(masked), max);
 }
 
 // The chokepoint (Codex P1 r1-r3 #5957: the question, the concern, then report
@@ -1699,6 +1714,9 @@ function namesWrongTechnician(text, facts) {
   const known = new Set(normalizeKey(facts?.technician_first_name || '').split(' ').filter(Boolean));
   for (const product of asArray(facts?.products)) for (const word of normalizeKey(product.name).split(' ')) known.add(word);
   known.add('waves');
+  // A recorded technician may not be called missing: "The report does not
+  // name your technician" (Codex P1 #5964 r69).
+  if (facts?.technician_first_name && TECH_MISSING_RE.test(matchForm(text))) return true;
   // The recorded technician may not be denied: "Alex was not your technician"
   // (Codex P1 #5964 r53).
   const first = normalizeKey(facts?.technician_first_name || '').split(' ')[0];
@@ -1712,6 +1730,7 @@ function namesWrongTechnician(text, facts) {
     return name && !known.has(name) && !SENTENCE_WORDS.has(name) && !TECH_NAME_STOP.has(name) && !MONTH_OR_DAY_WORD.test(name);
   }));
 }
+const TECH_MISSING_RE = /\b(?:(?:does|do|did)\s*n['’]?o?t\s+(?:name|list|show|include|say|mention|record)\b[^.?!]*\b(?:tech\w*|who)\b|(?:tech\w*|technician)\s+(?:is|was|isn['’]t|wasn['’]t)\s+(?:not\s+)?(?:listed|named|recorded|shown|known|on\s+(?:the|this)\s+report)|no\s+(?:tech\w*|technician)\s+(?:is\s+|was\s+)?(?:listed|named|recorded|shown)|(?:don['’]?t|do\s+not|can['’]?t|cannot)\s+(?:know|tell|say|see)\s+who)\b/i;
 const TECH_NAME_STOP = new Set('we it they he she you i your our the this that our a an yes no our team office staff someone nobody'.split(' '));
 
 // A health verdict on the lawn or plants must fit the report: "Your lawn
@@ -2127,7 +2146,7 @@ const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
   // The answer may not hand back an access word either (Codex P2 #5964 r56).
-  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS), ...text.matchAll(ACCESS_VALUE_FIRST), ...text.matchAll(ACCESS_VERB_DEVICE)].length > 0],
+  ['access_phrase', (text) => splitSentences(text).some((sentence) => ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence) && /[A-Z]{2,}|\d|\b(?:is|was)\s+\S+\s*$|\bwith\s+\S+/.test(sentence.replace(/\[[^\]]*\]/g, ''))) || [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS), ...text.matchAll(ACCESS_VALUE_FIRST), ...text.matchAll(ACCESS_VERB_DEVICE)].length > 0],
   ['lawn_status_claim', (text, { facts }) => contradictsLawnStatus(text, facts)],
   ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
   ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],

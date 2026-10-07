@@ -2438,3 +2438,17 @@ test('only the drying instruction itself is exempt (pre-push audit)', () => {
   expect(screenAskAnswer('Keep pets off treated areas until dry and consider applying fertilizer.', { question: 'q', data, facts })).toBe('own_instruction');
   expect(screenAskAnswer('Keep pets off treated areas until dry, then they can go back out.', { question: 'q', data, facts })).toBeNull();
 });
+
+describe('answer screen, Codex round 69', () => {
+  test('a device-first access instruction leaves whole, in any word order', () => {
+    const facts = buildReportAskFacts({ data: lawnData({ customerConcern: 'For the side gate, enter BLUE MOON. Ants by the pool.', reportV2: { aftercare: {} } }) });
+    expect(facts.customer_concern).toBe('[access details removed] Ants by the pool.');
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    expect(screenAskAnswer('For the side gate, enter BLUE MOON.', { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('access_phrase');
+  });
+
+  test.each(['The report does not name your technician.', 'Your technician is not listed on this report.'])('a recorded technician may not be called missing: %s', (answer) => {
+    const data = lawnData({ technicianName: 'Alex Rivera', reportV2: { aftercare: {} } });
+    expect(screenAskAnswer(answer, { question: 'Who was my technician?', data, facts: buildReportAskFacts({ data }) })).toBe('technician_name');
+  });
+});
