@@ -3,6 +3,7 @@ const { savepointRead } = require('../utils/savepoint-read');
 const { etParts } = require('../utils/datetime-et');
 const { isDeepStrictEqual } = require('node:util');
 const featureGates = require('../config/feature-gates');
+const { activeProtocolProducts } = require('./lawn-protocol-retired');
 const { LAWN_V13_VERSION, BAHIA_TRACK, bahiaHasNoProgram } = require('./lawn-program');
 
 // The checked-in field reference and plan matcher are released with protocol
@@ -231,12 +232,9 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
   const window = windowForVisit(protocol, windowKey, etParts(serviceDate).month);
   if (!window) return { protocol, window: null, products: [], gates: protocol.gates };
 
-  const productsQuery = knex('lawn_protocol_products as lpp')
+  const productsQuery = activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
     .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
     .where('lpp.lawn_protocol_window_id', window.id)
-    // A retired row (Dismiss, once a completion actual references it) keeps its place and its actuals'
-    // link, but is no longer part of the window's products.
-    .whereRaw("COALESCE(lpp.gates->>'retired', '') <> 'true'")
     .select(
       'lpp.*',
       'pc.name as catalog_product_name',

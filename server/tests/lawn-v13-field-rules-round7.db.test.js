@@ -4,6 +4,8 @@
 const { randomUUID } = require('crypto');
 const { createLawnHistoryDb } = require('./helpers/lawn-history-db');
 const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
+const adminProtocols = require('../routes/admin-protocols');
+const { isRetiredProtocolRow } = require('../services/lawn-protocol-retired');
 const migration = require('../models/migrations/20261007158000_lawn_v13_field_rules_round7');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
@@ -53,8 +55,14 @@ describeDb('v13 field rules round 7 through PostgreSQL', () => {
   });
   afterAll(async () => { if (owned) await owned.dispose(); });
 
-  test('before: the window offers Dismiss', async () => {
+  const sopFor = async () => {
+    const payload = await adminProtocols._internals.loadWindowSopPayload(knex, protocol.id, 'nov_v13_spreader_feeding');
+    return { payload, markdown: adminProtocols._internals.renderWindowSopMarkdown(payload) };
+  };
+
+  test('before: the window and its SOP offer Dismiss', async () => {
     expect((await novemberContext()).products.map((p) => p.product_name)).toEqual(expect.arrayContaining([DISMISS, VELISTA]));
+    expect((await sopFor()).markdown).toContain(DISMISS);
   });
 
   test('up retires the referenced row in place, and the plan context no longer offers it', async () => {
@@ -65,6 +73,19 @@ describeDb('v13 field rules round 7 through PostgreSQL', () => {
     expect(context.products.map((p) => p.product_name)).toEqual([VELISTA]);
     expect(summarizeProtocolContext(context).products.map((p) => p.protocolProductName)).toEqual([VELISTA]);
     expect((await knex('lawn_protocol_products').where({ id: velistaRow.id }).first()).gates).toEqual({});
+  });
+
+  test('the SOP (and so the wiki sync) lists the window without the retired row', async () => {
+    const { payload, markdown } = await sopFor();
+    expect(payload.products.map((p) => p.product_name)).toEqual([VELISTA]);
+    expect(markdown).toContain(VELISTA);
+    expect(markdown).not.toContain(DISMISS);
+  });
+
+  test('the shared check: only gates.retired = true is retired', () => {
+    expect(isRetiredProtocolRow({ gates: { retired: true } })).toBe(true);
+    expect(isRetiredProtocolRow({ gates: JSON.stringify({ retired: true }) })).toBe(true);
+    for (const gates of [{}, { retired: false }, { retired: 'yes' }, null, 'not json']) expect(isRetiredProtocolRow({ gates })).toBe(false);
   });
 
   test('the historical actual keeps its link, name and rates', async () => {
@@ -92,5 +113,6 @@ describeDb('v13 field rules round 7 through PostgreSQL', () => {
     expect(await goalOf(december.id)).toBe('Owner edited December goal.');
     expect(await knex('lawn_protocol_audit_log').where({ action: 'v13_field_rules_r7' })).toHaveLength(0);
     expect((await novemberContext()).products.map((p) => p.product_name)).toEqual(expect.arrayContaining([DISMISS]));
+    expect((await sopFor()).markdown).toContain(DISMISS);
   });
 });

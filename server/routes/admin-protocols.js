@@ -28,6 +28,7 @@ const {
   v13VisitLimits,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
+const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
 const jobCard = require('../services/job-card');
 const featureGates = require('../config/feature-gates');
 
@@ -281,7 +282,8 @@ async function loadWindowSopPayload(knex, protocolId, windowKey) {
     .first();
   if (!window) return null;
   const [products, gates] = await Promise.all([
-    knex('lawn_protocol_products')
+    // The SOP and its wiki sync tell people what to apply: a retired row is left out.
+    activeProtocolProducts(knex('lawn_protocol_products'))
       .where({ lawn_protocol_window_id: window.id })
       .orderBy('sort_order', 'asc'),
     knex('lawn_protocol_gates')
@@ -1938,6 +1940,8 @@ router._internals = {
   stockStatusForProduct,
   unmatchedPricedProtocolLines,
   isPricedProtocolLine,
+  loadWindowSopPayload,
+  renderWindowSopMarkdown,
 };
 
 module.exports = router;
