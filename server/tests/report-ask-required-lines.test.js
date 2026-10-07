@@ -1990,3 +1990,11 @@ test('a time or count noun does not borrow a score value (pre-push audit)', () =
   expect(screenAskAnswer('Lawn health can take 82 days to improve.', { question: 'How long?', data, facts })).toBe('unstated_number');
   expect(screenAskAnswer('Your lawn health score is 82 out of 100.', { question: 'How is it?', data, facts })).toBeNull();
 });
+
+test('the spoken-email mask stays fast on hostile input (pre-push audit P0)', () => {
+  const started = Date.now();
+  for (const text of [`x at ${'adot'.repeat(120)}!`, `x at ${'a dot '.repeat(80)}!`, `${'a.'.repeat(240)} at b`]) {
+    buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: text } });
+  }
+  expect(Date.now() - started).toBeLessThan(1000);
+});

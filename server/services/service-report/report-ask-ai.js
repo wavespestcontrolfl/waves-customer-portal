@@ -398,13 +398,17 @@ function maskSpokenPhones(text) {
 
 // An email in spoken or obfuscated form: "jane dot doe at gmail dot com",
 // "jane(at)gmail(dot)com" (Codex P1 #5964 r31).
-const SEP_DOT = '\\s*(?:[\\(\\[]\\s*)?(?:dot|\\.)(?:\\s*[\\)\\]])?\\s*';
-const SPOKEN_DOT = '\\s*(?:[\\(\\[]\\s*)?dot(?:\\s*[\\)\\]])?\\s*';
-const SPOKEN_EMAIL = new RegExp(`\\b[a-z0-9._%+-]+(?:${SEP_DOT}[a-z0-9_-]+)*\\s*(?:[\\(\\[]\\s*)?(?:at|@)(?:\\s*[\\)\\]])?\\s*[a-z0-9-]+(?:${SEP_DOT}[a-z0-9-]+)*${SEP_DOT}(?:com|net|org|edu|gov|io|us|co|info|biz|me)\\b`
+// Each separator matches one way only: a spoken "dot" or "at" needs spaces or
+// brackets around it, and no segment holds a dot, so no input can backtrack
+// exponentially (pre-push audit P0, #5964).
+const SPOKEN_DOT = '(?:\\s*[\\(\\[]\\s*dot\\s*[\\)\\]]\\s*|\\s+dot\\s+)';
+const SEP_DOT = `(?:${SPOKEN_DOT}|\\s*\\.\\s*)`;
+const SPOKEN_AT = '(?:\\s*@\\s*|\\s*[\\(\\[]\\s*at\\s*[\\)\\]]\\s*|\\s+at\\s+)';
+const SPOKEN_EMAIL = new RegExp(`\\b[a-z0-9_%+-]+(?:${SEP_DOT}[a-z0-9_%+-]+)*${SPOKEN_AT}[a-z0-9-]+(?:${SEP_DOT}[a-z0-9-]+)*?${SEP_DOT}(?:com|net|org|edu|gov|io|us|co|info|biz|me)\\b`
   // Any ending after a spoken or tight dot: "jane at example dot dev",
   // "jane(at)example(dot)app" (Codex P1 #5964 r38). A spaced "." stays on the
   // list above, so prose ("at home. Then") is never masked.
-  + `|\\b[a-z0-9._%+-]+(?:${SEP_DOT}[a-z0-9_-]+)*\\s*(?:[\\(\\[]\\s*)?(?:at|@)(?:\\s*[\\)\\]])?\\s*[a-z0-9-]+(?:${SEP_DOT}[a-z0-9-]+)*(?:${SPOKEN_DOT}|\\.)[a-z]{2,24}\\b`, 'gi');
+  + `|\\b[a-z0-9_%+-]+(?:${SEP_DOT}[a-z0-9_%+-]+)*${SPOKEN_AT}[a-z0-9-]+(?:(?:${SPOKEN_DOT}|\\.)[a-z0-9-]+)*?(?:${SPOKEN_DOT}|\\.)[a-z]{2,24}\\b`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
