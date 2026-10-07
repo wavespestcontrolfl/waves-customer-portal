@@ -10184,8 +10184,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   );
 }
 
-function reportDataUrl(token, mode, pinnedAssessment) {
+// The PDF renderer's URL carries the Visit Summary signature its cache key names (`vs`); the page asks its
+// own /data for exactly that snapshot, and the server answers 409 for any other (the report changed since
+// the key was computed), so the render fails instead of being cached under the wrong key. PDF mode only.
+function reportDataUrl(token, mode, pinnedAssessment, expectedVisitSummary = null) {
   return `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+    + (mode === 'pdf' && expectedVisitSummary ? `&vs=${encodeURIComponent(expectedVisitSummary)}` : '')
     + (pinnedAssessment
       ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
         + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
@@ -10232,6 +10236,11 @@ export default function ReportViewPage() {
     };
   }, []);
 
+  const expectedVisitSummary = useMemo(() => {
+    if (typeof window === 'undefined' || mode !== 'pdf') return null;
+    return (new URLSearchParams(window.location.search).get('vs') || '').trim() || null;
+  }, [mode]);
+
   // Liquid-glass theme — live view only, mounted at the PAGE level so the
   // scene is up from the very first paint (loading skeleton included), not
   // only after /data resolves — mounting it inside ServiceReportV1 made the
@@ -10256,7 +10265,7 @@ export default function ReportViewPage() {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = reportDataUrl(token, mode, pinnedAssessment);
+    const dataUrl = reportDataUrl(token, mode, pinnedAssessment, expectedVisitSummary);
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -10313,7 +10322,7 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, mode, pinnedAssessment, loadAttempt]);
+  }, [token, mode, pinnedAssessment, expectedVisitSummary, loadAttempt]);
 
   useEffect(() => {
     if (!data || data.error) return;

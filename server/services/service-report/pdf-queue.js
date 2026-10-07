@@ -311,6 +311,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
       pinnedLawnAssessmentId: effectivePin,
       pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
       pinnedLawnHistoryIdentity,
+      // Bind the browser's own /data to the summary this key names (only for a canonical, cacheable render).
+      expectedVisitSummarySignature: expectedVisitSummaryFor(canonical, { isDeliveryPin, effectivePin }),
     });
     pdf = rendered.pdf;
     renderImageFailures = rendered.imageFailures ?? null;
@@ -978,6 +980,30 @@ function renderedVisitSummary(pageReport, localData) {
   return { source: localData?.summarySource ?? null, signature: lawnVisitSummaryRenderedSignature(localData) };
 }
 
+// The Visit Summary signature the render URL asks /data to match: only while the gate is live, only for a
+// lawn render with a canonical answer, and never for a delivery pinned to a different assessment (that
+// render is never cached, and the key's component describes the canonical assessment).
+function expectedVisitSummaryFor(canonical, { isDeliveryPin = false, effectivePin = null } = {}) {
+  const deliveryPinDiffers = isDeliveryPin && effectivePin !== canonical?.pin;
+  const live = require('../../config/feature-gates').lawnVisitSummaryV2Live?.() === true;
+  if (!live || deliveryPinDiffers || !canonical || canonical.pin == null || typeof canonical.visitSummarySignature !== 'string') return undefined;
+  return canonical.visitSummarySignature;
+}
+
+// The /data route's side of that binding: with a `vs` the PDF renderer sent, the payload about to be
+// returned must carry the summary the key names (same precedence rule as the render fence), else the
+// route answers 409 and the page never renders, so the renderer fails and nothing is cached.
+function visitSummaryDataMismatch({ live, mode, expected, data }) {
+  if (!live || mode !== 'pdf' || typeof expected !== 'string' || !expected) return false;
+  return visitSummaryRenderMismatch({
+    live,
+    pinned: true,
+    renderedSource: data?.summarySource ?? null,
+    renderedSignature: lawnVisitSummaryRenderedSignature(data),
+    keySignature: expected === 'none' ? '' : expected,
+  });
+}
+
 function visitSummaryRenderMismatch({ live, pinned, renderedSource, renderedSignature, keySignature }) {
   if (!live || !pinned) return false;
   if (renderedSource != null && renderedSource !== 'lawn_visit_summary' && renderedSource !== 'recap') return false;
@@ -986,6 +1012,8 @@ function visitSummaryRenderMismatch({ live, pinned, renderedSource, renderedSign
 
 module.exports = {
   visitSummaryRenderMismatch,
+  visitSummaryDataMismatch,
+  expectedVisitSummaryFor,
   renderedVisitSummary,
   CLAIM_LIMIT,
   // Shared with the ops queue so its stale-claim rule cannot drift from

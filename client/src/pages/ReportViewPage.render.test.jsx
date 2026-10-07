@@ -1957,3 +1957,54 @@ describe('print (Codex r2 on #6088)', () => {
     expect(printBlocks.some((b) => /\.plan-visit-reschedule\s*\{\s*display:\s*none;/.test(b))).toBe(true);
   });
 });
+
+// GATE_LAWN_VISIT_SUMMARY_V2 snapshot binding: the PDF renderer's URL carries `vs`, and the page asks its own
+// /data for exactly that snapshot (the server answers 409 for any other). PDF mode only.
+describe('ReportViewPage — forwards the PDF renderer\'s vs param to /data', () => {
+  const dataUrlFor = async (search) => {
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', `/report/test-legacy-lawn${search}`);
+    try {
+      renderReport(structuredClone(legacyLawnReport));
+      await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+      return String(globalThis.fetch.mock.calls[0][0]);
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
+  };
+
+  it('pdf mode: vs rides on the data request (url-encoded, "none" included)', async () => {
+    expect(await dataUrlFor('?mode=pdf&vs=%3Avs%3Dabcdef12')).toContain('/data?mode=pdf&vs=%3Avs%3Dabcdef12');
+    expect(await dataUrlFor('?mode=pdf&vs=none')).toContain('&vs=none');
+  });
+
+  it('pdf mode without vs: the request is what it was', async () => {
+    expect(await dataUrlFor('?mode=pdf')).not.toContain('vs=');
+  });
+
+  it('live, static and sms_preview never forward it, even when the URL carries one', async () => {
+    for (const search of ['?vs=none', '?mode=static&vs=none', '?mode=sms_preview&vs=none']) {
+      expect(await dataUrlFor(search)).not.toContain('vs=');
+    }
+  });
+});
+
+describe('ReportViewPage — a refused (409 Report changed) pdf /data never renders a document', () => {
+  it('shows the load error, so the renderer\'s .service-report-v1 wait fails and no PDF is produced', async () => {
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', '/report/test-legacy-lawn?mode=pdf&vs=none');
+    try {
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ error: 'Report changed' }) })));
+      const { container } = render(
+        <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+          <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+      await screen.findByText(/service report/i);
+      expect(container.querySelector('.service-report-v1')).toBeNull();
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
+  });
+});

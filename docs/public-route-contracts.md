@@ -2730,7 +2730,21 @@ component is not cached. The printed summary is the one the RENDERED page report
 (`window.__WAVES_PDF_VISIT_SUMMARY`, read after `page.pdf()` like the image count,
 because the browser fetches its own `/data`); a renderer that cannot report one falls
 back to the worker's own payload. Both PDF writers (the queue and the public direct-PDF
-route) apply the fence. Every watering template is one sentence and the composer
+route) apply the fence.
+
+`GET /api/reports/:token/data` accepts ONE optional query parameter, `vs`, used only by the PDF
+renderer and only while `GATE_LAWN_VISIT_SUMMARY_V2` is live (any other request, any other mode and the
+gate off ignore it, so the payload and the status are unchanged without it). The renderer's page URL
+(`/report/:token?mode=pdf&...&vs=<value>`) carries the Visit Summary component the PDF cache key names
+(`:vs=<hash>`, or `none` when the key names no summary); the page forwards it, in `pdf` mode only, to its own
+`/data` request. When the payload the route is about to return would print a different summary (same
+`lawnVisitSummaryRenderedSignature` and the same precedence rule as the render fence: a technician report or
+typed narrative that won the slot is not compared), the route answers `409 { "error": "Report changed" }`
+with no report data. The page then shows its load error instead of the document, the renderer's wait for the
+report element fails, the render errors (the queue retries; the direct route answers its 503 and enqueues a
+retry), and nothing is cached. This binds the render to the key's snapshot for every renderer, including the
+Cloudflare renderer, which cannot report what it printed. It reveals nothing a caller without `vs` cannot
+already read: a wrong guess gets the generic 409, a right one gets the same payload. Every watering template is one sentence and the composer
 caps the paragraph at six sentences. When duplicate findings share a label, the
 least-confident read wins.
 The technician note, the program line, the headline and rain are not inputs. It

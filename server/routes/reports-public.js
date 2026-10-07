@@ -179,7 +179,7 @@ const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps')
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
 const { treatmentNarrativePdfSignature } = require('../services/service-report/treatment-narrative');
-const { enqueuePdfRenderRetry, renderedVisitSummary, visitSummaryRenderMismatch } = require('../services/service-report/pdf-queue');
+const { enqueuePdfRenderRetry, renderedVisitSummary, visitSummaryRenderMismatch, visitSummaryDataMismatch, expectedVisitSummaryFor } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
@@ -2211,6 +2211,8 @@ router.get('/:token', async (req, res, next) => {
             pinnedLawnAssessmentId: canonicalPin,
             pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
+            // Bind the browser's own /data to the summary this key names (GATE_LAWN_VISIT_SUMMARY_V2).
+            expectedVisitSummarySignature: expectedVisitSummaryFor(canonical),
           });
           pdf = rendered.pdf;
           renderImageFailures = rendered.imageFailures ?? null;
@@ -2271,7 +2273,7 @@ router.get('/:token', async (req, res, next) => {
         } else if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (visitSummaryRenderMismatch({
-          live: require('../config/feature-gates').lawnVisitSummaryV2Live(),
+          live: require('../config/feature-gates').lawnVisitSummaryV2Live?.() === true,
           pinned: vsPinned,
           renderedSource: vsRendered.source,
           renderedSignature: vsRendered.signature,
@@ -2514,6 +2516,19 @@ router.get('/:token/data', async (req, res, next) => {
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
       });
+      // The PDF renderer's snapshot binding (GATE_LAWN_VISIT_SUMMARY_V2): the renderer's URL carries the
+      // Visit Summary signature the cache key names (`vs`, 'none' for no summary). A payload whose summary
+      // differs is refused with a generic 409 and no data: the page then fails to render, the render
+      // errors, and nothing is cached (the retry path runs). Absent `vs`, or the gate off: unchanged.
+      if (visitSummaryDataMismatch({
+        live: require('../config/feature-gates').lawnVisitSummaryV2Live?.() === true,
+        mode,
+        expected: typeof req.query.vs === 'string' ? req.query.vs.trim() : '',
+        data: v1Data,
+      })) {
+        logger.warn(`[reports-public] report changed since the PDF key was computed for service_record ${serviceRecordId || 'unknown'}`);
+        return res.status(409).json({ error: 'Report changed' });
+      }
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports

@@ -107,3 +107,49 @@ describe('both PDF writers use the page-reported fence', () => {
     expect(read('../services/service-report/pdf.js')).toMatch(/visitSummary: rendered\.visitSummary \?\? null/);
   });
 });
+
+// Codex r8: the render URL carries the key's Visit Summary snapshot (renderer-agnostic), and /data refuses another.
+describe('the renderer URL carries the expected Visit Summary signature', () => {
+  const { serviceReportViewerUrl } = require('../services/service-report/pdf-puppeteer');
+  const { expectedVisitSummaryFor, visitSummaryDataMismatch } = require('../services/service-report/pdf-queue');
+  const featureGates = require('../config/feature-gates');
+  const saved = process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+  afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_VISIT_SUMMARY_V2; else process.env.GATE_LAWN_VISIT_SUMMARY_V2 = saved; });
+
+  test('a signature rides as &vs= (encoded); no summary rides as "none"; undefined adds nothing', () => {
+    expect(serviceReportViewerUrl('tok-1', null, 'pdf', { expectedVisitSummarySignature: ':vs=abcdef12' })).toContain('/report/tok-1?mode=pdf&vs=%3Avs%3Dabcdef12');
+    expect(serviceReportViewerUrl('tok-1', null, 'pdf', { expectedVisitSummarySignature: '' })).toContain('&vs=none');
+    expect(serviceReportViewerUrl('tok-1', null, 'pdf', {})).not.toContain('vs=');
+    expect(serviceReportViewerUrl('tok-1', null, 'pdf', { expectedVisitSummarySignature: undefined })).toBe(serviceReportViewerUrl('tok-1', null, 'pdf'));
+  });
+
+  test('the worker asks only while the gate is live, for a canonical lawn render', () => {
+    const canonical = { pin: 'la-1', visitSummarySignature: ':vs=abcdef12' };
+    delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+    expect(featureGates.lawnVisitSummaryV2Live()).toBe(false);
+    expect(expectedVisitSummaryFor(canonical)).toBeUndefined(); // gate off: no parameter
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    expect(expectedVisitSummaryFor(canonical)).toBe(':vs=abcdef12');
+    expect(expectedVisitSummaryFor({ pin: 'la-1', visitSummarySignature: '' })).toBe('');
+    expect(expectedVisitSummaryFor(canonical, { isDeliveryPin: true, effectivePin: 'other' })).toBeUndefined(); // a delivery pinned to another assessment
+    expect(expectedVisitSummaryFor(canonical, { isDeliveryPin: true, effectivePin: 'la-1' })).toBe(':vs=abcdef12'); // a delivery pinned to the canonical one
+    expect(expectedVisitSummaryFor({ pin: null, signature: '' })).toBeUndefined(); // not a lawn render
+  });
+
+  test('/data side: same snapshot passes, another is refused, absent / not-pdf / gate-off change nothing', () => {
+    const TEXT = 'Today we applied a feeding, which fits the fall season.';
+    const summaryData = { summarySource: 'lawn_visit_summary', summary: TEXT };
+    const key = lawnVisitSummaryRenderedSignature(summaryData);
+    const live = true;
+    expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: key, data: summaryData })).toBe(false);
+    // The race: the key names the summary, the payload is the plain recap (and the reverse).
+    expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: key, data: { summarySource: 'recap', summary: 'Thanks.' } })).toBe(true);
+    expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: 'none', data: summaryData })).toBe(true);
+    expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: 'none', data: { summarySource: 'recap', summary: 'Thanks.' } })).toBe(false);
+    // A higher-precedence source printed no summary: nothing to compare.
+    expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: key, data: { summarySource: 'technician_report', summary: 'x' } })).toBe(false);
+    expect(visitSummaryDataMismatch({ live, mode: 'pdf', expected: '', data: { summarySource: 'recap' } })).toBe(false);
+    expect(visitSummaryDataMismatch({ live, mode: 'live', expected: key, data: { summarySource: 'recap' } })).toBe(false);
+    expect(visitSummaryDataMismatch({ live: false, mode: 'pdf', expected: key, data: { summarySource: 'recap' } })).toBe(false);
+  });
+});

@@ -20,7 +20,12 @@ function serviceReportPublicBase(req) {
 // the attachment's content deterministic is to tell the page which assessment
 // to show. The data route validates the pin against what this token already
 // exposes and refuses anything else.
-function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity } = {}) {
+// expectedVisitSummarySignature (GATE_LAWN_VISIT_SUMMARY_V2): the Visit Summary component the cache key names
+// (':vs=<hash>', or '' for none). When a string, the URL carries it as &vs= ("none" for ''), and the page
+// forwards it to its own /data request, which refuses (409) a payload whose summary differs. That binds the
+// render to the key's snapshot for EVERY renderer, including those that cannot report what they printed.
+// undefined = gate off or not a lawn render: no parameter.
+function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, expectedVisitSummarySignature } = {}) {
   const base = serviceReportPublicBase(req).replace(/\/+$/, '');
   const params = [];
   if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
@@ -60,6 +65,7 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
     params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
     if (planPin) params.push(`plan=${encodeURIComponent(planPin)}`);
   }
+  if (typeof expectedVisitSummarySignature === 'string') params.push(`vs=${encodeURIComponent(expectedVisitSummarySignature || 'none')}`);
   const query = params.length ? `?${params.join('&')}` : '';
   return `${base}/report/${encodeURIComponent(token)}${query}`;
 }
