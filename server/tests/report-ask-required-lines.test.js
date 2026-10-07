@@ -585,15 +585,15 @@ describe('answerReportQuestionWithAI with required lines', () => {
     expect(callModel.mock.calls[0][0].maxTokens).toBe(400);
   });
 
-  test('a lawn watering hold: the AI answer must carry the hold and the plan word for word', async () => {
+  // A sprinkler question is a care-permission question: the fixed answer
+  // states the hold and the plan word for word, with no model call (Codex P1s
+  // #5964 r63, r67).
+  test('a lawn watering hold: the sprinkler question keeps the fixed answer', async () => {
     const data = lawnData();
     const routed = route('Can I turn my sprinklers back on?', data);
-    const good = `Not yet. ${texts(routed).map((t) => (/[.!?]$/.test(t) ? t : `${t}.`)).join(' ')}`;
-    const callModel = jest.fn().mockResolvedValue(ok(good));
-    const out = await answerReportQuestionWithAI({ question: 'Can I turn my sprinklers back on?', data, requiredLines: routed.requiredLines }, { callModel });
-    expect(out.answer).toBe(good);
-    const dropped = jest.fn().mockResolvedValue(ok(`Not yet. ${routed.requiredLines[0].text}`));
-    expect(await answerReportQuestionWithAI({ question: 'Can I turn my sprinklers back on?', data, requiredLines: routed.requiredLines }, { callModel: dropped })).toBeNull();
+    const callModel = jest.fn();
+    expect(await answerReportQuestionWithAI({ question: 'Can I turn my sprinklers back on?', data, requiredLines: routed.requiredLines }, { callModel })).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
   });
 
   describe('required lines are scrubbed before the model sees them', () => {
@@ -2107,7 +2107,7 @@ describe('answer screen, Codex round 57', () => {
   });
 
   test('serviced areas ground coverage answers', () => {
-    const data = pestData({ applications: [], areasServiced: ['Garage', 'Exterior perimeter'] });
+    const data = lawnData({ applications: [], areasServiced: ['Garage', 'Exterior perimeter'], reportV2: { aftercare: {} } });
     const facts = buildReportAskFacts({ data });
     const ask = (answer) => screenAskAnswer(answer, { question: 'Did you do the garage?', data, facts });
     expect(facts.areas_serviced).toEqual(['Garage', 'Exterior perimeter']);
@@ -2390,8 +2390,24 @@ describe('answer screen, Codex round 66', () => {
 });
 
 test('serviced areas come from the payload field serviceAreas (pre-push audit)', () => {
-  const data = pestData({ applications: [], serviceAreas: ['Garage', 'Exterior perimeter'] });
+  const data = lawnData({ applications: [], serviceAreas: ['Garage', 'Exterior perimeter'], reportV2: { aftercare: {} } });
   const facts = buildReportAskFacts({ data });
   expect(facts.areas_serviced).toEqual(['Garage', 'Exterior perimeter']);
   expect(screenAskAnswer('The garage was not serviced.', { question: 'Was the garage serviced?', data, facts })).toBe('unrecorded_work');
+});
+
+describe('answer screen, Codex round 67', () => {
+  test.each(['Would mowing now be fine?', 'Is mowing now allowed?', 'Would it be okay if I mow?'])('a care-permission question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', question)).toBe('next_steps');
+  });
+
+  test('a "won\'t be a problem" permission is rejected', () => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    expect(screenAskAnswer('Mowing now won’t be a problem.', { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
+  });
+
+  test('a pest report sends no serviced-area labels', () => {
+    const facts = buildReportAskFacts({ data: pestData({ applications: [], serviceAreas: ['Kitchen', 'Master bedroom'] }) });
+    expect(facts.areas_serviced).toBeUndefined();
+  });
 });

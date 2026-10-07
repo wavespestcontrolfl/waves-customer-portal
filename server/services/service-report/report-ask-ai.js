@@ -473,6 +473,16 @@ function keeperFor(data) {
 // Lawn assessment facts the rule answers (answerTrend, answerFindings,
 // answerNextSteps) read. Scores are given out of 100 (the report shows them
 // as percentages; the answer screen rejects a percent sign).
+// The serviced-area labels the report shows (Codex P1 #5964 r57). The payload
+// names them serviceAreas (pre-push audit). A pest report names no treated
+// areas (owner 2026-10-05; hidesTreatedAreas), so the model gets none there
+// (Codex P1 #5964 r67).
+function servicedAreaFacts(data) {
+  if ((data.serviceLine || 'pest') === 'pest') return [];
+  return asArray(data.serviceAreas || data.areasServiced)
+    .map((area) => cleanText(typeof area === 'string' ? area : area?.label)).filter(Boolean).slice(0, 12);
+}
+
 function grassTypeOf(turf) {
   const parts = [underscoresToSpaces(turf?.grassType || ''), cleanText(turf?.cultivar || '')].filter(Boolean);
   return cleanText(parts.join(' ')) || null;
@@ -804,9 +814,7 @@ function buildReportAskFacts({
     report_sections: sections,
     visit_summary: sections.length || !keep(summary) ? null : summary,
     findings,
-    // The serviced-area labels the report shows (Codex P1 #5964 r57).
-    // The payload names them serviceAreas (pre-push audit, #5964).
-    areas_serviced: asArray(data.serviceAreas || data.areasServiced).map((area) => cleanText(typeof area === 'string' ? area : area?.label)).filter(Boolean).slice(0, 12),
+    areas_serviced: servicedAreaFacts(data),
     lawn_assessment: lawnAssessmentFacts(data, keep),
     tree_shrub_report: treeShrubFacts(data, keep),
     lawn_report: lawnV2Facts(data, keep),
@@ -1366,7 +1374,7 @@ const CARE_BENEFIT_RE = new RegExp(`\\b${CARE_VERBS}\\b[^.?!]*\\b(?:beneficial|b
 const CARE_PURPOSE_RE = new RegExp(`\\b(?:help|helps|improve|support|boost|encourage)\\s+(?:\\w+\\s+){0,3}?by\\s+(?:\\w+\\s+)?${CARE_VERBS}\\b|^(?:to|for)\\s+[^,]{2,60},\\s*(?:please\\s+)?${CARE_VERBS}\\b`, 'i');
 // Copular care permission: "Mowing now is fine", "It's OK to water" (Codex P1
 // #5964 r58).
-const CARE_PERMISSION_STATEMENT = /\b(?:mowing|watering|fertiliz\w*|irrigat\w*|seeding|overseeding|aerating|trimming|pruning|cutting|raking|spraying|edging|weeding)\b(?:\s+\w+){0,3}\s+(?:is|are|would\s+be|will\s+be|should\s+be|seems)\s+(?:\w+\s+)?(?:fine|ok|okay|safe|good|alright|allowed|recommended|best|needed|necessary|unnecessary|important|helpful)\b|\b(?:it['’]s|it\s+is|it\s+would\s+be)\s+(?:\w+\s+)?(?:fine|ok|okay|safe|good|alright|time|best|important)\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|seed|overseed|aerat\w*|trim|prune|cut|rake|spray|edge|weed)\b|\b(?:you|we)\s+(?:are|['’]re)\s+(?:fine|ok|okay|clear|good|free)\s+to\s+(?:mow|water|irrigat\w*|fertiliz\w*|seed|aerat\w*|trim|prune|cut|rake|spray)\b/i;
+const CARE_PERMISSION_STATEMENT = /\b(?:mowing|watering|fertiliz\w*|irrigat\w*|seeding|aerating|trimming|pruning|cutting|raking|spraying|edging|weeding)\b(?:\s+\w+){0,3}\s+(?:won['’]?t|will\s+not|wouldn['’]?t|would\s+not|isn['’]?t|is\s+not|shouldn['’]?t|should\s+not)\s+(?:be\s+)?(?:a\s+|an\s+|any\s+)?(?:problem|issue|concern|harm|trouble)\b|\b(?:mowing|watering|fertiliz\w*|irrigat\w*|seeding|overseeding|aerating|trimming|pruning|cutting|raking|spraying|edging|weeding)\b(?:\s+\w+){0,3}\s+(?:is|are|would\s+be|will\s+be|should\s+be|seems)\s+(?:\w+\s+)?(?:fine|ok|okay|safe|good|alright|allowed|recommended|best|needed|necessary|unnecessary|important|helpful)\b|\b(?:it['’]s|it\s+is|it\s+would\s+be)\s+(?:\w+\s+)?(?:fine|ok|okay|safe|good|alright|time|best|important)\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|seed|overseed|aerat\w*|trim|prune|cut|rake|spray|edge|weed)\b|\b(?:you|we)\s+(?:are|['’]re)\s+(?:fine|ok|okay|clear|good|free)\s+to\s+(?:mow|water|irrigat\w*|fertiliz\w*|seed|aerat\w*|trim|prune|cut|rake|spray)\b/i;
 function isCareInstruction(sentence) {
   return [CARE_PERMISSION_STATEMENT, CARE_INSTRUCTION_RE, CARE_ADVICE_RE, CARE_RECOMMENDATION_RE, GERUND_CARE_RE, CARE_BENEFIT_RE, CARE_PURPOSE_RE].some((re) => re.test(sentence))
     || sentence.split(/[,;:]\s*/).slice(1).some((clause) => CARE_INSTRUCTION_RE.test(clause));
@@ -2393,7 +2401,8 @@ function asksAboutSchedule(question) {
 
 // "Can I mow now?", "Is it necessary to fertilize?": a care decision the
 // model has no ground for keeps the fixed answer (Codex P1 #5964 r57).
-const CARE_PERMISSION_QUESTION = /\b(?:can|could|may|should|shall)\s+(?:i|we|you)\b[^?.!]{0,30}\b(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|overseed|aerat\w*|trim|prune|cut|weed|rake|sod|dethatch|edge|plant)\w*|\b(?:is\s+it|it['’]s)\s+(?:ok|okay|safe|fine|necessary|needed|time|alright|a\s+good\s+idea|too\s+(?:early|soon|late))\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|overseed|aerat\w*|trim|prune|cut|weed|rake|sod|dethatch|edge|plant)|\b(?:do|should)\s+(?:i|we)\s+(?:need|have)\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|aerat\w*|trim|prune|cut|weed|rake)|\bwhen\s+(?:can|should|do)\s+(?:i|we)\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|aerat\w*|trim|prune|cut|weed|rake)/i;
+const CARE_VERB_Q = '(?:mow\\w*|water\\w*|irrigat\\w*|fertiliz\\w*|spray\\w*|seed\\w*|overseed\\w*|aerat\\w*|trim\\w*|prun\\w*|cut\\w*|weed\\w*|rak\\w*|sod\\w*|dethatch\\w*|edg(?:e|ing)|plant\\w*|sprinkler\\w*)';
+const CARE_PERMISSION_QUESTION = new RegExp(`\\b${CARE_VERB_Q}\\b[^?.!]*\\b(?:ok(?:ay)?|fine|allowed|alright|all\\s+right|safe|problem|issue|good\\s+idea|bad\\s+idea|permitted|necessary|needed|time|wait|too\\s+(?:soon|early|late))\\b|\\b(?:can|could|may|should|shall|would|will|do|does|is|are|when)\\b[^?.!]{0,40}\\b${CARE_VERB_Q}\\b[^.!]*\\?`, 'i');
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
