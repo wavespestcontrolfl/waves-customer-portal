@@ -442,7 +442,7 @@ async function openInspectionCredit(customerId) {
  * Everything the card shows and the commit needs, read without writing.
  * Returns { error, code } to refuse, or { plan } for the card and commit.
  */
-async function buildProgramPlan(input) {
+async function buildProgramPlan(input, actionContext) {
   const PlanRateLedger = require('../plan-rate-ledger');
   const RateChange = require('./rate-change');
   const { impliedMonthlyStampForWrite } = require('../billing-lane');
@@ -506,7 +506,7 @@ async function buildProgramPlan(input) {
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, firstDate: args.firstDate, ...window,
       tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
-      bill, reprice, ledgerPin, serviceAddress, overlap, planSyncUpdates: planSync.updates,
+      bill, reprice, ledgerPin, serviceAddress, overlap, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
@@ -514,7 +514,7 @@ async function buildProgramPlan(input) {
       version: crypto.createHash('sha256').update(JSON.stringify([
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, family, args.tier, args.cadence, args.firstDate,
-        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress,
+        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, techNoticeFor(techPin, actionContext),
         overlap.map((o) => o.fact), planSync.updates,
       ])).digest('hex'),
     },
@@ -532,6 +532,7 @@ function cardLines(plan) {
   add('operational', `Series: ${plan.catalogRow.name}, ${CADENCES[plan.cadence]}, ${series}`);
   add('operational', `First visit: ${when}, technician ${plan.tech.name}, at ${plan.serviceAddress}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
+  add('operational', 'Leads: no lead status changes (this booking marks no lead won)');
   add('operational', `After booking: ask the bar to optimize ${plan.tech.name}'s route on ${dateLabel(plan.firstDate)} (a second card)`);
   if (plan.overlap.length) {
     const who = plan.overlap.map((o) => [o.customer, o.service, o.window].filter(Boolean).join(', ')).join('; ');
@@ -575,6 +576,7 @@ function cardLines(plan) {
     : 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
   add('comms', 'Texts: visit reminders before each visit, set up as the Schedule screen sets them up');
   add('comms', 'Email: the membership-started email is not sent');
+  if (plan.techNotice) add('comms', `Technician: notifies ${plan.tech.name} of the new visits (app notice)`);
   return lines;
 }
 
@@ -600,6 +602,7 @@ function previewFromPlan(plan) {
     // The handler registers the 72 h / 24 h reminder rows for every visit it
     // books, whatever send_texts says, so the customer is always contacted.
     notifies_customer: true,
+    notifies_technician: plan.techNotice,
     card_lines: lines,
     _version: plan.version,
     note: 'PREVIEW ONLY: nothing was booked or changed. The operator confirms from the card.',
@@ -717,6 +720,14 @@ function partialReceipt(plan, booked, state, reason) {
   };
 }
 
+// The handler's new-visit notice to the booked technician
+// (tech-visit-notifications, GATE_TECH_VISIT_NOTIFICATIONS): only while the
+// gate is on, and silent when the confirming actor IS that technician.
+function techNoticeFor(tech, actionContext = {}) {
+  const actorId = actionContext.technicianId || actionContext.actorId || null;
+  return require('../tech-visit-notifications').isEnabled() === true && String(actorId || '') !== String(tech.id);
+}
+
 // Step 1. Returns { result } when the booking did not land (refused: nothing
 // changed; threw: unknown), else the handler's { status, json }.
 async function bookSeries(plan, actionContext) {
@@ -729,6 +740,10 @@ async function bookSeries(plan, actionContext) {
       body: scheduleBody(plan), actor: await actorFor(actionContext), creditFreeCard: true,
       // The overlaps the card showed; the handler's locked probe refuses any other.
       approvedOverlapFacts: plan.overlap.map((o) => o.fact),
+      // The handler's lead conversion picks a lead through a multi-tier
+      // resolver that is not callable without writing; this card changes no
+      // lead, so the booking skips it.
+      skipLeadConversion: true,
     });
   } catch (err) {
     logger.error(`[intelligence-bar] start_program booking threw for customer ${plan.customerId}: ${err.message}`);
@@ -766,7 +781,7 @@ async function commitProgram(input, actionContext) {
   if (!approved) {
     return { error: 'This program start has no approved card. Ask again for a fresh confirmation card.', preview_changed: true };
   }
-  const built = await buildProgramPlan(input);
+  const built = await buildProgramPlan(input, actionContext);
   if (built.error) return { ...built, preview_changed: true };
   const { plan } = built;
   if (plan.version !== approved) {
@@ -823,7 +838,7 @@ async function startProgram(input, actionContext = {}) {
   }
   // ONLY the server-derived context confirms (same rule as merge_customers).
   if (actionContext.confirmed !== true) {
-    const built = await buildProgramPlan(input);
+    const built = await buildProgramPlan(input, actionContext);
     if (built.error) return built;
     return previewFromPlan(built.plan);
   }

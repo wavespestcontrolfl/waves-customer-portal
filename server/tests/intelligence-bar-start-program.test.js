@@ -26,6 +26,7 @@ const Sync = require('../services/self-booking-plan-sync');
 const WindowRules = require('../services/scheduling/window-rules');
 const DatetimeEt = require('../utils/datetime-et');
 const InspectionCredit = require('../services/inspection-credit');
+const TechNotices = require('../services/tech-visit-notifications');
 const { createScheduleBooking } = require('../routes/admin-schedule');
 const { executeCustomerLifecycleTool, CUSTOMER_LIFECYCLE_TOOLS } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { buildContract } = require('../services/intelligence-bar/authorization-contract');
@@ -116,6 +117,7 @@ beforeEach(() => {
   ]);
   jest.spyOn(WindowRules, 'probeSlotOverlap').mockResolvedValue([]);
   jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockResolvedValue(0);
+  jest.spyOn(TechNotices, 'isEnabled').mockReturnValue(false);
   createScheduleBooking.mockReset();
 });
 
@@ -166,6 +168,31 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     expect(typeof preview._version).toBe('string');
     expect(writes).toEqual([]);
     expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the card says no lead status changes', async () => {
+    const preview = await run(BASE_INPUT);
+    expect(lines(preview, 'operational')).toContain('Leads: no lead status changes (this booking marks no lead won)');
+  });
+
+  test('tech notice gate on and the confirming actor is not the technician: the card and contract name the notice', async () => {
+    TechNotices.isEnabled.mockReturnValue(true);
+    const preview = await run(BASE_INPUT, { technicianId: 'office-admin-1' });
+    expect(lines(preview, 'comms')).toContain('Technician: notifies Sam Tech of the new visits (app notice)');
+    expect(preview.notifies_technician).toBe(true);
+    const contract = buildContract({ toolName: 'start_program', params: BASE_INPUT, displayParams: {}, preview });
+    expect(contract.notifies_technician).toBe(true);
+  });
+
+  test('tech notice: silent when the technician confirms, and when the gate is off', async () => {
+    TechNotices.isEnabled.mockReturnValue(true);
+    const own = await run(BASE_INPUT, { technicianId: TECH_ID });
+    expect(own.notifies_technician).toBe(false);
+    expect(lines(own, 'comms').some((l) => l.startsWith('Technician:'))).toBe(false);
+    TechNotices.isEnabled.mockReturnValue(false);
+    const off = await run(BASE_INPUT, { technicianId: 'office-admin-1' });
+    expect(off.notifies_technician).toBe(false);
+    expect(buildContract({ toolName: 'start_program', params: BASE_INPUT, displayParams: {}, preview: off }).notifies_technician).toBe(false);
   });
 
   test('the confirm-card contract carries every card line and says the customer is contacted', async () => {
@@ -359,6 +386,7 @@ describe('commit', () => {
     expect(actor).toEqual({ technicianId: TECH_ID, technicianName: 'Sam Tech' });
     expect(createScheduleBooking.mock.calls[0][0].creditFreeCard).toBe(true);
     expect(createScheduleBooking.mock.calls[0][0].approvedOverlapFacts).toEqual([]);
+    expect(createScheduleBooking.mock.calls[0][0].skipLeadConversion).toBe(true);
     // The handler queues its texts after it replies: queued, never "sent".
     expect(result.message).toContain('Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).');
     expect(result.message).not.toMatch(/\bsent per\b|confirmation sent/);
@@ -479,6 +507,14 @@ describe('commit', () => {
     expect(result).toMatchObject({ code: 'INSPECTION_CREDIT_CHANGED', preview_changed: true, nothing_changed: true });
     expect(writes).toEqual([]);
     expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+  });
+
+  test('the tech-notice gate flipping after the card refuses with preview_changed', async () => {
+    const version = (await run(BASE_INPUT, { technicianId: 'office-admin-1' }))._version;
+    TechNotices.isEnabled.mockReturnValue(true);
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: 'office-admin-1' });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
   });
 
   test('the handler finds a new overlap under its lock: refused, nothing booked, preview_changed', async () => {

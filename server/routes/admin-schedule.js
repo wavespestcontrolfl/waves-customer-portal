@@ -9791,7 +9791,9 @@ async function scheduleCreateHandler(req, res, next) {
         // label alone) and reports converted:false, so the promotion below
         // stays off too. The lead stays open and the customer row keeps its
         // lead stage until the quote is accepted.
-        if (!estimateRefusedAcceptance) {
+        // skipLeadConversion: set only by createScheduleBooking for the
+        // Intelligence Bar's start_program, whose card says no lead changes.
+        if (!estimateRefusedAcceptance && req.skipLeadConversion !== true) {
           try {
             const { convertLeadFromEvent } = require('../services/lead-estimate-link');
             const conversion = await convertLeadFromEvent({
@@ -9894,10 +9896,13 @@ async function scheduleCreateHandler(req, res, next) {
 // credit-free (create_appointment's mechanism).
 // approvedOverlapFacts: the overlapping visits the caller's card showed
 // (bookingOverlapFacts facts); any other overlap refuses under the lock.
-async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts }) {
+// skipLeadConversion: no lead is marked won (and no booking promotion runs)
+// for this booking.
+async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
     body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true,
+    skipLeadConversion: skipLeadConversion === true,
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
   };
   return new Promise((resolve, reject) => {

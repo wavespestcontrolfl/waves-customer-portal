@@ -30,6 +30,10 @@ jest.mock('../utils/customer-comms-lock', () => ({
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: jest.fn() })) })),
 }));
+jest.mock('../services/lead-estimate-link', () => ({
+  ...jest.requireActual('../services/lead-estimate-link'),
+  convertLeadFromEvent: jest.fn().mockResolvedValue({ converted: false, reason: 'no_open_lead' }),
+}));
 jest.mock('../services/inspection-credit', () => ({
   ...jest.requireActual('../services/inspection-credit'),
   redeemInspectionCreditForBooking: jest.fn().mockResolvedValue(undefined),
@@ -164,6 +168,18 @@ describe('createScheduleBooking runs the POST / handler', () => {
     expect(result.json.code).toBe('INSPECTION_CREDIT_CHANGED');
     expect(inserts).toEqual([]);
     expect(markBookingForInspectionCredit).not.toHaveBeenCalled();
+  });
+
+  test('lead conversion: the Schedule screen path runs it; skipLeadConversion skips it', async () => {
+    const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 200));
+    expect((await createScheduleBooking({ body: oneOff, actor })).status).toBe(201);
+    await settle();
+    expect(convertLeadFromEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'appointment_booked', customerId: 'cust-1' }));
+    convertLeadFromEvent.mockClear();
+    expect((await createScheduleBooking({ body: oneOff, actor, skipLeadConversion: true })).status).toBe(201);
+    await settle();
+    expect(convertLeadFromEvent).not.toHaveBeenCalled();
   });
 
   describe('approvedOverlapFacts (Intelligence Bar start_program)', () => {

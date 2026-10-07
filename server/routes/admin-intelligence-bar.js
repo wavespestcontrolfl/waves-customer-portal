@@ -1165,7 +1165,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // lets ActionRegistry.execute's own allowed() check pass for an outside-
     // service write proposed by the full-access owner, and correctly refuse
     // one from anyone else even if a forged tool_use reached this far.
-    preview = await executeToolByName(toolUse.name, { ...params }, null, { fullAccess: ibFullAccess(req) });
+    // technicianId (the proposing actor, as the confirm re-run and commit
+    // already pass it): start_program's card says whether the booked
+    // technician gets a new-visit notice, which is silent for the creator.
+    preview = await executeToolByName(toolUse.name, { ...params }, null, {
+      fullAccess: ibFullAccess(req), technicianId: req.technicianId || req.technician?.id || null,
+    });
     if (isToolFailure(preview)) {
       return { failed: true, modelResult: preview };
     }

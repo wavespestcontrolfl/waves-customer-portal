@@ -1043,6 +1043,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // customer notice above rather than promising a certain send.
   const cancelTechnicianNotice = toolName === 'cancel_appointment'
     ? (preview?.cancellation?.technician_notice || 'none') : 'none';
+  // start_program's new-visit notice to the booked technician: its card line
+  // is curated (start-program.js); the flag follows the preview.
+  const programTechnicianNotice = toolName === 'start_program' && preview?.notifies_technician === true;
   if (cancelTechnicianNotice !== 'none') {
     push('comms', 'The assigned technician MAY get a cancelled-visit notice (tech home card + push) by the existing tech-notifications system, depending on conditions at the moment it processes the cancellation');
   }
@@ -1090,7 +1093,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // tool (it never deletes a variable or writes anything but true/false).
       || (toolName === 'set_railway_gate' && preview?.prior_kind !== 'boolean'),
     notifies_customer: notifiesCustomer,
-    notifies_technician: cancelTechnicianNotice !== 'none',
+    notifies_technician: cancelTechnicianNotice !== 'none' || programTechnicianNotice,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),
     ...(toolName === 'bulk_update_leads' && Array.isArray(params?.lead_ids)
