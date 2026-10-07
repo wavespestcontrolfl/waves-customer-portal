@@ -265,6 +265,20 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     });
   });
 
+  test('the current container\'s raw lines make a stale older row of the same service consume-only: one lawn line, at the current price', async () => {
+    const audit = (data) => buildEstimatePricingAudit({ id: 'est-stale', status: 'sent', source: 'manual', monthly_total: '60.00', annual_total: '720.00', onetime_total: null, estimate_data: data });
+    const lawnLines = async (data) => (await audit(data)).lines.filter((l) => l.serviceKey === 'lawn_care');
+    // The authoritative result carries lawn only as raw lineItems (60/mo = 720/yr); the stale engine row is a mapped lawn row at another price.
+    const result = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 60, annual: 720, frequency: 9 }, { service: 'pest_control', name: 'Pest Control', monthly: 40, annual: 480, frequency: 4 }] };
+    const stale = { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 45, monthly: 45, tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9 }] } };
+    const lines = await lawnLines({ result, engineResult: stale });
+    expect(lines).toHaveLength(1);
+    expect(lines[0].price).toBe(720);
+    // A service only the older container carries still merges (the legitimate mixed shape is unchanged for a different service).
+    const mixed = await audit({ result, engineResult: { recurring: { services: [{ service: 'mosquito', name: 'Mosquito', mo: 50, monthly: 50 }] } } });
+    expect(mixed.lines.map((l) => l.serviceKey)).toEqual(expect.arrayContaining(['lawn_care', 'pest_control', 'mosquito']));
+  });
+
   test('the audit and the bermuda evidence pick the same container: an unpriced ancillary result yields to a priced engineResult; a SERVER reprice keeps its result', async () => {
     await withRemovalGate('true', async () => {
       const pricedEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 71.25 } }] };

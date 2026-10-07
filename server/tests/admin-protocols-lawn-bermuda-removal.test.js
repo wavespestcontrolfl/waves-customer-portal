@@ -348,7 +348,7 @@ describe('the account decides, on the server', () => {
     expect(stepNames(await lawnMix({ month: '4', scheduledServiceId: SERVICE_ID }))).toEqual(all);
   });
 
-  test('the base mixing order never holds a step line; the step has its own order (water, Recognition, Fusilade II, surfactant last) only when selected and available', async () => {
+  test('the base mixing order never holds a step line; the step has its own order (water, Recognition, Fusilade II, surfactant last) whenever the step is offered for the visit', async () => {
     const orderText = (body) => JSON.stringify(body.mixingOrder);
     // The base visit's own order is the order of a visit with no step at all.
     account.profile.bermuda_removal = false;
@@ -356,8 +356,15 @@ describe('the account decides, on the server', () => {
     expect(plain.bermudaMixingOrder).toBeUndefined();
     account.profile.bermuda_removal = true;
     const unselected = await lawnMix({ scheduledServiceId: SERVICE_ID });
-    expect(unselected.bermudaMixingOrder).toBeUndefined();
+    // Offered but not selected: the tank sheet still shows the step's order (the tech reads it before choosing).
+    expect(unselected.bermudaMixingOrder.map((step) => step.productName)).toEqual(['Water', REC, FUS, NIS]);
     expect(unselected.mixingOrder).toEqual(plain.mixingOrder);
+    // A step that is not offered (a limit holds an unselected one back) has no order.
+    applicationLimits.checkLimits.mockImplementation(async (_c, productId) => (productId === 'rec' ? { blocks: [{ message: 'Limit reached.' }], warnings: [] } : { blocks: [], warnings: [] }));
+    expect((await lawnMix({ scheduledServiceId: SERVICE_ID })).bermudaMixingOrder).toBeUndefined();
+    applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
+    // The reference tab's sheet (no visit named) has none.
+    expect((await lawnMix({})).bermudaMixingOrder).toBeUndefined();
     const clean = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec' });
     expect(orderText(clean)).not.toMatch(/Recognition|Fusilade|Surfactant/);
     expect(clean.mixingOrder).toEqual(plain.mixingOrder);

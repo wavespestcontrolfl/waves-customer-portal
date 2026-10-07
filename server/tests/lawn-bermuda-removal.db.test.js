@@ -15,7 +15,7 @@ const programMigration = require('../models/migrations/20261006190300_lawn_bermu
 const catalogMigration = require('../models/migrations/20261006190400_lawn_bermuda_removal_catalog');
 const zoysiaNoteMigration = require('../models/migrations/20261006220600_bermuda_zoysia_2ee_note');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
-const { rateAdvisories, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
+const { rateAdvisories, stepOffered, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 
 // An accepted estimate whose current priced result still carries the add-on on its lawn line.
 const BERMUDA_ESTIMATE = { engineRequest: { options: { bermudaSuppression: true } }, result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } };
@@ -823,6 +823,44 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       // All five back: the step is offered again.
       const back = await lawn({ date: '2026-06-20', bermuda: true });
       expect(optionNames(await plan(back.visit))).toEqual(expect.arrayContaining([REC, FUS, NIS]));
+    });
+
+    test('stepOffered (the Fast Complete handoff): true only for an eligible, configured, uncapped step visit; read from the visit alone', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      expect(await stepOffered(knex, f.visit.id)).toBe(true);
+      // Not offered: another month, no switch, a pest visit, an excluded cultivar, gates off.
+      const may = await lawn({ date: '2026-05-12', bermuda: true });
+      expect(await stepOffered(knex, may.visit.id)).toBe(false);
+      const plain = await lawn({ date: '2026-06-20' });
+      expect(await stepOffered(knex, plain.visit.id)).toBe(false);
+      const pest = await lawn({ date: '2026-06-20', bermuda: true });
+      await knex('scheduled_services').where({ id: pest.visit.id }).update({ service_type: 'Pest Control Quarterly' });
+      expect(await stepOffered(knex, pest.visit.id)).toBe(false);
+      const excluded = await lawn({ date: '2026-06-20', bermuda: true, cultivar: 'ProVista' });
+      expect(await stepOffered(knex, excluded.visit.id)).toBe(false);
+      // Capped (two sprays in the year): not offered, because the plan would withhold it.
+      await history(f.customerId, rec, ['2026-03-01', '2026-04-20']);
+      expect(await stepOffered(knex, f.visit.id)).toBe(false);
+      // The completion-default gates never matter.
+      const g = await lawn({ date: '2026-06-20', bermuda: true });
+      delete process.env.GATE_LAWN_COMPLETION_DEFAULTS; delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+      expect(await stepOffered(knex, g.visit.id)).toBe(true);
+      setGates({ v13: false });
+      expect(await stepOffered(knex, g.visit.id)).toBe(false);
+    });
+
+    test('stepOffered: an unconfigured program (a tagged row missing) is not offered', async () => {
+      setGates();
+      const saved = await knex('product_limits').where({ match_value: 'bermuda_removal', product_id: fus.id, limit_type: 'min_interval_days' });
+      await knex('product_limits').where({ id: saved[0].id }).del();
+      try {
+        const f = await lawn({ date: '2026-06-20', bermuda: true });
+        expect(await stepOffered(knex, f.visit.id)).toBe(false);
+      } finally {
+        const { id, ...row } = saved[0];
+        await knex('product_limits').insert(row);
+      }
     });
 
     test('the tagged rows missing: a mix spelled by a catalog alias or linked from the staged rows still triggers the refusal (links and aliases before names)', async () => {

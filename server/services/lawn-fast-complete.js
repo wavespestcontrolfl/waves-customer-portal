@@ -28,7 +28,7 @@ const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS }
 const { etCalendarDayOf } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
-const { BERMUDA_GROUP } = require('./lawn-bermuda-removal');
+const bermudaRemoval = require('./lawn-bermuda-removal');
 const BERMUDA_FULL_FORM_REASON = 'Bermuda removal mix this visit: use the full form';
 
 const LAWN_CATEGORY = 'lawn_care';
@@ -504,9 +504,6 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
   try {
     if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return empty();
     const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
-    // The bermuda removal mix is one grouped selection the quick sheet has no UI for: a visit whose
-    // plan offers it takes the full form (the context says so; the sheet hands the visit over).
-    const bermudaMix = (plan?.completionDefaults?.options || []).some((option) => option?.group === BERMUDA_GROUP);
     const withProduct = (list) => (Array.isArray(list) ? list : []).filter((item) => item?.product?.id);
     const items = withProduct(plan?.completionDefaults?.items);
     const addOns = withProduct(plan?.completionDefaults?.addOns);
@@ -536,7 +533,6 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
     return {
       source: 'plan',
       unavailable: null,
-      needsFullForm: bermudaMix ? BERMUDA_FULL_FORM_REASON : null,
       items: items.map(plannedItem),
       // The visit's month (1-12, ET), for the add-on row's title.
       month: Number(String(etCalendarDayOf(svc.scheduled_date) || '').slice(5, 7)) || null,
@@ -645,14 +641,14 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   // caught at submit (recapVisitIdentityChanged compares it when sent).
   const service = { ...recapServiceIdentity(svc, profile), technicianId: svc.technician_id ?? null };
   if (reason) return { ok: true, eligible: false, reason, visitType, service };
+  // The bermuda removal mix is one grouped selection the quick sheet has no UI for: a visit that OFFERS it
+  // (decided from the visit's step eligibility, whatever the completion defaults say) takes the full form.
+  if (await bermudaRemoval.stepOffered(knex, svc.id)) return { ok: true, eligible: false, reason: 'bermuda_removal', needsFullForm: BERMUDA_FULL_FORM_REASON, visitType, service };
 
   const { assessmentRow, assessmentReadFailed, assessmentUnusable } = await loadAssessmentState(svc, knex, readFailures);
   const photos = assessmentRow ? await loadAssessmentPhotos(assessmentRow.id, knex, readFailures) : null;
   const typed = !!profile.findingsType;
-  const { unavailable: plannedProductsUnavailable, needsFullForm, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
-  // A plan that offers the bermuda removal mix gets the answer an ineligible visit gets, which the
-  // sheet already turns into the full form.
-  if (needsFullForm) return { ok: true, eligible: false, reason: 'bermuda_removal', needsFullForm, visitType, service };
+  const { unavailable: plannedProductsUnavailable, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
   const reCheck = await loadReCheckNote(svc, knex);
 

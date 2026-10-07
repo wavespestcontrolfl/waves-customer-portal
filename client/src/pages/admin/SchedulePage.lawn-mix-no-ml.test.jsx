@@ -137,7 +137,11 @@ describe('Service Protocol drawer bermuda backpack mix order', () => {
     if (path.endsWith('/lawn-mix')) return {
       month: 'Jun', visit: { visit: 6 }, areaSqft: 10000,
       equipment: { systemName: 'Fixture calibrated rig', carrierGalPer1000: 2 },
-      items: [{ raw: 'Base instruction', selected: true, product: { name: 'Liquid potassium' }, jobMix: { amount: 30, amountUnit: 'fl_oz' }, fullTankMix: { amount: 60, amountUnit: 'fl_oz' } }],
+      items: [
+        { raw: 'Base instruction', selected: true, product: { name: 'Liquid potassium' }, jobMix: { amount: 30, amountUnit: 'fl_oz' }, fullTankMix: { amount: 60, amountUnit: 'fl_oz' } },
+        // The three step lines are offered, none selected.
+        ...['Fixture Recognition', 'Fixture Fusilade', 'Fixture surfactant'].map((name) => ({ raw: name, selected: false, conditional: true, bermudaStep: true, product: { id: name, name }, jobMix: null, fullTankMix: null, plannedMix: null, spot: { note: 'Spot: enter the area treated and the amount used.', reference: 'Label rate' } })),
+      ],
       mixingOrder: [{ step: 1, productId: 'pot', productName: 'Liquid potassium', instruction: 'Add the potassium.' }],
       ...(withBermuda ? { bermudaMixingOrder } : {}),
     };
@@ -148,7 +152,9 @@ describe('Service Protocol drawer bermuda backpack mix order', () => {
     vi.stubGlobal('scrollTo', vi.fn());
   });
 
-  it('shows a separate Bermuda backpack mix order only when the sheet returns one', async () => {
+  // The visit's sheet returns the order whenever the step is offered, selected or not: here no step line is
+  // selected (only the base item is), and the block still shows.
+  it('shows a separate Bermuda backpack mix order only when the sheet returns one, with no step line selected', async () => {
     withBermuda = true;
     await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
     await screen.findByText('Bermuda backpack mix');

@@ -224,6 +224,21 @@ async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
   return step.active ? visit : null;
 }
 
+// Is the bermuda removal mix OFFERED on this visit: the visit carries the step (the shared
+// step-visit check: gate, v13, a lawn visit, the step month, the account's switch or estimate, the
+// cultivar), the program's limit rows are all configured, and neither limited product is capped
+// or too soon. Decided from the visit alone, never from the completion-default prefill, so no
+// early return of a reader (defaults gates off, a one-time or per-application visit) hides it.
+// Read strictly: a failed read throws, never "not offered".
+async function stepOffered(knex, serviceId) {
+  if (!bermudaRemovalLive() || featureGates.lawnV13Live?.() !== true) return false; // gate off: no read at all
+  const visit = await stepVisitOf(knex, serviceId, { strict: true });
+  if (!visit) return false;
+  const ids = await stepProductIds(knex);
+  if (!ids.tagged) return false;
+  return !(await capViolation(knex, visit, [{ id: ids.recognition }, { id: ids.fusilade }]));
+}
+
 // A visit with the property its step is judged for, whether or not the visit carries the
 // step: the visit's own property, else a one-property customer's sole active property
 // (effective_property_id; null when none resolves).
@@ -480,8 +495,9 @@ const WATER_STEP = {
 
 // The backpack mix order for the step, apart from the base order: water, Recognition,
 // Fusilade II, then the surfactant last. The recipe lists the lines in that order, so
-// the lines keep it. Only when the step is selected and available (every item given is a
-// selected one; an unavailable line, or `held` for a blocked mix, gives no order).
+// the lines keep it. Only when the step is available: the lines given are the step lines the
+// reader offers (the plan passes the selected ones, the visit's tank sheet all of them); an
+// unavailable line, or `held` for a blocked mix, gives no order.
 // Returns { bermudaMixingOrder } or {} (a visit with no step has no such field).
 function mixOrderField(items, held = false) {
   const lines = items.filter((item) => isStepLine(item) && item.product && !item.unavailable);
@@ -685,7 +701,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
 }
 
 module.exports = {
-  trackForVisit, once,
+  stepOffered, trackForVisit, once,
   openPlanStep,
   visitMonthOf,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,

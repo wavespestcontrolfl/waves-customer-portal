@@ -1150,8 +1150,9 @@ router.get('/lawn-mix', async (req, res, next) => {
       items: seesPricing ? items : items.map(stripLawnMixItemPricing),
       selectedItems: seesPricing ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
       mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.filter(bermuda.mixable).map(mixInput), limitCheck.capped),
-      // The backpack step's own order, apart from the base order, when it is selected.
-      ...bermuda.mixOrderField(selectedItems.map(mixInput), blocks.length > 0),
+      // The backpack step's own order, apart from the base order, whenever the step is offered for the
+      // visit (selected or not): the tech reads it before choosing. Offered = its lines are on the sheet.
+      ...bermuda.mixOrderField(items.map(mixInput), blocks.length > 0),
       warnings,
       blocks: [...blocks, ...limitCheck.blocks, ...settled.blocks],
     };

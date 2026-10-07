@@ -113,6 +113,9 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
     survivors.forEach(remember);
   };
   merge(collectors.raw(result, setupOpts));
+  // The current container's raw lines are priced services too: an older container's row for the same
+  // service and cadence is a stale revision of them, never an extra.
+  rawLines.forEach((line) => mappedServiceKeys.add(priceKey(line)));
   const other = data.engineResult;
   if (other && other !== result) {
     merge(collectors.mapped(other, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
