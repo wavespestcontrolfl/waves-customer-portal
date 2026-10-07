@@ -152,3 +152,21 @@ test('PDF cache key: a zone write (count or newest updated_at) re-keys the lawn 
   expect(remarked).not.toBe(marked);
   expect(await sig({ n: 1, newest: '2026-10-07T13:00:00Z' })).toBe(remarked);
 });
+
+test('PDF cache key: a re-geocode or a geometry zoom change re-keys the lawn PDF (drift inputs, codex #6089 r4)', async () => {
+  process.env[KEY] = 'true';
+  const knexWith = (zoom) => {
+    const base = makeKnex({});
+    return (table) => {
+      if (table === 'property_zones') { const q = { where: () => q, count: () => q, max: () => q, first: () => Promise.resolve({ n: 1, newest: '2026-10-07T12:00:00Z' }) }; return q; }
+      if (table === 'property_geometries') { const q = { where: () => q, orderBy: () => q, first: () => Promise.resolve({ zoom }) }; return q; }
+      return base(table);
+    };
+  };
+  const svc = (lat) => ({ id: 'svc-cur', customer_id: 'customer-1', service_line: 'lawn', service_date: '2026-10-06', customer_latitude: lat, customer_longitude: -82.5 });
+  const sig = async (lat, zoom) => (await resolveCanonicalLawnRender(svc(lat), knexWith(zoom))).signature;
+  const base = await sig(27.4, 20);
+  expect(await sig(27.4, 20)).toBe(base);
+  expect(await sig(27.41, 20)).not.toBe(base);
+  expect(await sig(27.4, 19)).not.toBe(base);
+});

@@ -3970,15 +3970,22 @@ async function resolveRecordedProtocolVersion(knex, service) {
   return scheduled?.lawn_protocol_version || null;
 }
 
-// GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES PDF stamp: the customer's active zone
-// rows as "<count>-<newest updated_at ms>", so any zone write re-keys the PDF.
+// GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES PDF stamp: every input the coverage
+// verdict reads — the customer's active zone rows ("<count>-<newest updated_at
+// ms>") and the drift-resolution inputs (the visit's map center and the latest
+// property_geometries zoom, codex #6089 r4) — so a zone write, a re-geocode or
+// a zoom change that flips lawnCoverageHidden also re-keys the cached PDF.
 async function lawnZoneMarkStamp(service, knex) {
   try {
     const row = await knex('property_zones')
       .where({ customer_id: service.customer_id, is_active: true })
       .count({ n: '*' }).max({ newest: 'updated_at' }).first();
+    const geometry = await knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first();
     const newest = row && row.newest ? new Date(row.newest).getTime() : 0;
-    return `${Number(row && row.n) || 0}-${newest}`;
+    const lat = numberOrNull(service.customer_latitude ?? service.latitude ?? service.lat);
+    const lng = numberOrNull(service.customer_longitude ?? service.longitude ?? service.lng);
+    const center = lat != null && lng != null ? `${lat.toFixed(6)},${lng.toFixed(6)}` : 'nc';
+    return `${Number(row && row.n) || 0}-${newest}@${center}~${Number(geometry && geometry.zoom) || 20}`;
   } catch {
     return 'zerr';
   }
@@ -5432,7 +5439,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // only schematic default zones shows no coverage section. The lawn is
   // treated whole (the product card says "Your whole lawn").
   const hideDefaultLawnCoverage = serviceLine === 'lawn' && coverageZonesAreDefaults
-    && typeof featureGates.lawnCoverageHideDefaultZonesLive === 'function' && featureGates.lawnCoverageHideDefaultZonesLive();
+    && featureGates.lawnCoverageHideDefaultZonesLive();
   const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,
