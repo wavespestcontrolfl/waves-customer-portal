@@ -67,10 +67,13 @@ const NAME_SPELLING_LETTERS_RE = new RegExp([
   String.raw`\b(?:[a-z]-){2,}[a-z]\b`,
   // Phonetic markers.
   String.raw`\b[A-Za-z]\s+as\s+in\s+[A-Za-z]{3,}\b`,
-  String.raw`\b[A-Z]\s+for\s+[A-Z][a-z]{2,}\b`,
+  // "V like Victor" / "S for Sam": a capital letter (never "I like pizza")...
+  String.raw`\b[A-HJ-Z]\s+(?:like|for)\s+(?:in\s+)?[A-Za-z]{3,}\b`,
   // Two or more separated single letters shortly after the word "name" ("last name is l e e").
   String.raw`\b[Nn]ame\b[^.?!\n]{0,40}?\b(?:[A-Za-z][\s,-]+)+[A-Za-z]\b(?![A-Za-z'’])`,
 ].join('|'), '');
+// ...or any casing when the word starts with the letter it names ("v like victor").
+const NAME_SPELLING_PHONETIC_RE = /\b([a-z])\s+(?:as|like|for)\s+(?:in\s+)?\1[a-z]{2,}\b/i;
 // Suffix coverage for the service area's street vocabulary — Fruitville ROAD,
 // Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
 // dictation-focused second STT pass never ran for those calls. The common
@@ -88,7 +91,7 @@ function detectContactDictationSignals(transcript) {
   const t = String(transcript || '');
   const email = EMAIL_SIGNAL_RE.test(t) || (/@/.test(t) && SPELLING_SIGNAL_RE.test(t));
   const address = ADDRESS_SIGNAL_RE.test(t);
-  const name = NAME_SPELLING_WORD_RE.test(t) || NAME_SPELLING_LETTERS_RE.test(t);
+  const name = NAME_SPELLING_WORD_RE.test(t) || NAME_SPELLING_LETTERS_RE.test(t) || NAME_SPELLING_PHONETIC_RE.test(t);
   return { email, address, name, any: email || address || name };
 }
 
@@ -400,11 +403,10 @@ function callerSpelledName(dictation, field) {
 
 /**
  * Pure name policy. `current` is { first_name, last_name } as extracted.
- * Returns only the fields to change: the caller's spelled value replaces a
- * name that is the same name misheard (or the same letters in the wrong
- * case), or fills an EMPTY name when the spelling followed name wording in
- * the caller's turn and not email wording (a spelled email local part is not
- * a surname). A name that is not close to the spelling is left alone — the
+ * Returns only the fields to change: when the spelling followed name wording
+ * in the caller's turn and not email wording (a spelled email local part is
+ * not a surname), the caller's spelled value replaces a name that is the same
+ * name misheard (or the same letters in the wrong case) or fills an EMPTY one. A name that is not close to the spelling is left alone — the
  * spelling may be of someone else's name that the model mislabeled, and the
  * decoder's own confidence is not enough to overwrite a different name.
  */
@@ -414,7 +416,8 @@ function applyNameDictationPolicy({ current = {}, dictation = null } = {}) {
     const spelled = callerSpelledName(dictation, field);
     const existing = String(current[field] || '').trim();
     if (!spelled || existing === spelled.value) continue;
-    if (existing ? sameNameMisheard(existing, spelled.value) : spelled.nameContext) changes[field] = spelled.value;
+    // One rule for fill and replace: no name context, no change.
+    if (spelled.nameContext && (!existing || sameNameMisheard(existing, spelled.value))) changes[field] = spelled.value;
   }
   return changes;
 }

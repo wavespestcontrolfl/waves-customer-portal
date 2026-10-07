@@ -11087,10 +11087,14 @@ const CallRecordingProcessor = {
         // through the GATE_CONTACT_CORRECTION lane and its own gates.
         // Secondary contacts are never touched.
         const nameChanges = applyNameDictationPolicy({ current: extracted, dictation: contactDictation });
-        for (const [field, value] of Object.entries(nameChanges)) {
+        for (const field of ['first_name', 'last_name']) {
           const spelled = callerSpelledName(contactDictation, field);
-          extracted[field] = value;
-          spelledNameOverrides[field] = { value, confidence: spelled.confidence, quote: spelled.quote };
+          // Decoder-backed whenever a grounded caller spelling with name context exists
+          // for a name the policy changed OR the record already holds, so staging never
+          // falls back to a different V2 mishearing.
+          if (!spelled?.nameContext || !(nameChanges[field] || String(extracted[field] || '').trim() === spelled.value)) continue;
+          extracted[field] = spelled.value;
+          spelledNameOverrides[field] = { value: spelled.value, confidence: spelled.confidence, quote: spelled.quote };
         }
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
         if (Object.keys(nameChanges).length) logger.info(`[call-proc-dictation] Applied caller-spelled name field(s) for ${maskSid(callSid)}: ${Object.keys(nameChanges).join(', ')}`);

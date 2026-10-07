@@ -29,6 +29,9 @@ describe('detectContactDictationSignals', () => {
     expect(detectContactDictationSignals('Caller: Varnum, V-A-R-N-U-M.').name).toBe(true);
     expect(detectContactDictationSignals('Caller: V A R N U M.').name).toBe(true);
     expect(detectContactDictationSignals('Caller: the last name is spelled differently').name).toBe(true);
+    for (const line of ['V like Victor', 'v like victor', 'S for Sam', 's as in sam', 'it is V like Victor, A like Adam']) {
+      expect(detectContactDictationSignals(`Caller: ${line}`).name).toBe(true);
+    }
     for (const line of ['how do you spell that', 'let me spell my name', 'can you spell it for me', 'what is the spelling']) {
       expect(detectContactDictationSignals(`Caller: ${line}`).name).toBe(true);
     }
@@ -47,7 +50,7 @@ describe('detectContactDictationSignals', () => {
     for (const line of ['Caller: I need a B test on the lawn', 'Caller: I have a B plan or a c plan', 'Caller: press 1 or 2',
       'Caller: the name is Bob, a plumber', 'Caller: J. R. Smith called', 'Caller: my name is Jordan Rivers',
       'Caller: that is a-ok', 'Caller: we have a lot of ants', 'Caller: my name is Lee, a customer since 2020',
-      'Caller: I live on 5th and A street', 'Caller: we have had a dry spell', 'Caller: a cold spell is coming']) {
+      'Caller: I live on 5th and A street', 'Caller: I like pizza', 'Caller: I like it a lot', 'Caller: we like in-ground sprinklers', 'Caller: we have had a dry spell', 'Caller: a cold spell is coming']) {
       expect(detectContactDictationSignals(line).name).toBe(false);
     }
   });
@@ -353,8 +356,9 @@ describe('spelled-name decoding', () => {
       );
       const d = { emails: [], addresses: [], names };
       expect(applyNameDictationPolicy({ current: { first_name: 'Quentrell', last_name: null }, dictation: d })).toEqual({});
-      // ...but a near-match correction of an existing name keeps today's rule.
-      expect(applyNameDictationPolicy({ current: { last_name: 'Jonas' }, dictation: d })).toEqual({ last_name: 'Jones' });
+      // One rule for fill and replace: a near-match name is not rewritten without name context either.
+      expect(applyNameDictationPolicy({ current: { last_name: 'Jonas' }, dictation: d })).toEqual({});
+      expect(applyNameDictationPolicy({ current: { first_name: 'Quentrell', last_name: 'Jonas' }, dictation: d })).toEqual({});
     });
   });
 
@@ -465,8 +469,9 @@ describe('processor wiring — the spelled name goes to the flat record and the 
     const at = src.indexOf('applyNameDictationPolicy({ current: extracted');
     expect(at).toBeGreaterThan(0);
     const block = src.slice(at, at + 900);
-    expect(block).toMatch(/extracted\[field\] = value;/);
-    expect(block).toMatch(/spelledNameOverrides\[field\] = \{ value, confidence: spelled\.confidence, quote: spelled\.quote \}/);
+    expect(block).toMatch(/extracted\[field\] = spelled\.value;/);
+    expect(block).toMatch(/spelledNameOverrides\[field\] = \{ value: spelled\.value, confidence: spelled\.confidence, quote: spelled\.quote \}/);
+    expect(block).toMatch(/nameChanges\[field\] \|\| String\(extracted\[field\] \|\| ''\)\.trim\(\) === spelled\.value/);
     expect(block).not.toMatch(/v2Result/);
     expect(src).not.toMatch(/NAME_DICTATION_MARKER|name_dictation|applyNameDictationToV2Caller/);
     expect(src).toMatch(/nameOverrides: spelledNameOverrides,/);
