@@ -1946,3 +1946,61 @@ describe('markEstimateManuallyAccepted — converter operational 4xx refusals ke
     })).rejects.toMatchObject({ statusCode: 500 });
   });
 });
+
+// The Intelligence Bar's accept_estimate card (owner ruling 2026-10-07, Q5)
+// sends its pins as `expected`; they are re-checked under this accept's own
+// estimate and customer locks, so a change after the card refuses before any
+// write — never an accept on terms the operator did not see.
+describe('the bar card pins (expected) are re-checked under the accept locks', () => {
+  const { ledgerPin } = require('../services/intelligence-bar/rate-change');
+  const estimateRow = (overrides = {}) => ({
+    id: 'estimate-pins', status: 'sent', customer_id: 'customer-pins', sent_at: '2026-10-01T12:00:00.000Z',
+    accepted_at: null, updated_at: new Date('2026-10-06T12:00:00.000Z'), monthly_total: '90.00', onetime_total: null,
+    waveguard_tier: 'Silver', ...overrides,
+  });
+  const customerRow = (overrides = {}) => ({ id: 'customer-pins', updated_at: new Date('2026-10-05T09:00:00.000Z'), monthly_rate: '55.00', ...overrides });
+  const pins = {
+    estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: 'customer-pins',
+    customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: ledgerPin([], '55.00'),
+  };
+  function dbWith(estimate, customer) {
+    const made = makeDb(estimate);
+    const inner = made.database;
+    const database = jest.fn((table) => {
+      const builder = inner(table);
+      if (table === 'customers') builder.first = async () => customer;
+      return builder;
+    });
+    database.fn = inner.fn;
+    database.raw = inner.raw;
+    database.transaction = jest.fn(async (callback) => callback(database));
+    return { ...made, database };
+  }
+  const accept = (database, estimateConverter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) }) => markEstimateManuallyAccepted({
+    estimateId: 'estimate-pins', adminUserId: 'admin-1', source: 'verbal_yes', expected: pins,
+    database, estimateConverter, leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+  });
+
+  test('matching pins accept exactly as Mark accepted does', async () => {
+    const { database, updates } = dbWith(estimateRow(), customerRow());
+    const converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
+    const result = await accept(database, converter);
+    expect(result.estimate.status).toBe('accepted');
+    expect(updates).toHaveLength(1);
+    expect(converter.convertEstimate).toHaveBeenCalled();
+  });
+
+  test.each([
+    ['the estimate was edited', estimateRow({ updated_at: new Date('2026-10-06T12:05:00.000Z') }), customerRow()],
+    ['the estimate was accepted elsewhere', estimateRow({ status: 'accepted' }), customerRow()],
+    ['the customer row changed', estimateRow(), customerRow({ updated_at: new Date('2026-10-06T13:00:00.000Z') })],
+    ['the bill changed', estimateRow(), customerRow({ monthly_rate: '60.00' })],
+  ])('refuses with preview_changed and writes nothing when %s', async (_name, estimate, customer) => {
+    const { database, updates, inserts } = dbWith(estimate, customer);
+    const converter = { convertEstimate: jest.fn() };
+    await expect(accept(database, converter)).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(updates).toEqual([]);
+    expect(inserts).toEqual([]);
+    expect(converter.convertEstimate).not.toHaveBeenCalled();
+  });
+});

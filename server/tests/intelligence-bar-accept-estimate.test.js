@@ -51,7 +51,7 @@ const INPUT = { estimate_id: ESTIMATE_ID, customer_id: CUSTOMER_ID };
 function seed(overrides = {}) {
   tables.estimates = [{
     id: ESTIMATE_ID, token: 'addonquote42', status: 'sent', customer_id: CUSTOMER_ID,
-    monthly_total: 90, onetime_total: 0, waveguard_tier: 'Silver', updated_at: '2026-10-06T12:00:00.000Z',
+    monthly_total: 90, onetime_total: 0, waveguard_tier: 'Gold', updated_at: '2026-10-06T12:00:00.000Z',
     estimate_data: {
       recurring: {
         services: [
@@ -73,6 +73,7 @@ function seed(overrides = {}) {
 }
 
 let classify;
+let priorKeys;
 beforeEach(() => {
   process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
   delete process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND;
@@ -83,8 +84,11 @@ beforeEach(() => {
   // A proven-disjoint add-on: the lawn plan stays and the new services add on.
   classify = jest.spyOn(Converter, 'classifyAddOnAcceptContext')
     .mockResolvedValue({ addOnBase: 55, hadOtherLiveFamilies: false, sameFamilyAtOtherProperty: false });
+  // The customer's live qualifying services (no frozen snapshot on this quote).
+  priorKeys = jest.spyOn(require('../services/waveguard-existing-services'), 'loadExistingQualifyingServiceKeys')
+    .mockResolvedValue(['lawn_care']);
 });
-afterEach(() => classify.mockRestore());
+afterEach(() => { classify.mockRestore(); priorKeys.mockRestore(); });
 afterAll(() => { delete process.env.GATE_IB_ACCEPT_ESTIMATE; });
 
 const card = (preview) => AuthorizationContract.buildContract({
@@ -99,7 +103,7 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(preview.preview).toBe(true);
     const lines = labels(card(preview));
     expect(lines).toEqual(expect.arrayContaining([
-      'Accepts estimate addonquo for Lena Synthetic: Silver tier, $90.00 a month',
+      'Accepts estimate addonquo for Lena Synthetic: $90.00 a month',
       expect.stringMatching(/^Starts Pest control \(Quarterly Pest Control\): 4 visits a year, \$49\.00 a month$/),
       expect.stringMatching(/^Starts Mosquito \(Mosquito Barrier\): 17 visits a year, \$41\.00 a month$/),
       'Bill line Lawn care: $55.00 → $55.00 a month',
@@ -107,13 +111,23 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
       'Bill line Mosquito: $0.00 → $41.00 a month',
       'Bill total: $55.00 → $145.00 a month (added to the existing plan)',
       'Billing lane: billed per application (each visit) → billed per application (each visit) (unchanged)',
-      'Tier: Bronze → Silver (as quoted)',
+      'Tier: Bronze → Gold',
       'No setup invoice, no charge and no receipt now',
       'Visits: books none — book the first visit on the calendar after',
       'Message: Email "membership started" to l***@example.com right after Confirm: plan, tier, rate and services (sent once per estimate)',
       'Message: No welcome text now (Mark accepted skips it). Booking the first visit later on the calendar may send it',
     ]));
     expect(writes).toEqual([]);
+  });
+
+  test('the tier is the one the accept activates, not only what the quote says', async () => {
+    // A legacy quote still says Silver, but with the live lawn plan the accept
+    // counts three services and activates Gold; the card says Gold.
+    seed({ estimate: { waveguard_tier: 'Silver' } });
+    expect(labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)))).toContain('Tier: Bronze → Gold');
+    // A frozen snapshot on the quote wins over the live lookup, as in the converter.
+    seed({ estimate: { estimate_data: { ...tables.estimates[0].estimate_data, membershipSnapshot: { existingServiceKeys: [] } } } });
+    expect(labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)))).toContain('Tier: Bronze → Silver');
   });
 
   test('is irreversible and tells the operator the customer will be emailed', async () => {
@@ -200,8 +214,18 @@ describe('Confirm', () => {
     markEstimateAcceptedAsStaff.mockResolvedValue({ status: 200, json: { success: true, alreadyAccepted: false, conversion: { monthlyRate: 145, tier: 'Silver' }, warnings: [] } });
     const result = await confirmWith(approved);
     expect(markEstimateAcceptedAsStaff).toHaveBeenCalledWith({
-      estimateId: ESTIMATE_ID, body: { source: 'verbal_yes' }, actor: { technicianId: 'tech-owner' },
+      estimateId: ESTIMATE_ID,
+      body: {
+        source: 'verbal_yes',
+        // The card's pins, re-checked under the accept's own locks.
+        expected: {
+          estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: CUSTOMER_ID,
+          customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
+        },
+      },
+      actor: { technicianId: 'tech-owner' },
     });
+    expect(approved.pins.ledger).toBe('55.00|lawn_care=55.00');
     expect(result).toMatchObject({ success: true, monthly_rate_now: 145, tier_now: 'Silver' });
     expect(result.message).toMatch(/No visits were booked/);
   });
@@ -216,6 +240,14 @@ describe('Confirm', () => {
     const result = await confirmWith(approved);
     expect(result.preview_changed).toBe(true);
     expect(markEstimateAcceptedAsStaff).not.toHaveBeenCalled();
+  });
+
+  test('a change caught under the accept locks comes back as preview_changed', async () => {
+    const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    markEstimateAcceptedAsStaff.mockResolvedValue({ status: 409, json: { error: 'The estimate, the customer or the bill changed after the card was shown. Nothing was changed.', code: 'preview_changed' } });
+    const result = await confirmWith(approved);
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(result.success).toBeUndefined();
   });
 
   test('refuses without a verified card', async () => {

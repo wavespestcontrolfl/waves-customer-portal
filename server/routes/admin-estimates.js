@@ -5441,6 +5441,9 @@ async function markAcceptedHandler(req, res, next) {
       adminUserId: req.technicianId,
       source: req.body?.source || 'verbal_yes',
       billingTerm: req.body?.billingTerm || 'standard',
+      // The Intelligence Bar card's pins (markEstimateAcceptedAsStaff); the
+      // estimate page sends none.
+      ...(req.body?.expected && typeof req.body.expected === 'object' ? { expected: req.body.expected } : {}),
     });
     clearRouteCacheForRequest(req, ['/admin/dashboard']);
     res.json({ success: true, ...result });

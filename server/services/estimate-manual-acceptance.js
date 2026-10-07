@@ -509,6 +509,39 @@ function manualAcceptLockedRowRefusal(estimate) {
   return null;
 }
 
+// The Intelligence Bar accept_estimate card's pins
+// (services/intelligence-bar/estimate-accept-tools.js), re-checked under this
+// accept's own locks: anything that changed since the operator saw the card
+// refuses before a write. The estimate page sends none.
+const versionText = (v) => (v == null ? null : (v instanceof Date ? v.toISOString() : String(v)));
+
+function cardChanged() {
+  const err = httpError('The estimate, the customer or the bill changed after the card was shown. Nothing was changed.', 409);
+  err.code = 'preview_changed';
+  return err;
+}
+
+async function assertExpectedEstimate(trx, estimateId, expected) {
+  const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('updated_at', 'status', 'customer_id');
+  if (!row || versionText(row.updated_at) !== expected.estimateVersion || row.status !== expected.estimateStatus
+    || String(row.customer_id || '') !== String(expected.customerId || '')) {
+    throw cardChanged();
+  }
+}
+
+// Same property-preferences advisory then customer row order as the
+// annual-prepay guard in markEstimateManuallyAccepted (and convertEstimate).
+async function assertExpectedCustomerBill(trx, customerId, expected) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+  const customer = await trx('customers').where({ id: customerId }).forUpdate().first('updated_at', 'monthly_rate');
+  if (!customer || versionText(customer.updated_at) !== expected.customerVersion) throw cardChanged();
+  if (expected.ledgerPin != null) {
+    const { loadComponents } = require('./plan-rate-ledger');
+    const { ledgerPin } = require('./intelligence-bar/rate-change');
+    if (ledgerPin(await loadComponents(trx, customerId), customer.monthly_rate) !== expected.ledgerPin) throw cardChanged();
+  }
+}
+
 async function logManualAcceptance(database, {
   estimate,
   updatedEstimate,
@@ -558,6 +591,9 @@ async function markEstimateManuallyAccepted({
   agreementStartDate = null,
   // Accept-on-book links these same-customer rows after conversion commits.
   bookedAppointmentIds = [],
+  // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
+  // customerId, customerVersion, ledgerPin }); null for every other caller.
+  expected = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
@@ -600,6 +636,7 @@ async function markEstimateManuallyAccepted({
         estimate = fresh;
       }
     }
+    if (expected) await assertExpectedEstimate(trx, estimateId, expected);
 
     if (estimate.status === 'accepted') {
       return { acceptedEstimate: estimate, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: estimate };
@@ -672,6 +709,7 @@ async function markEstimateManuallyAccepted({
     }
 
     throwRefusal(manualAcceptLockedRowRefusal(estimate));
+    if (expected) await assertExpectedCustomerBill(trx, estimate.customer_id, expected);
 
     const isCommercialProposal = isCommercialProposalEstimate(estimate);
 

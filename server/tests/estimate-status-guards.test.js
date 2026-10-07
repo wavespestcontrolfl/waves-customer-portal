@@ -628,6 +628,20 @@ describe('markEstimateAcceptedAsStaff runs the POST /:id/mark-accepted handler',
     expect(reply).toEqual({ status: 200, json: { success: true, alreadyAccepted: false, warnings: [] } });
   });
 
+  test("the bar card's pins reach the service; the page sends none", async () => {
+    markEstimateManuallyAccepted.mockResolvedValue({ alreadyAccepted: false, warnings: [] });
+    const expected = { estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: 'cust-1', customerVersion: 'v', ledgerPin: '0.00|' };
+    await adminEstimatesRouter.markEstimateAcceptedAsStaff({
+      estimateId: 'est-1', body: { source: 'verbal_yes', expected }, actor: { technicianId: 'tech-1' },
+    });
+    expect(markEstimateManuallyAccepted.mock.calls[0][0]).toEqual({
+      estimateId: 'est-1', adminUserId: 'tech-1', source: 'verbal_yes', billingTerm: 'standard', expected,
+    });
+    const handler = routeHandler(adminEstimatesRouter, '/:id/mark-accepted', 'post');
+    await handler({ params: { id: 'est-1' }, body: { source: 'verbal_yes' }, technicianId: 'tech-1' }, makeRes(), jest.fn());
+    expect(markEstimateManuallyAccepted.mock.calls[1][0]).not.toHaveProperty('expected');
+  });
+
   test("the page's refusal comes back as the same status and body", async () => {
     markEstimateManuallyAccepted.mockRejectedValue(Object.assign(new Error('Estimate is no longer active.'), { statusCode: 409 }));
     const reply = await adminEstimatesRouter.markEstimateAcceptedAsStaff({

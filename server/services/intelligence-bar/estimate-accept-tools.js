@@ -283,23 +283,45 @@ async function loadTarget(input) {
   return refusal || { estimate, estimateData, label, customerId };
 }
 
+// The recurring services the converter activates and the tier it gives them
+// (estimate-converter.js convertEstimate: the folded, legacy-rodent-filtered
+// rows; the quote's frozen prior-services snapshot, else the customer's live
+// qualifying services; determineTier on the combined count).
+async function activation(estimateData, customerId) {
+  const Converter = require('../estimate-converter');
+  const { legacyRodentRowPredicateFor } = require('../billing-cadence');
+  const isLegacyRodentRow = legacyRodentRowPredicateFor(estimateData);
+  const services = Converter.foldTermiteRentalIntoBait(Converter.recurringServicesFromEstimateData(estimateData))
+    .filter((svc) => !isLegacyRodentRow(svc));
+  const keys = Converter.tierQualifyingRecurringServiceKeys(services);
+  const commercialOnly = keys.length === 0
+    && services.some((svc) => String(Converter.recurringServiceKey(svc) || '').startsWith('commercial_'));
+  if (commercialOnly) return { commercialOnly, tier: 'Commercial' };
+  let prior = [];
+  if (keys.length) {
+    prior = Converter.priorQualifyingKeysFromSnapshot(estimateData)
+      || await require('../waveguard-existing-services').loadExistingQualifyingServiceKeys(db, customerId).catch(() => []);
+  }
+  const { tier } = Converter.determineTier(Converter.combinedTierQualifyingCount(keys, prior), services.length > 0);
+  return { commercialOnly, tier: tier === 'none' ? null : tier };
+}
+
 // Billing lane and tier after the accept (estimate-converter's own lane rule).
-function laneAndTier({ estimate, customer, converts, commercialOnly, totalAfter }) {
+function laneAndTier({ customer, converts, tierAfter, totalAfter }) {
   const Converter = require('../estimate-converter');
   const { customerPreservesMonthlyMembership } = require('../billing-cadence');
   const { resolveBillingLane } = require('../billing-lane');
   const laneBefore = Number(customer.monthly_rate) > 0 || customer.billing_mode ? resolveBillingLane(customer).mode : null;
-  const quotedTier = commercialOnly ? 'Commercial' : (estimate.waveguard_tier || null);
   const tierBefore = customer.waveguard_tier || null;
-  if (!converts) return { laneBefore, laneAfter: laneBefore, quotedTier, tierBefore, tierAfter: tierBefore };
+  if (!converts) return { laneBefore, laneAfter: laneBefore, tierBefore, tierAfter: tierBefore };
   const laneAfter = Converter.acceptedBillingLaneForConversion({
     billingTerm: 'standard',
     preservesExistingMembership: customerPreservesMonthlyMembership(customer),
     customerBillingMode: customer.billing_mode || null,
-    waveguardTier: quotedTier,
+    waveguardTier: tierAfter,
     monthlyRate: totalAfter,
   });
-  return { laneBefore, laneAfter, quotedTier, tierBefore, tierAfter: quotedTier };
+  return { laneBefore, laneAfter, tierBefore, tierAfter };
 }
 
 // Visits already booked from this estimate (its booking link): the accept
@@ -342,14 +364,13 @@ function beforeAfterLine(topic, { before, after }, changedNote) {
 
 function cardLines(preview) {
   const e = preview.estimate;
-  const tier = e.tier ? `${e.tier} tier, ` : '';
   const oneTime = e.one_time_total > 0 ? `, ${money(e.one_time_total)} one-time` : '';
   const booked = preview.visits.booked_from_estimate;
   return [
-    { kind: 'customer', label: `Accepts ${e.label} for ${preview.customer_name || preview.customer_id}: ${tier}${money(e.monthly_total)} a month${oneTime}` },
+    { kind: 'customer', label: `Accepts ${e.label} for ${preview.customer_name || preview.customer_id}: ${money(e.monthly_total)} a month${oneTime}` },
     ...serviceAndBillLines(preview),
     beforeAfterLine('Billing lane', preview.billing_lane, ''),
-    beforeAfterLine('Tier', preview.tier, ' (as quoted)'),
+    beforeAfterLine('Tier', preview.tier, ''),
     { kind: 'billing', label: 'No setup invoice, no charge and no receipt now' },
     {
       kind: 'operational',
@@ -374,16 +395,13 @@ async function planAccept(input) {
   if (!customer) return refuse('No customer with that id.', 'customer_not_found');
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
 
-  const Converter = require('../estimate-converter');
   const monthlyRate = round2(estimate.monthly_total);
   // Mark accepted runs the converter only for a recurring monthly total
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
-  const recurringLines = PlanRateLedger.acceptedRecurringBillingLines(estimateData);
-  const commercialOnly = recurringLines.some((l) => String(Converter.recurringServiceKey(l) || '').startsWith('commercial_'))
-    && Converter.tierQualifyingRecurringServiceKeys(recurringLines).length === 0;
+  const { commercialOnly, tier } = await activation(estimateData, customerId);
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
-  const lt = laneAndTier({ estimate, customer, converts, commercialOnly, totalAfter: bill?.total_after });
+  const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after });
   const booked = converts ? await bookedFromEstimate(estimate.id) : [];
   const { collectTermiteFacts, autosendGateOn } = require('../termite-program-agreement');
   const termiteProgram = { has_program: !!collectTermiteFacts(estimateData)?.hasProgram, autosend: autosendGateOn() };
@@ -394,7 +412,7 @@ async function planAccept(input) {
     estimate_id: String(estimate.id),
     customer_id: customerId,
     customer_name: customerName(customer),
-    estimate: { label, status: estimate.status, tier: lt.quotedTier, monthly_total: monthlyRate, one_time_total: round2(estimate.onetime_total) },
+    estimate: { label, status: estimate.status, tier: estimate.waveguard_tier || null, monthly_total: monthlyRate, one_time_total: round2(estimate.onetime_total) },
     converts,
     services: converts ? startedServices(estimateData, bill.slices) : [],
     bill: bill && {
@@ -423,6 +441,16 @@ async function planAccept(input) {
 function planKey(preview) {
   const AuthorizationContract = require('./authorization-contract');
   return AuthorizationContract.previewFingerprint(preview);
+}
+
+function expectedFrom(approved) {
+  return {
+    estimateVersion: approved.pins.estimate_version,
+    estimateStatus: approved.pins.estimate_status,
+    customerId: approved.customer_id,
+    customerVersion: approved.pins.customer_version,
+    ledgerPin: approved.pins.ledger,
+  };
 }
 
 function acceptedResult(preview, json) {
@@ -455,11 +483,16 @@ async function acceptEstimate(input, actionContext = {}) {
 
   // The estimate page's Mark accepted, through the route's own handler.
   const { markEstimateAcceptedAsStaff } = require('../../routes/admin-estimates');
+  // The card's pins ride along and are re-checked under the accept's own
+  // estimate and customer locks (estimate-manual-acceptance.js).
   const reply = await markEstimateAcceptedAsStaff({
     estimateId: preview.estimate_id,
-    body: { source: 'verbal_yes' },
+    body: { source: 'verbal_yes', expected: expectedFrom(approved) },
     actor: { technicianId: actionContext.technicianId || null },
   });
+  if (reply.json?.code === 'preview_changed') {
+    return { error: reply.json.error, preview_changed: true };
+  }
   if (reply.status !== 200 || reply.json?.success !== true) {
     return { ...refuse(reply.json?.error || 'The estimate was not accepted.', reply.json?.code), status: reply.status };
   }
