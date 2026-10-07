@@ -2351,3 +2351,10 @@ describe('answer screen, Codex round 64', () => {
     expect(medicalExposureAnswer(question)).toBeNull();
   });
 });
+
+test('an ideal value grounds only an ideal claim (pre-push audit)', () => {
+  const data = lawnData({ reportV2: { aftercare: {}, mowing: { measuredHeightInches: 3, idealMinInches: 3.5, idealMaxInches: 4, status: 'too_short' } } });
+  const facts = buildReportAskFacts({ data });
+  expect(screenAskAnswer('The measured mowing height was 4 inches.', { question: 'q', data, facts })).toBe('unstated_number');
+  expect(screenAskAnswer('The mower is at 3 inches, and the ideal range is 3.5 to 4 inches.', { question: 'q', data, facts })).toBeNull();
+});

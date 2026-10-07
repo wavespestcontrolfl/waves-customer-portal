@@ -1223,6 +1223,7 @@ const RANGE_TAIL_RE = /^\s*(?:to|-|–|and)\s*\d+(?:\.\d+)?/i;
 
 const PRESSURE_WORDS = /\b(?:pressure|gauge|score|rating|level|index)\b/i;
 
+const IDEAL_CLAIM_RE = /\b(?:ideal|recommended|target|range|goal|should|best|aim|between|needs?|per\s+week|a\s+week|weekly)\b/i;
 const PAST_CLAIM_RE = /\b(?:from|was|were|started|began|earlier|previous(?:ly)?|last\s+(?:month|visit|time|season)|ago|before|back\s+in|used\s+to|in\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*)\b/i;
 const TIME_OR_COUNT_NOUNS = new Set(['day', 'week', 'month', 'year', 'hour', 'minut', 'minute', 'visit', 'treatment', 'application', 'time', 'nest', 'mound', 'station', 'spot', 'area', 'plant', 'palm', 'tree', 'shrub', 'room', 'bed', 'zone', 'gallon', 'pound', 'bag']);
 
@@ -1250,7 +1251,12 @@ function numberIsKnown(value, after, sentence, known) {
   // score is 50" may not borrow the 50 the trend began at (pre-push audit,
   // #5964).
   const pastClaim = PAST_CLAIM_RE.test(sentence);
-  known = known.filter((fact) => fitsRow(fact) && (pastClaim || !/\.trends\.[^.]+\.from\./.test(fact.key)));
+  // An ideal or target value grounds only a claim about the ideal or target:
+  // "the measured height was 4 inches" may not borrow the ideal maximum
+  // (pre-push audit, #5964).
+  const idealClaim = IDEAL_CLAIM_RE.test(sentence);
+  known = known.filter((fact) => fitsRow(fact) && (pastClaim || !/\.trends\.[^.]+\.from\./.test(fact.key))
+    && (idealClaim || !/(?:^|\.)(?:ideal_|target_)/.test(fact.key)));
   if (!kind) {
     // A number from report text grounds only a claim about the same thing:
     // "4 inches" in a section is no "4 nests" (Codex P1 #5964 r26).
