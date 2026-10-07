@@ -186,6 +186,10 @@ describe('processor wiring (source pins)', () => {
     expect(src.slice(blockStart, blockEnd)).not.toMatch(/db\('customers'\)[\s\S]*\.update\(/);
   });
 
+  test('the stranded-confirmation replay repair never re-arms a call whose ANI cannot take texts', () => {
+    expect(src).toContain('if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent && !callAniCannotText) {');
+  });
+
   test('the dropped-call address text (ANI only) is card-only when the ANI cannot take texts', () => {
     expect(src).toMatch(/genuineNewProspect && callAniCannotText\) \{\s*\/\/[^]*?smsOutcome = \{ sent: false, skipped: 'ani_cannot_text' \};/);
   });

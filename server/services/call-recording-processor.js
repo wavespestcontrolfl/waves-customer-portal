@@ -19910,7 +19910,10 @@ const CallRecordingProcessor = {
                 // from it would send the customer an obsolete time. The
                 // retry rail is the same one the verify itself leans on: a
                 // later replay (or the visit's own next edit) re-runs both.
-                if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {
+                // ani_cannot_text (schema 1.25.0) is excluded too: the sweep resolves the saved
+                // customer contacts and never sees this call's text-number override, so it could
+                // text the ANI. Failing toward silence; the text_number_differs card stays.
+                if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent && !callAniCannotText) {
                   try {
                     // ALL THREE delivery ledgers, not just messaging_audit_log
                     // (Codex #3361 r7 P2): appointment EMAILS audit into
