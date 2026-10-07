@@ -301,7 +301,8 @@ describe('staged migration 20261005120000', () => {
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
-      expect(spots.sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
+      // Migration 20261007150000 retires the Dismiss rows and the recipe drops its lines (use up the jug, do not reorder).
+      expect(spots.filter((n) => n !== migration.NAMES.DIS).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');

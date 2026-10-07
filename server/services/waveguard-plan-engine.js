@@ -511,13 +511,16 @@ function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
 // against the visit's resolved municipality, spreaderVisitOnly against the window's
 // production mode. Keys not in the table carry no field text. Order is display order.
 const NOV_TO_MAR = (month) => month > 3 && month < 11;
+const isNorthPort = (municipality) => /north\s*port/i.test(String(municipality || ''));
 const V13_GATE_NOTES = [
   { key: 'minDistanceFromWaterFt', required: true, text: (ft) => `Keep ${ft} ft from ponds, lakes and canals; skip that strip.` },
   { key: 'holdForTropicalWatch', required: true, text: () => 'Hold the application if a tropical storm or hurricane is forecast.' },
   { key: 'novToMarOnly', required: true, when: (ctx) => ctx.monthNumber != null && NOV_TO_MAR(ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
   { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
-  { key: 'northPortBlocked', required: true, when: (ctx) => /north\s*port/i.test(String(ctx.municipality || '')), text: () => 'Not allowed in North Port this month; skip this product.' },
+  { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'Not allowed in North Port this month; skip this product.' },
+  { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port holds this product from June to September until the city confirms. Do not apply it at this visit.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
+  { key: 'delayWateringOrMowingHours', text: (hours) => `Delay watering (irrigation) or mowing for ${hours} hours after application (label).` },
   { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
   { key: 'noWaterIn', text: () => 'Do not water this in.' },
   { key: 'tankMixWith', text: (product) => `Tank mix with ${product}.` },
@@ -1579,17 +1582,44 @@ function planLineFields(item) {
 // (a saved substitution is never applied) and reads its own staged row:
 //   unavailable: no row is linked to the matched catalog product, so nothing is sized
 //                (never the catalog default);
+//   held:        a product the city bans for this visit's window (North Port Nutra-TECH, June to
+//                September): not selected, no amount;
 //   capped:      a hard application limit (annual cap, interval, blackout) is reached;
 //   spot:        a spot or label-rate row, no quantity (enter the area and amount used);
 //   calculate:   a whole-lawn row that states a rate or a nutrient target.
-function v13LineState(product, v13Rows, cappedIds = new Set()) {
+function v13LineState(product, v13Rows, cappedIds = new Set(), gateContext = {}) {
   const row = v13Rows.get(String(product.id)) || null;
   if (!row) return { row, state: 'unavailable' };
+  if (v13NorthPortHold(row, gateContext.municipality)) return { row, state: 'held' };
   if (cappedIds.has(String(product.id))) return { row, state: 'capped' };
   return { row, state: v13RowCalculates(row) ? 'calculate' : 'spot' };
 }
 
+const NORTH_PORT_HOLD_REASON = 'north_port_product_window';
+const CITY_HOLD_KIND = 'city_hold';
+
+// A staged v13 row the city bans for the visit's window (gates.northPortProductWindow) in North
+// Port. The product has no N or P analysis, so the ordinance check cannot see it: the plan holds
+// the row back itself, and the completion flags a recording of it like the nitrogen ban.
+function v13NorthPortHold(row, municipality) {
+  return row?.gates?.northPortProductWindow === true && isNorthPort(municipality);
+}
+
+// The matched items a North Port visit may not apply: not selected, so no default, no amount.
+function holdNorthPortProducts(items, v13Rows, municipality) {
+  return items.map((item) => (item.product && v13NorthPortHold(v13Rows.get(String(item.product.id)), municipality)
+    ? { ...item, selected: false, selectionReason: NORTH_PORT_HOLD_REASON } : item));
+}
+
+function v13HoldWarnings(planItems) {
+  return planItems.filter((item) => item.selectionReason === NORTH_PORT_HOLD_REASON && item.product).map((item) => ({
+    code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
+    message: `${item.product.name}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`,
+  }));
+}
+
 const V13_UNAVAILABLE = {
+  held: 'North Port holds this product in the summer until the city confirms, so it is not selected and no amount is planned.',
   unavailable: 'No protocol row is linked to this product, so no amount is planned. Enter the actual work.',
   capped: 'An application limit is reached for this product, so no amount is planned.',
 };
@@ -1660,6 +1690,26 @@ async function loadVisitForPlan(knex, id, scope = (q) => q) {
     .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')) || null;
 }
 
+// The city a booked visit is judged under, resolved the way the plan resolves it (the stamped visit
+// address, then the turf profile's municipality, then the customer's city); null for no visit or no
+// city on file. The tank sheet reads it for the city holds.
+async function loadVisitCity(knex, visit) {
+  if (!visit?.id) return null;
+  const stamped = await knex('scheduled_services').where({ id: visit.id }).first('service_address_city');
+  const profile = visit.customer_id ? await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('municipality') : null;
+  const customer = visit.customer_id ? await knex('customers').where({ id: visit.customer_id }).first('city') : null;
+  return String(stamped?.service_address_city || profile?.municipality || customer?.city || '').trim() || null;
+}
+
+// A reader with no resolved city (the reference tab, or a visit with no city on file) cannot tell
+// North Port from anywhere else: every row carrying the product window says so and keeps its amount.
+function v13NorthPortReferenceWarnings(items) {
+  return items.filter((item) => item.product && item.gates?.northPortProductWindow === true).map((item) => ({
+    code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
+    message: `${item.product.name}: North Port: not applied June to September (until the city confirms). Skip this product there.`,
+  }));
+}
+
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
 // block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
 async function v13VisitLimits(knex, service, items, rows, targets = {}) {
@@ -1674,7 +1724,8 @@ function v13LineNotices(planItems, capped, ignoredSubstitutionIds) {
   const blocks = [...capped].flatMap(([productId, found]) => found.map((block) => ({
     code: 'lawn_v13_annual_limit', severity: 'block', productId, productName: block.productName, message: block.message,
   })));
-  const warnings = planItems.filter((item) => item.unavailable && item.product).map((item) => ({
+  // A product the city holds back has its own warning (v13HoldWarnings); it is not an unlinked line.
+  const warnings = planItems.filter((item) => item.unavailable && item.unavailable.kind !== CITY_HOLD_KIND && item.product).map((item) => ({
     code: 'lawn_v13_line_unlinked', severity: 'warning', productId: item.product.id, productName: item.product.name,
     message: `${item.product.name}: no protocol row is linked to this product, so no amount is planned.`,
   }));
@@ -1697,7 +1748,7 @@ function v13ItemFields(line, gateContext, product) {
       ? { note: 'Spot: enter the area treated and the amount used.', reference: v13SpotReference(row, product) }
       : null,
     // A line the plan cannot size at all: say why; the tech enters the actual work.
-    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state] } : null,
+    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}) } : null,
   };
 }
 
@@ -1845,11 +1896,16 @@ async function buildPlanForService(serviceId, options = {}) {
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional', { exactName });
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
-  const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
+  // own protocol row supplies its rate, its sunny-turf limit and its gates.
+  const v13Rows = v13ProtocolRows(structuredProtocol);
+  const resolvedItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
     stressFlags,
   });
+  // A product the city bans for this visit's window is held back before anything is sized.
+  const candidateItems = holdNorthPortProducts(resolvedItems, v13Rows, resolvedOrdinanceCity);
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
   // A rig the visit names (assignment or explicit request) is the visit's;
@@ -1870,9 +1926,6 @@ async function buildPlanForService(serviceId, options = {}) {
   const lawnSqft = completionContext
     ? Number(options.lawnSqft !== undefined ? options.lawnSqft : (completionContext.propertyMatchesProfile ? profile?.lawn_sqft : 0)) || 0
     : Number(profile?.lawn_sqft || 0);
-  // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
-  // own protocol row supplies its rate and its sunny-turf limit.
-  const v13Rows = v13ProtocolRows(structuredProtocol);
   // What every line's area factor and gate text share, built once.
   const areaContext = {
     sunExposure: profile?.sun_exposure,
@@ -1893,7 +1946,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
-  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
+  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, gateContext) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
   // blocks and withholds the selection's quantities (as the tank sheet does).
   const applyAloneBlocks = v13SelectionBlocks(candidateItems, (item) => v13LineOf(item)?.row, gateContext);
@@ -1956,7 +2009,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // Restored v13 product gates on the selected items: a condition the plan cannot
   // clear is a visible warning; an apply-alone product selected beside any other
   // product holds the mix.
-  warnings.push(...v13SelectedGateWarnings(plannedItems));
+  warnings.push(...v13SelectedGateWarnings(plannedItems), ...v13HoldWarnings(planItems));
   if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
   blocks.push(...applyAloneBlocks);
   if (v13Active) {
@@ -2230,6 +2283,11 @@ module.exports = {
   v13ApplyAloneBlocks,
   v13SelectionBlocks,
   v13LineState,
+  holdNorthPortProducts,
+  v13NorthPortHold,
+  loadVisitCity,
+  v13NorthPortReferenceWarnings,
+  v13HoldWarnings,
   lawnVisitsPerYear,
   visitForPlan,
   loadVisitForPlan,
