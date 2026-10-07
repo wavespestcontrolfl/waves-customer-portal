@@ -15,6 +15,7 @@ const { describeInventoryConversion } = require('./inventory-units');
 const { resolveAddressCounty } = require('../config/address-county');
 const { addressKey } = require('./customer-property-address-keys');
 const { singleTurfFamily } = require('./lawn-turf-restrictions');
+const { grassConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
 const { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches } = require('./lawn-completion-defaults');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -575,6 +576,11 @@ async function visitIsAtProfileHome(knex, visit) {
 async function loadV13Turf(knex, visit) {
   if (!visit?.customer_id) return { species: null };
   if (!(await visitIsAtProfileHome(knex, visit))) return { species: null, untied: true };
+  // After a home move the profile still describes the former yard until a writer that reviewed the
+  // current lawn re-confirms the grass (the same ledger entry the weekly plan's grass type waits on).
+  // Until then there is no grass at all: no fallback to the stale grass, track or legacy lawn type.
+  const prefs = await knex('property_preferences').where({ customer_id: visit.customer_id }).first('irrigation_home_changed_at', 'irrigation_confirmed_fields');
+  if (!grassConfirmedAfterMove(prefs || {})) return { species: null, unconfirmed: true };
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type', 'track_key');
   const customer = await knex('customers').where({ id: visit.customer_id }).first('lawn_type');
   return { species: v13TurfSpecies(profile, customer?.lawn_type) };
@@ -641,7 +647,7 @@ function v13ApplyAloneBlocks(selectedItems) {
 function v13TurfBlocks(lines, stateOf, turf) {
   return lines.filter((line) => line.selected && line.product && stateOf(line)?.state === 'turf').map((line) => ({
     code: 'lawn_v13_turf_species', severity: 'block', productId: line.product.id, productName: line.product.name,
-    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and ${turf.species ? `the grass on file is ${TURF_LABELS[turf.species] || turf.species}` : (turf.untied ? 'the saved turf profile cannot be tied to this visit\'s property' : 'no single allowed grass is on file')}. No amount is planned. Enter the actual work.`,
+    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and ${turf.species ? `the grass on file is ${TURF_LABELS[turf.species] || turf.species}` : (turf.untied ? 'the saved turf profile cannot be tied to this visit\'s property' : (turf.unconfirmed ? 'the grass has not been re-confirmed since the home move' : 'no single allowed grass is on file'))}. No amount is planned. Enter the actual work.`,
   }));
 }
 

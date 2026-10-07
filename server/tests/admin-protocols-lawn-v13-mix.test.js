@@ -80,12 +80,14 @@ const itemFor = (body, name) => body.items.find((item) => item.product?.name ===
 let visitRows = [];
 let turfRows = [];
 let propertyRows = [];
+let prefsRows = [];
 const HOME = { id: 'prop-A', customer_id: 'cust-1', active: true, is_primary: true, address_line1: '1 Main St', address_line2: null, city: 'Sarasota', zip: '34201' };
 beforeEach(() => {
   jest.clearAllMocks();
   visitRows = [];
   turfRows = [];
   propertyRows = [HOME];
+  prefsRows = [];
   mockCheckLimits.mockReset().mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
   process.env.GATE_LAWN_V13 = 'true';
   operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: LAWN_V13_VERSION } });
@@ -98,6 +100,7 @@ beforeEach(() => {
     if (table === 'product_aliases') return readQuery([]);
     if (table === 'scheduled_services') return readQuery(visitRows);
     if (table === 'customer_turf_profiles') return readQuery(turfRows);
+    if (table === 'property_preferences') return readQuery(prefsRows);
     if (table === 'customer_properties') { const q = { where: () => q, select: async () => propertyRows }; return q; }
     if (table === 'customers') return readQuery([{ lawn_type: null }]);
     throw new Error(`Unexpected table: ${table}`);
@@ -406,6 +409,17 @@ describe('the February atrazine option on the sheet follows the lawn the sheet i
       expect(itemFor(body, F24).jobMix).toBeTruthy();
     }
     visitRows = [visit];
+    expect(itemFor(await lawnMix({ ...febQuery, scheduledServiceId: VISIT }), ATRAZINE).jobMix).toMatchObject({ amount: 40 });
+  });
+
+  test('after a home move the sheet leaves atrazine unsized until the grass is re-confirmed', async () => {
+    visitRows = [visit];
+    turfRows = [{ grass_type: 'st_augustine', track_key: 'st_augustine' }];
+    prefsRows = [{ irrigation_home_changed_at: '2026-01-10T12:00:00Z', irrigation_confirmed_fields: [] }];
+    const moved = await lawnMix({ ...febQuery, scheduledServiceId: VISIT });
+    expect(itemFor(moved, ATRAZINE).jobMix).toBeNull();
+    expect(moved.blocks[0].message).toMatch(/not been re-confirmed since the home move/);
+    prefsRows = [{ irrigation_home_changed_at: '2026-01-10T12:00:00Z', irrigation_confirmed_fields: ['turf_grass'] }];
     expect(itemFor(await lawnMix({ ...febQuery, scheduledServiceId: VISIT }), ATRAZINE).jobMix).toMatchObject({ amount: 40 });
   });
 

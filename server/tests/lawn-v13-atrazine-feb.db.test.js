@@ -11,6 +11,7 @@ const fillMigration = require('../models/migrations/20261007161000_lawn_v13_atra
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const applicationLimits = require('../services/application-limits');
+const { confirmIrrigationFields, GRASS_CONFIRMED_FIELD } = require('../services/irrigation-schedule-confirmation');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const v13 = require('../config/lawn-protocol-v13.json');
 const fs = require('fs');
@@ -314,6 +315,31 @@ describeDb('the atrazine option through PostgreSQL', () => {
       expect(await guard(stamped)).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
       const same = await visitAt(f, f.property.id, { service_address_line1: f.property.address_line1, service_address_city: f.property.city, service_address_zip: f.property.zip });
       expect(await guard(same)).toBeNull();
+    });
+
+    test('a moved home: the profile still holds the old lawn, so plan and closeout are blocked until the grass is re-confirmed, then allowed', async () => {
+      const f = await customerWithHome();
+      const visit = await visitAt(f, f.property.id);
+      await knex('property_preferences').insert({ customer_id: f.customerId, irrigation_home_changed_at: new Date('2026-01-10T12:00:00Z'), irrigation_confirmed_fields: JSON.stringify([]) });
+      const blocked = await plan(visit);
+      expect(blockCodes(blocked)).toContain('lawn_v13_turf_species');
+      expect(blocked.propertyGate.blocks.find((b) => b.code === 'lawn_v13_turf_species').message).toMatch(/not been re-confirmed since the home move/);
+      expect(item(blocked, ATRAZINE).mix).toBeNull();
+      expect(await guard(visit)).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      // Other confirmations (the county, the sizing fields) do not re-confirm the grass.
+      await confirmIrrigationFields(knex, f.customerId, ['turf_county', 'irrigation_run_minutes']);
+      expect(await guard(visit)).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      await confirmIrrigationFields(knex, f.customerId, [GRASS_CONFIRMED_FIELD]);
+      expect(blockCodes(await plan(visit))).not.toContain('lawn_v13_turf_species');
+      expect(item(await plan(visit), ATRAZINE).mix).toMatchObject({ amount: 40 });
+      expect(await guard(visit)).toBeNull();
+    });
+
+    test('a customer with no move on record is not held (no preferences row, or a row with no move stamp)', async () => {
+      const f = await customerWithHome();
+      expect(await guard(await visitAt(f, f.property.id))).toBeNull();
+      await knex('property_preferences').insert({ customer_id: f.customerId, irrigation_confirmed_fields: JSON.stringify([]) });
+      expect(await guard(await visitAt(f, f.property.id))).toBeNull();
     });
 
     test('a sole active property is the home even when it is not flagged primary; with two active properties and no primary, neither is provable', async () => {
