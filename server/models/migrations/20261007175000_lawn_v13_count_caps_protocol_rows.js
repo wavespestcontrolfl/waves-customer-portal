@@ -18,7 +18,6 @@
  * audit row per protocol lists each row and what was added, and down() removes a key only where it
  * was added by this migration and still equals what it wrote.
  */
-const crypto = require('crypto');
 const staged = require('./20261005120000_lawn_protocol_v13_staged');
 const { V13_COUNT_CAPS } = require('../../config/lawn-v13-count-caps');
 
