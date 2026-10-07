@@ -958,6 +958,13 @@
           ],
           "description": "1.21.0, additive/optional (never `required`): true ONLY when the accepted amount was the LAST price staff stated for this service on the call: with nothing added to it: no later correction, revision, different number or ADDED CHARGE, in any amount and any phrasing, before the call ended (\"actually, correction, it's $250\", \"plus ten dollars for the garage\", \"that is before the trip fee\"). false when staff or the caller changed the price or a charge was added between the offer and the acceptance OR after it, even a small one. When in doubt, false. null when no price was discussed."
         },
+        "price_discussed": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.24.0, additive/optional (never `required`): the extraction's judgement over the WHOLE call of whether any price came up. false ONLY when neither the caller nor the agent mentioned any price, amount, cost, fee, estimate, quote, discount or payment (\"it's a free assessment\", \"no charge\", and a call that never touches money, are false). true when either side mentioned any of them, in any form, including a BARE amount with no currency word from EITHER side (\"Could you do one forty-nine?\", \"it'll be 149\", \"is that around a hundred?\"), a competitor's number, a range, or a question about cost. null when unsure. The call pipeline's no-price assessment booking requires exactly false; any other value sends the call to the priced path or the office."
+        },
         "quote_requested": {
           "type": [
             "boolean",
@@ -1319,7 +1326,7 @@
             "boolean",
             "null"
           ],
-          "description": "1.20.0, additive/optional (never `required`): the extraction's judgement of the agent's promise for the agreed slot. true when the agent's own words firmly commit to that day and time. false ONLY when a hedge or condition applies to WHETHER or WHEN the appointment happens: could/might/can-try/probably/possibly/tentatively/hopefully/perhaps, a condition on the slot (\"if ...\", \"once ...\", \"upon ...\", \"pending ...\", \"after the rain\", \"weather permitting\"), or a plan still to be checked. A courtesy or contingency line about a LATER follow-up (\"if anything comes up I'll let you know\", \"we'll text you a confirmation\", \"that should be fine\" said after a firm slot) does not make it false. Prefer false when genuinely unsure. The agent's commitment quote (/scheduling/agent_committed_booking) must be the WHOLE clause holding the day, date and time INCLUDING every qualifier around them. null when no slot was agreed."
+          "description": "1.20.0, additive/optional (never `required`): the extraction's judgement of the agent's promise for the agreed slot. true when the agent's own words firmly commit to that day and time. false ONLY when a hedge or condition applies to WHETHER or WHEN the appointment happens: could/might/can-try/probably/possibly/tentatively/hopefully/perhaps, a condition on the slot (\"if ...\", \"once ...\", \"upon ...\", \"pending ...\", \"after the rain\", \"weather permitting\"), or a plan still to be checked. A courtesy or contingency line about a LATER follow-up (\"if anything comes up I'll let you know\", \"we'll text you a confirmation\", \"that should be fine\" said after a firm slot) does not make it false. Prefer false when genuinely unsure. The agent's commitment quote (/scheduling/agent_committed_booking) must be the WHOLE clause holding the day, date and time INCLUDING every qualifier around them. Exception: when this prompt contains the AGENT-PROPOSED SLOT block, the quote for that shape is instead the agent's bare commitment sentence after the caller's yes (including every qualifier in it), which holds no day or time. null when no slot was agreed."
         },
         "relative_date_used": {
           "type": [

@@ -17,11 +17,12 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
   CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
 const IbThreads = require('../services/intelligence-bar/threads');
+const PriceReadBack = require('../services/intelligence-bar/price-read-back');
 const { HISTORY_TOOLS, executeHistoryTool } = require('../services/intelligence-bar/history-tools');
 const AuthorizationContract = require('../services/intelligence-bar/authorization-contract');
 const { gateEnvValue, ibCancelAppointmentLive } = require('../config/feature-gates');
@@ -33,7 +34,7 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
-const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer } = require('../services/intelligence-bar/comms-tools');
+const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer, sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
@@ -894,7 +895,44 @@ const VERIFIED_VERSION_PARAMS = {
   resend_receipt: '_verified_receipt_version',
 };
 
+// The overlapping visits a booking card names, or [] when the lookup fails
+// (the plain line shows and only the boolean pin applies).
+async function bookingOverlapWithBestEffort(params) {
+  try {
+    return await ibBookingOverlapWho(params.scheduled_date, params.time_window);
+  } catch (err) {
+    logger.warn(`[intelligence-bar] booking overlap names unavailable: ${err.message}`);
+    return [];
+  }
+}
+
+// "Thursday, Oct 9, morning" for the booking card (display only). A date or
+// window that does not parse shows as typed, never dropped.
+function bookingWhenLabel(scheduledDate, timeWindow) {
+  const parts = [];
+  if (scheduledDate !== undefined && scheduledDate !== null && String(scheduledDate).trim()) {
+    const raw = String(scheduledDate).trim();
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+    const d = m ? new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : null;
+    parts.push(d && !Number.isNaN(d.getTime()) && d.getUTCMonth() === Number(m[2]) - 1
+      ? d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' })
+      : raw);
+  }
+  if (timeWindow !== undefined && timeWindow !== null && String(timeWindow).trim()) parts.push(String(timeWindow).trim());
+  return parts.length ? parts.join(', ') : null;
+}
+
 function confirmationDisplayParams(toolName, params, preview) {
+  // The card shows what the plan will save (a note as the line it adds; a
+  // property code that is the community code is left out) and what it will
+  // not, never the raw request.
+  if (toolName === 'update_property_access' && preview?.preview === true) {
+    return {
+      customer: preview.customer_name || params.customer_id,
+      ...(preview.would_update || {}),
+      ...(preview.kept?.length ? { not_saved_or_changed: preview.kept.join('; ') } : {}),
+    };
+  }
   if (toolName === 'cancel_plan' && preview?.preview === true) {
     // The card must show everything the commit will do: who, what scope,
     // the visits coming off, the money, the effective date, whether the
@@ -970,7 +1008,11 @@ function confirmationDisplayParams(toolName, params, preview) {
     // is a money fact the card must show (owner 2026-09-27); the contract
     // carries this display line as a billing effect.
     const pinnedPrice = preview?.pinned_price;
-    const { price, ...unpriced } = params;
+    const {
+      price, customer_id: customerId, scheduled_date: scheduledDate, time_window: timeWindow,
+      service_type: serviceType, technician_id: technicianId, technician_name: technicianName,
+      price_confirmed: _priceConfirmed, ...others
+    } = params;
     const money = (n) => `$${Number(n).toFixed(2)}`;
     // A member discount names itself and the list price it came off (owner
     // 2026-09-27: members get the WaveGuard member discount on a one-off).
@@ -981,15 +1023,37 @@ function confirmationDisplayParams(toolName, params, preview) {
     if (pinnedPrice && pinnedPrice.amount == null) {
       priceLine = 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type';
     } else if (pinnedPrice) {
-      const basis = pinnedPrice.source === 'stated' ? 'as stated' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
-      priceLine = `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
+      const basis = pinnedPrice.source === 'stated' ? 'price you gave' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
+      // A stated price that differs from what the catalog would charge this
+      // customer shows both, so a typo in the stated one is easy to spot.
+      priceLine = pinnedPrice.source === 'stated' && pinnedPrice.catalog_price != null
+        ? `${money(pinnedPrice.amount)} (${basis}) — catalog price is ${money(pinnedPrice.catalog_price)}. Invoiced when the visit is completed`
+        : `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
     }
-    const shown = !pinnedPrice ? params : { ...unpriced, price: priceLine };
-    if (!preview?.pinned_technician) return shown;
-    // Show the pinned tech by NAME (the id is opaque on a card) — the visit
-    // binds to exactly this technician at commit.
-    const { technician_id, technician_name, ...rest } = shown;
-    return { ...rest, technician: preview.pinned_technician.name };
+    // Plain fields, in the order an owner reads them. Display text only: the
+    // execution params and pins are untouched. The raw customer id stays off
+    // the card once the customer is pinned by name ("Booked for").
+    const shown = {};
+    const when = bookingWhenLabel(scheduledDate, timeWindow);
+    if (when) shown.when = when;
+    if (serviceType !== undefined && serviceType !== null) shown.service = serviceType;
+    if (!pinnedPrice && price !== undefined && price !== null) shown.price = price;
+    else if (priceLine) shown.price = priceLine;
+    // Show the pinned tech by NAME, once (the id is opaque on a card) — the
+    // visit binds to exactly this technician at commit.
+    if (preview?.pinned_technician) shown.technician = preview.pinned_technician.name;
+    else {
+      if (technicianId !== undefined && technicianId !== null) shown.technician_id = technicianId;
+      if (technicianName !== undefined && technicianName !== null) shown.technician_name = technicianName;
+    }
+    if (!preview?.pinned_customer && customerId !== undefined && customerId !== null) shown.customer_id = customerId;
+    // Model-supplied extras can never overwrite or imitate a server-derived
+    // card fact (GATE_IB_PLATFORM off lets extra fields through): the display
+    // alias keys are dropped in any case, and the curated fields spread last.
+    const CARD_ALIAS_KEYS = new Set(['when', 'service', 'technician', 'price']);
+    const extras = Object.fromEntries(Object.entries(others)
+      .filter(([k]) => !CARD_ALIAS_KEYS.has(String(k).toLowerCase().replace(/[\s_-]+/g, ''))));
+    return { ...extras, ...shown };
   }
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
@@ -1172,6 +1236,15 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
+    if (toolUse.name === 'send_sms') {
+      // No card for a text that cannot go out: an opted-out or suppressed number,
+      // or a repeat of a text whose provider outcome is still unknown. Runs for a
+      // pinned customer AND for a direct phone with no customer. The refusal
+      // carries the send tool's own wording; the execution-time check stays (a
+      // customer can opt out between the card and the confirm).
+      const sendRefusal = await sendSmsProposalRefusal(params);
+      if (sendRefusal) return { failed: true, modelResult: sendRefusal };
+    }
     if (toolUse.name === 'create_appointment' && (params.technician_id || params.technician_name)) {
       // Pin the technician like send_sms pins the recipient: resolution
       // happens NOW, so the card names the exact tech the visit binds to
@@ -1278,6 +1351,30 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._ib_notes_before = current.crm_notes ?? null;
       notesReadVersion = current.version;
     }
+    if (toolUse.name === 'update_customer') {
+      // monthly_rate is the customer's WHOLE monthly bill (owner 2026-10-06):
+      // a rate edit names the one service whose price changes, the card lists
+      // every line before and after, and a total below the other lines is
+      // refused (rate-change.js). rate_service is model input only: it is
+      // resolved here into the pinned _rate_family, never stored as itself.
+      const rateService = params.rate_service;
+      delete params.rate_service;
+      if (params.customer_id && params.updates && params.updates.monthly_rate !== undefined) {
+        let rate;
+        try {
+          rate = await require('../services/intelligence-bar/rate-change')
+            .rateChangeProposal(String(params.customer_id), params.updates.monthly_rate, rateService);
+        } catch {
+          return { failed: true, modelResult: { error: 'Could not read this customer\'s monthly bill — nothing was proposed. Try again in a moment.' } };
+        }
+        if (rate?.error) return { failed: true, modelResult: { error: rate.error, ...(rate.code ? { code: rate.code } : {}) } };
+        if (rate) {
+          params._rate_family = rate.family;
+          params._rate_ledger_pin = rate.pin;
+        }
+        if (rate?.display) preview = { ...preview, rate_change: rate.display };
+      }
+    }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like
       // the Schedule screen): the stated price, else the catalog default the
@@ -1294,6 +1391,35 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
       // A refusal may carry a stable code (window_not_on_the_hour, W5-dev-03); the model sees it, and no card is made.
       if (booking.error) return { failed: true, modelResult: { error: booking.error, ...(booking.code ? { code: booking.code } : {}) } };
+      // One-time price read-back: a STATED price that differs from the
+      // catalog price for this customer is asked about once before a card.
+      // Not a hard refusal (custom quotes and owner rulings differ on
+      // purpose). price_confirmed is model-supplied, so it counts only when
+      // the server recorded a read-back for this operator, customer and
+      // stated price in an EARLIER request (price-read-back.js): the model
+      // cannot skip the question on its first call or by retrying in the same
+      // loop. The flag is never stored or pinned; the execution pins
+      // (_booking_price etc.) are unchanged. No catalog price: no guard.
+      const priceConfirmedClaim = params.price_confirmed === true;
+      delete params.price_confirmed;
+      if (booking.source === 'stated' && booking.catalogPrice != null) {
+        const readBackKey = {
+          actorId: getAdminActorId(req), customerId: String(params.customer_id), statedPrice: booking.price,
+        };
+        if (priceConfirmedClaim && PriceReadBack.isConfirmed({ ...readBackKey, catalogPrice: booking.catalogPrice, requestStartedAt })) {
+          PriceReadBack.clear(readBackKey);
+        } else {
+          PriceReadBack.recordReadBack({ ...readBackKey, catalogPrice: booking.catalogPrice, requestStartedAt });
+          const money = (n) => `$${Number(n).toFixed(2)}`;
+          return {
+            failed: true,
+            modelResult: {
+              error: `You gave ${money(booking.price)}, but the catalog price is ${money(booking.catalogPrice)}. Ask the user which price to use. If they confirm ${money(booking.price)}, propose again with price_confirmed: true. Nothing was booked.`,
+              code: 'price_read_back',
+            },
+          };
+        }
+      }
       // Server pins, set unconditionally so a model-supplied value can never
       // stand in for them. The discount identity/terms (Codex r2 on #5093,
       // P1) ride alongside the net price and service id: the card shows the
@@ -1332,9 +1458,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       if (overlapNow == null) delete params._booking_overlap;
       else params._booking_overlap = overlapNow;
+      // What the card shows about each overlapping visit is pinned (set
+      // below); a model-supplied value can never stand in for it.
+      delete params._booking_overlap_facts;
+      // Who the overlapping visit is, for the card line only. Best effort:
+      // a lookup that fails leaves the plain line; the _booking_overlap pin
+      // above is the boolean the executor compares and is never changed here.
+      const overlapWith = overlapNow ? await bookingOverlapWithBestEffort(params) : [];
+      // Pin the facts the card names: the executor refuses an overlapping
+      // visit outside this set, or one whose shown facts changed, as a new
+      // overlap (fresh card). Nothing pinned (a failed lookup or an overlap
+      // gone by now) keeps the boolean pin.
+      if (overlapWith.length) params._booking_overlap_facts = overlapWith.map((v) => v.fact).sort();
       preview = {
         ...preview,
-        ...(overlapNow ? { slot_overlap: { already_overlaps: true } } : {}),
+        ...(overlapNow ? { slot_overlap: { already_overlaps: true, ...(overlapWith.length ? { with: overlapWith.map(({ id: _id, fact: _fact, ...shownVisit }) => shownVisit) } : {}) } } : {}),
         pinned_price: {
           amount: booking.price,
           source: booking.source,
@@ -1342,6 +1480,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           list_price: booking.listPrice,
           discount_name: booking.discountName,
           discount_percent: booking.discountPercent,
+          // Only when the price was stated and the catalog would charge this
+          // customer a different amount (display only).
+          ...(booking.catalogPrice != null ? { catalog_price: booking.catalogPrice } : {}),
         },
       };
     }
@@ -1683,7 +1824,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Live rows only (pre-push r11 P1): a soft-deleted/merged customer
       // must never ride a proposal — the executors refuse or skip them,
       // but the card must not name them as approved targets either.
-      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name');
+      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name', 'monthly_rate');
+      // A bulk rate edit writes one number as each customer's WHOLE monthly
+      // bill (owner 2026-10-06): on a customer who already has a bill that
+      // would replace every service line. Only first rates go in bulk; an
+      // existing bill is edited one customer at a time, naming the service.
+      if (params.updates && params.updates.monthly_rate !== undefined) {
+        const billedIds = await require('../services/intelligence-bar/rate-change').customersWithBill(db, rows);
+        const billed = rows.filter((r) => billedIds.has(String(r.id)));
+        if (billed.length) {
+          const names = billed.slice(0, 5).map((r) => `${r.first_name || ''} ${r.last_name || ''}`.trim() || r.id).join(', ');
+          return { failed: true, modelResult: { error: `${billed.length} of these customers already have a monthly bill (${names}${billed.length > 5 ? ', …' : ''}). A bulk rate would replace their whole bill. Change each one with update_customer and rate_service, or leave them out. Nothing was proposed.`, code: 'bulk_rate_over_existing_bill' } };
+        }
+      }
       const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
       const missing = ids.filter((id) => !nameById.has(id));
       if (missing.length) {
@@ -1730,7 +1883,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
     });
-    if (target.error) return { failed: true, modelResult: target };
+    // A refused target leaves no card and writes nothing; the model is told so
+    // in plain words, so its reply can never read as a recorded change.
+    if (target.error) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
     if (toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
@@ -1766,6 +1921,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // acts on exactly those, and task-context validates the invoice by id.
   if (toolUse.name === 'remove_saved_payment_method' && preview?.method?.id) {
     params.payment_method_id = String(preview.method.id);
+  }
+  // The property access write pins the plan the card showed; the confirmed
+  // run refuses when its plan under the lock differs.
+  if (toolUse.name === 'update_property_access' && preview?.plan_hash) {
+    params._ib_property_plan_hash = String(preview.plan_hash);
   }
   if (toolUse.name === 'correct_invoice_address' && preview?.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
@@ -2315,7 +2475,7 @@ ENGINE BASICS (so you can explain numbers):
 - Loaded labor rate: $35/hr
 - Pest frequencies: quarterly (~90d), bimonthly (~60d), monthly (~30d)
 - Lawn tracks: st_augustine, bermuda, zoysia, bahia. Tiers: basic, enhanced, premium
-- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+) — discount applies automatically based on service count
+- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+). The tier is a label the office sets; changing it changes NO price. Prices change only through a new estimate or a monthly-rate edit, so never tell the operator a discount "will apply" after a tier change. monthly_rate is the customer's whole monthly bill (all services summed; get_customer_detail shows the lines as monthly_bill).
 - Default sqft if unknown: 2000. Default lot: 4× home sqft.
 
 OUT-OF-SCOPE EXAMPLES (do not draft):
@@ -2410,8 +2570,23 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 // on EVERY admin context regardless of role (INFRA_TOOLS below), so this
 // filter is the ONLY place that keeps these out of a non-full-access list —
 // there is no per-module QUERY-only export to fall back to.
+// Core tools on EVERY admin page (EVERY_PAGE_TOOL_NAMES in
+// action-registry.js; owner IB history 10-06: asks failed with "no tool" on
+// the Customers page or dashboard). This legacy list carries the ones its
+// modules execute by name. The property writes are registry-only
+// (executePropertyTool refuses unless GATE_IB_PLATFORM), so they ride the
+// platform list only. Admin-only; never the tech or agent-estimate rails.
+// Only the offer widens: every write keeps its UI-confirm card.
+const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
+function withEveryPageTools(tools, context, isAdmin) {
+  if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
+  const present = new Set(tools.map(t => t.name));
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS]
+    .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
+}
+
 function getToolsForContext(context, isAdmin = false, fullAccess = false) {
-  const tools = toolsForContextUngated(context, isAdmin, fullAccess)
+  const tools = withEveryPageTools(toolsForContextUngated(context, isAdmin, fullAccess), context, isAdmin)
     // Defense in depth: catches a future red tool reaching a context list
     // through a module that forgot its own write-free "query" export
     // (banking-tools.js / seo-tools.js already build one for the branches
@@ -2707,6 +2882,7 @@ RULES:
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
+- Number read-back: when the operator gives a money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm in your previous turn, act on neither. Ask one short question naming both ("You said $60.33, but earlier it was $61.33. Which one?") and prepare no card until they answer. Voice dictation often mishears digits.
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 

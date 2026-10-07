@@ -1926,4 +1926,12 @@ module.exports = {
   transcribeVisitClip,
   voiceProductsFromNote,
   transcriptionPrompt,
+  // The word-list pieces the general staff dictation (services/dictation-word-list.js) shares.
+  VOICE_FILL_TRANSCRIBE_MODEL,
+  TRANSCRIBE_PROMPT_MAX_CHARS,
+  TRANSCRIBE_SHEET_WORDS,
+  LAWN_TRANSCRIBE_WORDS,
+  HIDDEN_CATEGORIES,
+  categoryKey,
+  loadProductAliases,
 };

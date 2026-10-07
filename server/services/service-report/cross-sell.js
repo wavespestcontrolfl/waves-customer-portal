@@ -463,7 +463,9 @@ async function loadEstimateSeed(database, customerId, scopeStreet) {
 // enough. Lazy-required — property-lookup-v2 is heavy and cyclic-prone.
 async function cacheOnlyPropertyLookup(address) {
   const { performPropertyLookup } = require('../../routes/property-lookup-v2');
-  return performPropertyLookup(address, { cacheOnly: true, persist: false });
+  // Scope decision: lookup-callers.js (report_cross_sell: customer report, cache-only).
+  const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
+  return performPropertyLookup(address, lookupOptionsFor('report_cross_sell', { cacheOnly: true, persist: false }));
 }
 
 // buildReportCrossSell(service, database) → crossSell payload | null.

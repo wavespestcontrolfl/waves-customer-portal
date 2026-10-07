@@ -34,21 +34,33 @@ function requestParts(input, init) {
   return { url, auth };
 }
 
-export function installStaffSessionGuard({ getToken, onRejected, target = globalThis }) {
+// `onEnrollmentRequired` (optional): a 403 MFA_ENROLLMENT_REQUIRED for the
+// current token (GATE_ADMIN_MFA_ENFORCE) is the same kind of verdict on the
+// session; the body is read from a clone, in the background, so the caller's
+// response is untouched.
+export function installStaffSessionGuard({ getToken, onRejected, onEnrollmentRequired = null, target = globalThis }) {
   const original = target.fetch;
   if (typeof original !== 'function') return () => {};
   // Once per token: a later login gets a fresh guard.
   let firedFor = null;
+  let enrollmentFiredFor = null;
   const guarded = async function guardedFetch(input, init) {
     const response = await original.call(this, input, init);
     try {
       const token = getToken();
-      if (firedFor !== token && response?.status === 401 && token) {
-        const { url, auth } = requestParts(input, init);
-        if (API_PATH.test(url) && !NOT_SESSION_401.some((re) => re.test(url)) && auth === `Bearer ${token}`) {
-          firedFor = token;
-          onRejected();
-        }
+      const { url, auth } = requestParts(input, init);
+      const forCurrentSession = Boolean(token) && API_PATH.test(url) && auth === `Bearer ${token}`;
+      if (firedFor !== token && response?.status === 401 && forCurrentSession && !NOT_SESSION_401.some((re) => re.test(url))) {
+        firedFor = token;
+        onRejected();
+      }
+      if (onEnrollmentRequired && enrollmentFiredFor !== token && response?.status === 403 && forCurrentSession
+        && typeof response.clone === 'function') {
+        response.clone().json().then((body) => {
+          if (body?.code !== 'MFA_ENROLLMENT_REQUIRED' || enrollmentFiredFor === token || getToken() !== token) return;
+          enrollmentFiredFor = token;
+          onEnrollmentRequired();
+        }).catch(() => {});
       }
     } catch { /* the guard never breaks the caller's request */ }
     return response;

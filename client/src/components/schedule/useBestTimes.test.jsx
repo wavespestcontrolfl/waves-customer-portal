@@ -39,6 +39,14 @@ it('scores the picked hour on the day and searches the next 3 days for the singl
   expect(result.current.bestInRange).toMatchObject({ date: '2035-01-03', start: '13:00', driveInMinutes: 5, fromHomeBase: true });
 });
 
+it('a capacity slot (no insertion) keeps its own origin labels on the plain path (Codex #6045 r11)', async () => {
+  const capacity = { date: '2035-01-02', start_time: '09:00', end_time: '10:00', detour_minutes: 20, drive_in_minutes: 15, from_home_base: true, from_name: null, technician: { id: 'tech', name: 'A' } };
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [capacity] }) }));
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech' }));
+  await waitFor(() => expect(result.current.bestTimes).toHaveLength(1));
+  expect(result.current.bestTimes[0]).toMatchObject({ driveInMinutes: 15, fromHomeBase: true, fromName: null });
+});
+
 it('trims a stored HH:MM:SS window to the picked hour (edit form initial state)', async () => {
   const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
   vi.stubGlobal('fetch', fetch);
@@ -127,12 +135,57 @@ it('summary mode: one search around the picked date answers availability and not
     pickedDate: '2035-01-05',
     days: [
       { date: '2035-01-01', status: 'full', hours: [] },
-      { date: '2035-01-02', status: 'open', hours: [{ date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 12, technicianId: 'tech', technicianName: null }] },
+      { date: '2035-01-02', status: 'open', hours: [{
+        date: '2035-01-02', start: '10:00', end: '11:00', detourMinutes: 12, driveInMinutes: null, fromHomeBase: null, fromName: null,
+        driveSource: null, rainChance: null, stopsThatDay: null, technicianId: 'tech', technicianName: null,
+      }] },
     ],
-    picked: { start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null },
+    best: null,
+    picked: {
+      start: '14:00', fits: false, reason: 'arrival_window', detourMinutes: null,
+      driveInMinutes: null, fromHomeBase: null, fromName: null, driveSource: null, rainChance: null,
+    },
   });
   expect(result.current.bestTimes).toEqual([]);
   expect(result.current.bestInRange).toBeNull();
+});
+
+it('summary mode: a pick two weeks out asks once more for the next-7-days row (Codex #6045 r1)', async () => {
+  const far = {
+    ...summaryAnswer,
+    summary: { ...summaryAnswer.summary, best: { day: [], week: [], week_covered: false } },
+  };
+  const week = {
+    slots: [],
+    summary: { days: [], best: { day: [], week: [{ date: '2035-01-02', start_time: '10:00', end_time: '11:00', detour_minutes: 12 }], week_covered: true } },
+  };
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => far })
+    .mockResolvedValueOnce({ ok: true, json: async () => week });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    summary: true, bestRows: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00',
+  }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(fetch).toHaveBeenCalledTimes(2);
+  // The picked search keeps its window around the pick (Codex #6045 r2).
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ bestRows: true, dateFrom: '2035-01-02', dateTo: '2035-01-12' });
+  const second = JSON.parse(fetch.mock.calls[1][1].body);
+  expect(second).toMatchObject({ summary: true, pickedDate: '2035-01-05' });
+  expect(second.pickedStart).toBeUndefined();
+  expect(result.current.availability.best.weekCovered).toBe(true);
+  expect(result.current.availability.best.week.map((h) => h.start)).toEqual(['10:00']);
+  // The pills stay the picked search's days.
+  expect(result.current.availability.days.map((d) => d.date)).toEqual(['2035-01-01', '2035-01-02']);
+});
+
+it('summary mode without bestRows never asks for the rows', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => summaryAnswer });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ summary: true, date: '2035-01-05', serviceId: 'fixture', technicianId: 'tech', pickedStart: '14:00' }));
+  await waitFor(() => expect(result.current.availability).not.toBeNull());
+  expect(JSON.parse(fetch.mock.calls[0][1].body).bestRows).toBeUndefined();
+  expect(fetch).toHaveBeenCalledOnce();
 });
 
 it('summary mode keeps "could not check" apart from a miss', async () => {

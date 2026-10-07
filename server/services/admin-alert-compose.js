@@ -138,7 +138,15 @@ async function raiseAdminAlert(category, spec = {}, rawOpts = {}) {
   });
 }
 
+// True when a piece of text could not stand in a why on its own: a second
+// sentence or any forbidden token (the same checks composeAdminAlert runs).
+// Callers that splice source words into a why use it to fall back early.
+function breaksAlertRules(text) {
+  const t = String(text || '');
+  return hasSecondSentence(t) || FORBIDDEN.some(([, hit]) => hit(t));
+}
+
 module.exports = {
   AREAS, SEVERITIES, WHO, SUBJECT_TYPES, MAX_HEADLINE_CHARS, MAX_WHY_CHARS,
-  composeAdminAlert, raiseAdminAlert, validStructuredFields, cutAtWord: truncateAtWord, firstSentence,
+  composeAdminAlert, raiseAdminAlert, validStructuredFields, cutAtWord: truncateAtWord, firstSentence, breaksAlertRules,
 };

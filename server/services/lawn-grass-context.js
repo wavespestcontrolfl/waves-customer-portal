@@ -24,6 +24,28 @@ const GRASS_TYPE_LABELS = {
   unknown: 'Unknown',
 };
 
+// Who set customer_turf_profiles.grass_type (grass_type_source, migration
+// 20261007100000). NULL = set before the column existed. Only a STAFF value
+// (the turf-profile editor) is never replaced by a later photo AI read.
+const GRASS_SOURCE = Object.freeze({ STAFF: 'staff', ESTIMATE: 'estimate', PHOTO_AI: 'photo_ai' });
+// The four grasses with a lawn track, and the vague values a photo AI read
+// that names one of them may replace.
+const KNOWN_TRACK_GRASS = new Set(['st_augustine', 'bermuda', 'zoysia', 'bahia']);
+const AI_REPLACEABLE_GRASS = new Set(['mixed', 'unknown']);
+
+// Whether a photo AI read writes its grass to the turf profile. A blank grass
+// fills either way. A Mixed or Unknown grass is replaced by a read that names
+// one known grass (owner 2026-10-06), only from photos of the current home
+// (`fresh`) and never over a grass staff set in the turf-profile editor.
+function photoAiWritesGrass({ prior, read, fresh }) {
+  if (!read) return false;
+  if (!prior?.grass_type) return true;
+  return !!fresh
+    && AI_REPLACEABLE_GRASS.has(prior.grass_type)
+    && KNOWN_TRACK_GRASS.has(read)
+    && prior.grass_type_source !== GRASS_SOURCE.STAFF;
+}
+
 function grassTypeLabel(grassType) {
   if (!grassType) return null;
   return GRASS_TYPE_LABELS[grassType] || grassType;
@@ -116,6 +138,10 @@ async function loadCustomerGrassContext(customerId, knex = db, { strict = false 
 
 module.exports = {
   GRASS_TYPE_LABELS,
+  GRASS_SOURCE,
+  KNOWN_TRACK_GRASS,
+  AI_REPLACEABLE_GRASS,
+  photoAiWritesGrass,
   grassTypeLabel,
   normalizeGrassType,
   irrigationTypeHasSystem,

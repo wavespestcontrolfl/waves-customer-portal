@@ -487,7 +487,11 @@ async function loadLawnWindowGuidance(dbh, svc) {
     const LimitChecker = require('./application-limits');
     for (const entry of shaped) {
       if (!entry.fixed || !entry.productId) continue;
-      const limits = await LimitChecker.checkLimits(svc.customer_id, entry.productId, serviceDate);
+      // The treated property and this visit scope the history, as the plan engine scopes it:
+      // another property's applications, and this visit's own ledger rows, are not held against it.
+      const limits = await LimitChecker.checkLimits(svc.customer_id, entry.productId, serviceDate, undefined, {
+        propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id,
+      });
       const violations = [
         ...(limits.blocks || []).map((v) => ({ severity: 'block', type: v.type || null, message: cleanText(v.message || v.description, 200) })),
         ...(limits.warnings || []).map((v) => ({ severity: v.severity || 'warn', type: v.type || null, message: cleanText(v.message || v.description, 200) })),

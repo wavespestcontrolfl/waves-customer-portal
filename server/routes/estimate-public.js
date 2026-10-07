@@ -17415,6 +17415,38 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   return { disclosures, wouldChargeBundled, afterPerApplication };
 }
 
+// Who is a "member" for the tier picker: the linked customer_id when there is
+// one, otherwise the prospective PHONE match the accept lands on
+// (matchAcceptCustomerByPhone) — an unlinked estimate whose phone belongs to
+// a member must not see new-customer tier prices. Strict and fail-closed:
+// any read error reads as "member".
+// The customer an UNLINKED estimate's accept would land on, in the accept's
+// own order: an accepted sibling in the property group hands over its (live)
+// customer first (one resolver for all readers, recurring-card-on-file),
+// only then the unambiguous phone match. Throws on a read error (callers
+// fail closed); null when nothing resolves.
+async function resolveProspectiveOwnerId(estimate, database = db) {
+  if (!estimate) return null;
+  // ONE resolver with the accept's policy readers (recurring-card-on-file):
+  // linked → grouped sibling → authoritative phone match. A failed lookup
+  // there is a thrown error here, so every caller fails closed.
+  const { resolveProspectiveAcceptCustomer } = require('../services/recurring-card-on-file');
+  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate, database, { authoritative: true });
+  if (lookupFailed) throw new Error('prospective_owner_lookup_failed');
+  return customerId || null;
+}
+
+async function offerTierMemberBlock(estimate, database = db) {
+  if (!estimate) return true;
+  try {
+    const ownerId = await resolveProspectiveOwnerId(estimate, database);
+    if (!ownerId) return false;
+    return !!(await isActivePlanCustomer(database, ownerId, { strict: true }));
+  } catch (_) {
+    return true;
+  }
+}
+
 // Good / Better / Best tiles for the customer page (GATE_ESTIMATE_OFFER_TIERS).
 // A VIEW over the rail below: the row is in one of two ordinary states —
 // 'best' (pest + lawn, as quoted) or 'pest_only' (lawn removed through the
@@ -17423,7 +17455,7 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
 // live accept-active surface for a row the office marked, when the rail
 // itself would allow the move (its resolvers decide). null = no picker, the
 // page renders exactly as today.
-async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDraftPreview = false, mixChange = applyServiceMixChange }) {
+async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDraftPreview = false, mixChange = applyServiceMixChange, memberBlock = offerTierMemberBlock }) {
   const OfferTiers = require('../services/estimate-offer-tiers');
   if (!OfferTiers.offerTiersGateLive() || !serviceOptOutGateOn()) return null;
   if (adminDraftPreview || !OfferTiers.offerTiersRequested(estData)) return null;
@@ -17431,14 +17463,15 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   const OptOut = require('../services/estimate-service-opt-out');
   const key = OfferTiers.COMPANION_KEY;
   const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
-  // A linked customer who became an active member after the save gets no
-  // picker (strict, fail-closed): the rail's commit would refuse them, and
-  // the dry run would show new-customer prices they cannot take.
-  if (estimate.customer_id) {
-    let activeMember = true;
-    try { activeMember = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
-    catch (_) { activeMember = true; }
-    if (activeMember) return null;
+  // A customer who is an active member gets no picker — judged the way the
+  // accept resolves the customer: the linked customer_id, else the
+  // prospective phone match (strict, fail-closed on any read error). The
+  // rail's commit would refuse them, and the dry run would show
+  // new-customer prices they cannot take.
+  try {
+    if (await memberBlock(estimate, db)) return null;
+  } catch (_) {
+    return null;
   }
   // The CURRENT mix must be exactly the model's: pest + lawn, or pest alone
   // with lawn removed. A line added since the mark (the priced-add rail's
@@ -17502,9 +17535,16 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   if (!better.rows.length || best.rows.length < 2) return null;
   // Good: the one-time pest visit, priced the way the one-time option prices
   // it — from the pest plan's own per-application list price.
-  const goodTotal = (state === 'pest_only' && estimate.show_one_time_option
-    ? resolveAcceptOneTimeTotal(estimate, pricingBundle)
-    : 0) || oneTimePestChoiceAmountFromResultStats(estData) || 0;
+  // Good is priced by the SAME one-time-choice breakdown acceptance uses
+  // (the pest visit from the plan's list price PLUS any preserved one-time
+  // add-on, e.g. a roach treatment), judged as if the option were on.
+  // Good is the one-time CHOICE amount acceptance resolves. In the as-quoted
+  // state it is reached only AFTER the lawn removal, so the dry run computed
+  // it on the post-change result (discount reallocation included); on the
+  // pest-only row the served state is that result.
+  const goodTotal = state === 'best'
+    ? Number(dry.body.oneTimeChoiceAmount || 0)
+    : (oneTimeChoiceAmountForEstimate({ ...estimate, show_one_time_option: true }, estData, pricingBundle) || 0);
   return {
     state,
     companionKey: key,
@@ -17551,7 +17591,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // numbers. Both row-version reads pass through the same JS Date
     // millisecond truncation — never a JS ms date against the raw µs column.
     const rowBasis = estimate.updated_at ? new Date(estimate.updated_at).toISOString() : null;
-    const optOutPreviewDigest = (nextTotals, impactState) => crypto
+    const optOutPreviewDigest = (nextTotals, impactState, oneTimeChoice = null) => crypto
       .createHmac('sha256', process.env.JWT_SECRET || 'estimate-opt-out-preview')
       .update(JSON.stringify({
         rowBasis,
@@ -17563,6 +17603,9 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         a: nextTotals.annualTotal,
         o: nextTotals.onetimeTotal,
         w: nextTotals.waveGuardTier || null,
+        // The Good tile's figure (tier gate on only): a one-time floor or
+        // multiplier change between preview and commit must refuse too.
+        ...(oneTimeChoice != null ? { g: oneTimeChoice } : {}),
         // The DISPLAYED terms, not just the aggregates: a config change can
         // redistribute per-application prices among surviving lines while the
         // totals stay put (pre-push codex P0 on 2d9fd6e). Disclosures carry
@@ -17729,6 +17772,29 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // as a new customer here while counting as a member there (pre-push
     // codex P0). `priors` above is gathered separately only because the
     // recompute needs the list itself.
+    // An UNLINKED estimate whose prospective owner (grouped sibling, then
+    // phone match — the accept's own order) is an active member: nothing
+    // here may price new-customer terms onto a member plan, and the accept
+    // would link that member. Strict and fail-closed, same 409 as below.
+    // The staff compensation restore (an undelivered send's park reverted)
+    // returns the estimate to the shape it was sent in and is exempt, as in
+    // the write below: a member who appeared since the park must not leave
+    // the row stuck in its reduced shape.
+    // The owner resolved here (an unlocked read) is also the one whose
+    // comms fence the transaction takes BEFORE the estimate lock; under the
+    // lock it is re-resolved and any drift aborts (never chase a newly
+    // observed owner's fence after locking the estimate).
+    let expectedProspectiveOwnerId = null;
+    if (!estimate.customer_id && !(actor === 'staff' && mode === 'restore')) {
+      let prospectiveMember = true;
+      try {
+        expectedProspectiveOwnerId = await resolveProspectiveOwnerId(estimate, db);
+        prospectiveMember = expectedProspectiveOwnerId
+          ? !!(await isActivePlanCustomer(db, expectedProspectiveOwnerId, { strict: true }))
+          : false;
+      } catch (_) { prospectiveMember = true; }
+      if (prospectiveMember) return { status: 409, body: ({ error: 'reprice_unavailable' }) };
+    }
     const memberEvidence = OptOut.memberEvidenceInEstimateData(parsedData) || priors.length > 0;
     // STRICT verification before member pricing can be WRITTEN (pre-push
     // codex P0 on e77857d): reconcileFrozenMembershipSnapshot never throws —
@@ -17845,7 +17911,18 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
 
     // One digest for both directions: the dry run hands it out, the commit
     // re-derives it from its OWN recompute and refuses on any mismatch.
-    const previewDigest = optOutPreviewDigest(next, impact);
+    // Good / Better / Best (tier gate on only — off, the response and the
+    // digest are byte-identical to before): the one-time CHOICE the
+    // post-change row would offer, by acceptance's own resolver on the
+    // post-change result, bound into the digest.
+    const offerTierChoice = require('../services/estimate-offer-tiers').offerTiersGateLive()
+      ? (oneTimeChoiceAmountForEstimate(
+        { ...estimate, show_one_time_option: true, onetime_total: next.onetimeTotal },
+        { ...parsedData, result: afterResult },
+        null,
+      ) || 0)
+      : null;
+    const previewDigest = optOutPreviewDigest(next, impact, offerTierChoice);
     if (dryRun) {
       return { status: 200, body: ({
         success: true, dryRun: true, serviceKey, label, included, mode,
@@ -17854,6 +17931,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         // Better / Best tiles read them; the disclosures say the same thing
         // in sentences).
         perApplication: impact.afterPerApplication,
+        ...(offerTierChoice != null ? { oneTimeChoiceAmount: offerTierChoice } : {}),
         // Echo this back on the commit; the write refuses if the row, the
         // pricing config, or the membership verdict moved since this preview.
         previewBasis: previewDigest,
@@ -17983,12 +18061,51 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // Lock ORDER matches the accept path (estimate row first, customer row
       // later inside the converter) so an add racing an acceptance can never
       // deadlock (GH codex r10 P2); the CAS below still decides the write.
+      // An UNLINKED estimate's expected prospective owner is fenced here,
+      // before the estimate lock, exactly as a linked owner is inside
+      // lockEstimateOwnerForUpdate — customer-first writers (merges, contact
+      // edits) take the same fence, so the row order never crosses theirs.
+      const guardsProspectiveOwner = !memberEvidence && !(actor === 'staff' && mode === 'restore') && !estimate.customer_id;
+      if (guardsProspectiveOwner && expectedProspectiveOwnerId) {
+        await lockCustomerComms(trx, expectedProspectiveOwnerId);
+      }
       await lockEstimateOwnerForUpdate(trx, estimate);
-      if (!memberEvidence && !(actor === 'staff' && mode === 'restore') && estimate.customer_id) {
-        const customerRow = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
-        if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
-          memberActivatedMidWrite = true;
-          return;
+      if (!memberEvidence && !(actor === 'staff' && mode === 'restore')) {
+        // Linked: the row itself. Unlinked: the PROSPECTIVE owner, re-resolved
+        // inside the transaction (grouped sibling, then phone match) so a plan
+        // activated for that customer between the pre-check and this write is
+        // seen on its locked row. Same lock order (estimate first, customer
+        // later); a resolution error fails closed with the same 409.
+        let ownerIdToLock = estimate.customer_id || null;
+        if (!ownerIdToLock) {
+          try {
+            // Serialized with a sibling's acceptance by the SAME advisory
+            // lock that path takes (estimate row, then this lock, then the
+            // customer row — the same order here), so a grouped owner cannot
+            // appear between this lookup and the write.
+            if (estimate.estimate_group_id) {
+              await trx.raw(
+                'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                ['estimate-group-accept', String(estimate.estimate_group_id)],
+              );
+            }
+            ownerIdToLock = await resolveProspectiveOwnerId(estimate, trx);
+          } catch (_) { memberActivatedMidWrite = true; return; }
+          // Identity drift since the pre-read (an owner appeared, vanished or
+          // changed) aborts: the fence above is the expected owner's, and a
+          // newly observed owner's fence is never acquired after the estimate
+          // lock. The customer retries against the settled state.
+          if (String(ownerIdToLock || '') !== String(expectedProspectiveOwnerId || '')) {
+            memberActivatedMidWrite = true;
+            return;
+          }
+        }
+        if (ownerIdToLock) {
+          const customerRow = await trx('customers').where({ id: ownerIdToLock }).forUpdate().first();
+          if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
+            memberActivatedMidWrite = true;
+            return;
+          }
         }
       }
       updateCount = await trx('estimates')
@@ -29943,7 +30060,17 @@ async function composeEstimateDataPayload(estimate, {
     // for a linked active member, and the page must never advertise an add
     // the write refuses (pre-push codex P0). Computed once, ahead of the
     // payload literal; a lookup error withholds the stamp.
-    let addStampBlockedByMembership = false;
+    // An UNLINKED estimate whose prospective owner (grouped sibling, then
+    // phone match — the accept's own order) is an active member gets no
+    // service-removal control and no add offer: the rail's write refuses
+    // both (strict, fail-closed), and a control that can only fail is worse
+    // than none. A linked member is handled by the live check just below.
+    let unlinkedMemberHidesMixChange = false;
+    if ((serviceOptOutGateOn() || serviceAddGateOn()) && !adminDraftPreview && !estimate.customer_id) {
+      try { unlinkedMemberHidesMixChange = !!(await offerTierMemberBlock(estimate, db)); }
+      catch (_) { unlinkedMemberHidesMixChange = true; }
+    }
+    let addStampBlockedByMembership = unlinkedMemberHidesMixChange;
     if (serviceAddGateOn() && !adminDraftPreview && estimate.customer_id) {
       try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { addStampBlockedByMembership = true; }
@@ -30418,6 +30545,7 @@ async function composeEstimateDataPayload(estimate, {
         ...((() => {
           if (!serviceOptOutGateOn() || adminDraftPreview) return {};
           if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at) return {};
+          if (unlinkedMemberHidesMixChange) return {};
           const sections = Array.isArray(pricingBundle.services) ? pricingBundle.services : [];
           if (!sections.length) return {};
           const { serviceOptOutRemovableKeys } = require('../services/estimate-service-opt-out');
@@ -31156,3 +31284,5 @@ module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
 module.exports.buildOfferTiersBlock = buildOfferTiersBlock;
+module.exports.offerTierMemberBlock = offerTierMemberBlock;
+module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;

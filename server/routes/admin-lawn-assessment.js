@@ -26,7 +26,7 @@ const LawnIntel = require('../services/lawn-intelligence');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
-const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
+const { loadCustomerGrassContext, GRASS_SOURCE, photoAiWritesGrass } = require('../services/lawn-grass-context');
 const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
 const { visitProtocolQuery } = require('../services/lawn-program');
 
@@ -992,27 +992,25 @@ router.post('/assess', async (req, res, next) => {
             Object.assign(assessment, fields);
           }
           if (!mergedComposite.grass_type) return;
-          const prior = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
-          await trx('customer_turf_profiles')
-            .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
-            .onConflict('customer_id')
-            .merge({
-              grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
-              updated_at: new Date(),
-            });
-          // The AI read observed a lawn: when it actually set the grass
-          // (blank before), that re-establishes it for the weekly plan
-          // after a move (codex #3565 gh-r41) — but only when the photos
-          // describe the CURRENT home: the linked visit must not be stamped
-          // for another premise, and no move may have committed since the
-          // analysis began (stamp compared under the fence's prefs advisory
-          // lock — gh-r45). The grass VALUE still fills either way; only
-          // the ledger entry is withheld.
+          const prior = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type', 'grass_type_source');
+          // The AI read observed a lawn: it describes the CURRENT home only
+          // when the linked visit is not stamped for another premise and no
+          // move committed since the analysis began (stamp compared under the
+          // fence's prefs advisory lock — codex #3565 gh-r45).
           const stampNow = (await trx('property_preferences')
             .where({ customer_id: customerId }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
           const stampMs = (v) => (v ? new Date(v).getTime() : null);
           const grassFresh = premiseProven && stampMs(stampNow) === stampMs(preAnalysisMoveStamp);
-          if (!prior?.grass_type && grassFresh) {
+          // Blank fills; Mixed/Unknown gives way to a known grass from the
+          // current home unless staff set it (photoAiWritesGrass).
+          if (!photoAiWritesGrass({ prior, read: mergedComposite.grass_type, fresh: grassFresh })) return;
+          await trx('customer_turf_profiles')
+            .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type, grass_type_source: GRASS_SOURCE.PHOTO_AI })
+            .onConflict('customer_id')
+            .merge({ grass_type: mergedComposite.grass_type, grass_type_source: GRASS_SOURCE.PHOTO_AI, updated_at: new Date() });
+          // A grass this read actually set re-establishes it for the weekly
+          // plan after a move (codex #3565 gh-r41), from the current home only.
+          if (grassFresh) {
             const { GRASS_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
             await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);
           }

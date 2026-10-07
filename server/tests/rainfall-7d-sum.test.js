@@ -1,5 +1,15 @@
 const { sumPrecipInches, et0SumToInches, rainWindowEndingOn } = require('../services/service-report/application-conditions');
 
+// These tests pin the free endpoint (fixed past dates the paid plan's 92-day
+// reach would skip); a caller's own key must not change them, and must
+// survive the suite (Codex #6052 r4).
+const ORIGINAL_OPEN_METEO_KEY = process.env.OPEN_METEO_API_KEY;
+beforeEach(() => { delete process.env.OPEN_METEO_API_KEY; });
+afterAll(() => {
+  if (ORIGINAL_OPEN_METEO_KEY === undefined) delete process.env.OPEN_METEO_API_KEY;
+  else process.env.OPEN_METEO_API_KEY = ORIGINAL_OPEN_METEO_KEY;
+});
+
 describe('et0SumToInches (unit safety)', () => {
   test('inch unit (our request) passes through', () => {
     expect(et0SumToInches(1.57, 'inch')).toBe(1.57);

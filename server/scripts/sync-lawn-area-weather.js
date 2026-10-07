@@ -13,11 +13,10 @@
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-
-const OPEN_METEO = 'https://api.open-meteo.com/v1/forecast';
+const { openMeteoForecastUrl } = require('../services/open-meteo-endpoint');
 
 async function fetchAreaDailyPrecip(lat, lng, pastDays) {
-  const url = new URL(OPEN_METEO);
+  const url = openMeteoForecastUrl();
   url.searchParams.set('latitude', String(lat));
   url.searchParams.set('longitude', String(lng));
   url.searchParams.set('daily', 'precipitation_sum');

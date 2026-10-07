@@ -12,6 +12,23 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Arrival prompts and the auto-start card wait for the tech to see them, but
+// not past the end of the ET day they were raised: Start timer on yesterday's
+// visit is wrong, and "Timer auto-started" days later is noise. A stop notice
+// is not held: it is served only inside its 30-minute Undo window. Only the
+// two ACTIONABLE types (reminder, select) get the high sort bucket in the
+// order below;
+// the started card keeps its old sort position so a burst of them (two rows
+// per automatic stop) cannot crowd out an unseen prompt.
+const DAY_CAPPED_TYPES = ['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started'];
+const UNDO_WINDOW_MINUTES = 30;
+
+// 00:00 ET of today as an instant (the server runs UTC).
+function startOfTodayET(now = new Date()) {
+  const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+  return parseETDateTime(`${etDateString(now)}T00:00`);
+}
+
 // GET /api/tech/notifications?unreadOnly=true
 router.get('/', async (req, res, next) => {
   try {
@@ -26,6 +43,22 @@ router.get('/', async (req, res, next) => {
       .where(function stormFreshness() {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
+      })
+      // A stop notice is only useful inside its Undo window (undo-stop
+      // answers 410 after it), so the feed stops serving it then, seen or not.
+      .where(function stopFreshness() {
+        this.whereNot({ type: 'geofence_timer_stopped' })
+          .orWhereRaw(`created_at >= now() - interval '${UNDO_WINDOW_MINUTES} minutes'`);
+      })
+      // Arrival prompts and the started card stay until the tech has SEEN them (owner 2026-10-06,
+      // "keep notices"): the client starts its 5-minute clock only after the
+      // card has been on screen, and marks it read then. Until that, the row
+      // stays unread and this feed keeps serving it. The hard cap is the end
+      // of the tech's ET day, so an unseen prompt from earlier days cannot
+      // pile up into a wall of cards on the next load.
+      .where(function noticeDayCap() {
+        this.whereNotIn('type', DAY_CAPPED_TYPES)
+          .orWhere('created_at', '>=', startOfTodayET());
       });
     // GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off
     // stops the sweep — which is the only thing that dismisses a tracking
@@ -82,9 +115,14 @@ router.get('/', async (req, res, next) => {
     // bucket 0 with them meant an offline tech who collected 20 newer
     // geofence/timer prompts — two events across ten stops — still lost the
     // stage-2 card from the window (codex P2 round 17). The other buckets
-    // keep their relative order, one step down.
+    // keep their relative order, one step down. Actionable arrival prompts
+    // (reminder, select) are held until the tech has seen them (owner
+    // 2026-10-06, "keep notices"), so they get their OWN bucket 1 for the
+    // rest of their ET day: a burst of informational started/stopped cards
+    // (automatic mode writes two per stop) or visit cards cannot push an
+    // unseen prompt out of the window.
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type IN ('geofence_arrival_reminder', 'geofence_arrival_select') THEN 1 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 4 WHEN type = 'storm_watch_alert' THEN 3 WHEN created_at >= now() - interval '6 hours' THEN 2 ELSE 4 END")
       // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
       // truncates: a tech with more than 20 undismissed tracking cards would
       // otherwise lose an older critical arrival check behind 20 newer

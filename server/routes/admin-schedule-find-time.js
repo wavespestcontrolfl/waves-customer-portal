@@ -213,7 +213,7 @@ router.post('/', async (req, res) => {
       topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
-      summary, pickedDate, moveScope, compareTechs, serviceTypes,
+      summary, pickedDate, moveScope, compareTechs, serviceTypes, bestRows,
     } = req.body || {};
     // Edit appointment's choice on a shared stop: 'separate' = the save
     // splits this service off and moves only it.
@@ -424,13 +424,24 @@ router.post('/', async (req, res) => {
     // Calendar labels for the strip's day pills (closed day, technician off).
     const dayFacts = await loadSummaryDayFacts(plan, technicianId || null);
 
+    // A summary also answers the best-times rows (find-time-hints.js
+    // buildBestRows), with the picked verdict's drive numbers priced the
+    // same way as the chips.
+    const built = await buildHintSummary(plan, every, {
+      rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,
+      // Only New Appointment shows the rows; other strips skip the rain and
+      // road-time work (Codex #6045 r2).
+      bestRows: bestRows === true,
+    });
+    const pickedOut = built.picked;
+
     res.json({
       ...engineResult,
       slots,
-      ...(picked ? { picked } : {}),
+      ...(pickedOut ? { picked: pickedOut } : {}),
       ...(pickedByTech ? { pickedByTech } : {}),
       // undefined (dropped from the JSON) for everything but a summary plan.
-      summary: buildHintSummary(plan, every, { rejectionsByDate, startedAt, ...dayFacts }),
+      summary: built.summary,
       target,
       range: { dateFrom: plan.from, dateTo: plan.to },
     });
