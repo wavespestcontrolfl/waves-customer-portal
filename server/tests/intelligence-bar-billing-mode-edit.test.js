@@ -2,12 +2,12 @@
 // (owner D5 2026-10-06, GATE_IB_BILLING_MODE_EDIT). Proposal rules mirror the
 // customer page's PUT (billing-mode-rules.js), the card text, the commit-time
 // pin, and the gate.
-const mockState = { customer: null, version: 'v1', term: null, unpriced: [], visits: [], updates: [] };
+const mockState = { customer: null, version: 'v1', term: null, armed: null, unpriced: [], visits: [], updates: [] };
 
 jest.mock('../models/db', () => {
   const build = (table) => {
     const q = { cols: [] };
-    for (const m of ['where', 'whereIn', 'whereNull', 'whereNot', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'forUpdate']) q[m] = () => q;
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'forUpdate']) q[m] = () => q;
     q.select = (...cols) => { q.cols = cols; return q; };
     q.first = async (...cols) => {
       if (table === 'customers') {
@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
         return mockState.customer ? { ...mockState.customer, version: mockState.version } : null;
       }
       if (table === 'annual_prepay_terms') return mockState.term;
+      if (table === 'payments') return mockState.armed;
       return null;
     };
     q.then = (resolve, reject) => {
@@ -54,6 +55,7 @@ const BASE = {
   id: CUSTOMER_ID, first_name: 'Pat', last_name: 'Sample', deleted_at: null,
   billing_mode: 'per_visit', per_application_fee: null, monthly_rate: '0.00',
   waveguard_tier: null, waveguard_tier_source: null,
+  payer_id: null, autopay_enabled: true, autopay_paused_until: null,
 };
 const UNPRICED = { id: 's1', service_type: 'Pest Control', is_callback: false, scheduled_date: '2099-01-05' };
 
@@ -63,6 +65,7 @@ beforeEach(() => {
   mockState.customer = { ...BASE };
   mockState.version = 'v1';
   mockState.term = null;
+  mockState.armed = null;
   mockState.unpriced = [];
   mockState.visits = [];
   mockState.updates = [];
@@ -88,7 +91,7 @@ describe('proposal refusals mirror the customer page (billing-mode-rules.js)', (
     expect(r.error).toContain(BillingModeRules.PER_APPLICATION_NEEDS_FEE);
     const ok = await propose({ billing_mode: 'per_application', per_application_fee: 147 });
     expect(ok.error).toBeUndefined();
-    expect(ok.pin).toBe(BillingModeChange.billingPin(BASE));
+    expect(ok.pin).toBe(BillingModeChange.cardPin(BASE, []));
   });
 
   test('per visit and one time refuse while an upcoming visit has no price (route message)', async () => {
@@ -149,12 +152,43 @@ describe('cases refused because the bar would have to reproduce another flow', (
   });
 });
 
+describe('refusals added in Codex round 1 on #6118', () => {
+  test('a Bill-To payer on the customer or on an upcoming visit', async () => {
+    mockState.customer = { ...BASE, payer_id: 7 };
+    expect((await propose({ billing_mode: 'per_application', per_application_fee: 147 })).code).toBe('bill_to_payer');
+    mockState.customer = { ...BASE };
+    mockState.visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '90.00', payer_id: 9 }];
+    const r = await propose({ per_application_fee: 147 });
+    expect(r).toMatchObject({ code: 'bill_to_payer', error: expect.stringContaining('This customer has a Bill-To payer — change billing on the customer page') });
+  });
+
+  test('monthly membership with Auto Pay off or paused', async () => {
+    mockState.customer = { ...BASE, monthly_rate: '55.00', autopay_enabled: false };
+    const off = await propose({ billing_mode: 'monthly_membership' });
+    expect(off).toMatchObject({ code: 'autopay_off', error: expect.stringContaining('Turn on Auto Pay first; the monthly dues run skips customers without it') });
+    mockState.customer = { ...BASE, monthly_rate: '55.00', autopay_paused_until: '2099-12-31' };
+    expect((await propose({ billing_mode: 'monthly_membership' })).code).toBe('autopay_off');
+    mockState.customer = { ...BASE, monthly_rate: '55.00', autopay_paused_until: '2000-01-01' };
+    expect((await propose({ billing_mode: 'monthly_membership' })).error).toBeUndefined();
+  });
+
+  test('leaving monthly membership while a failed payment retry is armed', async () => {
+    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+    mockState.armed = { id: 'pay-1' };
+    const r = await propose({ billing_mode: 'per_application', per_application_fee: 147 });
+    expect(r).toMatchObject({ code: 'dues_retry_armed', error: expect.stringContaining('This customer has a dues retry scheduled — resolve it on the billing page first') });
+    // Not leaving the monthly lane: no retry check.
+    mockState.customer = { ...BASE, billing_mode: 'per_application', per_application_fee: '91.00' };
+    expect((await propose({ per_application_fee: 147 })).error).toBeUndefined();
+  });
+});
+
 describe('card text', () => {
   test('monthly member to per application at $147: type, fee, next visits, dues stop, no message', async () => {
     mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
     mockState.visits = [
-      { estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
-      { estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
+      { id: 'v1', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
+      { id: 'v2', estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Pest Control' },
       { estimated_price: '120.00', primary_line_price: null, prepaid_amount: null, is_callback: false, service_type: 'Lawn Care' },
       { estimated_price: null, primary_line_price: null, prepaid_amount: null, is_callback: true, service_type: 'Pest Control' },
       // $100 paid in cash against the new $147 fee: $47 still collects.
@@ -195,7 +229,7 @@ describe('commit (update_customer executor)', () => {
     customer_id: CUSTOMER_ID,
     updates: { billing_mode: 'per_application', per_application_fee: 147 },
     _ib_customer_version: 'v1',
-    _ib_billing_pin: BillingModeChange.billingPin(BASE),
+    _ib_billing_pin: BillingModeChange.cardPin(BASE, []),
   });
 
   test('writes the two columns only, sends no message, reports the changes', async () => {
@@ -216,7 +250,7 @@ describe('commit (update_customer executor)', () => {
     mockState.customer = { ...BASE, per_application_fee: '91.00' };
     const result = await executeTool('update_customer', card());
     expect(result).toMatchObject({ preview_changed: true });
-    expect(result.error).toMatch(/billing changed since the card/);
+    expect(result.error).toMatch(/billing or upcoming visits changed since the card/);
     expect(customerWrites()).toHaveLength(0);
   });
 
@@ -226,6 +260,57 @@ describe('commit (update_customer executor)', () => {
     expect(result).toMatchObject({ preview_changed: true });
     expect(result.error).toMatch(/annual prepay term covering today.*Nothing was updated/);
     expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('an upcoming visit changed since the card (projection pin): preview_changed, nothing written', async () => {
+    const pinned = card();
+    mockState.visits = [{ id: 'v1', status: 'confirmed', scheduled_date: '2099-01-05', estimated_price: '90.00' }];
+    const result = await executeTool('update_customer', pinned);
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(result.error).toMatch(/upcoming visits changed/);
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('Auto Pay turned off after a monthly-membership card: preview_changed', async () => {
+    mockState.customer = { ...BASE, monthly_rate: '55.00' };
+    const pin = BillingModeChange.cardPin(mockState.customer, []);
+    mockState.customer.autopay_enabled = false;
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: { billing_mode: 'monthly_membership' }, _ib_customer_version: 'v1', _ib_billing_pin: pin,
+    });
+    expect(result.preview_changed).toBe(true);
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('a retry armed after the card refuses under the lock', async () => {
+    mockState.customer = { ...BASE, billing_mode: 'monthly_membership', monthly_rate: '55.00', waveguard_tier: 'Gold', waveguard_tier_source: 'manual' };
+    const pin = BillingModeChange.cardPin(mockState.customer, []);
+    mockState.armed = { id: 'pay-1' };
+    const result = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: { billing_mode: 'per_application', per_application_fee: 147 }, _ib_customer_version: 'v1', _ib_billing_pin: pin,
+    });
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(result.error).toMatch(/dues retry scheduled.*Nothing was updated/);
+    expect(customerWrites()).toHaveLength(0);
+  });
+
+  test('a mode-only card and a fee-only card each commit', async () => {
+    mockState.customer = { ...BASE, per_application_fee: '91.00' };
+    const pin = BillingModeChange.cardPin(mockState.customer, []);
+    const modeOnly = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: { billing_mode: 'per_application' }, _ib_customer_version: 'v1', _ib_billing_pin: pin,
+    });
+    expect(modeOnly.error).toBeUndefined();
+    expect(modeOnly.changes).toEqual({ billing_mode: { from: 'per_visit', to: 'per_application' } });
+    const pin2 = BillingModeChange.cardPin(mockState.customer, []);
+    const feeOnly = await executeTool('update_customer', {
+      customer_id: CUSTOMER_ID, updates: { per_application_fee: 147 }, _ib_customer_version: 'v1', _ib_billing_pin: pin2,
+    });
+    expect(feeOnly.error).toBeUndefined();
+    expect(feeOnly.changes).toEqual({ per_application_fee: { from: '91.00', to: 147 } });
+    expect(customerWrites().map(({ table: _t, updated_at: _u, ...w }) => w)).toEqual([
+      { billing_mode: 'per_application' }, { per_application_fee: 147 },
+    ]);
   });
 
   test('a customer version change refuses (the existing update_customer pin)', async () => {

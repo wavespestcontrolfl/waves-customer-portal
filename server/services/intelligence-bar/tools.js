@@ -1341,7 +1341,9 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   if (billingEdit.error) return billingEdit;
   const clean = { ...sanitizeUpdates(updates), ...billingEdit.fields };
   Object.assign(clean, normalizeContactRecord(clean));
-  if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
+  // updated_at alone (sanitizeUpdates always stamps it) is no edit; a card
+  // with one recognized field (e.g. billing_mode alone) is one.
+  if (!Object.keys(clean).some((k) => k !== 'updated_at')) return { error: 'No valid fields to update' };
 
   const before = await db('customers').where('id', customerId).first();
   if (!before) return { error: 'Customer not found' };

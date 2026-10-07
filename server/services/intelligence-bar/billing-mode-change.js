@@ -20,13 +20,20 @@
  *         today (the lane follows the paid annual invoice and its term);
  *       * clearing the billing type to "Not set";
  *       * a change that turns a customer into a member, where the customer
- *         page sends the membership welcome email (the bar sends no message).
+ *         page sends the membership welcome email (the bar sends no message);
+ *       * any edit for a customer with a Bill-To payer (on the customer or on
+ *         an upcoming visit);
+ *       * a move to monthly membership while Auto Pay is off or paused (the
+ *         dues run skips them);
+ *       * leaving monthly membership while a failed payment's retry is armed
+ *         (the retry ladder stops for a non-monthly lane).
  *   - The card shows the billing type and fee before -> after in words, what
  *     the next visits are charged (billing-lane.js completion rules), and that
  *     no customer message is sent.
- *   - The billing fields read are pinned with the customer version; at commit,
- *     under the customer row lock, a changed pin or a rule that no longer
- *     holds refuses as preview_changed.
+ *   - Pinned with the customer version: the billing fields, payer and Auto Pay
+ *     state, and each upcoming visit's billing fields (the projection). At
+ *     commit, under the customer row lock, a changed pin or a rule that no
+ *     longer holds refuses as preview_changed.
  *
  * The write is the two columns only. The customer page's save also writes a
  * sensitive-field audit row for billing_mode and may send the membership
@@ -111,7 +118,8 @@ function parseBillingEdit(updates) {
   return { fields };
 }
 
-// What the card was built from, compared under the row lock at commit.
+// What the card was built from, compared under the row lock at commit: the
+// billing fields, the Bill-To payer and the Auto Pay state the rules read.
 function billingPin(row) {
   return JSON.stringify([
     row?.billing_mode || null,
@@ -119,7 +127,40 @@ function billingPin(row) {
     Number(row?.monthly_rate || 0).toFixed(2),
     row?.waveguard_tier || null,
     row?.waveguard_tier_source || null,
+    row?.payer_id == null ? null : String(row.payer_id),
+    row?.autopay_enabled === false ? false : (row?.autopay_enabled ?? null),
+    row?.autopay_paused_until == null ? null : String(row.autopay_paused_until instanceof Date
+      ? row.autopay_paused_until.toISOString() : row.autopay_paused_until).slice(0, 10),
   ]);
+}
+
+// The upcoming visits the card's projection and the payer check read, in a
+// stable order. Their billing fields are pinned (visitsPin) with the card.
+const VISIT_COLUMNS = ['id', 'status', 'scheduled_date', 'estimated_price', 'primary_line_price',
+  'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type', 'payer_id'];
+
+async function upcomingVisits(dbh, customerId) {
+  const { etDateString } = require('../../utils/datetime-et');
+  return dbh('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['pending', 'confirmed'])
+    .where('scheduled_date', '>=', etDateString())
+    .select(VISIT_COLUMNS)
+    .orderBy('scheduled_date', 'asc')
+    .orderBy('id', 'asc')
+    .limit(200);
+}
+
+function visitsPin(visits) {
+  return JSON.stringify((visits || []).map((v) => VISIT_COLUMNS.map((c) => {
+    const value = v[c];
+    if (value == null) return null;
+    return value instanceof Date ? value.toISOString().slice(0, 10) : String(value);
+  })));
+}
+
+function cardPin(row, visits) {
+  return `${billingPin(row)}|${visitsPin(visits)}`;
 }
 
 // The customer page's save sends the membership welcome email when an edit
@@ -133,33 +174,79 @@ function startsMembership(before, after) {
   return !member(before) && member(after);
 }
 
+// Refusals where the bar would have to reproduce what another flow does.
+// Each check gets { dbh, customerId, row, after, fields, visits, laneBefore,
+// laneAfter } and returns a refusal or null; the first refusal wins.
+const SIDE_FLOW_CHECKS = [
+  // Payer-billed visits go to the Bill-To payer's AP invoice
+  // (payer.js resolveForInvoice reads customers.payer_id and each visit's own
+  // scheduled_services.payer_id): a payer on the customer or on any upcoming
+  // visit keeps billing changes on the customer page.
+  ({ row, visits }) => (row.payer_id || visits.some((v) => v.payer_id)
+    ? refuse('This customer has a Bill-To payer — change billing on the customer page. Nothing was proposed.', 'bill_to_payer') : null),
+  // The monthly dues run skips a customer with Auto Pay off or paused
+  // (billing-cron.js GUARD 1 / GUARD 2, autopay-eligibility.js isPaused).
+  ({ row, laneAfter, laneBefore }) => {
+    if (laneAfter !== 'monthly_membership' || laneBefore === 'monthly_membership') return null;
+    const { isPaused } = require('../autopay-eligibility');
+    return row.autopay_enabled === false || isPaused(row)
+      ? refuse('Turn on Auto Pay first; the monthly dues run skips customers without it. Nothing was proposed.', 'autopay_off') : null;
+  },
+  // Leaving the monthly lane stops the retry ladder of a failed dues charge
+  // (billing-cron.js LANE_NOT_MONTHLY). An armed retry (retry-collectibility.js
+  // armedRetryQuery, the sweep's own selection) is resolved first.
+  async ({ dbh, customerId, laneBefore, laneAfter }) => {
+    if (laneBefore !== 'monthly_membership' || laneAfter === 'monthly_membership') return null;
+    const { armedRetryQuery } = require('../retry-collectibility');
+    const armed = await armedRetryQuery(dbh, { customerIds: [customerId] }).first('id');
+    return armed ? refuse('This customer has a dues retry scheduled — resolve it on the billing page first. Nothing was proposed.', 'dues_retry_armed') : null;
+  },
+  // The customer page's save sends the membership welcome email when an edit
+  // turns a non-member into a member (admin-customers.js PUT, the
+  // !beforeHasMembership && afterHasMembership branch). The bar sends no message.
+  ({ row, after }) => (startsMembership(row, after)
+    ? refuse('This change would make the customer a member. The customer page sends the membership welcome email for that, so make this change there. Nothing was proposed.', 'starts_membership') : null),
+];
+
+function unchangedEdit(row, fields) {
+  return BILLING_EDIT_FIELDS.every((k) => !(k in fields)
+    || (k === 'per_application_fee' ? Number(row[k] || 0).toFixed(2) === Number(fields[k]).toFixed(2) : row[k] === fields[k]));
+}
+
+// The customer page's own billing-type rules (billing-mode-rules.js).
+async function customerPageRefusal(dbh, customerId, row, fields) {
+  if (fields.billing_mode === undefined) return null;
+  const message = await BillingModeRules.billingModeRefusal(fields.billing_mode, {
+    requestedMonthlyRate: undefined,
+    requestedPerApplicationFee: fields.per_application_fee,
+    loadRates: async () => row,
+    loadLiveAnnualTerm: () => BillingModeRules.liveAnnualPrepayTerm(dbh, customerId),
+    loadUnpricedFutureVisits: () => BillingModeRules.unpricedFutureBillableVisits(dbh, customerId),
+  });
+  return message ? refuse(`${message}${message.endsWith('.') ? '' : '.'} Nothing was proposed.`, 'billing_mode_rule') : null;
+}
+
 /**
  * The refusal for applying `fields` to the customer `row`, or null. Runs at
  * proposal and again at commit under the row lock (dbh = that transaction).
+ * `visits` is upcomingVisits() read on the same handle.
  */
-async function billingEditRefusal(dbh, customerId, row, fields) {
-  const after = { ...row, ...fields };
+async function billingEditRefusal(dbh, customerId, row, fields, visits) {
   if (row.billing_mode === 'annual_prepay') return refuse('This customer is on annual prepay; that lane follows the annual invoice and its term, so it is not changed from the bar. Nothing was proposed.', 'annual_prepay_lane');
-  const unchanged = BILLING_EDIT_FIELDS.every((k) => !(k in fields)
-    || (k === 'per_application_fee' ? Number(row[k] || 0).toFixed(2) === Number(fields[k]).toFixed(2) : row[k] === fields[k]));
-  if (unchanged) return refuse('The billing type and per-application fee are already set that way. Nothing was proposed.', 'no_change');
+  if (unchangedEdit(row, fields)) return refuse('The billing type and per-application fee are already set that way. Nothing was proposed.', 'no_change');
   if (await BillingModeRules.liveAnnualPrepayTerm(dbh, customerId)) {
     return refuse('This customer has an annual prepay term covering today, so the billing type is not changed from the bar. Nothing was proposed.', 'live_annual_prepay_term');
   }
-  // The customer page's own billing-type rules (billing-mode-rules.js).
-  const mode = fields.billing_mode;
-  if (mode !== undefined) {
-    const message = await BillingModeRules.billingModeRefusal(mode, {
-      requestedMonthlyRate: undefined,
-      requestedPerApplicationFee: fields.per_application_fee,
-      loadRates: async () => row,
-      loadLiveAnnualTerm: () => BillingModeRules.liveAnnualPrepayTerm(dbh, customerId),
-      loadUnpricedFutureVisits: () => BillingModeRules.unpricedFutureBillableVisits(dbh, customerId),
-    });
-    if (message) return refuse(`${message}${message.endsWith('.') ? '' : '.'} Nothing was proposed.`, 'billing_mode_rule');
-  }
-  if (startsMembership(row, after)) {
-    return refuse('This change would make the customer a member. The customer page sends the membership welcome email for that, so make this change there. Nothing was proposed.', 'starts_membership');
+  const pageRefusal = await customerPageRefusal(dbh, customerId, row, fields);
+  if (pageRefusal) return pageRefusal;
+  const after = { ...row, ...fields };
+  const ctx = {
+    dbh, customerId, row, after, fields, visits,
+    laneBefore: resolveBillingLane(row).mode, laneAfter: resolveBillingLane(after).mode,
+  };
+  for (const check of SIDE_FLOW_CHECKS) {
+    const refusal = await check(ctx);
+    if (refusal) return refusal;
   }
   return null;
 }
@@ -169,14 +256,7 @@ async function billingEditRefusal(dbh, customerId, row, fields) {
 // per_application lane with the card's fee): a visit's own price wins, else
 // the fee; a prepayment is netted and covers the visit only when it covers the
 // whole amount; callbacks, free visit types and $0 bill nothing.
-async function perApplicationVisitCounts(dbh, customerId, fee) {
-  const { etDateString } = require('../../utils/datetime-et');
-  const rows = await dbh('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereIn('status', ['pending', 'confirmed'])
-    .where('scheduled_date', '>=', etDateString())
-    .select('estimated_price', 'primary_line_price', 'prepaid_amount', 'prepaid_method', 'is_callback', 'service_type')
-    .limit(200);
+function perApplicationVisitCounts(rows, fee) {
   const counts = { fee: 0, own: 0, partly: 0, prepaid: 0, none: 0 };
   for (const r of rows) {
     const p = predictCompletionBilling({
@@ -197,7 +277,7 @@ function plural(n, one, many) {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-async function nextVisitLines(dbh, customerId, row, fields) {
+function nextVisitLines(row, fields, visits) {
   const after = { ...row, ...fields };
   const laneBefore = resolveBillingLane(row).mode;
   const laneAfter = resolveBillingLane(after).mode;
@@ -208,7 +288,7 @@ async function nextVisitLines(dbh, customerId, row, fields) {
   const lines = [];
   if (laneAfter === 'per_application') {
     lines.push(`Each completed visit is charged its own scheduled price, or ${money(after.per_application_fee)} when it has none — auto-charged to the saved card when Auto Pay is on, invoiced otherwise. Callbacks and free visit types bill nothing. No monthly dues charge.`);
-    const c = await perApplicationVisitCounts(dbh, customerId, after.per_application_fee);
+    const c = perApplicationVisitCounts(visits, after.per_application_fee);
     const parts = [
       c.fee && `${plural(c.fee, 'visit', 'visits')} at ${money(after.per_application_fee)}`,
       c.own && `${plural(c.own, 'visit', 'visits')} at its own price`,
@@ -238,18 +318,19 @@ async function billingEditProposal(customerId, updates, dbh = db) {
   if (parsed.error) return parsed;
   const row = await dbh('customers').where('id', customerId).whereNull('deleted_at')
     .first('billing_mode', 'per_application_fee', 'monthly_rate', 'waveguard_tier', 'waveguard_tier_source',
-      dbh.raw('updated_at::text AS version'));
+      'payer_id', 'autopay_enabled', 'autopay_paused_until', dbh.raw('updated_at::text AS version'));
   if (!row) return refuse('No customer matches that id — nothing was proposed.', 'customer_not_found');
-  const refusal = await billingEditRefusal(dbh, customerId, row, parsed.fields);
+  const visits = await upcomingVisits(dbh, customerId);
+  const refusal = await billingEditRefusal(dbh, customerId, row, parsed.fields, visits);
   if (refusal) return refusal;
   const after = { ...row, ...parsed.fields };
   return {
-    pin: billingPin(row),
+    pin: cardPin(row, visits),
     version: row.version,
     display: {
       ...('billing_mode' in parsed.fields ? { billing_type: { before: laneWords(row), after: laneWords(after) } } : {}),
       ...('per_application_fee' in parsed.fields ? { fee: { before: feeWords(row.per_application_fee), after: money(after.per_application_fee) } } : {}),
-      next_visits: await nextVisitLines(dbh, customerId, row, parsed.fields),
+      next_visits: nextVisitLines(row, parsed.fields, visits),
     },
   };
 }
@@ -274,10 +355,13 @@ function executorBillingEdit(updates, pin) {
 async function assertBillingEditUnderLock(trx, customerId, lockedBefore, fields, pin) {
   if (!Object.keys(fields).length) return;
   const changed = (message) => Object.assign(new Error(message), { previewChanged: true });
-  if (billingPin(lockedBefore) !== pin) {
-    throw changed("This customer's billing changed since the card was shown — nothing was updated. Ask again for a fresh card.");
+  // The customer's billing fields, payer and Auto Pay state, plus every
+  // upcoming visit's billing fields the card's projection was built from.
+  const visits = await upcomingVisits(trx, customerId);
+  if (cardPin(lockedBefore, visits) !== pin) {
+    throw changed("This customer's billing or upcoming visits changed since the card was shown — nothing was updated. Ask again for a fresh card.");
   }
-  const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields);
+  const refusal = await billingEditRefusal(trx, customerId, lockedBefore, fields, visits);
   if (refusal) throw changed(refusal.error.replace('Nothing was proposed.', 'Nothing was updated.'));
 }
 
@@ -288,6 +372,8 @@ module.exports = {
   hasBillingEdit,
   parseBillingEdit,
   billingPin,
+  visitsPin,
+  cardPin,
   billingEditRefusal,
   billingEditProposal,
   executorBillingEdit,
