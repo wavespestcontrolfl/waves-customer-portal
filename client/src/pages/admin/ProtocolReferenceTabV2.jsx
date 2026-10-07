@@ -874,7 +874,7 @@ export function ProtocolMixCard({
       {plan.bermudaMixingOrder?.length > 0 && (
         <Card className="overflow-hidden">
           <div className="px-4 py-3 border-b border-hairline border-zinc-200 bg-zinc-50">
-            <div className="text-13 font-medium text-zinc-900">Bermuda backpack mix</div>
+            <div className="text-14 font-medium text-zinc-900">Bermuda backpack mix</div>
           </div>
           <div className="p-4 space-y-2">
             {plan.bermudaMixingOrder.map((step) => (

@@ -14,6 +14,9 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
   const recognitionIngredient = require('../models/migrations/20261006220400_bermuda_recognition_active_ingredient');
   const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
   const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const mowHold = require('../models/migrations/20261006220800_bermuda_mow_hold_days');
+  const { _private: { buildMowHold } } = require('../services/service-report/lawn-watering-instruction');
+  const { approvedReportProductFacts } = require('../services/service-report/report-data');
   const fusiladeRate = require('../models/migrations/20261006220700_bermuda_fusilade_default_rate_null');
   const aliasBackfill = require('../models/migrations/20261006220500_watering_rule_bermuda_removal_alias_backfill');
   const zoysiaNote = require('../models/migrations/20261006220600_bermuda_zoysia_2ee_note');
@@ -296,6 +299,50 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
         await fusiladeRate.down(trx);
         expect(Number(await rate())).toBe(0.3);
       });
+    });
+  });
+
+  describe('20261006220800 mow hold days', () => {
+    const NAMES = ['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide'];
+    const SEEDED = 'migration:20261006220800_bermuda_mow_hold_days:seeded';
+    const hold = async (trx, name) => (await trx('products_catalog').where({ name }).first('mow_hold_days')).mow_hold_days;
+
+    test('on a migrations-only database both herbicides carry a 2-day mow hold and the surfactant none', async () => {
+      for (const name of NAMES) expect(await hold(db, name)).toBe(2);
+      expect(await hold(db, 'LESCO 90/10 Nonionic Surfactant')).toBeNull();
+    });
+
+    test('fills only an empty hold on the products the staged rows link (alias-linked included); never an admin value; audited; idempotent; down is a no-op', async () => {
+      await rolledBack(async (trx) => {
+        const events = () => trx('audit_log').where({ action: SEEDED });
+        const original = (await events()).length;
+        // An alias-spelled Recognition linked from the staged rows, and an admin-set hold on Fusilade II.
+        const [aliased] = await trx('products_catalog').insert({ name: 'Recog 20.4 WG (office)', category: 'herbicide', active: true, rate_unit: 'oz' }).returning('*');
+        await trx('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").where({ product_name: NAMES[0] }).update({ product_id: aliased.id });
+        await trx('products_catalog').where({ name: NAMES[0] }).update({ mow_hold_days: null });
+        await trx('products_catalog').where({ name: NAMES[1] }).update({ mow_hold_days: 5 });
+        await mowHold.up(trx);
+        expect((await trx('products_catalog').where({ id: aliased.id }).first('mow_hold_days')).mow_hold_days).toBe(2);
+        expect(await hold(trx, NAMES[1])).toBe(5);
+        expect((await events()).length).toBe(original + 1);
+        await mowHold.up(trx);
+        expect((await events()).length).toBe(original + 1);
+        await mowHold.down(trx);
+        expect((await trx('products_catalog').where({ id: aliased.id }).first('mow_hold_days')).mow_hold_days).toBe(2);
+      });
+    });
+
+    test('the customer report states it: the frozen product fact is 2 days and the aftercare line says 2 days after treatment', async () => {
+      const row = await db('products_catalog').where({ name: NAMES[0] }).first();
+      // The report facts builder reads the catalog column: once the product is approved for service reports it freezes mowHoldDays.
+      const facts = approvedReportProductFacts({ ...row, approved_for_service_report: true });
+      expect(facts).toBeTruthy();
+      expect(facts.mowHoldDays).toBe(2);
+      const completedAt = '2026-06-16T14:00:00.000Z';
+      const hold2 = buildMowHold([{ mowHoldDays: 2 }, { mowHoldDays: null }], completedAt);
+      expect(hold2).toMatchObject({ days: 2 });
+      expect(hold2.line).toMatch(/Mowing: hold off until .*, 2 days after today's treatment\./);
+      expect(new Date(hold2.untilAt).getTime() - new Date(completedAt).getTime()).toBeGreaterThanOrEqual(2 * 24 * 3600 * 1000);
     });
   });
 
