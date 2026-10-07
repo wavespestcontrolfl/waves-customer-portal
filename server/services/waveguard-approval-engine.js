@@ -83,9 +83,11 @@ async function latestComparableGroupApplication(knex, customerId, product, group
 // The repeat-group rule (never the same chemical group twice in a row) has two named exemptions
 // (owner 2026-10-06); every other same-group repeat behaves as before:
 //   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
-//   take_all_artavia_pair: the labeled take-all pair is Artavia twice, about 28 days apart (up to
-//     TAKE_ALL_PAIR_MAX_DAYS between visits), and ONLY when both applications recorded a take-all
+//   take_all_artavia_pair: the labeled take-all pair is Artavia twice, 28 days apart (label spacing:
+//     TAKE_ALL_PAIR_MIN_DAYS to TAKE_ALL_PAIR_MAX_DAYS between visits; an earlier repeat is a normal
+//     repeat), and ONLY when both applications recorded a take-all
 //     target. No target evidence, no exemption.
+const TAKE_ALL_PAIR_MIN_DAYS = 28;
 const TAKE_ALL_PAIR_MAX_DAYS = 45;
 const TAKE_ALL_TARGET = /\btake all\b/;
 
@@ -109,7 +111,7 @@ function productIsPreEmergent(product, plan) {
 function isTakeAllPair(product, last, input, serviceDate) {
   const apart = dayNumber(serviceDate) - dayNumber(last.service_date);
   return /\bartavia\b/.test(normalizeText(product.name)) && normalizeText(last.product_name) === normalizeText(product.name)
-    && apart > 0 && apart <= TAKE_ALL_PAIR_MAX_DAYS
+    && apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
     && hasTakeAllTarget(input.targets) && hasTakeAllTarget(last.targets);
 }
 
@@ -140,6 +142,48 @@ function serviceSuggestsDethatching(service, submittedProducts) {
     ...(submittedProducts || []).map((p) => p.name),
   ].map(normalizeText).join(' ');
   return /\bdethatch|\bdethatching|\bthatch removal\b/.test(text);
+}
+
+// The groups the last application carried, for the group type compared.
+function lastApplicationGroups(last, groupType) {
+  if (groupType === 'moa') return [last?.catalog_group, last?.moa_group];
+  if (groupType === 'hrac') return [last?.catalog_group, last?.catalog_group_secondary];
+  return [last?.catalog_group];
+}
+
+// One repeat-group finding: the code, the message, and what the rotation check read (the group, the
+// last application and the targets; empty = none recorded).
+function repeatGroupFinding({ product, input, groupType, groupValue, last }) {
+  const lastDate = String(last.service_date).slice(0, 10);
+  const fungicide = groupType === 'frac' && normalizeText(product.category).includes('fungicide');
+  return {
+    code: fungicide ? 'fungicide_frac_rotation_approval' : `repeat_${groupType}_group`,
+    severity: 'block',
+    productId: product.id,
+    productName: product.name,
+    message: `${product.name} repeats ${groupType.toUpperCase()} ${groupValue}; last matching application was ${last.product_name || 'unknown product'} on ${lastDate}.`,
+    evidence: {
+      groupType,
+      groupValue: String(groupValue),
+      lastProduct: last.product_name || null,
+      lastDate,
+      targets: targetList(input.targets),
+      lastTargets: targetList(last.targets),
+    },
+  };
+}
+
+// The repeat-group (rotation) review of one applied product: for each of its groups, the latest
+// comparable application, the named exemptions, and the finding.
+async function repeatGroupFindings(knex, { customerId, product, input, plan, serviceDate, strict }) {
+  const findings = [];
+  for (const [groupType, groupValue] of productGroups(product)) {
+    const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict });
+    if (!last || !lastApplicationGroups(last, groupType).some((lastGroup) => String(lastGroup || '') === String(groupValue))) continue;
+    if (rotationExemption({ product, plan, groupType, groupValue, last, input, serviceDate })) continue;
+    findings.push(repeatGroupFinding({ product, input, groupType, groupValue, last }));
+  }
+  return findings;
 }
 
 async function evaluateWaveGuardManagerApprovals(knex, {
@@ -222,36 +266,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
       });
     }
 
-    for (const [groupType, groupValue] of productGroups(product)) {
-      const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict });
-      const lastGroups = groupType === 'moa'
-        ? [last?.catalog_group, last?.moa_group]
-        : groupType === 'hrac'
-          ? [last?.catalog_group, last?.catalog_group_secondary]
-          : [last?.catalog_group];
-      if (!last || !lastGroups.some((lastGroup) => String(lastGroup || '') === String(groupValue))) continue;
-      if (rotationExemption({ product, plan, groupType, groupValue, last, input, serviceDate })) continue;
-      const code = groupType === 'frac' && normalizeText(product.category).includes('fungicide')
-        ? 'fungicide_frac_rotation_approval'
-        : `repeat_${groupType}_group`;
-      blocks.push({
-        code,
-        severity: 'block',
-        productId: product.id,
-        productName: product.name,
-        message: `${product.name} repeats ${groupType.toUpperCase()} ${groupValue}; last matching application was ${last.product_name || 'unknown product'} on ${String(last.service_date).slice(0, 10)}.`,
-        // What the rotation check read, kept with the finding: the group, the last application, and the
-        // targets (empty = none recorded).
-        evidence: {
-          groupType,
-          groupValue: String(groupValue),
-          lastProduct: last.product_name || null,
-          lastDate: String(last.service_date).slice(0, 10),
-          targets: targetList(input.targets),
-          lastTargets: targetList(last.targets),
-        },
-      });
-    }
+    blocks.push(...await repeatGroupFindings(knex, { customerId, product, input, plan, serviceDate, strict }));
   }
 
   const turfProfile = await savepointRead(knex, (k) => k('customer_turf_profiles')

@@ -268,10 +268,15 @@ describe('waveguard approval engine', () => {
       expect(repeats(await run([post], [last], { productId: 'base' })).map((b) => b.code)).toEqual(['repeat_hrac_group']);
     });
 
-    test('the second Artavia is exempt only when both applications carry take-all evidence, inside the window', async () => {
+    test('the second Artavia is exempt only when both applications carry take-all evidence, 28 to 45 days apart', async () => {
       const lastArtavia = (date, targets) => prior({ service_date: date, product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11', targets });
       const pair = (date, last, now) => run([ARTAVIA], [lastArtavia(date, last)], { productId: 'base', serviceDate: '2026-06-10', targets: now });
       expect(repeats(await pair('2026-05-13', ['Take-all root rot'], ['take-all']))).toEqual([]);
+      // Label spacing: 28 to 45 days between the two applications; 27 or 46 days is a normal repeat.
+      for (const [date, exempt] of [['2026-05-14', false], ['2026-05-13', true], ['2026-04-26', true], ['2026-04-25', false]]) {
+        const found = repeats(await pair(date, ['Take-all'], ['Take-all']));
+        expect({ date, codes: found.map((b) => b.code) }).toEqual({ date, codes: exempt ? [] : ['fungicide_frac_rotation_approval'] });
+      }
       // No evidence on either side, or on one side only: no exemption (the rule as before).
       for (const [last, now] of [[undefined, undefined], [['Take-all'], undefined], [undefined, ['Take-all']], [['Large patch'], ['Take-all']], [['Take-all'], ['Gray leaf spot']]]) {
         expect(repeats(await pair('2026-05-13', last, now)).map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
