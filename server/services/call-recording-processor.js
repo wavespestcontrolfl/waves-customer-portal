@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotTextNumber } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -958,7 +958,8 @@ const CONFIRM_REASON_TEXT = {
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
-  callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
+  callback_number_needed: "this incoming number can't be texted (the caller said it is not theirs, or it can't take texts) and no number for texts was given — get one before texting confirmations or reminders",
+  text_number_differs: "the caller's line can't take texts and they gave another number for texts — the account phone is a different number; confirm it, then swap the account phone (the line they called from stays for calls)",
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -12367,6 +12368,19 @@ const CallRecordingProcessor = {
     // audit (ai_extraction_enriched, triage payloads) but must not drive
     // customer/lead side effects.
     const v2CanonicalExtraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+    // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-07, option A): the caller's
+    // line cannot take texts and they gave a separate number for texts. That number is
+    // the contact number for this call's customer and texts; the line they called from
+    // stays the call number (customers.secondary_phone). This is NOT caller_id_disclaimed:
+    // the caller owns the line. Own lines, sentinels and near-ANI numbers never count.
+    // callTextNumber picks this call's text recipient in any mode, so a shadow-mode pass
+    // never texts the ANI either; callTextNumberWrites drives the customer and card
+    // writes and only exists under V2 primary, like every other V2 adoption here.
+    const callAniCannotText = v2CanonicalExtraction?.caller?.ani_cannot_text === true;
+    const callTextNumber = callAniCannotText
+      ? firstExternalPhone(aniCannotTextNumber(v2CanonicalExtraction.caller, { ani: contactPhone }))
+      : null;
+    const callTextNumberWrites = callExtractionV2PrimaryEnabled() ? callTextNumber : null;
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
@@ -12421,7 +12435,7 @@ const CallRecordingProcessor = {
     if (!(await stillOwnsClaim())) return abandonToPeer('the customer write');
     // Step 3: Create or update customer
     let customerId = call.customer_id;
-    const phone = resolveCallContactPhone(call, extracted.phone);
+    const phone = callTextNumberWrites || resolveCallContactPhone(call, extracted.phone);
     let newsletterResult = null;
     let newsletterCandidate = null;
     let createdCustomerFromCall = false;
@@ -12592,6 +12606,10 @@ const CallRecordingProcessor = {
               first_name: extracted.first_name || '',
               last_name: extracted.last_name || null,
               phone,
+              // The line they called from stays on the account for calls (and for
+              // recognizing them next time); texts use `phone`. null otherwise.
+              secondary_phone: callTextNumberWrites && !samePhone(contactPhone, callTextNumberWrites)
+                ? firstExternalPhone(contactPhone) : null,
               email: extracted.email || null,
               address_line1: addrLine || null,
               // The extraction carries the unit separately — dropping it made
@@ -12837,6 +12855,39 @@ const CallRecordingProcessor = {
           .merge({ payload: secondaryTriageItem.payload, updated_at: new Date() });
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] secondary-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    }
+
+    // text_number_differs (owner ruling 2026-10-07, option A): the caller's line cannot
+    // take texts and they gave another number for texts, but the call linked to an
+    // EXISTING customer whose account phone is a different number. customers.phone never
+    // changes on its own — an advisory card carries both numbers and asks the office to
+    // swap. (A new customer from this call already got the text number as its phone.)
+    // The confirmation for THIS call still goes to the text number, never the ANI (see
+    // smsRecipient). Fail-soft: a card failure never blocks the pass.
+    if (callTextNumberWrites && customerId && !createdCustomerFromCall) {
+      try {
+        const linkedForText = await db('customers').where({ id: customerId }).first('phone');
+        if (linkedForText && !samePhone(linkedForText.phone, callTextNumberWrites)) {
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'text_number_differs',
+              extraction: v2CanonicalExtraction || undefined,
+              severity: 'advisory',
+              extraPayload: {
+                text_phone: callTextNumberWrites,
+                ani_phone: firstExternalPhone(contactPhone),
+                customer_phone: linkedForText.phone || null,
+                customer_phone_is_ani: samePhone(linkedForText.phone, contactPhone),
+              },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+          if (!bridgeNeedsConfirmation.includes('text_number_differs')) bridgeNeedsConfirmation.push('text_number_differs');
+        }
+      } catch (triageErr) {
+        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
       }
     }
 
@@ -13529,7 +13580,11 @@ const CallRecordingProcessor = {
         const linked = await db('customers').where({ id: customerId })
           .first(['first_name', 'last_name', ...identityPhoneCols]);
         const phoneOnFile = !!linked && identityPhoneCols.some((col) => samePhone(verifiableAni, linked[col]));
-        if (linked && !phoneOnFile) {
+        // A relay/landline ANI the caller said cannot take texts is no number to ask the
+        // office to save to the account: the phone backfill stays suppressed, and the
+        // text-number card above carries the ask (owner ruling 2026-10-07).
+        if (linked && !phoneOnFile && callTextNumberWrites) callerPhoneUnverified = true;
+        if (linked && !phoneOnFile && !callTextNumberWrites) {
           callerPhoneUnverified = true;
           await db('triage_items')
             .insert(buildTriageItem({
@@ -17477,9 +17532,13 @@ const CallRecordingProcessor = {
             const smsLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
             const smsTargetIsInboundAni = smsLast10(smsPhone).length === 10
               && smsLast10(smsPhone) === smsLast10(contactPhone);
+            // The caller said the ANI cannot take texts (ani_cannot_text): never redirect to
+            // it. With a usable text number the confirmation goes there (the caller's own
+            // direction, so implied consent does not hold it back); without one the implied
+            // leg holds below, and the callback_number_needed hold already covers the rest.
             const redirectImpliedToAni = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni
-              && smsLast10(contactPhone).length === 10;
-            const smsRecipient = redirectImpliedToAni ? contactPhone : smsPhone;
+              && smsLast10(contactPhone).length === 10 && !callAniCannotText;
+            const smsRecipient = callTextNumber || (redirectImpliedToAni ? contactPhone : smsPhone);
             if (redirectImpliedToAni) {
               logger.info(`[call-proc] Implied-consent confirmation for ${maskSid(callSid)} goes to the inbound caller's number (resolved customer phone differs)`);
             }
@@ -20276,7 +20335,8 @@ const CallRecordingProcessor = {
           // (A dialable ANI redirects to the caller instead — see
           // smsRecipient. Sends cleared by explicit sms_consent_given or by
           // the legacy V2-off path go to the resolved customer phone.)
-          const holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni;
+          const holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni
+            && !callTextNumber;
           if (scheduledServiceId && !v2SmsBlocked && holdImpliedSmsLeg) {
             logger.info(`[call-proc] Holding confirmation SMS leg for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable (email leg unaffected)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };

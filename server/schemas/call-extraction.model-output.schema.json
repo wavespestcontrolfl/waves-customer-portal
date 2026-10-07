@@ -139,6 +139,21 @@
           "maxLength": 160,
           "description": "1.14.0 additive. The caller's own words explaining the number, verbatim or lightly trimmed (e.g. \"this is our office line, they route calls to me and I text back\"). Only set alongside caller_id_disclaimed=true. null when nothing was said about the number itself."
         },
+        "ani_cannot_text": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.25.0 additive/optional (never `required`). true ONLY when the caller says the line they are calling from cannot receive text messages and they want texts somewhere else (a deaf relay service, an office landline, \"you can't text this one\"). It does NOT mean the number is not theirs: the caller still owns that line for calls, so never set caller_id_disclaimed for it. null when nothing like that was said; false is never set."
+        },
+        "text_phone_e164": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^\\+[1-9]\\d{1,14}$",
+          "description": "1.25.0 additive/optional (never `required`). The separate number the caller gave for TEXTS when ani_cannot_text is true, in E.164. null when they gave none. This is the number to text, not the callback number for calls."
+        },
         "email": {
           "type": [
             "string",

@@ -56,7 +56,8 @@ const REASON_LABELS = {
   low_extraction_confidence: "Low extraction confidence",
   spam_or_wrong_number: "Spam / wrong number",
   caller_phone_missing: "Caller phone missing",
-  callback_number_needed: "Caller ID isn't theirs — need a callback number",
+  callback_number_needed: "Can't text this number — need a number for texts",
+  text_number_differs: "Caller wants texts at another number — swap?",
   do_not_contact_requested: "Do not contact",
   after_hours_emergency: "After-hours emergency",
   name_email_mismatch: "Name / email mismatch",
@@ -148,6 +149,12 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
       value: p.candidates.map((c) => c.name || `Customer ${String(c.id).slice(0, 8)}`).join(" · ")
         + (Number(p.share_count) > p.candidates.length ? ` (+${Number(p.share_count) - p.candidates.length} more)` : ""),
     },
+    // text_number_differs: the caller's line cannot take texts and they gave
+    // another number for texts. Both numbers sit side by side so the office can
+    // swap the account phone (the line they called from stays for calls).
+    p.text_phone && { label: "Texts go to", value: p.text_phone },
+    p.text_phone && p.ani_phone && { label: "Called from (calls)", value: p.ani_phone },
+    p.text_phone && { label: "Account phone now", value: p.customer_phone || "no primary phone" },
     // caller_phone_not_on_file: the mismatching caller number IS the card —
     // the header prefers the linked customer's on-file phone, so without
     // these rows the office sees the on-file identity but never the number

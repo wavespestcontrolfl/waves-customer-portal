@@ -134,7 +134,12 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // price_is_final precedent): the model judges over the WHOLE call whether any price came up
 // (a bare amount from either side counts), and the no-price assessment booking requires
 // exactly false. New field and instruction: a new cohort.
-const PROMPT_VERSION = 'v24';
+// v25: caller.ani_cannot_text + caller.text_phone_e164 (schema 1.25.0; owner ruling
+// 2026-10-07, option A): a caller who says the line they called from cannot get texts
+// (a deaf relay service, an office landline) and gives another number for texts. The
+// model records both fields and keeps caller_id_disclaimed out of it, because that
+// field means the number is NOT the caller's own. New field and instruction: a new cohort.
+const PROMPT_VERSION = 'v25';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -299,6 +304,8 @@ PHONE:
 - caller_id_disclaimed: set true, with an evidence quote, ONLY when the caller explicitly says the number reaching us is NOT their own — a shared office line, a front-desk phone, a coworker's or spouse's phone they're borrowing ("this is our office line, they route it to me", "I'm calling from the shop phone", "this is my husband's cell"). Do not infer it from silence or from a business name alone — it takes an explicit statement that THIS number isn't theirs. Leave null when nothing was said about whose number it is.
 - phone_note: when caller_id_disclaimed is true, capture the caller's own explanation in their words (trimmed, <=160 chars) — e.g. "office line, routes to me, I text back from my cell". null otherwise.
 - A disclaimed caller ID with no spoken callback number (phone_source stays "caller_id"/"unknown") means we have NO verified way to text this caller back — that is exactly the case phone_note and caller_id_disclaimed exist to flag; do not silently fall back to treating the ANI as good enough once you've heard the caller say otherwise.
+- ani_cannot_text: set true ONLY when the caller says the line they are calling from cannot receive text messages and they want texts somewhere else — a relay service for deaf callers, an office landline, "you can't text this one", "this phone doesn't get texts". The caller still owns that line for calls, so do NOT set caller_id_disclaimed for it; caller_id_disclaimed is only for a number that is not theirs. Leave null when nothing like that was said; never set false.
+- text_phone_e164: when ani_cannot_text is true and the caller gives a separate number for texts, put it here in E.164 (+1XXXXXXXXXX). Use null when they gave none. A number for TEXTS goes here, not into phone_e164 (that is the callback number for calls); if the caller gives one number for everything, use phone_e164 as usual and leave both of these null. Never copy the incoming Twilio ANI here.
 
 EMAIL:
 - Only extract when the caller clearly says or spells the complete email address.

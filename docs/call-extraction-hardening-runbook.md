@@ -74,6 +74,22 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   also appends a deterministic coaching line ("Caller said this number isn't
   theirs — ask for a cell before ending the call") when the call ends with
   the flag set and no cell captured.
+- **Line that cannot take texts, separate number for texts** (schema 1.25.0,
+  owner ruling 2026-10-07, option A) — `caller.ani_cannot_text` +
+  `caller.text_phone_e164`. A deaf relay service, an office landline, "you can't
+  text this one". It is NOT `caller_id_disclaimed`: the caller still owns that
+  line for calls, so the disclaimed consumers (crm_notes stamp, CSR coaching, the
+  booking-link `caller_id_disclaimed` skip) never read it. With a usable text
+  number (`aniCannotTextNumber` in `call-triage-flags.js`: dialable, not the ANI,
+  not a near-miss of it, not one of our own lines): a NEW customer gets it as
+  `customers.phone` and the calling number as `customers.secondary_phone`; an
+  EXISTING linked customer is never rewritten, the processor files the advisory
+  `text_number_differs` card (payload `text_phone`, `ani_phone`, `customer_phone`)
+  asking the office to swap; this call's confirmation goes to the text number,
+  never the ANI. With no usable text number: `callback_number_needed` (same hold
+  and card as a disclaimed caller ID). The booking-link text lane sends only to
+  the text number, and only with explicit SMS consent; otherwise it skips.
+  Customer and card writes need V2 primary; the confirmation recipient does not.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner

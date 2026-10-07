@@ -85,6 +85,29 @@ function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
   return !(caller.phone_source === 'spoken' || caller.phone_source === 'both');
 }
 
+// ani_cannot_text (schema 1.25.0, owner ruling 2026-10-07, option A): the caller
+// said the line they called from cannot take texts and gave a separate number for
+// texts. This is NOT caller_id_disclaimed — the caller still owns that line for
+// calls — so none of the disclaimed-number consumers (crm_notes stamp, CSR
+// coaching, booking-link lane) read it. Returns the text number as E.164 when it
+// is usable: dialable, and not the ANI (a near-miss of the ANI counts as the ANI,
+// the same fail-closed rule as the disclaimed predicate above). null otherwise,
+// including when the flag is not set.
+function aniCannotTextNumber(caller, opts = {}) {
+  if (!caller || caller.ani_cannot_text !== true) return null;
+  const text = caller.text_phone_e164;
+  if (!isDialablePhone(text)) return null;
+  if (isDialablePhone(opts.ani) && sameCallbackAsAni(text, opts.ani)) return null;
+  const e164 = toE164(text);
+  return typeof e164 === 'string' && isLikelyE164(e164) ? e164 : null;
+}
+
+// The caller cannot take texts on the ANI and gave no usable number to text
+// instead: callback_number_needed holds the call's SMS leg and files the ask.
+function aniCannotTextNeedsNumber(caller, opts = {}) {
+  return !!caller && caller.ani_cannot_text === true && !aniCannotTextNumber(caller, opts);
+}
+
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
 // name — don't treat these as a name↔email mismatch.
 const GENERIC_EMAIL_LOCALPARTS = new Set([
@@ -509,7 +532,8 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // callerIdDisclaimedNeedsCallback (single source of truth — pre-push
   // review P1: the crm_notes stamp and CSR-coaching addendum call it too,
   // rather than re-deriving the condition).
-  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone })) {
+  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone })
+      || aniCannotTextNeedsNumber(caller, { ani: opts.contactPhone })) {
     flags.push('callback_number_needed');
   }
 
@@ -3270,6 +3294,8 @@ module.exports = {
   SMS_ONLY_FLAGS,
   callbackNumberNeededBlocksSms,
   callerIdDisclaimedNeedsCallback,
+  aniCannotTextNumber,
+  aniCannotTextNeedsNumber,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

@@ -1005,6 +1005,10 @@ function buildTriageItem({
     // spoken callback — same review lane as the other phone/consent asks;
     // the appointment already booked, this only gets a real number.
     callback_number_needed: 'customer_field_conflict',
+    // The caller's line cannot take texts and they gave another number for texts, but
+    // the call linked to an existing customer whose account phone differs — the office
+    // swaps the account phone (owner ruling 2026-10-07). Advisory; filed by the processor.
+    text_number_differs: 'customer_field_conflict',
     do_not_contact_requested: 'customer_field_conflict',
     lead_creation_failed: 'customer_field_conflict',
     name_email_mismatch: 'name_review',

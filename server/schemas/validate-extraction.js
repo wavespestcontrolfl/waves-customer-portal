@@ -172,7 +172,14 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // price_is_final precedent) and the call pipeline requires exactly false
 // (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING), keeping its transcript screens as an extra
 // fail-closed layer. Older payloads, which lack it, still validate and never qualify.
-const SCHEMA_VERSION = '1.24.0';
+// 1.25.0: additive — caller.ani_cannot_text (optional nullable boolean) and
+// caller.text_phone_e164 (optional nullable E.164 string) in both schemas, never `required`.
+// Owner ruling 2026-10-07 (option A): a caller whose line cannot take texts (a deaf relay
+// service, an office landline, "you can't text this one") and who gives a separate number
+// for texts gets texts there. Distinct from caller_id_disclaimed, which means the number is
+// not the caller's own: this caller still owns the line for calls. Older payloads, which
+// lack both, still validate and read as "no such statement".
+const SCHEMA_VERSION = '1.25.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);
