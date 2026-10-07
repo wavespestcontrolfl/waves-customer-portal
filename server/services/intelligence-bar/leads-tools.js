@@ -164,7 +164,7 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
-        address: { type: 'string', description: 'Street line. Only together with city and zip, all non-blank. Stored as written, trimmed.' },
+        address: { type: 'string', description: 'Street line only (unit allowed), no city or ZIP. Only together with city and zip, all non-blank. Stored as written, trimmed.' },
         city: { type: 'string', description: 'Only together with address and zip, non-blank.' },
         zip: { type: 'string', description: '5-digit ZIP code. Only together with address and city, non-blank.' },
       },
@@ -671,6 +671,19 @@ async function matchBulkLeads(input) {
 // address). Leads have no state column.
 const ADDRESS_TOGETHER = 'Give the street, city and ZIP together. Nothing was proposed.';
 const asText = (text) => ({ value: text });
+// The street part is the street line only: a city or ZIP inside it would be
+// printed again beside the city/zip columns (estimate and inspection readers
+// append them). Same place evidence the customer address fan-out uses — a
+// comma alone is not enough ("1 Example Way, Apt 4B" is street + unit), and a
+// comma-free line ending in a ZIP carries locality too (Codex #6099 r10).
+function normalizeLeadStreet(text) {
+  const { snapshotTailPlace, addressMatchKey } = require('../customer-address-fanout');
+  const tail = snapshotTailPlace(text);
+  const namesPlace = (tail && (tail.zip || addressMatchKey(tail.city))) || /\b\d{5}(?:-\d{4})?\s*$/.test(text);
+  return namesPlace
+    ? { error: 'address is the street line only — put the city and ZIP in city and zip. Nothing was proposed.' }
+    : { value: text };
+}
 const LEAD_FIELD_SPECS = {
   first_name: { blank: 'first_name cannot be blank — a lead needs a first name.', normalize: asText, max: 255 },
   last_name: { normalize: asText, max: 255 },
@@ -682,7 +695,7 @@ const LEAD_FIELD_SPECS = {
     },
     max: 255,
   },
-  address: { blank: ADDRESS_TOGETHER, normalize: asText, max: 255 },
+  address: { blank: ADDRESS_TOGETHER, normalize: normalizeLeadStreet, max: 255 },
   city: { blank: ADDRESS_TOGETHER, normalize: asText, max: 120 },
   zip: { blank: ADDRESS_TOGETHER, normalize: asText, max: 20 },
 };

@@ -269,6 +269,16 @@ test('query_leads returns the stored ZIP, so a street-only fix can pass the curr
   expect(res.leads[0]).toMatchObject({ address: '21 Palm Ave', city: 'Sarasota', zip: '34201' });
 });
 
+test('the street part must be the street line only: an embedded city or ZIP is refused, a unit is fine', async () => {
+  db.mockReturnValue(chain({ first: { ...LEAD, address: '100 Main St, Sarasota, FL 34201', city: 'Sarasota', zip: '34201' } }));
+  const full = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St, Sarasota, FL 34201', city: 'Bradenton', zip: '34208' });
+  expect(full.error).toMatch(/street line only/);
+  const trailingZip = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '100 Main St Sarasota FL 34201', city: 'Bradenton', zip: '34208' });
+  expect(trailingZip.error).toMatch(/street line only/);
+  const unit = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '1 Example Way, Apt 4B', city: 'Bradenton', zip: '34208' });
+  expect(unit.preview).toBe(true);
+});
+
 describe('address fields', () => {
   const ADDR_LEAD = { ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' };
   const NEW = { address: '12 Palm Ave', city: 'Sarasota', zip: '34201' };
