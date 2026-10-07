@@ -33,7 +33,8 @@ function mockExec(q) {
     });
     return q.returning ? made : made.length;
   }
-  let hit = rows.filter((r) => mockMatches(r, q.wheres) && q.whereIns.every(([c, vals]) => vals.includes(r[c])));
+  let hit = rows.filter((r) => mockMatches(r, q.wheres) && q.whereIns.every(([c, vals]) => vals.includes(r[c]))
+    && (!q.staleOnly || !(r.captured_at instanceof Date) || r.captured_at < new Date(Date.now() - 30 * 60 * 1000)));
   if (q.update) {
     if (q.table === 'seo_aio_sweep_results' && q.update.status !== 'running' && mockState.failResultUpdates > 0) {
       mockState.failResultUpdates -= 1;
@@ -64,7 +65,12 @@ jest.mock('../models/db', () => {
   const make = (table) => {
     const q = { table, wheres: [], whereIns: [], groupBy: [], limit: null, first: false, count: false, update: null, insert: null, returning: false, orderRaw: null, rawWheres: [] };
     const b = {
-      where: (...a) => { if (typeof a[0] === 'object') q.wheres.push(a[0]); return b; },
+      where: (...a) => {
+        if (typeof a[0] === 'object') q.wheres.push(a[0]);
+        // recoverInterrupted: captured_at < now() - 30 minutes; a row with no date counts as stale.
+        else if (a[0] === 'captured_at' && a[1] === '<') q.staleOnly = true;
+        return b;
+      },
       whereIn: (c, v) => { q.whereIns.push([c, v]); return b; },
       whereNotNull: () => b,
       whereRaw: (s) => { q.rawWheres.push(s); return b; },
@@ -334,6 +340,23 @@ describe('processSweepChunk', () => {
     await sweep.processSweepChunk();
     const claim = mockState.queries.find((x) => x.table === 'seo_aio_sweep_results' && x.update && x.update.status === 'running');
     expect(claim.rawWheres.join(' ')).toMatch(/exists \(select 1 from seo_aio_sweep_runs r where r\.id = \? and r\.status = 'open'\)/);
+  });
+
+  test('a fresh running row pauses the chunk: no new paid call', async () => {
+    openRun();
+    mockState.results.push({ id: 'r1', run_id: 'run-open', query: 'busy', status: 'running', captured_at: new Date() });
+    pendingRow('next');
+    await sweep.processSweepChunk();
+    expect(dataforseo.request).not.toHaveBeenCalled();
+  });
+
+  test('cancelling settles running rows and books their estimate', async () => {
+    openRun();
+    mockState.results.push({ id: 'r1', run_id: 'run-open', query: 'busy', status: 'running' });
+    const out = await sweep.cancelSweep('run-open');
+    expect(out.status).toBe('cancelled');
+    expect(mockState.results[0]).toMatchObject({ status: 'request_error' });
+    expect(mockState.runs[0]).toMatchObject({ attempted: 1, cost_usd: 0.006 });
   });
 
   test('a row is claimed as running before its paid call', async () => {

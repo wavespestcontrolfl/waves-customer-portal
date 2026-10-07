@@ -403,6 +403,10 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
   const maxCost = run.max_cost_usd == null ? Infinity : Number(run.max_cost_usd);
   const recovered = await recoverInterrupted(run.id);
   let runCost = (Number(run.cost_usd) || 0) + recovered * EST_CALL_COST_USD;
+  // A row still 'running' (under 30 minutes) may hold an unbooked charge:
+  // spend nothing more until recoverInterrupted settles it.
+  const inFlightLeft = await db('seo_aio_sweep_results').where({ run_id: run.id, status: 'running' }).count({ n: '*' }).first();
+  if (Number(inFlightLeft?.n)) return summary;
   // A run with nothing left is done, whatever its cost.
   const left = await db('seo_aio_sweep_results').where({ run_id: run.id }).whereIn('status', ['pending', 'running']).count({ n: '*' }).first();
   if (!Number(left?.n)) {
@@ -497,6 +501,14 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
 }
 
 async function cancelSweep(runId) {
+  const run = await db('seo_aio_sweep_runs').where({ id: runId, status: 'open' }).first();
+  if (!run) return null;
+  // Settle every claimed row first (one call's estimate each): once the run is
+  // cancelled, recoverInterrupted never revisits it.
+  const running = await db('seo_aio_sweep_results').where({ run_id: runId, status: 'running' }).select('id');
+  for (const r of running) {
+    await storeResult(runId, r.id, { status: 'request_error', error: 'cancelled while the paid call was in flight', captured_at: db.fn.now() }, EST_CALL_COST_USD);
+  }
   const [row] = await db('seo_aio_sweep_runs').where({ id: runId, status: 'open' })
     .update({ status: 'cancelled', finished_at: db.fn.now() }).returning('*');
   return row || null;
