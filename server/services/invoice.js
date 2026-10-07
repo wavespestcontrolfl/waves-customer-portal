@@ -7006,6 +7006,9 @@ const InvoiceService = {
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
     _zeroDueRetried = false,
+    // Intelligence Bar send_invoice only (via sendViaSMSAndEmail): the phone digits
+    // its card showed, or null when the card showed no text. Undefined = unchanged.
+    expectedSmsPhone = undefined,
   } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
@@ -7066,7 +7069,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true, expectedSmsPhone,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -7144,6 +7147,14 @@ const InvoiceService = {
       const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
       if (restored) await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
+    }
+    // The bar's approved text recipient, checked on the row this leg sends to:
+    // a phone changed (or a text the card never showed) is not sent.
+    if (expectedSmsPhone !== undefined
+      && (!expectedSmsPhone || String(customer?.phone || "").replace(/\D/g, "") !== String(expectedSmsPhone))) {
+      const restored = await restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+      if (restored) await reverseSmsCreditOnFailure();
+      throw Object.assign(new Error("The customer's phone is not the one the approval showed; the text was not sent"), { code: "recipient_changed" });
     }
 
     const domain = publicPortalUrl();
@@ -7829,11 +7840,16 @@ const InvoiceService = {
       // Internal-only: set by the renewal-gate re-entry below so the inner
       // call does not re-read the term link. Never set by a real caller.
       _underRenewalGate = false,
+      // Intelligence Bar send_invoice: { phone, email } its card showed (phone
+      // digits / lowercased email, null = that leg was not on the card). Each
+      // leg refuses a different recipient at its own send. Null = unchanged.
+      expectedRecipients = null,
     } = {},
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
       emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
+      expectedRecipients,
     });
 
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -7856,6 +7872,7 @@ const InvoiceService = {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
           emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+          expectedRecipients,
         }));
       }
     }
@@ -8046,6 +8063,7 @@ const InvoiceService = {
           // restore/resolve) any queued pay-link SMS this send supersedes —
           // the nested claim must not adopt it a second time.
           adoptsQueuedInvoiceSend: false,
+          ...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),
         });
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.settled_zero_due) {
@@ -8292,6 +8310,7 @@ const InvoiceService = {
           claimToken: claim.invoice.send_claim_token,
           holdExempt,
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
+          ...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),
         });
         if (r?.ok) email.ok = true;
         if (r?.deduped) email.deduped = true;

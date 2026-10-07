@@ -43,18 +43,22 @@ async function post(path, body) {
 beforeEach(() => jest.clearAllMocks());
 
 describe('sendInvoiceFromBar', () => {
-  test('runs the Send handler: the same service call as the page, plus the approved total and no credit draw', async () => {
+  test('runs the Send handler: the same service call as the page, plus the approved total and recipients, no credit draw, no hold exemption', async () => {
     InvoiceService.sendViaSMSAndEmail.mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: true } });
     const page = await post('/inv-1/send', { requestReview: false });
     const pageCall = InvoiceService.sendViaSMSAndEmail.mock.calls[0];
+    const recipients = { phone: '9415550100', email: 'robin@example.com' };
     const bar = await router.sendInvoiceFromBar({
-      invoiceId: 'inv-1', body: { requestReview: false }, actor: { technicianId: 'staff-1' }, approvedSend: { expectedTotal: 129 },
+      invoiceId: 'inv-1', body: { requestReview: false }, actor: { technicianId: 'staff-1' }, approvedSend: { expectedTotal: 129, recipients },
     });
     const barCall = InvoiceService.sendViaSMSAndEmail.mock.calls[1];
     expect(page).toEqual({ status: 200, json: { ok: true, sms: { ok: true }, email: { ok: true } } });
     expect(bar).toEqual(page);
     expect(barCall[0]).toBe('inv-1');
-    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, skipAccountCreditAutoApply: true });
+    // Same call as the page, except the bar never draws credit and never takes the
+    // page's operator dispute-hold exemption, and it carries the approved total + recipients.
+    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, expectedRecipients: recipients, skipAccountCreditAutoApply: true, holdExempt: null });
+    expect(pageCall[1].holdExempt).toBe('operator');
     expect(pageCall[1].expectedTotal).toBeUndefined();
     expect(pageCall[1].skipAccountCreditAutoApply).toBeUndefined();
     expect(pageCall[1]).toMatchObject({ requestReview: false, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: 'staff-1', firstDeliveryOnly: false, overridesReviewHold: false });
@@ -70,6 +74,17 @@ describe('sendInvoiceFromBar', () => {
     InvoiceService.sendViaSMSAndEmail.mockRejectedValueOnce(new Error('database down'));
     await expect(router.sendInvoiceFromBar({ invoiceId: 'inv-1', body: {}, actor: {}, approvedSend: { expectedTotal: 1 } }))
       .rejects.toThrow('database down');
+  });
+});
+
+describe('the approved recipients reach each send leg (source contract)', () => {
+  test('sendViaSMSAndEmail hands the phone to the text leg and the email to the email leg', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/invoice.js'), 'utf8');
+    const fn = src.slice(src.indexOf('  async sendViaSMSAndEmail('));
+    expect(fn).toContain('...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),');
+    expect(fn).toContain('...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),');
+    // Both re-entries (the zero-due retry and the renewal gate) keep the pins.
+    expect(fn.slice(0, fn.indexOf('let packetClaim')).match(/^\s+expectedRecipients,$/gm)).toHaveLength(2);
   });
 });
 

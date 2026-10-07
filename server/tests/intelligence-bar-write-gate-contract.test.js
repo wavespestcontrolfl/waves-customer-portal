@@ -853,6 +853,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     const invoiceActionSpies = ['send_invoice', 'charge_invoice'].includes(toolName)
       ? [
         jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveCollectionHoldChecked').mockResolvedValue(false),
+        jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveMessagingHoldChecked').mockResolvedValue(false),
         jest.spyOn(require('../routes/admin-invoices'), 'getInvoiceDeliveryRecipients')
           .mockResolvedValue({ customerName: 'Pat Tester', primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'pat@example.com' } }),
         jest.spyOn(require('../services/stripe'), 'quoteInvoiceSavedCardCharge')

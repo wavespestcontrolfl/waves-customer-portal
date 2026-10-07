@@ -167,6 +167,18 @@ describe('invoice SMS provider handoff', () => {
     });
   });
 
+  test('expectedSmsPhone (the bar\'s approved text recipient): a different phone, or a text the card never showed, is refused before the provider', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM123' });
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550199' }))
+      .rejects.toMatchObject({ code: 'recipient_changed', message: "The customer's phone is not the one the approval showed; the text was not sent" });
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: null }))
+      .rejects.toMatchObject({ code: 'recipient_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    invoiceReads = [invoice, invoice, invoice];
+    await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', expectedSmsPhone: '19415550101' });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415550101' }));
+  });
+
   test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {
     const invoiceQueries = [];
     db.mockImplementation((table) => {

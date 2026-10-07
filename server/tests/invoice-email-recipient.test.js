@@ -212,6 +212,24 @@ describe('invoice email recipient resolution', () => {
     expect(result.recipient).toEqual(expect.objectContaining({ email: 'ap@westbay.com', role: 'payer' }));
   });
 
+  test('expectedEmail (the bar\'s approved recipient): a different resolved address is refused before any send; the same one sends', async () => {
+    buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
+    sendgrid.isConfigured.mockReturnValue(true);
+    sendTemplate.mockResolvedValue({ message: { provider_message_id: 'm1' } });
+    shortenOrPassthrough.mockResolvedValue('https://portal.wavespestcontrol.com/l/x');
+    db.mockImplementation(dbWithPayer(
+      { id: 7, ap_email: 'ap@westbay.com', company_name: 'Homes by West Bay', active: true },
+    ));
+    await expect(sendInvoiceEmail('invoice-1', { expectedEmail: 'old-ap@westbay.com' })).resolves.toEqual({
+      ok: false, code: 'recipient_changed', error: 'The billing email is not the one the approval showed; the email was not sent',
+    });
+    await expect(sendInvoiceEmail('invoice-1', { expectedEmail: null })).resolves.toMatchObject({ ok: false, code: 'recipient_changed' });
+    expect(sendTemplate).not.toHaveBeenCalled();
+    const sent = await sendInvoiceEmail('invoice-1', { expectedEmail: 'ap@westbay.com' });
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ to: 'ap@westbay.com' }));
+    expect(sent.ok).toBe(true);
+  });
+
   test('the pay short code of a payer invoice is marked payer_invoice/email; a homeowner invoice mints it unchanged', async () => {
     buildInvoicePDFBuffer.mockResolvedValue(Buffer.from('pdf'));
     sendgrid.isConfigured.mockReturnValue(true);

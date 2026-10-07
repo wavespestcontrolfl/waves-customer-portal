@@ -17,6 +17,7 @@ jest.mock('../routes/admin-invoices', () => ({
 jest.mock('../services/stripe', () => ({ quoteInvoiceSavedCardCharge: jest.fn() }));
 jest.mock('../services/collections/collection-hold', () => ({
   customerHasActiveCollectionHoldChecked: jest.fn(async () => false),
+  customerHasActiveMessagingHoldChecked: jest.fn(async () => false),
   assertNoCollectionHold: jest.fn(async () => {}),
 }));
 
@@ -127,6 +128,7 @@ beforeEach(() => {
   Invoices.getInvoiceDeliveryRecipients.mockImplementation(async () => recipients());
   StripeService.quoteInvoiceSavedCardCharge.mockImplementation(async () => quote());
   CollectionHold.customerHasActiveCollectionHoldChecked.mockResolvedValue(false);
+  CollectionHold.customerHasActiveMessagingHoldChecked.mockResolvedValue(false);
   CollectionHold.assertNoCollectionHold.mockResolvedValue(undefined);
 });
 afterAll(() => { delete process.env.GATE_IB_INVOICE_ACTIONS; });
@@ -251,7 +253,7 @@ describe('send_invoice card', () => {
   });
 
   test('refuses a dispute hold, no recipient, an unknown invoice and a double target', async () => {
-    CollectionHold.customerHasActiveCollectionHoldChecked.mockResolvedValueOnce(true);
+    CollectionHold.customerHasActiveMessagingHoldChecked.mockResolvedValueOnce(true);
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'collection_hold' });
     Invoices.getInvoiceDeliveryRecipients.mockResolvedValueOnce(recipients({ primaryContact: { phone: '' }, emailRecipient: null }));
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ code: 'no_recipient' });
@@ -281,8 +283,11 @@ describe('send_invoice commit', () => {
     const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
     const result = await run();
     expect(Invoices.sendInvoiceFromBar).toHaveBeenCalledWith({
-      invoiceId: INV, body: { requestReview: false }, actor: { technicianId: 'staff-1' }, approvedSend: { expectedTotal: 129 },
+      invoiceId: INV, body: { requestReview: false }, actor: { technicianId: 'staff-1' },
+      approvedSend: { expectedTotal: 129, recipients: { phone: '9415550100', email: 'robin@example.com' } },
     });
+    // The exact recipients ride only to the send, never into the result.
+    expect(JSON.stringify(result)).not.toMatch(/9415550100|robin@example\.com/);
     expect(result).toMatchObject({ success: true, text: { status: 'sent' }, email: { status: 'sent' } });
     expect(executionOutcome(result)).toBe('completed');
   });

@@ -71,7 +71,7 @@ const INVOICE_ACTION_TOOLS = [
   {
     name: 'send_invoice',
     description: `Send ONE existing invoice to the customer, exactly as the Invoices page "Send" button does (text with the pay link and/or the invoice email with the PDF). The first call returns a PREVIEW and sends nothing: the invoice, the customer, the amount due, the lines, the channels and who each reaches (masked), and which message goes out. The operator approves on the confirmation card; the confirmed run re-checks all of it, refuses if anything changed, and reports the text and the email separately.
-Refused with the reason: invoice not found, paid, prepaid, void, refunded, canceled, a bank payment processing, billed on a payer's monthly statement, nothing due, a billing-dispute hold on the customer, no phone or email on file. Never creates, edits, voids or refunds an invoice. No review request is sent. Admin only.
+Refused with the reason: invoice not found, paid, prepaid, void, refunded, canceled, a bank payment processing, billed on a payer's monthly statement, nothing due, a collections hold on the customer's billing messages, no phone or email on file. Never creates, edits, voids or refunds an invoice. No review request is sent. Admin only.
 Takes invoice_id OR invoice_number, exactly one.
 Use for: "send the invoice", "text her the invoice", "resend invoice WPC-2026-0534".`,
     input_schema: { type: 'object', properties: { ...TARGET_PROPS } },
@@ -143,8 +143,13 @@ function collectibleRefusal(invoice) {
   try { assertInvoiceCollectible(invoice); return null; } catch (err) { return refusal(err.message, 'invoice_not_collectible', { invoice_id: invoice.id }); }
 }
 
+// A charge reads the charging predicate (dispute holds); a send reads the
+// messaging predicate (any hold), the same split the invoice senders use.
 async function disputeHold(customerId) {
   return require('../collections/collection-hold').customerHasActiveCollectionHoldChecked(customerId);
+}
+async function messagingHold(customerId) {
+  return require('../collections/collection-hold').customerHasActiveMessagingHoldChecked(customerId);
 }
 
 // ── send_invoice ────────────────────────────────────────────────
@@ -170,8 +175,8 @@ async function sendRefusal(invoice, dueCents) {
   if (terminal) {
     return refusal(`Linked visit is ${terminal}; delivery not attempted. Void or keep this invoice from the Invoices page.`, 'visit_terminal', at);
   }
-  if (await disputeHold(invoice.customer_id)) {
-    return refusal('This customer has a billing-dispute hold. Send this invoice from the Invoices page if you mean to override it.', 'collection_hold', at);
+  if (await messagingHold(invoice.customer_id)) {
+    return refusal('This customer has a collections hold on billing messages. Send this invoice from the Invoices page if you mean to override it.', 'collection_hold', at);
   }
   return null;
 }
@@ -193,7 +198,9 @@ function sendLegs(who, invoice, dueCents) {
   return { phone, email, text, emailLine };
 }
 
-async function buildSendPlan(input) {
+// opts.forSend: the confirmed run also gets the exact recipients (never on the
+// card or in a model-visible result) to hand the send as its approved pins.
+async function buildSendPlan(input, { forSend = false } = {}) {
   const target = await resolveInvoice(input);
   if (target.error) return target;
   const { invoice } = target;
@@ -205,7 +212,9 @@ async function buildSendPlan(input) {
   const legs = sendLegs(who, invoice, dueCents);
   if (!legs.phone && !legs.email) return refusal('No phone or email is on file for this invoice, so it cannot be sent.', 'no_recipient', { invoice_id: invoice.id });
   const totalCents = toCents(invoice.total);
+  const recipients = { phone: legs.phone ? String(legs.phone).replace(/\D/g, '') : null, email: legs.email };
   return {
+    ...(forSend ? { sendRecipients: recipients } : {}),
     preview: true,
     tool: 'send_invoice',
     invoice_id: invoice.id,
@@ -231,7 +240,7 @@ async function buildSendPlan(input) {
       invoice_version: msOf(invoice.updated_at),
       sent: msOf(invoice.sent_at),
       payer_id: invoice.payer_id || null,
-      recipients: digest({ phone: legs.phone ? String(legs.phone).replace(/\D/g, '') : null, email: legs.email }),
+      recipients: digest(recipients),
     },
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
@@ -246,7 +255,7 @@ function channelResult(leg) {
 // The re-derived plan when it still matches the card's pin, or the refusal.
 async function verifiedPlan(input, pinned, build, { what, changed }) {
   if (!pinned) return { refusal: refusal(`Use the confirmation card to approve this ${what}.`, 'approval_required') };
-  const plan = await build(input);
+  const plan = await build(input, { forSend: true });
   if (plan.error) return { refusal: { error: `${changed}: ${plan.error}`, code: plan.code, ...(plan.code === 'charge_limit' ? { blocked: true } : { preview_changed: true }) } };
   if (JSON.stringify(plan._version) !== JSON.stringify(pinned)) {
     return { refusal: { error: `What this ${what} would do changed after the card was shown — ${changed.toLowerCase()}. Ask again for a fresh confirmation card.`, preview_changed: true } };
@@ -290,7 +299,9 @@ async function commitSend(input, actionContext) {
     // send (neither firstDelivery nor resend) and no review request.
     body: { requestReview: false },
     actor: { technicianId: actionContext?.technicianId || null },
-    approvedSend: { expectedTotal: pinned.total_cents / 100 },
+    // The total and the recipients the card showed: the send refuses a different
+    // total on its claimed row, and each leg refuses a different recipient.
+    approvedSend: { expectedTotal: pinned.total_cents / 100, recipients: plan.sendRecipients },
   });
   const result = sendOutcome(plan, status, json || {});
   logger.info(`[intelligence-bar:invoice-actions] send ${plan.invoice_id}: ${result.text?.status || 'n/a'} / ${result.email?.status || 'n/a'}`);

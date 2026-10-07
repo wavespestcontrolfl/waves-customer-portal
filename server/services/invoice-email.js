@@ -235,6 +235,12 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const { recipient, error: recipientError } = invoiceRecipientFor(customer, prefs, effectiveOverride);
   if (recipientError) return { ok: false, error: recipientError };
   if (!recipient?.email) return { ok: false, error: 'No invoice recipient email' };
+  // Intelligence Bar send_invoice only: the address its card showed (null = no
+  // email on the card). Any other resolved recipient is not emailed.
+  if (options.expectedEmail !== undefined
+    && String(recipient.email).trim().toLowerCase() !== String(options.expectedEmail || '')) {
+    return { ok: false, error: 'The billing email is not the one the approval showed; the email was not sent', code: 'recipient_changed' };
+  }
   const recipientPayload = publicRecipient(recipient);
 
   // Freeze the AP email this invoice was actually DELIVERED to onto the payer
