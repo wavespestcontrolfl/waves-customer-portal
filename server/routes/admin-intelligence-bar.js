@@ -1883,7 +1883,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
     });
-    if (target.error) return { failed: true, modelResult: target };
+    // A refused target leaves no card and writes nothing; the model is told so
+    // in plain words, so its reply can never read as a recorded change.
+    if (target.error) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
     if (toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
