@@ -722,6 +722,90 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+  test('assertUnderChargeLock runs on the charge transaction with the final total and refuses before Stripe (the bar caps, owner ruling 2026-10-07)', async () => {
+    const invoice = {
+      id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
+      subtotal: '200.00', total: '200.00', discount_amount: '0.00',
+      credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+    };
+    const card = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
+    };
+    let chargeAttempt = null;
+    const attemptUpdates = [];
+    const db = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+        chain[method] = jest.fn((arg) => {
+          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          return chain;
+        });
+      });
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') return invoice;
+        if (table === 'payment_methods') return card;
+        if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
+        if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        return null;
+      });
+      chain.insert = jest.fn((payload) => {
+        if (table === 'stripe_invoice_charge_attempts') chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
+        return chain;
+      });
+      chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.update = jest.fn(async (payload) => {
+        if (table === 'stripe_invoice_charge_attempts') attemptUpdates.push(payload);
+        if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
+        return 1;
+      });
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.fn = { now: jest.fn(() => 'NOW') };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    const stripeClient = { paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn() } };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+    const StripeService = require('../services/stripe');
+    const guard = jest.fn(async () => { throw new Error('Bar charge limit: over the daily limit'); });
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {
+      expectedTotal: 200, operatorOverride: true, assertUnderChargeLock: guard, initiatedVia: 'intelligence_bar',
+    })).rejects.toThrow('Bar charge limit: over the daily limit');
+    // The debit card carries no surcharge: the guard sees computeChargeAmount's final total.
+    expect(guard).toHaveBeenCalledWith(db, { totalCents: 20000, invoice: expect.objectContaining({ id: 'inv-1' }) });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    // Never marked submitted: the claim is released, not left blocking.
+    expect(attemptUpdates.some((u) => u.submitted_at)).toBe(false);
+  });
+
+  test('the bar guard runs after the final-total checks and before the submission marker; the stamp rides the payments insert only (source contract)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/stripe.js'), 'utf8');
+    const fn = src.slice(src.indexOf('async chargeInvoiceWithSavedCard('));
+    const totalIdx = fn.indexOf('const chargeInfo = computeChargeAmount(invoiceAmountDue(lockedInvoice)');
+    const maxIdx = fn.indexOf('if (maxAuthorizedTotalCents != null && invTotalCents >');
+    const guardIdx = fn.indexOf('await assertUnderChargeLock(trx, { totalCents: invTotalCents, invoice: lockedInvoice });');
+    const cancelIdx = fn.indexOf('await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);', maxIdx);
+    const submitIdx = fn.indexOf('await commitInvoiceSavedCardChargeSubmission({');
+    expect([totalIdx, maxIdx, guardIdx, cancelIdx, submitIdx].every((i) => i > -1)).toBe(true);
+    expect(totalIdx).toBeLessThan(guardIdx);
+    expect(maxIdx).toBeLessThan(guardIdx);
+    expect(guardIdx).toBeLessThan(cancelIdx);
+    expect(guardIdx).toBeLessThan(submitIdx);
+    const insertIdx = fn.indexOf("[paymentRecord] = await trx('payments').insert({");
+    const stamp = "...(initiatedVia === 'intelligence_bar' ? { initiated_via: 'intelligence_bar' } : {}),";
+    const stampIdx = fn.indexOf(stamp);
+    expect(stampIdx).toBeGreaterThan(insertIdx);
+    expect(fn.indexOf('initiated_via', stampIdx + stamp.length)).toBe(-1);
+  });
+
   test('requireCompletedVisit without a visit id refuses before touching Stripe', async () => {
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
     const StripeService = require('../services/stripe');

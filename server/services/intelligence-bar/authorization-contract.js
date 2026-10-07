@@ -19,8 +19,9 @@
  *   red    — confirmed-endpoint writes (payouts, SEO pipeline): owner-only,
  *            confirmed:true + idempotency key on /execute, never a card
  *   green  — reads (never reach a card)
- * Charges/refunds/sensitive money movement have no IB tool at all
- * (blocked by absence — nothing to gate).
+ * Refunds and voids have no IB tool at all (blocked by absence — nothing
+ * to gate). The one charge is charge_invoice (owner ruling 2026-10-07): an
+ * existing invoice, a saved card, capped, always on a card.
  */
 
 const crypto = require('crypto');
@@ -89,6 +90,10 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // The Stripe detach cannot be undone, and an Auto Pay-off the customer
   // is emailed about is only reversible by the customer's own consent.
   'remove_saved_payment_method',
+  // An invoice sent to the customer cannot be unsent; a card charge is money
+  // the portal only gives back by a refund, which the bar never does.
+  'send_invoice',
+  'charge_invoice',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
@@ -112,7 +117,15 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'trigger_review_request',
   // The confirmed run emails and/or texts the customer their paid receipt.
   'resend_receipt',
+  // The invoice text/email; after a charge, the queued payment receipt.
+  'send_invoice',
+  'charge_invoice',
 ]);
+
+// send_invoice / charge_invoice: their card lines come from their own preview
+// (invoice-action-tools.js cardLines), never the generic dump; both move money
+// or bill the customer.
+CURATED_PREVIEW_TOOL_NAMES.add('send_invoice').add('charge_invoice');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -142,6 +155,8 @@ const BILLING_TOOL_NAMES = new Set([
   'create_pending_estimate',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
+  'send_invoice',
+  'charge_invoice',
 ]);
 
 const ACTION_LABELS = {
@@ -171,6 +186,8 @@ const ACTION_LABELS = {
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
   resend_receipt: 'Re-send a paid receipt',
+  send_invoice: 'Send an invoice to the customer',
+  charge_invoice: "Charge an invoice to the customer's saved card",
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -767,6 +784,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (notes.hold_lookup_failed) push('billing', "Couldn't check whether this card holds an upcoming appointment");
     if (preview.autopay_note) push('billing', preview.autopay_note);
     if (preview.customer_emails?.summary) push('comms', String(preview.customer_emails.summary));
+  }
+  // send_invoice / charge_invoice: invoice, money, card and who is contacted.
+  if ((toolName === 'send_invoice' || toolName === 'charge_invoice') && preview?.preview === true) {
+    for (const line of require('./invoice-action-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // correct_invoice_address: what the rewrite does and does not touch.
   if (toolName === 'correct_invoice_address' && preview?.does) {

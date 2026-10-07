@@ -1657,7 +1657,8 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
 // Either channel failing alone doesn't abort the other — returns per-
 // channel status so the UI can toast accordingly. Missing phone / email
 // on the customer record is treated as "channel skipped", not an error.
-router.post('/:id/send', requireAdmin, async (req, res, next) => {
+router.post('/:id/send', requireAdmin, invoiceSendHandler);
+async function invoiceSendHandler(req, res, next) {
   try {
     const { id } = req.params;
     const {
@@ -1740,6 +1741,8 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         operatorInitiated: true,
         holdExempt: 'operator',
         actorTechnicianId: req.technicianId || null,
+        // Set only by sendInvoiceFromBar (never an HTTP field): the total the bar's card showed.
+        ...(req.ibApprovedSend ? { expectedTotal: req.ibApprovedSend.expectedTotal } : {}),
       });
     } catch (err) {
       // A FIRST delivery finding the invoice already owned by another live
@@ -1824,7 +1827,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+}
 
 // POST /:id/schedule-send — send invoice later via the scheduler.
 router.post('/:id/schedule-send', requireAdmin, async (req, res, next) => {
@@ -1898,7 +1901,8 @@ router.post('/:id/charge-card-quote', async (req, res) => {
 // Body: { paymentMethodId } (our internal payment_methods.id).
 // The card must belong to the invoice customer. Succeeds by calling
 // Stripe off-session with confirm:true; webhook marks the invoice paid.
-router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
+router.post('/:id/charge-card', requireAdmin, invoiceChargeCardHandler);
+async function invoiceChargeCardHandler(req, res, next) {
   try {
     const { paymentMethodId, expectedTotal } = req.body || {};
     if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId required' });
@@ -1924,6 +1928,9 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
           actorId: req.technicianId || null, ip: req.ip, userAgent: req.get('user-agent') || null,
           route: 'admin_invoice_charge_card', invoiceId: req.params.id,
         },
+        // Set only by chargeInvoiceFromBar (never an HTTP field): the bar's caps,
+        // rechecked under the charge lock, and the payment row's provenance stamp.
+        ...(req.ibChargeGuard ? { assertUnderChargeLock: req.ibChargeGuard, initiatedVia: 'intelligence_bar' } : {}),
       },
     );
     res.json({ success: true, ...result });
@@ -1960,7 +1967,7 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     }
     res.status(400).json({ error: err.message });
   }
-});
+}
 
 // POST /:id/void — void invoice
 router.post('/:id/void', requireAdmin, async (req, res, next) => {
@@ -3735,4 +3742,36 @@ router._private = {
   stopInvoiceFollowupsForPaymentPlan,
 };
 
+// The Intelligence Bar's send_invoice / charge_invoice (owner ruling
+// 2026-10-07) run the SAME handlers as POST /:id/send and /:id/charge-card,
+// without an HTTP request (the #6086 adapter pattern): the handler gets the
+// only request fields it reads and a capture response, and the promise
+// resolves the reply it would send, { status, json }. An error passed to
+// next() rejects. The ib* fields exist only here, so the HTTP routes never
+// set them.
+function runInvoiceHandler(handler, req) {
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    Promise.resolve(handler(req, res, reject)).catch(reject);
+  });
+}
+function barRequest(invoiceId, body, actor, extra) {
+  return { params: { id: invoiceId }, body, technicianId: actor?.technicianId || null, ip: null, get: () => null, ...extra };
+}
+// approvedSend: { expectedTotal } — the invoice total the card showed.
+function sendInvoiceFromBar({ invoiceId, body, actor, approvedSend }) {
+  return runInvoiceHandler(invoiceSendHandler, barRequest(invoiceId, body, actor, { ibApprovedSend: approvedSend }));
+}
+// chargeGuard: async (trx, { totalCents, invoice }) — the bar's caps, run under the charge lock.
+function chargeInvoiceFromBar({ invoiceId, body, actor, chargeGuard }) {
+  return runInvoiceHandler(invoiceChargeCardHandler, barRequest(invoiceId, body, actor, { ibChargeGuard: chargeGuard }));
+}
+
 module.exports = router;
+module.exports.sendInvoiceFromBar = sendInvoiceFromBar;
+module.exports.chargeInvoiceFromBar = chargeInvoiceFromBar;
+module.exports.getInvoiceDeliveryRecipients = getInvoiceDeliveryRecipients;

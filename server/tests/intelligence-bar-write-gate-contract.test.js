@@ -73,8 +73,11 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  // send_invoice / charge_invoice are dark behind GATE_IB_INVOICE_ACTIONS; off, their preview refuses.
+  process.env.GATE_IB_INVOICE_ACTIONS = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_INVOICE_ACTIONS;
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
@@ -153,6 +156,8 @@ const WRITE_TWO_STEP = [
   'resend_receipt',
   'remove_saved_payment_method',
   'correct_invoice_address',
+  'send_invoice',
+  'charge_invoice',
   'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
@@ -646,6 +651,18 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       }],
       customers: [{ id: '00000000-0000-0000-0000-00000000f001', first_name: 'Card', last_name: 'Fixture', address_line1: '55 Live Ave', city: 'Venice', state: 'FL', zip: '34285' }],
     }],
+    // send_invoice / charge_invoice read the invoice, the dispute hold, the recipients /
+    // saved cards and the charge quote (the route helpers are spied below — their own
+    // paths are covered by intelligence-bar-invoice-actions.test.js). Neither writes.
+    ['invoice-action-tools', 'executeInvoiceActionTool', 'send_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f101' }, {
+      invoices: [{ id: '00000000-0000-0000-0000-00000000f101', invoice_number: 'WPC-2099-0101', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0', line_items: [{ description: 'Pest Control', amount: 129 }] }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+    }],
+    ['invoice-action-tools', 'executeInvoiceActionTool', 'charge_invoice', { invoice_id: '00000000-0000-0000-0000-00000000f102' }, {
+      invoices: [{ id: '00000000-0000-0000-0000-00000000f102', invoice_number: 'WPC-2099-0102', status: 'sent', customer_id: 'cust-1', payer_id: null, total: '129.00', credit_applied: '0' }],
+      customers: [{ id: 'cust-1', first_name: 'Pat', last_name: 'Tester' }],
+      payment_methods: [{ id: '00000000-0000-0000-0000-00000000f103', customer_id: 'cust-1', method_type: 'card', card_brand: 'Visa', last_four: '4242', exp_month: 12, exp_year: 2032, is_default: true, stripe_payment_method_id: 'pm_synthetic' }],
+    }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES
     // below supplies the token env vars + mocked fetch responses these rows
@@ -833,6 +850,14 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
         },
       }) : null;
+    const invoiceActionSpies = ['send_invoice', 'charge_invoice'].includes(toolName)
+      ? [
+        jest.spyOn(require('../services/collections/collection-hold'), 'customerHasActiveCollectionHoldChecked').mockResolvedValue(false),
+        jest.spyOn(require('../routes/admin-invoices'), 'getInvoiceDeliveryRecipients')
+          .mockResolvedValue({ customerName: 'Pat Tester', primaryContact: { phone: '9415550100' }, emailRecipient: { email: 'pat@example.com' } }),
+        jest.spyOn(require('../services/stripe'), 'quoteInvoiceSavedCardCharge')
+          .mockResolvedValue({ base: 129, surcharge: 3.87, total: 132.87, rateBps: 300, funding: 'credit', projectedCreditApplied: 0, coveredByCredit: false }),
+      ] : [];
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -860,6 +885,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
+      invoiceActionSpies.forEach((spy) => spy.mockRestore());
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {
         for (const [key, value] of Object.entries(savedEnv)) {
@@ -1002,6 +1028,7 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // explicitly opts out of live smoke; its preview is exercised above. So does
     // resend_receipt (_sideEffects): its confirmed run emails/texts the customer.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt']);
+    // send_invoice / charge_invoice (_sideEffects): their confirmed runs text/email the customer or charge a card.
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property', 'resend_receipt', 'send_invoice', 'charge_invoice']);
   });
 });

@@ -14,6 +14,7 @@
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
+ *   GATE_IB_INVOICE_ACTIONS=true (the Intelligence Bar's send_invoice and charge_invoice write tools, owner ruling 2026-10-07: for an EXISTING invoice only, an admin can send it to the customer or charge its open balance to a saved card, each on a confirm card (never owner-direct), through the Invoices page's own handlers (POST /admin/invoices/:id/send and /:id/charge-card). A charge is card only, at most $500 including the card surcharge, and at most $1,500 a day (ET) across the bar, rechecked under the charge lock. No invoice creation, amount edit, refund or void. Read at call time via ibInvoiceActionsLive(), strict 'true', dark by default; off = the tools are not offered and refuse every call, changing nothing.)
  *   GATE_GEOFENCE_AUTO_CLOCK_IN=true (owner 2026-10-06: in automatic geofence mode, a technician with no shift today who arrives at their own scheduled visit for today is clocked in automatically (source geofence_auto) and the job timer starts, so the first stop starts the paid day; never on an unscheduled, multi-stop, other-tech, other-day, stale, inactive-tech or already-clocked-in arrival. Read at call time via geofenceAutoClockInLive(), dark by default; off = today's behavior; rollback = unset)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
@@ -4575,6 +4576,14 @@ function onSiteCallerDemoteLive() {
   return process.env.GATE_ONSITE_CALLER_DEMOTE === 'true';
 }
 
+// GATE_IB_INVOICE_ACTIONS read at CALL time — strict `=== 'true'`, dark. The
+// Intelligence Bar's send_invoice / charge_invoice tools
+// (services/intelligence-bar/invoice-action-tools.js): offered and executable
+// only while on. Kill: unset.
+function ibInvoiceActionsLive() {
+  return process.env.GATE_IB_INVOICE_ACTIONS === 'true';
+}
+
 // Report text to on-location contacts (services/contact-report-text.js),
 // read at CALL time. Strict `=== 'true'`, dark in every environment.
 function contactReportTextLive() {
@@ -5992,3 +6001,5 @@ module.exports.multiTechTextTimesLive = multiTechTextTimesLive;
 module.exports.serverDictationLive = serverDictationLive;
 // GATE_REPORT_PLAN_RESCHEDULE reader, on its own line so gate PRs never conflict.
 module.exports.reportPlanRescheduleLive = reportPlanRescheduleLive;
+// GATE_IB_INVOICE_ACTIONS reader, on its own line so gate PRs never conflict.
+module.exports.ibInvoiceActionsLive = ibInvoiceActionsLive;

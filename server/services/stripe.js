@@ -2132,6 +2132,11 @@ const StripeService = {
   // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
+  // opts.assertUnderChargeLock — async (trx, { totalCents, invoice }) run inside
+  // the charge transaction, under the invoice lock, after the final surcharged
+  // total is known and before any Stripe call; a throw refuses the charge.
+  // opts.initiatedVia — 'intelligence_bar' stamps payments.metadata.initiated_via
+  // (the bar's daily charge cap counts those rows). Both null = unchanged.
   // opts.operatorOverride — a staff member explicitly ordered THIS charge
   // (admin card-on-file): skips the default collections-dispute-hold guard and
   // records the override (opts.overrideTrail = {actorId, ip, userAgent, route,
@@ -2143,7 +2148,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requirePerformedVisit = false, requireHeldTermId = null, requireNoOtherVisitInvoice = false, requireSignedContractId = null, selfPayAccountScope = false, maxAuthorizedInvoiceTotalCents = null, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null, assertUnderChargeLock = null, initiatedVia = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2737,6 +2742,13 @@ const StripeService = {
         if (maxAuthorizedTotalCents != null && invTotalCents > Math.round(Number(maxAuthorizedTotalCents))) {
           throw new Error('Charge total exceeds the quoted total the customer authorized. Review before charging.');
         }
+        // Opt-in (the Intelligence Bar's charge_invoice, owner ruling 2026-10-07):
+        // the caller's own limits, checked on this transaction with the final
+        // total computed above, before Stripe is touched. A throw rolls back
+        // and releases the unsubmitted claim, like the refusals above.
+        if (typeof assertUnderChargeLock === 'function') {
+          await assertUnderChargeLock(trx, { totalCents: invTotalCents, invoice: lockedInvoice });
+        }
         if (stalePaymentIntentToCancel) {
           await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);
           // Unbind combined siblings from the canceled intent (codex #3427
@@ -2883,6 +2895,8 @@ const StripeService = {
             surcharge_rate_bps: invRateBps,
             surcharge_policy_version: invPolicyVersion,
             source: 'admin_card_on_file',
+            // Opt-in provenance (the Intelligence Bar's charge_invoice daily cap counts these rows).
+            ...(initiatedVia === 'intelligence_bar' ? { initiated_via: 'intelligence_bar' } : {}),
             // Stripe's settlement moment, so readers never wait on the
             // succeeded webhook for it (Codex #4996 r14): an off-session
             // intent is created, confirmed and charged in one request, so a

@@ -66,6 +66,7 @@ const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligenc
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
+const { INVOICE_ACTION_TOOLS, executeInvoiceActionTool, invoiceActionsLive } = require('../services/intelligence-bar/invoice-action-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const {
@@ -155,6 +156,7 @@ const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
 const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name));
 const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
+const INVOICE_ACTION_TOOL_NAMES = new Set(INVOICE_ACTION_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
@@ -226,6 +228,8 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Mirror requireAdmin /api/admin/customers/:id/payment-methods/:methodId and
   // /api/admin/invoices/:id/receipt-address.
   ...BILLING_WRITE_TOOL_NAMES,
+  // send_invoice / charge_invoice run the requireAdmin invoice send and charge-card handlers.
+  ...INVOICE_ACTION_TOOL_NAMES,
   // Closeout repair queues customer report emails / receipts — admin only,
   // like the closeout reads it builds on.
   ...CLOSEOUT_REPAIR_TOOL_NAMES,
@@ -853,6 +857,14 @@ const PINNED_DISPLAY_BUILDERS = {
       corrected_to: preview.after_correction_text,
     }
     : null),
+  // send_invoice / charge_invoice: the card names the invoice, the customer, the
+  // money and who is contacted; the full lines are curated in authorization-contract.js.
+  send_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'send_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, amount_due: preview.amount_due, send_by: preview.channels, sent_before: preview.send_note }
+    : null),
+  charge_invoice: (params, preview) => (preview?.preview === true && preview.tool === 'charge_invoice'
+    ? { invoice: preview.invoice_number, customer: preview.customer_name || preview.customer_id, card: preview.card, balance: preview.balance, surcharge: preview.surcharge, total_charged: preview.total_charged }
+    : null),
   // Feature switches (Codex r1 on #5489): the card must show the live facts
   // the preview read — current → new, what it means, the target and the
   // restart — not just the raw gate name / value the model sent.
@@ -889,6 +901,10 @@ const VERIFIED_VERSION_PARAMS = {
   adjust_stock: '_verified_inventory_version',
   create_restock_request: '_verified_inventory_version',
   update_restock_request: '_verified_inventory_version',
+  // send_invoice / charge_invoice bind the invoice state, the recipients or the card,
+  // and the total the card showed (invoice-action-tools.js _version).
+  send_invoice: '_verified_invoice_send_version',
+  charge_invoice: '_verified_invoice_charge_version',
   cancel_queued_message: '_verified_message_version',
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
@@ -1933,6 +1949,16 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     params.invoice_id = String(preview.invoice_id);
     delete params.invoice_number;
   }
+  // send_invoice / charge_invoice: the stored approval names the invoice (and the
+  // saved card) the preview resolved, never the number or last 4 the model sent.
+  if ((toolUse.name === 'send_invoice' || toolUse.name === 'charge_invoice') && preview?.preview === true && preview.invoice_id) {
+    params.invoice_id = String(preview.invoice_id);
+    delete params.invoice_number;
+    if (toolUse.name === 'charge_invoice' && preview.payment_method_id) {
+      params.payment_method_id = String(preview.payment_method_id);
+      delete params.card_last4;
+    }
+  }
 
   if (task) {
     const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name })
@@ -2602,7 +2628,18 @@ function getToolsForContext(context, isAdmin = false, fullAccess = false) {
     // below) — never offered without full access, whatever module it rides.
     .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name))
     .filter(t => fullAccess || !FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(t.name));
-  return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
+  const offered = withInvoiceActionTools(tools, context, isAdmin);
+  return mergeCustomersEnabled() ? offered : offered.filter(t => t.name !== 'merge_customers');
+}
+
+// send_invoice / charge_invoice (owner ruling 2026-10-07): offered to admins on the
+// Customers, Invoices / Revenue and dashboard pages while GATE_IB_INVOICE_ACTIONS is
+// on; off, they are in no list (and refuse every call).
+const INVOICE_ACTION_CONTEXTS = new Set(['customers', 'revenue', 'dashboard']);
+function withInvoiceActionTools(tools, context, isAdmin) {
+  if (!isAdmin || !INVOICE_ACTION_CONTEXTS.has(context) || !invoiceActionsLive()) return tools;
+  const present = new Set(tools.map(t => t.name));
+  return [...tools, ...INVOICE_ACTION_TOOLS.filter(t => !present.has(t.name))];
 }
 
 function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
@@ -2810,6 +2847,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (BILLING_WRITE_TOOL_NAMES.has(toolName)) {
     return executeBillingWriteTool(toolName, input, actionContext);
   }
+  if (INVOICE_ACTION_TOOL_NAMES.has(toolName)) {
+    return executeInvoiceActionTool(toolName, input, actionContext);
+  }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
   }
@@ -2888,6 +2928,7 @@ RULES:
 - Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
 - En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
+- Invoices: send_invoice and charge_invoice (when they are in your tools) act only on an EXISTING invoice — send it, or charge its open balance to a saved card (card only; at most $500 a charge and $1,500 a day from the bar). Never create an invoice, change an amount, refund or void from the bar; for those, say so and point the operator to that invoice on the Invoices page.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
