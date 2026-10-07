@@ -55,12 +55,19 @@ test('desktop and mobile are both called; a coordinate pin_location becomes loca
   await runPinnedCaptures({ pass: 'am' });
   expect(dataforseo.request).toHaveBeenCalledTimes(2);
   const bodies = dataforseo.request.mock.calls.map((c) => c[1][0]);
-  expect(bodies.map((b) => [b.device, b.os])).toEqual([['desktop', 'macos'], ['mobile', 'iOS']]);
+  expect(bodies.map((b) => [b.device, b.os])).toEqual([['desktop', 'macos'], ['mobile', 'ios']]);
   for (const b of bodies) {
-    expect(b).toMatchObject({ keyword: 'best pest control in Exampleville', location_coordinate: '27.5870,-82.4248,10', language_name: 'English', load_async_ai_overview: true });
+    expect(b).toMatchObject({ keyword: 'best pest control in Exampleville', location_coordinate: '27.5870,-82.4248,200', language_name: 'English', load_async_ai_overview: true });
     expect(b.location_name).toBeUndefined();
   }
   expect(dataforseo.request.mock.calls[0][0]).toBe('/serp/google/organic/live/advanced');
+});
+
+test('a coordinate always goes out with a radius DataForSEO accepts (199..199999)', () => {
+  const { serpPoint } = require('../services/seo/aio-pinned-capture');
+  expect(serpPoint('27.3364,-82.5307,10')).toEqual({ location_coordinate: '27.3364,-82.5307,200' });
+  expect(serpPoint('27.3364,-82.5307')).toEqual({ location_coordinate: '27.3364,-82.5307,200' });
+  expect(serpPoint('Sarasota,Florida,United States')).toEqual({ location_name: 'Sarasota,Florida,United States' });
 });
 
 test('no pin_location uses the Bradenton place name', async () => {

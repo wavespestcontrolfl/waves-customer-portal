@@ -23,6 +23,16 @@ const DEVICES = ['desktop', 'mobile'];
 const MAX_PINNED_CALLS_PER_PASS = 12;
 const ORGANIC_TOP_N = 10;
 
+// DataForSEO's organic SERP takes location_coordinate as "lat,lng,radius" with
+// radius 199..199999 (docs example 200); dataforseo.serpLocation's default 20
+// is below that, so these calls set the radius themselves. Mobile os is "ios".
+const SERP_RADIUS = 200;
+function serpPoint(location) {
+  const m = String(location || '').trim().match(/^(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:,\s*\d+(?:\.\d+)?)?$/);
+  return m ? { location_coordinate: `${m[1]},${m[2]},${SERP_RADIUS}` } : { location_name: location };
+}
+const osFor = (device) => (device === 'desktop' ? 'macos' : 'ios');
+
 const arr = (v) => (Array.isArray(v) ? v : []);
 // pg turns a JS array into a Postgres array, which a jsonb column rejects.
 const json = (v) => (v == null ? null : JSON.stringify(v));
@@ -94,10 +104,10 @@ async function captureOne(queryRow, device, pass) {
   const base = { query_id: queryRow.id, query: queryRow.query, pass, device, location };
   const data = await dataforseo.request(SERP_PATH, [{
     keyword: queryRow.query,
-    ...dataforseo.serpLocation(location),
+    ...serpPoint(location),
     language_name: 'English',
     device,
-    os: device === 'desktop' ? 'macos' : 'iOS',
+    os: osFor(device),
     load_async_ai_overview: true,
   }]);
 
@@ -181,4 +191,4 @@ async function runPinnedCaptures({ pass = 'am' } = {}) {
   return summary;
 }
 
-module.exports = { runPinnedCaptures, parseSerp, MAX_PINNED_CALLS_PER_PASS, DEFAULT_LOCATION };
+module.exports = { runPinnedCaptures, parseSerp, serpPoint, osFor, MAX_PINNED_CALLS_PER_PASS, DEFAULT_LOCATION };

@@ -397,7 +397,7 @@ describe('processSweepChunk', () => {
 
     expect(dataforseo.request).toHaveBeenCalledTimes(5);
     const shownBody = dataforseo.request.mock.calls.find((c) => c[1][0].keyword === 'shown query')[1][0];
-    expect(shownBody).toMatchObject({ device: 'mobile', os: 'iOS', language_name: 'English', load_async_ai_overview: true, location_coordinate: '27.0442,-82.2359,20' });
+    expect(shownBody).toMatchObject({ device: 'mobile', os: 'ios', language_name: 'English', load_async_ai_overview: true, location_coordinate: '27.0442,-82.2359,200' });
     expect(dataforseo.request.mock.calls[0][0]).toBe('/serp/google/organic/live/advanced');
 
     expect(rowOf('shown query')).toMatchObject({ status: 'shown', aio_shown: true, waves_cited: false, citation_kind: 'web' });

@@ -16,7 +16,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
-const { parseSerp } = require('./aio-pinned-capture');
+const { parseSerp, serpPoint, osFor } = require('./aio-pinned-capture');
 const { WAVES_RE } = require('./llm-mention-companies');
 const { normalizeCity } = require('./llm-app-scraper');
 const { isOwnedUrl } = require('./aeo-measurement');
@@ -31,7 +31,7 @@ const CHUNK_CONCURRENCY = 4;
 const GSC_WINDOW_DAYS = 90;
 const INSERT_BATCH = 500;
 
-// "lat,lng" per service city; dataforseo.serpLocation adds the radius.
+// "lat,lng" per service city; serpPoint (aio-pinned-capture.js) adds the radius.
 const CITY_COORDS = {
   Bradenton: '27.4989,-82.5748',
   Sarasota: '27.3364,-82.5307',
@@ -309,10 +309,10 @@ async function sweepOne(row) {
   // One attempt: a retry after a dropped connection can be a second billed task.
   const data = await dataforseo.request(SERP_PATH, [{
     keyword: row.query,
-    ...dataforseo.serpLocation(row.location || locationForCity(DEFAULT_CITY)),
+    ...serpPoint(row.location || locationForCity(DEFAULT_CITY)),
     language_name: 'English',
     device: 'mobile',
-    os: 'iOS',
+    os: osFor('mobile'),
     load_async_ai_overview: true,
   }], 1);
   // A dropped connection can still be a billed task: book one call's estimate
@@ -363,7 +363,7 @@ async function recoverInterrupted(runId) {
     .where('captured_at', '<', db.raw("now() - interval '30 minutes'"))
     .select('id');
   for (const r of stale) {
-    await storeResult(runId, r.id, { status: 'request_error', error: 'interrupted after the paid call started', captured_at: db.fn.now() }, EST_CALL_COST_USD);
+    await storeResult(runId, r.id, { status: 'request_error', error: 'interrupted after the paid call started', cost_usd: EST_CALL_COST_USD, captured_at: db.fn.now() }, EST_CALL_COST_USD);
   }
   return stale.length;
 }
@@ -501,17 +501,17 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
 }
 
 async function cancelSweep(runId) {
-  const run = await db('seo_aio_sweep_runs').where({ id: runId, status: 'open' }).first();
-  if (!run) return null;
-  // Settle every claimed row first (one call's estimate each): once the run is
-  // cancelled, recoverInterrupted never revisits it.
-  const running = await db('seo_aio_sweep_results').where({ run_id: runId, status: 'running' }).select('id');
-  for (const r of running) {
-    await storeResult(runId, r.id, { status: 'request_error', error: 'cancelled while the paid call was in flight', captured_at: db.fn.now() }, EST_CALL_COST_USD);
-  }
+  // Close the run first: every claim requires an open run in the same UPDATE,
+  // so no new paid call can start after this. Then settle the rows already
+  // claimed (one call's estimate each); a cancelled run is never revisited.
   const [row] = await db('seo_aio_sweep_runs').where({ id: runId, status: 'open' })
     .update({ status: 'cancelled', finished_at: db.fn.now() }).returning('*');
-  return row || null;
+  if (!row) return null;
+  const running = await db('seo_aio_sweep_results').where({ run_id: runId, status: 'running' }).select('id');
+  for (const r of running) {
+    await storeResult(runId, r.id, { status: 'request_error', error: 'cancelled while the paid call was in flight', cost_usd: EST_CALL_COST_USD, captured_at: db.fn.now() }, EST_CALL_COST_USD);
+  }
+  return running.length ? db('seo_aio_sweep_runs').where({ id: runId }).first() : row;
 }
 
 async function listRuns({ limit = 20 } = {}) {
