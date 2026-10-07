@@ -953,9 +953,12 @@ function leaksTargetList(text, {
   ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
   // Any sentence that is not a "no" or a "not sure" affirms it: "The symptoms
   // indicate root rot", "It treats termites" (Codex P1s #5964 r39).
-  return splitSentences(text).some((sentence) => !NOT_CONFIRMED_RE.test(sentence)
+  // "Is not labeled for termites" is a claim too; only "the report does not
+  // say" style uncertainty may repeat the term (Codex P1 #5964 r47).
+  return splitSentences(text).some((sentence) => !UNCERTAIN_RE.test(sentence)
     && terms.some((label) => stemmedTerms(sentence).includes(label) && !inFacts.includes(label)));
 }
+const UNCERTAIN_RE = /\b(?:(?:does|do|did)\s*n['’]?o?t\s+(?:say|show|list|mention|record|note|include|name|confirm|cover)|(?:is|are|was|were)\s*n['’]?o?t\s+(?:listed|recorded|noted|mentioned|shown|named|on\s+(?:the|this|your)\s+report)|not\s+(?:on|in)\s+(?:the|this|your)\s+report|no\s+(?:record|mention|note)|can['’]?t\s+(?:confirm|tell|say)|cannot\s+(?:confirm|tell|say)|unable\s+to|unclear|unknown|don['’]?t\s+know|not\s+sure|whether|if)\b/i;
 const NOT_CONFIRMED_RE = /\b(?:no|not|never|none|without|doesn['’]?t|does\s+not|didn['’]?t|did\s+not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|can['’]?t|cannot|unable|unclear|unknown|don['’]?t\s+know|whether|if)\b/i;
 
 const splitSentences = (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -1237,7 +1240,7 @@ const DRY_TIME_GUIDANCE = /\b(?:pets?|kids?|children|family|treated\s+(?:areas?|
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|yards?|lawns?|grass|turf|patios?|lanais?|decks?|porch(?:es)?|pool\s+(?:area|deck)|play\s*(?:area|set|ground)|treated\s+(?:areas?|zones?|spots?)|(?:the\s+)?areas?|rooms?|home|house|inside|indoors|outside|outdoors|enter\w*|use\s+(?:it|the)|ready|safe\s+to|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
 // A grant of permission with no condition: "can go out", "right away", "no
 // need to wait". "Once it is dry" and "until" keep the instruction's terms.
-const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:can|may|could)\s+(?:be|stay|get|remain)\s+(?:out|outside|in|inside|back|on|there)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead|(?:let|allow)\s+(?:your\s+|the\s+)?(?:pets?|dogs?|cats?|kids?|children|family|them|everyone)\s+(?:back|out|in|go|play|return|onto)|(?:allowed|permitted|cleared)\s+(?:back|out|to\s+(?:go|return|play|use))|(?:is|are)\s+(?:allowed|permitted|cleared|fine|okay|ok)\b)\b/i;
+const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run|enter|re-?enter|step|walk|be\s+let)|(?:let|allow)\s+(?:\w+\s+){0,2}?(?:enter|re-?enter|in|onto)\b|\bwhile\s+(?:the\s+\w+\s+|it\s+)?(?:is\s+|are\s+)?(?:still\s+)?wet\b|\bbefore\s+(?:it|the\s+\w+)\s+(?:is\s+)?dr(?:y|ies)\b|\beven\s+(?:if|when|while)\s+(?:it['’]?s\s+|it\s+is\s+)?(?:still\s+)?wet\b|(?:can|may|could)\s+(?:be|stay|get|remain)\s+(?:out|outside|in|inside|back|on|there)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead|(?:let|allow)\s+(?:your\s+|the\s+)?(?:pets?|dogs?|cats?|kids?|children|family|them|everyone)\s+(?:back|out|in|go|play|return|onto)|(?:allowed|permitted|cleared)\s+(?:back|out|to\s+(?:go|return|play|use))|(?:is|are)\s+(?:allowed|permitted|cleared|fine|okay|ok)\b)\b/i;
 // The condition must govern the restriction: drying, a wait in hours or
 // minutes, or the treatment settling ("once it is dry", "after 2 hours").
 // "After reading this" is no condition (Codex P1 #5964 r11).
@@ -1528,10 +1531,15 @@ function contradictsHealth(text, facts) {
 const GRASS_NAMES = ['st\\.?\\s*augustine', 'floratam', 'bermuda', 'zoysia', 'bahia', 'centipede', 'paspalum', 'fescue', 'rye\\s*grass', 'ryegrass', 'kikuyu', 'buffalo\\s*grass', 'carpet\\s*grass', 'empire', 'palmetto', 'celebration', 'argentine'];
 function namesWrongGrass(text, facts) {
   const recorded = String(facts?.lawn_assessment?.grass_type || '').toLowerCase();
-  return clausesOf(text).some((clause) => {
+  // "St. Augustine" is one name, not a sentence end.
+  return clausesOf(String(text).replace(/\bSt\.\s+(?=Augustine)/gi, 'St ')).some((clause) => {
     const lower = clause.toLowerCase();
-    if (NOT_CONFIRMED_RE.test(lower)) return false;
-    return GRASS_NAMES.some((name) => new RegExp(`\\b${name}\\b`).test(lower) && !new RegExp(`\\b${name}\\b`).test(recorded));
+    const named = GRASS_NAMES.filter((name) => new RegExp(`\\b${name}\\b`).test(lower));
+    if (UNCERTAIN_RE.test(lower)) return false;
+    // A denial of the recorded grass fails too: "this is not St. Augustine"
+    // (Codex P1 #5964 r47).
+    if (NOT_CONFIRMED_RE.test(lower)) return named.some((name) => new RegExp(`\\b${name}\\b`).test(recorded));
+    return named.some((name) => !new RegExp(`\\b${name}\\b`).test(recorded));
   });
 }
 
@@ -1552,14 +1560,17 @@ const WORK_ACTOR = /\b(?:we|i|our|tech\w*|technician|crew|team|[A-Z][a-z]+)\b|\b
 function claimsUnrecordedWork(text, facts) {
   const sheet = JSON.stringify([facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.products, facts?.areas_serviced]).toLowerCase();
   return clausesOf(text).some((clause) => {
-    if (NOT_CONFIRMED_RE.test(clause) || !WORK_ACTOR.test(clause)) return false;
     const lower = clause.toLowerCase();
     if (/\b(?:will|would|can|could|should|may|might|next\s+visit|if)\b/.test(lower)) return false;
     // The place or thing worked on must be on the sheet too: an ant trail on
     // the lanai grounds no attic inspection (Codex P1 #5964 r43).
-    const places = (lower.match(WORK_PLACE_RE) || []).map((place) => place.replace(/\\s+/g, ' '));
-    return WORK_CLAIMS.some(([kind, re]) => re.test(lower)
-      && (!WORK_FACT_WORDS[kind].test(sheet) || places.some((place) => !sheet.includes(place.replace(/e?s$/, '')))));
+    const places = (lower.match(WORK_PLACE_RE) || []).map((place) => place.replace(/\s+/g, ' '));
+    const recorded = (kind) => WORK_FACT_WORDS[kind].test(sheet) && places.every((place) => sheet.includes(place.replace(/e?s$/, '')));
+    // A denial of recorded work fails: "We did not inspect the attic" when the
+    // report says we did (Codex P1 #5964 r47).
+    if (NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause)) return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && recorded(kind));
+    if (!WORK_ACTOR.test(clause)) return false;
+    return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && !recorded(kind));
   });
 }
 
@@ -1612,9 +1623,29 @@ function contradictsTrend(text, facts) {
   });
 }
 
+// The kind of service named must be the recorded one: "Yes, this was a lawn
+// service" on a pest report (Codex P1 #5964 r47).
+const SERVICE_KINDS = [['pest', /\bpest\b/], ['lawn', /\b(?:lawn|turf|grass)\b/], ['tree', /\b(?:tree|shrub|palm)s?\b/], ['termite', /\btermites?\b/], ['mosquito', /\bmosquito(?:es)?\b/], ['rodent', /\b(?:rodent|rat|mouse|mice)s?\b/]];
+const SERVICE_NOUN = /\b(?:service|visit|treatment|program|plan|appointment)\b/i;
+const THIS_VISIT = /\b(?:this|that|it|today['’]?s?|your|the)\b/i;
+function contradictsServiceKind(text, facts, data) {
+  const recorded = `${facts?.service || ''} ${data?.serviceLine || ''}`.toLowerCase().replace(/_/g, ' ');
+  if (!recorded.trim()) return false;
+  return clausesOf(text).some((clause) => {
+    const lower = clause.toLowerCase();
+    if (!SERVICE_NOUN.test(lower) || !THIS_VISIT.test(lower) || UNCERTAIN_RE.test(lower)) return false;
+    // "a lawn service" names the visit's kind only next to the service noun.
+    const kinds = SERVICE_KINDS.filter(([, re]) => new RegExp(`${re.source}\\s+(?:\\w+\\s+)?(?:service|visit|treatment|program|plan|appointment)\\b`).test(lower));
+    if (!kinds.length) return false;
+    const negated = NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower);
+    return kinds.some(([, re]) => (negated ? re.test(recorded) : !re.test(recorded)));
+  });
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['service_kind', (text, { facts, data }) => contradictsServiceKind(text, facts, data)],
   ['trend_claim', (text, { facts }) => contradictsTrend(text, facts)],
   ['denies_application', (text, { facts }) => deniesRecordedApplication(text, facts)],
   ['grass_type', (text, { facts }) => namesWrongGrass(text, facts)],
@@ -1864,8 +1895,11 @@ function defaultCallModel(payload, options) {
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
 const SCHEDULE_QUESTION = /\b(?:when\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)\s+(?:is|will\s+be)|(?:service|visit|appointment|treatment)\s+date|date\s+of\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|appointment|treatment)|(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?<!\bdid\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back|in|into|inside))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?<!\b(?:did|when)\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit(?:ing)?\b|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
+// Passive booking questions: "Is another treatment booked?" (Codex P1 #5964 r47).
+const BOOKING_QUESTION = /\b(?:is|are|was|were|has|have|do|does|did)\s+(?:there\s+)?(?:another|a|any|my|our|the\s+next|(?:a|the)\s+follow[\s-]?up|more|a\s+second|a\s+return)\s+(?:\w+\s+)?(?:treatments?|visits?|services?|appointments?)\s+(?:\w+\s+)?(?:booked|scheduled|set\s+up|lined\s+up|planned|arranged|confirmed|reserved|coming)\b|\b(?:another|next|follow[\s-]?up|return|second)\s+(?:\w+\s+)?(?:treatment|visit|service|appointment)\s+(?:\w+\s+)?(?:booked|scheduled|planned|coming)\b|\bany\s+(?:more|other|upcoming|future)\s+(?:treatments?|visits?|services?|appointments?)\b/i;
 function asksAboutSchedule(question) {
-  return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
+  const text = String(question == null ? '' : question);
+  return SCHEDULE_QUESTION.test(text) || BOOKING_QUESTION.test(text);
 }
 
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);

@@ -1787,3 +1787,45 @@ describe('answer screen, Codex round 46', () => {
     expect(ask('Your overall score dropped from 80 out of 100 to 50 out of 100.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 47', () => {
+  test('entry while still wet contradicts the drying line', () => {
+    const line = 'Keep pets off treated zones until fully dry.';
+    const data = pestData({ applications: [] });
+    expect(screenAskAnswer(`${line} Pets can enter while the treatment is still wet.`, { question: 'Can my dog go out?', data, facts: { required_lines: [line] }, requiredLines: [line] })).not.toBeNull();
+  });
+
+  test('a negative label claim on a question-only pest is rejected', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, targets: ['ants'] }] });
+    const question = 'Does Alpine WSG control termites?';
+    const facts = buildReportAskFacts({ question, data });
+    expect(screenAskAnswer('Alpine WSG is not labeled for termites.', { question, data, facts })).toBe('target_list');
+    expect(screenAskAnswer('The report does not list termites for Alpine WSG.', { question, data, facts })).toBeNull();
+  });
+
+  test('a denial of the recorded grass is rejected', () => {
+    const data = lawnData({ lawnAssessment: { scores: { overallScore: 82 }, turfProfile: { grassType: 'st_augustine' } }, reportV2: { aftercare: {} } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Is this St. Augustine?', data, facts });
+    expect(ask('No, this is not St. Augustine grass.')).toBe('grass_type');
+    expect(ask('Your lawn is not Bermuda grass.')).toBeNull();
+  });
+
+  test.each(['We did not inspect the attic.', 'The technician never checked the attic.', 'No entry points were sealed.'])('a denial of recorded work is rejected: %s', (answer) => {
+    const data = pestData({ applications: [], reportSections: [{ title: 'Visit', text: 'We inspected the attic and sealed entry points.' }] });
+    expect(screenAskAnswer(answer, { question: 'Did you inspect the attic?', data, facts: buildReportAskFacts({ data }) })).toBe('unrecorded_work');
+  });
+
+  test('the service kind must be the recorded one', () => {
+    const data = pestData({ applications: [], serviceDisplayName: 'Quarterly Pest Control' });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Was this a lawn service?', data, facts });
+    expect(ask('Yes, this was a lawn service.')).toBe('service_kind');
+    expect(ask('This was not a pest service.')).toBe('service_kind');
+    expect(ask('This was a pest service.')).toBeNull();
+  });
+
+  test('a passive booking question keeps the fixed answer', () => {
+    expect(ruleAnswerReason({ serviceLine: 'pest' }, [], 'applied', 'Is another treatment booked?')).toBe('next_visit');
+  });
+});
