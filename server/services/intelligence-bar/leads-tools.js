@@ -289,7 +289,9 @@ async function queryLeads(input, readCustomerIds = []) {
       status: l.status, source: l.source_name, channel: l.channel,
       service_interest: l.service_interest, urgency: l.urgency,
       assigned_to: l.assigned_name,
-      city: l.city, address: l.address,
+      // zip too: an address edit passes street, city and ZIP together, so the
+      // bar needs the stored ZIP when only the street changes.
+      city: l.city, address: l.address, zip: l.zip,
       monthly_value: l.monthly_value ? parseFloat(l.monthly_value) : null,
       response_time_min: l.response_time_minutes,
       first_contact: l.first_contact_at,

@@ -261,6 +261,14 @@ test('authorization contract: one before/after effect per changed field, tier ye
 // address). One structural rule (Codex #6099 r7): an address edit gives
 // street, city and ZIP together, none blank; the card and the commit treat
 // the three as one set. No state field (leads have no state column).
+test('query_leads returns the stored ZIP, so a street-only fix can pass the current city and ZIP', async () => {
+  const q = chain({ limit: [{ ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' }] });
+  q.select = jest.fn(() => q);
+  db.mockReturnValue(q);
+  const res = await executeLeadsTool('query_leads', { search: 'Beta' });
+  expect(res.leads[0]).toMatchObject({ address: '21 Palm Ave', city: 'Sarasota', zip: '34201' });
+});
+
 describe('address fields', () => {
   const ADDR_LEAD = { ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' };
   const NEW = { address: '12 Palm Ave', city: 'Sarasota', zip: '34201' };
