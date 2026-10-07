@@ -607,7 +607,7 @@ const ComplianceService = {
           .where({ 'pah.product_id': limit.product_id })
           .where('pah.application_date', '>=', yearStart)
           .whereNull('pah.retracted_at')
-          .select('pah.customer_id', 'ss_prop.property_id as visit_property_id')
+          .select('pah.customer_id', 'pah.property_id', 'ss_prop.property_id as visit_property_id')
           .then(placeOnTheLedgerProperty);
         const byCustomer = new Map();
         for (const row of rows) {

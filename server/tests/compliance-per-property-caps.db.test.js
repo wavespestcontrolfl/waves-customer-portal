@@ -145,6 +145,25 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     expect(await row(customerId)).toMatchObject({ currentUsage: 1, status: 'warning' });
   });
 
+  test('the dashboard groups by the property frozen on the ledger row: two applications frozen to one lawn still warn after one visit is moved to another property', async () => {
+    const [capped] = await db('products_catalog').insert({ name: `Count cap frozen dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
+    made.products.push(capped.id);
+    const [cap3] = await db('product_limits').insert({ product_id: capped.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 3, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' }).returning('*');
+    made.limits.push(cap3.id);
+    const before = (await ComplianceService.getDashboard()).warningCount;
+    const customerId = await customerWithTwoProperties([0, 0], capped);
+    const [a, b] = (await db('customer_properties').where({ customer_id: customerId }).orderBy('is_primary', 'desc')).map((p) => p.id);
+    await db('property_application_history').where({ customer_id: customerId }).update({ property_id: a });
+    // Staff move one of the two visits to the other property afterwards: the live join would now say 1 + 1.
+    const [moved] = await db('scheduled_services').where({ customer_id: customerId }).orderBy('id').select('id');
+    await db('scheduled_services').where({ id: moved.id }).update({ property_id: b });
+    // 2 of 3 on one lawn is the warning ("this would be the LAST allowed"); 1 + 1 would not warn.
+    expect((await ComplianceService.getDashboard()).warningCount).toBe(before + 1);
+    // A legacy row (no frozen property) follows its visit: 1 at A, 1 at B, nothing near the cap.
+    await db('property_application_history').where({ customer_id: customerId }).update({ property_id: null });
+    expect((await ComplianceService.getDashboard()).warningCount).toBe(before);
+  });
+
   test('getDashboard: three customers with one application each never trip a per-lawn cap of 3 on the company total; two at one lawn of 3 does warn', async () => {
     const [capped] = await db('products_catalog').insert({ name: `Count cap dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
     made.products.push(capped.id);
