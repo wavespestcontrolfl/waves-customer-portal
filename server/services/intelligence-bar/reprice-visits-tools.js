@@ -412,7 +412,12 @@ async function stillAsApproved(pin) {
   if (!row) return null;
   const now = visitPin(row);
   if (!sameShownState(pin, now)) return null;
-  const [invoices, addons] = await Promise.all([linkedInvoices([pin.id]), visitsWithAddons([pin.id])]);
+  const [invoices, addons, customer] = await Promise.all([
+    linkedInvoices([pin.id]), visitsWithAddons([pin.id]), loadCustomer(pin.customer_id),
+  ]);
+  // The customer must still bill per visit: a switch to monthly membership
+  // during the batch stops it (dues cover those visits).
+  if (!customer || resolveBillingLane(customer).mode === 'monthly_membership') return null;
   return exclusionReason(row, { invoice: invoices.get(pin.id), hasAddons: addons.has(pin.id) }) ? null : now;
 }
 

@@ -243,6 +243,17 @@ describe('the confirmed run', () => {
     expect(Schedule.updateVisitDetails).toHaveBeenCalledTimes(1);
   });
 
+  test('a customer switched to monthly membership during the earlier saves stops the batch', async () => {
+    const card = await preview();
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      Object.assign(tables.customers[0], { billing_mode: 'monthly_membership', monthly_rate: '89.00' });
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(ask(), card._version);
+    expect(res.failed_visit).toMatchObject({ id: 'v-2', code: 'preview_changed' });
+    expect(Schedule.updateVisitDetails).toHaveBeenCalledTimes(1);
+  });
+
   test('a later visit invoiced during the earlier saves is not saved', async () => {
     const card = await preview();
     Schedule.updateVisitDetails.mockImplementationOnce(async () => {
