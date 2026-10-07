@@ -182,6 +182,44 @@ describe('createScheduleBooking runs the POST / handler', () => {
     expect(convertLeadFromEvent).not.toHaveBeenCalled();
   });
 
+  describe('approvedServiceAnchor (Intelligence Bar start_program)', () => {
+    test('the anchor the card showed books; the Schedule screen path never checks', async () => {
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedServiceAnchor: { propertyId: null, address: 'no address on file' } })).status).toBe(201);
+      expect((await createScheduleBooking({ body: oneOff, actor })).status).toBe(201);
+    });
+
+    test('a different address refuses with ADDRESS_CHANGED and books nothing', async () => {
+      const result = await createScheduleBooking({ body: oneOff, actor, approvedServiceAnchor: { propertyId: null, address: '1 Example St, Sarasota, FL 34201' } });
+      expect(result.status).toBe(409);
+      expect(result.json.code).toBe('ADDRESS_CHANGED');
+      expect(inserts).toEqual([]);
+    });
+  });
+
+  describe('child overlaps (approvedOverlapFacts set)', () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    const recurring = { ...oneOff, isRecurring: true, recurringPattern: 'monthly', recurringOngoing: true, createInvoice: true };
+    const childClash = [{ id: 'visit-7', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Lawn Care' }];
+
+    test('a child occurrence that overlaps refuses with OVERLAP_CHANGED before the child is inserted', async () => {
+      findConflictingVisits.mockResolvedValueOnce([]).mockResolvedValue(childClash);
+      const result = await createScheduleBooking({ body: recurring, actor, approvedOverlapFacts: [] });
+      expect(result.status).toBe(409);
+      expect(result.json.code).toBe('OVERLAP_CHANGED');
+      expect(inserts).toHaveLength(1); // the parent only; the transaction rolls it back
+      findConflictingVisits.mockResolvedValue([]);
+    });
+
+    test('the Schedule screen path books the series with an overlap warning', async () => {
+      findConflictingVisits.mockResolvedValueOnce([]).mockResolvedValue(childClash);
+      const result = await createScheduleBooking({ body: recurring, actor });
+      expect(result.status).toBe(201);
+      expect(result.json.recurringCreated).toBeGreaterThan(1);
+      expect(result.json.warnings.length).toBeGreaterThan(0);
+      findConflictingVisits.mockResolvedValue([]);
+    });
+  });
+
   describe('approvedOverlapFacts (Intelligence Bar start_program)', () => {
     const { findConflictingVisits } = require('../services/scheduling/occupancy');
     const clash = { id: 'visit-9', scheduled_date: '2099-07-03', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Pest Control' };

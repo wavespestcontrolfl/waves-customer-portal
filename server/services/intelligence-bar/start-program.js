@@ -233,12 +233,18 @@ async function loadProgramCustomer(customerId) {
   }
   // The address the visits anchor to: the sole active property (the
   // handler's soleActivePropertyId), else the customer's own address.
-  const place = (properties || [])[0] || customer;
-  const serviceAddress = [
-    [place.address_line1, place.address_line2].filter(Boolean).join(' '),
-    place.city, [place.state, place.zip].filter(Boolean).join(' '),
+  const serviceAddress = serviceAnchorAddress((properties || [])[0] || customer);
+  const propertyIds = (properties || []).map((p) => String(p.id));
+  return { customer, serviceAddress, propertyIds, propertyId: propertyIds[0] || null };
+}
+
+// One formatted service address (an address row: a property or the
+// customer). Shared with the booking handler's locked anchor check.
+function serviceAnchorAddress(place) {
+  return [
+    [place?.address_line1, place?.address_line2].filter(Boolean).join(' '),
+    place?.city, [place?.state, place?.zip].filter(Boolean).join(' '),
   ].filter((part) => String(part || '').trim()).join(', ') || 'no address on file';
-  return { customer, serviceAddress, propertyIds: (properties || []).map((p) => String(p.id)) };
 }
 
 // The catalog row (the Schedule screen books a picked catalog service) and
@@ -451,7 +457,7 @@ async function buildProgramPlan(input, actionContext) {
   if (args.error) return args;
   const loaded = await loadProgramCustomer(args.customerId);
   if (loaded.error) return loaded;
-  const { customer, propertyIds, serviceAddress } = loaded;
+  const { customer, propertyIds, propertyId, serviceAddress } = loaded;
   const service = await resolveProgramService(args.serviceText, args.cadence);
   if (service.error) return service;
   const { catalogRow, family } = service;
@@ -506,7 +512,7 @@ async function buildProgramPlan(input, actionContext) {
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, firstDate: args.firstDate, ...window,
       tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
-      bill, reprice, ledgerPin, serviceAddress, overlap, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
+      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
@@ -533,6 +539,9 @@ function cardLines(plan) {
   add('operational', `First visit: ${when}, technician ${plan.tech.name}, at ${plan.serviceAddress}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
   add('operational', 'Leads: no lead status changes (this booking marks no lead won)');
+  add('operational', plan.overlap.length
+    ? `No other visits at visits 2-${ONGOING_PRESEED} times (if one appears, nothing is booked)`
+    : `No other visits at the first ${ONGOING_PRESEED === 4 ? 'four' : ONGOING_PRESEED} visit times (if one appears, nothing is booked)`);
   add('operational', `After booking: ask the bar to optimize ${plan.tech.name}'s route on ${dateLabel(plan.firstDate)} (a second card)`);
   if (plan.overlap.length) {
     const who = plan.overlap.map((o) => [o.customer, o.service, o.window].filter(Boolean).join(', ')).join('; ');
@@ -744,6 +753,8 @@ async function bookSeries(plan, actionContext) {
       // resolver that is not callable without writing; this card changes no
       // lead, so the booking skips it.
       skipLeadConversion: true,
+      // The address the card showed; the handler refuses any other anchor.
+      approvedServiceAnchor: { propertyId: plan.propertyId, address: plan.serviceAddress },
     });
   } catch (err) {
     logger.error(`[intelligence-bar] start_program booking threw for customer ${plan.customerId}: ${err.message}`);
@@ -757,7 +768,7 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
-      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
+      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }
@@ -886,6 +897,7 @@ Ongoing programs only (no visit count). Refuses: a customer who is not on a mont
 module.exports = {
   START_PROGRAM_TOOL,
   startProgram,
+  serviceAnchorAddress,
   startProgramLive,
   _test: { planBill, scheduleBody, cardLines, buildProgramPlan, applyTierAndBill },
 };

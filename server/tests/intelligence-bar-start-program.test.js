@@ -173,6 +173,7 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
   test('the card says no lead status changes', async () => {
     const preview = await run(BASE_INPUT);
     expect(lines(preview, 'operational')).toContain('Leads: no lead status changes (this booking marks no lead won)');
+    expect(lines(preview, 'operational')).toContain('No other visits at the first four visit times (if one appears, nothing is booked)');
   });
 
   test('tech notice gate on and the confirming actor is not the technician: the card and contract name the notice', async () => {
@@ -387,6 +388,7 @@ describe('commit', () => {
     expect(createScheduleBooking.mock.calls[0][0].creditFreeCard).toBe(true);
     expect(createScheduleBooking.mock.calls[0][0].approvedOverlapFacts).toEqual([]);
     expect(createScheduleBooking.mock.calls[0][0].skipLeadConversion).toBe(true);
+    expect(createScheduleBooking.mock.calls[0][0].approvedServiceAnchor).toEqual({ propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' });
     // The handler queues its texts after it replies: queued, never "sent".
     expect(result.message).toContain('Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).');
     expect(result.message).not.toMatch(/\bsent per\b|confirmation sent/);
@@ -515,6 +517,14 @@ describe('commit', () => {
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: 'office-admin-1' });
     expect(result.preview_changed).toBe(true);
     expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the handler resolves a different service address under its lock: refused, preview_changed', async () => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'The service address changed since the card was shown. Nothing was booked.', code: 'ADDRESS_CHANGED' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code: 'ADDRESS_CHANGED', preview_changed: true, nothing_changed: true });
+    expect(writes).toEqual([]);
   });
 
   test('the handler finds a new overlap under its lock: refused, nothing booked, preview_changed', async () => {

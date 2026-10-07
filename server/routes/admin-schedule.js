@@ -8813,6 +8813,22 @@ async function scheduleCreateHandler(req, res, next) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
       }
+      // Intelligence Bar start_program (approvedServiceAnchor, set only by
+      // createScheduleBooking): the anchor resolved here must be the address
+      // the card showed. A lazily created primary (no property before) is the
+      // customer address, so only a pinned property id is compared by id.
+      if (req.approvedServiceAnchor) {
+        const anchorId = insertData.property_id ?? null;
+        const ADDRESS_COLS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+        const place = anchorId
+          ? await trx('customer_properties').where({ id: anchorId }).first(ADDRESS_COLS)
+          : await trx('customers').where({ id: customerId }).first(ADDRESS_COLS);
+        const approved = req.approvedServiceAnchor;
+        if ((approved.propertyId && String(anchorId || '') !== String(approved.propertyId))
+          || require('../services/intelligence-bar/start-program').serviceAnchorAddress(place) !== approved.address) {
+          throw Object.assign(httpError(409, 'The service address changed since the card was shown. Nothing was booked.'), { code: 'ADDRESS_CHANGED' });
+        }
+      }
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
@@ -9067,6 +9083,12 @@ async function scheduleCreateHandler(req, res, next) {
           });
           if (childClash.length) {
             bookingWarnings.push(slotOverlapWarning(nextDateStr));
+            // Intelligence Bar start_program: its card promised no other
+            // visit at these times, so a child overlap refuses (pre-commit,
+            // same transaction). The Schedule screen keeps the warning.
+            if (Array.isArray(req.approvedOverlapFacts)) {
+              throw Object.assign(httpError(409, `Another visit overlaps the ${nextDateStr} visit. Nothing was booked.`), { code: 'OVERLAP_CHANGED' });
+            }
           }
         }
         const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
@@ -9897,12 +9919,14 @@ async function scheduleCreateHandler(req, res, next) {
 // approvedOverlapFacts: the overlapping visits the caller's card showed
 // (bookingOverlapFacts facts); any other overlap refuses under the lock.
 // skipLeadConversion: no lead is marked won (and no booking promotion runs)
-// for this booking.
-async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false }) {
+// for this booking. approvedServiceAnchor: { propertyId, address } the card
+// showed; any other anchor refuses under the lock.
+async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor }) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
     body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true,
     skipLeadConversion: skipLeadConversion === true,
+    ...(approvedServiceAnchor ? { approvedServiceAnchor } : {}),
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
   };
   return new Promise((resolve, reject) => {
