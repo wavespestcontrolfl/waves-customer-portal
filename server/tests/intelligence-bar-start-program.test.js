@@ -16,7 +16,19 @@ jest.mock('../utils/customer-comms-lock', () => ({
   ...jest.requireActual('../utils/customer-comms-lock'),
   lockCustomerComms: jest.fn(async () => {}),
 }));
-jest.mock('../routes/admin-schedule', () => ({ createScheduleBooking: jest.fn() }));
+jest.mock('../routes/admin-schedule', () => {
+  // The handler's own date-planning functions run for real; the booking and
+  // the blackout read are stubbed.
+  const actual = jest.requireActual('../routes/admin-schedule');
+  return {
+    createScheduleBooking: jest.fn(),
+    loadSeriesBlackoutDates: jest.fn(async () => null),
+    nextRecurringDate: actual.nextRecurringDate,
+    seasonalSafeShift: actual.seasonalSafeShift,
+    recurringCandidateTooCloseToAnchor: actual.recurringCandidateTooCloseToAnchor,
+    recurrenceOrdinalOptions: actual.recurrenceOrdinalOptions,
+  };
+});
 
 const db = require('../models/db');
 const PlanRateLedger = require('../services/plan-rate-ledger');
@@ -27,6 +39,9 @@ const WindowRules = require('../services/scheduling/window-rules');
 const DatetimeEt = require('../utils/datetime-et');
 const InspectionCredit = require('../services/inspection-credit');
 const TechNotices = require('../services/tech-visit-notifications');
+const Seeder = require('../services/recurring-appointment-seeder');
+const FeatureGates = require('../config/feature-gates');
+const Schedule = require('../routes/admin-schedule');
 const { createScheduleBooking } = require('../routes/admin-schedule');
 const { executeCustomerLifecycleTool, CUSTOMER_LIFECYCLE_TOOLS } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { buildContract } = require('../services/intelligence-bar/authorization-contract');
@@ -87,6 +102,15 @@ const BASE_INPUT = {
   technician_id: TECH_ID,
 };
 
+// The handler books and its WaveGuard plan sync raises the tier to what the
+// card predicted (Silver), as the real booking would.
+function bookWithPlanSync(reply) {
+  createScheduleBooking.mockImplementation(async () => {
+    tables.customers = [memberCustomer({ waveguard_tier: 'Silver' })];
+    return reply;
+  });
+}
+
 const run = (input, ctx = {}) => executeCustomerLifecycleTool('start_program', input, ctx);
 
 beforeEach(() => {
@@ -118,6 +142,9 @@ beforeEach(() => {
   jest.spyOn(WindowRules, 'probeSlotOverlap').mockResolvedValue([]);
   jest.spyOn(InspectionCredit, 'projectRedeemableOfferAmount').mockResolvedValue(0);
   jest.spyOn(TechNotices, 'isEnabled').mockReturnValue(false);
+  jest.spyOn(Seeder, 'customerPrefersNoWeekends').mockResolvedValue(false);
+  const realIsEnabled = FeatureGates.isEnabled;
+  jest.spyOn(FeatureGates, 'isEnabled').mockImplementation((g) => (g === 'editApptAddress' ? true : realIsEnabled(g)));
   createScheduleBooking.mockReset();
 });
 
@@ -168,6 +195,35 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     expect(typeof preview._version).toBe('string');
     expect(writes).toEqual([]);
     expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('the card shows all four visit dates the Schedule screen would book', async () => {
+    const preview = await run(BASE_INPUT);
+    expect(lines(preview, 'operational')).toContain('Visit dates booked now: Tue, Mar 3, 2099; Tue, Apr 7, 2099; Tue, May 5, 2099; Tue, Jun 2, 2099');
+  });
+
+  test('a no-weekend customer: Saturday occurrences move the way the handler moves them', async () => {
+    Seeder.customerPrefersNoWeekends.mockResolvedValue(true);
+    const preview = await run({ ...BASE_INPUT, first_date: '2099-03-07' });
+    const line = lines(preview, 'operational').find((l) => l.startsWith('Visit dates booked now:'));
+    // The anchor the operator picked stays; every later visit lands on a weekday.
+    expect(line.split(': ')[1].split('; ').slice(1).every((d) => !/^(Sat|Sun)/.test(d))).toBe(true);
+    expect(line).toContain('Sat, Mar 7, 2099');
+  });
+
+  test('a blackout day on a planned date moves it, and the card shows the moved date', async () => {
+    Schedule.loadSeriesBlackoutDates.mockResolvedValue({ dates: new Set(['2099-04-03']), weeklyDaysOff: [] });
+    const preview = await run(BASE_INPUT);
+    const line = lines(preview, 'operational').find((l) => l.startsWith('Visit dates booked now:'));
+    expect(line).not.toContain('Fri, Apr 3, 2099');
+    Schedule.loadSeriesBlackoutDates.mockResolvedValue(null);
+  });
+
+  test('GATE_EDIT_APPT_ADDRESS off: no explicit propertyId (the handler would refuse it); the anchor check still applies', async () => {
+    FeatureGates.isEnabled.mockImplementation((g) => (g === 'editApptAddress' ? false : false));
+    const { scheduleBody, buildProgramPlan } = require('../services/intelligence-bar/start-program')._test;
+    const built = await buildProgramPlan(BASE_INPUT);
+    expect(scheduleBody(built.plan).propertyId).toBeUndefined();
   });
 
   test('the card says no lead status changes', async () => {
@@ -358,6 +414,13 @@ describe('refusals', () => {
     expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_already_billed' });
   });
 
+  test('no saved property: refused (the booking would create one)', async () => {
+    tables.customer_properties = [];
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_no_property');
+    expect(result.error).toContain('Add the service address as a property on the customer page first');
+  });
+
   test('more than one saved address', async () => {
     tables.customer_properties = [{ id: 'prop-1' }, { id: 'prop-2' }];
     expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_multiple_properties' });
@@ -371,7 +434,7 @@ describe('commit', () => {
 
   test('books through the Schedule screen handler, then sets tier and bill in one transaction', async () => {
     const version = await approvedVersion();
-    createScheduleBooking.mockResolvedValue({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [{ id: 'series-1', date: '2099-03-03' }], warnings: [] } });
+    bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [{ id: 'series-1', date: '2099-03-03' }], warnings: [] } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true, technicianId: TECH_ID });
 
     expect(result).toMatchObject({ success: true, tier: { before: 'Bronze', after: 'Silver' }, monthly_bill: { before: 41.33, after: 102.66 } });
@@ -388,6 +451,9 @@ describe('commit', () => {
     expect(createScheduleBooking.mock.calls[0][0].creditFreeCard).toBe(true);
     expect(createScheduleBooking.mock.calls[0][0].approvedOverlapFacts).toEqual([]);
     expect(createScheduleBooking.mock.calls[0][0].skipLeadConversion).toBe(true);
+    expect(createScheduleBooking.mock.calls[0][0].approvedVisitDates).toEqual(['2099-03-03', '2099-04-07', '2099-05-05', '2099-06-02']);
+    expect(createScheduleBooking.mock.calls[0][0].approvedNoOpenEstimateFamily).toBe('lawn_care');
+    expect(body.propertyId).toBe('prop-1');
     expect(createScheduleBooking.mock.calls[0][0].approvedServiceAnchor).toEqual({ propertyId: 'prop-1', address: '1 Example St, Sarasota, FL 34201' });
     expect(createScheduleBooking.mock.calls[0][0].approvedBilling).toEqual({
       payer_id: null, billing_mode: 'monthly_membership', per_application_fee: null, waveguard_tier: 'Bronze', monthly_rate: '41.33',
@@ -404,7 +470,7 @@ describe('commit', () => {
   test('reprice lines are written first, in the card order', async () => {
     const input = { ...BASE_INPUT, reprice_lines: [{ service: 'pest_control', monthly: 39.26 }] };
     const version = await approvedVersion(input);
-    createScheduleBooking.mockResolvedValue({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+    bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
     await run({ ...input, _verified_program_version: version }, { confirmed: true });
     expect(PlanRateLedger.setLineForScalarWrite.mock.calls.map((c) => c[2])).toEqual([
       { familyKey: 'pest_control', previousScalar: 41.33, newScalar: 39.26 },
@@ -537,6 +603,27 @@ describe('commit', () => {
     expect(createScheduleBooking).not.toHaveBeenCalled();
   });
 
+  test.each(['DATES_CHANGED', 'ESTIMATE_OPENED'])('the handler refuses with %s: nothing booked, preview_changed', async (code) => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Changed. Nothing was booked.', code } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code, preview_changed: true, nothing_changed: true });
+    expect(writes).toEqual([]);
+  });
+
+  test('a tier another writer set after the booking is not overwritten: partial receipt names it', async () => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockImplementation(async () => {
+      // Plan sync was predicted to leave Silver (source manual); someone set Gold.
+      tables.customers = [memberCustomer({ waveguard_tier: 'Gold', waveguard_tier_source: 'manual' })];
+      return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+    });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ partial: true, not_done: ['waveguard_tier', 'monthly_bill'] });
+    expect(result.warning).toContain('The tier changed after the booking (now Gold, set by manual)');
+    expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+  });
+
   test('the handler finds changed billing under its lock: refused, nothing booked, preview_changed', async () => {
     const version = await approvedVersion();
     createScheduleBooking.mockResolvedValue({ status: 409, json: { error: "The customer's billing changed since the card was shown. Nothing was booked.", code: 'BILLING_CHANGED' } });
@@ -596,7 +683,7 @@ describe('commit', () => {
   test('a first-ever recurring customer: the receipt says the welcome is queued', async () => {
     Welcome.isNewRecurringSignupCandidate.mockResolvedValue(true);
     const version = await approvedVersion();
-    createScheduleBooking.mockResolvedValue({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
+    bookWithPlanSync({ status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result.message).toContain('Welcome text and welcome email queued for about 1 hour from now (a failure is logged).');
   });

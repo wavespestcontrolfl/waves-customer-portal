@@ -8,6 +8,9 @@
  * Harness from admin-schedule-create-tech-absence.test.js.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+// Read into the gate map at load: an explicit propertyId (start_program's
+// pinned property) is accepted only while it is on.
+process.env.GATE_EDIT_APPT_ADDRESS = 'true';
 jest.setTimeout(30000);
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -208,6 +211,61 @@ describe('createScheduleBooking runs the POST / handler', () => {
       expect(result.status).toBe(409);
       expect(result.json.code).toBe('BILLING_CHANGED');
       expect(inserts).toEqual([]);
+    });
+  });
+
+  describe('approvedVisitDates / approvedNoOpenEstimateFamily / propertyId (Intelligence Bar start_program)', () => {
+    const recurringBody = { ...oneOff, isRecurring: true, recurringPattern: 'monthly', recurringOngoing: true, createInvoice: true };
+
+    test('the dates the handler plans book; any other dates refuse with DATES_CHANGED before any insert', async () => {
+      const plain = await createScheduleBooking({ body: recurringBody, actor });
+      expect(plain.status).toBe(201);
+      const dates = plain.json.appointments.map((a) => a.date);
+      inserts.length = 0;
+      expect((await createScheduleBooking({ body: recurringBody, actor, approvedVisitDates: dates })).status).toBe(201);
+      inserts.length = 0;
+      const changed = await createScheduleBooking({ body: recurringBody, actor, approvedVisitDates: [dates[0], '2099-12-31'] });
+      expect(changed.status).toBe(409);
+      expect(changed.json.code).toBe('DATES_CHANGED');
+      expect(inserts).toEqual([]);
+    });
+
+    test('an open estimate found inside the transaction refuses with ESTIMATE_OPENED; none books', async () => {
+      const StartProgram = require('../services/intelligence-bar/start-program');
+      const spy = jest.spyOn(StartProgram, 'openEstimateForFamily').mockResolvedValueOnce({ id: 'est-1', status: 'sent' });
+      const refused = await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimateFamily: 'lawn_care' });
+      expect(refused.status).toBe(409);
+      expect(refused.json.code).toBe('ESTIMATE_OPENED');
+      expect(spy).toHaveBeenCalledWith('cust-1', 'lawn_care', expect.anything());
+      expect(inserts).toEqual([]);
+      spy.mockResolvedValueOnce(null);
+      expect((await createScheduleBooking({ body: oneOff, actor, approvedNoOpenEstimateFamily: 'lawn_care' })).status).toBe(201);
+      spy.mockRestore();
+    });
+
+    test('an explicit propertyId (GATE_EDIT_APPT_ADDRESS on) stamps that property on the visit', async () => {
+      const PROP = '00000000-0000-4000-8000-00000000a001';
+      const propertyRow = { id: PROP, customer_id: 'cust-1', active: true, address_line1: '1 Example St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201' };
+      const baseDb = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        if (table === 'customer_properties') return chain(propertyRow);
+        const c = baseDb(table);
+        if (table === 'scheduled_services') {
+          c.columnInfo = jest.fn().mockResolvedValue({ source_action: {}, property_id: {}, service_address_line1: {}, service_address_line2: {}, service_address_city: {}, service_address_state: {}, service_address_zip: {} });
+        }
+        return c;
+      });
+      const baseTrx = db.transaction.getMockImplementation();
+      db.transaction.mockImplementation(async (cb) => baseTrx(async (trx) => {
+        const wrapped = jest.fn((table) => (table === 'customer_properties' ? chain(propertyRow) : trx(table)));
+        Object.assign(wrapped, trx);
+        return cb(wrapped);
+      }));
+      const result = await createScheduleBooking({ body: { ...oneOff, propertyId: PROP }, actor });
+      expect(result.status).toBe(201);
+      // The zone comes from the pinned property (Sarasota), not the customer
+      // row (no city here -> the lakewood_ranch default).
+      expect(inserts[0]).toMatchObject({ property_id: PROP, service_address_line1: '1 Example St', service_address_city: 'Sarasota', zone: 'sarasota' });
     });
   });
 

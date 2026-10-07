@@ -619,6 +619,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       }],
       services: [{ id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', billing_type: 'recurring', is_active: true, default_duration_minutes: 60 }],
       technicians: [{ id: '00000000-0000-0000-0000-00000000e0aa', name: 'Sam Tech' }],
+      customer_properties: [{ id: 'prop-e001', address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '34201' }],
       scheduled_services: [],
       estimates: [],
     }],

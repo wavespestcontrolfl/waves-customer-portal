@@ -139,11 +139,11 @@ function planBill({ components, previousScalar, family, monthly, monthlyTotal, r
 // Is there an open estimate for this service family? Accepting estimates from
 // the bar is a pending owner decision (Q5), so an open quote for the service
 // refuses instead of booking around it. An unreadable estimate fails closed.
-async function openEstimateForFamily(customerId, family) {
+async function openEstimateForFamily(customerId, family, conn = db) {
   // The estimate lifecycle's open set (sending included); an archived row keeps
   // its status but is no longer an offer.
   const { OPEN_ESTIMATE_STATUSES } = require('../estimate-conversion-agent');
-  const rows = await db('estimates').where({ customer_id: customerId })
+  const rows = await conn('estimates').where({ customer_id: customerId })
     .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').select('id', 'status', 'estimate_data');
   if (!rows.length) return null;
   const { acceptedRecurringBillingLines } = require('../plan-rate-ledger');
@@ -230,6 +230,11 @@ async function loadProgramCustomer(customerId) {
     .select('id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
   if ((properties || []).length > 1) {
     return refusal('This customer has more than one saved address. Book the program from the Schedule screen so you can pick the address. Nothing was proposed.', 'program_multiple_properties');
+  }
+  // No saved property: the booking would create one (soleActivePropertyId's
+  // lazy primary), an effect this card does not show.
+  if (!(properties || []).length) {
+    return refusal('This customer has no saved service address. Add the service address as a property on the customer page first. Nothing was proposed.', 'program_no_property');
   }
   // The address the visits anchor to: the sole active property (the
   // handler's soleActivePropertyId), else the customer's own address.
@@ -424,6 +429,29 @@ async function firstVisitOverlap(firstDate, window, customerId, propertyId) {
   return facts.sort((a, b) => (a.fact < b.fact ? -1 : a.fact > b.fact ? 1 : 0));
 }
 
+// The first four visit dates, by the handler's own planning functions
+// (admin-schedule.js nextRecurringDate / seasonalSafeShift /
+// recurringCandidateTooCloseToAnchor / recurrenceOrdinalOptions /
+// loadSeriesBlackoutDates, exported unchanged) in the handler's own loop
+// shape: no skip-weekends box, the customer's no-weekend preference,
+// forward shift, blackout days. The handler re-plans and refuses with
+// DATES_CHANGED if its dates differ.
+async function plannedVisitDates(customerId, firstDate, cadence) {
+  const Sched = require('../../routes/admin-schedule');
+  const { customerPrefersNoWeekends } = require('../recurring-appointment-seeder');
+  const skip = !!(await customerPrefersNoWeekends(db, customerId));
+  const blackout = await Sched.loadSeriesBlackoutDates(db, firstDate);
+  const rOpts = { ...Sched.recurrenceOrdinalOptions(firstDate, { nth: undefined, weekday: undefined }), intervalDays: undefined };
+  const dates = [firstDate];
+  const maxAttempts = (ONGOING_PRESEED - 1) * 4 + 30;
+  for (let attempt = 1; dates.length < ONGOING_PRESEED && attempt < maxAttempts; attempt += 1) {
+    const next = Sched.seasonalSafeShift(Sched.nextRecurringDate(firstDate, cadence, attempt, rOpts), cadence, skip, 'forward', blackout);
+    if (!next || Sched.recurringCandidateTooCloseToAnchor(firstDate, cadence, next) || dates.includes(next)) continue;
+    dates.push(next);
+  }
+  return dates;
+}
+
 // D3: the Schedule screen's texts. The new-recurring welcome text has no
 // switch on that screen either, so a "no texts" card is refused when the
 // welcome would still go out.
@@ -495,6 +523,7 @@ async function buildProgramPlan(input, actionContext) {
   if (overlap.error) return overlap;
   const planSync = await predictPlanSync(customer, catalogRow, args.firstDate, args.cadence);
   if (planSync.error) return planSync;
+  const visitDates = await plannedVisitDates(args.customerId, args.firstDate, args.cadence);
 
   const welcome = await welcomeVerdict(args);
   if (welcome.error) return welcome;
@@ -520,7 +549,7 @@ async function buildProgramPlan(input, actionContext) {
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, firstDate: args.firstDate, ...window,
       tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: welcome.delay,
-      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
+      bill, reprice, ledgerPin, serviceAddress, propertyId, overlap, visitDates, sendPropertyId: editApptAddressLive(), techNotice: techNoticeFor(techPin, actionContext), planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
@@ -528,7 +557,7 @@ async function buildProgramPlan(input, actionContext) {
       version: crypto.createHash('sha256').update(JSON.stringify([
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, family, args.tier, args.cadence, args.firstDate,
-        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, techNoticeFor(techPin, actionContext),
+        window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds, inspectionCredit, serviceAddress, visitDates, editApptAddressLive(), techNoticeFor(techPin, actionContext),
         overlap.map((o) => o.fact), planSync.updates,
       ])).digest('hex'),
     },
@@ -545,6 +574,7 @@ function cardLines(plan) {
   const series = `ongoing, no end date (the first ${ONGOING_PRESEED} visits are booked now, as on the Schedule screen)`;
   add('operational', `Series: ${plan.catalogRow.name}, ${CADENCES[plan.cadence]}, ${series}`);
   add('operational', `First visit: ${when}, technician ${plan.tech.name}, at ${plan.serviceAddress}`);
+  add('operational', `Visit dates booked now: ${plan.visitDates.map((d) => dateLabel(d)).join('; ')}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
   add('operational', 'Leads: no lead status changes (this booking marks no lead won)');
   add('operational', plan.overlap.length
@@ -651,6 +681,11 @@ function scheduleBody(plan) {
     skipWeekends: false,
     sendConfirmationSms: plan.sendTexts,
     sendConfirmation: plan.sendTexts,
+    // The pinned property, so the handler's bookingProperty, zone and
+    // per-property series scope use it from the start. The handler accepts
+    // an explicit property only while GATE_EDIT_APPT_ADDRESS is on (pinned);
+    // off, its sole-property anchor resolves the same single property.
+    ...(plan.sendPropertyId ? { propertyId: plan.propertyId } : {}),
   };
 }
 
@@ -664,6 +699,15 @@ async function actorFor(actionContext) {
     } catch { /* name is a label only */ }
   }
   return { technicianId, technicianName };
+}
+
+// The tier must be what the booking's plan sync was predicted to leave;
+// anything else was written by someone else and is not overwritten.
+function tierDrift(plan, locked) {
+  const expectedTier = plan.planSyncUpdates?.waveguard_tier ?? plan.customer.waveguard_tier ?? null;
+  if ((locked.waveguard_tier ?? null) === expectedTier
+    && (locked.waveguard_tier_source ?? null) === (plan.customer.waveguard_tier_source ?? null)) return null;
+  return Object.assign(new Error(`The tier changed after the booking (now ${locked.waveguard_tier || 'none'}, set by ${locked.waveguard_tier_source || 'unknown'}).`), { drift: true });
 }
 
 // Step 2: tier + ledger lines + monthly total in ONE transaction, with the
@@ -690,6 +734,8 @@ async function applyTierAndBill(plan) {
       || (locked.payer_id || null) !== (plan.customer.payer_id || null)) {
       throw Object.assign(new Error("The customer's monthly bill or billing lane changed after the card was shown."), { drift: true });
     }
+    const tierChanged = tierDrift(plan, locked);
+    if (tierChanged) throw tierChanged;
     const clean = sanitizeUpdates({ waveguard_tier: plan.tier, monthly_rate: plan.bill.totalAfter });
     if (impliedMonthlyStampForWrite(locked, { ...locked, ...clean })) {
       throw Object.assign(new Error('The change would set a new billing lane the card did not show.'), { drift: true });
@@ -765,6 +811,9 @@ async function bookSeries(plan, actionContext) {
       skipLeadConversion: true,
       // The address the card showed; the handler refuses any other anchor.
       approvedServiceAnchor: { propertyId: plan.propertyId, address: plan.serviceAddress },
+      approvedVisitDates: plan.visitDates,
+      // Re-run the open-estimate check inside the booking transaction.
+      approvedNoOpenEstimateFamily: plan.family,
       // The billing state the card was built on (dues-covered visits); the
       // handler re-checks it under the customer lock before any insert.
       approvedBilling: Object.fromEntries(['payer_id', 'billing_mode', 'per_application_fee', 'waveguard_tier', 'monthly_rate']
@@ -782,7 +831,7 @@ async function bookSeries(plan, actionContext) {
     return { result: {
       error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
       ...(body.code ? { code: body.code } : {}),
-      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED'].includes(body.code) ? { preview_changed: true } : {}),
+      ...(['INSPECTION_CREDIT_CHANGED', 'OVERLAP_CHANGED', 'ADDRESS_CHANGED', 'BILLING_CHANGED', 'DATES_CHANGED', 'ESTIMATE_OPENED'].includes(body.code) ? { preview_changed: true } : {}),
       nothing_changed: true,
     } };
   }
@@ -908,8 +957,13 @@ Ongoing programs only (no visit count). Refuses: a customer who is not on a mont
   },
 };
 
+function editApptAddressLive() {
+  return require('../../config/feature-gates').isEnabled('editApptAddress') === true;
+}
+
 module.exports = {
   START_PROGRAM_TOOL,
+  openEstimateForFamily,
   startProgram,
   serviceAnchorAddress,
   startProgramLive,

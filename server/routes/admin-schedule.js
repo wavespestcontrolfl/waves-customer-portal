@@ -8510,6 +8510,13 @@ async function scheduleCreateHandler(req, res, next) {
         bookingWarnings.push(`Recurring plan requested ${plannedCount} visits but only ${placed} could be placed — the remaining dates fall on blackout days or closed weekdays. Adjust the days-off/blackout settings or add the missing visits manually.`);
       }
     }
+    // Intelligence Bar start_program (approvedVisitDates, set only by
+    // createScheduleBooking): the series dates must be the ones its card
+    // showed. Nothing is written yet.
+    if (Array.isArray(req.approvedVisitDates)
+      && [dateOnly(scheduledDate), ...plannedChildDates].join(',') !== req.approvedVisitDates.join(',')) {
+      throw Object.assign(httpError(409, 'The visit dates changed since the card was shown. Nothing was booked.'), { code: 'DATES_CHANGED' });
+    }
 
     // Booster months — extra one-off visits on top of the base series
     // (e.g. quarterly pest + summer-month boosters). Pre-seed the next 12
@@ -8637,6 +8644,16 @@ async function scheduleCreateHandler(req, res, next) {
         const projectedCredit = await InspectionCreditLock.projectRedeemableOfferAmount(customerId, { dbh: trx, includePaused: true });
         if ((Number(projectedCredit?.amount ?? projectedCredit) || 0) > 0) {
           throw Object.assign(httpError(409, 'This customer now has an open inspection credit the card did not show. Nothing was booked.'), { code: 'INSPECTION_CREDIT_CHANGED' });
+        }
+      }
+      // start_program (approvedNoOpenEstimateFamily): the card's open-estimate
+      // check re-run inside this transaction. Estimate creation takes no
+      // shared per-customer lock, so only its own insert can still race this.
+      if (req.approvedNoOpenEstimateFamily) {
+        const openEstimate = await require('../services/intelligence-bar/start-program')
+          .openEstimateForFamily(customerId, req.approvedNoOpenEstimateFamily, trx);
+        if (openEstimate) {
+          throw Object.assign(httpError(409, 'This customer now has an open estimate for this service. Mark the estimate accepted on the estimate page. Nothing was booked.'), { code: 'ESTIMATE_OPENED' });
         }
       }
       // Phone-agent double-booking backstop: the call pipeline inserts its
@@ -9930,13 +9947,21 @@ async function scheduleCreateHandler(req, res, next) {
 // for this booking. approvedServiceAnchor: { propertyId, address } the card
 // showed; any other anchor refuses under the lock. approvedBilling: the
 // billing columns (payer, lane, fee, tier, rate) the card was built on.
-async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling }) {
+// approvedVisitDates: the series dates the card showed (DATES_CHANGED on any
+// difference); approvedNoOpenEstimateFamily: re-check open estimates for that
+// service family inside the transaction (ESTIMATE_OPENED).
+async function createScheduleBooking({
+  body, actor, creditFreeCard = false, approvedOverlapFacts, skipLeadConversion = false, approvedServiceAnchor, approvedBilling,
+  approvedVisitDates, approvedNoOpenEstimateFamily,
+}) {
   await primePercentDiscountExclusions().catch(() => {});
   const req = {
     body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true,
     skipLeadConversion: skipLeadConversion === true,
     ...(approvedServiceAnchor ? { approvedServiceAnchor } : {}),
     ...(approvedBilling ? { approvedBilling } : {}),
+    ...(Array.isArray(approvedVisitDates) ? { approvedVisitDates } : {}),
+    ...(approvedNoOpenEstimateFamily ? { approvedNoOpenEstimateFamily } : {}),
     ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
   };
   return new Promise((resolve, reject) => {
@@ -28467,6 +28492,12 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
+// The series date planning the create handler runs, for the Intelligence
+// Bar's start_program card (its dates are re-checked here: DATES_CHANGED).
+module.exports.seasonalSafeShift = seasonalSafeShift;
+module.exports.recurringCandidateTooCloseToAnchor = recurringCandidateTooCloseToAnchor;
+module.exports.recurrenceOrdinalOptions = recurrenceOrdinalOptions;
+module.exports.loadSeriesBlackoutDates = loadSeriesBlackoutDates;
 // Read-only reuse for the pest-rides-the-lawn-rhythm READ-ONLY PREVIEW
 // (services/rider-series-preview.js — the write engine itself is #5268,
 // paused): the SAME series-eligibility table the nightly top-up already
