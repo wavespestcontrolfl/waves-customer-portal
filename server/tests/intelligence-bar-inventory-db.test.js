@@ -301,7 +301,7 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     const forged = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: outsider.id });
     expect(forged).toMatchObject({ status: 409, body: { code: 'product_not_offered' } });
     const chosen = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
-    expect(chosen.status).toBe(200);
+    expect([chosen.status, chosen.body.error]).toEqual([200, undefined]);
     for (const row of [ten, twenty, outsider]) {
       expect(await onHand(row.id)).toBe(10);
       expect(await db('product_inventory_movements').where({ product_id: row.id })).toHaveLength(0);
@@ -312,6 +312,13 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(replay.body).toMatchObject({ replayed: true, pendingAction: { id: chosen.body.pendingAction.id, contract_hash: chosen.body.pendingAction.contract_hash } });
     expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: picker.id, contract_hash: picker.contract_hash })).status).toBe(409);
     const card = chosen.body.pendingAction;
+    // Under the platform the picker belonged to a task: the chosen card joins it.
+    const pickerTask = (await db('ib_pending_actions').where({ id: picker.id }).first()).task_id;
+    expect(pickerTask).toBeTruthy();
+    expect((await db('ib_pending_actions').where({ id: card.id }).first()).task_id).toBe(pickerTask);
+    const waiting = await api(`/api/admin/intelligence-bar/tasks/${pickerTask}?session_id=${sessionId}`);
+    expect(waiting.body.pendingActions.map((a) => a.id)).toEqual([card.id]);
+    expect(waiting.body.taskState).toBe('awaiting_approval');
     expect(JSON.stringify(card.contract.effects)).toContain(`${twenty.name}: restock 2 lb; on hand 10 → 12 lb`);
     const saved = await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
     expect(saved.body).toMatchObject({ success: true, result: { product: { id: twenty.id } } });
@@ -330,13 +337,15 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(await api('/api/admin/intelligence-bar/show-again', { pending_action_id: taskCard.id }))
       .toMatchObject({ status: 409, body: { code: 'task_owned' } });
     expect((await db('ib_pending_actions').where({ id: taskCard.id }).first()).status).toBe('pending');
-    // A product choice makes a standalone card (no task).
-    const prefix = `ReshowQA${crypto.randomUUID().slice(0, 8)}`;
-    const ten = await product({ name: `${prefix} 10% SC` });
-    await product({ name: `${prefix} 20% SC` });
-    const picker = (await propose('adjust_stock', { product_name: prefix, movement_type: 'restock', quantity: 2, unit: 'lb' },
-      `We got 2 lb of ${prefix}`)).body.pendingActions[0];
-    const card = (await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: ten.id })).body.pendingAction;
+    // A standalone card (no task): the platform path off for one proposal.
+    const ten = await product();
+    process.env.GATE_IB_PLATFORM = 'false';
+    let card;
+    try {
+      card = (await propose('adjust_stock', { product_id: ten.id, movement_type: 'restock', quantity: 2, unit: 'lb' },
+        `Add 2 lb of ${ten.name} that arrived`)).body.pendingActions[0];
+    } finally { process.env.GATE_IB_PLATFORM = 'true'; }
+    expect((await db('ib_pending_actions').where({ id: card.id }).first()).task_id).toBeNull();
     expect(await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id })).toMatchObject({ status: 409, body: { code: 'not_expired' } });
     await db('ib_pending_actions').where({ id: card.id }).update({ expires_at: new Date(Date.now() - 1000) });
     const shown = await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id });

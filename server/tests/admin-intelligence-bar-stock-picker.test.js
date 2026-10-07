@@ -24,6 +24,7 @@ const mockRecordResult = jest.fn(async () => true);
 const mockGetPendingRow = jest.fn();
 const mockRetireExpiredAction = jest.fn();
 const mockAttachThread = jest.fn(async () => 1);
+const mockFindChosenCard = jest.fn(async () => null);
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -86,6 +87,8 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   getPendingRow: (...args) => mockGetPendingRow(...args),
   retireExpiredAction: (...args) => mockRetireExpiredAction(...args),
   attachThread: (...args) => mockAttachThread(...args),
+  findChosenCard: (...args) => mockFindChosenCard(...args),
+  stepKey: jest.fn(() => 'step-key'),
   getActionReceipt: jest.fn(async () => null),
 }));
 jest.mock('../services/inspection-credit', () => ({ projectRedeemableOfferAmount: jest.fn(async () => ({ amount: 0 })) }));
@@ -158,7 +161,7 @@ const confirmedCalls = () => mockExecuteProcurementTool.mock.calls.filter(([, , 
 beforeEach(() => {
   jest.clearAllMocks();
   mockCreatePendingAction.mockImplementation(async ({ toolName, summary }) => ({
-    id: NEW_ID, tool_name: toolName, summary, expires_at: new Date(Date.now() + 600000).toISOString(),
+    id: NEW_ID, tool_name: toolName, summary, status: 'pending', expires_at: new Date(Date.now() + 600000).toISOString(),
   }));
   mockProductChoicesFor.mockResolvedValue(CHOICES);
   mockExecuteProcurementTool.mockImplementation(async (name, input) => {
@@ -254,7 +257,11 @@ describe('/choose-product', () => {
     // The pick is the grounding: no free-text resolution runs on it.
     expect(mockResolveInventoryWriteTarget).not.toHaveBeenCalled();
     expect(confirmedCalls()).toHaveLength(0);
-    expect(mockRecordResult).toHaveBeenCalledWith(CHOICE_ID, expect.objectContaining({ success: true, written: false, chosen_product_id: PRODUCT_B, next_action_id: NEW_ID }));
+    expect(mockRecordResult).toHaveBeenCalledWith(CHOICE_ID, expect.objectContaining({ success: true, written: false, chosen_product_id: PRODUCT_B }));
+    // The receipt reaches the model on task resume: it never carries the new card's id.
+    expect(JSON.stringify(mockRecordResult.mock.calls)).not.toContain(NEW_ID);
+    expect(proposed.params._ib_chosen_from).toBe(CHOICE_ID);
+    expect(proposed.taskId).toBeUndefined();
   });
 
   test.each([
@@ -299,8 +306,8 @@ describe('/choose-product replay and history', () => {
     contract: { action_label: 'Adjust inventory stock', effects: [] }, expires_at: new Date(Date.now() + 300000).toISOString() };
 
   test('a retry after a lost response gets the card the same choice already made', async () => {
-    const used = pickerRow({ status: 'confirmed', result: { success: true, chosen_product_id: PRODUCT_B, next_action_id: NEW_ID } });
-    mockGetPendingRow.mockImplementation(async (id) => (id === NEW_ID ? nextRow : used));
+    mockGetPendingRow.mockResolvedValue(pickerRow({ status: 'confirmed', result: { success: true, chosen_product_id: PRODUCT_B } }));
+    mockFindChosenCard.mockResolvedValue({ ...nextRow, params: { product_id: PRODUCT_B, _ib_chosen_from: CHOICE_ID } });
     mockClaimForConfirm.mockResolvedValue({ error: 'already_used' });
     await withServer(async (baseUrl) => {
       const replay = await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_B });
@@ -310,8 +317,25 @@ describe('/choose-product replay and history', () => {
       expect(other.status).toBe(409);
       expect(other.body.pendingAction).toBeUndefined();
     });
+    expect(mockFindChosenCard).toHaveBeenCalledWith(CHOICE_ID, 'admin-1');
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
     expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
+  });
+
+  test('a task picker hands its step to the chosen card, so the task waits for that card', async () => {
+    const ctx = { targets: [], requestedRecords: {} };
+    // Task scope rules are covered by the Postgres suite; here only the hand-off.
+    const validate = jest.spyOn(require('../services/intelligence-bar/task-context'), 'validateRecordTarget').mockResolvedValue(null);
+    const row = pickerRow({ task_id: 'task-9', params: { ...pickerRow().params, _ib_task_context: ctx } });
+    mockGetPendingRow.mockResolvedValue(row);
+    mockClaimForConfirm.mockResolvedValue({ action: { ...row, status: 'confirmed' } });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_A });
+      expect([res.status, res.body.error]).toEqual([200, undefined]);
+    });
+    expect(mockCreatePendingAction.mock.calls[0][0]).toMatchObject({ taskId: 'task-9', inheritedTask: true });
+    expect(mockCreatePendingAction.mock.calls[0][0].params._ib_task_context).toMatchObject({ requestedRecords: { product_id: PRODUCT_A } });
+    validate.mockRestore();
   });
 
   test('the card a choice makes joins the picker card thread exchange', async () => {

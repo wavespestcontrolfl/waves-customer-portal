@@ -1918,6 +1918,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // A refused target leaves no card and writes nothing; the model is told so
     // in plain words, so its reply can never read as a recorded change.
     if (target.error && !productChoice) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
+    // Server pin naming the picker this card was chosen from, so a retried
+    // /choose-product finds it (findChosenCard). Set after the preview: the
+    // tool's argument schema never sees it.
+    if (reproposal?.chosenFrom) params._ib_chosen_from = reproposal.chosenFrom;
     if (!productChoice && toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
@@ -2018,7 +2022,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // When this request started, on the platform-on and platform-off paths alike:
     // a request that finishes late must not out-rank one that started later.
     requestStartedAt,
-    ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolUse.name, params, preview) } : {}),
+    ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolUse.name, params, preview),
+      ...(task.inherited ? { inheritedTask: true } : {}) } : {}),
   });
 
   // A request that finished after a newer request already replaced its card:
@@ -2163,10 +2168,14 @@ async function proposeChosenProduct(req, action, productId) {
   }
   const input = publicCardInput(action.params);
   delete input.product_name;
+  // A task's picker hands its step to the new card: the task keeps waiting
+  // for that card's outcome instead of reading the picker as the result.
+  const task = action.task_id ? { id: action.task_id, runner_token: null, inherited: true } : null;
   const proposed = await proposePendingWrite({
     toolUse: { name: 'adjust_stock', input: { ...input, product_id: productId } },
     req, context: action.context || null, requestStartedAt: new Date(),
-    reproposal: { groundedTarget: { productId } },
+    task, taskContext: task ? taskScopeFromProof(action.params?._ib_task_context) : null,
+    reproposal: { groundedTarget: { productId }, chosenFrom: String(action.id) },
   });
   if (proposed.failed || !proposed.clientPayload) {
     const refused = proposed.modelResult || {};
@@ -2178,11 +2187,17 @@ async function proposeChosenProduct(req, action, productId) {
   await attachDerivedCard(action, proposed.clientPayload.id, getAdminActorId(req));
   const name = proposed.modelResult?.product?.name || 'The product';
   await PendingActions.recordResult(action.id, { success: true, state: 'completed', written: false, chosen_product_id: productId,
-    next_action_id: proposed.clientPayload.id,
     note: 'No stock was changed by this card. A new card for the chosen product waits for the operator to confirm.',
     receipt: { label: 'Product chosen', summary: `${name}. Confirm the new card to change the stock.` } });
   logger.info(`[intelligence-bar:pending] Product chosen on ${action.id}; proposed ${proposed.clientPayload.id}`);
   return { status: 200, body: { success: true, outcome: 'completed', chosen_product_id: productId, pendingAction: proposed.clientPayload } };
+}
+
+// A stored card keeps only its approval proof, not the task's raw context.
+// The chosen card is validated afresh in the same customer scope the picker
+// was approved in (its targets and the owner-direct flag), never wider.
+function taskScopeFromProof(proof) {
+  return { targets: Array.isArray(proof?.targets) ? proof.targets : [], ...(proof?.ownerDirect === true ? { ownerDirect: true } : {}) };
 }
 
 // A card made from another card (a product choice, Show again) joins the
@@ -2206,14 +2221,11 @@ function cardPayload(row) {
 }
 
 // The picker card was already used. When this operator used it for this same
-// product, answer with the card that choice made (from the picker's durable
-// receipt); otherwise it stays a plain "already used" refusal.
+// product, answer with the card that choice made (found by its server pin);
+// otherwise it stays a plain "already used" refusal.
 async function replayProductChoice(id, actor, productId) {
-  const row = await PendingActions.getPendingRow(id, actor);
-  const result = typeof row?.result === 'string' ? JSON.parse(row.result) : row?.result;
-  const nextId = result?.chosen_product_id === productId ? result.next_action_id : null;
-  const next = nextId ? await PendingActions.getPendingRow(nextId, actor) : null;
-  if (!next) return { status: 409, body: { error: claimErrorMessage('already_used') } };
+  const next = await PendingActions.findChosenCard(id, actor);
+  if (!next || String(next.params?.product_id || '').toLowerCase() !== productId) return { status: 409, body: { error: claimErrorMessage('already_used') } };
   return { status: 200, body: { success: true, outcome: 'completed', replayed: true, chosen_product_id: productId, pendingAction: cardPayload(next) } };
 }
 

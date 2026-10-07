@@ -323,11 +323,14 @@ async function applySupersession(trx, row, { toolName, params }) {
   return row;
 }
 
-async function createPendingAction({ toolName, params, requestedBy, taskId, requestStartedAt = null, ...card }) {
+// inheritedTask: the card replaces a task card the operator just used (a
+// product picker). It joins that task as its own step so the task waits for
+// its outcome, without a running task lease (no model round is running).
+async function createPendingAction({ toolName, params, requestedBy, taskId, requestStartedAt = null, inheritedTask = false, ...card }) {
   const intent = intentKey(toolName, params);
   if (intent) params = stampRequestStart(params, requestStartedAt);
   const persist = async trx => {
-    if (taskId) {
+    if (taskId && !inheritedTask) {
       const existing = await loadTaskStep(trx, { taskId, requestedBy, runnerToken: card.runnerToken, toolName, stepKey: card.stepKey });
       if (existing) return existing;
     }
@@ -433,6 +436,17 @@ async function getPendingRow(id, requestedBy) {
   return row ? { ...row, params: paramsOf(row) } : null;
 }
 
+// The card a product choice made from picker card `pickerId` (its params pin
+// _ib_chosen_from). Used to replay /choose-product after a lost response; the
+// picker's own receipt never carries the new card's id, since receipts reach
+// the model and pending ids are client-only credentials.
+async function findChosenCard(pickerId, requestedBy) {
+  const row = await db('ib_pending_actions').where({ requested_by: String(requestedBy) })
+    .whereRaw("params->>'_ib_chosen_from' = ?", [String(pickerId)])
+    .orderBy('created_at', 'desc').first();
+  return row ? { ...row, params: paramsOf(row) } : null;
+}
+
 // Show again (owner 2026-10-07): retires a card that expired with no decision,
 // in one statement, so one expired card is shown again at most once. Returns
 // the retired row (params parsed), or null when the card is not this actor's,
@@ -518,6 +532,7 @@ module.exports = {
   claimForConfirm,
   cancelPendingAction,
   getPendingRow,
+  findChosenCard,
   retireExpiredAction,
   recordResult,
   getActionReceipt,
