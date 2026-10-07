@@ -5,7 +5,7 @@ const engine = require('../services/waveguard-plan-engine');
 const { buildPlanForService } = engine;
 const migration = require('../models/migrations/20261007160000_lawn_v13_atrazine_feb_option');
 const { turfRestrictedProductsBlock } = require('../services/complete-scheduled-service');
-const { allowedTurfFor } = require('../services/lawn-turf-restrictions');
+const { allowedTurfFor, singleTurfFamily } = require('../services/lawn-turf-restrictions');
 const stampMigration = require('../models/migrations/20261007162000_lawn_v13_atrazine_label_stamp');
 const fillMigration = require('../models/migrations/20261007161000_lawn_v13_atrazine_catalog_fill');
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
@@ -77,15 +77,25 @@ describe('the atrazine option data (no database)', () => {
     expect(text.avoidHighWaterTable).toMatch(/high water table/);
   });
 
-  test('turf species: St. Augustine and centipede only, from the profile grass, then track, then the legacy lawn type', () => {
+  test('turf species: one grass family from the profile grass, then track, then the legacy lawn type; anything mixed or unclear is none', () => {
     const species = (profile, legacy) => engine.v13TurfSpecies(profile, legacy);
     expect(species({ grass_type: 'st_augustine' })).toBe('st_augustine');
     expect(species({ grass_type: 'Centipede' })).toBe('centipede');
-    expect(species({ grass_type: 'mixed', track_key: 'st_augustine' })).toBe('mixed');
+    expect(species({ grass_type: 'mixed', track_key: 'st_augustine' })).toBeNull();
     expect(species({ track_key: 'st_augustine' })).toBe('st_augustine');
     expect(species(null, 'Floratam Full Sun')).toBe('st_augustine');
     expect(species({ grass_type: 'bermuda' })).toBe('bermuda');
     expect([species({}, 'weird lawn of things'), species(null, null)]).toEqual([null, null]);
+  });
+
+  test.each([
+    'St. Augustine / Bahia mix', 'St. Augustine and Bahia', 'Bahia mixed with St. Augustine', 'St Augustine, Bermuda', 'Floratam + Argentine bahia',
+    'St. Augustine blend', 'Centipede/St Augustine', 'St. Augustine x Zoysia', 'Augustine w/ Bermuda patches', 'Bermuda patches in St Augustine',
+    'half St Augustine half bahia', 'Centipede & St. Augustine', 'mixed', 'unknown',
+  ])('"%s" is never one allowed grass, in the profile or the legacy lawn type', (text) => {
+    expect(engine.v13TurfSpecies({ grass_type: text })).toBeNull();
+    expect(engine.v13TurfSpecies(null, text)).toBeNull();
+    expect(singleTurfFamily(text)).toBeNull();
   });
 
   test('the closeout list names the atrazine bag for St. Augustine and centipede only, and no other product', () => {
@@ -251,6 +261,77 @@ describeDb('the atrazine option through PostgreSQL', () => {
       const result = await plan(await visit(null));
       expect(blockCodes(result)).toContain('lawn_v13_turf_species');
     });
+  });
+
+  describe('a turf profile authorizes the bag only for the property it describes (the customer\'s home)', () => {
+    const atrazineId = async () => (await knex('products_catalog').where({ name: ATRAZINE }).first()).id;
+    async function customerWithHome(grass = 'st_augustine') {
+      process.env.GATE_LAWN_V13 = 'true';
+      const f = await fixture(knex);
+      await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
+      await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: grass, track_key: grass, lawn_sqft: 10000 });
+      return f;
+    }
+    const visitAt = async (f, propertyId, changes = {}) => f.visit(0, { scheduled_date: '2026-02-12', property_id: propertyId, ...changes });
+    const guard = async (visit) => turfRestrictedProductsBlock(knex, visit, [{ productId: await atrazineId() }]);
+    const planBlocks = async (visit) => blockCodes(await plan(visit));
+
+    test('the home property: allowed in the plan and the closeout', async () => {
+      const f = await customerWithHome();
+      const visit = await visitAt(f, f.property.id);
+      expect(await planBlocks(visit)).not.toContain('lawn_v13_turf_species');
+      expect(await guard(visit)).toBeNull();
+    });
+
+    test('a St. Augustine home profile and a second property: blocked at the second, in the plan and the closeout, allowed at home', async () => {
+      const f = await customerWithHome();
+      const [second] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const atSecond = await visitAt(f, second.id);
+      const blocked = await plan(atSecond);
+      expect(blockCodes(blocked)).toContain('lawn_v13_turf_species');
+      expect(blocked.propertyGate.blocks.find((b) => b.code === 'lawn_v13_turf_species').message).toMatch(/cannot be tied to this visit's property/);
+      expect(item(blocked, ATRAZINE).mix).toBeNull();
+      expect(await guard(atSecond)).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      const atHome = await visitAt(f, f.property.id);
+      expect(await planBlocks(atHome)).not.toContain('lawn_v13_turf_species');
+      expect(await guard(atHome)).toBeNull();
+    });
+
+    test('unknown property linkage fails closed: no property on the visit, a property of another customer, an inactive property', async () => {
+      const f = await customerWithHome();
+      const other = await fixture(knex);
+      const [inactive] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '300 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false, active: false }).returning('*');
+      for (const propertyId of [null, other.property.id, inactive.id]) {
+        const visit = await visitAt(f, propertyId);
+        expect(await planBlocks(visit)).toContain('lawn_v13_turf_species');
+        expect(await guard(visit)).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      }
+    });
+
+    test('a visit stamped to another address is not the saved home; a stamp of the home\'s own address is', async () => {
+      const f = await customerWithHome();
+      const stamped = await visitAt(f, f.property.id, { service_address_line1: '999 Elsewhere Road', service_address_city: 'Fixture City', service_address_zip: '34201' });
+      expect(await guard(stamped)).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      const same = await visitAt(f, f.property.id, { service_address_line1: f.property.address_line1, service_address_city: f.property.city, service_address_zip: f.property.zip });
+      expect(await guard(same)).toBeNull();
+    });
+
+    test('a sole active property is the home even when it is not flagged primary; with two active properties and no primary, neither is provable', async () => {
+      const f = await customerWithHome();
+      await knex('customer_properties').where({ id: f.property.id }).update({ is_primary: false });
+      expect(await guard(await visitAt(f, f.property.id))).toBeNull();
+      const [second] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      expect(await guard(await visitAt(f, f.property.id))).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      expect(await guard(await visitAt(f, second.id))).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+    });
+
+    test.each(['St. Augustine / Bahia mix', 'St. Augustine and Bahia', 'Bahia mixed with St. Augustine', 'St Augustine blend'])(
+      'a profile that reads "%s" is mixed: blocked in the plan and the closeout', async (grass) => {
+        const f = await customerWithHome(grass);
+        const visit = await visitAt(f, f.property.id);
+        expect(await planBlocks(visit)).toContain('lawn_v13_turf_species');
+        expect(await guard(visit)).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      });
   });
 
   describe('the closeout refuses the product from the lawn\'s grass, in any month, on any track', () => {

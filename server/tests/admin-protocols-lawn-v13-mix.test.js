@@ -79,10 +79,13 @@ const itemFor = (body, name) => body.items.find((item) => item.product?.name ===
 
 let visitRows = [];
 let turfRows = [];
+let propertyRows = [];
+const HOME = { id: 'prop-A', customer_id: 'cust-1', active: true, is_primary: true, address_line1: '1 Main St', address_line2: null, city: 'Sarasota', zip: '34201' };
 beforeEach(() => {
   jest.clearAllMocks();
   visitRows = [];
   turfRows = [];
+  propertyRows = [HOME];
   mockCheckLimits.mockReset().mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
   process.env.GATE_LAWN_V13 = 'true';
   operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: LAWN_V13_VERSION } });
@@ -95,6 +98,7 @@ beforeEach(() => {
     if (table === 'product_aliases') return readQuery([]);
     if (table === 'scheduled_services') return readQuery(visitRows);
     if (table === 'customer_turf_profiles') return readQuery(turfRows);
+    if (table === 'customer_properties') { const q = { where: () => q, select: async () => propertyRows }; return q; }
     if (table === 'customers') return readQuery([{ lawn_type: null }]);
     throw new Error(`Unexpected table: ${table}`);
   });
@@ -388,6 +392,29 @@ describe('the February atrazine option on the sheet follows the lawn the sheet i
     // An allowed lawn gets no species warning (the plan's own gate context carries the grass).
     expect(body.warnings.filter((w) => w.gate === 'turfOnly')).toEqual([]);
     expect(itemFor(body, ATRAZINE).gateNotes.map((note) => note.key)).not.toContain('turfOnly');
+  });
+
+  test('a visit at a second property of a St. Augustine customer, a visit with no property, and a visit stamped elsewhere: unsized, blocked', async () => {
+    turfRows = [{ grass_type: 'st_augustine', track_key: 'st_augustine' }];
+    propertyRows = [HOME, { ...HOME, id: 'prop-B', is_primary: false, address_line1: '2 Oak Ave' }];
+    for (const changes of [{ property_id: 'prop-B' }, { property_id: null }, { service_address_line1: '9 Elsewhere Rd', service_address_city: 'Sarasota', service_address_zip: '34201' }]) {
+      visitRows = [{ ...visit, ...changes }];
+      const body = await lawnMix({ ...febQuery, scheduledServiceId: VISIT });
+      expect(itemFor(body, ATRAZINE).jobMix).toBeNull();
+      expect(body.blocks.map((block) => block.code)).toEqual(['lawn_v13_turf_species']);
+      expect(body.blocks[0].message).toMatch(/cannot be tied to this visit's property/);
+      expect(itemFor(body, F24).jobMix).toBeTruthy();
+    }
+    visitRows = [visit];
+    expect(itemFor(await lawnMix({ ...febQuery, scheduledServiceId: VISIT }), ATRAZINE).jobMix).toMatchObject({ amount: 40 });
+  });
+
+  test.each(['St. Augustine / Bahia mix', 'St. Augustine and Bahia', 'Bahia mixed with St. Augustine'])('a visit on a lawn recorded as "%s": unsized, blocked', async (grass) => {
+    visitRows = [visit];
+    turfRows = [{ grass_type: grass, track_key: null }];
+    const body = await lawnMix({ ...febQuery, scheduledServiceId: VISIT });
+    expect(itemFor(body, ATRAZINE).jobMix).toBeNull();
+    expect(body.blocks.map((block) => block.code)).toEqual(['lawn_v13_turf_species']);
   });
 
   test.each(['mixed', 'unknown', 'bahia', 'bermuda', 'zoysia'])('a visit on a %s lawn: no atrazine amount, a block, the default bag stays', async (grass) => {

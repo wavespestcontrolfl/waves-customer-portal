@@ -13,6 +13,8 @@ const {
 } = require('./lawn-protocol-operating-layer');
 const { describeInventoryConversion } = require('./inventory-units');
 const { resolveAddressCounty } = require('../config/address-county');
+const { addressKey } = require('./customer-property-address-keys');
+const { singleTurfFamily } = require('./lawn-turf-restrictions');
 const { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches } = require('./lawn-completion-defaults');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -544,16 +546,35 @@ function v13AreaLine(item, row) {
 }
 
 // The lawn's grass as a species gate (a row's turfOnly list) reads it: the grass on the profile, else its
-// track, else the visit's legacy lawn type. Mixed, unknown and free text are never one of the allowed species.
+// track, else the visit's legacy lawn type, read as ONE grass family or not at all (singleTurfFamily:
+// mixed, blended, several-grass and unrecognized descriptions are null, never the first grass named).
 function v13TurfSpecies(profile, legacyGrass) {
-  return normalizeGrassType([profile?.grass_type, profile?.track_key, legacyGrass].map((value) => String(value || '').trim()).find(Boolean));
+  return singleTurfFamily([profile?.grass_type, profile?.track_key, legacyGrass].map((value) => String(value || '').trim()).find(Boolean));
+}
+
+// The turf profile is customer-owned (it has no property of its own) and describes the customer's home:
+// the sole active property or the one primary property (customer-properties mirrors the primary onto it).
+// It authorizes a restricted product only for a visit that is provably at that property: a property id on
+// the visit that is one of the customer's active properties and is the home, and no service-address stamp
+// that names a different address. Anything else cannot be tied to the profile and fails closed.
+async function visitIsAtProfileHome(knex, visit) {
+  if (!visit?.property_id) return false;
+  const active = (await knex('customer_properties').where({ customer_id: visit.customer_id }).select('*')).filter((property) => property.active);
+  const property = active.find((candidate) => String(candidate.id) === String(visit.property_id));
+  const primaries = active.filter((candidate) => candidate.is_primary === true);
+  if (!property || !(active.length === 1 || (property.is_primary === true && primaries.length === 1))) return false;
+  return !visit.service_address_line1 || addressKey({
+    address_line1: visit.service_address_line1, address_line2: visit.service_address_line2, city: visit.service_address_city, zip: visit.service_address_zip,
+  }) === addressKey(property);
 }
 
 // The grass a booked visit is judged on, read the way the plan reads it (active turf profile, then the
-// customer's legacy lawn type). A reader with no visit passes { species: null } itself: nothing is on
-// file, so a restricted row stays unsized. turf = null (the cost audit) restricts nothing.
+// customer's legacy lawn type), and only when the profile can be tied to the visit's property. A reader with
+// no visit passes { species: null } itself: nothing is on file, so a restricted row stays unsized.
+// turf = null (the cost audit) restricts nothing.
 async function loadV13Turf(knex, visit) {
   if (!visit?.customer_id) return { species: null };
+  if (!(await visitIsAtProfileHome(knex, visit))) return { species: null, untied: true };
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type', 'track_key');
   const customer = await knex('customers').where({ id: visit.customer_id }).first('lawn_type');
   return { species: v13TurfSpecies(profile, customer?.lawn_type) };
@@ -620,7 +641,7 @@ function v13ApplyAloneBlocks(selectedItems) {
 function v13TurfBlocks(lines, stateOf, turf) {
   return lines.filter((line) => line.selected && line.product && stateOf(line)?.state === 'turf').map((line) => ({
     code: 'lawn_v13_turf_species', severity: 'block', productId: line.product.id, productName: line.product.name,
-    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and ${turf.species ? `the grass on file is ${TURF_LABELS[turf.species] || turf.species}` : 'no allowed grass is on file'}. No amount is planned. Enter the actual work.`,
+    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and ${turf.species ? `the grass on file is ${TURF_LABELS[turf.species] || turf.species}` : (turf.untied ? 'the saved turf profile cannot be tied to this visit\'s property' : 'no single allowed grass is on file')}. No amount is planned. Enter the actual work.`,
   }));
 }
 
@@ -1703,7 +1724,7 @@ async function visitForPlan(knex, recipeVisit, service, override = null) {
 async function loadVisitForPlan(knex, id, scope = (q) => q) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) return null;
   return (await scope(knex('scheduled_services').where({ 'scheduled_services.id': id }))
-    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')) || null;
+    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')) || null;
 }
 
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
@@ -1892,7 +1913,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's own protocol row supplies
   // its rate, its sunny-turf limit and its grass restriction; a bag that replaces the default one takes it off.
   const v13Rows = v13ProtocolRows(structuredProtocol);
-  const turf = { species: v13TurfSpecies(profile, service.lawn_type) };
+  const turf = v13Rows.size ? await loadV13Turf(knex, service) : { species: null };
   const candidateItems = v13ReplaceDefaultBag(resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
