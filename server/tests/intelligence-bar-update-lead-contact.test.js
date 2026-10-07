@@ -291,6 +291,13 @@ describe('address fields', () => {
     expect(Object.keys(all.changes).sort()).toEqual(['address', 'city', 'zip']);
   });
 
+  test('place-aware: a street + unit line takes a city-only edit; a comma-free line ending in a ZIP refuses it', async () => {
+    db.mockReturnValue(chain({ first: { ...LEAD, address: '1 Example Way, Apt 4B', city: 'Sarasota', zip: '34201' } }));
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton' })).preview).toBe(true);
+    db.mockReturnValue(chain({ first: { ...LEAD, address: '100 Main St Sarasota FL 34201', city: 'Sarasota', zip: '34201' } }));
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34208' })).error).toMatch(/holds a full address/);
+  });
+
   test('a name-only edit does not mention estimates', async () => {
     db.mockReturnValue(chain({ first: ADDR_LEAD }));
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' });

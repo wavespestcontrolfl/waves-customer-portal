@@ -746,6 +746,19 @@ function approvedLeadContactChanges(pinned, requested) {
   return changes;
 }
 
+// Whether a stored lead address line already names a place (a city or ZIP),
+// using the same place evidence the customer address fan-out uses: a comma
+// alone is not enough ("1 Example Way, Apt 4B" is street + unit), and a
+// comma-free line that ends in a ZIP is a full address too.
+function leadAddressNamesPlace(address) {
+  const text = String(address || '').trim();
+  if (!text) return false;
+  const { snapshotTailPlace, addressMatchKey } = require('../customer-address-fanout');
+  const tail = snapshotTailPlace(text);
+  if (tail && (tail.zip || addressMatchKey(tail.city))) return true;
+  return /\b\d{5}(?:-\d{4})?\s*$/.test(text);
+}
+
 async function updateLeadContact(input) {
   const requested = {};
   for (const field of LEAD_CONTACT_FIELDS) {
@@ -778,8 +791,8 @@ async function updateLeadContact(input) {
   // A legacy lead may hold the whole address in `address` ("100 Main St,
   // Sarasota, FL 34201"); estimate and inspection readers append city/zip to
   // it, so a city- or ZIP-only edit would print two localities. Change the
-  // street line in the same request instead (Codex #6099 r5).
-  if ((changes.city || changes.zip) && !changes.address && String(lead.address || '').includes(',')) {
+  // street line in the same request instead (Codex #6099 r5/r6).
+  if ((changes.city || changes.zip) && !changes.address && leadAddressNamesPlace(lead.address)) {
     return { error: `Lead ${leadName}'s address line holds a full address ("${lead.address}"). Change address, city and zip together so they agree. Nothing was proposed.` };
   }
 
