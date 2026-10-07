@@ -25,6 +25,8 @@ const logger = require('./logger');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_EXCEPTION_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const RETIRE_BATCH_LIMIT = 200;
+// Sends checked per draft (same-door first): bounds the read per draft.
+const SENDS_PER_DRAFT = 5;
 
 // Hold markers a sweep must never step over: each one means another flow
 // still owns this draft's next write.
@@ -145,11 +147,12 @@ async function retireOneDraft(trx, pair) {
 async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   const batch = Math.max(1, Math.min(Number(limit) || RETIRE_BATCH_LIMIT, 1000));
   // Unqualified columns in DRAFT_ELIGIBLE_SQL resolve to the draft (the
-  // subquery reads one table). One pair per draft: its customer's NEWEST real send created after it
-  // (fails closed — a newest send for another door keeps the draft). So the
-  // read is bounded by the open drafts that have a newer sent sibling, with
-  // no LIMIT for other-door pairs to starve later drafts behind; the WRITES
-  // are capped at `batch`.
+  // subquery reads one table). Up to SENDS_PER_DRAFT real sends per draft,
+  // created after it, from a bounded lateral that lists same-property and
+  // same-address sends first, so a newer send for another door cannot hide
+  // the one that replaced the draft, and no drafts x sends set is formed. No
+  // outer LIMIT for other-door pairs to starve later drafts behind; the
+  // WRITES are capped at `batch`.
   const pairs = (await conn.raw(`
     SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
            s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address
@@ -162,12 +165,16 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
            AND ${SENT_EVIDENCE_SQL('s')}
            AND s.created_at > d.created_at
            AND d.updated_at <= s.sent_at
-         ORDER BY s.sent_at DESC
-         LIMIT 1
+         ORDER BY (s.property_id IS NOT NULL AND s.property_id = d.property_id) DESC,
+                  (LOWER(TRIM(s.address)) = LOWER(TRIM(d.address))) DESC,
+                  s.sent_at DESC
+         LIMIT ${SENDS_PER_DRAFT}
       ) s
   `))?.rows || [];
 
-  const chosen = pairs.filter(sameProperty).slice(0, batch);
+  // First matching send per draft (the lateral lists same-door sends first).
+  const chosen = [...new Map(pairs.filter(sameProperty).reverse().map((p) => [p.draft_id, p])).values()]
+    .slice(0, batch);
 
   const rows = [];
   for (const pair of chosen) {

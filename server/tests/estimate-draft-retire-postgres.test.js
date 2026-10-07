@@ -183,6 +183,15 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect(bell.resolution).toBe('estimate_draft_replaced');
   });
 
+  test('a newer send for another property does not hide the send that replaced the draft', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(90) });
+    const sameDoor = await estimate(c, { status: 'sent', createdAt: minutesAgo(60), sentAt: minutesAgo(50) });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10), address: '500 Elsewhere Blvd, Testville, FL 34000' });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(sameDoor);
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
