@@ -11,7 +11,7 @@
  */
 
 jest.mock('../models/db', () => {
-  const state = { stub: null, twins: [], counts: {}, primaryCount: 1 };
+  const state = { stub: null, twins: [], counts: {}, properties: [] };
   const builder = (table) => {
     const q = { _table: table, _single: false, _count: false, _where: {} };
     q.where = (arg) => { if (arg && typeof arg === 'object') Object.assign(q._where, arg); else if (typeof arg === 'function') arg({ orWhereRaw: () => null, orWhere: () => null }); return q; };
@@ -20,11 +20,12 @@ jest.mock('../models/db', () => {
     q.whereIn = () => q;
     q.orderBy = () => q;
     q.select = () => q;
+    // `await conn('customer_properties').where(...).select('*')` reads the rows.
+    q.then = (resolve, reject) => Promise.resolve(table === 'customer_properties' ? state.properties : []).then(resolve, reject);
     q.count = () => { q._count = true; return q; };
     q.limit = async () => (table === 'customers' ? state.twins : []);
     q.first = async () => {
       if (table === 'customers') return state.stub;
-      if (q._count && table === 'customer_properties') return { n: state.primaryCount };
       if (q._count) return { n: state.counts[table] || 0 };
       return null;
     };
@@ -42,9 +43,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockLoserAutoBlockers = jest.fn();
 const mockPreviewMergeEffects = jest.fn();
+const mockDecideWinner = jest.fn();
 jest.mock('../services/customer-dedupe', () => ({
   loserAutoBlockers: (...args) => mockLoserAutoBlockers(...args),
   previewMergeEffects: (...args) => mockPreviewMergeEffects(...args),
+  // The engine's keep/discard decision (real rule tested at the bottom).
+  decideWinner: (...args) => mockDecideWinner(...args),
+  // The REAL note-append rule: its column list decides what is customer text.
+  predictNoteAppends: jest.requireActual('../services/customer-dedupe').predictNoteAppends,
   // The REAL exclusion list: every table the merge reader skips is counted.
   REPOINT_EXCLUDED_TABLES: jest.requireActual('../services/customer-dedupe').REPOINT_EXCLUDED_TABLES,
 }));
@@ -63,10 +69,22 @@ const STUB_ID = '20000000-0000-4000-8000-000000000001';
 const TWIN_ID = '20000000-0000-4000-8000-000000000002';
 const baseStub = () => ({
   id: STUB_ID, first_name: 'Unknown', last_name: '', phone: '(941) 555-0199', email: null,
+  address_line1: '12 Sample Lane', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34208',
   deleted_at: null, version: '2026-10-01 12:00:00.000001+00', created_on: '2026-10-01',
-  waveguard_tier: null, monthly_rate: '0', account_credits: '0',
+  waveguard_tier: null, monthly_rate: '0', account_credits: '0', crm_notes: null, technician_notes: '',
+  service_contact_name: null, service_contact2_phone: '',
 });
-const twin = { customer_id: TWIN_ID, id: TWIN_ID, first_name: 'Jordan', last_name: 'Sample', phone: '9415550199', email: 'jordan.sample@example.com', created_on: '2025-03-14' };
+const twin = { id: TWIN_ID, first_name: 'Jordan', last_name: 'Sample', phone: '9415550199', email: 'jordan.sample@example.com', created_on: '2025-03-14' };
+// The untouched primary the backfill (ensurePrimaryCore) creates from the
+// customer's own address.
+const autoPrimary = () => ({
+  id: 'prop-1', customer_id: STUB_ID, label: 'Primary', occupancy_type: 'owner_occupied', relationship: 'owner', is_primary: true,
+  address_line1: '12 Sample Lane', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34208', latitude: null, longitude: null,
+  property_type: null, lawn_type: null, property_sqft: null, lot_sqft: null, bed_sqft: null, linear_ft_perimeter: null, palm_count: null, canopy_type: null,
+  address_key: require('../services/customer-properties').addressKey(baseStub()), source: 'backfill', active: true,
+  neighborhood_id: null, neighborhood_source: null, county_subdivision: null, neighborhood_checked_at: null,
+  created_at: new Date('2026-10-01'), updated_at: new Date('2026-10-01'),
+});
 
 const run = (input, ctx = {}) => executeCustomerLifecycleTool('delete_duplicate_customer', input, ctx);
 const preview = () => run({ customer_id: STUB_ID });
@@ -78,8 +96,10 @@ beforeEach(() => {
   db.__state.stub = baseStub();
   db.__state.twins = [twin];
   db.__state.counts = {};
-  db.__state.primaryCount = 1;
+  db.__state.properties = [autoPrimary()];
   mockLoserAutoBlockers.mockResolvedValue([]);
+  // Default: the engine keeps the twin, so the selected stub is the duplicate.
+  mockDecideWinner.mockImplementation(async (_conn, rows) => rows.find((r) => r.id !== STUB_ID));
   // One auto-created primary property and the nightly health score: allowed.
   mockPreviewMergeEffects.mockResolvedValue({ moving: { customer_properties: 1, customer_health_scores: 1, total_rows: 2 }, referral: { loser_enrolled: false } });
   // The real adapter runs `precheck` inside the archive transaction before
@@ -109,8 +129,8 @@ describe('preview (empty stub)', () => {
     expect(result).toMatchObject({
       preview: true,
       customer_id: STUB_ID,
-      stub: { name: 'Unknown', phone_last4: '0199', created_on: '2026-10-01' },
-      duplicate_of: [{ customer_id: TWIN_ID, name: 'Jordan Sample', phone_last4: '0199', created_on: '2025-03-14', shares: 'phone' }],
+      stub: { name: 'Unknown', phone_masked: '(***) ***-0199', email_masked: null, created_on: '2026-10-01' },
+      duplicate_of: [{ customer_id: TWIN_ID, name: 'Jordan Sample', phone_masked: '(***) ***-0199', email_masked: 'j***@example.com', created_on: '2025-03-14', shares: 'phone' }],
       customer_message: 'No customer message is sent',
       _version: '2026-10-01 12:00:00.000001+00',
     });
@@ -119,21 +139,25 @@ describe('preview (empty stub)', () => {
     expect(Object.keys(result.checks)).toEqual(expect.arrayContaining(['Visits', 'Service records', 'Invoices', 'Payments, saved cards, Stripe profile',
       'Estimates', 'Leads', 'Calls, texts, emails', 'Plan-rate ledger', 'Monthly rate, plan, billing', 'Portal login', 'Referral or credit balance']));
     expect(result.card).toMatchObject({
-      delete: 'Unknown (…0199), created 2026-10-01',
-      duplicate_of: expect.stringMatching(/^Jordan Sample \(…0199\), created 2025-03-14 — shares phone; stays as is$/),
+      delete: 'Unknown (phone (***) ***-0199), created 2026-10-01',
+      duplicate_of: 'Jordan Sample (phone (***) ***-0199, email j***@example.com), created 2025-03-14 — shares phone; stays as is',
       customer_message: 'No customer message is sent',
     });
     // The merge engine's own readers, keyed on the stub only.
     expect(mockLoserAutoBlockers).toHaveBeenCalledWith(db, expect.objectContaining({ id: STUB_ID }));
     expect(mockPreviewMergeEffects).toHaveBeenCalledWith(db, STUB_ID, STUB_ID);
+    // The engine decided the pair, stub vs the twin.
+    expect(mockDecideWinner).toHaveBeenCalledWith(db, [expect.objectContaining({ id: STUB_ID }), expect.objectContaining({ id: TWIN_ID })]);
     expect(mockArchiveCustomerAsAdmin).not.toHaveBeenCalled();
   });
 
-  test('no record shares the phone or email: the card says so', async () => {
-    db.__state.twins = [];
+  test('two blank stubs read differently: masked phone and email on both sides', async () => {
+    db.__state.stub = { ...baseStub(), email: 'kit.example@example.org' };
+    db.__state.twins = [{ id: TWIN_ID, first_name: 'Unknown', last_name: '', phone: '9415550199', email: 'pat.example@example.net', created_on: '2026-09-02' }];
     const result = await preview();
-    expect(result.duplicate_of).toEqual([]);
-    expect(result.card.duplicate_of).toBe('No other live customer shares this phone or email');
+    expect(result.card.delete).toBe('Unknown (phone (***) ***-0199, email k***@example.org), created 2026-10-01');
+    expect(result.card.duplicate_of).toBe('Unknown (phone (***) ***-0199, email p***@example.net), created 2026-09-02 — shares phone; stays as is');
+    expect(result.card.delete).not.toBe(result.card.duplicate_of.split(' — ')[0]);
   });
 
   test('missing or already-deleted record refuses as unavailable', async () => {
@@ -142,6 +166,33 @@ describe('preview (empty stub)', () => {
     db.__state.stub = { ...baseStub(), deleted_at: new Date('2026-10-02') };
     expect(await preview()).toMatchObject({ code: 'record_unavailable', error: expect.stringMatching(/already deleted/) });
     expect(await run({})).toMatchObject({ error: 'customer_id is required' });
+  });
+});
+
+describe('the selected record must be the duplicate the engine would discard', () => {
+  test('no live record shares its phone or email: refused', async () => {
+    db.__state.twins = [];
+    expect(await preview()).toMatchObject({ code: 'no_duplicate', error: expect.stringMatching(/No live duplicate found/) });
+  });
+
+  test('the model selects the canonical record (the engine keeps it): refused', async () => {
+    mockDecideWinner.mockImplementation(async (_conn, rows) => rows.find((r) => r.id === STUB_ID));
+    const result = await preview();
+    expect(result).toMatchObject({ code: 'not_the_duplicate' });
+    expect(result.error).not.toMatch(/Jordan|Sample/);
+  });
+
+  test('the loser against one twin but the keeper against another: refused', async () => {
+    const other = { id: '20000000-0000-4000-8000-000000000003', first_name: 'Unknown', phone: '9415550199', email: null, created_on: '2026-10-05' };
+    db.__state.twins = [twin, other];
+    mockDecideWinner.mockImplementation(async (_conn, rows) => (rows.some((r) => r.id === other.id) ? rows.find((r) => r.id === STUB_ID) : rows.find((r) => r.id !== STUB_ID)));
+    expect(await preview()).toMatchObject({ code: 'not_the_duplicate' });
+    expect(mockDecideWinner).toHaveBeenCalledTimes(2);
+  });
+
+  test('too many records share the contact: refused', async () => {
+    db.__state.twins = Array.from({ length: 25 }, (_, i) => ({ ...twin, id: `t-${i}` }));
+    expect(await preview()).toMatchObject({ code: 'too_many_duplicates' });
   });
 });
 
@@ -162,7 +213,17 @@ describe('refuses any record that is not empty, naming what it found and pointin
     ['a text', moving({ sms_log: 4 }), 'Calls, texts, emails', /4 sms_log/],
     ['an email (polymorphic pointer)', moving({ 'email_messages.recipient_id': 1 }), 'Calls, texts, emails', /email_messages\.recipient_id/],
     ['a second saved property', moving({ customer_properties: 2 }), 'Saved properties', /2 customer_properties/],
-    ['one saved property that is not the primary', () => { db.__state.primaryCount = 0; }, 'Saved properties', /1 customer_properties/],
+    ['one saved property that is not the primary', () => { db.__state.properties = [{ ...autoPrimary(), is_primary: false }]; }, 'Saved properties', /not the primary/],
+    ['a manual primary', () => { db.__state.properties = [{ ...autoPrimary(), source: 'manual' }]; }, 'Saved properties', /source manual/],
+    ['a call-pipeline primary', () => { db.__state.properties = [{ ...autoPrimary(), source: 'call_pipeline' }]; }, 'Saved properties', /source call_pipeline/],
+    ['a self-book primary', () => { db.__state.properties = [{ ...autoPrimary(), source: 'self_book' }]; }, 'Saved properties', /source self_book/],
+    ['a primary with a nickname', () => { db.__state.properties = [{ ...autoPrimary(), label: 'Beach house' }]; }, 'Saved properties', /a custom label/],
+    ['a primary with an edited address', () => { db.__state.properties = [{ ...autoPrimary(), address_key: 'other' }]; }, 'Saved properties', /an edited address/],
+    ['a primary with operator data in another column', () => { db.__state.properties = [{ ...autoPrimary(), access_notes: 'side gate' }]; }, 'Saved properties', /access_notes/],
+    ['a primary with an office neighborhood entry', () => { db.__state.properties = [{ ...autoPrimary(), neighborhood_id: 'n-1', neighborhood_source: 'office' }]; }, 'Saved properties', /office neighborhood/],
+    ['CRM notes', () => { db.__state.stub.crm_notes = 'Prefers mornings'; }, 'Notes and service contacts', /crm_notes/],
+    ['technician notes', () => { db.__state.stub.technician_notes = 'Dog in yard'; }, 'Notes and service contacts', /technician_notes/],
+    ['a service contact', () => { db.__state.stub.service_contact_name = 'Sam Example'; }, 'Notes and service contacts', /service_contact_name/],
     ['a plan-rate ledger row', () => { db.__state.counts.customer_plan_rates = 1; }, 'Plan-rate ledger', /1 customer_plan_rates/],
     ['a monthly rate', blockers(['monthly_rate']), 'Monthly rate, plan, billing', /a monthly rate/],
     ['a live customer stage', blockers(['live_stage']), 'Monthly rate, plan, billing', /a live customer stage/],
@@ -233,6 +294,27 @@ describe('commit', () => {
     expect(result.error).toMatch(/1 sms_log/);
   });
 
+  test('the engine role, notes and the primary property are re-asserted inside the transaction', async () => {
+    const cases = [
+      () => mockDecideWinner.mockImplementation(async (_conn, rows) => rows.find((r) => r.id === STUB_ID)),
+      () => { db.__state.twins = []; },
+      () => { db.__state.stub.crm_notes = 'Added after the card'; },
+      () => { db.__state.properties = [{ ...autoPrimary(), source: 'manual' }]; },
+    ];
+    for (const arrange of cases) {
+      mockArchiveCustomerAsAdmin.mockImplementationOnce(async ({ precheck }) => {
+        arrange();
+        await precheck(db);
+        throw new Error('unreachable: the delete must not run');
+      });
+      expect(await commit()).toMatchObject({ preview_changed: true });
+      db.__state.stub = baseStub();
+      db.__state.twins = [twin];
+      db.__state.properties = [autoPrimary()];
+      mockDecideWinner.mockImplementation(async (_conn, rows) => rows.find((r) => r.id !== STUB_ID));
+    }
+  });
+
   test('the record version moved after the card: preview_changed (the route pins _approved_version)', async () => {
     const result = await run({ customer_id: STUB_ID, _approved_version: '2026-09-30 08:00:00+00' }, { confirmed: true, technicianId: 'admin-7' });
     expect(result).toMatchObject({ code: 'version_changed', preview_changed: true });
@@ -265,6 +347,38 @@ describe('commit', () => {
   });
 });
 
+describe('allowed: the untouched automatic primary', () => {
+  test('a county neighborhood stamp from the automatic lookup is still the untouched primary', async () => {
+    db.__state.properties = [{ ...autoPrimary(), neighborhood_id: 'n-1', neighborhood_source: 'county', county_subdivision: 'Example Glen', neighborhood_checked_at: new Date() }];
+    expect((await preview()).preview).toBe(true);
+  });
+});
+
+describe('the engine keep/discard decision (customer-dedupe decideWinner, real)', () => {
+  const { decideWinner } = jest.requireActual('../services/customer-dedupe');
+  // batchAutoBlockers reads grouped counts per blocker table.
+  const fakeDb = (countsByTable = {}) => (table) => {
+    const q = {};
+    q.whereIn = () => q;
+    q.groupBy = () => q;
+    q.select = () => q;
+    q.count = async () => countsByTable[table] || [];
+    return q;
+  };
+  const row = (id, extra = {}) => ({ id, created_at: '2026-01-01T00:00:00Z', pipeline_stage: 'new_lead', ...extra });
+
+  test('an empty newer record loses to an older one', async () => {
+    expect((await decideWinner(fakeDb(), [row('b', { created_at: '2026-10-01' }), row('a', { created_at: '2025-03-14' })])).id).toBe('a');
+  });
+  test('a record with a Stripe profile is kept even when newer', async () => {
+    expect((await decideWinner(fakeDb(), [row('b', { created_at: '2026-10-01', stripe_customer_id: 'cus_synthetic' }), row('a', { created_at: '2025-03-14' })])).id).toBe('b');
+  });
+  test('business rows outweigh age (the queue\'s business weight)', async () => {
+    const counts = { invoices: [{ customer_id: 'b', n: '2' }] };
+    expect((await decideWinner(fakeDb(counts), [row('b', { created_at: '2026-10-01' }), row('a', { created_at: '2025-03-14' })])).id).toBe('b');
+  });
+});
+
 describe('pins and card contract', () => {
   test('the route pin (preview fingerprint) binds the stub version, the checks and the shared-phone record', async () => {
     const a = await preview();
@@ -273,8 +387,10 @@ describe('pins and card contract', () => {
     db.__state.stub = { ...baseStub(), version: '2026-10-01 12:05:00.000001+00' };
     expect(AuthorizationContract.previewFingerprint(await preview())).not.toBe(AuthorizationContract.previewFingerprint(a));
     db.__state.stub = baseStub();
-    db.__state.twins = [];
-    expect(AuthorizationContract.previewFingerprint(await preview())).not.toBe(AuthorizationContract.previewFingerprint(a));
+    db.__state.twins = [{ ...twin, email: 'other.sample@example.com' }];
+    const twinChanged = await preview();
+    expect(twinChanged.preview).toBe(true);
+    expect(AuthorizationContract.previewFingerprint(twinChanged)).not.toBe(AuthorizationContract.previewFingerprint(a));
   });
 
   test('the contract: labelled, reversible, no customer contact, card lines only', async () => {
@@ -283,7 +399,7 @@ describe('pins and card contract', () => {
     expect(contract).toMatchObject({ action_label: 'Delete empty duplicate customer', tier: 'yellow', irreversible: false, notifies_customer: false });
     const labels = contract.effects.map((e) => e.label);
     expect(labels).toEqual(expect.arrayContaining([
-      'delete: Unknown (…0199), created 2026-10-01',
+      'delete: Unknown (phone (***) ***-0199), created 2026-10-01',
       'customer message: No customer message is sent',
       'visits: none',
       'invoices: none',

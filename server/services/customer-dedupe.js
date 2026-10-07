@@ -280,6 +280,24 @@ function pickWinner(rows, extraScore = () => 0) {
     || String(a.id).localeCompare(String(b.id)))[0];
 }
 
+// Business-signal weight for winner selection: COUNT of business signals
+// (billing tables + active stage), excluding stripe/portal which winnerScore
+// already weighs — one definition for every queue and decideWinner.
+function businessBoostFor(blockersById) {
+  return (r) => 16 * (blockersById.get(r.id) || [])
+    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+}
+
+// The engine's keep/discard decision for customer rows read outside the
+// queue scan (whole rows: winnerScore reads stripe_customer_id,
+// password_hash, pipeline_stage, created_at, id) — the same pickWinner and
+// business weight every queue uses (sameAddressPairEligibility decides a
+// pair the same way). Returns the row the engine keeps.
+async function decideWinner(database, rows) {
+  const blockersById = await batchAutoBlockers(database, rows);
+  return pickWinner(rows, businessBoostFor(blockersById));
+}
+
 function pairKey(idA, idB) {
   return idA < idB ? [idA, idB] : [idB, idA];
 }
@@ -357,8 +375,7 @@ function buildPhoneGroupCandidates(members, blockersById) {
   // excluding stripe/portal which winnerScore already weighs — a Stripe-only
   // shell (24 under a binary boost) must never outrank a row with actual
   // invoices/services.
-  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
-    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  const businessBoost = businessBoostFor(blockersById);
   const hasKnownName = (m) => !!(normName(m.first_name) || normName(m.last_name));
   let pool = members.filter(hasKnownName);
   const unnamed = members.filter((m) => !hasKnownName(m));
@@ -626,8 +643,7 @@ function sameAddressEdges({ customers, properties = [], dismissed = new Set() })
 
 function assembleSameAddressGroups({ byId, edges: allEdges }, { blockersById = new Map(), upcomingVisits = null } = {}) {
   const edges = new Map(allEdges);
-  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
-    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  const businessBoost = businessBoostFor(blockersById);
   const groups = [];
   // Each round: the strongest remaining row wins, its direct neighbours are
   // the candidates, and every edge among the group's own members is spent
@@ -822,8 +838,7 @@ async function sameAddressPairEligibility(winnerId, loserId, database = db) {
   const winner = detected.byId.get(String(winnerId));
   const loser = detected.byId.get(String(loserId));
   const blockersById = await batchAutoBlockers(database, [winner, loser]);
-  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
-    .filter((x) => x !== 'stripe_customer_id' && x !== 'portal_login').length;
+  const businessBoost = businessBoostFor(blockersById);
   if (pickWinner([winner, loser], businessBoost).id !== winner.id) return gone;
   const verdict = classifyPair(winner, loser, blockersById.get(loser.id) || []);
   const phonesMissing = !phone10(winner.phone) || !phone10(loser.phone);
@@ -998,8 +1013,7 @@ function sameNameEdges({ customers, properties = [], dismissed = new Set() }) {
 
 function assembleSameNameGroups({ byId, edges: allEdges }, { blockersById = new Map(), upcomingVisits = null } = {}) {
   const edges = new Map(allEdges);
-  const businessBoost = (r) => 16 * (blockersById.get(r.id) || [])
-    .filter((b) => b !== 'stripe_customer_id' && b !== 'portal_login').length;
+  const businessBoost = businessBoostFor(blockersById);
   const addressOf = (r) => ({ address_line1: r.address_line1 || null, address_line2: r.address_line2 || null, city: r.city || null, zip: r.zip || null });
   const groups = [];
   // Same round structure as assembleSameAddressGroups: the strongest remaining
@@ -7044,6 +7058,8 @@ module.exports = {
   // The tables previewMergeEffects never counts — the same check counts them
   // itself so a table excluded here can never read as "empty".
   REPOINT_EXCLUDED_TABLES,
+  // Which of a set of records the engine keeps (the rest are the duplicates).
+  decideWinner,
   executeMerge,
   lockSeriesCreateForMerge,
   runAutoMergeSweep,

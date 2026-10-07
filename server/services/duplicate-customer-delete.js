@@ -65,7 +65,8 @@ const CHECKS = [
     label: 'Calls, texts, emails',
     match: (table) => /(call|sms|email|message|conversation|notification|voicemail|outbox)/.test(table),
   },
-  { key: 'properties', label: 'Saved properties (one auto-created primary allowed)', tables: ['customer_properties'] },
+  { key: 'properties', label: 'Saved properties (one untouched auto-created primary allowed)', tables: ['customer_properties'] },
+  { key: 'customer_text', label: 'Notes and service contacts' },
   { key: 'plan_rates', label: 'Plan-rate ledger', tables: ['customer_plan_rates'] },
   {
     key: 'billing',
@@ -112,7 +113,69 @@ function phone10(raw) {
   return digits.length >= 10 ? digits.slice(-10) : '';
 }
 
-const last4 = (phone) => phone10(phone).slice(-4) || String(phone || '').replace(/\D/g, '').slice(-4) || '????';
+// The columns the automatic primary-property backfill writes
+// (customer-properties.js ensurePrimaryCore) plus row bookkeeping. Any other
+// column holding a value is operator data, and makes the property history.
+const AUTO_PRIMARY_COLUMNS = new Set([
+  'id', 'customer_id', 'label', 'occupancy_type', 'relationship', 'is_primary',
+  'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude',
+  'property_type', 'lawn_type', 'property_sqft', 'lot_sqft', 'bed_sqft', 'linear_ft_perimeter',
+  'palm_count', 'canopy_type', 'address_key', 'source', 'active', 'created_at', 'updated_at',
+]);
+// The automatic neighborhood lookup (neighborhood-access.js) stamps these
+// with source 'county'; any other source is an office entry.
+const AUTO_NEIGHBORHOOD_COLUMNS = ['neighborhood_id', 'neighborhood_source', 'county_subdivision', 'neighborhood_checked_at'];
+
+const isBlank = (v) => v === null || v === undefined || v === false || String(v).trim() === ''
+  || (typeof v === 'object' && !(v instanceof Date) && Object.keys(v).length === 0);
+
+// What makes a saved property more than the untouched automatic primary:
+// another source (manual, call_pipeline, self_book), not primary, inactive,
+// a label or address that differs from what the backfill copies from the
+// customer, an office neighborhood entry, or any other column with a value.
+function primaryPropertyEdits(property, customer) {
+  const { addressKey } = require('./customer-properties');
+  const edits = [];
+  if (property.source !== 'backfill') edits.push(`source ${property.source || 'unknown'}`);
+  if (property.is_primary !== true) edits.push('not the primary');
+  if (property.active === false) edits.push('inactive');
+  if (property.label && ![customer.profile_label, 'Primary'].includes(property.label)) edits.push('a custom label');
+  if (property.address_key && property.address_key !== addressKey(customer)) edits.push('an edited address');
+  if (property.neighborhood_source && property.neighborhood_source !== 'county') edits.push('an office neighborhood entry');
+  for (const [column, value] of Object.entries(property)) {
+    if (AUTO_PRIMARY_COLUMNS.has(column) || AUTO_NEIGHBORHOOD_COLUMNS.includes(column)) continue;
+    if (!isBlank(value)) edits.push(column);
+  }
+  return edits;
+}
+
+// Customer-owned text the merge carries onto the survivor: the notes it
+// appends (customer-dedupe predictNoteAppends — its own column list) and the
+// service-contact slots. Deleting would strand it on the archived row.
+function customerOwnedText(stub, predictNoteAppends) {
+  const notes = Object.keys(predictNoteAppends({}, stub));
+  const contacts = Object.entries(stub)
+    .filter(([column, value]) => /^service_contact\d?_(name|phone|email)$/.test(column) && !isBlank(value))
+    .map(([column]) => column);
+  return [...notes, ...contacts];
+}
+
+function maskEmail(address) {
+  const text = String(address || '').trim();
+  if (!text) return null;
+  const [local, domain] = text.split('@');
+  return domain ? `${local.slice(0, 1)}***@${domain}` : '***';
+}
+
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits ? `(***) ***-${digits.slice(-4)}` : null;
+}
+
+function identityLine(row) {
+  const parts = [maskPhone(row.phone) && `phone ${maskPhone(row.phone)}`, maskEmail(row.email) && `email ${maskEmail(row.email)}`].filter(Boolean);
+  return `${customerName(row)} (${parts.join(', ') || 'no phone or email'}), created ${row.created_on || 'unknown date'}`;
+}
 
 function customerName(row) {
   return `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed customer';
@@ -124,33 +187,66 @@ async function loadStub(customerId, conn = db) {
     .first();
 }
 
+// Above this many records sharing the contact the bar does not decide.
+const TWIN_LIMIT = 25;
+
 // Live customers that share the stub's phone (last 10 digits) or email —
-// read only, shown on the card so the operator sees which record stays.
-async function findLiveTwins(stub) {
+// whole rows, because the engine's keep/discard decision reads them.
+async function findLiveTwins(stub, conn = db) {
   const phone = phone10(stub.phone);
   const email = String(stub.email || '').trim().toLowerCase();
   if (!phone && !email) return [];
-  const rows = await db('customers')
+  const rows = await conn('customers')
     .whereNull('deleted_at')
     .whereNot('id', stub.id)
     .where((q) => {
       if (phone) q.orWhereRaw("right(regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone]);
       if (email) q.orWhereRaw('lower(email) = ?', [email]);
     })
-    .select('id', 'first_name', 'last_name', 'phone', 'email', db.raw("to_char(created_at, 'YYYY-MM-DD') AS created_on"))
+    .select('*', db.raw("to_char(created_at, 'YYYY-MM-DD') AS created_on"))
     .orderBy('created_at', 'asc')
-    .limit(3);
-  return rows.map((r) => {
-    const shares = [phone && phone10(r.phone) === phone ? 'phone' : null,
-      email && String(r.email || '').trim().toLowerCase() === email ? 'email' : null].filter(Boolean);
-    return {
-      customer_id: r.id,
-      name: customerName(r),
-      phone_last4: last4(r.phone),
-      created_on: r.created_on || null,
-      shares: shares.join(' and ') || 'phone or email',
-    };
-  });
+    .limit(TWIN_LIMIT);
+  return rows.filter((r) => String(r.id) !== String(stub.id));
+}
+
+function twinView(stub, r) {
+  const phone = phone10(stub.phone);
+  const email = String(stub.email || '').trim().toLowerCase();
+  const shares = [phone && phone10(r.phone) === phone ? 'phone' : null,
+    email && String(r.email || '').trim().toLowerCase() === email ? 'email' : null].filter(Boolean);
+  return {
+    customer_id: r.id,
+    name: customerName(r),
+    phone_masked: maskPhone(r.phone),
+    email_masked: maskEmail(r.email),
+    created_on: r.created_on || null,
+    shares: shares.join(' and ') || 'phone or email',
+  };
+}
+
+// The selected record must be the one the duplicate engine would DISCARD
+// against every live record sharing its phone or email (customer-dedupe.js
+// decideWinner — the queue's own pickWinner + business weight). No twin, or
+// the engine keeping this record over any twin, refuses. Refusals never name
+// a person (the route runs the preview before validating the target).
+async function duplicateRoleRefusal(stub, twins, conn) {
+  if (!twins.length) {
+    return { error: 'No live duplicate found — this tool only removes a duplicate of a real customer (no other live record shares its phone or email).', code: 'no_duplicate' };
+  }
+  if (twins.length >= TWIN_LIMIT) {
+    return { error: `At least ${TWIN_LIMIT} live records share this phone or email — resolve these from the duplicates queue instead.`, code: 'too_many_duplicates' };
+  }
+  const { decideWinner } = require('./customer-dedupe');
+  for (const twin of twins) {
+    const kept = await decideWinner(conn, [stub, twin]);
+    if (String(kept.id) === String(stub.id)) {
+      return {
+        error: 'The duplicate engine keeps this record over another live record that shares its phone or email — this is the record to keep, not the duplicate. Select the other record, or use merge_customers.',
+        code: 'not_the_duplicate',
+      };
+    }
+  }
+  return null;
 }
 
 async function countTable(table, customerId, conn = db, columns = ['customer_id']) {
@@ -169,7 +265,7 @@ async function countTable(table, customerId, conn = db, columns = ['customer_id'
 // checked" — it blocks, like a found row (fail closed). `conn` is the
 // archive transaction on the commit's locked re-check.
 async function readEmptiness(stub, conn = db) {
-  const { loserAutoBlockers, previewMergeEffects, REPOINT_EXCLUDED_TABLES } = require('./customer-dedupe');
+  const { loserAutoBlockers, previewMergeEffects, REPOINT_EXCLUDED_TABLES, predictNoteAppends } = require('./customer-dedupe');
   const { hasMembership } = require('./membership-state');
   const found = Object.fromEntries(CHECKS.map((c) => [c.key, []]));
   const add = (key, text) => { if (!found[key].includes(text)) found[key].push(text); };
@@ -195,8 +291,11 @@ async function readEmptiness(stub, conn = db) {
     if (key === 'total_rows') continue;
     if (DERIVED_TABLES.has(key)) continue;
     if (key === 'customer_properties' && n === 1) {
-      const primary = await conn('customer_properties').where({ customer_id: stub.id, is_primary: true }).count({ n: '*' }).first();
-      if (Number(primary?.n || 0) === 1) continue;
+      const [property] = await conn('customer_properties').where({ customer_id: stub.id }).select('*');
+      const edits = property ? primaryPropertyEdits(property, stub) : ['could not be read'];
+      if (!edits.length) continue;
+      add('properties', `1 customer_properties (${edits.join(', ')})`);
+      continue;
     }
     // A table the blocker list already named reads once, with its count.
     const category = categoryFor(key);
@@ -212,6 +311,8 @@ async function readEmptiness(stub, conn = db) {
     const n = await countTable(table, stub.id, conn, EXCLUDED_TABLE_KEYS[table]);
     if (n !== 0) add(categoryFor(table), countText(table, n));
   }
+
+  for (const column of customerOwnedText(stub, predictNoteAppends)) add('customer_text', column);
 
   if (hasMembership({ waveguard_tier: stub.waveguard_tier, monthly_rate: 0 })) add('billing', `a ${stub.waveguard_tier} plan tier`);
   if (Number(stub.account_credits || 0) > 0) add('referral_credit', `$${Number(stub.account_credits).toFixed(2)} account credit`);
@@ -240,17 +341,18 @@ async function previewDeleteDuplicateCustomer(customerId) {
 
   const refusal = notEmptyRefusal(await readEmptiness(stub));
   if (refusal) return refusal;
+  const twinRows = await findLiveTwins(stub);
+  const roleRefusal = await duplicateRoleRefusal(stub, twinRows, db);
+  if (roleRefusal) return roleRefusal;
 
-  const twins = await findLiveTwins(stub);
+  const twins = twinRows.map((r) => twinView(stub, r));
   const checks = Object.fromEntries(CHECKS.map((c) => [c.label, 'none']));
-  const stubLine = `${customerName(stub)} (…${last4(stub.phone)}), created ${stub.created_on || 'unknown date'}`;
-  const twinLine = twins.length
-    ? twins.map((t) => `${t.name} (…${t.phone_last4}), created ${t.created_on || 'unknown date'} — shares ${t.shares}; stays as is`).join(' | ')
-    : 'No other live customer shares this phone or email';
+  const stubLine = identityLine(stub);
+  const twinLine = twinRows.map((r, i) => `${identityLine(r)} — shares ${twins[i].shares}; stays as is`).join(' | ');
   return {
     preview: true,
     customer_id: stub.id,
-    stub: { name: customerName(stub), phone_last4: last4(stub.phone), created_on: stub.created_on || null },
+    stub: { name: customerName(stub), phone_masked: maskPhone(stub.phone), email_masked: maskEmail(stub.email), created_on: stub.created_on || null },
     duplicate_of: twins,
     checks,
     restore: RESTORE_LINE,
@@ -283,7 +385,8 @@ async function commitDeleteDuplicateCustomer(customerId, actionContext, approved
     if (approvedVersion && String(row.version) !== String(approvedVersion)) {
       throw changed('This customer record changed after the card was shown. Ask again for a fresh card.', 'version_changed');
     }
-    const refusal = notEmptyRefusal(await readEmptiness(row, trx));
+    const refusal = notEmptyRefusal(await readEmptiness(row, trx))
+      || await duplicateRoleRefusal(row, await findLiveTwins(row, trx), trx);
     if (refusal) throw changed(refusal.error, refusal.code);
   };
   const { archiveCustomerAsAdmin } = require('../routes/admin-customers');
@@ -312,5 +415,5 @@ module.exports = {
   commitDeleteDuplicateCustomer,
   RESTORE_LINE,
   NO_MESSAGE_LINE,
-  _test: { CHECKS, categoryFor, readEmptiness, findLiveTwins },
+  _test: { CHECKS, categoryFor, readEmptiness, findLiveTwins, primaryPropertyEdits, maskEmail, maskPhone },
 };
