@@ -415,7 +415,7 @@ describe('spelled-name decoding', () => {
     test('rewrites the component at its own end of name_full when both parts match', () => {
       const lee = { first_name: 'Odell', last_name: 'Odell', name_full: 'Odell Odell' };
       applyNameDictationToV2Caller(lee, dictation(entry({ spelled_value: 'Odele', field: 'last_name' })));
-      expect(lee).toEqual({ first_name: 'Lee', last_name: 'Odele', name_full: 'Odell Odele' });
+      expect(lee).toEqual({ first_name: 'Odell', last_name: 'Odele', name_full: 'Odell Odele' });
       const leeFirst = { first_name: 'Odell', last_name: 'Odell', name_full: 'Odell Odell' };
       applyNameDictationToV2Caller(leeFirst, dictation(entry({ spelled_value: 'Odele', field: 'first_name' })));
       expect(leeFirst).toEqual({ first_name: 'Odele', last_name: 'Odell', name_full: 'Odele Odell' });
