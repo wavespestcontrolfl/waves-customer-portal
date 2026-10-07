@@ -1011,8 +1011,10 @@ function headlineWords(quote, rawQuote, description, redact) {
   const raw = matchedSlice(rawQuote, description);
   const slice = raw && redact(raw).replace(/\s+/g, ' ').trim();
   // Sentence punctuation means the slice is not one plain phrase. A period
-  // inside a word (an email address, a URL, 2.5) is not a sentence break.
-  if (slice && !/[!?。！？]|\.(\s|$)/u.test(slice) && !compose.breaksAlertRules(slice)) return slice;
+  // inside a word (an email address, 2.5) is not a sentence break; one
+  // followed by a space, the end, or a capital ("receipt.Then") is. A URL
+  // still falls back: the alert rules forbid paths in alert text.
+  if (slice && !/[!?。！？]|\.(\s|$|\p{Lu})/u.test(slice) && !compose.breaksAlertRules(slice)) return slice;
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }
 

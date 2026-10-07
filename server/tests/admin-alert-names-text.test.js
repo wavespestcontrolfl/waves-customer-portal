@@ -212,6 +212,12 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(first).not.toContain('alice@example.test');
     await ring({ row: { kind: 'other', description: 'mail the receipt. then call', evidence: [{ quote: 'Okay. I will mail the receipt. then call' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // no space after the stop, next sentence capitalized: still a break
+    await ring({ row: { kind: 'other', description: 'mail the receipt.Then call', evidence: [{ quote: 'Okay. I will mail the receipt.Then call' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // a URL is a path the alert rules forbid: the headline keeps the first sentence
+    await ring({ row: { kind: 'other', description: 'visit https://example.com/help', evidence: [{ quote: 'Sure. I will visit https://example.com/help later' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Sure” (Sep 29) — nothing on record shows it done.');
   });
 
   test('a description that is not in the quote keeps the first sentence', async () => {
