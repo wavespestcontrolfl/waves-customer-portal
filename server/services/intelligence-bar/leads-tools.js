@@ -152,8 +152,8 @@ Use for: "move all unresponsive leads older than 30 days to lost", "mark all no-
   },
   {
     name: 'update_lead_contact',
-    description: `Correct a lead's contact details: first name, last name, phone, email, or address (street address, city, zip) — the lead record only; a linked customer account is NOT changed. Pass ONLY the fields to change. A blank last_name / phone / email / address / city / zip clears that field; first_name cannot be cleared. Leads have no state field.
-Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email", "the Smith lead's street address is 12 Palm Ave, not 21"
+    description: `Correct a lead's contact details: first name, last name, phone, email, or address — the lead record only; a linked customer account is NOT changed. Pass ONLY the name/phone/email fields to change; a blank last_name / phone / email clears it, and first_name cannot be cleared. An address change ALWAYS passes all three of address (street line), city and zip, none blank — even when only the street changes, pass the lead's current city and zip; an address cannot be cleared here. Ask the operator for any part you do not know. Leads have no state field.
+Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email", "the Smith lead's address is 12 Palm Ave, Bradenton 34208"
 ALWAYS show the operator the before → after values and get approval before saving.`,
     input_schema: {
       type: 'object',
@@ -164,9 +164,9 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
-        address: { type: 'string', description: 'Street address as the lead record holds it (the Leads page address field). Stored as written, trimmed.' },
-        city: { type: 'string' },
-        zip: { type: 'string', description: '5-digit ZIP code' },
+        address: { type: 'string', description: 'Street line. Only together with city and zip, all non-blank. Stored as written, trimmed.' },
+        city: { type: 'string', description: 'Only together with address and zip, non-blank.' },
+        zip: { type: 'string', description: '5-digit ZIP code. Only together with address and city, non-blank.' },
       },
     },
   },
