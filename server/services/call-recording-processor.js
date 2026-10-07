@@ -12544,6 +12544,7 @@ const CallRecordingProcessor = {
           callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
           caller: { first_name: extracted.first_name, last_name: extracted.last_name },
           secondaryContacts: callSecondaryContacts,
+          callerPhone: phone,
         });
         if (result.status === 'candidates') {
           await db('triage_items')
@@ -17415,7 +17416,14 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified });
+          // A family-linked call is the CALLER's, on the account holder's record: the caller's
+          // name, number and email never become the holder's (the caller is a service contact).
+          customer = await backfillCustomerFromAppointmentContact(
+            customerId, customer,
+            familyNameLink ? { ...extracted, first_name: null, last_name: null, phone: null, email: null } : extracted,
+            familyNameLink ? null : contactPhone,
+            { suppressPhone: callerPhoneUnverified || !!familyNameLink },
+          );
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           // Email advisory (owner ruling 2026-07-31): file the "collect the
           // email" card whenever the email is missing — INDEPENDENT of the

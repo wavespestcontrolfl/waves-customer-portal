@@ -20,7 +20,7 @@ const { randomUUID } = require('crypto');
 const gates = require('../config/feature-gates');
 const {
   pickNamedAccountHolder, normName, fullNameKey, resolveFamilyNameLink,
-  findLiveCustomersByFullName, linkCallToCustomer,
+  findLiveCustomersByFullName, linkCallToCustomer, phoneOnAnyLiveAccount,
 } = require('../services/call-family-name-link');
 
 const { buildTriageItem } = require('../services/call-routing-gates');
@@ -127,6 +127,10 @@ describe('Step 3 wiring (structural)', () => {
   test('the holder exclusion uses the structured name, so a two-word first name keys the same', () => {
     expect(fullNameKey({ first_name: 'Mary Ann', last_name: 'Testerson' })).toBe('mary ann|testerson');
     expect(source).toContain('holderKey: fullNameKey(holder)');
+  });
+
+  test('the booking backfill never copies the caller onto the holder', () => {
+    expect(source).toContain('familyNameLink ? { ...extracted, first_name: null, last_name: null, phone: null, email: null } : extracted');
   });
 });
 
@@ -240,6 +244,19 @@ const SKIP = !process.env.DATABASE_URL;
     });
     expect(outcome).toBe('customer_gone');
     expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+  });
+
+  test('a number carried by any live account, even only in a service-contact slot, is not ours to link', async () => {
+    await customer();
+    await customer({ first_name: 'Slot', last_name: 'Holder', service_contact2_phone: '+19415550177' });
+    await customer({ first_name: 'Gone', last_name: 'Customer', phone: '+19415550188', deleted_at: new Date() });
+    const callLogId = await call();
+    const out = await resolveFamilyNameLink(args(callLogId, { callerPhone: '(941) 555-0177' }));
+    expect(out.status).toBe('phone_on_file');
+    expect((await trx('call_log').where({ id: callLogId }).first()).customer_id).toBeNull();
+    expect(await phoneOnAnyLiveAccount(trx, '+19415550188')).toBe(false); // a retired account does not hold a number
+    expect(await phoneOnAnyLiveAccount(trx, '+19415550199')).toBe(false);
+    expect((await resolveFamilyNameLink(args(await call(), { callerPhone: '+19415550199' }))).status).toBe('linked');
   });
 
   test('a caller who is not a family member links nothing', async () => {

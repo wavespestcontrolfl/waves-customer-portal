@@ -132,19 +132,41 @@ async function linkCallToCustomer({ callLogId, procToken, customer, holder, call
   return outcome;
 }
 
+// Is this number on ANY live account, as the primary phone or in a service-contact slot?
+// findCustomerForCallContact returns null for a number it matched but would not link (a
+// service-contact slot match whose role or address checks fail), which is not "no account
+// carries this number". The family link runs only when nothing carries it, so it never
+// competes with the phone, shared-phone, household or relink paths.
+async function phoneOnAnyLiveAccount(conn, phone) {
+  const ten = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (ten.length !== 10) return false;
+  const { SERVICE_CONTACT_SLOTS } = require('./customer-contact');
+  const cols = ['phone', ...SERVICE_CONTACT_SLOTS.map((slot) => slot.phone)];
+  const sql = cols
+    .map((col) => `RIGHT(regexp_replace(COALESCE(??, ''), '[^0-9]', '', 'g'), 10) = ?`)
+    .join(' OR ');
+  const row = await conn('customers')
+    .whereNull('deleted_at')
+    .whereRaw(`(${sql})`, cols.flatMap((col) => [col, ten]))
+    .first('id');
+  return !!row;
+}
+
 /**
  * The whole linking step. Returns
  *   { status: 'linked', customer, holder }  - call_log now carries the customer
  *   { status: 'candidates', holder, candidates } - zero or 2+ matches, nothing linked
  *   { status: 'not_applicable' }  - no named holder
+ *   { status: 'phone_on_file' }  - some live account carries the caller's number: not ours to link
  *   { status: 'customer_gone' | 'claim_lost' }
  * The processor files the cards (it owns buildTriageItem and the card context).
  */
 async function resolveFamilyNameLink({
-  callLogId, procToken, callerRelationship, caller, secondaryContacts, conn = db,
+  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhone = null, conn = db,
 }) {
   const holder = pickNamedAccountHolder({ callerRelationship, caller, secondaryContacts });
   if (!holder) return { status: 'not_applicable' };
+  if (await phoneOnAnyLiveAccount(conn, callerPhone)) return { status: 'phone_on_file', holder };
   const matches = await findLiveCustomersByFullName(conn, holder);
   if (matches.length !== 1) {
     return {
@@ -174,6 +196,7 @@ module.exports = {
   displayName,
   pickNamedAccountHolder,
   findLiveCustomersByFullName,
+  phoneOnAnyLiveAccount,
   linkCallToCustomer,
   resolveFamilyNameLink,
 };
