@@ -138,6 +138,15 @@ test('a shown overview maps elements to urls, keeps reference titles and flags a
   expect(summary).toMatchObject({ shown: 2, costUsd: 0.008 });
 });
 
+test('an overview inside the knowledge panel is read as shown', async () => {
+  mockQueries = [q()];
+  dataforseo.request.mockResolvedValue(serp([{ type: 'knowledge_graph', items: [
+    { type: 'knowledge_graph_ai_overview_item', markdown: 'Panel overview', items: [{ type: 'ai_overview_element', text: 'A', references: [{ url: 'https://rival0.example/k' }] }] },
+  ] }]));
+  await runPinnedCaptures({ pass: 'am' });
+  expect(mockInserts[0]).toMatchObject({ status: 'shown', answer_markdown: 'Panel overview' });
+});
+
 test('citations on table, expanded and nested component elements count', async () => {
   mockQueries = [q()];
   dataforseo.request.mockResolvedValue(serp([{ type: 'ai_overview', markdown: 'x', references: [], items: [

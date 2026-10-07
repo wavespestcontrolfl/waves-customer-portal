@@ -372,9 +372,12 @@ async function runStillOpen(runId) {
   return Boolean(await db('seo_aio_sweep_runs').where({ id: runId, status: 'open' }).first());
 }
 
+// Idempotent: only a row still 'running' moves, and the run's ledger moves
+// only with it, so a retry after a lost commit acknowledgement changes nothing.
 async function storeResult(runId, rowId, patch, cost) {
   await db.transaction(async (trx) => {
-    await trx('seo_aio_sweep_results').where({ id: rowId }).update(patch);
+    const moved = await trx('seo_aio_sweep_results').where({ id: rowId, status: 'running' }).update(patch);
+    if (!moved) return;
     await trx('seo_aio_sweep_runs').where({ id: runId }).update({
       attempted: trx.raw('attempted + 1'),
       cost_usd: trx.raw('cost_usd + ?', [cost]),
@@ -400,6 +403,12 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
   const maxCost = run.max_cost_usd == null ? Infinity : Number(run.max_cost_usd);
   const recovered = await recoverInterrupted(run.id);
   let runCost = (Number(run.cost_usd) || 0) + recovered * EST_CALL_COST_USD;
+  // A run with nothing left is done, whatever its cost.
+  const left = await db('seo_aio_sweep_results').where({ run_id: run.id }).whereIn('status', ['pending', 'running']).count({ n: '*' }).first();
+  if (!Number(left?.n)) {
+    if (await finishRun(run.id, 'done')) summary.status = 'done';
+    return summary;
+  }
   if (runCost + EST_CALL_COST_USD > maxCost) {
     if (await finishRun(run.id, 'stopped_budget')) {
       logger.warn(`[aio-sweep] run ${run.id} stopped: $${runCost} leaves no room for another call under the $${maxCost} cap`);
@@ -529,4 +538,5 @@ async function rankGaps(runId, { limit = 200 } = {}) {
 module.exports = {
   buildCandidates, mergeCandidates, startSweep, processSweepChunk, rankGaps, cancelSweep, listRuns,
   citationKindOf, isMapCardUrl, cityFromQuery, CITY_COORDS, DEFAULT_CITY,
+  _storeResult: storeResult, // exported for the idempotency test only
 };

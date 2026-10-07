@@ -29,7 +29,12 @@ const json = (v) => (v == null ? null : JSON.stringify(v));
 
 function parseSerp(items) {
   const list = arr(items);
-  const aio = list.find((i) => i?.type === 'ai_overview') || null;
+  // An overview can also arrive inside the knowledge panel, as a
+  // knowledge_graph_ai_overview_item with the same element children.
+  const aio = list.find((i) => i?.type === 'ai_overview')
+    || list.filter((i) => i?.type === 'knowledge_graph').flatMap((i) => arr(i.items)).find((i) => i?.type === 'knowledge_graph_ai_overview_item')
+    || list.find((i) => i?.type === 'knowledge_graph_ai_overview_item')
+    || null;
 
   const organicTop = list
     .filter((i) => i?.type === 'organic')

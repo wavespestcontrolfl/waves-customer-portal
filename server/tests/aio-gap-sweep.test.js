@@ -310,6 +310,23 @@ describe('processSweepChunk', () => {
     expect(mockState.runs[0].cost_usd).toBeLessThanOrEqual(0.02);
   });
 
+  test('a run with nothing left finishes as done even when its cost leaves no room', async () => {
+    openRun({ cost_usd: 10, max_cost_usd: 10 });
+    mockState.results.push({ id: 'r1', run_id: 'run-open', query: 'q', status: 'none' });
+    const out = await sweep.processSweepChunk();
+    expect(out.status).toBe('done');
+    expect(mockState.runs[0].status).toBe('done');
+  });
+
+  test('storing a result twice moves the row and the ledger only once', async () => {
+    openRun();
+    mockState.results.push({ id: 'r1', run_id: 'run-open', query: 'q', status: 'running' });
+    await sweep._storeResult('run-open', 'r1', { status: 'shown' }, 0.004);
+    await sweep._storeResult('run-open', 'r1', { status: 'request_error' }, 0.004);
+    expect(mockState.results[0].status).toBe('shown');
+    expect(mockState.runs[0]).toMatchObject({ attempted: 1, cost_usd: 0.004 });
+  });
+
   test('a row is claimed as running before its paid call', async () => {
     openRun();
     pendingRow('q');
