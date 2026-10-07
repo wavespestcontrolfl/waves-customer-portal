@@ -1386,11 +1386,15 @@ function isCareInstruction(sentence) {
 }
 function givesOwnCareInstruction(sentence) {
   if (!DRY_TIME_GUIDANCE.test(sentence)) return isCareInstruction(sentence);
-  // Split off the drying clause; any other clause is screened on its own.
-  return sentence.split(/\s*[,;:]\s*|\s+(?:and|then|also|plus|but)\s+(?=(?:please\s+)?(?:mow|water|irrigate|apply|spread|fertiliz\w*|spray|stop|start|avoid|keep|cut|trim|prune|remove|rake|aerate|seed|use|add|run|turn|set|skip|wait|don['’]?t|do\s+not|never|make\s+sure|be\s+sure|try)\b)/i)
-    .filter((part) => part && !DRY_TIME_GUIDANCE.test(part) && !/\bdr(?:y|ied|ies)\b/i.test(part))
-    .some((part) => isCareInstruction(part.replace(/^\s*(?:please\s+)?/, '')));
+  // Remove only the drying instruction itself and screen whatever is left:
+  // "...until dry and consider applying fertilizer" (pre-push audit, #5964).
+  const rest = sentence.replace(DRY_INSTRUCTION_RE, ' ').replace(/^[\s,;:]*(?:and|then|also|plus|but|so)?\b\s*/i, '').trim();
+  if (!/[a-z]{3,}/i.test(rest)) return false;
+  return rest.split(/\s*[,;:]\s*|\s+(?:and|then|also|plus|but)\s+/i).filter(Boolean)
+    .some((part) => isCareInstruction(part.replace(/^\s*(?:please\s+)?/, '')) || isCareInstruction(rest));
 }
+// The drying instruction alone, from its verb to "dry".
+const DRY_INSTRUCTION_RE = /\b(?:keep|stay|let|allow|have|wait|hold)\b[^.?!;]*?\b(?:until|once|after)\b[^.?!;]*?\bdr(?:y|ied|ies)\b(?:\s+(?:completely|fully))?/i;
 const DRY_TIME_GUIDANCE = /\b(?:pets?|kids?|children|family|treated\s+(?:areas?|zones?))\b[^.?!]*\b(?:until|once|after)\b[^.?!]*\bdr(?:y|ied|ies)\b/i;
 // The treated place itself counts: "The yard is ready right now" (Codex P1 #5964 r40).
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|yards?|lawns?|grass|turf|patios?|lanais?|decks?|porch(?:es)?|pool\s+(?:area|deck)|play\s*(?:area|set|ground)|treated\s+(?:areas?|zones?|spots?)|(?:the\s+)?areas?|rooms?|home|house|inside|indoors|outside|outdoors|enter\w*|use\s+(?:it|the)|ready|safe\s+to|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;

@@ -2431,3 +2431,10 @@ describe('answer screen, Codex round 68', () => {
     expect(ruleAnswerReason(data, [], 'applied', 'Why was Bifen used?')).toBeNull();
   });
 });
+
+test('only the drying instruction itself is exempt (pre-push audit)', () => {
+  const data = lawnData({ reportV2: { aftercare: {} } });
+  const facts = buildReportAskFacts({ data });
+  expect(screenAskAnswer('Keep pets off treated areas until dry and consider applying fertilizer.', { question: 'q', data, facts })).toBe('own_instruction');
+  expect(screenAskAnswer('Keep pets off treated areas until dry, then they can go back out.', { question: 'q', data, facts })).toBeNull();
+});
