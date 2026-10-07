@@ -64,7 +64,8 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
-const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, isDateInWindow, resolveOrdinanceJurisdiction, loadV13Turf } = require('../services/waveguard-plan-engine');
+const { allowedTurfFor } = require('../services/lawn-turf-restrictions');
 const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -1894,18 +1895,23 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
   };
 }
 
-// A lawn visit may not record a staged v13 product this lawn's grass rules out (the February atrazine bag on
-// bermuda, zoysia, bahia, mixed or unknown grass). The appointment plan lists those product ids
-// (propertyGate.turfRestrictedProductIds); the plan only withholds an amount, so the closeout refuses the record.
-function turfRestrictedProductsBlockPayload({ plan = null, products = [] } = {}) {
-  const restricted = new Set((plan?.propertyGate?.turfRestrictedProductIds || []).map(String));
-  const applied = (Array.isArray(products) ? products : []).filter((product) => product?.productId && restricted.has(String(product.productId)));
-  if (!applied.length) return null;
-  const names = [...new Set(applied.map((product) => product.productName || product.name || 'This product'))];
+// A lawn visit may not record a product the label limits to certain grasses (the atrazine bag) on a lawn
+// whose grass is not one of them. Judged from the submitted catalog products and the lawn's own grass, not
+// from the visit's window or the plan, so it holds in any month, on any track, gate on or off. The plan
+// only withholds an amount; the closeout refuses the record. null = nothing restricted applies.
+async function turfRestrictedProductsBlock(knex, svc, products = []) {
+  const ids = [...new Set((Array.isArray(products) ? products : []).map((p) => p?.productId).filter(Boolean).map(String))];
+  if (!ids.length) return null;
+  const rows = await savepointRead(knex, (k) => k('products_catalog').whereIn('id', ids).select('id', 'name'));
+  const limited = rows.map((row) => ({ ...row, allowed: allowedTurfFor(row.name) })).filter((row) => row.allowed);
+  if (!limited.length) return null;
+  const { species } = await savepointRead(knex, (k) => loadV13Turf(k, svc));
+  const refused = limited.filter((row) => !row.allowed.includes(species));
+  if (!refused.length) return null;
   return {
-    error: `${names.join(', ')} cannot be recorded on this lawn: the product is not allowed on the grass recorded for it. Remove it, or correct the grass on the turf profile first.`,
+    error: `${refused.map((row) => row.name).join(', ')} cannot be recorded on this lawn: the product is not allowed on the grass recorded for it. Remove it, or correct the grass on the turf profile first.`,
     code: 'lawn_v13_turf_species_not_allowed',
-    productIds: applied.map((product) => String(product.productId)),
+    productIds: refused.map((row) => String(row.id)),
   };
 }
 
@@ -4471,6 +4477,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return ({ status: 422, body: internalOnlyProductsBlock });
       }
     }
+    const turfRestrictedBlock = claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn'
+      ? await turfRestrictedProductsBlock(db, svc, products) : null;
+    if (turfRestrictedBlock) {
+      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(turfRestrictedBlock.code), db);
+      return ({ status: 422, body: turfRestrictedBlock });
+    }
 
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
@@ -5121,11 +5133,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       waveguardEquipmentSystemId = null;
       waveguardCalibrationId = null;
       waveguardCalibrationCleared = true;
-    }
-    const turfRestrictedBlock = claim.action === 'proceed' ? turfRestrictedProductsBlockPayload({ plan: waveguardPlan, products }) : null;
-    if (turfRestrictedBlock) {
-      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(turfRestrictedBlock.code), db);
-      return ({ status: 422, body: turfRestrictedBlock });
     }
     if (claim.action === 'proceed' && waveguardCloseout) {
       const plan = waveguardPlan;
@@ -15292,7 +15299,7 @@ module.exports = {
   pestPressureConfigAllowsTechnicianRating,
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
-  turfRestrictedProductsBlockPayload,
+  turfRestrictedProductsBlock,
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,

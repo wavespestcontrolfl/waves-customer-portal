@@ -22,6 +22,8 @@ describe('lawn-grass-context', () => {
     expect(grassTypeLabel('bermuda')).toBe('Bermuda');
     expect(grassTypeLabel('zoysia')).toBe('Zoysia');
     expect(grassTypeLabel('bahia')).toBe('Bahia');
+    expect(grassTypeLabel('centipede')).toBe('Centipede');
+    expect(normalizeGrassType('Centipedegrass')).toBe('centipede');
     expect(grassTypeLabel(null)).toBe(null);
     expect(grassTypeLabel('weird_value')).toBe('weird_value');
     expect(GRASS_TYPE_LABELS.unknown).toBe('Unknown');

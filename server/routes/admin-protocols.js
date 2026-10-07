@@ -24,6 +24,8 @@ const {
   v13VisitLimits,
   v13AreaLine,
   v13ReplaceDefaultBag,
+  v13TurfBlocks,
+  loadV13Turf,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -993,7 +995,10 @@ router.get('/lawn-mix', async (req, res, next) => {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
     }
-    // A bag that replaces the default one (the February atrazine option) takes it off the sheet, as in the plan.
+    // The grass the plan would judge this visit on (none on file for the reference tab): a row limited to
+    // certain grasses is unsized unless the lawn's grass is one of them. A bag that replaces the default
+    // one (the February atrazine option) takes it off the sheet, as in the plan.
+    const turf = lawnV13On() ? await loadV13Turf(db, scheduled) : null;
     const resolvedLines = v13ReplaceDefaultBag(resolveProtocolItems(allLines, products, {
       selectedConditionalProductIds: req.query.selectedConditionalProductIds,
       selectedConditionalProductNames: req.query.selectedConditionalProductNames,
@@ -1003,7 +1008,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       conditionFlags: req.query.conditionFlags,
       propertyFlags: req.query.propertyFlags,
       includePremiumOnly: req.query.includePremiumOnly === 'true',
-    }), v13Rows);
+    }), v13Rows, turf);
 
     // The rig, derived once: carrier, tank size, and the coverage one tank gives.
     const [carrier, tankCapacity] = ['carrier_gal_per_1000', 'tank_capacity_gal'].map((key) => Number((calibration || {})[key] || 0));
@@ -1030,7 +1035,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
       // no quantity at all; a capped line none either).
-      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped) : null;
+      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, turf) : null;
       const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
@@ -1131,7 +1136,7 @@ router.get('/lawn-mix', async (req, res, next) => {
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
       })), limitCheck.capped),
       warnings,
-      blocks: [...blocks, ...limitCheck.blocks],
+      blocks: [...blocks, ...limitCheck.blocks, ...v13TurfBlocks(resolvedLines, (line) => (line.product ? v13LineState(line.product, v13Rows, limitCheck.capped, turf) : null), turf)],
     };
     res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }

@@ -32,7 +32,7 @@ router.use(requireTechOrAdmin);
 // Allowed-value lists. Lives in code (not DB enums) so the WaveGuard
 // plan engine can extend without a migration. Keep these names in
 // sync with what the protocol-rules table will reference.
-const GRASS_TYPES = ['st_augustine', 'bermuda', 'zoysia', 'bahia', 'mixed', 'unknown'];
+const GRASS_TYPES = ['st_augustine', 'bermuda', 'zoysia', 'bahia', 'centipede', 'mixed', 'unknown'];
 // 'heavy_shade' (not 'shade') — the value name itself signals severity
 // for the future plan engine, which treats sun exposure as a modifier
 // that gates hot herbicides / PGR rather than a separate protocol track.

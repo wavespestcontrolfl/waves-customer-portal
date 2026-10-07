@@ -27,6 +27,7 @@ const NUTRA = 'LESCO Nutra-TECH T&O Micronutrient Package';
 const STONEWALL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const TETRINO = 'Tetrino Insecticide';
+const ATRAZINE = 'LESCO Atrazine 1.05% 18-0-10 56% PolyPlus OPTI45 2%Fe 0.5%Mn 0.5%Mg AS MOP';
 const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
 const CATALOG = [
   { id: 'nt', name: NUTRA, aliases: [], default_rate_per_1000: 12, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
@@ -36,6 +37,7 @@ const CATALOG = [
   { id: 'cel', name: 'Celsius WG', aliases: [], default_rate_per_1000: 0.085, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
+  { id: 'atz', name: ATRAZINE, aliases: [], analysis_n: 18, analysis_k: 10, default_rate_per_1000: 4, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
   { id: 'dim', name: DIMENSION, aliases: [], analysis_n: 18, analysis_k: 10, default_rate_per_1000: 2.78, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
 ];
 const V13_SUMMARY = {
@@ -43,8 +45,9 @@ const V13_SUMMARY = {
   products: [
     { productId: 'nt', ratePer1000: 6, rateUnit: 'fl oz', gates: {} },
     { productId: 'stw', ratePer1000: 0.5, rateUnit: 'fl oz', gates: {} },
-    { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
+    { productId: 'f24', protocolProductName: F24, ratePer1000: null, rateUnit: 'lb_n', gates: {} },
     { productId: 'dim', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
+    { productId: 'atz', protocolProductName: ATRAZINE, ratePer1000: 4, rateUnit: 'lb', gates: { turfOnly: ['st_augustine', 'centipede'], wholeLawn: true, replacesProduct: F24 } },
     { productId: 'are', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
     { productId: 'cel', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', gates: { annualCounter: 'celsius_oz_per_1000' } },
     { productId: 'nis', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { concentration: '0.25% v/v', tankMixWith: 'Celsius WG' } },
@@ -75,9 +78,11 @@ async function lawnMix(query, reqExtra = {}) {
 const itemFor = (body, name) => body.items.find((item) => item.product?.name === name);
 
 let visitRows = [];
+let turfRows = [];
 beforeEach(() => {
   jest.clearAllMocks();
   visitRows = [];
+  turfRows = [];
   mockCheckLimits.mockReset().mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
   process.env.GATE_LAWN_V13 = 'true';
   operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: LAWN_V13_VERSION } });
@@ -89,6 +94,8 @@ beforeEach(() => {
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery([]);
     if (table === 'scheduled_services') return readQuery(visitRows);
+    if (table === 'customer_turf_profiles') return readQuery(turfRows);
+    if (table === 'customers') return readQuery([{ lawn_type: null }]);
     throw new Error(`Unexpected table: ${table}`);
   });
 });
@@ -352,4 +359,41 @@ test('whole-lawn rows keep their amounts beside the spot rows (a window with no 
   expect(itemFor(body, NUTRA).jobMix.amount).toBe(60);
   expect(itemFor(body, STONEWALL).jobMix.amount).toBe(5);
   expect(itemFor(body, 'Celsius WG').jobMix).toBeNull();
+});
+
+describe('the February atrazine option on the sheet follows the lawn the sheet is opened for', () => {
+  const VISIT = '3f2c1d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+  const visit = { id: VISIT, customer_id: 'cust-1', property_id: 'prop-A', scheduled_date: '2026-02-12', service_id: null, service_type: 'Lawn Care', recurring_pattern: null, recurring_interval_days: null };
+  const febQuery = { month: '2', track: 'st_augustine', selectedConditionalProductNames: ATRAZINE };
+
+  test('the reference tab (no lawn): atrazine is unsized, says why, a block names it, and the default bag stays', async () => {
+    const body = await lawnMix(febQuery);
+    const atrazine = itemFor(body, ATRAZINE);
+    expect(atrazine.selected).toBe(true);
+    expect(atrazine.jobMix).toBeNull();
+    expect(atrazine.unavailable.reason).toMatch(/certain grasses only/);
+    expect(atrazine.gateNotes.map((note) => note.key)).toContain('turfOnly');
+    expect(body.blocks).toEqual([expect.objectContaining({ code: 'lawn_v13_turf_species', productName: ATRAZINE })]);
+    expect(itemFor(body, F24).selected).toBe(true);
+    expect(itemFor(body, F24).jobMix).toBeTruthy();
+  });
+
+  test.each(['st_augustine', 'centipede'])('a visit on a %s lawn: atrazine is sized for the whole lawn and the 24-0-11 is off the sheet', async (grass) => {
+    visitRows = [visit];
+    turfRows = [{ grass_type: grass, track_key: null }];
+    const body = await lawnMix({ ...febQuery, scheduledServiceId: VISIT });
+    expect(itemFor(body, ATRAZINE).jobMix).toMatchObject({ amount: 40, amountUnit: 'lb' });
+    expect(body.blocks).toEqual([]);
+    expect(body.selectedItems.map((item) => item.product.name)).toEqual([ATRAZINE]);
+  });
+
+  test.each(['mixed', 'unknown', 'bahia', 'bermuda', 'zoysia'])('a visit on a %s lawn: no atrazine amount, a block, the default bag stays', async (grass) => {
+    visitRows = [visit];
+    turfRows = [{ grass_type: grass, track_key: null }];
+    const body = await lawnMix({ ...febQuery, scheduledServiceId: VISIT });
+    expect(itemFor(body, ATRAZINE).jobMix).toBeNull();
+    expect(body.blocks.map((block) => block.code)).toEqual(['lawn_v13_turf_species']);
+    expect(body.selectedItems.map((item) => item.product.name).sort()).toEqual([ATRAZINE, F24].sort());
+    expect(itemFor(body, F24).jobMix).toBeTruthy();
+  });
 });

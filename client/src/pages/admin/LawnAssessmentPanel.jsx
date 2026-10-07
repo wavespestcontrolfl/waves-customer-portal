@@ -69,6 +69,7 @@ const TURF_PROFILE_OPTIONS = {
     "bermuda",
     "zoysia",
     "bahia",
+    "centipede",
     "mixed",
     "unknown",
   ],

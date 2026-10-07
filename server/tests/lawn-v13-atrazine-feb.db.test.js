@@ -4,7 +4,9 @@ const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const engine = require('../services/waveguard-plan-engine');
 const { buildPlanForService } = engine;
 const migration = require('../models/migrations/20261007160000_lawn_v13_atrazine_feb_option');
-const { turfRestrictedProductsBlockPayload } = require('../services/complete-scheduled-service');
+const { turfRestrictedProductsBlock } = require('../services/complete-scheduled-service');
+const { allowedTurfFor } = require('../services/lawn-turf-restrictions');
+const fillMigration = require('../models/migrations/20261007161000_lawn_v13_atrazine_catalog_fill');
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
@@ -84,13 +86,11 @@ describe('the atrazine option data (no database)', () => {
     expect([species({}, 'weird lawn of things'), species(null, null)]).toEqual([null, null]);
   });
 
-  test('the completion refuses a restricted product and nothing else', () => {
-    const plan = { propertyGate: { turfRestrictedProductIds: ['p1'] } };
-    expect(turfRestrictedProductsBlockPayload({ plan, products: [{ productId: 'p2' }] })).toBeNull();
-    expect(turfRestrictedProductsBlockPayload({ plan: null, products: [{ productId: 'p1' }] })).toBeNull();
-    expect(turfRestrictedProductsBlockPayload({ plan: { propertyGate: {} }, products: [{ productId: 'p1' }] })).toBeNull();
-    expect(turfRestrictedProductsBlockPayload({ plan, products: [{ productId: 'p1', productName: 'Bag' }, { productId: 'p2' }] }))
-      .toMatchObject({ code: 'lawn_v13_turf_species_not_allowed', productIds: ['p1'], error: expect.stringMatching(/^Bag cannot be recorded on this lawn/) });
+  test('the closeout list names the atrazine bag for St. Augustine and centipede only, and no other product', () => {
+    expect(allowedTurfFor(ATRAZINE)).toEqual(['st_augustine', 'centipede']);
+    expect(allowedTurfFor('lesco atrazine 1.05% 18-0-10 56% polyplus opti45 2%fe 0.5%mn 0.5%mg as mop')).toEqual(['st_augustine', 'centipede']);
+    expect(allowedTurfFor(F24)).toBeNull();
+    expect(JSON.parse(migration.PROTOCOL_ROW.gates).turfOnly).toEqual(allowedTurfFor(ATRAZINE));
   });
 });
 
@@ -214,7 +214,6 @@ describeDb('the atrazine option through PostgreSQL', () => {
       expect(blockCodes(result)).not.toContain('lawn_v13_turf_species');
       const selectedBags = result.mixCalculator.items.filter((entry) => entry.selected && entry.product && /^LESCO (24|Atrazine)/.test(entry.product.name));
       expect(selectedBags.map((entry) => entry.product.name)).toEqual([ATRAZINE]);
-      expect(result.propertyGate.turfRestrictedProductIds).toEqual([]);
     });
 
     test('atrazine not picked: the default bag is unchanged and atrazine is not selected', async () => {
@@ -232,23 +231,106 @@ describeDb('the atrazine option through PostgreSQL', () => {
       expect(item(result, ATRAZINE).gateNotes.map((n) => n.key)).not.toContain('turfOnly');
     });
 
-    test.each([['mixed', null], ['unknown', null], ['bahia', 'st_augustine']])('%s grass: no amount, a block, the default bag stays, completion refuses the product', async (grass, track) => {
+    test.each([['mixed', null], ['unknown', null], ['bahia', 'st_augustine']])('%s grass: no amount, a block, the default bag stays', async (grass, track) => {
       const result = await plan(await visit(grass, track));
       expect(blockCodes(result)).toContain('lawn_v13_turf_species');
       expect(result.status).toBe('blocked');
       const bag = item(result, ATRAZINE);
       expect(bag.mix).toBeNull();
-      expect(bag.unavailable.reason).toMatch(/not allowed on the grass recorded/);
+      expect(bag.unavailable.reason).toMatch(/certain grasses only/);
       expect(bag.gateNotes.map((n) => n.key)).toContain('turfOnly');
       expect(item(result, F24)).toMatchObject({ selected: true });
       expect(item(result, F24).mix).toBeTruthy();
-      expect(result.propertyGate.turfRestrictedProductIds).toEqual([String(bag.product.id)]);
-      expect(turfRestrictedProductsBlockPayload({ plan: result, products: [{ productId: bag.product.id }] })).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+      // The plan's own block is the only one: the withheld amount is not also a missing nutrient rate.
+      expect(blockCodes(result)).not.toContain('missing_nutrient_rate');
     });
 
     test('no grass on file at all is not St. Augustine or centipede either', async () => {
       const result = await plan(await visit(null));
-      expect(result.propertyGate.turfRestrictedProductIds.length).toBe(1);
+      expect(blockCodes(result)).toContain('lawn_v13_turf_species');
+    });
+  });
+
+  describe('the closeout refuses the product from the lawn\'s grass, in any month, on any track', () => {
+    async function visitOn(grass, track, date) {
+      const scheduled = await visit(grass, track);
+      return knex('scheduled_services').where({ id: scheduled.id }).update({ scheduled_date: date }).then(() => ({ ...scheduled, scheduled_date: date }));
+    }
+    const atrazineId = async () => (await knex('products_catalog').where({ name: ATRAZINE }).first()).id;
+
+    test.each([['bahia', 'bahia', '2026-07-14'], ['zoysia', 'zoysia', '2026-10-13'], ['bermuda', 'bermuda', '2026-02-12'], ['mixed', null, '2026-05-12'], [null, null, '2026-03-10']])(
+      '%s lawn (track %s), visit on %s: refused with a 422 payload naming the bag', async (grass, track, date) => {
+        const scheduled = await visitOn(grass, track, date);
+        const block = await turfRestrictedProductsBlock(knex, scheduled, [{ productId: await atrazineId() }]);
+        expect(block).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed', productIds: [String(await atrazineId())] });
+        expect(block.error).toMatch(/^LESCO Atrazine 1\.05%.* cannot be recorded on this lawn/);
+      });
+
+    test.each([['st_augustine', 'st_augustine'], ['centipede', null]])('%s lawn: allowed, and a product with no restriction is never refused', async (grass, track) => {
+      const scheduled = await visitOn(grass, track, '2026-09-08');
+      expect(await turfRestrictedProductsBlock(knex, scheduled, [{ productId: await atrazineId() }])).toBeNull();
+      const bad = await visitOn('bahia', 'bahia', '2026-09-08');
+      expect(await turfRestrictedProductsBlock(knex, bad, [{ productId: f24.id }])).toBeNull();
+      expect(await turfRestrictedProductsBlock(knex, bad, [])).toBeNull();
+    });
+
+    test('the check does not depend on GATE_LAWN_V13', async () => {
+      const bad = await visitOn('bahia', 'bahia', '2026-02-12');
+      delete process.env.GATE_LAWN_V13;
+      expect(await turfRestrictedProductsBlock(knex, bad, [{ productId: await atrazineId() }])).toMatchObject({ code: 'lawn_v13_turf_species_not_allowed' });
+    });
+  });
+
+  describe('migration 20261007161000: fills a catalog row that already existed', () => {
+    const catalogRow = () => knex('products_catalog').where({ name: ATRAZINE }).first();
+    const fillLog = () => knex('lawn_protocol_audit_log').where({ action: 'v13_atrazine_catalog_fill' });
+
+    test('a complete row (the 160000 insert) is left alone: no change, no audit row', async () => {
+      const before = await catalogRow();
+      await fillMigration.up(knex);
+      expect(await catalogRow()).toEqual(before);
+      expect(await fillLog()).toHaveLength(0);
+    });
+
+    test('a hand-made row with blanks gets the missing label fields and price; its own values and inventory stay; down restores only what is unchanged', async () => {
+      const original = await catalogRow();
+      await knex('products_catalog').where({ id: original.id }).update({
+        epa_reg_number: 'N/A', default_rate_per_1000: null, analysis_n: null, labeled_turf_species: JSON.stringify([]), post_application_watering: null,
+        best_price: null, needs_pricing: true, max_label_rate_per_1000: 4.5, inventory_on_hand: 77,
+      });
+      try {
+        await fillMigration.up(knex);
+        const filled = await catalogRow();
+        expect(filled).toMatchObject({ epa_reg_number: '10404-94', labeled_turf_species: ['st_augustine', 'centipede'], needs_pricing: false });
+        expect(Number(filled.default_rate_per_1000)).toBe(4);
+        expect(Number(filled.analysis_n)).toBe(18);
+        expect(Number(filled.best_price)).toBe(36.14);
+        expect(filled.post_application_watering).toMatchObject({ source: 'owner' });
+        // Untouched: a value the row had, and operational fields.
+        expect(Number(filled.max_label_rate_per_1000)).toBe(4.5);
+        expect(Number(filled.inventory_on_hand)).toBe(77);
+        const [log] = await fillLog();
+        expect(log.changed_fields).toEqual(expect.arrayContaining(['epa_reg_number', 'default_rate_per_1000', 'best_price']));
+        expect(log.changed_fields).not.toContain('max_label_rate_per_1000');
+        // A second up writes nothing more.
+        await fillMigration.up(knex);
+        expect(await fillLog()).toHaveLength(1);
+        // Someone edits the rate afterwards: down leaves that edit and takes back the rest.
+        await knex('products_catalog').where({ id: original.id }).update({ default_rate_per_1000: 3.5 });
+        await fillMigration.down(knex);
+        const undone = await catalogRow();
+        expect(Number(undone.default_rate_per_1000)).toBe(3.5);
+        expect(undone).toMatchObject({ epa_reg_number: 'N/A', analysis_n: null, post_application_watering: null, best_price: null, needs_pricing: true });
+        expect(undone.labeled_turf_species).toEqual([]);
+        expect(Number(undone.inventory_on_hand)).toBe(77);
+        expect(await fillLog()).toHaveLength(0);
+      } finally {
+        await knex('products_catalog').where({ id: original.id }).update({
+          epa_reg_number: original.epa_reg_number, default_rate_per_1000: original.default_rate_per_1000, analysis_n: original.analysis_n,
+          labeled_turf_species: JSON.stringify(original.labeled_turf_species), post_application_watering: JSON.stringify(original.post_application_watering),
+          best_price: original.best_price, needs_pricing: original.needs_pricing, max_label_rate_per_1000: original.max_label_rate_per_1000, inventory_on_hand: original.inventory_on_hand,
+        });
+      }
     });
   });
 });

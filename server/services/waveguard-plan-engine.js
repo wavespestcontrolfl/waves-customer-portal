@@ -546,11 +546,19 @@ function v13AreaLine(item, row) {
 // The lawn's grass as a species gate (a row's turfOnly list) reads it: the grass on the profile, else its
 // track, else the visit's legacy lawn type. Mixed, unknown and free text are never one of the allowed species.
 function v13TurfSpecies(profile, legacyGrass) {
-  const recorded = [profile?.grass_type, profile?.track_key, legacyGrass].map((value) => String(value || '').trim()).find(Boolean) || '';
-  return /centipede/i.test(recorded) ? 'centipede' : normalizeGrassType(recorded);
+  return normalizeGrassType([profile?.grass_type, profile?.track_key, legacyGrass].map((value) => String(value || '').trim()).find(Boolean));
 }
 
-// turf = { species } for a lawn; null for a reader with no lawn (the tank sheet), which restricts nothing.
+// The grass a booked visit is judged on, read the way the plan reads it (active turf profile, then the
+// customer's legacy lawn type). A reader with no visit passes { species: null } itself: nothing is on
+// file, so a restricted row stays unsized. turf = null (the cost audit) restricts nothing.
+async function loadV13Turf(knex, visit) {
+  if (!visit?.customer_id) return { species: null };
+  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type', 'track_key');
+  const customer = await knex('customers').where({ id: visit.customer_id }).first('lawn_type');
+  return { species: v13TurfSpecies(profile, customer?.lawn_type) };
+}
+
 function v13TurfBlocked(row, turf) {
   const allowed = row?.gates?.turfOnly;
   return Boolean(turf) && Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(turf.species);
@@ -608,17 +616,12 @@ function v13ApplyAloneBlocks(selectedItems) {
 }
 
 // A selected line whose row is not allowed on this lawn's grass (v13LineState 'turf') is a block of its own:
-// the plan withholds its amount, and the completion refuses it (v13TurfRestrictedIds).
+// the plan withholds its amount (the closeout's own check is lawn-turf-restrictions.js).
 function v13TurfBlocks(lines, stateOf, turf) {
   return lines.filter((line) => line.selected && line.product && stateOf(line)?.state === 'turf').map((line) => ({
     code: 'lawn_v13_turf_species', severity: 'block', productId: line.product.id, productName: line.product.name,
-    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and the grass on file is ${turf.species ? (TURF_LABELS[turf.species] || turf.species) : 'not one of those'}. No amount is planned. Enter the actual work.`,
+    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and ${turf.species ? `the grass on file is ${TURF_LABELS[turf.species] || turf.species}` : 'no allowed grass is on file'}. No amount is planned. Enter the actual work.`,
   }));
-}
-
-// Every staged row this lawn's grass rules out, selected or not: what a completion may not record.
-function v13TurfRestrictedIds(rows, turf) {
-  return [...rows].filter(([, row]) => v13TurfBlocked(row, turf)).map(([productId]) => productId);
 }
 
 // The same rows for a reader with no visit (the tank sheet, the cost audit): one
@@ -1633,7 +1636,7 @@ function v13LineState(product, v13Rows, cappedIds = new Set(), turf = null) {
 
 const V13_UNAVAILABLE = {
   unavailable: 'No protocol row is linked to this product, so no amount is planned. Enter the actual work.',
-  turf: 'This product is not allowed on the grass recorded for this lawn, so no amount is planned. Enter the actual work.',
+  turf: 'This product is for certain grasses only (see its note), and this lawn\'s grass is not one of them or is not on file, so no amount is planned. Enter the actual work.',
   capped: 'An application limit is reached for this product, so no amount is planned.',
 };
 
@@ -2057,7 +2060,9 @@ async function buildPlanForService(serviceId, options = {}) {
     });
   }
 
-  const missingNutrientRates = findNutrientProductsMissingRates(plannedItems);
+  // A v13 line the plan withholds on purpose (capped, grass not allowed, unlinked) states its own reason
+  // above; it is not also a missing rate.
+  const missingNutrientRates = findNutrientProductsMissingRates(plannedItems.filter((item) => !item.unavailable));
   for (const item of missingNutrientRates) {
     blocks.push({
       code: 'missing_nutrient_rate',
@@ -2180,8 +2185,6 @@ async function buildPlanForService(serviceId, options = {}) {
         restrictedNitrogen: !!rule.restricted_nitrogen,
         restrictedPhosphorus: !!rule.restricted_phosphorus,
       })),
-      // Staged v13 products this lawn's grass rules out (a row's turfOnly list): the completion refuses them.
-      turfRestrictedProductIds: v13Active ? v13TurfRestrictedIds(v13Rows, turf) : [],
       annualN: {
         ...annualN,
         ledgerSource: nutrientLedger.source || null,
@@ -2265,7 +2268,8 @@ module.exports = {
   v13ItemFields,
   v13AreaLine,
   v13ReplaceDefaultBag,
-  v13TurfRestrictedIds,
+  v13TurfBlocks,
+  loadV13Turf,
   v13TurfSpecies,
   v13RowCalculates,
   planLineFields,

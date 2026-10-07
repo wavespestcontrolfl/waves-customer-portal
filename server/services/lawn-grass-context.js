@@ -20,6 +20,7 @@ const GRASS_TYPE_LABELS = {
   bermuda: 'Bermuda',
   zoysia: 'Zoysia',
   bahia: 'Bahia',
+  centipede: 'Centipede',
   mixed: 'Mixed',
   unknown: 'Unknown',
 };
@@ -63,6 +64,7 @@ function normalizeGrassType(raw) {
   if (/bermuda|celebration|tifway|tifgrand|latitude\s*36/.test(key)) return 'bermuda';
   if (/zoysia|empire|zeon|geo|jamur|palisades/.test(key)) return 'zoysia';
   if (/bahia|argentine|pensacola/.test(key)) return 'bahia';
+  if (/centipede/.test(key)) return 'centipede';
   if (/\bmix(ed)?\b/.test(key)) return 'mixed';
   return null;
 }
