@@ -243,17 +243,21 @@ const PACK_OR_STRENGTH_RE = /\s+\d+(?:\.\d+)?\s*(?:%|(?:percent|fl\.?\s*oz|oz|ou
 
 const NPK_ANALYSIS_RE = /\b\d{1,2}-\d{1,2}-\d{1,2}\b/g;
 
+// A leading or inner N-P-K analysis ("24-0-11", "LESCO 15-0-15") reads as a
+// date to the screen, so it is dropped too (Codex P2 #5964 r52).
+function customerProductName(fullName) {
+  const name = fullName.replace(PACK_OR_STRENGTH_RE, '').replace(NPK_ANALYSIS_RE, ' ').replace(/\s+/g, ' ').trim();
+  if (name) return name;
+  return NPK_ANALYSIS_RE.test(fullName) ? 'Fertilizer' : '';
+}
+
 function productFacts(app = {}) {
   const product = app.product || {};
   const copy = product.report_copy || {};
   // A catalog name may carry a pack size or a strength ("Dismiss 64 oz",
   // "Copper Fungicide 27.15%"); the answer screen rejects amounts, so the
   // customer-facing name stops before them (Codex P2 #5964 r13).
-  // A leading or inner N-P-K analysis ("24-0-11", "LESCO 15-0-15") reads as a
-  // date to the screen, so it is dropped too (Codex P2 #5964 r52).
-  const fullName = cleanText(product.name || app.productName || app.product_name);
-  const name = fullName.replace(PACK_OR_STRENGTH_RE, '').replace(NPK_ANALYSIS_RE, ' ').replace(/\s+/g, ' ').trim()
-    || (NPK_ANALYSIS_RE.test(fullName) ? 'Fertilizer' : '');
+  const name = customerProductName(cleanText(product.name || app.productName || app.product_name));
   if (!name) return null;
   const whatItDoes = cleanText(copy.how_it_works)
     || cleanText(product.service_report_summary)
@@ -940,46 +944,40 @@ const PEST_TERMS = [
 // Any "-bug", "-worm", "-fly", "-miner" or "-borer" compound is a pest name too.
 const PEST_SHAPE_RE = /\b[a-z]+(?:bugs?|worms?|fl(?:y|ies)|miners?|borers?)\b/gi;
 
+// The fact-sheet text a term may come from, stemmed.
+const factText = (parts) => stemmedTerms(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
+const sentenceNames = (sentence, label) => stemmedTerms(sentence).includes(label);
+
+// "We found ants" needs the visit's own record, not the concern alone (Codex
+// P1 #5964 r50), and its place must be there too: ants found in the kitchen
+// are no ants found in the attic (Codex P1 #5964 r51).
+function ungroundedFinding(text, terms, visitOnly) {
+  return splitSentences(text).some((sentence) => {
+    if (!FINDING_CLAIM.test(sentence) || UNCERTAIN_RE.test(sentence)) return false;
+    const named = terms.filter((label) => sentenceNames(sentence, label));
+    if (named.some((label) => !visitOnly.includes(label))) return true;
+    return named.length > 0 && (sentence.toLowerCase().match(FINDING_PLACE_RE) || []).some((place) => !visitOnly.includes(stemmedTerms(place).trim()));
+  });
+}
+
 function leaksTargetList(text, {
   question, data, facts, requiredLines,
 }) {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for, product.active_ingredient]);
-  const allowed = stemmedTerms([
-    question, data.customerConcern, facts?.report_sections, facts?.findings,
-    facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report,
-    approvedWording, requiredLines,
-  ]
-    .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
-    .join(' '));
-  const said = stemmedTerms(text);
+  const visitParts = [facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
+    facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines];
+  const allowed = factText([question, data.customerConcern, ...visitParts]);
   const shaped = (text.match(PEST_SHAPE_RE) || []).map((term) => stemmedTerms(term));
   const terms = [...targetLabelsOf(data), ...PEST_TERMS, ...shaped];
-  if (terms.some((label) => said.includes(label) && !allowed.includes(label))) return true;
+  if (terms.some((label) => sentenceNames(text, label) && !allowed.includes(label))) return true;
+  if (ungroundedFinding(text, terms, factText(visitParts))) return true;
   // A term only the question names may be repeated, never confirmed: "Is this
-  // root rot?" -> "Yes, your lawn has root rot" (Codex P1 #5964 r37).
-  const inFacts = stemmedTerms([
-    data?.customerConcern, facts?.customer_concern, facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
-    facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines,
-  ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
-  // What the customer reported is not what we found: "We found ants" needs
-  // the visit's own record, not the concern alone (Codex P1 #5964 r50).
-  const visitOnly = stemmedTerms([
-    facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
-    facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines,
-  ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
-  if (splitSentences(text).some((sentence) => FINDING_CLAIM.test(sentence) && !UNCERTAIN_RE.test(sentence)
-    && terms.some((label) => stemmedTerms(sentence).includes(label) && !visitOnly.includes(label)))) return true;
-  // The place of a finding must be on the visit's record too: ants found in
-  // the kitchen are no ants found in the attic (Codex P1 #5964 r51).
-  if (splitSentences(text).some((sentence) => FINDING_CLAIM.test(sentence) && !UNCERTAIN_RE.test(sentence)
-    && terms.some((label) => stemmedTerms(sentence).includes(label))
-    && (sentence.toLowerCase().match(FINDING_PLACE_RE) || []).some((place) => !visitOnly.includes(stemmedTerms(place).trim())))) return true;
-  // Any sentence that is not a "no" or a "not sure" affirms it: "The symptoms
-  // indicate root rot", "It treats termites" (Codex P1s #5964 r39).
-  // "Is not labeled for termites" is a claim too; only "the report does not
-  // say" style uncertainty may repeat the term (Codex P1 #5964 r47).
+  // root rot?" -> "Yes, your lawn has root rot" (Codex P1s #5964 r37, r39).
+  // Only "the report does not say" style uncertainty may repeat it; "is not
+  // labeled for termites" is a claim too (Codex P1 #5964 r47).
+  const inFacts = factText([data?.customerConcern, facts?.customer_concern, ...visitParts]);
   return splitSentences(text).some((sentence) => !UNCERTAIN_RE.test(sentence)
-    && terms.some((label) => stemmedTerms(sentence).includes(label) && !inFacts.includes(label)));
+    && terms.some((label) => sentenceNames(sentence, label) && !inFacts.includes(label)));
 }
 const FINDING_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathroom|bedroom|closet|pantry|laundry|cabinet|sink|baseboard|wall|ceiling|eave|soffit|vent|window|door|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|lawn|bed|tree|shrub|palm|hedge|driveway|sidewalk|basement|living\s+room|dining\s+room|office|stairs?)s?\b/g;
 const FINDING_CLAIM = /\b(?:we|i|our\s+tech\w*|the\s+tech\w*|your\s+tech\w*|technician|crew|team)\s+(?:\w+\s+){0,2}?(?:found|find|saw|spott\w*|observ\w*|noted|discover\w*|confirm\w*|identif\w*|detect\w*|located|turned\s+up)\b|\b(?:was|were|been|got)\s+(?:\w+\s+)?(?:found|seen|spotted|observed|noted|discovered|confirmed|identified|detected|located)\b/i;
@@ -1188,7 +1186,7 @@ function numberIsKnown(value, after, sentence, known) {
   // names ("the score went from 70 to 100"); with none named ("82 days") it
   // may only repeat a number the report's own text states (Codex P1 r12).
   const rowArea = (fact) => (/\.diagnosis\.([a-z0-9_]+)\./.exec(fact.key) || [])[1];
-  const fitsRow = (fact) => !rowArea(fact) || normalizeKey(sentence).includes(rowArea(fact).replace(/_/g, ' '));
+  const fitsRow = (fact) => !rowArea(fact) || rowArea(fact).split('_').filter((word) => word.length > 3).some((word) => normalizeKey(sentence).includes(word.replace(/s$/, '')));
   known = known.filter(fitsRow);
   if (!kind) {
     // A number from report text grounds only a claim about the same thing:
@@ -1506,7 +1504,10 @@ function contradictsPressure(text, facts) {
     const negated = NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower);
     if (negated) {
       if (!fact || !/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/i.test(text)) return false;
-      return PRESSURE_LEVELS.filter(([, re]) => re.test(lower)).some(([name]) => name === label);
+      // "Has not improved" on an improving trend fails too (Codex P1 #5964 r54).
+      return PRESSURE_LEVELS.filter(([, re]) => re.test(lower)).some(([name]) => name === label)
+        || (PRESSURE_DOWN.test(lower) && /improv|decreas|lower|better|down/.test(trendText))
+        || (PRESSURE_UP.test(lower) && /increas|worse|rising/.test(trendText));
     }
     // "Activity may stay up for a few days" is the normal flush, not the gauge.
     // A later clause ("it was high") carries the subject of the first.
@@ -1566,6 +1567,20 @@ const clausesOf = (text) => splitSentences(matchForm(text))
   .flatMap((sentence) => sentence.split(/[;,:]\s*|\s+(?:but|and|while|whereas|though|although|yet)\s+|\s+[—–-]\s+/i)).filter(Boolean);
 const GROUP_NEEDS_CARE = /needs\s+attention|urgent|watch|deficit|declin|poor|stress/i;
 const GROUP_FINE = /healthy|strong|stable|good|excellent|thriving/i;
+// A score that plainly disagrees (past the hard cut) fails even with sheet
+// wording; past the soft cut, only sheet wording grounds it.
+// A named plant group is judged on its own status card (Codex P1 #5964 r53).
+function plantGroupScores(lower, facts) {
+  return asArray(facts?.tree_shrub_report?.plant_groups)
+    .filter((group) => group.group && normalizeKey(group.group).split(' ').filter((word) => word.length > 3).some((word) => lower.includes(word.replace(/e?s$/, ''))))
+    .map((group) => String(group.status || ''))
+    .map((status) => (GROUP_NEEDS_CARE.test(status) ? 40 : (GROUP_FINE.test(status) ? 85 : null)))
+    .filter((value) => value != null);
+}
+function verdictFails(known, grounded, [hard, soft], beyond) {
+  if (!known.length) return !grounded;
+  return known.some((n) => beyond(n, hard)) || (!grounded && known.some((n) => beyond(n, soft)));
+}
 const PLANT_SUBJECT = /\b(?:plants?|shrubs?|trees?|hedges?|palms?|beds?|landscape)\b/i;
 const HEALTH_BAD = ['poor', 'unhealthy', 'bad', 'struggling', 'stressed', 'declining', 'thin', 'thinning', 'sparse', 'weak', 'sick', 'dying', 'dead', 'patchy', 'bare', 'damaged', 'diseased', 'worse', 'worsening', 'failing', 'suffering'];
 const HEALTH_GOOD = ['healthy', 'good', 'great', 'excellent', 'thriving', 'lush', 'strong', 'thick', 'dense', 'vibrant', 'perfect'];
@@ -1592,23 +1607,17 @@ function contradictsHealth(text, facts) {
     const plantScore = facts?.tree_shrub_report?.plant_health_score_out_of_100;
     const overall = PLANT_SUBJECT.test(lower) && plantScore != null ? [plantScore]
       : [facts?.lawn_assessment?.overall_out_of_100 ?? plantScore];
-    // A named plant group is judged on its own status card (Codex P1 #5964 r53).
-    const groupScores = asArray(facts?.tree_shrub_report?.plant_groups)
-      .filter((group) => group.group && normalizeKey(group.group).split(' ').filter((word) => word.length > 3).some((word) => lower.includes(word.replace(/e?s$/, ''))))
-      .map((group) => (GROUP_NEEDS_CARE.test(String(group.status || '')) ? 40 : GROUP_FINE.test(String(group.status || '')) ? 85 : null))
-      .filter((value) => value != null);
-    const pool = groupScores.length ? groupScores : scores.length ? scores : overall;
+    const groupScores = plantGroupScores(lower, facts);
+    const pool = [groupScores, scores, overall].find((list) => list.length);
     const known = pool.filter((value) => value != null && Number.isFinite(Number(value))).map(Number);
     const used = (words) => words.filter((word) => new RegExp(`\\b${word}\\b`).test(lower));
     // A score that plainly disagrees wins over any sheet wording; between the
     // bands, wording from the same dimension or the score may ground it.
-    const bad = used(negated ? HEALTH_GOOD : HEALTH_BAD);
-    const good = used(negated ? HEALTH_BAD : HEALTH_GOOD);
     // A negated verdict is judged on the score alone: "not healthy" is no
     // sheet word.
     const grounded = (word) => !negated && has(word);
-    return bad.some((word) => (known.length ? known.some((n) => n >= 75) || (!grounded(word) && known.some((n) => n >= 60)) : !grounded(word)))
-      || good.some((word) => (known.length ? known.some((n) => n < 50) || (!grounded(word) && known.some((n) => n < 70)) : !grounded(word)));
+    return used(negated ? HEALTH_GOOD : HEALTH_BAD).some((word) => verdictFails(known, grounded(word), [75, 60], (n, cut) => n >= cut))
+      || used(negated ? HEALTH_BAD : HEALTH_GOOD).some((word) => verdictFails(known, grounded(word), [50, 70], (n, cut) => n < cut));
   });
 }
 
@@ -1687,25 +1696,32 @@ function deniesRecordedApplication(text, facts) {
 const TREND_UP = /\b(?:improv\w*|increas\w*|ros(?:e|en)|rising|climb\w*|grew|grow(?:ing|n|s)?|went\s+up|gone\s+up|up\b|higher|better|gain\w*)\b/i;
 const TREND_DOWN = /\b(?:declin\w*|decreas\w*|dropp?\w*|fell|fall(?:en|ing|s)?|went\s+down|gone\s+down|down\b|lower|worse|slipp?\w*|los[st]\w*)\b/i;
 const TREND_KEYS = [[/\bfoliage\b/i, 'foliage_out_of_100'], [/\b(?:water\s+stress|drought)\b/i, 'water_stress_out_of_100'], [/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_cleanliness_out_of_100']];
+// The trend a clause speaks about: a named series, else the overall one.
+function trendEndsFor(clause, trends) {
+  const key = (TREND_KEYS.find(([re]) => re.test(clause)) || [])[1]
+    || (/\b(?:lawn|overall|health|score|grass|turf|plants?|shrubs?|trees?|palms?|hedges?|landscape)\b/i.test(clause) ? 'overall_out_of_100' : null);
+  const trend = key && trends[key];
+  const from = Number(trend?.from?.value);
+  const to = Number(trend?.to?.value);
+  return Number.isFinite(from) && Number.isFinite(to) ? { from, to } : null;
+}
 function contradictsTrend(text, facts) {
   // Tree & Shrub trends too (Codex P1 #5964 r51).
   const trends = facts?.lawn_report?.trends || facts?.tree_shrub_report?.trends;
   if (!trends || typeof trends !== 'object') return false;
   return clausesOf(text).some((clause) => {
-    if (NOT_CONFIRMED_RE.test(clause)) return false;
-    const key = (TREND_KEYS.find(([re]) => re.test(clause)) || [])[1]
-      || (/\b(?:lawn|overall|health|score|grass|turf|plants?|shrubs?|trees?|palms?|hedges?|landscape)\b/i.test(clause) ? 'overall_out_of_100' : null);
-    const trend = key && trends[key];
-    const from = Number(trend?.from?.value);
-    const to = Number(trend?.to?.value);
-    if (!Number.isFinite(from) || !Number.isFinite(to)) return false;
+    if (UNCERTAIN_RE.test(clause)) return false;
+    const ends = trendEndsFor(clause, trends);
+    if (!ends) return false;
+    const { from, to } = ends;
     // Endpoints in the wrong order: "from 50 to 80" on 80 -> 50.
     const span = /\bfrom\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b[^.?!]*?\bto\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b/i.exec(clause);
     if (span && Number(span[1]) === to && Number(span[2]) === from && from !== to) return true;
     const up = TREND_UP.test(clause);
-    const down = TREND_DOWN.test(clause);
-    if (up === down) return false;
-    return up ? !(to > from) : !(to < from);
+    if (up === TREND_DOWN.test(clause)) return false;
+    // "Has not improved" claims the other way (Codex P1 #5964 r54).
+    const rose = up !== (NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause));
+    return rose ? !(to > from) : !(to < from);
   });
 }
 
@@ -1770,7 +1786,8 @@ const CONCERN_STOP = new Set('the and you your did not was were have has had any
 
 // A Tree & Shrub diagnosis row's polarity must hold: "We detected a Ganoderma
 // conk" when the row says none was seen (Codex P1 #5964 r51).
-const DIAGNOSIS_CLEAR = /^(?:no|none|clear|not\s+(?:seen|observed|found|present)|absent|healthy|strong|stable|good|ok|okay)$/i;
+const DIAGNOSIS_CLEAR = /^(?:no|none|clear|not\s+(?:seen|observed|found|present)|absent|healthy|strong|stable|good|excellent|ok|okay)$/i;
+const PRESENCE_CLAIM = /\b(?:present|presence|found|seen|detected|visible|observed|spotted|showed|shows|signs?\s+of|has|have|had|there\s+(?:is|are|was|were)|infest\w*|affected|absent|clear\s+of|free\s+of)\b/i;
 const DIAGNOSIS_PRESENT = /^(?:yes|present|detected|confirmed|needs\s+attention|urgent|watch|tracking|deficit)$/i;
 const DIAGNOSIS_GENERIC = new Set('disease diseases pests insects insect health plant plants tree trees shrub shrubs issue issues damage pressure stress overall color foliage'.split(' '));
 function contradictsDiagnosis(text, facts) {
@@ -1780,12 +1797,14 @@ function contradictsDiagnosis(text, facts) {
     const lower = clause.toLowerCase();
     if (UNCERTAIN_RE.test(lower)) return false;
     const negated = NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower);
-    // Scored rows are categories ("Disease 100"), not presence findings.
-    return rows.filter((row) => row.score_out_of_100 == null).some((row) => {
+    // Only a presence or absence claim is judged, on every row, scored or not:
+    // "Leaf-spot signals were present" against a clear card (Codex P1 #5964 r54).
+    if (!PRESENCE_CLAIM.test(lower)) return false;
+    return rows.some((row) => {
       const words = String(row.area || '').toLowerCase().split(/[^a-z]+/).filter((word) => word.length > 3 && !DIAGNOSIS_GENERIC.has(word));
       if (!words.length || !words.every((word) => lower.includes(word.replace(/s$/, '')))) return false;
       const status = String(row.status || '').trim();
-      const clear = DIAGNOSIS_CLEAR.test(status) || /^\s*no\b|\bnot\s+(?:seen|observed|found|present)\b/i.test(String(row.explanation || ''));
+      const clear = DIAGNOSIS_CLEAR.test(status) || /^\s*no\b|\bnot\s+(?:seen|observed|found|present|visible)\b|\bno\s+(?:\w+\s+){0,3}?(?:signals?|signs?|activity)\b/i.test(String(row.explanation || ''));
       const present = !clear && DIAGNOSIS_PRESENT.test(status);
       return (clear && !negated) || (present && negated);
     });
@@ -1810,9 +1829,40 @@ function statesUnrecordedMethod(text, facts) {
   });
 }
 
+// Water balance and mowing height in words must fit the dashboard status:
+// "received enough water" on a deficit, "cut too short" on too tall (Codex
+// P1s #5964 r54).
+const WATER_ENOUGH = /\b(?:enough|sufficient|adequate|plenty\s+of)\s+(?:water|rain|moisture|irrigation)\b|\bwell[\s-]watered\b|\b(?:water|watering|moisture)\s+(?:was|is|were)\s+(?:enough|sufficient|adequate|fine|good|on\s+target)\b/i;
+const WATER_SURPLUS = /\b(?:more\s+(?:water|rain|moisture)?\s*than\s+(?:it\s+)?(?:needed|needs|required)|too\s+much\s+(?:water|rain|moisture)|over[\s-]?water\w*|excess\s+(?:water|rain|moisture)|surplus|soggy|waterlogged)\b/i;
+const WATER_DEFICIT = /\b(?:not\s+enough|too\s+little|insufficient)\s+(?:water|rain|moisture)|\bunder[\s-]?water\w*|\b(?:water|rain|moisture)\s+(?:deficit|shortfall|gap)|\b(?:too\s+dry|dried\s+out|thirsty|needs?\s+more\s+water)\b/i;
+const MOW_SHORT = /\b(?:too\s+short|cut\s+(?:too\s+)?short|scalp\w*|too\s+low)\b/i;
+const MOW_TALL = /\b(?:too\s+(?:tall|high|long)|overgrown)\b/i;
+const MOW_IDEAL = /\b(?:was|were|is|are|at|to)\s+(?:the\s+|an\s+|a\s+)?(?:ideal|right|correct|perfect|good|proper|recommended)\s+(?:mowing\s+)?(?:height|length)\b|\b(?:height|mowing)\s+(?:was|is)\s+(?:ideal|right|correct|perfect|good|in\s+range|on\s+target)\b|\b(?:was|is|were|are)\s+in\s+(?:the\s+)?(?:ideal|recommended)\s+range\b/i;
+function contradictsWater(clause, water, negated) {
+  const enough = WATER_ENOUGH.test(clause) && !WATER_DEFICIT.test(clause);
+  if (enough) return negated ? water !== 'deficit' : water === 'deficit';
+  if (negated) return false;
+  return (WATER_SURPLUS.test(clause) && water !== 'surplus') || (WATER_DEFICIT.test(clause) && water !== 'deficit');
+}
+function contradictsMowing(clause, mow) {
+  return (MOW_SHORT.test(clause) && !/short|low|below/.test(mow))
+    || (MOW_TALL.test(clause) && !/tall|high|above/.test(mow))
+    || (MOW_IDEAL.test(clause) && !/ideal|range/.test(mow));
+}
+function contradictsLawnStatus(text, facts) {
+  const water = String(facts?.lawn_report?.water_this_week?.status || '').toLowerCase();
+  const mow = String(facts?.lawn_report?.mowing?.status || '').toLowerCase().replace(/_/g, ' ');
+  return clausesOf(text).some((clause) => {
+    if (UNCERTAIN_RE.test(clause)) return false;
+    const negated = NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause);
+    return Boolean((water && contradictsWater(clause, water, negated)) || (mow && !negated && contradictsMowing(clause, mow)));
+  });
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['lawn_status_claim', (text, { facts }) => contradictsLawnStatus(text, facts)],
   ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
   ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],
   ['denies_concern', (text, { facts }) => deniesConcern(text, facts)],

@@ -2010,3 +2010,42 @@ test('a prose number keeps its measurement (pre-push audit)', () => {
   expect(screenAskAnswer('Rain was 4 inches this week.', { question: 'How much rain?', data, facts })).toBe('unstated_number');
   expect(screenAskAnswer('The mowing height was 4 inches.', { question: 'How high?', data, facts })).toBeNull();
 });
+
+describe('answer screen, Codex round 54', () => {
+  test('a scored diagnosis card keeps its polarity', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 }, diagnosis: [{ key: 'disease', label: 'Disease / Leaf Spot Signals', score: 95, status: 'strong', explanation: 'No leaf spot signals were visible.' }] } };
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Any disease?', data, facts });
+    expect(ask('Disease and leaf-spot signals were present.')).toBe('diagnosis_claim');
+    expect(ask('Leaf spot signals scored 95 out of 100.')).toBeNull();
+  });
+
+  const lawn = lawnData({
+    reportV2: {
+      aftercare: {},
+      trends: { overall: [{ label: 'Aug', value: 50 }, { label: 'Oct', value: 80 }] },
+      water: { status: 'deficit', totalInches: 0.5, targetInches: 1, explanation: 'Short on water.' },
+      mowing: { measuredHeightInches: 5, idealMinInches: 3.5, idealMaxInches: 4, status: 'too_tall' },
+    },
+  });
+  const lawnFacts = buildReportAskFacts({ data: lawn });
+  const askLawn = (answer) => screenAskAnswer(answer, { question: 'How is my lawn?', data: lawn, facts: lawnFacts });
+
+  test.each(['Your lawn has not improved.', 'Your lawn did not get better.'])('a negated trend claim is judged the other way: %s', (answer) => {
+    expect(askLawn(answer)).toBe('trend_claim');
+  });
+
+  test.each(['Yes, your lawn received enough water this week.', 'The lawn received more water than it needed.', 'The lawn was cut too short.', 'The mowing height was ideal.'])('a water or mowing verdict must fit the status: %s', (answer) => {
+    expect(askLawn(answer)).toBe('lawn_status_claim');
+  });
+
+  test('verdicts that fit the status pass', () => {
+    expect(askLawn('The lawn did not get enough water this week.')).toBeNull();
+    expect(askLawn('The grass is too tall.')).toBeNull();
+  });
+
+  test('a negated pressure direction is judged against the trend', () => {
+    const data = pestData({ applications: [], pestPressure: { label: 'Low', trend: 'improving' } });
+    expect(screenAskAnswer('Pest pressure has not improved.', { question: 'Is it better?', data, facts: buildReportAskFacts({ data }) })).toBe('pressure_claim');
+  });
+});
