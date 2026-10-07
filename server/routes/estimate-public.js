@@ -23,6 +23,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
+const { UNISSUED_ESTIMATE, estimateNeverIssued } = require('../services/estimate-bahia-review');
 const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
 const {
   computeContactGaps,
@@ -19427,8 +19428,9 @@ function extractEngineInputs(estData) {
   // the inputs still win inside the engine's own resolution, and a silent
   // estimate (no stamp, no evidence) injects nothing and replays live.
   // savedEstimateReplay: a stored estimate re-priced as sold, so the lawn pricer's v13 bahia review
-  // (which parks NEW bahia quotes) leaves an estimate that was already sent alone.
-  const out = { ...base, ...savedFloorReplayOverrides(estData), savedEstimateReplay: true };
+  // (which parks NEW bahia quotes) leaves an estimate that was already sent alone. An estimate the
+  // caller knows was never issued (buildPricingBundleInner marks it) is not sold: it keeps the review.
+  const out = { ...base, ...savedFloorReplayOverrides(estData), savedEstimateReplay: estData[UNISSUED_ESTIMATE] !== true };
   // Existing-customer reprice: replay the prior qualifying services persisted at
   // save so any public recompute (bundle CTA, frequency slider) keeps the
   // COMBINED WaveGuard tier instead of reverting to this estimate's services
@@ -28078,6 +28080,9 @@ async function buildPricingBundleInner(estimate) {
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
+  // A row that was never issued (draft, scheduled, first send) is not sold: its replay keeps the
+  // GATE_LAWN_V13 bahia review, so the send snapshot cannot price a new bahia plan unreviewed.
+  if (estData && typeof estData === 'object' && estimateNeverIssued(estimate)) estData[UNISSUED_ESTIMATE] = true;
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
   // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
   // accept paths bill this frozen figure UP FRONT beside the first
