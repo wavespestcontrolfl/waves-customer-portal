@@ -71,6 +71,7 @@ beforeEach(() => {
       visit('v-2', '2099-06-10', { discount_type: 'percentage' }),
       visit('v-done', '2099-03-02', { status: 'completed' }),
       visit('v-road', '2099-03-01', { status: 'en_route' }),
+      visit('v-track', '2099-03-03', { track_state: 'on_property' }),
       visit('v-inv', '2099-04-10'),
       visit('v-pre', '2099-05-10', { prepaid_amount: '55.00', prepaid_at: '2099-02-01' }),
       visit('v-term', '2099-07-10', { annual_prepay_term_id: 'term-1' }),
@@ -105,6 +106,7 @@ describe('the card', () => {
     expect(reasons).toEqual({
       'v-done': 'completed',
       'v-road': expect.stringMatching(/in progress/),
+      'v-track': 'the visit tracker shows on property',
       'v-inv': expect.stringMatching(/^invoiced \(WPC-2099-0001/),
       'v-pre': 'prepaid',
       'v-term': 'covered by an annual prepay term',
@@ -228,6 +230,7 @@ describe('the confirmed run', () => {
     ['moved to another customer', { customer_id: '00000000-0000-0000-0000-0000000000c2' }],
     ['changed service', { service_type: 'Lawn Care' }],
     ['prepaid', { prepaid_amount: '49.00' }],
+    ['started on the tracker', { track_state: 'en_route' }],
   ])('a later visit %s during the earlier saves is not saved, even with its date, status and price unchanged', async (_label, change) => {
     const card = await preview();
     Schedule.updateVisitDetails.mockImplementationOnce(async () => {

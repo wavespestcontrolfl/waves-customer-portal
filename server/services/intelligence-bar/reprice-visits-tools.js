@@ -110,6 +110,7 @@ function visitPin(row) {
     is_callback: row.is_callback === true,
     date: dateOnly(row.scheduled_date),
     status: row.status || null,
+    track_state: row.track_state || null,
     estimated_price: cents(row.estimated_price),
     primary_line_price: cents(row.primary_line_price),
     prepaid_amount: cents(row.prepaid_amount),
@@ -206,16 +207,30 @@ async function committedMoney(rows, newPrice) {
   return findBillingCoveredVisits(db, rows.map((r) => ({ ...r, _proposedPrice: newPrice })), { liveInvoice: true });
 }
 
-// Why a visit is left alone, from its own row and the linked records — null
-// when it can be repriced.
-function exclusionReason(row, { invoice, hasAddons }) {
+// Not upcoming work: done, under way, or a tracker that moved on while the
+// status still reads confirmed.
+function workStateReason(row) {
   const status = String(row.status || '').toLowerCase();
   if (status === 'completed') return 'completed';
   if (IN_PROGRESS_STATUSES.has(status)) return 'in progress (technician on the way or on site)';
   if (!OPEN_STATUSES.has(status)) return `status is ${status || 'unknown'}`;
+  const track = row.track_state == null ? 'scheduled' : String(row.track_state);
+  return track === 'scheduled' ? null : `the visit tracker shows ${track.replace(/_/g, ' ')}`;
+}
+
+// Money already committed on the visit at its current price.
+function committedReason(row, invoice) {
   if (invoice) return `invoiced (${invoice.invoice_number || 'invoice'}, ${invoice.status || 'status unknown'})`;
   if (row.prepaid_at || (row.prepaid_amount != null && Number(row.prepaid_amount) > 0)) return 'prepaid';
   if (row.annual_prepay_term_id) return 'covered by an annual prepay term';
+  return null;
+}
+
+// Why a visit is left alone, from its own row and the linked records — null
+// when it can be repriced.
+function exclusionReason(row, { invoice, hasAddons }) {
+  const reason = workStateReason(row) || committedReason(row, invoice);
+  if (reason) return reason;
   if (row.is_callback) return 'a free re-service visit';
   // A series' template visit: the Schedule edit carries its price into the
   // visits the plan adds later, beyond what this card approves.
