@@ -2230,7 +2230,7 @@ async function showCardAgain(req, id) {
     await db.transaction(async (trx) => {
       retired = await PendingActions.retireExpiredAction(id, actor, { trx });
       if (!retired) throw rollback;
-      const proposed = await proposeShownAgain(req, retired, publicCardInput(retired.params), trx);
+      const proposed = await proposeShownAgain(req, retired, showAgainInput(retired), trx);
       if (proposed.failed || !proposed.clientPayload) {
         answer = { status: 409, body: { error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code } };
         throw rollback;
@@ -2245,6 +2245,18 @@ async function showCardAgain(req, id) {
     logger.info(`[intelligence-bar:pending] Expired action ${id} shown again as ${answer.body.pendingAction.id}`);
   }
   return answer || showAgainReplay(id, actor);
+}
+
+// The tool input Show again re-proposes: the stored card's input, plus what
+// the first proposal moved into a server pin. A rate change keeps only its
+// pinned _rate_family; the service the operator chose comes back as
+// rate_service, and the fresh proposal re-pins the ledger.
+function showAgainInput(row) {
+  const input = publicCardInput(row.params);
+  const rateService = row.tool_name === 'update_customer'
+    ? require('../services/intelligence-bar/rate-change').rateServiceForFamily(row.params?._rate_family) : null;
+  if (rateService) input.rate_service = rateService;
+  return input;
 }
 
 // Not retired now: a retry after a lost response gets the card Show again
@@ -4561,7 +4573,7 @@ router.post('/show-again', async (req, res, next) => {
     const row = await PendingActions.getPendingRow(id, getAdminActorId(req));
     const refusal = await showAgainRefusal(req, row);
     if (refusal) return res.status(refusal.status).json(refusal.body);
-    const invalid = platformInputRefusal(req, row, publicCardInput(row.params));
+    const invalid = platformInputRefusal(req, row, showAgainInput(row));
     if (invalid) return res.status(409).json({ error: invalid.error || 'This action cannot be shown again.', code: invalid.code });
     const shown = await showCardAgain(req, id);
     return res.status(shown.status).json(shown.body);

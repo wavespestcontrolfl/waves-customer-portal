@@ -478,6 +478,30 @@ describe('/show-again', () => {
     expect(mockAttachThread).toHaveBeenCalledWith([NEW_ID], 'thread-2', 7, 'admin-1');
   });
 
+  test('an expired rate change comes back with the service the operator chose (its pinned family)', async () => {
+    const CUSTOMER = '9a0c8f1e-0000-4000-8000-0000000000c1';
+    require('../services/intelligence-bar/tools').UPDATABLE_FIELDS.monthly_rate = 'monthly_rate';
+    const rateChange = require('../services/intelligence-bar/rate-change');
+    const proposal = jest.spyOn(rateChange, 'rateChangeProposal').mockResolvedValue({ family: 'lawn', pin: 'fresh-pin', display: null });
+    mockResolveCommsCustomer.mockResolvedValue({ id: CUSTOMER, first_name: 'Synthetic', last_name: 'Owner' });
+    const row = { id: CHOICE_ID, tool_name: 'update_customer', status: 'pending', context: 'customers',
+      params: { customer_id: CUSTOMER, updates: { monthly_rate: 120 }, _rate_family: 'lawn', _rate_ledger_pin: 'old-pin' } };
+    mockGetPendingRow.mockResolvedValue(row);
+    mockRetireExpiredAction.mockResolvedValue({ ...row, status: 'cancelled' });
+    try {
+      await withServer(async (baseUrl) => {
+        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+        expect([status, body.error]).toEqual([200, undefined]);
+      });
+      expect(proposal).toHaveBeenCalledWith(CUSTOMER, 120, 'lawn');
+      expect(mockCreatePendingAction.mock.calls[0][0].params).toMatchObject({ _rate_family: 'lawn', _rate_ledger_pin: 'fresh-pin' });
+      expect(mockCreatePendingAction.mock.calls[0][0].params.rate_service).toBeUndefined();
+    } finally {
+      proposal.mockRestore();
+      delete require('../services/intelligence-bar/tools').UPDATABLE_FIELDS.monthly_rate;
+    }
+  });
+
   test('another operator card is not found', async () => {
     mockGetPendingRow.mockResolvedValue(null);
     await withServer(async (baseUrl) => {
