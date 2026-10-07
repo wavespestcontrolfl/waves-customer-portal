@@ -655,74 +655,88 @@ async function matchBulkLeads(input) {
 // re-asserts every old value as well (same atomic guard as the status
 // write) — the fingerprint check and the commit are not one statement.
 
-const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'];
-
+// One spec per editable lead field: `blank` (when set) is the refusal for an
+// empty value — otherwise empty clears the field; `normalize` turns trimmed
+// text into { value } or { error }; `max` is the column's length cap,
+// checked on the normalized value (refused at preview, never at commit).
+//
 // Address parts take the lead editor's own rules (PUT /api/admin/leads/:id
-// stores them as sent; its create-side schema trims and caps them at these
-// lengths): trimmed text, blank clears. No street normalization: leads.address
-// often holds a whole "street, city, FL zip" line, which the street-line
-// normalizer would corrupt (see the contact-normalization backfill). Leads
-// have no state column.
-const LEAD_ADDRESS_MAX = { address: 255, city: 120, zip: 20 };
-const LEAD_ADDRESS_FIELDS = Object.keys(LEAD_ADDRESS_MAX);
+// stores them as sent; its create-side schema caps them at these lengths): no
+// street normalization, because leads.address often holds a whole "street,
+// city, FL zip" line. An address edit must give street, city and ZIP together
+// and none may be blank, so the three columns always change as one set
+// (Codex #6099 r5–r7: a city- or ZIP-only edit could contradict a full-line
+// address). Leads have no state column.
+const ADDRESS_TOGETHER = 'Give the street, city and ZIP together. Nothing was proposed.';
+const asText = (text) => ({ value: text });
+const LEAD_FIELD_SPECS = {
+  first_name: { blank: 'first_name cannot be blank — a lead needs a first name.', normalize: asText, max: 255 },
+  last_name: { normalize: asText, max: 255 },
+  phone: { normalize: normalizeLeadPhone, max: 255 },
+  email: {
+    normalize: (text) => {
+      const email = cleanValidEmailOrNull(text);
+      return email ? { value: email } : { error: 'email is not a valid email address.' };
+    },
+    max: 255,
+  },
+  address: { blank: ADDRESS_TOGETHER, normalize: asText, max: 255 },
+  city: { blank: ADDRESS_TOGETHER, normalize: asText, max: 120 },
+  zip: { blank: ADDRESS_TOGETHER, normalize: asText, max: 20 },
+};
+const LEAD_CONTACT_FIELDS = Object.keys(LEAD_FIELD_SPECS);
+const LEAD_ADDRESS_FIELDS = ['address', 'city', 'zip'];
+
+// Strict shape first (pre-push P1): the shared normalizer keeps the LAST ten
+// digits of a bare number, so a mistyped 12-digit string would be silently
+// truncated to a different phone. Accept exactly a 10-digit US number, 11
+// digits with a leading 1, or a full +country number. Only digits and
+// formatting punctuation (Codex r1 P2): "ext 23" or any letters would
+// otherwise be folded into the destination number.
+function normalizeLeadPhone(text) {
+  if (!/^\+?[\d\s().-]+$/.test(text)) return { error: 'phone is not a valid phone number — digits only, no extension.' };
+  const digits = text.replace(/\D/g, '');
+  const wellFormed = text.startsWith('+')
+    ? /^\+\d{8,15}$/.test(`+${digits}`)
+    : (digits.length === 10 || (digits.length === 11 && digits.startsWith('1')));
+  const e164 = wellFormed ? toE164(text) : null;
+  // Canonical E.164 (Codex r2 P2): a non-zero country code then 7–14 more
+  // digits — not the looser isLikelyE164 helper, which both admits a leading
+  // zero and rejects valid 8–9 digit international numbers. NANP (+1)
+  // numbers are exactly ten more digits, area code and exchange both 2-9.
+  const canonical = e164 && (e164.startsWith('+1') ? isValidNanpNumber(e164) : /^\+[2-9]\d{7,14}$/.test(e164));
+  return canonical ? { value: e164 } : { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
+}
 
 // Normalize one requested contact field. Returns { value } (null = clear)
 // or { error }.
 function normalizeLeadContactField(field, raw) {
-  const text = raw === null || raw === undefined ? '' : String(raw).trim();
-  if (field === 'first_name') {
-    if (!text) return { error: 'first_name cannot be blank — a lead needs a first name.' };
-    return { value: text.slice(0, 255) };
-  }
-  if (field === 'last_name') return { value: text ? text.slice(0, 255) : null };
-  if (field === 'phone') {
-    if (!text) return { value: null };
-    // Strict shape first (pre-push P1): the shared normalizer keeps the LAST
-    // ten digits of a bare number, so a mistyped 12-digit string would be
-    // silently truncated to a different phone. Accept exactly a 10-digit US
-    // number, 11 digits with a leading 1, or a full +country number.
-    // Only digits and formatting punctuation (Codex r1 P2): "ext 23" or any
-    // letters would otherwise be folded into the destination number.
-    if (!/^\+?[\d\s().-]+$/.test(text)) return { error: 'phone is not a valid phone number — digits only, no extension.' };
-    const digits = text.replace(/\D/g, '');
-    const wellFormed = text.startsWith('+')
-      ? /^\+\d{8,15}$/.test(`+${digits}`)
-      : (digits.length === 10 || (digits.length === 11 && digits.startsWith('1')));
-    const e164 = wellFormed ? toE164(text) : null;
-    // Canonical E.164 (Codex r2 P2): a non-zero country code then 7–14 more
-    // digits — not the looser isLikelyE164 helper, which both admits a
-    // leading zero and rejects valid 8–9 digit international numbers.
-    // NANP (+1) numbers are exactly ten more digits, area code and exchange both starting 2-9.
-    const canonical = e164 && (e164.startsWith('+1') ? isValidNanpNumber(e164) : /^\+[2-9]\d{7,14}$/.test(e164));
-    if (!canonical) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
-    return { value: e164 };
-  }
-  if (field === 'email') {
-    if (!text) return { value: null };
-    const email = cleanValidEmailOrNull(text);
-    if (!email) return { error: 'email is not a valid email address.' };
-    // leads.email is varchar(255) (Codex r2 P2): refuse at preview, not at commit.
-    if (email.length > 255) return { error: 'email is too long (255 characters max).' };
-    return { value: email };
-  }
-  if (LEAD_ADDRESS_MAX[field]) {
-    if (!text) return { value: null };
-    if (text.length > LEAD_ADDRESS_MAX[field]) return { error: `${field} is too long (${LEAD_ADDRESS_MAX[field]} characters max).` };
-    return { value: text };
-  }
-  return { error: `Unknown contact field: ${field}` };
+  const spec = LEAD_FIELD_SPECS[field];
+  const text = String(raw ?? '').trim();
+  if (!text) return spec.blank ? { error: spec.blank } : { value: null };
+  const out = spec.normalize(text);
+  if (out.error) return out;
+  return out.value.length > spec.max ? { error: `${field} is too long (${spec.max} characters max).` } : out;
 }
+
+const emptyAsNull = (v) => (v === undefined || v === null || v === '' ? null : String(v));
 
 // { field: { from, to } } for every requested field whose stored value
 // differs (empty string and NULL both read as "empty").
 function diffLeadContact(lead, requested) {
   const changes = {};
   for (const [field, next] of Object.entries(requested)) {
-    let current = lead[field] === undefined || lead[field] === null || lead[field] === '' ? null : String(lead[field]);
+    let current = emptyAsNull(lead[field]);
     // Emails compare normalized (the requested value is trimmed + lowercased)
     // so a legacy mixed-case stored address re-saved unchanged is not a change.
     if (field === 'email' && current !== null) current = current.trim().toLowerCase() || null;
     if (current !== next) changes[field] = { from: current, to: next };
+  }
+  // An address edit carries all three parts (the card shows the whole new
+  // address, and the commit re-asserts all three stored values), even the
+  // ones that do not change.
+  if (LEAD_ADDRESS_FIELDS.some(f => changes[f])) {
+    for (const f of LEAD_ADDRESS_FIELDS) changes[f] = { from: emptyAsNull(lead[f]), to: requested[f] };
   }
   return changes;
 }
@@ -746,19 +760,6 @@ function approvedLeadContactChanges(pinned, requested) {
   return changes;
 }
 
-// Whether a stored lead address line already names a place (a city or ZIP),
-// using the same place evidence the customer address fan-out uses: a comma
-// alone is not enough ("1 Example Way, Apt 4B" is street + unit), and a
-// comma-free line that ends in a ZIP is a full address too.
-function leadAddressNamesPlace(address) {
-  const text = String(address || '').trim();
-  if (!text) return false;
-  const { snapshotTailPlace, addressMatchKey } = require('../customer-address-fanout');
-  const tail = snapshotTailPlace(text);
-  if (tail && (tail.zip || addressMatchKey(tail.city))) return true;
-  return /\b\d{5}(?:-\d{4})?\s*$/.test(text);
-}
-
 async function updateLeadContact(input) {
   const requested = {};
   for (const field of LEAD_CONTACT_FIELDS) {
@@ -770,9 +771,12 @@ async function updateLeadContact(input) {
   if (Object.keys(requested).length === 0) {
     return { error: 'Nothing to update — pass at least one of first_name, last_name, phone, email, address, city, zip.' };
   }
+  if (![0, LEAD_ADDRESS_FIELDS.length].includes(LEAD_ADDRESS_FIELDS.filter(f => f in requested).length)) {
+    return { error: ADDRESS_TOGETHER };
+  }
 
   const lead = await resolveLeadForUpdate(input);
-  if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
+  if (!lead) return { error: 'No active lead matches that id or name.' };
   if (lead.error) return lead;
 
   // Only fields whose stored value actually differs are written (and shown).
@@ -784,16 +788,9 @@ async function updateLeadContact(input) {
   const approved = input.confirmed === true ? approvedLeadContactChanges(input._approved_changes, requested) : null;
   if (approved?.error) return approved;
   const changes = approved || diffLeadContact(lead, requested);
-  const leadName = `${lead.first_name || ''} ${lead.last_name || ''}`.trim();
+  const leadName = [lead.first_name, lead.last_name].filter(Boolean).join(' ');
   if (Object.keys(changes).length === 0) {
     return { error: `Lead ${leadName} already has those contact details — nothing to change.` };
-  }
-  // A legacy lead may hold the whole address in `address` ("100 Main St,
-  // Sarasota, FL 34201"); estimate and inspection readers append city/zip to
-  // it, so a city- or ZIP-only edit would print two localities. Change the
-  // street line in the same request instead (Codex #6099 r5/r6).
-  if ((changes.city || changes.zip) && !changes.address && leadAddressNamesPlace(lead.address)) {
-    return { error: `Lead ${leadName}'s address line holds a full address ("${lead.address}"). Change address, city and zip together so they agree. Nothing was proposed.` };
   }
 
   const preview = {
@@ -804,17 +801,15 @@ async function updateLeadContact(input) {
     ...(lead.customer_id ? { linked_customer_unchanged: true } : {}),
     // The lead editor runs no address fan-out: an estimate keeps the address
     // it was drafted with (estimates.address is its own column).
-    ...(LEAD_ADDRESS_FIELDS.some(f => changes[f]) ? { estimates_keep_address: true } : {}),
+    ...(changes.address ? { estimates_keep_address: true } : {}),
   };
 
   if (input.confirmed !== true) {
     return {
       preview: true,
       ...preview,
-      note: 'PREVIEW ONLY — nothing was saved. Updates the lead record only'
-        + (lead.customer_id ? ' (the linked customer account is NOT changed)' : '')
-        + (preview.estimates_keep_address ? '; estimates already made for this lead keep their own address' : '')
-        + '. After the operator approves, this commits via the confirmation card.',
+      note: 'PREVIEW ONLY — nothing was saved. Updates the lead record only (a linked customer account, if any, is NOT changed). '
+        + 'After the operator approves, this commits via the confirmation card.',
     };
   }
 
@@ -846,7 +841,7 @@ async function updateLeadContact(input) {
     });
     return rows;
   });
-  if (!updatedRows || updatedRows.length === 0) {
+  if (!updatedRows?.length) {
     return {
       error: 'Lead changed while the update was being applied. Re-check the lead and rebuild the confirmation card.',
       preview_changed: true,
