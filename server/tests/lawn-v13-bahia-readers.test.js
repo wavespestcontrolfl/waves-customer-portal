@@ -59,11 +59,15 @@ describe('resolveTrackKey and loadCustomerGrassContext', () => {
     ['bahia', 'st_augustine'], ['st_augustine', 'bahia'], ['bahia', 'zoysia'], ['bermuda', 'bahia'], ['bahia', null], [null, 'bahia'], ['bahia', 'bahia'],
   ];
 
-  test.each(CONFLICTS)('gate on: grass_type %s with track_key %s has no track', async (grass_type, track_key) => {
+  // Track identity (historical and report readers) does not follow the gate; `noProgram` (planning) does.
+  test.each(CONFLICTS)('gate on: grass_type %s with track_key %s keeps its identity and is a no-program lawn', async (grass_type, track_key) => {
     process.env.GATE_LAWN_V13 = 'true';
-    expect(resolveTrackKey(track_key, grass_type)).toBeNull();
+    const identity = resolveTrackKey(track_key, grass_type);
+    const gateOff = (() => { delete process.env.GATE_LAWN_V13; const v = resolveTrackKey(track_key, grass_type); process.env.GATE_LAWN_V13 = 'true'; return v; })();
+    expect(identity).toBe(gateOff);
     const ctx = await loadCustomerGrassContext('cust-1', fakeKnex({ grass_type, track_key, active: true }));
-    expect(ctx.trackKey).toBeNull();
+    expect(ctx.trackKey).toBe(identity);
+    expect(ctx.noProgram).toBe(true);
   });
 
   test('gate on: other grass is unaffected, and a mixed lawn still has no track of its own', async () => {

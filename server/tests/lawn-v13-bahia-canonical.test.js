@@ -41,10 +41,10 @@ describe('the canonical predicate', () => {
 describe('grass context (C)', () => {
   test.each(BAHIA)('normalizeGrassType(%j) is bahia', (value) => expect(normalizeGrassType(value)).toBe('bahia'));
 
-  test.each(BAHIA)('gate on: track_key %j, legacy lawn text %j: no track', async (code) => {
+  // Identity is separate from availability: the lawn keeps its bahia track identity (historical
+  // readers), and `noProgram` is what planning consumers ask.
+  test.each(BAHIA)('gate on: %j recorded as the track key or the legacy lawn text is a no-program bahia lawn', async (code) => {
     process.env.GATE_LAWN_V13 = 'true';
-    expect(resolveTrackKey(code, null)).toBeNull();
-    expect(resolveTrackKey('st_augustine', code)).toBeNull();
     expect(recordedGrassNamesBahia({ track_key: code }, null)).toBe(true);
     expect(recordedGrassNamesBahia(null, code)).toBe(true);
     const fakeKnex = (table) => {
@@ -54,9 +54,17 @@ describe('grass context (C)', () => {
       return b;
     };
     const ctx = await loadCustomerGrassContext('cust-1', fakeKnex);
-    expect(ctx).toMatchObject({ grassType: 'bahia', trackKey: null, noProgram: true });
+    expect(ctx).toMatchObject({ grassType: 'bahia', trackKey: 'bahia', noProgram: true });
     // a recorded profile outranks the legacy text
     expect(recordedGrassNamesBahia({ grass_type: 'zoysia' }, code)).toBe(false);
+  });
+
+  test('gate on: the track identity is unchanged by the gate; only noProgram follows it', () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    expect(resolveTrackKey('bahia', null)).toBe('bahia');
+    expect(resolveTrackKey(null, 'bahia')).toBe('bahia');
+    expect(resolveTrackKey('st_augustine', 'bahia')).toBe('st_augustine');
+    expect(resolveTrackKey('D', null)).toBeNull();
   });
 
   test('gate off: a D legacy lawn text resolves to the old bahia track', () => {

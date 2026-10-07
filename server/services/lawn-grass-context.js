@@ -13,7 +13,7 @@
  * so we do NOT synthesize legacy A/B/C1/C2/D codes here.
  */
 const db = require('./../models/db');
-const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram, lawnV13NoBahiaProgram } = require('./lawn-program');
+const { isBahiaGrass, lawnV13NoBahiaProgram } = require('./lawn-program');
 
 const GRASS_TYPE_LABELS = {
   st_augustine: 'St. Augustine',
@@ -81,19 +81,20 @@ function irrigationTypeHasSystem(irrigationType) {
   return IRRIGATION_HAS_SYSTEM[irrigationType] ?? null;
 }
 
-// Resolve the protocol track id, mirroring waveguard-plan-engine.js: an
-// explicit track_key wins when it names a real protocols.lawn track;
-// otherwise the canonical grass type doubles as the track id
-// (st_augustine / bermuda / zoysia / bahia). 'mixed'/'unknown' — and any
-// value not present in protocols.lawn — have no track.
+// Resolve the lawn's track IDENTITY, mirroring waveguard-plan-engine.js: an
+// explicit track_key wins when it names a known track; otherwise the
+// canonical grass type doubles as the track id (st_augustine / bermuda /
+// zoysia / bahia). 'mixed'/'unknown' have no track.
+//
+// This is identity, not availability: a bahia lawn keeps trackKey 'bahia'
+// when GATE_LAWN_V13 is on, so the historical readers (the service report
+// context, analytics, the wiki) still know which grass the lawn is. Whether
+// the LIVE program has anything for that track is a separate, planning-only
+// question: loadCustomerGrassContext's `noProgram` (and `bahiaHasNoProgram`),
+// which every planning consumer asks instead of relying on a null track.
 function resolveTrackKey(trackKey, grassType) {
-  // GATE_LAWN_V13 has no bahia program: any recorded field naming bahia (the grass type, or the track
-  // key, whichever other track the other field names) leaves the lawn with no track, the same rule
-  // the plan engine applies (recordedGrassFacts), so no consumer serves another grass's program.
-  if (bahiaHasNoProgram(grassType) || bahiaHasNoProgram(trackKey)) return null;
-  const lawn = lawnProtocols();
-  if (trackKey && lawn && lawn[trackKey]) return trackKey;
-  if (grassType && lawn && lawn[grassType]) return grassType;
+  if (trackKey && KNOWN_TRACK_GRASS.has(trackKey)) return trackKey;
+  if (grassType && KNOWN_TRACK_GRASS.has(grassType)) return grassType;
   return null;
 }
 
