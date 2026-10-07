@@ -566,7 +566,7 @@ async function buildBestRows(days, {
   // One forecast read serves the labels and, with GATE_BOOKING_RAIN_RANK on,
   // the ranking. No hour on screen: no lookup (Codex #6045 r1).
   const fit = bookingRainFit(serviceTypes);
-  const ranking = rankingNeedsForecast(fit, days, today);
+  const ranking = rankingNeedsForecast(fit, days, today, pickedDate);
   const forecast = days.some((day) => day.hours.length) || picked?.fits === true
     ? rainLookup(lat, lng, ranking).catch(() => null) : Promise.resolve(null);
   const tierOf = rainTierOf(fit, ranking ? await forecast : null, today);

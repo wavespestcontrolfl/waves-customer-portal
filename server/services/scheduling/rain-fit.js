@@ -29,8 +29,9 @@ const RODENT_CHECK = /check|monitor|inspect/i;
 // Words that put a service outside whatever else it says. "Accepted
 // estimate" is the placeholder line for a sold quote whose work is unknown
 // (admin-customers scheduleLinesFromEstimate): treatment work, not an
-// estimate visit (Codex #6102 r4).
-const OUTDOOR = /exterior|exclu|mesh|seal|remediat|accepted/i;
+// estimate visit (Codex #6102 r4). Treatment words win over an inspection
+// word: "Termite Inspection & Spot Treatment" applies product (r8).
+const OUTDOOR = /exterior|exclu|mesh|seal|remediat|accepted|treat|liquid|spot|applicat|spray|fumigat|foam/i;
 
 function rainOkService(name) {
   if (OUTDOOR.test(name)) return false;
@@ -99,8 +100,11 @@ function rainTier(fit, wet) {
 // Whether ranking can use a forecast at all: a non-neutral booking with at
 // least one candidate date inside the horizon. Otherwise every tier would be
 // "unknown", so the caller need not wait for the forecast (Codex #6102 r3).
-function rankingNeedsForecast(fit, days, today) {
-  return fit !== 'neutral' && days.some((day) => day.hours.length && inRainHorizon(day.date, today));
+// Only days the rows can show count: the picked date, or an open day that is
+// not a tech's day off (pickBestRows' own eligibility, Codex #6102 r8).
+function rankingNeedsForecast(fit, days, today, pickedDate) {
+  return fit !== 'neutral' && days.some((day) => day.hours.length && inRainHorizon(day.date, today)
+    && (day.date === pickedDate || (!day.closed && day.status !== 'off')));
 }
 
 // The ranking's tier function for one forecast, or null (drive-only order)

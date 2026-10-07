@@ -40,6 +40,9 @@ describe('rainFitFor', () => {
     [['Rodent Trapping'], 'avoid'],
     [['Interior + Exterior Pest'], 'avoid'],
     [['Accepted estimate'], 'avoid'],
+    [['Termite Liquid Treatment & Inspection'], 'avoid'],
+    [['Termite Inspection & Spot Treatment'], 'avoid'],
+    [['Rodent Bait Station Check'], 'prefer'],
     [['Interior Pest Only'], 'prefer'],
     [['WDO Inspection', 'General Pest Control'], 'avoid'],
     [[], 'neutral'],
@@ -140,6 +143,21 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
     expect(out.rows.day.map((c) => c.start_time)).toEqual(['14:00', '08:00']);
     // Labels only: the lookup is told it is not ranking, so it keeps the
     // rows' short label wait instead of the ranking one (Codex #6102 r5).
+    expect(hourlyRain).toHaveBeenCalledWith(1, 2, false);
+  });
+
+  test('a closed day inside the horizon does not trigger the ranking wait', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const far = '2026-10-14';
+    const hourlyRain = jest.fn(async () => hourly);
+    await buildBestRows([
+      { date: TODAY, status: 'open', closed: true, hours: [h(TODAY, '09:00', 5)] },
+      { date: '2026-10-08', status: 'off', hours: [h('2026-10-08', '09:00', 5)] },
+      { date: far, status: 'open', hours: [h(far, '09:00', 5)] },
+    ], {
+      pickedDate: far, today: TODAY, lat: 1, lng: 2, serviceTypes: ['General Pest Control'],
+      deps: { priceChipsOnRoads: async (chips) => chips, hourlyRain },
+    });
     expect(hourlyRain).toHaveBeenCalledWith(1, 2, false);
   });
 
