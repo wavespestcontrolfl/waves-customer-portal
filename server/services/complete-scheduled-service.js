@@ -2062,23 +2062,39 @@ const limitFigure = (finding) => (finding.limitType === 'min_interval_days'
 const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}:${finding.limitType || 'all'}`;
 
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
-  const notifications = require('../services/notification-service');
+  const { raiseAdminAlert } = require('../services/admin-alert-compose');
   for (const finding of findings) {
-    const over = finding.code === 'application_limit_exceeded';
-    const title = over ? 'Product over its limit — review' : 'Product limits not checked — review';
-    const body = over
-      ? `${finding.productName || 'A product'} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${limitFigure(finding)}). Review it and report it if needed.`
-      : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
     try {
-      const created = await notifications.notifyAdmin('service', title, body, {
+      const over = finding.code === 'application_limit_exceeded';
+      const fullName = finding.productName || 'a product';
+      // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
+      const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
+      const fullText = over
+        ? `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${limitFigure(finding)}). Review it and report it if needed.`
+        : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
+      const why = !over ? 'A lawn visit was recorded, but its product limits could not be checked.'
+        : finding.limitType === 'min_interval_days'
+          ? `${name}: only ${finding.current} days since another application, minimum ${finding.max}.`
+          : `${name} is over its yearly limit: ${finding.current} of ${finding.max} already used.`;
+      const dedupeKey = limitFindingDedupeKey(record, finding);
+      const created = await raiseAdminAlert('service', {
+        area: 'Schedule',
+        action: over ? `review ${name} over its limit` : 'review product limits not checked',
+        why,
+        severity: 'needs-you',
+        who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
+        subject: { type: 'visit', id: String(svc.id) },
+        doneWhen: over ? 'limit_overage_reviewed' : 'limits_checked',
+      }, {
         bell: true,
-        metadata: { ...finding, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey: limitFindingDedupeKey(record, finding) },
-        dedupeKey: limitFindingDedupeKey(record, finding),
+        dedupeKey,
+        detail: fullText,
+        metadata: { ...finding, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey },
       });
-      // notifyAdmin returns null (no throw) when its dedupe lock or insert fails; a deduped repeat
-      // returns the standing row. The advisory on the completion stands either way.
-      if (!created) logger.error(`[dispatch] application-limit finding bell NOT recorded for record ${record.id} (notifyAdmin returned null)`);
+      // The composer returns null (no throw) when notifyAdmin's dedupe lock or insert fails; a deduped
+      // repeat returns the standing row. The advisory on the completion stands either way.
+      if (!created) logger.error(`[dispatch] application-limit finding bell NOT recorded for record ${record.id} (admin alert returned null)`);
     } catch (err) {
       logger.error(`[dispatch] application-limit finding notification failed (non-blocking): ${err.message}`);
     }

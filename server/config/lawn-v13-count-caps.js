@@ -41,9 +41,13 @@ const v13CountCapFor = (productName) => BY_NAME.get(normalize(productName)) || n
 const CACHE_MS = 60 * 1000;
 let cache = new WeakMap(); // database handle -> { at, ids: Map(productId -> entry) }
 
+// savepointScope, never savepointRead: callers (the plan's v13Limits, the closeout audit) already run
+// this inside a queued savepointRead on the same transaction, and a nested savepointRead would wait on
+// its own outer read forever (grouped completion packets). A scope nests freely and still isolates a
+// failed query, so it cannot abort the caller's transaction.
 async function read(database, query) {
-  const { savepointRead } = require('../utils/savepoint-read');
-  try { return await savepointRead(database, query); } catch { return []; }
+  const { savepointScope } = require('../utils/savepoint-read');
+  try { return await savepointScope(database, query); } catch { return []; }
 }
 
 // productId -> cap entry, for every product a resolver found.

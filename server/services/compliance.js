@@ -75,10 +75,15 @@ const isProductCountRow = (limit) => limit.limit_type === 'annual_max_apps' && l
 // enforces them: a stored product row is lowered and made hard_block (in memory), and a capped product
 // with no stored row joins as a synthetic hard_block row. Gate off: the rows exactly as stored.
 async function limitRowsWithV13Caps({ hardOnly = false } = {}) {
-  let query = db('product_limits')
-    .leftJoin('products_catalog', 'product_limits.product_id', 'products_catalog.id');
-  if (hardOnly) query = query.where({ 'product_limits.severity': 'hard_block' });
-  const rows = await query.select('product_limits.*', 'products_catalog.name as product_name');
+  const rows = await db('product_limits')
+    .leftJoin('products_catalog', 'product_limits.product_id', 'products_catalog.id')
+    .select('product_limits.*', 'products_catalog.name as product_name');
+  const withCaps = await applyV13ToRows(rows);
+  // The hard-only filter comes AFTER the caps: a stored warning row under a v13 cap is a hard cap.
+  return hardOnly ? withCaps.filter((limit) => limit.severity === 'hard_block') : withCaps;
+}
+
+async function applyV13ToRows(rows) {
   if (require('../config/feature-gates').lawnV13Live?.() !== true) return rows;
   const capIds = await capIdMap(db);
   const capped = rows.map((limit) => (isProductCountRow(limit) && capIds.has(String(limit.product_id))
@@ -659,4 +664,5 @@ module.exports = ComplianceService;
 // shared-array extraction.
 module.exports.inferCountyFromZipInternal = inferCountyFromZipInternal;
 module.exports.worstPropertyCount = worstPropertyCount;
+module.exports.limitRowsWithV13Caps = limitRowsWithV13Caps;
 module.exports.isNitrogenApplication = isNitrogenApplication;

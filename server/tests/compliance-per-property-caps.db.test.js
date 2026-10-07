@@ -114,6 +114,25 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     expect((await applicationLimits.getPropertyComplianceStatus(stacked)).blocks).toBe(1);
   });
 
+  test('the dashboard reads the v13 caps BEFORE its hard-only filter: a stored warning row of 1 on a capped product is a hard cap of 1 (not dropped for a synthetic 2); gate off it is not a hard row at all', async () => {
+    const certainty = await db('products_catalog').where({ name: 'Certainty Turf Herbicide' }).first();
+    const [warning] = await db('product_limits').insert({ product_id: certainty.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 1, limit_unit: 'applications', severity: 'warning', description: 'fixture warning row' }).returning('*');
+    made.limits.push(warning.id);
+    const saved = process.env.GATE_LAWN_V13;
+    const hardRows = async () => (await ComplianceService.limitRowsWithV13Caps({ hardOnly: true })).filter((l) => l.product_id === certainty.id && l.limit_type === 'annual_max_apps');
+    try {
+      process.env.GATE_LAWN_V13 = 'true';
+      const on = await hardRows();
+      expect(on).toHaveLength(1);
+      expect(on[0]).toMatchObject({ id: warning.id, severity: 'hard_block' });
+      expect(Number(on[0].limit_value)).toBe(1);
+      delete process.env.GATE_LAWN_V13;
+      expect(await hardRows()).toEqual([]);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved;
+    }
+  });
+
   test('getDashboard: three customers with one application each never trip a per-lawn cap of 3 on the company total; two at one lawn of 3 does warn', async () => {
     const [capped] = await db('products_catalog').insert({ name: `Count cap dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
     made.products.push(capped.id);

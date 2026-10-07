@@ -629,6 +629,48 @@ describeDb('v13 count caps through PostgreSQL', () => {
         .toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'annual_max_apps', current: 2, max: 2 })]);
     });
 
+    describe('cap identity inside a transaction that is already in a queued savepoint read (grouped completion packets)', () => {
+      const { savepointRead } = require('../utils/savepoint-read');
+      const within = (promise, ms = 8000) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timed out: nested savepoint read is waiting on its own queue')), ms))]);
+
+      test('checkLimits inside savepointRead on a real transaction resolves the cap identity without waiting on the outer read', async () => {
+        const f = await twoApplications(ARENA);
+        resetV13CapIdentity();
+        const trx = await knex.transaction();
+        try {
+          const result = await within(savepointRead(trx, (k) => applicationLimits.checkLimits(f.customerId, catalog[ARENA].id, new Date('2026-06-10T16:00:00Z'), k, {})));
+          expect(result.blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', max: 2 })]);
+          await expect(trx.raw('SELECT 1 AS ok')).resolves.toBeTruthy();
+        } finally { await trx.rollback(); }
+      });
+
+      test('the closeout audit inside savepointRead on a transaction does too', async () => {
+        const f = await twoApplications(ARENA);
+        resetV13CapIdentity();
+        const visit = await f.visit(0, { scheduled_date: '2026-06-10', service_type: 'Every 6 Weeks Lawn Care Service' });
+        const trx = await knex.transaction();
+        try {
+          const found = await within(submittedProductLimitFindings({ svc: visit, productIds: [catalog[ARENA].id], serviceDate: '2026-06-10', database: trx }));
+          expect(found).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'annual_max_apps' })]);
+        } finally { await trx.rollback(); }
+      });
+
+      test('a grouped-packet plan build (the plan engine on a transaction, gate on, a capped product selected) completes and blocks the 3rd application', async () => {
+        const { buildPlanForService } = require('../services/waveguard-plan-engine');
+        const f = await fixture(knex);
+        await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
+        await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: 'bermuda', track_key: 'bermuda', lawn_sqft: 10000 });
+        const visit = await f.visit(0, { scheduled_date: '2026-05-12' });
+        for (const date of ['2026-02-02', '2026-03-16']) await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[ARENA].id, application_date: date, application_rate: 0.1, rate_unit: 'oz' });
+        resetV13CapIdentity();
+        const trx = await knex.transaction();
+        try {
+          const result = await within(buildPlanForService(visit.id, { db: trx, selectedConditionalProductNames: [ARENA] }), 20000);
+          expect(result.propertyGate.blocks.filter((b) => b.code === 'lawn_v13_annual_limit')).toHaveLength(1);
+        } finally { await trx.rollback(); }
+      });
+    });
+
     describe('the staged protocol rows carry the cap (20261007175000)', () => {
       const { summarizeProtocolContext, getProtocolWindowContext } = require('../services/lawn-protocol-operating-layer');
       const auditRows = () => knex('lawn_protocol_audit_log').where({ action: 'v13_count_caps_protocol_rows' });

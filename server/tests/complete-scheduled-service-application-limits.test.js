@@ -251,25 +251,67 @@ describe('the raw products array is capped at the closeout entry', () => {
   });
 });
 
-describe('the office notification for a finding', () => {
+describe('the office notification for a finding (raised through the admin alert composer)', () => {
   const record = { id: 'record-1' };
-  test('one admin notification per finding, deduped per record + code + product, naming the limit; a failure never throws', async () => {
-    const notify = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n1' });
-    const over = { code: 'application_limit_exceeded', productId: CELSIUS_ID, productName: 'Celsius WG', limitType: 'annual_max_apps', current: 2, max: 2 };
+  const over = { code: 'application_limit_exceeded', productId: CELSIUS_ID, productName: 'Celsius WG', limitType: 'annual_max_apps', current: 2, max: 2 };
+  const notifyFor = () => jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n1' });
+
+  test('each finding is a needs-you alert with area, headline, why, link, subject, done-when and who; the dedupe key is per record + code + product + limit type', async () => {
+    const notify = notifyFor();
     await notifyOfficeOfLimitFindings({ svc: service, record, findings: [over, { code: 'application_limit_check_unavailable', productId: null }] });
     expect(notify).toHaveBeenCalledTimes(2);
-    expect(notify.mock.calls[0][0]).toBe('service');
-    expect(notify.mock.calls[0][2]).toMatch(/Celsius WG .* over its yearly application limit \(2 of 2 already used\)/);
-    expect(notify.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}:annual_max_apps`, link: `/admin/customers?customerId=${service.customer_id}` });
-    expect(notify.mock.calls[1][3].dedupeKey).toBe('application-limit-finding:record-1:application_limit_check_unavailable:all:all');
-    // A product over both limits rings once per limit type.
-    notify.mockClear();
+    const [category, headline, why, opts] = notify.mock.calls[0];
+    expect(category).toBe('service');
+    expect(headline).toBe('Schedule — review Celsius WG over its limit');
+    expect(why).toBe('Celsius WG is over its yearly limit: 2 of 2 already used.');
+    expect(opts).toMatchObject({
+      bell: true,
+      link: `/admin/customers?customerId=${service.customer_id}`,
+      dedupeKey: `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}:annual_max_apps`,
+      detail: expect.stringMatching(/Celsius WG was recorded on a .* visit and is over its yearly application limit \(2 of 2 already used\)/),
+      metadata: expect.objectContaining({
+        area: 'Schedule', severity: 'needs-you', who: 'person', doneWhen: 'limit_overage_reviewed',
+        subject: { type: 'visit', id: SERVICE_ID }, code: 'application_limit_exceeded', productName: 'Celsius WG', limitType: 'annual_max_apps',
+      }),
+    });
+    const unavailable = notify.mock.calls[1];
+    expect(unavailable[1]).toBe('Schedule — review product limits not checked');
+    expect(unavailable[3].dedupeKey).toBe('application-limit-finding:record-1:application_limit_check_unavailable:all:all');
+    expect(unavailable[3].metadata).toMatchObject({ doneWhen: 'limits_checked', subject: { type: 'visit', id: SERVICE_ID } });
+  });
+
+  test('a product over both limits rings once per limit type, the interval one worded in days', async () => {
+    const notify = notifyFor();
     await notifyOfficeOfLimitFindings({ svc: service, record, findings: [over, { ...over, limitType: 'min_interval_days', current: 19, max: 60 }] });
     expect(notify.mock.calls.map((call) => call[3].dedupeKey)).toEqual([
       `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}:annual_max_apps`,
       `application-limit-finding:record-1:application_limit_exceeded:${CELSIUS_ID}:min_interval_days`,
     ]);
-    expect(notify.mock.calls[1][2]).toMatch(/minimum days between applications \(only 19 days from another application, minimum 60\)/);
+    expect(notify.mock.calls[1][2]).toBe('Celsius WG: only 19 days since another application, minimum 60.');
+    expect(notify.mock.calls[1][3].detail).toMatch(/minimum days between applications \(only 19 days from another application, minimum 60\)/);
+  });
+
+  test.each(['Celsius WG', 'Arena 50 WDG', 'Certainty Turf Herbicide', 'Blindside Herbicide', 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer'])('%s: the composed alert obeys the notification rule (headline 60, why 110, one sentence), both limits', async (productName) => {
+    const notify = notifyFor();
+    const logger = require('../services/logger');
+    await notifyOfficeOfLimitFindings({ svc: service, record, findings: [
+      { ...over, productName }, { ...over, productName, limitType: 'min_interval_days', current: 19, max: 60 },
+    ] });
+    // In test mode a rule violation throws inside the composer and is logged, never rung: both must ring.
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringMatching(/notification failed/));
+    expect(notify).toHaveBeenCalledTimes(2);
+    for (const call of notify.mock.calls) {
+      expect(call[1].length).toBeLessThanOrEqual(60);
+      expect(call[2].length).toBeLessThanOrEqual(110);
+    }
+  });
+
+  test('a bell that is not recorded (null) is logged, a failure never throws', async () => {
+    const notify = notifyFor();
+    notify.mockResolvedValue(null);
+    const logger = require('../services/logger');
+    await expect(notifyOfficeOfLimitFindings({ svc: service, record, findings: [over] })).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/bell NOT recorded for record record-1/));
     notify.mockRejectedValue(new Error('bell down'));
     await expect(notifyOfficeOfLimitFindings({ svc: service, record, findings: [over] })).resolves.toBeUndefined();
   });

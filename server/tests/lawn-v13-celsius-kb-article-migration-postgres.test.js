@@ -19,10 +19,14 @@ const AUDIT = migration._AUDIT_ACTION;
 const AUDIT_DOWN = migration._AUDIT_ACTION_DOWN;
 
 const seedScript = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'seed-knowledge-base.js'), 'utf8');
+// The seed script's article as 20261007173000 left it: 20261007176000 refines two of its lines later,
+// so those are put back first.
+const afterCap = require('../models/migrations/20261007176000_lawn_v13_celsius_kb_after_cap');
 function seededArticleContent() {
   const start = seedScript.indexOf(`slug: '${SLUG}'`);
   const open = seedScript.indexOf('content: `', start) + 'content: `'.length;
-  return seedScript.slice(open, seedScript.indexOf('`,', open));
+  const current = seedScript.slice(open, seedScript.indexOf('`,', open));
+  return afterCap._REPLACEMENTS.reduce((content, row) => content.replace(row.next, () => row.old), current);
 }
 // The article as 20260808000001 left it live: the OLD seeded lines (the new seed, reversed line by line).
 const oldContent = () => REPLACEMENTS.reduceRight((content, row) => content.replace(row.next, () => row.old), seededArticleContent());
