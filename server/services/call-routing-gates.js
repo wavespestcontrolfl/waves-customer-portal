@@ -1035,6 +1035,10 @@ function buildTriageItem({
     address_readback: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',
     secondary_contact_is_existing_customer: 'customer_field_conflict',
+    // GATE_CALL_FAMILY_NAME_LINK advisory cards: which account a family caller's call linked
+    // to (and why), or the candidates when the spoken name matched none or several.
+    family_account_linked: 'customer_field_conflict',
+    family_account_candidates: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
     // The call linked to an existing customer via something WEAKER than the
     // phone (pre-set call.customer_id, name/context) and the caller's number

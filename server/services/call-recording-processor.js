@@ -12456,8 +12456,101 @@ const CallRecordingProcessor = {
       && !!String(extracted.last_name || '').trim()
       && !addressRecovery?.recovered
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
+    // GATE_CALL_FAMILY_NAME_LINK (owner ruling 2026-10-07): a family member who calls for a
+    // parent or relative by full name, from a number no account carries, links the call to that
+    // person's account when exactly one LIVE customer has that first and last name. Set only
+    // when this pass (or the pass that wrote the link) did the link; read by the secondary-
+    // contact steps below so the named account holder is never filed as a contact on their own
+    // account. The matching and the token-fenced link live in call-family-name-link.js.
+    let familyNameLink = null;
+    const finishFamilyNameLink = async (linkedCustomerId, holderName) => {
+      const { fullNameKey } = require('./call-family-name-link');
+      const holderParts = String(holderName || '').trim().split(/\s+/);
+      familyNameLink = {
+        customerId: linkedCustomerId,
+        holderName,
+        holderKey: fullNameKey({ first_name: holderParts[0], last_name: holderParts.slice(1).join(' ') }),
+      };
+      const callerName = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null;
+      // One-step undo for the office: the card names the account, the caller and the reason.
+      await db('triage_items')
+        .insert(buildTriageItem({
+          callLogId: call.id,
+          flag: 'family_account_linked',
+          extraction: v2CanonicalExtraction || undefined,
+          severity: 'advisory',
+          extraPayload: {
+            linked_customer_id: String(linkedCustomerId),
+            account_holder_name: holderName,
+            caller_name: callerName,
+            reason: 'The caller said they were calling for a family member and gave that person\'s full name. Exactly one live account has that name. Relink the call if this is the wrong account.',
+          },
+        }))
+        .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .ignore()
+        .catch((triageErr) => logger.warn(`[call-proc] family-link card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`));
+      // The caller joins the account as a service contact through the one slot writer. Only
+      // the inbound number the caller is actually on: a dictated number is never texted here.
+      try {
+        if (!isOutboundCall(call) && phone && samePhone(phone, call.from_phone)) {
+          const saved = await persistCallSecondaryContact(linkedCustomerId, {
+            first_name: extracted.first_name || null,
+            last_name: extracted.last_name || null,
+            phone,
+            role: 'family_member',
+            wants_notifications: true,
+          });
+          logger.info(`[call-proc] family-link caller saved as a service contact for ${maskSid(callSid)}: ${saved}`);
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] family-link service contact skipped for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+      }
+    };
+    // Resolves the link for an unlinked call. Returns the customer row when it linked.
+    // Fail-open: any error leaves the call exactly as it was without the gate.
+    const tryFamilyNameLink = async () => {
+      try {
+        if (!require('../config/feature-gates').callFamilyNameLinkLive()) return null;
+        const { resolveFamilyNameLink, displayName } = require('./call-family-name-link');
+        const result = await resolveFamilyNameLink({
+          callLogId: call.id,
+          procToken,
+          callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
+          caller: { first_name: extracted.first_name, last_name: extracted.last_name },
+          secondaryContacts: callSecondaryContacts,
+        });
+        if (result.status === 'candidates') {
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'family_account_candidates',
+              extraction: v2CanonicalExtraction || undefined,
+              severity: 'advisory',
+              extraPayload: {
+                account_holder_name: displayName(result.holder),
+                caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+                candidates: result.candidates,
+                reason: result.candidates.length
+                  ? 'The caller named a family member. More than one live account has that name, so nothing was linked. Pick the right account.'
+                  : 'The caller named a family member. No live account has that name, so nothing was linked.',
+              },
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+          return null;
+        }
+        if (result.status !== 'linked') return null;
+        logger.info(`[call-proc] Linked call ${maskSid(callSid)} to customer ${result.customer.id} by the spoken family account-holder name`);
+        await finishFamilyNameLink(result.customer.id, displayName(result.holder));
+        return result.customer;
+      } catch (e) {
+        logger.warn(`[call-proc] family name link skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
+        return null;
+      }
+    };
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
+    let familyLinked = null;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -12508,6 +12601,10 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+      } else if (!isOutboundCall(call) && (familyLinked = await tryFamilyNameLink())) {
+        // Linked to the named family member's account (GATE_CALL_FAMILY_NAME_LINK): no new
+        // customer, no caller fields written onto the account holder's record.
+        customerId = familyLinked.id;
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -12728,6 +12825,18 @@ const CallRecordingProcessor = {
       }
     }
 
+    // A pass that wrote the family link and crashed before its card or contact write: the call
+    // row carries the marker, so a retry finishes the (idempotent) card and contact writes.
+    if (!familyNameLink && customerId && !explicitUnlink
+        && require('../config/feature-gates').callFamilyNameLinkLive()
+        && String(call.metadata?.family_name_link?.customer_id || '') === String(customerId)) {
+      try {
+        await finishFamilyNameLink(customerId, call.metadata.family_name_link.holder_name || '');
+      } catch (e) {
+        logger.warn(`[call-proc] family link resume skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
+      }
+    }
+
     // Pre-linked calls (call.customer_id set at ring time by the inbound
     // webhook, an operator link, or the transcript-name reconciliation
     // above) skipped the phone-match branch entirely, so a capture on a
@@ -12816,7 +12925,8 @@ const CallRecordingProcessor = {
     // contact info, but the office should confirm it before relying on it —
     // and when the persistence gate below is off, this triage item is the ONLY
     // surface carrying the second contact besides the lead's extracted_data.
-    if (callSecondaryContact && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
+    if (callSecondaryContact && !(familyNameLink?.holderKey && require('./call-family-name-link').fullNameKey(callSecondaryContact) === familyNameLink.holderKey)
+        && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
       bridgeNeedsConfirmation.push('secondary_contact_captured');
       try {
         const secondaryTriageItem = buildTriageItem({
@@ -14204,6 +14314,9 @@ const CallRecordingProcessor = {
       // the scan: a later party already on record still gets its on-site ask.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
       for (const resolvedEntry of callSecondaryContacts) {
+      // The named account holder is the account itself (GATE_CALL_FAMILY_NAME_LINK): never a
+      // service contact on their own account.
+      if (familyNameLink?.holderKey && require('./call-family-name-link').fullNameKey(resolvedEntry) === familyNameLink.holderKey) continue;
       // One cleaned entry drives the slot write AND every ask/send below: an
       // impossible number (a misheard +1 173-...) is never saved or texted,
       // even when the contact is still saved by its email.
