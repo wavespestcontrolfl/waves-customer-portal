@@ -73,9 +73,11 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  process.env.GATE_IB_ACCEPT_ESTIMATE = 'true';
 });
 afterAll(() => {
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
+  delete process.env.GATE_IB_ACCEPT_ESTIMATE;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -153,6 +155,7 @@ const WRITE_TWO_STEP = [
   'resend_receipt',
   'remove_saved_payment_method',
   'correct_invoice_address',
+  'accept_estimate',
   'update_lead_contact',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
@@ -645,6 +648,19 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         customer_address_snapshot: { address_line1: '1 Old Street', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34201' },
       }],
       customers: [{ id: '00000000-0000-0000-0000-00000000f001', first_name: 'Card', last_name: 'Fixture', address_line1: '55 Live Ave', city: 'Venice', state: 'FL', zip: '34285' }],
+    }],
+    // accept_estimate's preview reads the estimate, the customer, the bill and
+    // any visits booked from the estimate; it may not write without confirmed.
+    ['estimate-accept-tools', 'executeEstimateAcceptTool', 'accept_estimate', {
+      estimate_id: '00000000-0000-0000-0000-00000000e001', customer_id: '00000000-0000-0000-0000-00000000e002',
+    }, {
+      estimates: [{
+        id: '00000000-0000-0000-0000-00000000e001', token: 'acceptfixture1', status: 'sent', customer_id: '00000000-0000-0000-0000-00000000e002',
+        monthly_total: 49, onetime_total: 0, waveguard_tier: 'Bronze', updated_at: '2026-10-01T00:00:00Z',
+        estimate_data: { recurring: { services: [{ name: 'Quarterly Pest Control', service: 'pest_control', visitsPerYear: 4, monthly: 49 }] } },
+      }],
+      customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Accept', last_name: 'Fixture', email: 'accept@example.com', pipeline_stage: 'lead', monthly_rate: 0 }],
+      scheduled_services: [],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
     // from a live third-party API call, never the DB — OUTSIDE_WRITE_FIXTURES

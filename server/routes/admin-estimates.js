@@ -5407,7 +5407,8 @@ router.post('/:id/extend', async (req, res, next) => {
 // POST /api/admin/estimates/:id/mark-accepted — admin records a verbal yes.
 // This is intentionally separate from PATCH status edits so accepted_at is
 // stamped for funnel reporting and acceptance side effects run once.
-router.post('/:id/mark-accepted', async (req, res, next) => {
+router.post('/:id/mark-accepted', markAcceptedHandler);
+async function markAcceptedHandler(req, res, next) {
   try {
     // The DURABLE call-side verdict blocks a MANUAL acceptance too (codex
     // P0, PR #3304 GH r10b): when estimate-side invalidation failed — the
@@ -5451,7 +5452,25 @@ router.post('/:id/mark-accepted', async (req, res, next) => {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     next(err);
   }
-});
+}
+
+// Mark accepted without an HTTP request — the Intelligence Bar's
+// accept_estimate tool (owner ruling 2026-10-07, Q5) runs this so the bar and
+// the estimate page accept through the SAME handler (the call-linkage
+// preflight, markEstimateManuallyAccepted, the dashboard cache clear). It runs
+// the handler with the only request fields it reads and resolves the reply it
+// would send: { status, json }. An error the handler passes to next() rejects.
+function markEstimateAcceptedAsStaff({ estimateId, body, actor }) {
+  const req = { params: { id: estimateId }, body, technicianId: actor.technicianId };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    markAcceptedHandler(req, res, reject).catch(reject);
+  });
+}
 
 // Estimate status values backed by the estimates_status_check constraint
 // (models/migrations/20260518000003_estimate_scheduled_send_claims.js).
@@ -5742,3 +5761,6 @@ module.exports.revertLeadServiceForSend = revertLeadServiceForSend;
 module.exports.markLeadServiceRevertPending = markLeadServiceRevertPending;
 module.exports.clearEstimateDeliveryClaim = clearEstimateDeliveryClaim;
 module.exports.clearGroupSiblingDeliveryClaims = clearGroupSiblingDeliveryClaims;
+
+// Same handler as POST /:id/mark-accepted — see markEstimateAcceptedAsStaff above.
+module.exports.markEstimateAcceptedAsStaff = markEstimateAcceptedAsStaff;

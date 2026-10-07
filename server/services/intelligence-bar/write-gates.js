@@ -75,6 +75,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'resend_receipt',
   'remove_saved_payment_method',
   'correct_invoice_address',
+  'accept_estimate',
   'update_lead_contact',
   ...OUTSIDE_WRITE_TOOL_NAMES,
   'cancel_queued_message',

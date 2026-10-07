@@ -89,11 +89,14 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // The Stripe detach cannot be undone, and an Auto Pay-off the customer
   // is emailed about is only reversible by the customer's own consent.
   'remove_saved_payment_method',
+  // Accepting locks the estimate's price, starts the plan's billing and may
+  // email the customer; no portal path un-accepts an estimate.
+  'accept_estimate',
 ]);
 
 // Tools whose card lines are curated below from their own preview, not the
 // generic one-line-per-preview-key dump.
-const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address']);
+const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate']);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
 // moves and cancellations are deliberately NOT here: their executors
@@ -204,6 +207,7 @@ const ACTION_LABELS = {
   set_growthbook_feature_environment: 'Enable or disable a GrowthBook feature in one environment',
   remove_saved_payment_method: 'Remove a saved payment method',
   correct_invoice_address: 'Correct the address printed on an invoice',
+  accept_estimate: 'Mark an estimate accepted (starts the plan)',
 };
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
@@ -768,6 +772,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (preview.autopay_note) push('billing', preview.autopay_note);
     if (preview.customer_emails?.summary) push('comms', String(preview.customer_emails.summary));
   }
+  // accept_estimate: what the plan starts, the bill line by line, what it
+  // books, and every customer message (owner ruling 2026-10-07, Q5), as the
+  // tool's own card_lines. The card sorts lines by kind then label, so each
+  // label leads with its topic.
+  if (toolName === 'accept_estimate' && Array.isArray(preview?.card_lines)) {
+    for (const l of preview.card_lines) push(l.kind, l.label, l.before !== undefined ? { before: l.before, after: l.after } : {});
+  }
   // correct_invoice_address: what the rewrite does and does not touch.
   if (toolName === 'correct_invoice_address' && preview?.does) {
     push('billing', String(preview.does));
@@ -966,6 +977,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // The portal's own Auto Pay-off / payment-method-removed notices, only
       // when their gate is on and an email is on file (the plan says which).
       || (toolName === 'remove_saved_payment_method' && preview?.notifies_customer === true)
+      // The membership-started email (and an autosent termite agreement), only
+      // when the preview found they will go out; each rides its own comms line.
+      || (toolName === 'accept_estimate' && preview?.notifies_customer === true)
       || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
@@ -975,6 +989,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
+    if (toolName === 'accept_estimate') contactLabel = 'Customer will be emailed (see the Message lines)';
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3
       // push finding: the FIRST draft of this line asserted precise,

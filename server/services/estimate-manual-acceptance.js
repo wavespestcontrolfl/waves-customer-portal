@@ -418,6 +418,97 @@ function httpError(message, statusCode = 400) {
   return err;
 }
 
+function throwRefusal(refusal) {
+  if (refusal) throw httpError(refusal.message, refusal.statusCode);
+}
+
+const refusal = (message, statusCode) => ({ message, statusCode });
+
+// The estimate-row refusals of a manual Mark accepted, as { message,
+// statusCode } or null. markEstimateManuallyAccepted throws them at their
+// own points in the accept (below); the Intelligence Bar's accept_estimate
+// card (services/intelligence-bar/estimate-accept-tools.js) reads the same
+// three so the bar refuses with the page's own words before any card.
+//
+// One-tap purchase drafts are INTERNAL flow state (Codex #3395 r12 P2):
+// accepting one here flips it to 'accepted' outside the purchase saga — the
+// open ledger row is stranded (confirm rejects, neither cleanup sweep
+// reclaims a non-draft/expired row) and the purchase's own accept path is
+// the only one carrying its consent artifact.
+function oneTapPurchaseRefusal(estimate) {
+  return estimate.source === 'one_tap_purchase'
+    ? refusal('This is an internal one-tap purchase draft — the customer completes it in the portal.', 400)
+    : null;
+}
+
+// Checked after the already-accepted return, on the row as first read.
+function manualAcceptRowRefusal(estimate) {
+  if (!MANUAL_ACCEPTABLE_STATUSES.has(estimate.status)) {
+    return refusal(`Only sent or viewed estimates can be manually marked accepted. Current status: ${estimate.status}.`, 400);
+  }
+  if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
+    return refusal('Estimate is no longer active.', 409);
+  }
+  if (fixedBidDeadlinePassed(estimate)) {
+    return refusal('The bid validity date has passed. Update Valid through in the proposal builder before marking it won.', 409);
+  }
+  if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
+    return refusal('Manager approval is required before this estimate can be manually accepted.', 400);
+  }
+  // Same live-gate rule as the public accept route (codex #3272 r5): the
+  // canonical manual-acceptance path (admin Mark Won + linked-estimate
+  // booking) converts from stored rows without re-entering priceLawnCare,
+  // so a persisted suppression estimate must not be accepted/billed/
+  // scheduled while GATE_BERMUDA_SUPPRESSION is off. Already-accepted
+  // retries returned above stay untouched.
+  {
+    const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
+    if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
+      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+      return refusal('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before accepting.', 409);
+    }
+  }
+  if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
+    return refusal('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
+  }
+  return null;
+}
+
+// Checked after the accept re-reads estimate_data under its row lock.
+function manualAcceptLockedRowRefusal(estimate) {
+  // Retired T&S cadence (4x/quarterly, retired 2026-09-24): same gate as
+  // the customer PUT /accept (codex P1 r9). Already-accepted estimates
+  // returned above, so pre-retirement plans are unaffected.
+  {
+    const { recurringTreeShrubRowAtRetiredCadence } = require('../routes/estimate-public');
+    if (recurringTreeShrubRowAtRetiredCadence(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
+      return refusal('This estimate’s tree & shrub plan uses a retired schedule. Requote it with the 6x or 9x program before accepting.', 409);
+    }
+  }
+
+  const isCommercialProposal = isCommercialProposalEstimate(estimate);
+
+  // Invoice-mode: a normal estimate's due-immediately invoice is built by
+  // EstimateConverter via the customer link, so manual accept still rejects
+  // it. A commercial proposal instead builds its own first invoice from the
+  // proposal line items below (#1917 invoice-mode win), so it passes here.
+  if (estimate.bill_by_invoice && !isCommercialProposal) {
+    return refusal('Invoice-mode estimates must be accepted through the customer link so the due-immediately invoice is created correctly.', 400);
+  }
+
+  // No linked customer: a normal estimate must be linked first (the converter
+  // needs a customer). A commercial proposal win auto-creates and promotes
+  // the customer from the proposal/contact details (#1917 lead-win).
+  if (!estimate.customer_id && !isCommercialProposal) {
+    return refusal('Manual acceptance requires the estimate to be linked to a customer first.', 400);
+  }
+
+  if (estimate.show_one_time_option) {
+    return refusal('Estimates with a one-time option must be accepted through the customer link so recurring vs one-time is recorded.', 400);
+  }
+  return null;
+}
+
 async function logManualAcceptance(database, {
   estimate,
   updatedEstimate,
@@ -483,9 +574,7 @@ async function markEstimateManuallyAccepted({
     // saga — the open ledger row is stranded (confirm rejects, neither
     // cleanup sweep reclaims a non-draft/expired row) and the purchase's
     // own accept path is the only one carrying its consent artifact.
-    if (estimate.source === 'one_tap_purchase') {
-      throw httpError('This is an internal one-tap purchase draft — the customer completes it in the portal.', 400);
-    }
+    throwRefusal(oneTapPurchaseRefusal(estimate));
     // Rung 6 BEFORE the estimate row lock below (Codex #3109 r32): the
     // merge-undo takes customer-comms and THEN locks journaled estimates —
     // acquiring comms only later (inside convertEstimate, after the
@@ -516,39 +605,7 @@ async function markEstimateManuallyAccepted({
       return { acceptedEstimate: estimate, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: estimate };
     }
 
-    if (!MANUAL_ACCEPTABLE_STATUSES.has(estimate.status)) {
-      throw httpError(
-        `Only sent or viewed estimates can be manually marked accepted. Current status: ${estimate.status}.`,
-        400,
-      );
-    }
-
-    if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
-      throw httpError('Estimate is no longer active.', 409);
-    }
-    if (fixedBidDeadlinePassed(estimate)) {
-      throw httpError('The bid validity date has passed. Update Valid through in the proposal builder before marking it won.', 409);
-    }
-
-    if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
-      throw httpError('Manager approval is required before this estimate can be manually accepted.', 400);
-    }
-    // Same live-gate rule as the public accept route (codex #3272 r5): the
-    // canonical manual-acceptance path (admin Mark Won + linked-estimate
-    // booking) converts from stored rows without re-entering priceLawnCare,
-    // so a persisted suppression estimate must not be accepted/billed/
-    // scheduled while GATE_BERMUDA_SUPPRESSION is off. Already-accepted
-    // retries returned above stay untouched.
-    {
-      const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
-      if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
-        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
-        throw httpError('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before accepting.', 409);
-      }
-    }
-    if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
-      throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
-    }
+    throwRefusal(manualAcceptRowRefusal(estimate));
 
     // SERIALIZED with call-linkage corrections, mirroring the public
     // accept protocol (pre-push P0, PR #3304 — an unlocked read here let
@@ -614,45 +671,9 @@ async function markEstimateManuallyAccepted({
       }
     }
 
-    // Retired T&S cadence (4x/quarterly, retired 2026-09-24): same gate as
-    // the customer PUT /accept (codex P1 r9). Already-accepted estimates
-    // returned above, so pre-retirement plans are unaffected.
-    {
-      const { recurringTreeShrubRowAtRetiredCadence } = require('../routes/estimate-public');
-      if (recurringTreeShrubRowAtRetiredCadence(parseEstimateData(estimate.estimate_data || estimate.estimateData))) {
-        throw httpError('This estimate’s tree & shrub plan uses a retired schedule. Requote it with the 6x or 9x program before accepting.', 409);
-      }
-    }
+    throwRefusal(manualAcceptLockedRowRefusal(estimate));
 
     const isCommercialProposal = isCommercialProposalEstimate(estimate);
-
-    // Invoice-mode: a normal estimate's due-immediately invoice is built by
-    // EstimateConverter via the customer link, so manual accept still rejects
-    // it. A commercial proposal instead builds its own first invoice from the
-    // proposal line items below (#1917 invoice-mode win), so it passes here.
-    if (estimate.bill_by_invoice && !isCommercialProposal) {
-      throw httpError(
-        'Invoice-mode estimates must be accepted through the customer link so the due-immediately invoice is created correctly.',
-        400,
-      );
-    }
-
-    // No linked customer: a normal estimate must be linked first (the converter
-    // needs a customer). A commercial proposal win auto-creates and promotes
-    // the customer from the proposal/contact details (#1917 lead-win).
-    if (!estimate.customer_id && !isCommercialProposal) {
-      throw httpError(
-        'Manual acceptance requires the estimate to be linked to a customer first.',
-        400,
-      );
-    }
-
-    if (estimate.show_one_time_option) {
-      throw httpError(
-        'Estimates with a one-time option must be accepted through the customer link so recurring vs one-time is recorded.',
-        400,
-      );
-    }
 
     // A commercial proposal's pricing/cadence lives in estimate_data.proposal,
     // which EstimateConverter does not read, so the proposal branch below marks
@@ -1233,6 +1254,9 @@ async function markEstimateManuallyAccepted({
 module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   MANUAL_ACCEPTABLE_STATUSES,
   markEstimateManuallyAccepted,
+  oneTapPurchaseRefusal,
+  manualAcceptRowRefusal,
+  manualAcceptLockedRowRefusal,
   normalizeManualBillingTerm,
   resolveAnnualPrepayAmount,
   annualPrepayInvoiceTotalForEstimate,

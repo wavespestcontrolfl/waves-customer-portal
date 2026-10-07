@@ -344,7 +344,8 @@ const SCOPE_SNAPSHOT = {
     // resend_receipt's invoice_id (or invoice_number, bound by validateRecordTarget) is the invoice record.
     // remove_saved_payment_method / correct_invoice_address carry customer_id / invoice_id (validateRecordTarget
     // reads both); correct_invoice_address's invoice_number is resolved to invoice_id by the route before validation.
-    'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address',
+    // accept_estimate carries estimate_id + customer_id (validateRecordTarget binds the estimate to that customer).
+    'repair_closeout', 'resend_receipt', 'cancel_queued_message', 'remove_saved_payment_method', 'correct_invoice_address', 'accept_estimate',
     'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft',
     'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',

@@ -2149,6 +2149,7 @@ module.exports = {
   buildTermiteProgramAgreementValues,
   classifyExistingAgreement,
   collectTermiteFacts,
+  autosendGateOn,
   estimateMayDiscount,
   isAnnualPlanEstimate,
   annualPlanNetFee,

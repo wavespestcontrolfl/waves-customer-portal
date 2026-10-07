@@ -8958,6 +8958,7 @@ module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimate
 module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
+module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
 module.exports.applyFrozenExistingServiceExtension = applyFrozenExistingServiceExtension;
 module.exports.resolveConvertedPerApplicationFee = resolveConvertedPerApplicationFee;
