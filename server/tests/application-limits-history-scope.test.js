@@ -61,7 +61,8 @@ describe('checkLimits: the product history honors the treated property and the p
     const history = mockDb([]);
     await applicationLimits.checkLimits('cust-1', 'prod-1', new Date('2026-10-12T16:00:00Z'), db, { propertyId: 'prop-A' });
     const scope = history.calls.filter((call) => call[0] === 'whereNotExists');
-    expect(scope).toHaveLength(1);
+    // Two reads share the scope: this year's history, and (the year being empty and a minimum interval set) the look-back to the latest earlier application.
+    expect(scope).toHaveLength(2);
     expect(history.calls).toContainEqual(['whereRaw', 'sr_scope.id = ??.service_record_id', ['property_application_history']]);
     expect(history.calls).toContainEqual(['whereNotNull', 'ss_scope.property_id']);
     expect(history.calls).toContainEqual(['whereNot', 'ss_scope.property_id', 'prop-A']);

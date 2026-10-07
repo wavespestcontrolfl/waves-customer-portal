@@ -1937,29 +1937,82 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
 // returns a 503 'application_limit_check_unavailable' body (see applicationLimitBlockStatus).
 //
 // `lock: true` (the closeout's record transaction, right before the compliance-ledger rows are
-// written) first takes one transaction-scoped advisory lock per property + product + year, in
-// sorted order, so two closeouts that would both pass on the same history are serialized: the
-// second reads the first's committed ledger rows and is refused. The lock key is also the key
-// style of the other closeout locks (hashtextextended of a text key).
+// written) first takes transaction-scoped advisory locks, in sorted order, so two closeouts that
+// would both pass on the same history are serialized: the second reads the first's committed
+// ledger rows and is refused. Two keys per product: property + product + year (the yearly count
+// reads the calendar year) and property + product (a minimum interval reads the latest earlier
+// application whatever its year, so a December and a January closeout must meet on one key).
+// The keys use the style of the other closeout locks (hashtextextended of a text key).
+//
+// The submitted list is bounded (MAX_SUBMITTED_LIMIT_PRODUCTS distinct ids, else a 400), deduped
+// and read in two batched queries (the catalog rows, the products that carry a hard count limit);
+// only products with such a limit go through the checker, and an unknown id costs no query.
 const HARD_COUNT_LIMIT_TYPES = new Set(['annual_max_apps', 'min_interval_days']);
 const APPLICATION_LIMIT_UNAVAILABLE_CODE = 'application_limit_check_unavailable';
 // 503 (retryable) when the limits could not be read, 422 when a limit is reached.
-const applicationLimitBlockStatus = (payload) => (payload && payload.code === APPLICATION_LIMIT_UNAVAILABLE_CODE ? 503 : 422);
+const APPLICATION_LIMIT_TOO_MANY_CODE = 'too_many_submitted_products';
+const MAX_SUBMITTED_LIMIT_PRODUCTS = 100;
+const APPLICATION_LIMIT_ERROR_CODES = new Set(['application_limit_reached', APPLICATION_LIMIT_UNAVAILABLE_CODE, APPLICATION_LIMIT_TOO_MANY_CODE]);
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// 503 (retryable) when the limits could not be read, 400 for an oversized list, 422 when a limit is reached.
+const applicationLimitBlockStatus = (payload) => {
+  if (payload && payload.code === APPLICATION_LIMIT_UNAVAILABLE_CODE) return 503;
+  if (payload && payload.code === APPLICATION_LIMIT_TOO_MANY_CODE) return 400;
+  return 422;
+};
 function applicationLimitLockKey(svc, productId, serviceDate) {
   const day = serviceDate || svc.scheduled_date || etDateString();
   const year = (day instanceof Date ? etDateString(day) : String(day)).slice(0, 4);
   return `application-limit:${svc.property_id || `customer-${svc.customer_id}`}:${productId}:${year}`;
 }
+// The minimum interval's key: no year, so a December and a January closeout serialize.
+function applicationLimitIntervalLockKey(svc, productId) {
+  return `application-limit:${svc.property_id || `customer-${svc.customer_id}`}:${productId}`;
+}
 async function submittedProductLimitBlockPayload({ svc, products = [], serviceDate = null, database = db, lock = false } = {}) {
   if (!svc || !Array.isArray(products)) return null;
   if (require('../config/feature-gates').lawnV13Live?.() !== true) return null;
   if (detectServiceLine(svc.service_type) !== 'lawn') return null;
-  const ids = [...new Set(products.map((p) => p && p.productId).filter(Boolean).map(String))];
-  if (!ids.length) return null;
+  const distinct = [...new Set(products.map((p) => p && p.productId).filter(Boolean).map(String))];
+  if (distinct.length > MAX_SUBMITTED_LIMIT_PRODUCTS) {
+    return {
+      error: `Too many different products on one visit (${distinct.length}; the most allowed is ${MAX_SUBMITTED_LIMIT_PRODUCTS}).`,
+      code: APPLICATION_LIMIT_TOO_MANY_CODE,
+      max: MAX_SUBMITTED_LIMIT_PRODUCTS,
+    };
+  }
+  // A malformed id cannot be a catalog row: skipped here, never sent to the database.
+  const candidates = distinct.filter((id) => UUID_SHAPE.test(id));
+  if (!candidates.length) return null;
   const LimitChecker = require('../services/application-limits');
   const checkDate = toETNoonServiceDate(serviceDate || svc.scheduled_date);
+  let names;
+  let limited;
+  try {
+    // Two batched reads, whatever the list length: the catalog rows, then which of those carry
+    // a hard product-level count limit. Fail closed like the checker read below.
+    const catalogRows = await savepointRead(database, (k) => k('products_catalog').whereIn('id', candidates).select('id', 'name'));
+    names = new Map((catalogRows || []).map((row) => [String(row.id), row.name]));
+    const known = [...names.keys()];
+    const limitRows = known.length
+      ? await savepointRead(database, (k) => k('product_limits')
+        .whereIn('product_id', known)
+        .where({ match_type: 'product', severity: 'hard_block' })
+        .whereIn('limit_type', [...HARD_COUNT_LIMIT_TYPES])
+        .select('product_id'))
+      : [];
+    limited = new Set((limitRows || []).map((row) => String(row.product_id)));
+  } catch (err) {
+    logger.warn('completion application limits: batch read failed, refusing the closeout (retryable)', { serviceId: svc.id, error: err?.message });
+    return { error: 'Could not check product limits — try again.', code: APPLICATION_LIMIT_UNAVAILABLE_CODE };
+  }
+  const ids = candidates.filter((id) => limited.has(id));
+  if (!ids.length) return null;
   if (lock && database.isTransaction) {
-    const keys = [...new Set(ids.map((productId) => applicationLimitLockKey(svc, productId, serviceDate)))].sort();
+    const keys = [...new Set(ids.flatMap((productId) => [
+      applicationLimitLockKey(svc, productId, serviceDate),
+      applicationLimitIntervalLockKey(svc, productId),
+    ]))].sort();
     for (const key of keys) await database.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
   }
   for (const productId of ids) {
@@ -1982,8 +2035,7 @@ async function submittedProductLimitBlockPayload({ svc, products = [], serviceDa
     }
     const hard = (result.blocks || []).find((b) => b.matchType === 'product' && HARD_COUNT_LIMIT_TYPES.has(b.type));
     if (!hard) continue;
-    const catalog = await failSoftRead(database, (k) => k('products_catalog').where({ id: productId }).first('name'), null);
-    const productName = catalog?.name || null;
+    const productName = names.get(productId) || null;
     return {
       error: `${hard.message} Remove ${productName || 'this product'} from the products applied, or ask the office.`,
       code: 'application_limit_reached',
@@ -8401,7 +8453,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             code: 'issued_visit_identity_changed',
           } });
         }
-        if (err && err.limitBlock && (err.code === 'application_limit_reached' || err.code === APPLICATION_LIMIT_UNAVAILABLE_CODE)) {
+        if (err && err.limitBlock && APPLICATION_LIMIT_ERROR_CODES.has(err.code)) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: applicationLimitBlockStatus(err.limitBlock), body: err.limitBlock });
         }
@@ -15412,6 +15464,7 @@ module.exports = {
   internalOnlyProductsBlockPayload,
   submittedProductLimitBlockPayload,
   applicationLimitLockKey,
+  applicationLimitIntervalLockKey,
   applicationLimitBlockStatus,
   completionOwnershipError,
   techTipsGateOn,

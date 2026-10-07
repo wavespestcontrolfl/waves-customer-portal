@@ -301,6 +301,66 @@ describeDb('v13 count caps through PostgreSQL', () => {
     });
   });
 
+  describe('the limits read across the new year (the minimum interval) and by property', () => {
+    const applicationLimits = require('../services/application-limits');
+    let hard;
+    beforeAll(async () => {
+      hard = await product('Cross-year interval fixture');
+      await knex('product_limits').insert([
+        { product_id: hard.id, match_type: 'product', limit_type: 'min_interval_days', limit_value: 60, limit_unit: 'days', severity: 'hard_block', description: 'fixture' },
+        { product_id: hard.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 2, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' },
+      ]);
+    });
+    const applied = (customerId, date, extra = {}) => knex('property_application_history').insert({ customer_id: customerId, product_id: hard.id, application_date: date, application_rate: 1, rate_unit: 'oz', ...extra });
+    const check = (customerId, date, opts = {}) => applicationLimits.checkLimits(customerId, hard.id, new Date(`${date}T16:00:00Z`), knex, opts);
+    const types = (result) => result.blocks.map((b) => b.type);
+
+    test('a December application and a February proposal 50 days later: the 60-day interval blocks; 60 days later it does not', async () => {
+      const { customerId } = await fixture(knex);
+      await applied(customerId, '2025-12-20');
+      const fifty = await check(customerId, '2026-02-08');
+      expect(types(fifty)).toEqual(['min_interval_days']);
+      expect(fifty.blocks[0]).toMatchObject({ current: 50, max: 60 });
+      expect(types(await check(customerId, '2026-02-18'))).toEqual([]);
+      expect(types(await check(customerId, '2026-02-19'))).toEqual([]);
+      expect(types(await check(customerId, '2026-02-17'))).toEqual(['min_interval_days']);
+    });
+
+    test('the yearly count keeps the calendar year: two 2025 applications do not count in February 2026, two 2026 ones do', async () => {
+      const { customerId } = await fixture(knex);
+      await applied(customerId, '2025-01-05');
+      await applied(customerId, '2025-04-10');
+      expect(types(await check(customerId, '2026-02-12'))).toEqual([]);
+      const other = await fixture(knex);
+      await applied(other.customerId, '2026-01-02');
+      await applied(other.customerId, '2026-03-10');
+      expect(types(await check(other.customerId, '2026-06-01'))).toEqual(['annual_max_apps']);
+    });
+
+    test('property scope and the visit\'s own row: another property blocks neither count nor interval; the same property does; a re-plan leaves its own ledger row out', async () => {
+      const { customerId, property } = await fixture(knex);
+      const [other] = await knex('customer_properties').insert({ customer_id: customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const [past] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: other.id, scheduled_date: '2026-01-20', service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: past.id, service_date: '2026-01-20', service_type: 'Lawn fixture' }).returning('*');
+      await applied(customerId, '2026-01-20', { service_record_id: record.id });
+      expect(types(await check(customerId, '2026-02-12', { propertyId: property.id }))).toEqual([]);
+      expect(types(await check(customerId, '2026-02-12', { propertyId: other.id }))).toEqual(['min_interval_days']);
+      expect(types(await check(customerId, '2026-02-12', { propertyId: other.id, excludeScheduledServiceId: past.id }))).toEqual([]);
+    });
+
+    test('the closeout check applies the same reading: a December visit then a February closeout 50 days later is refused', async () => {
+      process.env.GATE_LAWN_V13 = 'true';
+      const f = await fixture(knex);
+      const visit = await f.visit(0, { scheduled_date: '2026-02-08', service_type: 'Every 6 Weeks Lawn Care Service' });
+      const [past] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: visit.property_id, scheduled_date: '2025-12-20', service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: '2025-12-20', service_type: 'Lawn fixture' }).returning('*');
+      await applied(f.customerId, '2025-12-20', { service_record_id: record.id });
+      expect(await submittedProductLimitBlockPayload({ svc: visit, products: [{ productId: hard.id }], serviceDate: '2026-02-08', database: knex }))
+        .toMatchObject({ code: 'application_limit_reached', limitType: 'min_interval_days', current: 50, max: 60 });
+      expect(await submittedProductLimitBlockPayload({ svc: visit, products: [{ productId: hard.id }], serviceDate: '2026-02-18', database: knex })).toBeNull();
+    });
+  });
+
   describe('the closeout check against real history (submittedProductLimitBlockPayload)', () => {
     beforeAll(async () => { await knex('product_limits').del(); await migration.up(knex); });
     beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
@@ -328,16 +388,16 @@ describeDb('v13 count caps through PostgreSQL', () => {
     describe('two closeouts racing on the same history (the in-transaction check holds a property + product + year lock)', () => {
       // Each closeout is one transaction: take the lock and judge the history (lock: true), pause as
       // a real closeout does while it writes its other rows, write the ledger row, commit.
-      async function closeout(visit, customerId, productName, { lock, pauseMs = 150 }) {
+      async function closeout(visit, customerId, productName, { lock, pauseMs = 150, date = '2026-05-12' }) {
         const trx = await knex.transaction();
         try {
           const blocked = await submittedProductLimitBlockPayload({
-            svc: visit, products: [{ productId: catalog[productName].id }], serviceDate: '2026-05-12', database: trx, lock,
+            svc: visit, products: [{ productId: catalog[productName].id }], serviceDate: date, database: trx, lock,
           });
           if (blocked) { await trx.rollback(); return { status: 422, code: blocked.code }; }
           await new Promise((resolve) => setTimeout(resolve, pauseMs));
-          const [record] = await trx('service_records').insert({ customer_id: customerId, scheduled_service_id: visit.id, service_date: '2026-05-12', service_type: 'Lawn fixture' }).returning('*');
-          await trx('property_application_history').insert({ customer_id: customerId, product_id: catalog[productName].id, application_date: '2026-05-12', application_rate: 0.085, rate_unit: 'oz', service_record_id: record.id });
+          const [record] = await trx('service_records').insert({ customer_id: customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+          await trx('property_application_history').insert({ customer_id: customerId, product_id: catalog[productName].id, application_date: date, application_rate: 0.085, rate_unit: 'oz', service_record_id: record.id });
           await trx.commit();
           return { status: 200 };
         } catch (err) { await trx.rollback().catch(() => {}); throw err; }
@@ -401,7 +461,34 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(await check(visitA, CELSIUS)).toBeNull();
       });
 
-      test('lock keys differ by property, product and year', () => {
+      test('a December and a January closeout (a minimum interval spans the new year) meet on one lock: one succeeds, the other is refused', async () => {
+        const intervalProduct = await product('Interval fixture');
+        await knex('product_limits').insert({ product_id: intervalProduct.id, match_type: 'product', limit_type: 'min_interval_days', limit_value: 60, limit_unit: 'days', severity: 'hard_block', description: 'fixture' });
+        const f = await fixture(knex);
+        const visit = (date) => knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: date, service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*').then(([row]) => row);
+        const [december, january] = [await visit('2026-12-31'), await visit('2027-01-02')];
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: intervalProduct.id, application_date: '2026-10-15', application_rate: 1, rate_unit: 'oz' });
+        const results = await Promise.all([
+          closeout(december, f.customerId, 'Interval fixture', { lock: true, date: '2026-12-31' }),
+          closeout(january, f.customerId, 'Interval fixture', { lock: true, date: '2027-01-02' }),
+        ]);
+        expect(results.map((r) => r.status).sort()).toEqual([200, 422]);
+        // Without the lock the two years' keys would not have met: both pass.
+        const g = await fixture(knex);
+        const visitG = (date) => knex('scheduled_services').insert({ customer_id: g.customerId, property_id: g.property.id, scheduled_date: date, service_type: 'Every 6 Weeks Lawn Care Service' }).returning('*').then(([row]) => row);
+        const [d2, j2] = [await visitG('2026-12-31'), await visitG('2027-01-02')];
+        await knex('property_application_history').insert({ customer_id: g.customerId, product_id: intervalProduct.id, application_date: '2026-10-15', application_rate: 1, rate_unit: 'oz' });
+        const unlocked = await Promise.all([
+          closeout(d2, g.customerId, 'Interval fixture', { lock: false, date: '2026-12-31' }),
+          closeout(j2, g.customerId, 'Interval fixture', { lock: false, date: '2027-01-02' }),
+        ]);
+        expect(unlocked.map((r) => r.status)).toEqual([200, 200]);
+      });
+
+      test('lock keys differ by property, product and year; the interval key has no year', () => {
+        const { applicationLimitIntervalLockKey } = require('../services/complete-scheduled-service');
+        expect(applicationLimitIntervalLockKey({ property_id: 'p1', customer_id: 'c1' }, 'prod')).toBe('application-limit:p1:prod');
+        expect(applicationLimitIntervalLockKey({ property_id: null, customer_id: 'c1' }, 'prod')).toBe('application-limit:customer-c1:prod');
         const { applicationLimitLockKey } = require('../services/complete-scheduled-service');
         const svc = { property_id: 'p1', customer_id: 'c1' };
         const key = applicationLimitLockKey(svc, 'prod', '2026-05-12');

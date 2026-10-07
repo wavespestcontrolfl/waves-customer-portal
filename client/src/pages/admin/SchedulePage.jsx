@@ -25417,8 +25417,8 @@ const PRODUCT_DESCRIPTIONS = {
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
   "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
   speedzone: "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
-  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
-  celsius: "selective weed killer for warm-season grass (max 2x/year)",
+  "celsius wg": "selective weed killer for warm-season grass (max 3x/year)",
+  celsius: "selective weed killer for warm-season grass (max 3x/year)",
   "k-flow 0-0-25":
     "potassium that strengthens roots against drought and disease",
   "k-flow": "potassium that strengthens roots against drought and disease",
@@ -25505,46 +25505,55 @@ const PRODUCT_DESCRIPTIONS = {
 /* Safety rules per track */
 const TRACK_SAFETY_RULES = {
   st_augustine: [
-    "Celsius WG: MAX 2 apps/year/property",
+    "Celsius WG: MAX 3 apps/year/property",
     "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   A_St_Aug_Sun: [
-    "Celsius WG: MAX 2 apps/year/property",
+    "Celsius WG: MAX 3 apps/year/property",
     "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   B_St_Aug_Shade: [
-    "Celsius WG: MAX 2 apps/year/property",
+    "Celsius WG: MAX 3 apps/year/property",
     "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   C1_Bermuda: [
-    "Celsius WG: MAX 2 apps/year/property",
+    "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Bermuda \u2014 EVER",
     "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   C2_Zoysia: [
-    "Celsius WG: MAX 2 apps/year/property",
+    "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Zoysia \u2014 EVER",
     "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   D_Bahia: [
-    "Celsius WG: MAX 2 apps/year/property",
+    "Celsius WG: MAX 3 apps/year/property",
     "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
+};
+
+/* Overrides for a lawn payload that carries its own safety_rules (the v13 program,
+   GATE_LAWN_V13): Celsius is limited to 2 applications a year there. The base list above keeps the
+   legacy wording (3) for the gate-off protocol. */
+const PRODUCT_DESCRIPTIONS_V13 = {
+  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
+  celsius: "selective weed killer for warm-season grass (max 2x/year)",
 };
 
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */
 export {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 };

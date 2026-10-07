@@ -43,6 +43,11 @@ const DEFAULT_ID = '00000000-0000-4000-8000-000000000302';
 const actor = { techRole: 'technician', technicianId: TECH_ID };
 let service;
 let checkLimits;
+// What the two batched limit reads answer: the catalog rows that exist and the products that carry a
+// hard product-level count limit. `queried` records every table the closeout's limit check touched.
+let catalogRows;
+let limitedIds;
+let queried;
 
 const celsiusBlock = { type: 'annual_max_apps', matchType: 'product', matchValue: null, message: 'Celsius WG: 2/2 applications this year — LIMIT REACHED.', current: 2, max: 2 };
 
@@ -66,7 +71,25 @@ beforeEach(() => {
   builder.columnInfo = jest.fn(async () => ({}));
   // A plain await of a query reads as no rows.
   builder.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
-  db.mockReturnValue(builder);
+  // The batched reads: products_catalog by id, product_limits by product_id.
+  const batched = (table, answer) => {
+    const q = { ids: null };
+    for (const method of ['where', 'select', 'leftJoin', 'orderBy', 'whereNot', 'whereRaw', 'whereNotNull', 'whereNull', 'limit', 'forUpdate']) q[method] = jest.fn(() => q);
+    q.whereIn = jest.fn((column, ids) => { if (Array.isArray(ids) && !q.ids) q.ids = ids; return q; });
+    q.first = jest.fn(async () => service);
+    q.columnInfo = jest.fn(async () => ({}));
+    q.then = (resolve, reject) => Promise.resolve(q.ids ? answer(q.ids) : []).then(resolve, reject);
+    queried.push(table);
+    return q;
+  };
+  catalogRows = [{ id: CELSIUS_ID, name: 'Celsius WG' }, { id: DEFAULT_ID, name: 'Default fixture' }];
+  limitedIds = new Set([CELSIUS_ID]);
+  queried = [];
+  db.mockImplementation((table) => {
+    if (table === 'products_catalog') return batched(table, (ids) => catalogRows.filter((row) => ids.includes(row.id)));
+    if (table === 'product_limits') return batched(table, (ids) => ids.filter((id) => limitedIds.has(id)).map((id) => ({ product_id: id })));
+    return builder;
+  });
   attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
   checkLimits = jest.spyOn(limits, 'checkLimits').mockImplementation(async (customerId, productId) => (
     productId === CELSIUS_ID ? { allowed: false, warnings: [], blocks: [celsiusBlock] } : { allowed: true, warnings: [], blocks: [] }
@@ -99,7 +122,10 @@ describe('closeout: submitted products against hard count limits', () => {
 
   test('a default product with no limit in the way is not refused by this check', async () => {
     passed(await completePastLimits([applied(DEFAULT_ID)]));
-    expect(checkLimits).toHaveBeenCalledWith(service.customer_id, DEFAULT_ID, expect.any(Date), expect.anything(), expect.objectContaining({ propertyId: PROPERTY_ID }));
+    // No hard count limit row on it: the checker is never asked about it.
+    expect(checkLimits).not.toHaveBeenCalled();
+    // A default product beside a capped one is still judged on its own: the capped one refuses.
+    expect((await complete([applied(DEFAULT_ID), applied(CELSIUS_ID)])).body).toMatchObject({ code: 'application_limit_reached', productId: CELSIUS_ID });
   });
 
   test('a warning, an active-ingredient cap or a rate limit is not this check\'s hard count block', async () => {
@@ -111,6 +137,7 @@ describe('closeout: submitted products against hard count limits', () => {
   });
 
   test('a hard minimum interval refuses too', async () => {
+    limitedIds.add(DEFAULT_ID);
     checkLimits.mockResolvedValue({ allowed: false, warnings: [], blocks: [{ type: 'min_interval_days', matchType: 'product', message: 'Dimension: only 10 days since last app (min 60).', current: 10, max: 60 }] });
     const result = await complete([applied(DEFAULT_ID)]);
     expect(result).toMatchObject({ status: 422, body: { code: 'application_limit_reached', limitType: 'min_interval_days' } });
@@ -143,5 +170,39 @@ describe('closeout: submitted products against hard count limits', () => {
   test('a reached limit stays a 422; only an unreadable limit is a 503', () => {
     expect(applicationLimitBlockStatus({ code: 'application_limit_reached' })).toBe(422);
     expect(applicationLimitBlockStatus({ code: 'application_limit_check_unavailable' })).toBe(503);
+  });
+
+  test('the submitted list is bounded: more than 100 distinct product ids is a 400 before any query; duplicates count once', async () => {
+    const many = Array.from({ length: 101 }, (_, i) => applied(`00000000-0000-4000-8000-${String(i + 1000).padStart(12, '0')}`));
+    const result = await complete(many);
+    expect(result).toMatchObject({ status: 400, body: { code: 'too_many_submitted_products', max: 100 } });
+    expect(checkLimits).not.toHaveBeenCalled();
+    // The helper itself reads nothing before it refuses.
+    queried.length = 0;
+    expect(await submittedProductLimitBlockPayload({ svc: service, products: many, database: db })).toMatchObject({ code: 'too_many_submitted_products' });
+    expect(queried).toEqual([]);
+    // 100 distinct ids, each repeated: within the bound.
+    const hundred = Array.from({ length: 100 }, (_, i) => applied(`00000000-0000-4000-8000-${String(i + 2000).padStart(12, '0')}`));
+    expect(await submittedProductLimitBlockPayload({ svc: service, products: [...hundred, ...hundred], database: db })).toBeNull();
+    expect(applicationLimitBlockStatus({ code: 'too_many_submitted_products' })).toBe(400);
+  });
+
+  test('two batched reads whatever the list: unknown, malformed and duplicate ids cost no per-id query', async () => {
+    const unknown = Array.from({ length: 50 }, (_, i) => applied(`00000000-0000-4000-8000-${String(i + 3000).padStart(12, '0')}`));
+    const out = await submittedProductLimitBlockPayload({
+      svc: service,
+      products: [...unknown, applied('not-a-uuid'), applied(CELSIUS_ID), applied(CELSIUS_ID), applied(DEFAULT_ID), { productId: null }, null],
+      database: db,
+    });
+    expect(out).toMatchObject({ code: 'application_limit_reached', productId: CELSIUS_ID, productName: 'Celsius WG' });
+    expect(queried).toEqual(['products_catalog', 'product_limits']);
+    // Only the one product that carries a hard count limit reaches the checker, once.
+    expect(checkLimits).toHaveBeenCalledTimes(1);
+  });
+
+  test('only unknown ids: the catalog is read once, nothing else is asked', async () => {
+    expect(await submittedProductLimitBlockPayload({ svc: service, products: [applied('00000000-0000-4000-8000-000000009999')], database: db })).toBeNull();
+    expect(queried).toEqual(['products_catalog']);
+    expect(checkLimits).not.toHaveBeenCalled();
   });
 });
