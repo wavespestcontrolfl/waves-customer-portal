@@ -33,7 +33,7 @@ const logger = require('./logger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { NOT_EXPLICITLY_UNLINKED_SQL } = require('../utils/call-link-override');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
-const { splitStreetLineUnit } = require('../utils/address-normalizer');
+const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 
 // Roles the model may give the person the family caller names. A named person
 // the model tagged as an arranger, tenant, buyer, lender and so on is someone
@@ -110,12 +110,14 @@ function statedAddressCorroborates(stated, customer) {
   if (statedZip && zip5(customer.zip) && statedZip !== zip5(customer.zip)) return false;
   const statedCity = cityKey(stated.city);
   if (statedCity && cityKey(customer.city) && statedCity !== cityKey(customer.city)) return false;
-  // sameHouseNumberStreet strips the unit on purpose, so the unit is judged here: when the call
-  // stated a unit and the account has one, they must be the same door.
+  // sameHouseNumberStreet strips the unit on purpose, so the unit is judged here, fail closed. The
+  // unit is read in either position (unitAnywhereOnLine: trailing "100 Main St Apt 4B" or the legacy
+  // unit-first "Apt 4B, 100 Main St") besides address_line2. A stated unit needs the same unit on
+  // file; a stated unit against a record with no parseable unit is not corroborated.
   const unitKey = (v) => String(v || '').toLowerCase().replace(/\b(apartment|apt|unit|suite|ste|number|no|bldg|building|lot|#)\b/g, '').replace(/[^a-z0-9]/g, '');
-  const statedUnit = unitKey(stated.street_line_2 || stated.unit || splitStreetLineUnit(street).unit);
-  const onFileUnit = unitKey(customer.address_line2 || splitStreetLineUnit(onFile).unit);
-  if (statedUnit && onFileUnit && statedUnit !== onFileUnit) return false;
+  const statedUnit = unitKey(stated.street_line_2 || stated.unit || unitAnywhereOnLine(street));
+  const onFileUnit = unitKey(customer.address_line2 || unitAnywhereOnLine(onFile));
+  if (statedUnit && statedUnit !== onFileUnit) return false;
   return true;
 }
 

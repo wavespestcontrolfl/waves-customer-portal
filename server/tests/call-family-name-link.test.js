@@ -102,13 +102,23 @@ describe('statedAddressCorroborates', () => {
     expect(statedAddressCorroborates({ street_line_1: '100 Other Street' }, onFile)).toBe(false);
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop' }, { address_line1: null })).toBe(false);
   });
-  test('a stated unit that differs from the stored unit does not; same unit, or one side blank, does', () => {
+  test('a stated unit must equal the stored unit; no stated unit is fine', () => {
     const condo = { address_line1: '100 Example Loop', address_line2: 'Apt 4B', city: 'Sarasota', zip: '34240' };
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: 'Unit 5C' }, condo)).toBe(false);
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop Apt 5C' }, condo)).toBe(false);
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: '#4b' }, condo)).toBe(true);
     expect(statedAddressCorroborates({ street_line_1: '100 Example Loop' }, condo)).toBe(true);
-    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: '4B' }, onFile)).toBe(true);
+  });
+  test('legacy unit-FIRST on-file address: same unit matches, a different unit does not', () => {
+    const legacy = { address_line1: 'Apt 4B, 100 Example Loop', address_line2: null, city: 'Sarasota', zip: '34240' };
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: 'Apt 4B' }, legacy)).toBe(true);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: 'Apt 9' }, legacy)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: 'Apt 9, 100 Example Loop' }, legacy)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop' }, legacy)).toBe(true);
+  });
+  test('a stated unit against a record with no parseable unit is not corroborated', () => {
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop', street_line_2: 'Apt 9' }, onFile)).toBe(false);
+    expect(statedAddressCorroborates({ street_line_1: '100 Example Loop Unit 9' }, onFile)).toBe(false);
   });
 
   test('a stated ZIP or city that disagrees with the account does not', () => {
