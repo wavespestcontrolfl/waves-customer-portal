@@ -511,13 +511,21 @@ function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
 // against the visit's resolved municipality, spreaderVisitOnly against the window's
 // production mode. Keys not in the table carry no field text. Order is display order.
 const NOV_TO_MAR = (month) => month > 3 && month < 11;
+const TURF_LABELS = { st_augustine: 'St. Augustine', centipede: 'Centipede' };
 const V13_GATE_NOTES = [
   { key: 'minDistanceFromWaterFt', required: true, text: (ft) => `Keep ${ft} ft from ponds, lakes and canals; skip that strip.` },
   { key: 'holdForTropicalWatch', required: true, text: () => 'Hold the application if a tropical storm or hurricane is forecast.' },
   { key: 'novToMarOnly', required: true, when: (ctx) => ctx.monthNumber != null && NOV_TO_MAR(ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
   { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
   { key: 'northPortBlocked', required: true, when: (ctx) => /north\s*port/i.test(String(ctx.municipality || '')), text: () => 'Not allowed in North Port this month; skip this product.' },
+  // The turf-species restriction is a hard gate in the plan (v13LineState 'turf'); the note shows on the
+  // tank sheet, which has no lawn, and on any lawn whose grass is not one the product allows.
+  { key: 'turfOnly', required: true, when: (ctx, allowed) => !allowed.includes(ctx.turfSpecies), text: (allowed) => `${allowed.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only. Not on bermuda, zoysia, bahia, mixed or unknown grass.` },
+  { key: 'avoidHighWaterTable', required: true, text: () => 'Not on wet or sandy lots with a high water table.' },
+  { key: 'minDistanceFromStormInletFt', required: true, text: (ft) => `Keep ${ft} ft from storm inlets until the bag label is read.` },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
+  { key: 'replacesProduct', text: (name) => `Instead of the ${name} on this visit: spread one bag only and record the bag you used.` },
+  { key: 'waterInNow', text: () => 'Water in right after application (label: must be watered in immediately). Keep people and pets off until it is watered in and dry.' },
   { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
   { key: 'noWaterIn', text: () => 'Do not water this in.' },
   { key: 'tankMixWith', text: (product) => `Tank mix with ${product}.` },
@@ -527,10 +535,44 @@ const V13_GATE_NOTES = [
   { key: 'sunnyTurfOnly', text: () => 'Sunny turf only; the amount covers the sunny share of the lawn.' },
 ];
 
+// The line effectiveAreaFactor reads for a v13 row. A row marked wholeLawn is a spreader bag that covers the
+// lawn even when its recipe line reads as a weed-spot product (the February atrazine bag, whose name makes the
+// line a SPOT_ALLOWANCE): the whole area, never the spot share. sunnyTurfOnly narrows a whole-lawn line.
+function v13AreaLine(item, row) {
+  if (row?.gates?.wholeLawn) return { ...item, scope: 'BROADCAST_FULL' };
+  return row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item;
+}
+
+// The lawn's grass as a species gate (a row's turfOnly list) reads it: the grass on the profile, else its
+// track, else the visit's legacy lawn type. Mixed, unknown and free text are never one of the allowed species.
+function v13TurfSpecies(profile, legacyGrass) {
+  const recorded = [profile?.grass_type, profile?.track_key, legacyGrass].map((value) => String(value || '').trim()).find(Boolean) || '';
+  return /centipede/i.test(recorded) ? 'centipede' : normalizeGrassType(recorded);
+}
+
+// turf = { species } for a lawn; null for a reader with no lawn (the tank sheet), which restricts nothing.
+function v13TurfBlocked(row, turf) {
+  const allowed = row?.gates?.turfOnly;
+  return Boolean(turf) && Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(turf.species);
+}
+
+// A row that names the default bag it stands in for (replacesProduct, the February atrazine bag): selecting
+// it takes that bag off the visit, so the plan never sizes two fertilizers. Not when the option is not
+// allowed on this lawn: the visit then keeps its default bag.
+function v13ReplaceDefaultBag(items, rows, turf = null) {
+  const rowOf = (item) => (item.product ? rows.get(String(item.product.id)) : null);
+  const replaced = new Set(items
+    .filter((item) => item.selected && rowOf(item)?.gates?.replacesProduct && !v13TurfBlocked(rowOf(item), turf))
+    .map((item) => normalizeText(rowOf(item).gates.replacesProduct)));
+  if (!replaced.size) return items;
+  return items.map((item) => (item.selected && replaced.has(normalizeText(rowOf(item)?.protocolProductName))
+    ? { ...item, selected: false, selectionReason: 'replaced_by_alternative_bag' } : item));
+}
+
 function v13GateNotes(gates, context = {}) {
   const g = gates && typeof gates === 'object' ? gates : {};
   return V13_GATE_NOTES
-    .filter((entry) => g[entry.key] && (!entry.when || entry.when(context)))
+    .filter((entry) => g[entry.key] && (!entry.when || entry.when(context, g[entry.key])))
     .map((entry) => ({ key: entry.key, severity: entry.required ? 'required' : 'note', text: entry.text(g[entry.key]) }));
 }
 
@@ -563,6 +605,20 @@ function v13ApplyAloneBlocks(selectedItems) {
       code: 'lawn_v13_apply_alone', severity: 'block', productId: item.product.id, productName: item.product.name,
       message: `${item.product.name} is applied alone, but other products are selected with it. Remove them from the mix or apply them separately.`,
     }));
+}
+
+// A selected line whose row is not allowed on this lawn's grass (v13LineState 'turf') is a block of its own:
+// the plan withholds its amount, and the completion refuses it (v13TurfRestrictedIds).
+function v13TurfBlocks(lines, stateOf, turf) {
+  return lines.filter((line) => line.selected && line.product && stateOf(line)?.state === 'turf').map((line) => ({
+    code: 'lawn_v13_turf_species', severity: 'block', productId: line.product.id, productName: line.product.name,
+    message: `${line.product.name} is for ${stateOf(line).row.gates.turfOnly.map((species) => TURF_LABELS[species] || species).join(' or ')} lawns only, and the grass on file is ${turf.species ? (TURF_LABELS[turf.species] || turf.species) : 'not one of those'}. No amount is planned. Enter the actual work.`,
+  }));
+}
+
+// Every staged row this lawn's grass rules out, selected or not: what a completion may not record.
+function v13TurfRestrictedIds(rows, turf) {
+  return [...rows].filter(([, row]) => v13TurfBlocked(row, turf)).map(([productId]) => productId);
 }
 
 // The same rows for a reader with no visit (the tank sheet, the cost audit): one
@@ -1563,18 +1619,21 @@ function planLineFields(item) {
 // (a saved substitution is never applied) and reads its own staged row:
 //   unavailable: no row is linked to the matched catalog product, so nothing is sized
 //                (never the catalog default);
+//   turf:        the row's turfOnly list does not include this lawn's grass: nothing is sized;
 //   capped:      a hard application limit (annual cap, interval, blackout) is reached;
 //   spot:        a spot or label-rate row, no quantity (enter the area and amount used);
 //   calculate:   a whole-lawn row that states a rate or a nutrient target.
-function v13LineState(product, v13Rows, cappedIds = new Set()) {
+function v13LineState(product, v13Rows, cappedIds = new Set(), turf = null) {
   const row = v13Rows.get(String(product.id)) || null;
   if (!row) return { row, state: 'unavailable' };
+  if (v13TurfBlocked(row, turf)) return { row, state: 'turf' };
   if (cappedIds.has(String(product.id))) return { row, state: 'capped' };
   return { row, state: v13RowCalculates(row) ? 'calculate' : 'spot' };
 }
 
 const V13_UNAVAILABLE = {
   unavailable: 'No protocol row is linked to this product, so no amount is planned. Enter the actual work.',
+  turf: 'This product is not allowed on the grass recorded for this lawn, so no amount is planned. Enter the actual work.',
   capped: 'An application limit is reached for this product, so no amount is planned.',
 };
 
@@ -1827,11 +1886,15 @@ async function buildPlanForService(serviceId, options = {}) {
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional', { exactName });
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
-  const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's own protocol row supplies
+  // its rate, its sunny-turf limit and its grass restriction; a bag that replaces the default one takes it off.
+  const v13Rows = v13ProtocolRows(structuredProtocol);
+  const turf = { species: v13TurfSpecies(profile, service.lawn_type) };
+  const candidateItems = v13ReplaceDefaultBag(resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
     stressFlags,
-  });
+  }), v13Rows, turf);
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
   // A rig the visit names (assignment or explicit request) is the visit's;
@@ -1852,9 +1915,6 @@ async function buildPlanForService(serviceId, options = {}) {
   const lawnSqft = completionContext
     ? Number(options.lawnSqft !== undefined ? options.lawnSqft : (completionContext.propertyMatchesProfile ? profile?.lawn_sqft : 0)) || 0
     : Number(profile?.lawn_sqft || 0);
-  // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
-  // own protocol row supplies its rate and its sunny-turf limit.
-  const v13Rows = v13ProtocolRows(structuredProtocol);
   // What every line's area factor and gate text share, built once.
   const areaContext = {
     sunExposure: profile?.sun_exposure,
@@ -1869,16 +1929,18 @@ async function buildPlanForService(serviceId, options = {}) {
     monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
     municipality: resolvedOrdinanceCity,
     productionMode: structuredProtocol?.window?.productionMode,
+    turfSpecies: turf.species,
   };
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
-  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
+  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, turf) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
   // blocks and withholds the selection's quantities (as the tank sheet does).
   const applyAloneBlocks = v13SelectionBlocks(candidateItems, (item) => v13LineOf(item)?.row, gateContext);
+  const turfBlocks = v13Active ? v13TurfBlocks(candidateItems, v13LineOf, turf) : [];
   const planItems = candidateItems.map((item) => {
     const line = v13LineOf(item);
     // One product per line: the approved substitute when one is on the visit, else the
@@ -1890,7 +1952,7 @@ async function buildPlanForService(serviceId, options = {}) {
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
-      areaFactor: effectiveAreaFactor(line?.row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, areaContext),
+      areaFactor: effectiveAreaFactor(v13AreaLine(item, line?.row), areaContext),
       ...nutrientTargets,
       ...v13RateOptions(line?.row),
     }) : null;
@@ -1940,7 +2002,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // product holds the mix.
   warnings.push(...v13SelectedGateWarnings(plannedItems));
   if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
-  blocks.push(...applyAloneBlocks);
+  blocks.push(...applyAloneBlocks, ...turfBlocks);
   if (v13Active) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
     blocks.push(...notices.blocks);
@@ -2118,6 +2180,8 @@ async function buildPlanForService(serviceId, options = {}) {
         restrictedNitrogen: !!rule.restricted_nitrogen,
         restrictedPhosphorus: !!rule.restricted_phosphorus,
       })),
+      // Staged v13 products this lawn's grass rules out (a row's turfOnly list): the completion refuses them.
+      turfRestrictedProductIds: v13Active ? v13TurfRestrictedIds(v13Rows, turf) : [],
       annualN: {
         ...annualN,
         ledgerSource: nutrientLedger.source || null,
@@ -2199,6 +2263,10 @@ module.exports = {
   lawnV13PlanBlock,
   v13GateNotes,
   v13ItemFields,
+  v13AreaLine,
+  v13ReplaceDefaultBag,
+  v13TurfRestrictedIds,
+  v13TurfSpecies,
   v13RowCalculates,
   planLineFields,
   v13SelectedGateWarnings,

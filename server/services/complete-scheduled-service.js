@@ -1894,6 +1894,21 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
   };
 }
 
+// A lawn visit may not record a staged v13 product this lawn's grass rules out (the February atrazine bag on
+// bermuda, zoysia, bahia, mixed or unknown grass). The appointment plan lists those product ids
+// (propertyGate.turfRestrictedProductIds); the plan only withholds an amount, so the closeout refuses the record.
+function turfRestrictedProductsBlockPayload({ plan = null, products = [] } = {}) {
+  const restricted = new Set((plan?.propertyGate?.turfRestrictedProductIds || []).map(String));
+  const applied = (Array.isArray(products) ? products : []).filter((product) => product?.productId && restricted.has(String(product.productId)));
+  if (!applied.length) return null;
+  const names = [...new Set(applied.map((product) => product.productName || product.name || 'This product'))];
+  return {
+    error: `${names.join(', ')} cannot be recorded on this lawn: the product is not allowed on the grass recorded for it. Remove it, or correct the grass on the turf profile first.`,
+    code: 'lawn_v13_turf_species_not_allowed',
+    productIds: applied.map((product) => String(product.productId)),
+  };
+}
+
 function completionOwnershipError({ role, actorTechnicianId, assignedTechnicianId }) {
   if (role === 'admin') return null;
   if (
@@ -5106,6 +5121,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       waveguardEquipmentSystemId = null;
       waveguardCalibrationId = null;
       waveguardCalibrationCleared = true;
+    }
+    const turfRestrictedBlock = claim.action === 'proceed' ? turfRestrictedProductsBlockPayload({ plan: waveguardPlan, products }) : null;
+    if (turfRestrictedBlock) {
+      await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(turfRestrictedBlock.code), db);
+      return ({ status: 422, body: turfRestrictedBlock });
     }
     if (claim.action === 'proceed' && waveguardCloseout) {
       const plan = waveguardPlan;
@@ -15272,6 +15292,7 @@ module.exports = {
   pestPressureConfigAllowsTechnicianRating,
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
+  turfRestrictedProductsBlockPayload,
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,

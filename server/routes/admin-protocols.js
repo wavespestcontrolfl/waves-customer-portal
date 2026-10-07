@@ -22,6 +22,8 @@ const {
   visitForPlan,
   loadVisitForPlan,
   v13VisitLimits,
+  v13AreaLine,
+  v13ReplaceDefaultBag,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -982,17 +984,6 @@ router.get('/lawn-mix', async (req, res, next) => {
     const allLines = [...baseLines, ...conditionalLines];
     const nutrientTargets = parseVisitNutrientTargets(visit.notes);
 
-    const resolvedLines = resolveProtocolItems(allLines, products, {
-      selectedConditionalProductIds: req.query.selectedConditionalProductIds,
-      selectedConditionalProductNames: req.query.selectedConditionalProductNames,
-      selectedConditionalRaw: req.query.selectedConditionalRaw,
-      soilPIndex: req.query.soilPIndex,
-      plan: req.query.plan,
-      conditionFlags: req.query.conditionFlags,
-      propertyFlags: req.query.propertyFlags,
-      includePremiumOnly: req.query.includePremiumOnly === 'true',
-    });
-
     // GATE_LAWN_V13: the tank sheet uses the staged protocol's stated rates and
     // nutrient-target derivation, as the plan does; no staged protocol = no sheet.
     let v13Rows;
@@ -1002,6 +993,18 @@ router.get('/lawn-mix', async (req, res, next) => {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
     }
+    // A bag that replaces the default one (the February atrazine option) takes it off the sheet, as in the plan.
+    const resolvedLines = v13ReplaceDefaultBag(resolveProtocolItems(allLines, products, {
+      selectedConditionalProductIds: req.query.selectedConditionalProductIds,
+      selectedConditionalProductNames: req.query.selectedConditionalProductNames,
+      selectedConditionalRaw: req.query.selectedConditionalRaw,
+      soilPIndex: req.query.soilPIndex,
+      plan: req.query.plan,
+      conditionFlags: req.query.conditionFlags,
+      propertyFlags: req.query.propertyFlags,
+      includePremiumOnly: req.query.includePremiumOnly === 'true',
+    }), v13Rows);
+
     // The rig, derived once: carrier, tank size, and the coverage one tank gives.
     const [carrier, tankCapacity] = ['carrier_gal_per_1000', 'tank_capacity_gal'].map((key) => Number((calibration || {})[key] || 0));
     const tankCoverageSqft = carrier ? (tankCapacity / carrier) * 1000 : 0;
@@ -1034,7 +1037,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       });
       // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
       // no turf profile, so it takes the half the plan's own default assumes.
-      const sizedLine = v13Line?.row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
+      const sizedLine = v13AreaLine(line, v13Line?.row);
       const areaFactor = effectiveAreaFactor(sizedLine, areaContext);
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,

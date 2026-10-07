@@ -135,8 +135,15 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
   const knexFor = (rows) => (table) => ({ where() { return this; }, first: async () => rows[table] ?? null });
 
   test('the four v13 copies are one program, so any key serves any grass', () => {
-    const body = ({ name, ...rest }) => JSON.stringify(rest);
+    // One difference: the February atrazine option is on the St. Augustine track alone (St. Augustine and
+    // centipede only on its label), so it is taken out before the tracks are compared.
+    const body = ({ name, ...rest }) => JSON.stringify({
+      ...rest,
+      visits: rest.visits.map((visit) => ({ ...visit, secondary: visit.secondary.split('\n').filter((line) => !line.startsWith('LESCO Atrazine')).join('\n') })),
+    });
     for (const grass of GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
+    expect(visitFor(2).secondary).toMatch(/^LESCO Atrazine/m);
+    for (const grass of GRASSES.filter((g) => g !== LAWN_V13_ANY_GRASS_TRACK)) expect(JSON.stringify(v13[grass])).not.toMatch(/atrazine/i);
   });
 
   test.each(['mixed', 'unknown', 'centipede'])('gate on: recorded %s plans the October v13 visit', (grass) => {
@@ -184,7 +191,9 @@ const BLINDSIDE = 'Blindside Herbicide';
 // October's whole-lawn bag is the Dimension 0.21% 18-0-10 row (20261007120500 swaps it in for
 // the staged Stonewall 15-0-15 line).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18];
+// The February atrazine option is added by migration 20261007160000.
+const ATRAZINE = require('../models/migrations/20261007160000_lawn_v13_atrazine_feb_option').NAME;
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, ATRAZINE];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
