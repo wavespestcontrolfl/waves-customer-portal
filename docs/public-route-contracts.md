@@ -2382,7 +2382,9 @@ the A-D perimeter coverage list, and adds one optional key
 generated "Where we treated" map or A-D legend either; a real technician-traced
 treatment map still prints. While the gate is live the lawn PDF signature
 (`lawnAssessmentPdfSignature`) carries `:covhide=1`, so PDFs cached before a flip
-re-render, and re-render again when the gate is turned off.
+re-render, and re-render again when the gate is turned off. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
+found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
+not served either.
 `GATE_LAWN_EXPECTATIONS` (dark; gate off leaves the lawn payload unchanged, key
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
@@ -2544,9 +2546,7 @@ and the PDF print, carries up to 8 photos too (6 with the gate off). The web
 report captions a photo with `zoneLabel` when present. The lawn PDF
 cache signature gains `:shots=1` while the gate is live, so a flip re-keys lawn
 PDFs in both directions. Nothing else in the payload changes, and with the gate
-off the payload and the signature are byte-identical to before. `GET /api/reports/:token/map.svg` answers the same generic 404 (`Report not
-found`) while `lawnCoverageHidden` is true, so the standalone schematic map is
-not served either.
+off the payload and the signature are byte-identical to before.
 
 `GATE_LAWN_REPORT_PHOTO_SET` (dark): for a lawn visit captured under the shot
 list (`lawn_assessments.photos[].photoVocabulary` is `shot_list_v1`; a visit
