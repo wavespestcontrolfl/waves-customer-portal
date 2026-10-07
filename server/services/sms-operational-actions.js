@@ -986,7 +986,8 @@ function obligationWords(row, message) {
 // Thai, ...) get no edge check. Script_Extensions, not Script: shared marks
 // such as the kana prolonged-sound mark ー are Common by Script.
 const LETTER = /[\p{L}\p{N}\p{M}]/u;
-const UNSPACED = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]/u;
+const UNSPACED_SRC = '[\\p{scx=Han}\\p{scx=Hiragana}\\p{scx=Katakana}\\p{scx=Hangul}\\p{scx=Thai}\\p{scx=Lao}\\p{scx=Khmer}\\p{scx=Myanmar}]';
+const UNSPACED = new RegExp(UNSPACED_SRC, 'u');
 // The edge's base character: the first one, or the last one before any
 // trailing combining marks.
 function needsEdge(chars) {
@@ -998,8 +999,10 @@ function matchedSlice(rawQuote, description) {
   if (!LETTER.test(part)) return null;
   const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
   const chars = [...part];
-  const lead = needsEdge(chars) ? '(?<![\\p{L}\\p{N}\\p{M}_])' : '';
-  const tail = needsEdge([...chars].reverse()) ? '(?![\\p{L}\\p{N}\\p{M}_])' : '';
+  // An edge only rejects a neighbour from a SPACED script: a Japanese or
+  // Korean ending attached to a Latin word (PDFを) is still a word break.
+  const lead = needsEdge(chars) ? `(?<!(?!${UNSPACED_SRC})[\\p{L}\\p{N}\\p{M}_])` : '';
+  const tail = needsEdge([...chars].reverse()) ? `(?!(?!${UNSPACED_SRC})[\\p{L}\\p{N}\\p{M}_])` : '';
   const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(rawQuote);
   return found ? found[0] : null;
 }
@@ -1007,7 +1010,9 @@ function headlineWords(quote, rawQuote, description, redact) {
   const compose = require('./admin-alert-compose');
   const raw = matchedSlice(rawQuote, description);
   const slice = raw && redact(raw).replace(/\s+/g, ' ').trim();
-  if (slice && !/[.!?。！？]/u.test(slice) && !compose.breaksAlertRules(slice)) return slice;
+  // Sentence punctuation means the slice is not one plain phrase. A period
+  // inside a word (an email address, a URL, 2.5) is not a sentence break.
+  if (slice && !/[!?。！？]|\.(\s|$)/u.test(slice) && !compose.breaksAlertRules(slice)) return slice;
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }
 
