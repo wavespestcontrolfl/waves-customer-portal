@@ -388,6 +388,9 @@ const ACCESS_WORD_IS = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockb
 // The value before the verb: "Use BLUE MOON to unlock the side gate", "Enter
 // BLUE MOON at the gate" (Codex security P2 #5964 r60).
 const ACCESS_VALUE_FIRST = /\b((?:use|enter|type|punch\s+in|key\s+in|press|dial|input|say)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)((?:[a-z0-9#*-]+\s+){0,5}?[a-z0-9#*-]+)(?=\s+(?:to|at|on|for|into)\s+(?:\w+\s+){0,3}?(?:gate|door|lock|keypad|key\s*pad|garage|lockbox|lock\s*box|box|entry)\b)/gi;
+// Verb, then device, then value: "unlock the side gate with BLUE MOON"
+// (Codex P1 #5964 r61).
+const ACCESS_VERB_DEVICE = /\b((?:unlock|open|get\s+(?:into|through|past)|access|operate)\s+(?:the\s+|your\s+)?(?:\w+\s+){0,2}?(?:gate|door|lock|keypad|key\s*pad|garage|lockbox|lock\s*box|box|entry)\s+(?:with|using|by\s+(?:entering|typing|using))\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+)*)/gi;
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
@@ -429,7 +432,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_VALUE_FIRST, '$1[redacted]').replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_VERB_DEVICE, '$1[redacted]').replace(ACCESS_VALUE_FIRST, '$1[redacted]').replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -556,6 +559,8 @@ function treeShrubFacts(data = {}, keep = () => true) {
   const score = readingOrNull(snapshot.overallScore);
   return dropEmpty({
     plant_health_score_out_of_100: score === null ? null : Math.round(score),
+    // The "From your technician" paragraph the hero shows (Codex P1 #5964 r61).
+    tech_paragraph: text(v2.techParagraph, 700),
     status_headline: text(snapshot.statusHeadline, 200),
     score_explanation: text(snapshot.scoreExplanation, 300),
     watching: asArray(snapshot.watching).slice(0, 3).map((item) => text(item, 160)).filter(Boolean),
@@ -1992,11 +1997,28 @@ function contradictsLawnStatus(text, facts) {
   });
 }
 
+// "The report does not mention scale insects" when it does (Codex P1 #5964
+// r61): a pest or condition the visit's own record names may not be called
+// missing.
+const SAYS_MISSING = /\b(?:(?:does|do|did)\s*n['’]?o?t\s+(?:say|show|list|mention|record|note|include|name)|(?:is|are|was|were)\s*n['’]?o?t\s+(?:listed|recorded|noted|mentioned|shown|named|on\s+(?:the|this|your)\s+report)|no\s+(?:record|mention|note)\s+of|not\s+(?:on|in)\s+(?:the|this|your)\s+report)\b/i;
+function deniesRecordedTerm(text, { data, facts }) {
+  const visit = factText([facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary,
+    facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report]);
+  const terms = [...targetLabelsOf(data), ...PEST_TERMS];
+  return splitSentences(text).some((sentence) => {
+    if (!SAYS_MISSING.test(sentence)) return false;
+    // The most specific name only: "ghost ant" is not "ant".
+    const named = terms.filter((label) => sentenceNames(sentence, label));
+    const specific = named.filter((label) => !named.some((other) => other !== label && other.includes(label)));
+    return specific.some((label) => visit.includes(label));
+  });
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
   // The answer may not hand back an access word either (Codex P2 #5964 r56).
-  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS), ...text.matchAll(ACCESS_VALUE_FIRST)].length > 0],
+  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS), ...text.matchAll(ACCESS_VALUE_FIRST), ...text.matchAll(ACCESS_VERB_DEVICE)].length > 0],
   ['lawn_status_claim', (text, { facts }) => contradictsLawnStatus(text, facts)],
   ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
   ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],
@@ -2049,6 +2071,7 @@ const ASK_CHECKS = [
   // The prompt's drying guidance exempts only its own clause: "until dry and
   // water the lawn daily" still screens the watering (pre-push audit #5964).
   ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some(givesOwnCareInstruction)],
+  ['denies_recorded_term', deniesRecordedTerm],
 ];
 
 function firstFailure(checks, text, context) {

@@ -2253,3 +2253,20 @@ test('a pet eating wins over a pest elsewhere in the sentence (pre-push audit)',
   expect(medicalExposureAnswer('My dog took a bite of bait that was gnawed by rats.')).toBeTruthy();
   expect(medicalExposureAnswer('Did the roaches quickly devour the bait?')).toBeNull();
 });
+
+describe('answer screen, Codex round 61', () => {
+  test('a verb-device-value credential is masked and never repeated', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Unlock the side gate with BLUE MOON. Ants by the pool.' } });
+    expect(facts.customer_concern).toBe('Unlock the side gate with [redacted]. Ants by the pool.');
+    expect(screenAskAnswer('Unlock the side gate with BLUE MOON.', { question: 'q', data: pestData({ applications: [] }), facts })).toBe('access_phrase');
+  });
+
+  test('the Tree & Shrub technician paragraph is on the sheet and may not be denied', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 }, techParagraph: 'We observed scale insects on the hibiscus.' } };
+    const question = 'Did you find scale insects?';
+    const facts = buildReportAskFacts({ question, data });
+    expect(facts.tree_shrub_report.tech_paragraph).toBe('We observed scale insects on the hibiscus.');
+    expect(screenAskAnswer('The report does not mention scale insects.', { question, data, facts })).toBe('denies_recorded_term');
+    expect(screenAskAnswer('We observed scale insects on the hibiscus.', { question, data, facts })).toBeNull();
+  });
+});
