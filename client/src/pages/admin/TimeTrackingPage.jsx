@@ -1129,6 +1129,15 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                       >
                         {e.entry_type}
                       </span>
+                      {e.source === "geofence_auto" && (
+                        <span
+                          title="Clocked in automatically on arrival at the first stop"
+                          data-testid="auto-clock-in-badge"
+                          style={{ ...sBadge(D.muted + "22", D.muted), marginLeft: 4 }}
+                        >
+                          auto
+                        </span>
+                      )}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
                       {e.clock_in ? formatETTime(e.clock_in) : "--"}
@@ -1480,6 +1489,15 @@ function EntriesTab({ showToast }) {
                     >
                       {e.entry_type}
                     </span>
+                    {e.source === "geofence_auto" && (
+                      <span
+                        title="Clocked in automatically on arrival at the first stop"
+                        data-testid="auto-clock-in-badge"
+                        style={{ ...sBadge(D.muted + "22", D.muted), marginLeft: 4 }}
+                      >
+                        auto
+                      </span>
+                    )}
                   </td>{" "}
                   <td style={{ ...tdStyle, fontFamily: MONO, fontSize: 10 }}>
                     {e.clock_in ? formatETTime(e.clock_in) : "--"}

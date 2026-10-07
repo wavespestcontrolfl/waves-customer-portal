@@ -14,6 +14,7 @@ const timeTracking = require('./time-tracking');
 const trackTransitions = require('./track-transitions');
 const auditLog = require('./audit-log');
 const { parseETDateTime } = require('../utils/datetime-et');
+const { arrivalStartOptions, findArrivalJobs } = require('./geofence-auto-clock-in');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
 
 /**
@@ -128,10 +129,12 @@ async function handleGeozoneEvent(payload) {
   }
 
   // Attach today's scheduled job (if any) to each candidate
-  const withJobs = await Promise.all(candidates.map(async (c) => ({
-    customer: c,
-    job: await matcher.findScheduledJob(tech.id, c.id, eventTime),
-  })));
+  // Gate on: each customer expands to its LIVE visits for this tech (several
+  // live stops become several candidates, so the tech is asked to pick). Gate
+  // off: the one findScheduledJob row, exactly as before.
+  const withJobs = (await Promise.all(candidates.map(async (c) => (
+    (await findArrivalJobs({ tech, customer: c, eventTime })).map((job) => ({ customer: c, job }))
+  )))).flat();
 
   // Preferred pick for EXIT + single-customer cases: one with a scheduled job, else nearest
   const scheduled = withJobs.filter((x) => x.job);
@@ -155,6 +158,33 @@ async function handleGeozoneEvent(payload) {
     job: primary.job,
     lat, lng, eventTime, imei, payload,
   });
+}
+
+// A start that finds nothing to start is logged under its own action (no
+// notification: a reminder to start it would only answer "job not found").
+const SKIPPED_START_ACTIONS = {
+  job_already_completed: 'skipped_job_completed',
+  job_not_live: 'skipped_job_not_live',
+};
+
+// What the tech is told, and what the event log records, for a started timer.
+// `entry.clocked_in_shift_id` is set only when this same start also clocked the
+// tech in (GATE_GEOFENCE_AUTO_CLOCK_IN).
+function startedOutcome(entry, { unscheduled, customerLabel }) {
+  if (entry.clocked_in_shift_id) {
+    return {
+      message: `Clocked in and timer started at ${customerLabel}`,
+      action: 'clocked_in_timer_started',
+      extra: { clocked_in: true, shift_entry_id: entry.clocked_in_shift_id },
+    };
+  }
+  return {
+    message: unscheduled
+      ? `Timer started — unscheduled visit at ${customerLabel}`
+      : `Timer started at ${customerLabel}`,
+    action: 'timer_started',
+    extra: {},
+  };
 }
 
 async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, payload }) {
@@ -235,17 +265,30 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const unscheduled = !job;
 
   if (mode === 'automatic') {
+    const jobId = job ? job.id : null;
+    const { ambiguousVisits, ...startOptions } = await arrivalStartOptions({ tech, job, eventTime });
+    if (ambiguousVisits) {
+      // Several live visits for this tech at this customer today: do not guess
+      // which one to clock in on. Same selection prompt as a multi-customer arrival.
+      return handleMultiArrival({
+        tech, candidates: ambiguousVisits.map((v) => ({ customer, job: v })), lat, lng, eventTime, imei, payload,
+      });
+    }
     let entry = null;
     try {
-      entry = await timeTracking.startJob(tech.id, job ? job.id : null, { lat, lng });
+      // Gate off: no options, exactly today's call. Gate on: the start also
+      // clocks in a tech with no shift today (one transaction, re-checked on
+      // the locked visit) and is idempotent for a job already running.
+      entry = await timeTracking.startJob(tech.id, jobId, { lat, lng, ...startOptions });
     } catch (err) {
       // The visit was completed between the job lookup above and the timer
       // start (the office closed it out on its paid invoice): there is
       // nothing to start and nothing to remind about — tapping a reminder
       // would only answer "job not found" (GitHub r5 P2 #5886). Logged, no
       // notification.
-      if (err && err.code === 'job_already_completed') {
-        logger.info(`[geofence-handler] auto startJob skipped: visit ${job ? job.id : null} is already completed`);
+      const skippedAction = SKIPPED_START_ACTIONS[err.code];
+      if (skippedAction) {
+        logger.info(`[geofence-handler] auto startJob skipped: visit ${jobId} (${err.code})`);
         await matcher.logEvent({
           bouncie_imei: imei,
           technician_id: tech.id,
@@ -253,8 +296,8 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
           latitude: lat,
           longitude: lng,
           matched_customer_id: customer.id,
-          matched_job_id: job ? job.id : null,
-          action_taken: 'skipped_job_completed',
+          matched_job_id: jobId,
+          action_taken: skippedAction,
           raw_payload: payload,
           event_timestamp: eventTime,
         });
@@ -265,7 +308,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       await sendTechNotification(tech.id, {
         type: 'geofence_arrival_reminder',
         message: `You're at ${customerLabel}. Start timer?`,
-        payload: { customer_id: customer.id, job_id: job ? job.id : null, reason: err.message },
+        payload: { customer_id: customer.id, job_id: jobId, reason: err.message },
       });
       await matcher.logEvent({
         bouncie_imei: imei,
@@ -274,13 +317,34 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
         latitude: lat,
         longitude: lng,
         matched_customer_id: customer.id,
-        matched_job_id: job ? job.id : null,
+        matched_job_id: jobId,
         action_taken: 'reminder_sent',
         raw_payload: payload,
         event_timestamp: eventTime,
       });
       return;
     }
+
+    if (entry.reused) {
+      // A concurrent or repeat ENTER found this job's timer already running
+      // (startJob returned it untouched): nothing to start, tell, or transition.
+      await matcher.logEvent({
+        bouncie_imei: imei,
+        technician_id: tech.id,
+        event_type: 'ENTER',
+        latitude: lat,
+        longitude: lng,
+        matched_customer_id: customer.id,
+        matched_job_id: jobId,
+        action_taken: 'ignored_duplicate',
+        time_entry_id: entry.id,
+        raw_payload: payload,
+        event_timestamp: eventTime,
+      });
+      return;
+    }
+
+    const outcome = startedOutcome(entry, { unscheduled, customerLabel });
 
     if (job) {
       // markOnProperty (track-transitions) is the sole owner of the customer
@@ -293,15 +357,14 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
 
     await sendTechNotification(tech.id, {
       type: 'geofence_timer_started',
-      message: unscheduled
-        ? `Timer started — unscheduled visit at ${customerLabel}`
-        : `Timer started at ${customerLabel}`,
+      message: outcome.message,
       payload: {
         customer_id: customer.id,
         customer_name: customerLabel,
-        job_id: job ? job.id : null,
+        job_id: jobId,
         time_entry_id: entry.id,
         unscheduled,
+        ...outcome.extra,
       },
     });
 
@@ -312,8 +375,8 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       latitude: lat,
       longitude: lng,
       matched_customer_id: customer.id,
-      matched_job_id: job ? job.id : null,
-      action_taken: 'timer_started',
+      matched_job_id: jobId,
+      action_taken: outcome.action,
       time_entry_id: entry.id,
       raw_payload: payload,
       event_timestamp: eventTime,
