@@ -895,6 +895,41 @@ describe('lawn bounded product section', () => {
     expect(mockWindowContext).not.toHaveBeenCalled();
   });
 
+  // GATE_LAWN_V13 has no bahia program: bahia in ANY recorded profile field leaves the lawn with no
+  // track, whichever other track the other field names, so the brief never serves another grass's window.
+  test.each([
+    [{ grass_type: 'bahia', track_key: 'st_augustine' }],
+    [{ grass_type: 'st_augustine', track_key: 'bahia' }],
+    [{ grass_type: 'bahia', track_key: null }],
+  ])('GATE_LAWN_V13: profile %j fails closed with no guessed window', async (profile) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    try {
+      mockGrassContext.mockImplementation((...args) => jest.requireActual('../services/lawn-grass-context').loadCustomerGrassContext(...args));
+      const state = useDb(baseResponses({
+        scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+        customer_turf_profiles: [{ customer_id: 'cust-1', active: true, ...profile }],
+      }));
+      const out = await PrevisitBrief.generateVisitBrief('svc-1');
+      expect(out.generated).toBe(true);
+      const { brief } = storedBrief(state);
+      expect(brief.product_guidance.available).toBe(false);
+      expect(brief.product_guidance.reason).toBe('unknown_grass_track');
+      expect(mockWindowContext).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_LAWN_V13;
+    }
+  });
+
+  test('gate off, a conflicting profile keeps the old resolution (the explicit track key)', async () => {
+    mockGrassContext.mockImplementation((...args) => jest.requireActual('../services/lawn-grass-context').loadCustomerGrassContext(...args));
+    useDb(baseResponses({
+      scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }],
+      customer_turf_profiles: [{ customer_id: 'cust-1', active: true, grass_type: 'bahia', track_key: 'st_augustine' }],
+    }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(mockWindowContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ grassTrack: 'st_augustine' }));
+  });
+
   test('an assigned protocol window wins over date derivation (unknown track included)', async () => {
     mockGrassContext.mockResolvedValue({ trackKey: null });
     mockSummarize.mockReturnValue({

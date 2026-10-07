@@ -75,6 +75,9 @@ it.each([
   [{ grass_type: 'zoysia', lawn_sqft: 5000 }, undefined, 'zoysia'],
   [null, 'Bermuda', 'bermuda'],
   [{ track_key: 'bahia', lawn_sqft: 5000 }, undefined, 'bahia'],
+  // Bahia in ANY recorded field wins over another field's track (v13 has no bahia program).
+  [{ grass_type: 'bahia', track_key: 'st_augustine', lawn_sqft: 5000 }, undefined, 'bahia'],
+  [{ grass_type: 'st_augustine', track_key: 'bahia', lawn_sqft: 5000 }, undefined, 'bahia'],
 ])('loads the matching protocol for profile %j and customer type %s', async (profile, lawnType, track) => {
   const fetchMock = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('turf-profile') ? { profile } : {} }));
   vi.stubGlobal('fetch', fetchMock);

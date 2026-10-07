@@ -13,7 +13,7 @@
  * so we do NOT synthesize legacy A/B/C1/C2/D codes here.
  */
 const db = require('./../models/db');
-const { lawnProtocols } = require('./lawn-program');
+const { lawnProtocols, lawnV13NoProgramGrass } = require('./lawn-program');
 
 const GRASS_TYPE_LABELS = {
   st_augustine: 'St. Augustine',
@@ -87,6 +87,10 @@ function irrigationTypeHasSystem(irrigationType) {
 // (st_augustine / bermuda / zoysia / bahia). 'mixed'/'unknown' — and any
 // value not present in protocols.lawn — have no track.
 function resolveTrackKey(trackKey, grassType) {
+  // GATE_LAWN_V13 has no bahia program: any recorded field naming bahia (the grass type, or the track
+  // key, whichever other track the other field names) leaves the lawn with no track, the same rule
+  // the plan engine applies (recordedGrassFacts), so no consumer serves another grass's program.
+  if (lawnV13NoProgramGrass(grassType) || lawnV13NoProgramGrass(String(trackKey || '').trim().toLowerCase())) return null;
   const lawn = lawnProtocols();
   if (trackKey && lawn && lawn[trackKey]) return trackKey;
   if (grassType && lawn && lawn[grassType]) return grassType;

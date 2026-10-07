@@ -74,3 +74,13 @@ describe('serverRecomputeFromEstimateData', () => {
     expect(lawnLine(out.rawEngineResult).manualReviewReasons).toContain('lawn_v13_bahia_no_program');
   });
 });
+
+describe('the shared client-field sanitizer (every posted-input door reads it)', () => {
+  const { sanitizeClientIdentityFields, CLIENT_IDENTITY_FIELDS } = require('../services/estimate-client-identity-fields');
+
+  test('removes the replay exemption fields in place and leaves the rest', () => {
+    expect(CLIENT_IDENTITY_FIELDS).toEqual(expect.arrayContaining(['savedEstimateReplay', 'addedServiceKeys']));
+    const body = { ...BASE, services: { lawn: bahia }, savedEstimateReplay: true, addedServiceKeys: [], recurringCustomer: true };
+    expect(sanitizeClientIdentityFields(body)).toEqual({ ...BASE, services: { lawn: bahia } });
+  });
+});

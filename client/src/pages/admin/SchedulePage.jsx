@@ -7818,8 +7818,11 @@ export function ProtocolPanel({ service, onClose }) {
       const recordedLawnTypes = profileLawnTypes.some((value) => String(value || "").trim())
         ? profileLawnTypes
         : [service.lawnType, service.lawn_type];
+      // Bahia in ANY recorded field wins over another field's track (the v13 program has no bahia
+      // track, so the server then answers no program instead of another grass's program).
+      const recordedTracks = recordedLawnTypes.map(protocolTrackForLawnType);
       const trackKey = isLawn && !failedSections.includes("Turf profile")
-        ? recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean)
+        ? (recordedTracks.includes("bahia") ? "bahia" : recordedTracks.find(Boolean))
           || (recordedLawnTypes.some((value) => String(value || '').trim()) ? null : "st_augustine")
         : null;
       const lawnSqft = isLawn

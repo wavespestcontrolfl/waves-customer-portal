@@ -40,3 +40,29 @@ describe('gate on', () => {
     expect(row[1]).not.toMatch(/Bahia each run|Bahia\b.*product track/);
   });
 });
+
+describe('the public quote contract for a bahia lawn', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const message = "Your grass type needs a quick look from our team before we finalize lawn pricing — we'll send your exact price shortly.";
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', '..', rel), 'utf8').replace(/\\'/g, "'");
+
+  test('/calculate answers the bahia reason with the customer message, and the contract doc quotes both', () => {
+    const route = read('server/routes/public-quote.js');
+    expect(route).toContain("quoteRequiredReason === 'lawn_v13_bahia_no_program'");
+    expect(route).toContain(message);
+    const doc = read('docs/public-route-contracts.md').replace(/\s+/g, ' ');
+    expect(doc).toContain("reason: 'lawn_v13_bahia_no_program'");
+    expect(doc).toContain(`"${message}"`);
+  });
+
+  test('the engine reason that /calculate reads is the one a bahia lawn carries', () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    try {
+      const { priceLawnCare } = require('../services/pricing-engine/service-pricing');
+      const line = priceLawnCare({ turfSf: 4500, turfConfidence: 'HIGH' }, { track: 'bahia' });
+      expect(line.customQuoteReason).toBe('lawn_v13_bahia_no_program');
+      expect(line.requiresManualReview).toBe(true);
+    } finally { delete process.env.GATE_LAWN_V13; }
+  });
+});
