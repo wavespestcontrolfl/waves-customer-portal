@@ -381,6 +381,9 @@ const NUMBER_WORD_RUN = new RegExp(`\\b(?:(?:double|triple)\\s+)?${NUMBER_TOKEN}
 const CHAIN_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|[a-z0-9])';
 // A split code near an access word: "the gate opens with 12-34" (Codex P1
 // #5964 r55).
+// A word credential after an opening phrase: "the side gate opens with
+// SUNSET" (Codex P2 #5964 r56).
+const ACCESS_PHRASE = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\b[^.?!]{0,20}?\b(?:opens?|unlocks?|opened|unlocked)\s+(?:with|using|by)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+)/gi;
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
@@ -422,7 +425,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_PHRASE, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -1883,6 +1886,8 @@ function contradictsLawnStatus(text, facts) {
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  // The answer may not hand back an access word either (Codex P2 #5964 r56).
+  ['access_phrase', (text) => [...text.matchAll(ACCESS_PHRASE)].length > 0],
   ['lawn_status_claim', (text, { facts }) => contradictsLawnStatus(text, facts)],
   ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
   ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],
@@ -2110,8 +2115,13 @@ function boundToProduct(sentence) {
   // a missed exposure is worse than a needless safety answer (pre-push audit,
   // #5964: "swallowed the liquid you sprayed").
   const rest = sentence.replace(TIME_CLAUSE_RE, ' ');
-  return EAT_VERB_RE.test(rest) && EXPOSURE_WORD.test(rest);
+  if (EAT_VERB_RE.test(rest) && EXPOSURE_WORD.test(rest)) return true;
+  // Fail safe: an unnamed thing or a treated surface still counts when the
+  // sentence names the product anywhere ("swallowed something from the
+  // treated floor after the pesticide was sprayed") (Codex P1 #5964 r56).
+  return EAT_VERB_RE.test(rest) && EXPOSURE_WORD.test(sentence) && UNKNOWN_OBJECT_RE.test(rest);
 }
+const UNKNOWN_OBJECT_RE = /\b(?:something|anything|stuff|some|it|them|that|this)\b|\btreated\b/i;
 const TIME_CLAUSE_RE = /\b(?:after|once|when|before|until|since)\s+(?:the\s+|it\s+|that\s+|your\s+)?(?:\w+\s+){0,2}?(?:dried|dries|dry|had\s+dried|was\s+dry|were\s+dry|is\s+dry|went\s+on|was\s+applied|was\s+sprayed|was\s+done|finished)\b/gi;
 const EAT_VERB_RE = new RegExp(`\\b${EAT_VERBS}\\b`, 'i');
 

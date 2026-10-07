@@ -2070,3 +2070,16 @@ describe('answer screen, Codex round 55', () => {
     expect(facts.customer_concern).not.toMatch(/\d/);
   });
 });
+
+describe('answer screen, Codex round 56', () => {
+  test('swallowing something from a treated surface gets the medical answer', () => {
+    expect(medicalExposureAnswer('John swallowed something from the treated floor after the pesticide was sprayed.')).toBeTruthy();
+  });
+
+  test('a word credential after an opening phrase is masked and never repeated', () => {
+    const data = lawnData({ customerConcern: 'The side gate opens with SUNSET, ants by the pool', reportV2: { aftercare: {} } });
+    const facts = buildReportAskFacts({ data });
+    expect(facts.customer_concern).toBe('The side gate opens with [redacted], ants by the pool');
+    expect(screenAskAnswer('The side gate opens with SUNSET.', { question: 'q', data, facts })).toBe('access_phrase');
+  });
+});
