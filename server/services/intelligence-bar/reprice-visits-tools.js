@@ -23,7 +23,7 @@
  * family (appointment-tagger's classification). Never a visit that is completed,
  * in progress (en_route / on_site), invoiced (any invoice row), prepaid, covered
  * by an annual prepay term, a free re-service, a $0 visit, a visit with add-on
- * lines, or one the screen's re-price block reports as holding money. A
+ * lines, a series' first (template) visit, or one the screen's re-price block reports as holding money. A
  * monthly-membership customer is refused whole: dues cover those visits, so the
  * price there is the monthly rate (update_customer / rate_service).
  *
@@ -55,7 +55,7 @@ const NO_MESSAGE = 'No customer message is sent.';
 const REPRICE_FUTURE_VISITS_TOOL = {
   name: 'reprice_future_visits',
   description: `Change the per-visit price of ONE customer's upcoming visits for ONE service (e.g. "she is Gold now, make her future pest visits $49"). The first call returns a PREVIEW and changes nothing: each visit that changes (date, service, old price → new price), each visit left alone and why, and that no customer message is sent. The operator approves on the confirmation card. Each visit is then saved exactly as the Schedule screen's Edit appointment price edit saves it.
-Never changes a visit that is completed, in progress, invoiced, prepaid, covered by an annual prepay term, a free re-service or $0 visit, a visit with add-on lines, or one holding money — those are listed on the card as left alone. At most ${MAX_VISITS} visits per card: pass through_date to split a longer schedule.
+Never changes a visit that is completed, in progress, invoiced, prepaid, covered by an annual prepay term, a free re-service or $0 visit, a visit with add-on lines, a plan's first (template) visit, or one holding money — those are listed on the card as left alone. At most ${MAX_VISITS} visits per card: pass through_date to split a longer schedule.
 Refused for a customer billed by monthly membership: dues cover those visits and the price is the monthly rate — use update_customer / rate_service for that instead.
 new_price is the new price of each visit in dollars (the full visit price after any discount). A percentage is not accepted: ask the operator for the dollar price. Changing a WaveGuard tier never reprices visits by itself — use this tool when the operator wants the visits repriced.
 Admin-only.`,
@@ -95,15 +95,26 @@ function classify(text) {
   return require('../appointment-tagger').classifyAppointmentType(String(text || ''));
 }
 
-// The pin each visit is approved against: identity, schedule, price and the
+// The pin each visit is approved against: identity (customer, service, plan
+// position), schedule, price, every eligibility field the card judged, and the
 // row version (any write to the row after the card changes it).
 function visitPin(row) {
+  const iso = (v) => (v instanceof Date ? v.toISOString() : (v == null ? null : String(v)));
   return {
     id: String(row.id),
+    customer_id: row.customer_id == null ? null : String(row.customer_id),
+    service_type: row.service_type || null,
+    service_id: row.service_id == null ? null : String(row.service_id),
+    is_recurring: row.is_recurring === true,
+    recurring_parent_id: row.recurring_parent_id == null ? null : String(row.recurring_parent_id),
+    is_callback: row.is_callback === true,
     date: dateOnly(row.scheduled_date),
     status: row.status || null,
     estimated_price: cents(row.estimated_price),
     primary_line_price: cents(row.primary_line_price),
+    prepaid_amount: cents(row.prepaid_amount),
+    prepaid_at: iso(row.prepaid_at),
+    annual_prepay_term_id: row.annual_prepay_term_id == null ? null : String(row.annual_prepay_term_id),
     row_version: row.row_version || null,
   };
 }
@@ -206,6 +217,9 @@ function exclusionReason(row, { invoice, hasAddons }) {
   if (row.prepaid_at || (row.prepaid_amount != null && Number(row.prepaid_amount) > 0)) return 'prepaid';
   if (row.annual_prepay_term_id) return 'covered by an annual prepay term';
   if (row.is_callback) return 'a free re-service visit';
+  // A series' template visit: the Schedule edit carries its price into the
+  // visits the plan adds later, beyond what this card approves.
+  if (row.is_recurring && !row.recurring_parent_id) return "the plan's first visit (later visits copy its price) — change it on the Schedule screen";
   if (row.estimated_price != null && Number(row.estimated_price) === 0) return 'a $0 visit — change it on the Schedule screen if that is intended';
   if (hasAddons) return 'has add-on lines — change it on the Schedule screen';
   return null;
@@ -311,9 +325,13 @@ function cardLines(preview) {
   return lines;
 }
 
+async function readRow(id) {
+  return db('scheduled_services').where({ id })
+    .first('scheduled_services.*', db.raw("(xmin::text || ':' || ctid::text) as row_version"));
+}
+
 async function readPin(id) {
-  const row = await db('scheduled_services').where({ id })
-    .first('id', 'scheduled_date', 'status', 'estimated_price', 'primary_line_price', db.raw("(xmin::text || ':' || ctid::text) as row_version"));
+  const row = await readRow(id);
   return row ? visitPin(row) : null;
 }
 
@@ -369,13 +387,25 @@ async function verifiedPlan(input) {
   return { plan };
 }
 
+// Right before its own save, the visit must still be what the card showed —
+// the same customer, service, plan position, date, status, price and
+// eligibility, still with no invoice or add-on line. Only the row version may
+// differ from the card (an earlier save's post-commit effects); the version
+// read here is the one the save's row lock must still find. Null on any drift.
+async function stillAsApproved(pin) {
+  const row = await readRow(pin.id);
+  if (!row) return null;
+  const now = visitPin(row);
+  if (!sameShownState(pin, now)) return null;
+  const [invoices, addons] = await Promise.all([linkedInvoices([pin.id]), visitsWithAddons([pin.id])]);
+  return exclusionReason(row, { invoice: invoices.get(pin.id), hasAddons: addons.has(pin.id) }) ? null : now;
+}
+
 // One visit's save: 'changed', a refusal (`failure`), or an unknown outcome.
 async function saveOne(plan, i, actionContext) {
   const visit = plan.visits[i];
-  // Right before its own save, the visit must still be what the card showed;
-  // the version read here is the one the save's row lock must still find.
-  const now = await readPin(visit.id);
-  if (!sameShownState(plan._pins[i], now)) {
+  const now = await stillAsApproved(plan._pins[i]);
+  if (!now) {
     return { failure: { id: visit.id, date: visit.date, error: 'this visit changed after the card was shown.', code: 'preview_changed' } };
   }
   let reply;

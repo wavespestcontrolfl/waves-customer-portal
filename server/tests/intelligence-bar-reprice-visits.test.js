@@ -118,6 +118,15 @@ describe('the card', () => {
     expect(Schedule.updateVisitDetails).not.toHaveBeenCalled();
   });
 
+  test("a series' first (template) visit is left alone: its price would carry into visits the plan adds later", async () => {
+    tables.scheduled_services.push(visit('v-tpl', '2099-03-05', { is_recurring: true, recurring_parent_id: null }));
+    tables.scheduled_services[0].is_recurring = true;
+    tables.scheduled_services[0].recurring_parent_id = 'v-tpl';
+    const card = await preview();
+    expect(card.visits.map((v) => v.id)).toEqual(['v-1', 'v-2']);
+    expect(card.left_alone).toContainEqual(expect.objectContaining({ id: 'v-tpl', reason: expect.stringMatching(/plan's first visit/) }));
+  });
+
   test("a visit the Schedule re-price block reports as holding money is left alone with that reason", async () => {
     Schedule.findBillingCoveredVisits.mockResolvedValue(new Map([['v-2', 'holding a card for a late-cancel fee']]));
     const card = await preview();
@@ -213,6 +222,33 @@ describe('the confirmed run', () => {
     const res = await confirm(ask(), card._version);
     expect(res.success).toBe(true);
     expect(Schedule.updateVisitDetails.mock.calls[1][0].approvedVisitVersion).toBe('v-2:v2');
+  });
+
+  test.each([
+    ['moved to another customer', { customer_id: '00000000-0000-0000-0000-0000000000c2' }],
+    ['changed service', { service_type: 'Lawn Care' }],
+    ['prepaid', { prepaid_amount: '49.00' }],
+  ])('a later visit %s during the earlier saves is not saved, even with its date, status and price unchanged', async (_label, change) => {
+    const card = await preview();
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      Object.assign(tables.scheduled_services[1], change, { row_version: 'v-2:v2' });
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(ask(), card._version);
+    expect(res.partial).toBe(true);
+    expect(res.failed_visit).toMatchObject({ id: 'v-2', code: 'preview_changed' });
+    expect(Schedule.updateVisitDetails).toHaveBeenCalledTimes(1);
+  });
+
+  test('a later visit invoiced during the earlier saves is not saved', async () => {
+    const card = await preview();
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      tables.invoices.push({ scheduled_service_id: 'v-2', invoice_number: 'WPC-2099-0003', status: 'draft' });
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(ask(), card._version);
+    expect(res.failed_visit).toMatchObject({ id: 'v-2', code: 'preview_changed' });
+    expect(Schedule.updateVisitDetails).toHaveBeenCalledTimes(1);
   });
 
   test('a row version that moved (any write to a listed visit) refuses with preview_changed', async () => {
