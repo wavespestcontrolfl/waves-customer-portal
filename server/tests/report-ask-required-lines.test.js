@@ -2049,3 +2049,24 @@ describe('answer screen, Codex round 54', () => {
     expect(screenAskAnswer('Pest pressure has not improved.', { question: 'Is it better?', data, facts: buildReportAskFacts({ data }) })).toBe('pressure_claim');
   });
 });
+
+describe('answer screen, Codex round 55', () => {
+  test.each(['The product was Roundup.', 'Roundup was the product.'])('a product identity off the record is rejected: %s', (answer) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+    const question = 'What product was used?';
+    expect(screenAskAnswer(answer, { question, data, facts: buildReportAskFacts({ question, data }) })).toBe('unrecorded_product');
+  });
+
+  test('a Lawn diagnosis row keeps its status', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, diagnosis: [{ key: 'turf_density', label: 'Turf density', score: 90, status: 'strong', explanation: 'Thick turf.' }] } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Does my turf density need attention?', data, facts });
+    expect(ask('Yes, your turf density needs attention.')).toBe('diagnosis_claim');
+    expect(ask('Your turf density is strong.')).toBeNull();
+  });
+
+  test.each(['The gate opens with 12-34', 'Door code 4-5-6-7'])('a split access code is masked: %s', (concern) => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `${concern}, ants by the pool` } });
+    expect(facts.customer_concern).not.toMatch(/\d/);
+  });
+});

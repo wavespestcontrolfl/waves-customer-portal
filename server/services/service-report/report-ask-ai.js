@@ -379,6 +379,9 @@ const NUMBER_WORD_RUN = new RegExp(`\\b(?:(?:double|triple)\\s+)?${NUMBER_TOKEN}
 // A hyphen-joined run of spoken digits or single characters is a credential
 // or a number: "one-two-three-four", "1-2-3-4", "A-7-B-2" (Codex P1 #5964 r39).
 const CHAIN_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|[a-z0-9])';
+// A split code near an access word: "the gate opens with 12-34" (Codex P1
+// #5964 r55).
+const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
 function maskSpokenPhones(text) {
@@ -419,7 +422,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -1424,10 +1427,16 @@ function namesUnrecordedObject(text, known) {
   return words.some((word) => !APPLIED_GENERIC_WORDS.has(word) && !known.has(word) && !SAYS_INSIDE.test(word) && !SAYS_OUTSIDE.test(word));
 }
 
+const PRODUCT_NOUN = '(?:product|treatment|chemical|pesticide|insecticide|herbicide|fungicide|fertilizer|bait|material|formula|brand)s?';
+const PRODUCT_IDENTITY_RE = new RegExp(`\\b${PRODUCT_NOUN}\\s+(?:used\\s+|applied\\s+|today\\s+)?(?:was|is|were|are|called|named)\\s+(?:called\\s+|named\\s+)?([A-Z][\\w-]*(?:\\s+[A-Z0-9][\\w-]*)*)|\\b([A-Z][\\w-]*(?:\\s+[A-Z0-9][\\w-]*)*)\\s+(?:was|is|were|are)\\s+(?:the|our|your)\\s+(?:\\w+\\s+)?${PRODUCT_NOUN}\\b`, 'g');
+
 function namesUnrecordedProduct(text, { facts }) {
   const known = new Set(asArray(facts?.products).flatMap((product) => normalizeKey(product.name).split(' ')));
   for (const word of normalizeKey(facts?.technician_first_name || '').split(' ')) known.add(word);
   if (namesUnrecordedObject(matchForm(text), known)) return true;
+  // "The product was Roundup", "Roundup was the product" (Codex P1 #5964 r55).
+  const identity = [...matchForm(text).matchAll(PRODUCT_IDENTITY_RE)].map((m) => m[1] || m[2]);
+  if (identity.some((name) => normalizeKey(name).split(' ').some((word) => word && !known.has(word) && !SENTENCE_WORDS.has(word)))) return true;
   return splitSentences(matchForm(text)).some((sentence) => {
     if (!APPLICATION_VERB.test(sentence)) return false;
     // The opening word is a name only as the subject ("Roundup was applied");
@@ -1569,6 +1578,23 @@ const GROUP_NEEDS_CARE = /needs\s+attention|urgent|watch|deficit|declin|poor|str
 const GROUP_FINE = /healthy|strong|stable|good|excellent|thriving/i;
 // A score that plainly disagrees (past the hard cut) fails even with sheet
 // wording; past the soft cut, only sheet wording grounds it.
+// Each dimension is judged on its own score: the lawn score, the Tree & Shrub
+// trend's latest point, or a diagnosis row for that dimension.
+function dimensionScores(lower, facts) {
+  const treeTrends = facts?.tree_shrub_report?.trends || {};
+  const own = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower))
+    .map(([, lawnKey, treeKey]) => (lawnKey ? facts?.lawn_assessment?.[lawnKey] : null) ?? (treeKey ? treeTrends[treeKey]?.to?.value : null));
+  const rows = [...asArray(facts?.lawn_report?.diagnosis), ...asArray(facts?.tree_shrub_report?.diagnosis)]
+    .filter((row) => row.score_out_of_100 != null && HEALTH_DIMENSIONS.some(([re]) => re.test(lower) && re.test(String(row.area || '').toLowerCase())))
+    .map((row) => row.score_out_of_100);
+  return [...own, ...rows].filter((value) => value != null);
+}
+// Plants, shrubs and trees take the Tree & Shrub score (Codex P1 #5964 r44).
+function overallScores(lower, facts) {
+  const plantScore = facts?.tree_shrub_report?.plant_health_score_out_of_100;
+  if (PLANT_SUBJECT.test(lower) && plantScore != null) return [plantScore];
+  return [facts?.lawn_assessment?.overall_out_of_100 ?? plantScore];
+}
 // A named plant group is judged on its own status card (Codex P1 #5964 r53).
 function plantGroupScores(lower, facts) {
   return asArray(facts?.tree_shrub_report?.plant_groups)
@@ -1599,14 +1625,8 @@ function contradictsHealth(text, facts) {
     const has = (word) => sheetClauses.some((part) => new RegExp(`\\b${word}`).test(part) && sameDimension(part));
     // Each dimension is judged on its own score: "Density is excellent" on a
     // density of 20 fails even when the overall is 72 (Codex P1 #5964 r42).
-    const treeTrends = facts?.tree_shrub_report?.trends || {};
-    const scores = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower))
-      .map(([, lawnKey, treeKey]) => (lawnKey ? facts?.lawn_assessment?.[lawnKey] : null) ?? (treeKey ? treeTrends[treeKey]?.to?.value : null))
-      .filter((value) => value != null);
-    // Plants, shrubs and trees take the Tree & Shrub score (Codex P1 #5964 r44).
-    const plantScore = facts?.tree_shrub_report?.plant_health_score_out_of_100;
-    const overall = PLANT_SUBJECT.test(lower) && plantScore != null ? [plantScore]
-      : [facts?.lawn_assessment?.overall_out_of_100 ?? plantScore];
+    const scores = dimensionScores(lower, facts);
+    const overall = overallScores(lower, facts);
     const groupScores = plantGroupScores(lower, facts);
     const pool = [groupScores, scores, overall].find((list) => list.length);
     const known = pool.filter((value) => value != null && Number.isFinite(Number(value))).map(Number);
@@ -1787,11 +1807,12 @@ const CONCERN_STOP = new Set('the and you your did not was were have has had any
 // A Tree & Shrub diagnosis row's polarity must hold: "We detected a Ganoderma
 // conk" when the row says none was seen (Codex P1 #5964 r51).
 const DIAGNOSIS_CLEAR = /^(?:no|none|clear|not\s+(?:seen|observed|found|present)|absent|healthy|strong|stable|good|excellent|ok|okay)$/i;
-const PRESENCE_CLAIM = /\b(?:present|presence|found|seen|detected|visible|observed|spotted|showed|shows|signs?\s+of|has|have|had|there\s+(?:is|are|was|were)|infest\w*|affected|absent|clear\s+of|free\s+of)\b/i;
+const PRESENCE_CLAIM = /\bneeds?\s+(?:attention|work|help|care|treatment|watching)\b|\b(?:problem|issue|concern|poor|weak|struggling)\b|\b(?:present|presence|found|seen|detected|visible|observed|spotted|showed|shows|signs?\s+of|has|have|had|there\s+(?:is|are|was|were)|infest\w*|affected|absent|clear\s+of|free\s+of)\b/i;
 const DIAGNOSIS_PRESENT = /^(?:yes|present|detected|confirmed|needs\s+attention|urgent|watch|tracking|deficit)$/i;
 const DIAGNOSIS_GENERIC = new Set('disease diseases pests insects insect health plant plants tree trees shrub shrubs issue issues damage pressure stress overall color foliage'.split(' '));
 function contradictsDiagnosis(text, facts) {
-  const rows = asArray(facts?.tree_shrub_report?.diagnosis);
+  // Lawn diagnosis rows too (Codex P1 #5964 r55).
+  const rows = [...asArray(facts?.tree_shrub_report?.diagnosis), ...asArray(facts?.lawn_report?.diagnosis)];
   if (!rows.length) return false;
   return clausesOf(text).some((clause) => {
     const lower = clause.toLowerCase();
