@@ -643,7 +643,7 @@ function heldProductBlocks(plan, submittedProducts = []) {
   return [...applied].map((id) => ({
     code: 'actual_north_port_product_window',
     severity: 'block',
-    message: `${held.get(id)} is recorded as applied, but North Port bans all turf fertilizing from April 1 to September 30; the plan held it back.`,
+    message: `${held.get(id)} is recorded as applied, but North Port holds this product from June to September until the city confirms; the plan held it back.`,
   }));
 }
 

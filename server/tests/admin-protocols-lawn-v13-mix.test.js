@@ -377,7 +377,7 @@ describe('the city hold on the tank sheet', () => {
     const body = await lawnMix({ month: '6', scheduledServiceId: VISIT });
     const nutra = itemFor(body, NUTRA);
     expect(nutra).toMatchObject({ selected: false, jobMix: null, plannedMix: null, fullTankMix: null });
-    expect(nutra.unavailable.reason).toMatch(/North Port bans this product/);
+    expect(nutra.unavailable.reason).toMatch(/North Port holds this product/);
     expect(nutra.gateNotes.map((n) => n.key)).toContain(WINDOW_KEY);
     expect(body.selectedItems.map((item) => item.product?.name)).not.toContain(NUTRA);
     expect(codes(body)).toContain('lawn_v13_north_port_product_window');
@@ -401,12 +401,12 @@ describe('the city hold on the tank sheet', () => {
     expect(codes(body)).not.toContain('lawn_v13_north_port_product_window');
   });
 
-  test('the reference sheet (no visit) keeps the amount and says North Port does not apply it April to September', async () => {
+  test('the reference sheet (no visit) keeps the amount and says North Port does not apply it June to September', async () => {
     const body = await lawnMix({ month: '6' });
     expect(itemFor(body, NUTRA)).toMatchObject({ selected: true, jobMix: { amount: 120 } });
     const warning = body.warnings.find((w) => w.code === 'lawn_v13_north_port_product_window');
     expect(warning).toMatchObject({ productName: NUTRA });
-    expect(warning.message).toContain('North Port: not applied April to September');
+    expect(warning.message).toContain('North Port: not applied June to September');
     expect(body.warnings.filter((w) => w.code === 'lawn_v13_north_port_product_window')).toHaveLength(1);
   });
 

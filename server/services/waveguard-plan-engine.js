@@ -518,7 +518,7 @@ const V13_GATE_NOTES = [
   { key: 'novToMarOnly', required: true, when: (ctx) => ctx.monthNumber != null && NOV_TO_MAR(ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
   { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
   { key: 'northPortBlocked', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'Not allowed in North Port this month; skip this product.' },
-  { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port bans all turf fertilizing from April 1 to September 30 (city fact sheet; the city has not confirmed yet). Do not apply this product at this visit.' },
+  { key: 'northPortProductWindow', required: true, when: (ctx) => isNorthPort(ctx.municipality), text: () => 'North Port holds this product from June to September until the city confirms. Do not apply it at this visit.' },
   { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
   { key: 'delayWateringOrMowingHours', text: (hours) => `Delay watering (irrigation) or mowing for ${hours} hours after application (label).` },
   { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
@@ -1614,12 +1614,12 @@ function holdNorthPortProducts(items, v13Rows, municipality) {
 function v13HoldWarnings(planItems) {
   return planItems.filter((item) => item.selectionReason === NORTH_PORT_HOLD_REASON && item.product).map((item) => ({
     code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
-    message: `${item.product.name}: North Port bans all turf fertilizing from April 1 to September 30 (city fact sheet; the city has not confirmed yet). The plan holds it back; do not apply it at this visit.`,
+    message: `${item.product.name}: North Port holds this product from June to September until the city confirms. The plan holds it back; do not apply it at this visit.`,
   }));
 }
 
 const V13_UNAVAILABLE = {
-  held: 'North Port bans this product at this time of year, so it is not selected and no amount is planned.',
+  held: 'North Port holds this product in the summer until the city confirms, so it is not selected and no amount is planned.',
   unavailable: 'No protocol row is linked to this product, so no amount is planned. Enter the actual work.',
   capped: 'An application limit is reached for this product, so no amount is planned.',
 };
@@ -1706,7 +1706,7 @@ async function loadVisitCity(knex, visit) {
 function v13NorthPortReferenceWarnings(items) {
   return items.filter((item) => item.product && item.gates?.northPortProductWindow === true).map((item) => ({
     code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
-    message: `${item.product.name}: North Port: not applied April to September (city fact sheet; the city has not confirmed yet). Skip this product there.`,
+    message: `${item.product.name}: North Port: not applied June to September (until the city confirms). Skip this product there.`,
   }));
 }
 

@@ -19,7 +19,7 @@
       "Dry spots: Dispatch Sprayable.",
       "No soil tests.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
-      "North Port: no Nutra-TECH on the June, August and September visits, and no fertilizer or Nutra-TECH on the April visit (the city fact sheet bans all turf fertilizing from April 1 to September 30; the city has not confirmed yet). April is inspect and spot work only. The plan holds the summer product back and a completion that records it is flagged."
+      "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap; use Blindside after the cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
@@ -31,7 +31,7 @@
       "N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).",
       "Do not repeat a chemical group on the next application. Exceptions: Group 3 pre-emergents (all of them are Group 3 this season; owner accepted 2026-10-06) and the take-all Artavia pair, both recorded for take-all.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
-      "North Port: no Nutra-TECH June through September, and no fertilizer or Nutra-TECH in April, until the city confirms (city fact sheet bans all turf fertilizing April 1 to September 30)."
+      "North Port: no Nutra-TECH June through September until the city confirms."
     ],
     "visits": [
       {
@@ -71,7 +71,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port (N ban starts April 1): the tech swaps March to granular Dimension, the last N before the ban. April is inspect and spot work only, with no fertilizer of any kind until the city confirms (see the April visit)."
+        "notes": "N rate: 0 lb N. Hose visit. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port (N ban starts April 1): the tech swaps March to granular Dimension, the last N before the ban, and April to Nutra-TECH."
       },
       {
         "visit": 4,
@@ -84,7 +84,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. North Port: no fertilizer or Nutra-TECH on this visit, inspect and spot work only, until the city confirms.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
@@ -217,7 +217,7 @@
       "Dry spots: Dispatch Sprayable.",
       "No soil tests.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
-      "North Port: no Nutra-TECH on the June, August and September visits, and no fertilizer or Nutra-TECH on the April visit (the city fact sheet bans all turf fertilizing from April 1 to September 30; the city has not confirmed yet). April is inspect and spot work only. The plan holds the summer product back and a completion that records it is flagged."
+      "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap; use Blindside after the cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
@@ -229,7 +229,7 @@
       "N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).",
       "Do not repeat a chemical group on the next application. Exceptions: Group 3 pre-emergents (all of them are Group 3 this season; owner accepted 2026-10-06) and the take-all Artavia pair, both recorded for take-all.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
-      "North Port: no Nutra-TECH June through September, and no fertilizer or Nutra-TECH in April, until the city confirms (city fact sheet bans all turf fertilizing April 1 to September 30)."
+      "North Port: no Nutra-TECH June through September until the city confirms."
     ],
     "visits": [
       {
@@ -269,7 +269,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port (N ban starts April 1): the tech swaps March to granular Dimension, the last N before the ban. April is inspect and spot work only, with no fertilizer of any kind until the city confirms (see the April visit)."
+        "notes": "N rate: 0 lb N. Hose visit. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port (N ban starts April 1): the tech swaps March to granular Dimension, the last N before the ban, and April to Nutra-TECH."
       },
       {
         "visit": 4,
@@ -282,7 +282,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. North Port: no fertilizer or Nutra-TECH on this visit, inspect and spot work only, until the city confirms.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"
@@ -415,7 +415,7 @@
       "Dry spots: Dispatch Sprayable.",
       "No soil tests.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
-      "North Port: no Nutra-TECH on the June, August and September visits, and no fertilizer or Nutra-TECH on the April visit (the city fact sheet bans all turf fertilizing from April 1 to September 30; the city has not confirmed yet). April is inspect and spot work only. The plan holds the summer product back and a completion that records it is flagged."
+      "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap; use Blindside after the cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
@@ -427,7 +427,7 @@
       "N and P blackout Jun 1 - Sep 30 (North Port Apr 1); the tech logs half the N on reclaimed-water lawns (the app does not adjust it yet).",
       "Do not repeat a chemical group on the next application. Exceptions: Group 3 pre-emergents (all of them are Group 3 this season; owner accepted 2026-10-06) and the take-all Artavia pair, both recorded for take-all.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
-      "North Port: no Nutra-TECH June through September, and no fertilizer or Nutra-TECH in April, until the city confirms (city fact sheet bans all turf fertilizing April 1 to September 30)."
+      "North Port: no Nutra-TECH June through September until the city confirms."
     ],
     "visits": [
       {
@@ -467,7 +467,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. Hose visit. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port (N ban starts April 1): the tech swaps March to granular Dimension, the last N before the ban. April is inspect and spot work only, with no fertilizer of any kind until the city confirms (see the April visit)."
+        "notes": "N rate: 0 lb N. Hose visit. Customer waters in 0.5 in within 24 hours after the pre-emergent. No pre-emergent on first-year sod or on thin or recovering turf. North Port (N ban starts April 1): the tech swaps March to granular Dimension, the last N before the ban, and April to Nutra-TECH."
       },
       {
         "visit": 4,
@@ -480,7 +480,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn. North Port: no fertilizer or Nutra-TECH on this visit, inspect and spot work only, until the city confirms.",
+        "notes": "N rate: 0.5 lb N. Spreader visit. 9x plan April: LESCO Dimension 0.21% 18-0-10 granular, 2.78 lb per 1,000 sq ft (0.5 lb N), in place of the 24-0-11. Fertilizer safety: deflector on, 10 ft water band kept, no fertilizing under a storm or tropical watch or warning, hard surfaces swept back onto the lawn.",
         "cadenceVariants": {
           "9": {
             "primary": "LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer — 2.78 lb per 1,000 sq ft (0.5 lb N), spreader"

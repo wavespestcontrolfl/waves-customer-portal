@@ -149,7 +149,7 @@ describeDb('v13 field rules through PostgreSQL', () => {
       const plan = await plannedJune('North Port');
       const nutra = item(plan, NUTRA);
       expect(nutra).toMatchObject({ selected: false, selectionReason: 'north_port_product_window', mix: null });
-      expect(nutra.unavailable.reason).toMatch(/North Port bans this product/);
+      expect(nutra.unavailable.reason).toMatch(/North Port holds this product/);
       expect(nutra.gateNotes.map((n) => n.key)).toContain('northPortProductWindow');
       expect(plan.propertyGate.warnings.map((w) => w.code)).toContain('lawn_v13_north_port_product_window');
       // The held row is not an unlinked line: the city-hold warning is the only one it produces.

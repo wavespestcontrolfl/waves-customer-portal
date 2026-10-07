@@ -68,27 +68,26 @@ describe('recipe text', () => {
     for (const month of ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jul', 'Oct', 'Nov', 'Dec']) expect(visit(grass, month).notes).not.toMatch(/North Port: skip Nutra-TECH/);
   });
 
-  test.each(TRACKS)('%s: North Port April gets no fertilizer and no Nutra-TECH (inspect and spot work only)', (grass) => {
+  test.each(TRACKS)('%s: North Port April keeps its Nutra-TECH pass (owner ruling 2026-10-07)', (grass) => {
     const track = v13[grass];
-    expect(JSON.stringify(track)).not.toMatch(/April to Nutra-TECH|swaps? April/);
-    expect(visit(grass, 'Mar').notes).toContain('April is inspect and spot work only, with no fertilizer of any kind');
-    expect(visit(grass, 'Apr').notes).toContain('North Port: no fertilizer or Nutra-TECH on this visit, inspect and spot work only, until the city confirms.');
-    expect(track.notes.find((line) => line.startsWith('North Port: no Nutra-TECH'))).toMatch(/no fertilizer or Nutra-TECH on the April visit/);
-    expect(track.safety_rules.find((line) => line.startsWith('North Port: no Nutra-TECH'))).toMatch(/no fertilizer or Nutra-TECH in April/);
-    // The April recipe lines keep the N rows the ordinance check already holds back; no Nutra-TECH line is added.
-    expect(visit(grass, 'Apr').primary).not.toMatch(/Nutra-TECH/);
-    expect(visit(grass, 'Apr').cadenceVariants['9'].primary).not.toMatch(/Nutra-TECH/);
+    expect(visit(grass, 'Mar').notes).toContain('North Port (N ban starts April 1): the tech swaps March to granular Dimension, the last N before the ban, and April to Nutra-TECH.');
+    expect(visit(grass, 'Apr').notes).not.toMatch(/North Port/);
+    expect(JSON.stringify(track)).not.toMatch(/inspect and spot work only|no fertilizer or Nutra-TECH|no fertilizer of any kind/);
+    expect(track.notes.find((line) => line.startsWith('North Port: no Nutra-TECH'))).toMatch(/June, August and September visits until the city confirms\. The April Nutra-TECH pass stays/);
+    expect(track.safety_rules.find((line) => line.startsWith('North Port: no Nutra-TECH'))).toBe('North Port: no Nutra-TECH June through September until the city confirms.');
   });
 
-  test('no staged April row delivers Nutra-TECH, so there is nothing for the product window to gate there', () => {
+  test('the product window gate sits on the summer Nutra-TECH rows only, never on an April row', () => {
     const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
-    const april = staged.PRODUCTS.filter(([windowKey]) => windowKey === 'apr_v13_spreader_feeding').map(([, spec]) => spec[0]);
-    expect(april.length).toBeGreaterThan(0);
-    expect(april).not.toContain(staged.NAMES.NT);
-    // The summer Nutra-TECH rows are the ones the migration gates.
     for (const windowKey of rules.NORTH_PORT_WINDOWS) {
       expect(staged.PRODUCTS.some(([key, spec]) => key === windowKey && spec[0] === staged.NAMES.NT)).toBe(true);
     }
+    expect(rules.NORTH_PORT_WINDOWS).not.toContain('apr_v13_spreader_feeding');
+    // An April Nutra-TECH row (none is staged today) would carry no gate, so the plan would not hold it.
+    expect(rules.missingGates({ product_name: rules.NAMES.NUTRA, window_key: 'apr_v13_spreader_feeding', gates: {} })).toEqual({});
+    const rows = new Map([['nutra', { gates: {} }]]);
+    const items = [{ product: { id: 'nutra' }, selected: true }];
+    expect(engine.holdNorthPortProducts(items, rows, 'North Port')).toEqual(items);
   });
 
   test('the tracks stay one program (identical but for the name)', () => {
@@ -150,7 +149,7 @@ describe('the North Port hold', () => {
   });
 
   test('the held line explains itself and warns on the plan', () => {
-    expect(engine.v13ItemFields({ row: rows.get('nutra'), state: 'held' }, {}, nutra).unavailable.reason).toMatch(/North Port bans this product/);
+    expect(engine.v13ItemFields({ row: rows.get('nutra'), state: 'held' }, {}, nutra).unavailable.reason).toMatch(/North Port holds this product/);
     const [warning] = engine.v13HoldWarnings([{ product: { id: 'nutra', name: 'Nutra' }, selectionReason: 'north_port_product_window' }, { product: { id: 'dim', name: 'Dim' }, selectionReason: 'x' }]);
     expect(warning).toMatchObject({ code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: 'nutra' });
   });
@@ -231,9 +230,9 @@ describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
 });
 
 describe('the April customer line', () => {
-  test('claims the feeding only where it fits the property (North Port April has none)', () => {
+  test('keeps the main wording: North Port April still gets a feeding-type pass (Nutra-TECH)', () => {
     const { PROGRAM_LINES_V13 } = require('../services/service-report/lawn-program-line');
-    expect(PROGRAM_LINES_V13[4].line).toContain('a light feeding where it fits the property');
-    expect(PROGRAM_LINES_V13[4].claims.feed).toBe('a light feeding where it fits the property');
+    expect(PROGRAM_LINES_V13[4].line).toBe('In April the program focuses on a light feeding, plus spot treatment for root disease and chinch bugs where needed.');
+    expect(PROGRAM_LINES_V13[4].claims.feed).toBe('a light feeding');
   });
 });
