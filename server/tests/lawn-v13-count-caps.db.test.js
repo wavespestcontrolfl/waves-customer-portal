@@ -6,6 +6,7 @@ const migration = require('../models/migrations/20261007170000_lawn_v13_count_ca
 const wording = require('../models/migrations/20261007171000_lawn_v13_count_caps_wording');
 const restore = require('../models/migrations/20261007172000_lawn_v13_celsius_cap_v13_only');
 const gateOnly = require('../models/migrations/20261007174000_lawn_v13_count_caps_v13_only');
+const protocolRows = require('../models/migrations/20261007175000_lawn_v13_count_caps_protocol_rows');
 const { DIMENSION } = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const { submittedProductLimitFindings } = require('../services/complete-scheduled-service');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
@@ -88,6 +89,7 @@ describeDb('v13 count caps through PostgreSQL', () => {
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   }, 60000);
   afterAll(async () => { if (owned) await owned.dispose(); });
+  beforeEach(() => { require('../config/lawn-v13-count-caps').resetV13CapIdentity(); });
   afterEach(() => {
     for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
   });
@@ -306,7 +308,6 @@ describeDb('v13 count caps through PostgreSQL', () => {
 
   describe('the Celsius cap of 2 lives behind the v13 gate (20261007172000)', () => {
     const applicationLimits = require('../services/application-limits');
-    const { effectiveCountCap } = require('../config/lawn-v13-count-caps');
     const celsiusRows = () => limitsOf(CELSIUS);
     const audits = () => knex('lawn_protocol_audit_log').where({ action: 'v13_celsius_cap_restore' });
     beforeEach(async () => {
@@ -362,14 +363,19 @@ describeDb('v13 count caps through PostgreSQL', () => {
       expect((await celsiusRows())[0].description).toBe('Celsius WG: max 2 applications per lawn per year (owner 2026-10-06; lowered from 3).');
     });
 
-    test('the override lowers a stored value to the v13 cap, only while the gate is on, and never raises one', () => {
-      expect(effectiveCountCap('Celsius WG', 3, true)).toBe(2);
-      expect(effectiveCountCap('Celsius WG', 3, false)).toBe(3);
-      expect(effectiveCountCap('Celsius WG', 1, true)).toBe(1);
-      expect(effectiveCountCap('Arena 50 WDG', 3, true)).toBe(2);
-      expect(effectiveCountCap('Arena 50 WDG', 3, false)).toBe(3);
-      expect(effectiveCountCap('Tetrino Insecticide', 3, true)).toBe(3);
-      expect(effectiveCountCap('Celsius WG', null, true)).toBeNull();
+    test('a stored row under a v13 cap entry is lowered AND made hard_block (in memory), never raised; with none stored a synthetic hard row is added', () => {
+      const { withEntryCaps, v13CountCapFor } = require('../config/lawn-v13-count-caps');
+      const celsius = v13CountCapFor('Celsius WG');
+      const row = (value, severity = 'hard_block') => ({ id: 'r1', match_type: 'product', limit_type: 'annual_max_apps', limit_value: value, severity });
+      expect(withEntryCaps(celsius, [row(3)])).toEqual([{ ...row(2), limit_value: 2 }]);
+      expect(withEntryCaps(celsius, [row(1)])[0].limit_value).toBe(1);
+      expect(withEntryCaps(celsius, [row(5, 'warning')])[0]).toMatchObject({ limit_value: 2, severity: 'hard_block' });
+      expect(withEntryCaps(celsius, [{ limit_type: 'min_interval_days', limit_value: 60, severity: 'warning' }])).toEqual([
+        { limit_type: 'min_interval_days', limit_value: 60, severity: 'warning' },
+        expect.objectContaining({ synthetic: true, limit_value: 2, severity: 'hard_block', product_id: null }),
+      ]);
+      expect(withEntryCaps(null, [row(3)])).toEqual([row(3)]);
+      expect(v13CountCapFor('Tetrino Insecticide')).toBeNull();
     });
 
     describe('with the stored row at the legacy 3', () => {
@@ -555,6 +561,135 @@ describeDb('v13 count caps through PostgreSQL', () => {
     test('an application whose property is unknown counts with the busiest property', async () => {
       const f = await twoLawns([[0, '2026-02-02'], [null, '2026-03-16']]);
       expect(await blocks(f)).toEqual([expect.objectContaining({ current: 2 })]);
+    });
+  });
+
+  describe('the v13 caps are keyed by product identity and stay hard (round 9)', () => {
+    const applicationLimits = require('../services/application-limits');
+    const { resetV13CapIdentity } = require('../config/lawn-v13-count-caps');
+    beforeEach(async () => {
+      await knex('product_limits').del(); await knex('product_aliases').del();
+      process.env.GATE_LAWN_V13 = 'true';
+    });
+    afterEach(async () => {
+      for (const name of NAMES) await knex('products_catalog').where({ id: catalog[name].id }).update({ name });
+      await knex('lawn_protocol_products').whereRaw("gates->>'annualMaxApps' is not null and product_name = ?", ['Arena 50 WDG']).update({ gates: JSON.stringify({ trigger: 'chinch' }) });
+      resetV13CapIdentity();
+    });
+    async function twoApplications(name) {
+      const f = await fixture(knex);
+      for (const date of ['2026-02-02', '2026-03-16']) await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[name].id, application_date: date, application_rate: 0.1, rate_unit: 'oz' });
+      return f;
+    }
+    const check = (customerId, name) => applicationLimits.checkLimits(customerId, catalog[name].id, new Date('2026-06-10T16:00:00Z'), knex, {});
+
+    test('a catalog rename does not drop a cap: the staged protocol row keeps the product identity (Arena, no stored row)', async () => {
+      await knex('lawn_protocol_products').where({ product_name: 'Arena 50 WDG' }).update({ gates: JSON.stringify({ trigger: 'chinch', annualMaxApps: 2 }) });
+      await knex('products_catalog').where({ id: catalog[ARENA].id }).update({ name: 'Arena WDG (renamed)' });
+      resetV13CapIdentity();
+      const f = await twoApplications(ARENA);
+      expect((await check(f.customerId, ARENA)).blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', max: 2 })]);
+    });
+
+    test('a rename after the identity is cached keeps the cap; an exact alias carries it across a restart (Celsius, stored 3)', async () => {
+      await knex('product_limits').insert({ product_id: catalog[CELSIUS].id, ...migration.CELSIUS_SEED });
+      const f = await twoApplications(CELSIUS);
+      expect((await check(f.customerId, CELSIUS)).blocks).toHaveLength(1); // caches the identity
+      await knex('products_catalog').where({ id: catalog[CELSIUS].id }).update({ name: 'Celsius (renamed)' });
+      expect((await check(f.customerId, CELSIUS)).blocks).toHaveLength(1); // cached id
+      resetV13CapIdentity(); // a restart: only the alias can carry it
+      expect((await check(f.customerId, CELSIUS)).blocks).toEqual([]);
+      await knex('product_aliases').insert({ product_id: catalog[CELSIUS].id, alias_name: CELSIUS });
+      resetV13CapIdentity();
+      expect((await check(f.customerId, CELSIUS)).blocks).toEqual([expect.objectContaining({ max: 2 })]);
+    });
+
+    test('the cap never lands on another product: a product that merely shares nothing with the capped four has none', async () => {
+      const f = await fixture(knex);
+      for (const date of ['2026-02-02', '2026-03-16', '2026-04-20']) await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog['Tetrino Insecticide'].id, application_date: date, application_rate: 0.1, rate_unit: 'oz' });
+      expect((await check(f.customerId, 'Tetrino Insecticide')).blocks).toEqual([]);
+    });
+
+    test('an admin warning row (Certainty, 5, severity warning): under v13 the cap is 2 and a hard block; gate off it stays a warning row', async () => {
+      await knex('product_limits').insert({ product_id: catalog[CERTAINTY].id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 5, limit_unit: 'applications', severity: 'warning', description: 'admin' });
+      const f = await twoApplications(CERTAINTY);
+      const on = await check(f.customerId, CERTAINTY);
+      expect(on.blocks).toEqual([expect.objectContaining({ type: 'annual_max_apps', max: 2, current: 2 })]);
+      expect(on.allowed).toBe(false);
+      delete process.env.GATE_LAWN_V13;
+      const off = await check(f.customerId, CERTAINTY);
+      expect(off.blocks).toEqual([]);
+      expect(off.warnings.filter((w) => w.severity === 'warning')).toEqual([]);
+      // The database row itself was never rewritten.
+      expect(await limitsOf(CERTAINTY)).toEqual([expect.objectContaining({ severity: 'warning' })]);
+      // The closeout audit reads the same hard cap.
+      process.env.GATE_LAWN_V13 = 'true';
+      const visit = await f.visit(0, { scheduled_date: '2026-06-10', service_type: 'Every 6 Weeks Lawn Care Service' });
+      expect(await submittedProductLimitFindings({ svc: visit, productIds: [catalog[CERTAINTY].id], serviceDate: '2026-06-10', database: knex }))
+        .toEqual([expect.objectContaining({ code: 'application_limit_exceeded', limitType: 'annual_max_apps', current: 2, max: 2 })]);
+    });
+
+    describe('the staged protocol rows carry the cap (20261007175000)', () => {
+      const { summarizeProtocolContext, getProtocolWindowContext } = require('../services/lawn-protocol-operating-layer');
+      const auditRows = () => knex('lawn_protocol_audit_log').where({ action: 'v13_count_caps_protocol_rows' });
+      let windowId;
+      beforeEach(async () => {
+        await knex('lawn_protocol_audit_log').del();
+        const [row] = await knex('lawn_protocol_windows').where({ window_key: 'may_v13' });
+        windowId = row.id;
+        await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId }).whereIn('product_name', [CERTAINTY, BLINDSIDE]).del();
+        for (const name of [CERTAINTY, BLINDSIDE]) {
+          await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: windowId, product_id: catalog[name].id, product_name: name, role: 'post_emergent_spot', application_mode: 'spot', default_in_plan: false, rate_unit: 'label_rate', gates: JSON.stringify({ tankMixWith: 'Celsius WG' }), annual_counter: JSON.stringify({}) });
+        }
+        await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId }).update({ gates: knex.raw("gates - 'annualMaxApps'"), annual_counter: knex.raw("annual_counter - 'maxApplications'") });
+      });
+      const rowsOf = () => knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId }).orderBy('product_name');
+
+      test('adds gates.annualMaxApps and annual_counter.maxApplications to the four products only, keeps every other key, audits once per protocol', async () => {
+        await protocolRows.up(knex);
+        const rows = await rowsOf();
+        const byName = Object.fromEntries(rows.map((r) => [r.product_name, r]));
+        for (const name of NAMES) {
+          expect(byName[name].gates.annualMaxApps).toBe(2);
+          expect(byName[name].annual_counter.maxApplications).toBe(2);
+        }
+        expect(byName[CERTAINTY].gates.tankMixWith).toBe('Celsius WG');
+        expect(byName['Tetrino Insecticide'].gates.annualMaxApps).toBeUndefined();
+        expect(byName['LESCO 90/10 Nonionic Surfactant'].gates.annualMaxApps).toBeUndefined();
+        expect(await auditRows()).toHaveLength(1);
+        await protocolRows.up(knex); // idempotent
+        expect(await auditRows()).toHaveLength(1);
+      });
+
+      test('an existing value is never replaced; down removes only what it added and only while it still equals 2', async () => {
+        await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: CELSIUS }).update({ gates: JSON.stringify({ annualMaxApps: 3 }) });
+        await protocolRows.up(knex);
+        const celsius = (await rowsOf()).find((r) => r.product_name === CELSIUS);
+        expect(celsius.gates.annualMaxApps).toBe(3);
+        expect(celsius.annual_counter.maxApplications).toBe(2);
+        await knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: ARENA }).update({ annual_counter: knex.raw("jsonb_set(annual_counter, '{maxApplications}', '4')") });
+        await protocolRows.down(knex);
+        const after = Object.fromEntries((await rowsOf()).map((r) => [r.product_name, r]));
+        expect(after[CELSIUS].gates.annualMaxApps).toBe(3);
+        expect(after[CELSIUS].annual_counter.maxApplications).toBeUndefined();
+        expect(after[ARENA].annual_counter.maxApplications).toBe(4);
+        expect(after[ARENA].gates.annualMaxApps).toBeUndefined();
+        expect(after[CERTAINTY].gates.annualMaxApps).toBeUndefined();
+        expect(after[CERTAINTY].gates.tankMixWith).toBe('Celsius WG');
+        expect(await auditRows()).toHaveLength(0);
+      });
+
+      test('the lawn/window summary (what GET /api/admin/protocols/lawn/window returns) carries the cap metadata', async () => {
+        await protocolRows.up(knex);
+        const context = await getProtocolWindowContext(knex, { serviceDate: new Date('2026-05-12T16:00:00Z'), grassTrack: 'bermuda', region: 'swfl', planning: true });
+        const summary = summarizeProtocolContext(context);
+        const capped = summary.products.filter((p) => NAMES.includes(p.protocolProductName));
+        expect(capped.map((p) => p.protocolProductName).sort()).toEqual([...NAMES].sort());
+        for (const product of capped) {
+          expect(product.gates.annualMaxApps).toBe(2);
+          expect(product.annualCounter.maxApplications).toBe(2);
+        }
+      });
     });
   });
 

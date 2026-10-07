@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
-const { withV13CountCaps } = require('../config/lawn-v13-count-caps');
+const { applyV13CountCaps } = require('../config/lawn-v13-count-caps');
 const { worstPropertyCount } = require('../utils/property-counts');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
@@ -113,7 +113,7 @@ class ApplicationLimitChecker {
 
     // Get applicable limits
     // The v13 program's own count cap (Celsius: 2) while GATE_LAWN_V13 is on; the stored row is the legacy value.
-    const productLimits = withV13CountCaps(product.name, await database('product_limits').where({ product_id: productId }), undefined, productId);
+    const productLimits = await applyV13CountCaps(database, product, await database('product_limits').where({ product_id: productId }), productId);
     const moaLimits = product.moa_group ? await database('product_limits')
       .where({ match_type: 'moa_group', match_value: product.moa_group }) : [];
     const nitrogenLimits = this.isNitrogenFertilizer(product)
@@ -409,9 +409,9 @@ class ApplicationLimitChecker {
   async auditHardCountLimits(customerId, productId, serviceDate, database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return [];
-    const limits = withV13CountCaps(product.name, await database('product_limits')
+    const limits = (await applyV13CountCaps(database, product, await database('product_limits')
       .where({ product_id: productId, match_type: 'product' })
-      .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']), undefined, productId)
+      .whereIn('limit_type', ['annual_max_apps', 'min_interval_days']), productId))
       .filter((limit) => limit.severity === 'hard_block');
     if (!limits.length) return [];
     const day = etCalendarDayOf(serviceDate);

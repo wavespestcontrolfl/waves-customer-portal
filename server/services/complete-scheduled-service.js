@@ -1984,8 +1984,12 @@ async function hardLimitedProductNames(database, ids) {
     .select('product_id'));
   const limited = new Set((limitRows || []).map((row) => String(row.product_id)));
   // The v13 count caps (Arena, Certainty, Blindside, Celsius) live in code, not in a stored row.
-  return new Map(rows.filter((row) => limited.has(String(row.id)) || require('../config/lawn-v13-count-caps').v13CountCapFor(row.name))
-    .map((row) => [String(row.id), row.name]));
+  const { v13CapEntryFor } = require('../config/lawn-v13-count-caps');
+  const found = new Map();
+  for (const row of rows) {
+    if (limited.has(String(row.id)) || await v13CapEntryFor(database, row.id, row.name)) found.set(String(row.id), row.name);
+  }
+  return found;
 }
 
 // Every finding for one product: one per violated hard limit (the yearly count and the minimum
