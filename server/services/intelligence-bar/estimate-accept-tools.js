@@ -38,7 +38,7 @@ const ESTIMATE_ACCEPT_TOOLS = [
     name: 'accept_estimate',
     description: `Mark ONE sent or viewed estimate accepted from the bar — exactly what the estimate page's "Mark accepted" does for a verbal yes. Use it when the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"); it is also how a customer's FIRST program starts. Never fake an acceptance with update_customer or create_appointment.
 The first call is a PREVIEW and changes nothing. The confirmation card shows the estimate (customer, tier, totals), each service the plan starts with its visits a year and monthly price, the monthly bill before and after line by line, the billing lane and tier change, which visits it books (none — book them on the calendar after), and every message the customer gets. Confirm marks the estimate accepted, locks its price, makes the customer an active customer, starts the plan's billing, marks a linked lead won and may email the customer a "membership started" email. No text and no invoice. It cannot be undone from the bar.
-Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and what the card cannot show yet: any termite program (accepted on the estimate page, where the agreement is handled), an estimate with visits already booked from it, and a quote that also re-prices the customer's existing services. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
+Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and what the card cannot show yet: any termite program or commercial recurring work (accepted on the estimate page), an estimate with visits already booked from it, a quote that also re-prices the customer's existing services, a per-visit charge the converter cannot resolve, and (with customer properties on) an estimate not linked to an existing property. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
 Use for: "Pat accepted the lawn quote", "mark her estimate accepted", "he said yes, set him up from the estimate".`,
     input_schema: {
       type: 'object',
@@ -158,6 +158,8 @@ async function billPlan({ estimate, estimateData, customer, monthlyRate }) {
   const families = [...new Set([...before.keys(), ...after.keys()])];
   return {
     pin: ledgerPin(components, previousScalar),
+    // The add-on classifier's evidence, re-checked under the accept's locks.
+    plan_rows: await Converter.otherPlanRowsPin(db, { customerId: customer.id, estimateId: estimate.id }),
     slices,
     lines: families.map((family) => ({ label: lineLabel(family), before: before.get(family) || 0, after: after.get(family) || 0 })),
     total_before: previousScalar,
@@ -192,15 +194,13 @@ function startedServices(estimateData, slices) {
   }));
 }
 
-function customerMessages({ customer, prefs, converts, commercialOnly, lane }) {
+function customerMessages({ customer, prefs, converts, lane }) {
   const messages = [];
   // The sender's own recipient (account-membership-email sendTemplate).
   const email = String(require('../customer-contact').getPrimaryContact(customer).email || '').trim();
   const emailOn = !(prefs && prefs.email_enabled === false);
   if (!converts) {
     messages.push({ kind: 'none', will_send: false, text: 'No email or text: a one-time estimate only changes status here' });
-  } else if (commercialOnly) {
-    messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email: a commercial-only plan is not a WaveGuard membership' });
   } else if (lane === 'one_time') {
     messages.push({ kind: 'none', will_send: false, text: 'No "membership started" email: the plan bills one time' });
   } else if (!email) {
@@ -293,11 +293,11 @@ function frozenExtensionPlan(estimateData, activatedTier) {
 // (recurringUnitsForAccept, perApplicationChargeForAccept,
 // resolveConvertedPerApplicationFee, assertPerApplicationAddOnPriced). A fee
 // the converter would leave unresolved is refused, not carded.
-function perApplicationPlan({ estimate, estimateData, customer, monthlyRate, act }) {
+function perApplicationPlan({ converts, estimate, estimateData, customer, monthlyRate, act }) {
   const Converter = require('../estimate-converter');
   const { customerPreservesMonthlyMembership } = require('../billing-cadence');
   const preserves = customerPreservesMonthlyMembership(customer);
-  if (preserves || act.pinnedLegacyRodentOnlyPlan || act.commercialOnly) return { refusal: null, line: null };
+  if (!converts || preserves || act.pinnedLegacyRodentOnlyPlan) return { refusal: null, line: null };
   const units = Converter.recurringUnitsForAccept(act.services, estimateData);
   const charge = Converter.perApplicationChargeForAccept({
     estimate, estimateData, monthlyRate, recurringServicesForConversion: act.services,
@@ -330,7 +330,7 @@ function perApplicationPlan({ estimate, estimateData, customer, monthlyRate, act
 // rings when the customer has prior qualifying services and the accept moves
 // the stored tier up, or a frozen extension plan parks for review.
 function tierReviewNotice({ estimateData, customer, act }) {
-  if (act.commercialOnly || !act.prior.length || !act.tier) return null;
+  if (!act.prior.length || !act.tier) return null;
   const Converter = require('../estimate-converter');
   if (Converter.isMembershipTierUpgrade(customer.waveguard_tier, act.tier)) {
     return `Office notice: tier review (${customer.waveguard_tier || 'none'} → ${act.tier})`;
@@ -386,19 +386,18 @@ async function activation(estimateData, customerId) {
   const pinnedLegacyRodentOnlyPlan = Converter.isPinnedLegacyRodentOnlyPlan(recurring, isLegacyRodentRow);
   const services = Converter.foldTermiteRentalIntoBait(recurring).filter((svc) => !isLegacyRodentRow(svc));
   const keys = Converter.tierQualifyingRecurringServiceKeys(services);
-  const hasCommercialRecurring = services.some((svc) => String(Converter.recurringServiceKey(svc) || '').startsWith('commercial_'));
-  const commercialOnly = keys.length === 0 && hasCommercialRecurring;
+  // A commercial recurring line is refused before the card (laterRefusal).
+  const commercialRecurring = Converter.hasCommercialRecurringLine(services);
   // A commercial recurring line or a priced commercial one-time line stamps
   // the customer commercial (converter and one-time accept alike).
-  const commercialStamp = hasCommercialRecurring || Converter.estimateHasCommercialOneTime(estimateData);
-  if (commercialOnly) return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, services, prior: [], tier: 'Commercial' };
+  const commercialStamp = Converter.estimateHasCommercialOneTime(estimateData);
   let prior = [];
   if (keys.length) {
     prior = Converter.priorQualifyingKeysFromSnapshot(estimateData)
       || await require('../waveguard-existing-services').loadExistingQualifyingServiceKeys(db, customerId).catch(() => []);
   }
   const { tier } = Converter.determineTier(Converter.combinedTierQualifyingCount(keys, prior), services.length > 0);
-  return { commercialOnly, commercialStamp, pinnedLegacyRodentOnlyPlan, services, prior, tier: tier === 'none' ? null : tier };
+  return { commercialRecurring, commercialStamp, pinnedLegacyRodentOnlyPlan, services, prior, tier: tier === 'none' ? null : tier };
 }
 
 // Billing lane and tier after the accept: the billing_mode the converter
@@ -417,10 +416,38 @@ function laneAndTier({ customer, converts, tierAfter, totalAfter, pinnedLegacyRo
   return { laneBefore, laneAfter, tierBefore, tierAfter };
 }
 
-// The refusals that need the activation facts: what the conversion would do
-// that the card cannot show, and linked visits.
-async function laterRefusal({ converts, estimate, estimateData, tier }) {
-  return (converts && (conversionRefusal(estimate, estimateData, tier) || await bookedRefusal(estimate.id))) || null;
+// The refusals that need the activation facts: commercial recurring work
+// (the converter's office-scheduled path and its admin bell), what the
+// conversion would do that the card cannot show, linked visits, and a
+// property the accept would add or match.
+async function laterRefusal({ converts, estimate, estimateData, act, customerId }) {
+  if (act.commercialRecurring) return refuse('Accept commercial work on the estimate page.', 'commercial_recurring');
+  const blocked = converts && (conversionRefusal(estimate, estimateData, act.tier) || await bookedRefusal(estimate.id));
+  return blocked || await propertyLinkRefusal(estimate, customerId);
+}
+
+// Under GATE_CUSTOMER_PROPERTIES the accept links the estimate to a property
+// (linkAcceptedEstimateProperty): with no linked property of this customer it
+// would match or create one, and with no primary it backfills one. The bar
+// accepts only an estimate already linked to an existing property.
+async function propertyLinkRefusal(estimate, customerId) {
+  const Linkage = require('../estimate-property-linkage');
+  if (!Linkage.customerPropertiesGateOn()) return null;
+  const linked = await Linkage.linkedAcceptPropertyId(db, estimate, customerId);
+  const primary = linked && await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first('id');
+  return primary ? null : refuse('Add or link the service address on the customer page first.', 'property_not_linked');
+}
+
+// The customer and their email settings; unreadable settings refuse rather
+// than guessing whether the membership email goes out.
+async function loadCustomer(customerId) {
+  const customer = await db('customers').where({ id: customerId }).first();
+  if (!customer) return refuse('No customer with that id.', 'customer_not_found');
+  try {
+    return { customer, prefs: await db('notification_prefs').where({ customer_id: customerId }).first() };
+  } catch {
+    return refuse("Could not verify the customer's email settings — try again.", 'prefs_unavailable');
+  }
 }
 
 // Visits already booked from this estimate (its booking link) send the
@@ -498,22 +525,22 @@ async function planAccept(input) {
   const target = await loadTarget(input);
   if (target.error) return target;
   const { estimate, estimateData, label, customerId } = target;
-  const customer = await db('customers').where({ id: customerId }).first();
-  if (!customer) return refuse('No customer with that id.', 'customer_not_found');
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  const who = await loadCustomer(customerId);
+  if (who.error) return who;
+  const { customer, prefs } = who;
 
   const monthlyRate = round2(estimate.monthly_total);
   // Mark accepted runs the converter only for a recurring monthly total
   // (estimate-manual-acceptance.js); a one-time estimate only changes status.
   const converts = monthlyRate > 0;
   const act = await activation(estimateData, customerId);
-  const { commercialOnly, commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = act;
-  const perApp = converts ? perApplicationPlan({ estimate, estimateData, customer, monthlyRate, act }) : { refusal: null, line: null };
-  const blocked = await laterRefusal({ converts, estimate, estimateData, tier }) || perApp.refusal;
+  const { commercialStamp, tier, pinnedLegacyRodentOnlyPlan } = act;
+  const perApp = perApplicationPlan({ converts, estimate, estimateData, customer, monthlyRate, act });
+  const blocked = await laterRefusal({ converts, estimate, estimateData, act, customerId }) || perApp.refusal;
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
-  const messages = customerMessages({ customer, prefs, converts, commercialOnly, lane: lt.laneAfter });
+  const messages = customerMessages({ customer, prefs, converts, lane: lt.laneAfter });
 
   const preview = {
     preview: true,
@@ -545,6 +572,7 @@ async function planAccept(input) {
       customer_version: iso(customer.updated_at),
       customer_billing: require('../estimate-manual-acceptance').customerBillingPin(customer),
       ledger: bill ? bill.pin : null,
+      plan_rows: bill ? bill.plan_rows : null,
       no_linked_visits: converts,
     },
     note_to_operator: 'PREVIEW ONLY — nothing was changed. Confirm runs the estimate page\'s Mark accepted.',
@@ -567,6 +595,7 @@ function expectedFrom(approved) {
     customerVersion: approved.pins.customer_version,
     customerBilling: approved.pins.customer_billing,
     ledgerPin: approved.pins.ledger,
+    planRows: approved.pins.plan_rows,
     noLinkedVisits: approved.pins.no_linked_visits === true,
   };
 }
@@ -615,8 +644,8 @@ async function acceptEstimate(input, actionContext = {}) {
     return { ...refuse(reply.json?.error || 'The estimate was not accepted.', reply.json?.code), status: reply.status };
   }
   logger.info(`[intelligence-bar:estimate-accept] estimate ${preview.estimate_id} accepted for customer ${preview.customer_id}`);
-  // The tier as stored (the converter writes 'Commercial' for a commercial-only
-  // plan where its own result says 'none'), read after the commit.
+  // The tier as stored (the converter's result can say 'none' where it stores
+  // a different value), read after the commit.
   const stored = await db('customers').where({ id: preview.customer_id }).first('waveguard_tier').catch(() => null);
   return acceptedResult(preview, reply.json, stored ? (stored.waveguard_tier || null) : null);
 }

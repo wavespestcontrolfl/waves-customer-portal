@@ -1747,6 +1747,75 @@ async function applyFrozenExistingServiceExtension({
 // plan-rate ledger's review signal (a legacy multi-plan customer whose
 // un-splittable scalar is being replaced — the owner hand-fix case, now
 // surfaced instead of silent).
+// The customer's other live recurring plan rows the add-on classifier reads
+// (classifyAddOnAcceptContext), and the family each one classifies to.
+// Exported so the Intelligence Bar accept_estimate card pins exactly this
+// evidence and the accept re-checks it under its locks.
+function otherPlanRowsQuery(conn, { customerId, estimateId, adoptedExistingAppointmentId = null }) {
+  const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
+  return conn('scheduled_services')
+    .leftJoin('services', 'scheduled_services.service_id', 'services.id')
+    .select(
+      'scheduled_services.id',
+      'scheduled_services.service_type',
+      'scheduled_services.is_callback',
+      'scheduled_services.property_id',
+      'scheduled_services.service_address_line1',
+      'scheduled_services.service_address_line2',
+      'scheduled_services.service_address_city',
+      'scheduled_services.service_address_zip',
+      'scheduled_services.source_estimate_id',
+      'services.service_key as catalog_service_key',
+      'services.name as catalog_service_name',
+    )
+    .where('scheduled_services.customer_id', customerId)
+    .whereNotIn('scheduled_services.status', TERMINAL_STATUSES)
+    .where('scheduled_services.is_recurring', true)
+    .where((builder) => {
+      builder
+        .whereNull('scheduled_services.source_estimate_id')
+        .orWhereNot('scheduled_services.source_estimate_id', estimateId);
+      if (adoptedExistingAppointmentId) {
+        builder.orWhere('scheduled_services.id', adoptedExistingAppointmentId);
+      }
+    });
+}
+
+function planRowFamily(row) {
+  const { serviceFamilyKeyForAdoption } = require('../routes/estimate-public');
+  return serviceFamilyKeyForAdoption({
+    service: row.catalog_service_key || null,
+    name: row.catalog_service_name || null,
+    service_type: row.service_type,
+  });
+}
+
+// Every input the classifier reads from those rows, sorted: id, family, the
+// property scoping fields, and the address / property of the estimate each
+// row was sourced from (scopePlanRowsToEstimateProperty reads them).
+async function otherPlanRowsPin(conn, { customerId, estimateId }) {
+  const rows = (await otherPlanRowsQuery(conn, { customerId, estimateId }) || [])
+    .filter((row) => row && row.is_callback !== true);
+  const sourceIds = [...new Set(rows.map((row) => row.source_estimate_id).filter(Boolean))];
+  const sources = sourceIds.length
+    ? await conn('estimates').whereIn('id', sourceIds).select('id', 'address', 'property_id')
+    : [];
+  const sourceOf = new Map((sources || []).map((e) => [String(e.id), `${e.address || ''}~${e.property_id || ''}`]));
+  return rows
+    .map((row) => [
+      row.id, planRowFamily(row) || '', row.property_id || '', row.service_address_line1 || '', row.service_address_line2 || '',
+      row.service_address_city || '', row.service_address_zip || '', row.source_estimate_id || '',
+      row.source_estimate_id ? (sourceOf.get(String(row.source_estimate_id)) || '') : '',
+    ].join('|'))
+    .sort()
+    .join(',');
+}
+
+// A commercial recurring line (convertEstimate's hasCommercialRecurring).
+function hasCommercialRecurringLine(services = []) {
+  return services.some((svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_'));
+}
+
 async function classifyAddOnAcceptContext({
   database, estimateId, estimate, estimateData, customer,
   adoptedExistingAppointmentId = null,
@@ -1812,32 +1881,9 @@ async function classifyAddOnAcceptContext({
     // the whole transaction — the catch below could then only return 0
     // while the customer update still failed, turning this optional lookup
     // into an acceptance-killer instead of the advertised replace fallback.
-    const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
-    const otherPlanRows = await database.transaction((sp) => sp('scheduled_services')
-      .leftJoin('services', 'scheduled_services.service_id', 'services.id')
-      .select(
-        'scheduled_services.service_type',
-        'scheduled_services.is_callback',
-        'scheduled_services.property_id',
-        'scheduled_services.service_address_line1',
-        'scheduled_services.service_address_line2',
-        'scheduled_services.service_address_city',
-        'scheduled_services.service_address_zip',
-        'scheduled_services.source_estimate_id',
-        'services.service_key as catalog_service_key',
-        'services.name as catalog_service_name',
-      )
-      .where('scheduled_services.customer_id', customer.id)
-      .whereNotIn('scheduled_services.status', TERMINAL_STATUSES)
-      .where('scheduled_services.is_recurring', true)
-      .where((builder) => {
-        builder
-          .whereNull('scheduled_services.source_estimate_id')
-          .orWhereNot('scheduled_services.source_estimate_id', estimateId);
-        if (adoptedExistingAppointmentId) {
-          builder.orWhere('scheduled_services.id', adoptedExistingAppointmentId);
-        }
-      }));
+    const otherPlanRows = await database.transaction((sp) => otherPlanRowsQuery(sp, {
+      customerId: customer.id, estimateId, adoptedExistingAppointmentId,
+    }));
     let planRows = (Array.isArray(otherPlanRows) ? otherPlanRows : [])
       .filter((row) => row && row.is_callback !== true);
     if (planRows.length === 0) return none;
@@ -1849,11 +1895,7 @@ async function classifyAddOnAcceptContext({
     // first — an unclassifiable or other-family row anywhere on the
     // account is other live plan money the owner should eyeball when a
     // replace lands.
-    const rowFamilyFor = (row) => serviceFamilyKeyForAdoption({
-      service: row.catalog_service_key || null,
-      name: row.catalog_service_name || null,
-      service_type: row.service_type,
-    });
+    const rowFamilyFor = planRowFamily;
     const allRowFamilies = planRows.map(rowFamilyFor);
     const hadOtherLiveFamilies = allRowFamilies.some((family, i) => !family
       || !appointmentMatchesEstimateFamily(planRows[i], familyKeys));
@@ -5263,9 +5305,7 @@ const EstimateConverter = {
     // Commercial auto-priced programs are FLAT and never a WaveGuard membership.
     // Used both to flag manual scheduling (the follow-up seeder doesn't support
     // their cadence) and to keep them off the Bronze tier fallback.
-    const hasCommercialRecurring = recurringServicesForConversion.some(
-      (svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_')
-    );
+    const hasCommercialRecurring = hasCommercialRecurringLine(recurringServicesForConversion);
     // Scoped one-time commercial lines (GATE_COMMERCIAL_ONETIME_SCOPED) carry
     // commercial identity on ONE-TIME rows only — a commercial estimate with
     // no recurring line (the motivating pre-slab case) must still stamp the
@@ -8988,6 +9028,8 @@ module.exports.lineAnnualPerVisitAmount = lineAnnualPerVisitAmount;
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
+module.exports.otherPlanRowsPin = otherPlanRowsPin;
+module.exports.hasCommercialRecurringLine = hasCommercialRecurringLine;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;
 module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;

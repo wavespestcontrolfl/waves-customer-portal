@@ -4,6 +4,8 @@ let mockFrozenRodentSetup = 0;
 let mockTermiteSignBeforePay = false;
 jest.mock('../services/estimate-converter', () => ({
   convertEstimate: jest.fn(),
+  // The add-on classifier's evidence the bar card pins (tests set it).
+  otherPlanRowsPin: jest.fn(async () => ''),
   // Sign-before-pay predicate (codex #4819 r7) — tests flip it to exercise
   // the termite annual Station Setup exemption.
   isTermiteAnnualSignBeforePayAccept: jest.fn(() => mockTermiteSignBeforePay),
@@ -2018,6 +2020,20 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     const { database, updates } = dbWith(estimateRow(), customerRow(), { linkedVisit: { id: 'svc-late' } });
     const converter = { convertEstimate: jest.fn() };
     await expect(accept(database, converter, { noLinkedVisits: true })).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(updates).toEqual([]);
+    expect(converter.convertEstimate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a plan row was inserted', '', 'plan-1:lawn_care'],
+    ['a plan row was cancelled', 'plan-1:lawn_care,plan-2:pest_control', 'plan-1:lawn_care'],
+  ])('refuses under the locks when %s after the card (the add-on evidence), and converts nothing', async (_name, pinned, live) => {
+    const Converter = require('../services/estimate-converter');
+    Converter.otherPlanRowsPin.mockResolvedValueOnce(live);
+    const { database, updates } = dbWith(estimateRow(), customerRow());
+    const converter = { convertEstimate: jest.fn() };
+    await expect(accept(database, converter, { planRows: pinned })).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(Converter.otherPlanRowsPin).toHaveBeenCalledWith(database, { customerId: 'customer-pins', estimateId: 'estimate-pins' });
     expect(updates).toEqual([]);
     expect(converter.convertEstimate).not.toHaveBeenCalled();
   });

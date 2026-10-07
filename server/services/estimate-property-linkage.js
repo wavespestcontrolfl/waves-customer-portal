@@ -260,6 +260,16 @@ async function refreshHasMultiHome(customerId, database = db) {
  * visits, refresh has_multi_home. Runs POST-COMMIT on the global pool.
  * Returns { propertyId, hasMultiHome } or null. Never throws.
  */
+// The accepted estimate's own property: estimates.property_id when it names an
+// active property of this customer. linkAcceptedEstimateProperty links this
+// one without creating or matching anything; exported so the Intelligence
+// Bar accept_estimate card can tell whether an accept would add a property.
+async function linkedAcceptPropertyId(database, estimate, customerId) {
+  if (!estimate?.property_id) return null;
+  const linked = await database('customer_properties').where({ id: estimate.property_id }).first();
+  return linked && String(linked.customer_id) === String(customerId) && linked.active !== false ? linked.id : null;
+}
+
 async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null }) {
   try {
     if (!estimateId || !customerId) return null;
@@ -406,13 +416,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     // runs this inside a transaction that already holds the customers row.
     await ensurePrimaryProperty(customerId, { conn: database });
 
-    let propertyId = null;
-    if (estimate.property_id) {
-      const linked = await database('customer_properties').where({ id: estimate.property_id }).first();
-      if (linked && String(linked.customer_id) === String(customerId) && linked.active !== false) {
-        propertyId = linked.id;
-      }
-    }
+    let propertyId = await linkedAcceptPropertyId(database, estimate, customerId);
 
     let parts = null;
     if (!propertyId) {
@@ -901,4 +905,6 @@ module.exports = {
   estimateQuotesCustomerAddress,
   refreshHasMultiHome,
   linkAcceptedEstimateProperty,
+  linkedAcceptPropertyId,
+  customerPropertiesGateOn,
 };

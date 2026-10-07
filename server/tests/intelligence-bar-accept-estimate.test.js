@@ -20,9 +20,9 @@ const writes = [];
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const q = {};
-    for (const m of ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereIn', 'orderBy', 'orWhereNot', 'limit', 'whereRaw']) q[m] = () => q;
+    for (const m of ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereIn', 'orderBy', 'orWhereNot', 'limit', 'whereRaw', 'leftJoin']) q[m] = () => q;
     q.first = () => { reads.push(table); return Promise.resolve((tables[table] || [])[0]); };
-    q.select = () => Promise.resolve(tables[table] || []);
+    q.select = () => q;
     q.then = (resolve, reject) => Promise.resolve(tables[table] || []).then(resolve, reject);
     for (const m of ['insert', 'update', 'del', 'delete']) q[m] = (...args) => { writes.push({ table, op: m, args }); return q; };
     return q;
@@ -321,6 +321,54 @@ describe('refusals before any card', () => {
     expect(writes).toEqual([]);
   });
 
+  test('commercial recurring work is refused (the converter schedules it by hand and rings the office)', async () => {
+    seed({ estimate: { estimate_data: { recurring: { services: [{ name: 'Commercial Pest Control', service: 'commercial_pest', visitsPerYear: 12, monthly: 120 }] } }, monthly_total: 120 } });
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('commercial_recurring');
+    expect(result.error).toBe('Accept commercial work on the estimate page. Nothing was changed.');
+  });
+
+  test("an unreadable email-settings row refuses instead of guessing the email", async () => {
+    const dbMock = require('../models/db');
+    const original = dbMock.getMockImplementation();
+    dbMock.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'notification_prefs') q.first = () => Promise.reject(new Error('relation unavailable'));
+      return q;
+    });
+    try {
+      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(result.code).toBe('prefs_unavailable');
+      expect(result.error).toBe("Could not verify the customer's email settings — try again. Nothing was changed.");
+    } finally {
+      dbMock.mockImplementation(original);
+    }
+  });
+
+  describe('with customer properties on', () => {
+    beforeEach(() => { process.env.GATE_CUSTOMER_PROPERTIES = 'true'; });
+    afterEach(() => { delete process.env.GATE_CUSTOMER_PROPERTIES; tables.customer_properties = []; });
+
+    test('an estimate not linked to an existing property of the customer is refused', async () => {
+      tables.customer_properties = [];
+      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(result.code).toBe('property_not_linked');
+      expect(result.error).toBe('Add or link the service address on the customer page first. Nothing was changed.');
+    });
+
+    test('an estimate linked to the customer\'s property, with a primary on file, gets its card', async () => {
+      seed({ estimate: { property_id: 'prop-1' } });
+      tables.customer_properties = [{ id: 'prop-1', customer_id: CUSTOMER_ID, active: true, is_primary: true }];
+      const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(result.preview).toBe(true);
+    });
+  });
+
+  test('with customer properties off an unlinked estimate is carded as before', async () => {
+    delete process.env.GATE_CUSTOMER_PROPERTIES;
+    expect((await executeEstimateAcceptTool('accept_estimate', INPUT)).preview).toBe(true);
+  });
+
   test('an estimate that belongs to another customer names its real owner', async () => {
     seed({ estimate: { customer_id: OTHER_CUSTOMER_ID } });
     const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
@@ -358,6 +406,7 @@ describe('Confirm', () => {
           estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: CUSTOMER_ID,
           customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
           customerBilling: 'per_application||Bronze|active_customer|',
+          planRows: '',
           noLinkedVisits: true,
         },
       },
@@ -388,7 +437,7 @@ describe('Confirm', () => {
     expect(result.success).toBeUndefined();
   });
 
-  test('tier_now is the tier as stored, so a commercial-only plan reads Commercial, not the converter\'s internal none', async () => {
+  test('tier_now is the tier as stored after the commit, not the converter\'s internal value', async () => {
     const approved = await executeEstimateAcceptTool('accept_estimate', INPUT);
     markEstimateAcceptedAsStaff.mockImplementation(async () => {
       tables.customers[0].waveguard_tier = 'Commercial'; // what the converter stores
@@ -428,5 +477,37 @@ describe('registration', () => {
   test('is never an owner-direct edit', () => {
     const OwnerDirect = require('../services/intelligence-bar/owner-direct');
     expect([...OwnerDirect.OWNER_DIRECT_TOOL_NAMES]).not.toContain('accept_estimate');
+  });
+});
+
+describe('the add-on evidence pin (otherPlanRowsPin)', () => {
+  const pinFor = (rows, sources = []) => {
+    const conn = (table) => {
+      const q = {};
+      for (const m of ['leftJoin', 'where', 'whereNotIn', 'whereIn', 'select']) q[m] = () => q;
+      q.then = (resolve, reject) => Promise.resolve(table === 'estimates' ? sources : rows).then(resolve, reject);
+      return q;
+    };
+    return Converter.otherPlanRowsPin(conn, { customerId: CUSTOMER_ID, estimateId: ESTIMATE_ID });
+  };
+  const lawn = { id: 'plan-1', service_type: 'Lawn Care', is_callback: false, source_estimate_id: 'est-old' };
+
+  test('the same rows moved to another property change the pin', async () => {
+    const here = await pinFor([{ ...lawn, property_id: 'prop-a', service_address_line1: '1 Synthetic Way' }]);
+    const moved = await pinFor([{ ...lawn, property_id: 'prop-b', service_address_line1: '9 Other Road' }]);
+    expect(moved).not.toBe(here);
+  });
+
+  test("a change to the source estimate's address changes the pin", async () => {
+    const before = await pinFor([lawn], [{ id: 'est-old', address: '1 Synthetic Way, Bradenton, FL', property_id: null }]);
+    const after = await pinFor([lawn], [{ id: 'est-old', address: '9 Other Road, Sarasota, FL', property_id: null }]);
+    expect(after).not.toBe(before);
+  });
+
+  test('inserted and cancelled rows change the pin; callbacks do not count', async () => {
+    const one = await pinFor([lawn]);
+    expect(await pinFor([lawn, { ...lawn, id: 'plan-2', service_type: 'Pest Control' }])).not.toBe(one);
+    expect(await pinFor([])).not.toBe(one);
+    expect(await pinFor([lawn, { ...lawn, id: 'cb-1', is_callback: true }])).toBe(one);
   });
 });

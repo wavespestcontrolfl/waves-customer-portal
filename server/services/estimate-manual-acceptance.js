@@ -521,14 +521,6 @@ function cardChanged() {
   return err;
 }
 
-async function assertExpectedEstimate(trx, estimateId, expected) {
-  const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('updated_at', 'status', 'customer_id');
-  if (!row || versionText(row.updated_at) !== expected.estimateVersion || row.status !== expected.estimateStatus
-    || String(row.customer_id || '') !== String(expected.customerId || '')) {
-    throw cardChanged();
-  }
-}
-
 // Visits linked to an estimate: the rows the converter's reservation path
 // starts from (estimate-converter.js reservation lookup — any status).
 function estimateLinkedVisitsQuery(conn, estimateId) {
@@ -543,25 +535,65 @@ function customerBillingPin(customer = {}) {
   return CUSTOMER_BILLING_PIN_FIELDS.map((k) => (customer[k] == null ? '' : String(customer[k]))).join('|');
 }
 
-// Same property-preferences advisory then customer row order as the
-// annual-prepay guard in markEstimateManuallyAccepted (and convertEstimate).
-async function assertExpectedCustomerBill(trx, customerId, expected) {
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
-  const customer = await trx('customers').where({ id: customerId }).forUpdate()
-    .first('updated_at', 'monthly_rate', ...CUSTOMER_BILLING_PIN_FIELDS);
-  if (!customer || versionText(customer.updated_at) !== expected.customerVersion) throw cardChanged();
-  if (expected.customerBilling != null && customerBillingPin(customer) !== expected.customerBilling) throw cardChanged();
-  if (expected.ledgerPin != null) {
-    const { loadComponents } = require('./plan-rate-ledger');
-    const { ledgerPin } = require('./intelligence-bar/rate-change');
-    if (ledgerPin(await loadComponents(trx, customerId), customer.monthly_rate) !== expected.ledgerPin) throw cardChanged();
-  }
-}
+// Each pin the card may send, checked by one loop (checkCardPins). A phase
+// reads its locked row once: 'estimate' right after the customer-comms lock
+// (before the already-accepted return), 'customer' after the call-linkage
+// locks, in the annual-prepay guard's property-preferences advisory then
+// customer row order. A pin the card did not send is skipped.
+const CARD_PIN_READS = {
+  estimate: async (trx, { estimateId }) => {
+    const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('updated_at', 'status', 'customer_id');
+    return row && { row };
+  },
+  customer: async (trx, { estimate }) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(estimate.customer_id)]);
+    const customer = await trx('customers').where({ id: estimate.customer_id }).forUpdate()
+      .first('updated_at', 'monthly_rate', ...CUSTOMER_BILLING_PIN_FIELDS);
+    return customer && { customer };
+  },
+};
 
-// What the card promised is still true under the locks: no visit linked to
-// the estimate since (the reservation path the card cannot show).
-async function assertExpectedNoNewWork(trx, estimate, expected) {
-  if (expected.noLinkedVisits && await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) throw cardChanged();
+const CARD_PIN_CHECKS = [
+  {
+    phase: 'estimate',
+    key: 'estimateVersion',
+    holds: ({ row, expected }) => versionText(row.updated_at) === expected.estimateVersion
+      && row.status === expected.estimateStatus && String(row.customer_id || '') === String(expected.customerId || ''),
+  },
+  { phase: 'customer', key: 'customerVersion', holds: ({ customer, expected }) => versionText(customer.updated_at) === expected.customerVersion },
+  { phase: 'customer', key: 'customerBilling', holds: ({ customer, expected }) => customerBillingPin(customer) === expected.customerBilling },
+  {
+    phase: 'customer',
+    key: 'ledgerPin',
+    holds: async ({ trx, customer, estimate, expected }) => {
+      const { loadComponents } = require('./plan-rate-ledger');
+      const { ledgerPin } = require('./intelligence-bar/rate-change');
+      return ledgerPin(await loadComponents(trx, estimate.customer_id), customer.monthly_rate) === expected.ledgerPin;
+    },
+  },
+  // The add-on classifier's evidence (the customer's other live plan rows).
+  {
+    phase: 'customer',
+    key: 'planRows',
+    holds: async ({ trx, estimate, expected }) => (await EstimateConverter.otherPlanRowsPin(trx, {
+      customerId: estimate.customer_id, estimateId: estimate.id,
+    })) === expected.planRows,
+  },
+  // Still no visit linked to the estimate (the reservation path the card cannot show).
+  { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
+];
+
+async function checkCardPins(trx, phase, ctx) {
+  const { expected } = ctx;
+  const checks = expected
+    ? CARD_PIN_CHECKS.filter((c) => c.phase === phase && expected[c.key] != null && expected[c.key] !== false)
+    : [];
+  if (!checks.length) return;
+  const read = await CARD_PIN_READS[phase](trx, ctx);
+  if (!read) throw cardChanged();
+  for (const check of checks) {
+    if (!(await check.holds({ trx, ...ctx, ...read }))) throw cardChanged();
+  }
 }
 
 async function logManualAcceptance(database, {
@@ -614,9 +646,10 @@ async function markEstimateManuallyAccepted({
   // Accept-on-book links these same-customer rows after conversion commits.
   bookedAppointmentIds = [],
   // The Intelligence Bar card's pins ({ estimateVersion, estimateStatus,
-  // customerId, customerVersion, customerBilling, ledgerPin, noLinkedVisits });
+  // customerId, customerVersion, customerBilling, ledgerPin, planRows,
+  // noLinkedVisits });
   // null for every other caller.
-  expected = null,
+  expected,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
@@ -659,7 +692,7 @@ async function markEstimateManuallyAccepted({
         estimate = fresh;
       }
     }
-    if (expected) await assertExpectedEstimate(trx, estimateId, expected);
+    await checkCardPins(trx, 'estimate', { estimateId, expected });
 
     if (estimate.status === 'accepted') {
       return { acceptedEstimate: estimate, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: estimate };
@@ -732,8 +765,7 @@ async function markEstimateManuallyAccepted({
     }
 
     throwRefusal(manualAcceptLockedRowRefusal(estimate));
-    if (expected) await assertExpectedCustomerBill(trx, estimate.customer_id, expected);
-    if (expected) await assertExpectedNoNewWork(trx, estimate, expected);
+    await checkCardPins(trx, 'customer', { estimate, expected });
 
     const isCommercialProposal = isCommercialProposalEstimate(estimate);
 
