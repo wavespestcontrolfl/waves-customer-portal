@@ -28,8 +28,6 @@ jest.mock('../services/service-report/report-data', () => ({
   lawnAssessmentPdfSignature: async () => '',
   // Non-lawn fixture: nothing to pin, empty key component (#3172).
   resolveCanonicalLawnRender: jest.fn(async () => ({ pin: null, signature: '' })),
-  // Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2): nothing printed.
-  lawnVisitSummaryRenderedSignature: () => '',
 }));
 // Photo-set key component (#4091). Stubbed empty like the lawn / time-on-site
 // components above: the real one queries service_photos with orderBy, which

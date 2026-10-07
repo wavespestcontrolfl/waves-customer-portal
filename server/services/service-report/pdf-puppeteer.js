@@ -20,12 +20,7 @@ function serviceReportPublicBase(req) {
 // the attachment's content deterministic is to tell the page which assessment
 // to show. The data route validates the pin against what this token already
 // exposes and refuses anything else.
-// expectedVisitSummarySignature (GATE_LAWN_VISIT_SUMMARY_V2): the Visit Summary component the cache key names
-// (':vs=<hash>', or '' for none). When a string, the URL carries it as &vs= ("none" for ''), and the page
-// forwards it to its own /data request, which refuses (409) a payload whose summary differs. That binds the
-// render to the key's snapshot for EVERY renderer, including those that cannot report what they printed.
-// undefined = gate off or not a lawn render: no parameter.
-function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, expectedVisitSummarySignature } = {}) {
+function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity } = {}) {
   const base = serviceReportPublicBase(req).replace(/\/+$/, '');
   const params = [];
   if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
@@ -65,7 +60,6 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
     params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
     if (planPin) params.push(`plan=${encodeURIComponent(planPin)}`);
   }
-  if (typeof expectedVisitSummarySignature === 'string') params.push(`vs=${encodeURIComponent(expectedVisitSummarySignature || 'none')}`);
   const query = params.length ? `?${params.join('&')}` : '';
   return `${base}/report/${encodeURIComponent(token)}${query}`;
 }
@@ -125,15 +119,7 @@ async function renderReportPdfWithBrowser(url) {
         typeof globalThis.__WAVES_PDF_IMAGE_FAILURES === 'number' ? globalThis.__WAVES_PDF_IMAGE_FAILURES : null
       ));
     } catch { imageFailures = null; }
-    // The Visit Summary the page printed (same channel; null = unknown, e.g. an old bundle).
-    let visitSummary = null;
-    try {
-      visitSummary = await page.evaluate(() => {
-        const v = globalThis.__WAVES_PDF_VISIT_SUMMARY;
-        return v && typeof v === 'object' ? { source: typeof v.source === 'string' ? v.source : null, summary: typeof v.summary === 'string' ? v.summary : null } : null;
-      });
-    } catch { visitSummary = null; }
-    return { pdf, imageFailures, visitSummary };
+    return { pdf, imageFailures };
   } finally {
     if (page) await page.close().catch(() => {});
     await browser.close().catch(() => {});

@@ -374,16 +374,6 @@ export default function ServiceReportDocument({ data, token }) {
   useEffect(() => {
     window.__WAVES_PDF_IMAGE_FAILURES = failedImages.size + payloadDroppedImages;
   }, [failedImages, payloadDroppedImages]);
-  // The Visit Summary the page actually printed (GATE_LAWN_VISIT_SUMMARY_V2): the headless renderer
-  // reads this after page.pdf(), like the image count above. The page fetches its own /data (maybe
-  // from another pod), so this, not the worker's own payload, says which summary the PDF shows.
-  // The summary text rides along only for the frozen lawn Visit Summary; the server hashes it.
-  useEffect(() => {
-    window.__WAVES_PDF_VISIT_SUMMARY = {
-      source: data.summarySource ?? null,
-      summary: data.summarySource === 'lawn_visit_summary' && typeof data.summary === 'string' ? data.summary : null,
-    };
-  }, [data.summarySource, data.summary]);
   const typed = data.typedReport || null;
   const result = typed?.todaysResult || null;
   const findings = (Array.isArray(typed?.findings) ? typed.findings : [])

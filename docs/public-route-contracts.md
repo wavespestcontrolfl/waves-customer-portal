@@ -2697,73 +2697,47 @@ signature gains `:tp=<hash of the text>` only while the gate is live AND a whole
 frozen entry exists.
 
 `GATE_LAWN_VISIT_SUMMARY_V2` (dark, strict opt-in, exactly `'true'`, read at call
-time; off leaves the `/api/reports/:token/data` payload, the render, the PDF and its
-cache signature unchanged, key for key, with no read) changes ONE existing lawn
-field, not the shape: `summary` carries the frozen lawn Visit Summary (fixed
-sentences, at most 6) in place of the generic completion recap
-(`structured_notes.customerRecap`), and `summarySource` is `'lawn_visit_summary'`
-instead of `'recap'`. No key is added. It applies only to a lawn report with a
-confirmed assessment, and the tech-reviewed AI report, which still wins, is
-unchanged. NO MODEL writes it: at completion (`finalizeLawnReportSynthesis`,
-`lawn-report-write-gate.js`, in the awaited step before the report email is queued)
-code picks sentences from closed phrase tables (`lawn-visit-summary.js`) using the
-report's own facts: product CATEGORIES (never names, rates or actives), the area
-reads, the technician-kept PHOTO findings (the "What the photos showed" selector;
-technician-added details have no photo provenance and never count) by their own
-symptom label (hedged when the confidence is low or unknown, or when the technician
-marked it undeterminable from the photos, and only while the report's card for that
-topic shows a concern), the visit's frozen water-in step with its exact inches and hours
-(hours rounded down from the frozen deadline, up to the watering rule's own 168-hour
-maximum; a hold, or a hold before a water-in,
-sends the reader to the report's own watering note and states no amounts), and the
-topics for the next visit. The two recurring-plan sentences ("each visit adds to the
-last one" and "At the next visit we will look at ...") print only for a recurring
-lawn plan visit, by the program line's own `resolveProgramVisit` answer (a one-time
-visit gets neither), and the next-visit sentence also needs a real scheduled next
-visit AT THIS PROPERTY (the property-scoped `lawnNextVisitAtProperty` answer, never
-the customer-wide `snapshot.nextVisit` label and never a cadence estimate); both
-decisions freeze in the slots. On the PDF the document prints the whole
-`summary` for `summarySource: 'lawn_visit_summary'` (the reconciled `todaysResult` is
-only its first sentence). The PDF key's `:vs` component is derived from the service
-row the render loaded, and a render whose printed summary differs from the key's
-component is not cached. The printed summary is the one the RENDERED page reports
-(`window.__WAVES_PDF_VISIT_SUMMARY`, read after `page.pdf()` like the image count,
-because the browser fetches its own `/data`); a renderer that cannot report one falls
-back to the worker's own payload. Both PDF writers (the queue and the public direct-PDF
-route) apply the fence.
-
-`GET /api/reports/:token/data` accepts ONE optional query parameter, `vs`, used only by the PDF
-renderer (any other request and any other mode ignore it, so the payload and the status are unchanged
-without it). An explicit `vs` in `pdf` mode is validated whatever the receiving pod's gate says, so a
-mixed-gate rollout (a gate-on worker reaching a gate-off pod that builds the plain recap) answers 409 too. The renderer's page URL
-(`/report/:token?mode=pdf&...&vs=<value>`) carries the Visit Summary component the PDF cache key names
-(`:vs=<hash>`, or `none` when the key names no summary); the page forwards it, in `pdf` mode only, to its own
-`/data` request. When the payload the route is about to return would print a different summary (same
-`lawnVisitSummaryRenderedSignature` and the same precedence rule as the render fence: a technician report or
-typed narrative that won the slot is not compared), the route answers `409 { "error": "Report changed" }`
-with no report data. The page then shows its load error instead of the document, the renderer's wait for the
-report element fails, the render errors (the queue retries; the direct route answers its 503 and enqueues a
-retry), and nothing is cached. This binds the render to the key's snapshot for every renderer, including the
-Cloudflare renderer, which cannot report what it printed. It reveals nothing a caller without `vs` cannot
-already read: a wrong guess gets the generic 409, a right one gets the same payload. Every watering template is one sentence and the composer
-caps the paragraph at six sentences. When duplicate findings share a label, the
-least-confident read wins.
-The technician note, the program line, the headline and rain are not inputs. It
-freezes first-writer-wins under `structured_notes.lawnVisitSummary[assessmentId]`
-(its own top-level key) as `{ text, slots }`; a render only reads it, from the record
-the build already loaded, so `/api/reports/:token/ask` gains no read. At read time the
-text must equal what the current tables render from the stored slots and pass the
-customer-copy and result-timing screens; a frozen text that no longer does prints the
-recap. Any miss, an unreadable record or a degraded product read leaves the generic
-recap exactly as it was. The SMS and email keep the short `customerRecap`. The PDF
-cache signature gains `:vs=<hash of the text>` only while the gate is live AND a
-frozen entry exists, so a PDF cached before the summary existed is never served after
-it, and a visit with none keeps its key. At read time the watering sentence is
-dropped once the frozen instruction's `expiresAt` has passed (the live banner's own
-end), the rest of the paragraph unchanged and still checked against the frozen
-slots; no known expiry (a hold that waits for the treatment to dry) keeps it. The
-PDF signature follows the text as read, so it changes at expiry. No token, eligibility, privacy, rate-limit or
-header change; no new route.
+time) controls ONLY the freeze at completion (no new summaries while it is off; a
+rollback leaves frozen ones in place). A render, the PDF and the PDF cache key depend
+only on the record, so every pod, browser and renderer agrees during a rollout: the
+`/api/reports/:token/data` payload changes ONE existing lawn field, not the shape, for
+a visit whose record carries a whole frozen summary, whatever the gate says. `summary`
+carries the frozen lawn Visit Summary (fixed sentences, at most 6) in place of the
+generic completion recap (`structured_notes.customerRecap`), and `summarySource` is
+`'lawn_visit_summary'` instead of `'recap'`. No key is added, and no query parameter.
+It applies only to a lawn report with a confirmed assessment, and the tech-reviewed AI
+report, which still wins, is unchanged. NO MODEL writes it: at completion
+(`finalizeLawnReportSynthesis`, `lawn-report-write-gate.js`, in the awaited step before
+the report email is queued) code picks sentences from closed phrase tables
+(`lawn-visit-summary.js`) using the report's own facts: product CATEGORIES (never
+names, rates or actives), the area reads (`strong` and `healthy` stay distinct
+phrases), the technician-kept PHOTO findings (the "What the photos showed" selector;
+technician-added details have no photo provenance and never count) by their own symptom
+label (hedged when the confidence is low or unknown, or when the technician marked it
+undeterminable from the photos, and only while the report's card for that topic shows a
+concern; duplicate labels keep the least-confident read), and, for a recurring lawn plan
+visit only (the program line's own `resolveProgramVisit` answer; a one-time visit gets
+neither), the fixed results sentence ("each visit adds to the last one") and, when a
+real scheduled next visit exists AT THIS PROPERTY (the property-scoped
+`lawnNextVisitAtProperty` answer, never the customer-wide `snapshot.nextVisit` label
+and never a cadence estimate), "At the next visit we will look at ..."; both decisions
+freeze in the slots. There is NO watering sentence: the report's watering banner owns the
+watering step, with its own timing and expiry. The technician note, the program line,
+the headline and rain are not inputs. It freezes first-writer-wins under
+`structured_notes.lawnVisitSummary[assessmentId]` (its own top-level key) as
+`{ text, slots }`; a render only reads it, from the record the build already loaded, so
+`/api/reports/:token/ask` gains no read. At read time the text must equal what the
+current tables render from the stored slots and pass the customer-copy and
+result-timing screens; a frozen text that no longer does prints the recap. Any miss, an
+unreadable record or a degraded product read leaves the generic recap exactly as it
+was. The SMS and email keep the short `customerRecap`. On the PDF the document prints
+the whole `summary` for `summarySource: 'lawn_visit_summary'` (the reconciled
+`todaysResult` is only its first sentence). The PDF cache signature carries
+`:vs=<hash of the frozen text>` whenever a whole frozen summary exists (whatever the gate
+says), derived from the service row the render loaded, so a PDF cached before the summary
+existed is never served after it, and a visit with none keeps its key. Every paragraph is
+at most six one-sentence parts. No token, eligibility, privacy, rate-limit or header
+change; no new route.
 
 `GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
 sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color

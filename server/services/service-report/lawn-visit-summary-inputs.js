@@ -37,27 +37,6 @@ function visitMonth(record) {
   return m ? Number(m[1]) : null;
 }
 
-/**
- * The visit's watering step in the facts' shape, from the FROZEN instruction only
- * (never the live catalog, so a later rule edit changes nothing). The instruction
- * is the authority for the state and the inches; the hours are the window it froze,
- * from completion to its water-in deadline, rounded DOWN so the paragraph can never
- * ask for a longer window than the report's own banner. A deadline under an hour
- * away, or an unreadable one, gives no step: the banner owns it.
- */
-function wateringFacts(instruction) {
-  if (!instruction || !['water_in', 'hold_then_water_in', 'hold'].includes(instruction.state)) return null;
-  // The report's watering note owns the hold's release condition and the water-in deadline.
-  const expiresAt = instruction.expiresAt || null;
-  if (instruction.state === 'hold' || instruction.state === 'hold_then_water_in') return { state: instruction.state, expiresAt };
-  const inches = Number(instruction.waterInInches);
-  const at = Date.parse(instruction.completedAt);
-  const by = Date.parse(instruction.waterInBy);
-  if (!Number.isFinite(inches) || !(inches > 0) || !Number.isFinite(at) || !Number.isFinite(by) || by <= at) return null;
-  const hours = Math.floor((by - at) / 3600000);
-  return hours >= 1 ? { state: instruction.state, inches, hours, expiresAt } : null;
-}
-
 // Products as kinds only; the composer reads a name solely to spot a fertilizer analysis.
 function appliedFacts(reportV2) {
   const products = (reportV2.treatment && reportV2.treatment.products) || [];
@@ -100,13 +79,12 @@ async function readKeptFindingsFor(knex, assessmentId) {
  * @param {object} args
  * @param {object} args.record       the customer-joined service record (service_date)
  * @param {object} args.data         buildReportV1Data output (reportV2, lawnAssessment)
- * @param {object} [args.instruction] the visit's frozen watering instruction
  * @param {boolean} [args.programVisit] the report's own resolveProgramVisit answer: a recurring lawn plan visit
  * @param {boolean} [args.nextVisitBooked] the report's PROPERTY-scoped next lawn booking exists (lawnNextVisitAtProperty)
  * @param {object} args.knex
  * @returns {Promise<object|null>} normalized facts, or null when the visit cannot support a summary
  */
-async function gatherVisitSummaryFacts({ record, data, instruction = null, programVisit = false, nextVisitBooked = false, knex }) {
+async function gatherVisitSummaryFacts({ record, data, programVisit = false, nextVisitBooked = false, knex }) {
   const reportV2 = data && data.reportV2;
   const lawnAssessment = data && data.lawnAssessment;
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
@@ -118,7 +96,6 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, progr
     applied: appliedFacts(reportV2),
     findings: await readKeptFindingsFor(knex, assessmentId),
     areas: areaFacts(reportV2),
-    watering: wateringFacts(instruction),
     watchNext: watchTopics(reportV2),
     // Recurring-plan promises ("each visit adds to the last one", "at the next visit") need a recurring
     // plan visit; the next-visit line also needs a real booking (the report's own scheduled next visit,
@@ -129,4 +106,4 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, progr
   });
 }
 
-module.exports = { gatherVisitSummaryFacts, wateringFacts, seasonOf, _test: { visitMonth } };
+module.exports = { gatherVisitSummaryFacts, seasonOf, _test: { visitMonth } };

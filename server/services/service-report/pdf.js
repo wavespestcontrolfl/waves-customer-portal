@@ -153,19 +153,19 @@ async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
 async function renderReportPdf(url, { serviceRecordId } = {}) {
   const provider = selectedPdfRenderer();
   if (provider === 'cloudflare_browser_rendering') {
-    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null, visitSummary: null };
+    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null };
   }
   return renderReportPdfWithBrowser(url);
 }
 
 async function renderServiceReportV1Pdf(data, {
-  token, req, logger: callLogger, serviceRecordId, pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, expectedVisitSummarySignature,
+  token, req, logger: callLogger, serviceRecordId, pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity,
 } = {}) {
   const reportToken = token || data.token;
   const recordId = serviceRecordId || data.serviceRecordId || data.id || null;
   // The pin rides on the URL the browser opens — `data` never reaches the
   // renderer (#3168), so this is the only channel to the page.
-  const url = serviceReportViewerUrl(reportToken, req, 'pdf', { pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, expectedVisitSummarySignature });
+  const url = serviceReportViewerUrl(reportToken, req, 'pdf', { pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity });
   const provider = selectedPdfRenderer();
   const started = Date.now();
 
@@ -181,8 +181,7 @@ async function renderServiceReportV1Pdf(data, {
     });
     // imageFailures: the page's own image-load outcome (null = unknown,
     // e.g. the Cloudflare renderer) — store paths gate caching on it.
-    // visitSummary: the Visit Summary the page printed (null = unknown, e.g. the Cloudflare renderer).
-    return { pdf, imageFailures: rendered.imageFailures ?? null, visitSummary: rendered.visitSummary ?? null };
+    return { pdf, imageFailures: rendered.imageFailures ?? null };
   } catch (err) {
     const elapsedMs = Date.now() - started;
     const errText = safePdfRenderError(err);

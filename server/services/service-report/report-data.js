@@ -2855,22 +2855,20 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
       irrigationStamp += `:tp=err${crypto.randomBytes(4).toString('hex')}`;
     }
   }
-  // The Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY) replaces the
-  // recap text the PDF prints, so it keys the PDF the same way.
-  // Derived from the SAME service row the render loads (service.structured_notes), never a
-  // fresh read: a fresh read after a freeze that landed mid-render would key a generic render
-  // under the summary's hash. Only a caller with a partial row (a cache lookup) reads the record.
-  let visitSummarySig = '';
-  if (featureGates.lawnVisitSummaryV2Live() && assessment?.id) {
+  // The Visit Summary (PROTOTYPE ONLY) replaces the recap text the PDF prints, so it keys the PDF
+  // the same way. A render depends only on the record's frozen text (never on the gate), so the key
+  // does too: present whenever a whole frozen summary exists, absent otherwise (a later freeze re-keys).
+  // Derived from the SAME service row the render loads (service.structured_notes); only a caller with
+  // a partial row (a cache lookup) reads the record. An unreadable record stamps random (re-render).
+  if (assessment?.id) {
     try {
       const notes = service.structured_notes !== undefined
         ? service.structured_notes
         : (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes;
-      visitSummarySig = require('./lawn-visit-summary').visitSummarySignature(notes, assessment.id).replace(':tp=', ':vs=');
+      irrigationStamp += require('./lawn-visit-summary').visitSummarySignature(notes, assessment.id).replace(':tp=', ':vs=');
     } catch {
-      visitSummarySig = `:vs=err${crypto.randomBytes(4).toString('hex')}`;
+      irrigationStamp += `:vs=err${crypto.randomBytes(4).toString('hex')}`;
     }
-    irrigationStamp += visitSummarySig;
   }
   // "What the photos showed" (P23b) is built from this assessment's reviewed run,
   // so the key follows the run's reviewed state, and only for a visit that would
@@ -2889,7 +2887,7 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   const historyStamp = lawnHistory ? `|hist=${lawnHistory.identity}` : '';
   if (!assessment?.id) {
     const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}${historyStamp}`).digest('hex').slice(0, 12);
-    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanAvailableAt, visitSummarySignature: visitSummarySig, ...(propertyHistoryEnabled ? { lawnHistory, propertyHistoryEnabled } : {}) };
+    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanAvailableAt, ...(propertyHistoryEnabled ? { lawnHistory, propertyHistoryEnabled } : {}) };
   }
 
   const recs = typeof assessment.recommendations === 'string'
@@ -2899,7 +2897,7 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}${historyStamp}`)
     .digest('hex')
     .slice(0, 12);
-  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanAvailableAt, visitSummarySignature: visitSummarySig, ...(propertyHistoryEnabled ? { lawnHistory, propertyHistoryEnabled } : {}) };
+  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanAvailableAt, ...(propertyHistoryEnabled ? { lawnHistory, propertyHistoryEnabled } : {}) };
 }
 
 // Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
@@ -2935,13 +2933,6 @@ async function loadServicePremise(service, knex = db) {
     );
   if (!row) throw new Error(`service_record ${service?.id || 'unknown'}: premise unavailable for the week-plan cache key`);
   return applyReportIdentitySnapshot({ ...service, ...row });
-}
-
-// The Visit Summary signature of the payload a render ACTUALLY built (':vs=<hash>', or '' when
-// it printed no frozen summary): the post-render check compares it with the key's own component.
-function lawnVisitSummaryRenderedSignature(data) {
-  const text = data && data.summarySource === 'lawn_visit_summary' && typeof data.summary === 'string' ? data.summary.replace(/\s+/g, ' ').trim() : '';
-  return text ? `:vs=${crypto.createHash('sha1').update(text).digest('hex').slice(0, 8)}` : '';
 }
 
 async function lawnAssessmentPdfSignature(service, knex = db, options = {}) {
@@ -6844,12 +6835,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
   let visitSummarySource = visitSummary ? 'recap' : null;
-  // GATE_LAWN_VISIT_SUMMARY_V2 (PROTOTYPE ONLY): a lawn visit with a frozen
-  // Visit Summary (fixed sentences written by code, no model) prints it in place of
-  // the generic completion recap (which the completion text keeps using). A render
-  // only READS the frozen text. No frozen entry, a failed read-time check or any error leaves
-  // the recap exactly as it was. The tech-reviewed AI report below still wins.
-  if (serviceLine === 'lawn' && lawnAssessment?.assessmentId && featureGates.lawnVisitSummaryV2Live()) {
+  // The lawn Visit Summary (PROTOTYPE ONLY): a lawn visit with a frozen summary (fixed sentences written
+  // by code, no model) prints it in place of the generic completion recap (which the completion text keeps
+  // using). GATE_LAWN_VISIT_SUMMARY_V2 controls only the freeze at completion; a render shows whatever whole
+  // summary the record carries, so every pod and browser agrees during a rollout. No frozen entry, a failed
+  // read-time check or any error leaves the recap exactly as it was. The tech-reviewed AI report below still wins.
+  if (serviceLine === 'lawn' && lawnAssessment?.assessmentId) {
     try {
       const frozenSummary = require('./lawn-visit-summary').readFrozenVisitSummary(service.structured_notes, lawnAssessment.assessmentId);
       if (frozenSummary) {
@@ -7599,7 +7590,6 @@ module.exports = {
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
-  lawnVisitSummaryRenderedSignature,
   loadServicePremise,
   reportScheduleUnconfirmed,
   buildReportWeekPlan,

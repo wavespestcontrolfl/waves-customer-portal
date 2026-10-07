@@ -22,7 +22,6 @@ const FACTS = {
   applied: [{ kind: 'fertilizer', alsoFeeds: false }],
   findings: [{ label: 'weed pressure', confidence: 'moderate' }],
   areas: [{ key: 'weed_pressure', status: 'watch' }],
-  watering: { state: 'water_in', inches: 0.5, hours: 24 },
   watchNext: [],
   recurring: true,
   nextVisitBooked: true,
@@ -30,7 +29,6 @@ const FACTS = {
 const TEXT = 'Today we applied a feeding, which fits the fall season. '
   + 'In the photos we noticed some weed pressure. '
   + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-  + 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. '
   + 'At the next visit we will look at weeds.';
 
 function fakeKnex(initialNotes = {}) {
@@ -94,7 +92,7 @@ describe('gate on', () => {
   test('composed by code, frozen under lawnVisitSummary[assessment] beside the synthesis; a retry changes nothing; no model call', async () => {
     const { knex, state } = fakeKnex({});
     const result = await run(knex);
-    expect(state.notes.lawnVisitSummary['77']).toMatchObject({ v: 2, text: TEXT, assessmentId: '77' });
+    expect(state.notes.lawnVisitSummary['77']).toMatchObject({ v: 3, text: TEXT, assessmentId: '77' });
     expect(state.notes.lawnVisitSummary['77'].slots).toMatchObject({ season: 'fall', applied: ['fertilizer'] });
     expect(state.notes.lawnReportV2).not.toHaveProperty('visitSummary');
     expect(result.visitSummaryFreeze).toEqual({ 77: state.notes.lawnVisitSummary['77'] });
@@ -142,18 +140,5 @@ describe('gate on', () => {
     expect((await run(knex)).persisted).toBe(true);
     expect(gatherVisitSummaryFacts).not.toHaveBeenCalled();
     expect(state.notes.lawnVisitSummary).toBeUndefined();
-  });
-
-  test('watering comes from the instruction the record is frozen to, not a later rebuild', async () => {
-    const built = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z', lines: ['x'] };
-    buildReportV1Data.mockImplementation(async (_record, _token, _knex, opts) => {
-      opts.wateringInstructionOut.instruction = built;
-      return { lawnAssessment: { assessmentId: 77 }, reportV2: { smsSummary: 'sms', snapshot: {} } };
-    });
-    // A watering freeze already on the record (an earlier run) wins over what this build produced.
-    const earlier = { ...built, waterInInches: 1, waterInBy: '2026-10-07T02:40:00Z' };
-    const { knex } = fakeKnex({ lawnWateringFreeze: { wateringInstruction: earlier } });
-    await run(knex);
-    expect(gatherVisitSummaryFacts.mock.calls[0][0].instruction).toEqual(earlier);
   });
 });

@@ -1119,19 +1119,8 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('No notable issues were found today.');
   });
 
-  it('reports the printed Visit Summary to the headless renderer (window.__WAVES_PDF_VISIT_SUMMARY)', () => {
-    const summary = 'Today we applied a feeding, which fits the fall season. In the photos we noticed some weed pressure.';
-    delete window.__WAVES_PDF_VISIT_SUMMARY;
-    render(<ServiceReportDocument data={{ ...BASE_DATA, typedReport: null, summary, summarySource: 'lawn_visit_summary' }} token="t" />);
-    expect(window.__WAVES_PDF_VISIT_SUMMARY).toEqual({ source: 'lawn_visit_summary', summary });
-    // Any other source reports its name and never the text.
-    render(<ServiceReportDocument data={{ ...BASE_DATA, typedReport: null, summary: 'Thanks for having us.', summarySource: 'recap' }} token="t" />);
-    expect(window.__WAVES_PDF_VISIT_SUMMARY).toEqual({ source: 'recap', summary: null });
-    delete window.__WAVES_PDF_VISIT_SUMMARY;
-  });
-
   it('prints the whole frozen lawn Visit Summary, not the reconciled first sentence', () => {
-    const summary = 'Today we applied a feeding, which fits the fall season. In the photos we noticed some weed pressure. Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. At the next visit we will look at weeds.';
+    const summary = 'Today we applied a feeding, which fits the fall season. In the photos we noticed some weed pressure. Results from treatments like these build gradually, and each visit adds to the last one. At the next visit we will look at weeds.';
     const data = {
       ...BASE_DATA,
       typedReport: null,

@@ -787,58 +787,67 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
   });
 });
 
-// GATE_LAWN_VISIT_SUMMARY_V2 (PROTOTYPE ONLY, Codex r5): the PDF key's ':vs' component comes from
-// the SAME service row the render loaded, never a fresh read, and the post-render check can compare
-// what the render actually printed.
-describe('GATE_LAWN_VISIT_SUMMARY_V2 PDF key follows the loaded row', () => {
+// The Visit Summary (PROTOTYPE ONLY): the PDF key's ':vs' component is a pure function of the record's frozen
+// summary (never of the gate or a renderer), derived from the SAME service row the render loaded.
+describe('the Visit Summary PDF key follows the loaded row, whatever the gate says', () => {
   const saved = process.env.GATE_LAWN_VISIT_SUMMARY_V2;
   const summary = require('../services/service-report/lawn-visit-summary');
-  const { lawnVisitSummaryRenderedSignature } = require('../services/service-report/report-data');
   const composed = summary.composeVisitSummary({ season: 'fall', applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'weed_pressure', status: 'healthy' }] });
   const FROZEN = { v: summary.FREEZE_VERSION, promptVersion: summary.COMPOSER_VERSION, assessmentId: 'la-cur', text: composed.paragraph, slots: composed.slots, frozenAt: '2026-09-30T18:41:00.000Z' };
   const frozenNotes = { lawnWeekWeather: { 'la-cur': WEEK }, lawnVisitSummary: { 'la-cur': FROZEN } };
   const bareNotes = { lawnWeekWeather: { 'la-cur': WEEK } };
   const svc = (notes) => ({ id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30', ...(notes === undefined ? {} : { structured_notes: notes }) });
   // The database holds `dbNotes`; the render loaded `rowNotes` (undefined = a partial cache-lookup row).
-  const canonical = (rowNotes, dbNotes) => resolveCanonicalLawnRender(svc(rowNotes), withRecords(fixtures(), { 'svc-cur': { structured_notes: dbNotes } }).knex);
+  const sig = async (rowNotes, dbNotes) => (await resolveCanonicalLawnRender(svc(rowNotes), withRecords(fixtures(), { 'svc-cur': { structured_notes: dbNotes } }).knex)).signature;
 
   beforeEach(() => {
-    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
     jest.clearAllMocks();
     history.installedForVisit.mockResolvedValue(CUR);
     history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
   });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_LAWN_VISIT_SUMMARY_V2; else process.env.GATE_LAWN_VISIT_SUMMARY_V2 = saved; });
 
-  test('race shape: the row was loaded before the freeze, the key is computed after it: the key names what the row renders (no summary)', async () => {
-    const before = await canonical(bareNotes, bareNotes);
-    const raced = await canonical(bareNotes, frozenNotes); // db already frozen, the render's row is older
-    expect(raced.visitSummarySignature).toBe('');
-    expect(raced.signature).toBe(before.signature);
-    // A row loaded after the freeze keys the summary.
-    const after = await canonical(frozenNotes, frozenNotes);
-    expect(after.visitSummarySignature).toMatch(/^:vs=[0-9a-f]{8}$/);
-    expect(after.signature).not.toBe(before.signature);
+  test('a whole frozen summary keys the PDF with the gate OFF too; none keeps the key it had', async () => {
+    const none = await sig(bareNotes, bareNotes);
+    const frozen = await sig(frozenNotes, frozenNotes);
+    expect(frozen).not.toBe(none);
+    process.env.GATE_LAWN_VISIT_SUMMARY_V2 = 'true';
+    expect(await sig(frozenNotes, frozenNotes)).toBe(frozen); // the gate changes nothing at render
+    expect(await sig(bareNotes, bareNotes)).toBe(none);
+  });
+
+  test('race shape: the row was loaded before the freeze, the key is computed after it: the key names what the row renders', async () => {
+    const before = await sig(bareNotes, bareNotes);
+    expect(await sig(bareNotes, frozenNotes)).toBe(before); // db already frozen, the render's row is older
+    expect(await sig(frozenNotes, frozenNotes)).not.toBe(before);
   });
 
   test('a partial cache-lookup row (no structured_notes) reads the record', async () => {
-    const lookup = await canonical(undefined, frozenNotes);
-    expect(lookup.visitSummarySignature).toBe((await canonical(frozenNotes, frozenNotes)).visitSummarySignature);
-    expect((await canonical(undefined, bareNotes)).visitSummarySignature).toBe('');
+    expect(await sig(undefined, frozenNotes)).toBe(await sig(frozenNotes, frozenNotes));
+    expect(await sig(undefined, bareNotes)).toBe(await sig(bareNotes, bareNotes));
   });
 
-  test('the rendered-payload signature equals the key component only for the summary the key names', async () => {
-    const key = (await canonical(frozenNotes, frozenNotes)).visitSummarySignature;
-    expect(lawnVisitSummaryRenderedSignature({ summary: FROZEN.text, summarySource: 'lawn_visit_summary' })).toBe(key);
-    // A render that printed the generic recap (the stale row) is not the summary the key names.
-    expect(lawnVisitSummaryRenderedSignature({ summary: 'Thanks for having us out.', summarySource: 'recap' })).toBe('');
-    expect(lawnVisitSummaryRenderedSignature({ summary: 'Thanks for having us out.', summarySource: 'recap' })).not.toBe(key);
-    expect(lawnVisitSummaryRenderedSignature(null)).toBe('');
+  test('a render shows the frozen summary with the gate OFF (the gate controls only the freeze)', async () => {
+    const recs = { 'svc-cur': { structured_notes: frozenNotes } };
+    const { knex } = withRecords(fixtures(), recs);
+    for (const gate of [undefined, 'true']) {
+      if (gate) process.env.GATE_LAWN_VISIT_SUMMARY_V2 = gate; else delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+      const data = await buildReportV1Data(service(frozenNotes), 'token-p14', knex, {});
+      expect(data.summary).toBe(FROZEN.text);
+      expect(data.summarySource).toBe('lawn_visit_summary');
+    }
+    // No frozen entry: the generic recap path, exactly as before.
+    const bare = await buildReportV1Data(service(bareNotes), 'token-p14', withRecords(fixtures(), { 'svc-cur': { structured_notes: bareNotes } }).knex, {});
+    expect(bare.summarySource).not.toBe('lawn_visit_summary');
   });
 
-  test('gate off: no component, same signature as before', async () => {
-    delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
-    expect((await canonical(frozenNotes, frozenNotes)).visitSummarySignature).toBe('');
+  test('a changed frozen text re-keys; a hand-edited (drifted) text keys as none', async () => {
+    const other = summary.composeVisitSummary({ season: 'spring', applied: [{ kind: 'herbicide', name: 'a' }], areas: [] });
+    const otherNotes = { ...frozenNotes, lawnVisitSummary: { 'la-cur': { ...FROZEN, text: other.paragraph, slots: other.slots } } };
+    expect(await sig(otherNotes, otherNotes)).not.toBe(await sig(frozenNotes, frozenNotes));
+    const drifted = { ...frozenNotes, lawnVisitSummary: { 'la-cur': { ...FROZEN, text: `${FROZEN.text} We guarantee results.` } } };
+    expect(await sig(drifted, drifted)).toBe(await sig(bareNotes, bareNotes));
   });
 });
 

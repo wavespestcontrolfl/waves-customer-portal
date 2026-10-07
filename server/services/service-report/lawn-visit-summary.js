@@ -16,8 +16,7 @@
  *   2. Photo read:    area reads as closed (area, status) phrases.
  *   3. Findings:      kept photo findings, by their own symptom label, hedged by confidence.
  *   4. Results build: one fixed sentence (no time words), recurring lawn plan visits only.
- *   5. Watering:      from the FROZEN watering instruction only.
- *   6. Next visit:    "At the next visit we will look at {topics}." Only for a recurring plan visit
+ *   5. Next visit:    "At the next visit we will look at {topics}." Only for a recurring plan visit
  *                     with a real scheduled next visit; a one-time visit promises neither line.
  *
  * Choices (each one pinned by a test):
@@ -32,7 +31,8 @@
  *   - A photo finding prints only while the report's own card for that topic reads
  *     watch or needs attention (the "What the photos showed" rule), so the
  *     paragraph never says "thick coverage" and "thinning turf" together.
- *   - Watering hours are the frozen deadline rounded DOWN, never longer.
+ *   - There is NO watering sentence: the report's watering banner owns the watering step, with its
+ *     own timing and expiry, so the summary can never contradict or outlive it (owner 2026-10-07).
  *
  * Where it lives: lawn-report-write-gate.js composes and freezes at completion,
  * in the awaited gate step that runs before the report email is queued and
@@ -45,18 +45,15 @@
  * Pure except the freeze's write. No gate read: callers decide.
  */
 
-const crypto = require('crypto');
 const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { lawnResultTimingViolation } = require('./report-writer-rules');
 const { CARD_FOR_LABEL, CARD_STATUSES_THAT_PRINT, PHOTO_FINDING_LABELS } = require('./lawn-photo-findings');
-// The watering rule's own limits: the frozen window and depth can never exceed them.
-const { MAX_HOURS, MAX_INCHES } = require('./lawn-watering-rule');
 
 const COMPOSER_VERSION = 'lawn_visit_summary_fixed_v1';
 const FREEZE_KEY = 'lawnVisitSummary';
-// v2: fixed sentences with slots. A v1 entry (the retired model-written prototype) reads as nothing.
-const FREEZE_VERSION = 2;
+// v3: fixed sentences with slots, no watering sentence. Older prototype entries read as nothing.
+const FREEZE_VERSION = 3;
 // No model call: the step is record reads plus one atomic write.
 const BUDGET_MS = 10 * 1000;
 // The longest paragraph any valid slots can render (pinned by a test).
@@ -95,27 +92,32 @@ const MAX_APPLIED = 4;
 
 const SEASONS = Object.freeze({ spring: 'spring', summer: 'summer', fall: 'fall', winter: 'winter' });
 
-// The report's score cards (reportV2.diagnosis keys) and their status bands.
-// Water / Coverage is the watering banner's, so it has no phrase here.
-const STATUS_BAND = Object.freeze({ strong: 'good', healthy: 'good', watch: 'watch', needs_attention: 'needs_attention' });
+// The report's score cards (reportV2.diagnosis keys) and their status bands. `strong` and `healthy` stay
+// DISTINCT bands (lawn-visual-diagnosis: 85+ and 70-84), so a lawn with visible thinning is never called
+// thick. Water / Coverage is the watering banner's, so it has no phrase here.
+const STATUS_BAND = Object.freeze({ strong: 'strong', healthy: 'healthy', watch: 'watch', needs_attention: 'needs_attention' });
+const POSITIVE_BANDS = Object.freeze(['strong', 'healthy']);
 const AREA_ORDER = Object.freeze(['weed_pressure', 'coverage', 'color_vigor', 'damage_disease_signals']);
 const AREA_PHRASES = Object.freeze({
   weed_pressure: Object.freeze({
-    good: 'few weeds',
+    strong: 'very few weeds',
+    healthy: 'weeds well in check',
     watch: 'some weeds we are keeping an eye on',
     needs_attention: 'weeds that need more attention',
   }),
   coverage: Object.freeze({
-    good: 'thick coverage',
+    strong: 'thick coverage',
+    healthy: 'good coverage overall with only minor thinning',
     watch: 'some thin areas we are keeping an eye on',
     needs_attention: 'thin areas that need more attention',
   }),
   color_vigor: Object.freeze({
-    good: 'good color',
+    strong: 'strong color',
+    healthy: 'healthy color',
     watch: 'color we are keeping an eye on',
     needs_attention: 'color that needs more attention',
   }),
-  // A healthy stress card prints nothing: "no stress" would be an all clear.
+  // A strong or healthy stress card prints nothing: "no stress" would be an all clear.
   damage_disease_signals: Object.freeze({
     watch: 'a few areas showing stress we are keeping an eye on',
     needs_attention: 'some areas showing stress that need more attention',
@@ -166,24 +168,13 @@ const SENTENCE = Object.freeze({
   results: 'Results from treatments like these build gradually, and each visit adds to the last one.',
   nextVisit: (list) => `At the next visit we will look at ${list}.`,
 });
-// The watering step, by the frozen instruction's state. The only sentences with digits.
-const WATERING_SENTENCE = Object.freeze({
-  water_in: (inches, hours) => `Please water the treated lawn in with ${inches} of water within ${hours} of today’s visit.`,
-  // The frozen hold has its own release condition (a clock time and/or "not before dry")
-  // and the water-in deadline counts from the visit, so the note owns both: no amounts here.
-  hold_then_water_in: () => 'Please follow the watering note in this report: hold off first, then water the treatment in when it says.',
-  hold: () => 'Please hold off on watering the treated lawn for now and follow the watering note in this report for when to start again.',
-});
 
 // ── Facts ─────────────────────────────────────────────────────────────────
 
 const CONFIDENCES = new Set(['high', 'moderate', 'low', 'unknown']);
-const WATERING_STATES = new Set(['water_in', 'hold_then_water_in', 'hold']);
 const FINDING_LABELS = new Set(PHOTO_FINDING_LABELS);
 // An N-P-K analysis such as 15-0-15 or 18-0-10 (percent signs not required).
 const FERTILIZER_ANALYSIS_RE = /\b\d{1,2}-\d{1,2}-\d{1,2}\b/;
-
-const finite = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // A product becomes its kind and whether it also feeds. Its name and active are read
 // here ONLY to spot a fertilizer analysis; neither is kept.
@@ -194,24 +185,6 @@ function cleanApplied(p) {
   const alsoFeeds = kind !== 'fertilizer' && kind !== 'supplement'
     && (p.alsoFeeds === true || FERTILIZER_ANALYSIS_RE.test(`${clean(p.activeIngredient)} ${clean(p.name)}`));
   return { kind, alsoFeeds };
-}
-
-// A timestamp the facts may carry, as an ISO string, or null.
-function isoOrNull(value) {
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
-}
-
-function cleanWatering(w) {
-  if (!w || !WATERING_STATES.has(w.state)) return null;
-  // A hold, alone or before a water-in, is described by the report's own watering note: no amounts.
-  const expiresAt = isoOrNull(w.expiresAt);
-  if (w.state === 'hold' || w.state === 'hold_then_water_in') return { state: w.state, inches: null, hours: null, expiresAt };
-  const inches = finite(w.inches);
-  const hours = finite(w.hours);
-  // A half-known step is no step: the report banner owns it.
-  if (!(inches > 0 && inches <= MAX_INCHES) || !(hours >= 1 && hours <= MAX_HOURS)) return null;
-  return { state: w.state, inches: Number(inches.toFixed(2)), hours: Math.floor(hours), expiresAt };
 }
 
 // The report's score-card key for a diagnosis row: its own key, else read from its label.
@@ -270,7 +243,6 @@ function normalizeFacts(input) {
     applied: applied.slice(0, 6),
     findings: cleanFindings(raw.findings).slice(0, 5),
     areas: cleanAreas(raw.areas),
-    watering: cleanWatering(raw.watering),
     watchNext: (Array.isArray(raw.watchNext) ? raw.watchNext : []).filter((t) => Object.prototype.hasOwnProperty.call(TOPIC_PHRASES, t)),
     recurring: raw.recurring === true,
     nextVisitBooked: raw.nextVisitBooked === true,
@@ -325,7 +297,6 @@ function buildSlots(rawFacts) {
     applied,
     areas,
     findings,
-    watering: facts.watering,
     // The recurring-plan promises are decided here and frozen, so a read renders the same.
     recurring: facts.recurring,
     nextVisit: facts.recurring && facts.nextVisitBooked,
@@ -333,10 +304,10 @@ function buildSlots(rawFacts) {
   };
 }
 
-const MAX_SENTENCES = 6;
+const MAX_SENTENCES = 6; // five parts exist today; the cap is a guard against a future template edit
 // Reading order, and the order parts are dropped in when a paragraph would pass the cap: the
 // results line first, then the next-visit line, then the area read.
-const SENTENCE_ORDER = Object.freeze(['applied', 'photoRead', 'findings', 'results', 'watering', 'nextVisit']);
+const SENTENCE_ORDER = Object.freeze(['applied', 'photoRead', 'findings', 'results', 'nextVisit']);
 const DROP_ORDER = Object.freeze(['results', 'nextVisit', 'photoRead']);
 
 // ── Render: slots -> sentences (a closed set; nothing else is ever printed) ──
@@ -344,14 +315,6 @@ const DROP_ORDER = Object.freeze(['results', 'nextVisit', 'photoRead']);
 function joinList(items) {
   if (items.length <= 1) return items.join('');
   return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
-}
-
-// The frozen amounts as words, or null when either is out of range.
-function amountOf(inches, hours) {
-  const n = Number(inches);
-  const h = Number(hours);
-  if (!(n > 0 && n <= MAX_INCHES) || !(Number.isInteger(h) && h >= 1 && h <= MAX_HOURS)) return null;
-  return { inches: `${n} ${n === 1 ? 'inch' : 'inches'}`, hours: `${h} ${h === 1 ? 'hour' : 'hours'}` };
 }
 
 function appliedSentence(slots) {
@@ -365,7 +328,7 @@ function photoReadSentence(slots) {
   const concerns = [];
   for (const a of Array.isArray(slots.areas) ? slots.areas : []) {
     const phrase = Object.hasOwn(AREA_PHRASES, a && a.key) && AREA_PHRASES[a.key][a.band];
-    if (phrase) (a.band === 'good' ? good : concerns).push(phrase);
+    if (phrase) (POSITIVE_BANDS.includes(a.band) ? good : concerns).push(phrase);
   }
   if (good.length && concerns.length) return SENTENCE.photoReadMixed(joinList(good), joinList(concerns));
   return good.length || concerns.length ? SENTENCE.photoRead(joinList(good.length ? good : concerns)) : null;
@@ -376,14 +339,6 @@ function findingsSentence(slots) {
     .filter((f) => f && Object.hasOwn(FINDING_PHRASES, f.label))
     .map((f) => FINDING_PHRASES[f.label][f.hedged === false ? 'sure' : 'hedged']);
   return phrases.length ? SENTENCE.findings(joinList(phrases)) : null;
-}
-
-function wateringSentence(slots) {
-  const w = slots.watering;
-  if (!w || !Object.hasOwn(WATERING_SENTENCE, w.state)) return null;
-  if (w.state === 'hold' || w.state === 'hold_then_water_in') return WATERING_SENTENCE[w.state]();
-  const amount = amountOf(w.inches, w.hours);
-  return amount ? WATERING_SENTENCE[w.state](amount.inches, amount.hours) : null;
 }
 
 function nextVisitSentence(slots) {
@@ -401,11 +356,10 @@ function renderSentences(slots) {
     photoRead: photoReadSentence(slots),
     findings: findingsSentence(slots),
     results: applied && slots.recurring === true ? SENTENCE.results : null,
-    watering: wateringSentence(slots),
     nextVisit: nextVisitSentence(slots),
   };
-  // Every template is ONE sentence, so six parts are at most six sentences; the cap is still
-  // enforced here, dropping the lowest-priority parts first, so a template edit cannot break it.
+  // Every template is ONE sentence; the cap is enforced here anyway, dropping the lowest-priority
+  // parts first, so a template edit cannot break it.
   const kept = new Set(SENTENCE_ORDER.filter((id) => parts[id]));
   for (const id of DROP_ORDER) if (kept.size > MAX_SENTENCES) kept.delete(id);
   return SENTENCE_ORDER.filter((id) => kept.has(id)).map((id) => parts[id]);
@@ -477,36 +431,12 @@ async function generateVisitSummary(facts) {
   return composed.ok ? { ...composed, inputsHash: engine.inputsHash(normalizeFacts(facts)) } : composed;
 }
 
-// The watering sentence is a command about the day of the visit. Once the frozen
-// instruction's expiresAt has passed, the report's banner stops showing its lines (live
-// view), so the summary stops giving the command too: the paragraph is rendered from
-// the same frozen slots without the watering slot. No known expiry (a hold that waits
-// for the treatment to dry) keeps it.
-function wateringExpired(slots, now) {
-  const ms = Date.parse(slots && slots.watering && slots.watering.expiresAt);
-  return Number.isFinite(ms) && now.getTime() > ms;
-}
-
-/**
- * The text a render may print, or null. The frozen entry must still equal render(slots)
- * under the current tables (the strict guard, checked against the FULL paragraph);
- * after the watering instruction has expired the printed text is that paragraph
- * without its watering sentence, and it passes the same screens.
- */
-function readFrozenVisitSummary(structuredNotes, assessmentId, now = new Date()) {
-  const full = engine.readFrozenTechParagraph(structuredNotes, assessmentId);
-  if (!full) return null;
-  const { slots } = engine.storedTechParagraphFor(structuredNotes, assessmentId);
-  if (!wateringExpired(slots, now)) return full;
-  const text = render({ ...slots, watering: null });
-  return text && !textProblem(text) ? text : null;
-}
-
-/** PDF cache-key component: '' when nothing prints, else a short hash of the text as read now. */
-function visitSummarySignature(structuredNotes, assessmentId, now = new Date()) {
-  const text = readFrozenVisitSummary(structuredNotes, assessmentId, now);
-  return text ? `:tp=${crypto.createHash('sha1').update(text).digest('hex').slice(0, 8)}` : '';
-}
+// A render depends only on the frozen record (never on the gate, the clock or the renderer), so every pod and
+// browser agrees: the text prints when the entry is whole, equals render(slots) under the CURRENT tables and passes
+// the screens; otherwise null (the report keeps the generic recap).
+const readFrozenVisitSummary = engine.readFrozenTechParagraph;
+// PDF cache-key component: '' when nothing prints, else ':tp=<hash of the frozen text>' (the caller renames it).
+const visitSummarySignature = engine.techParagraphSignature;
 
 function createAndFreezeVisitSummary(args) {
   return engine.createAndFreezeTechParagraph({ ...args, deps: { generate: generateVisitSummary, ...(args.deps || {}) } });
@@ -525,7 +455,6 @@ module.exports = {
   FINDING_PHRASES,
   TOPIC_PHRASES,
   SENTENCE,
-  WATERING_SENTENCE,
   normalizeFacts,
   buildSlots,
   renderSentences,
@@ -536,5 +465,5 @@ module.exports = {
   readFrozenVisitSummary,
   visitSummarySignature,
   freezeVisitSummary: engine.freezeTechParagraph,
-  _test: { frozenEntryProblem, textProblem, amountOf },
+  _test: { frozenEntryProblem, textProblem },
 };

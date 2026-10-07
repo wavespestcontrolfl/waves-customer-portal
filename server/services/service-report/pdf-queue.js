@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, lawnVisitSummaryRenderedSignature } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
 const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
@@ -225,9 +225,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // can't key a fallback PDF as final (codex P2 r15). '-tn0' matches the
   // lookup sentinel for reports that render no narrative.
   let tnRenderedSignature = '-tn0';
-  // The Visit Summary the render built, taken before reconciliation can touch the text.
-  let vsRenderedSignature = '';
-  let vsRenderedSource = null;
   // Same contract for the cockroach program state: the store key carries the
   // state the render actually used (stamped on the payload), so a render
   // that fell closed is never stored under the lookup's correct-state key.
@@ -311,12 +308,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
       pinnedLawnAssessmentId: effectivePin,
       pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
       pinnedLawnHistoryIdentity,
-      // Bind the browser's own /data to the summary this key names (only for a canonical, cacheable render).
-      expectedVisitSummarySignature: expectedVisitSummaryFor(canonical, { isDeliveryPin, effectivePin }),
     });
     pdf = rendered.pdf;
     renderImageFailures = rendered.imageFailures ?? null;
-    ({ source: vsRenderedSource, signature: vsRenderedSignature } = renderedVisitSummary(rendered.visitSummary, data));
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
     const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
@@ -411,22 +405,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });
-    // The Visit Summary the render printed must be the one the key names (the key is derived from
-    // the same loaded row; a summary that expired its watering note since, or a row older than the
-    // render, differs). Only compared while the gate is live and the key carries a component.
-    // Only while the Visit Summary or the plain recap won the summary slot (codex
-    // #6087 r6): when a higher-precedence source (the technician report, a typed
-    // narrative) won, the summary is not printed and there is nothing to compare.
-    if (visitSummaryRenderMismatch({
-      live: require('../../config/feature-gates').lawnVisitSummaryV2Live(),
-      pinned: canonical.pin != null,
-      renderedSource: vsRenderedSource,
-      renderedSignature: vsRenderedSignature,
-      keySignature: canonical.visitSummarySignature,
-    })) {
-      logger.warn(`[service-report-pdf] visit summary rendered differs from the key's for ${recordId} — not caching this render`);
-      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
-    }
     if (laAfter !== laSignature) {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
@@ -965,60 +943,7 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
   return summary;
 }
 
-// True when a render must not be cached because the Visit Summary it printed is
-// not the one the PDF key names. Only while the gate is live, the render is
-// pinned, and the Visit Summary or the plain recap won the summary slot: a
-// higher-precedence source (technician report, typed narrative) prints no
-// summary, so there is nothing to compare (codex #6087 r6).
-// The Visit Summary the PDF actually printed. The headless page fetches its own /data (maybe from
-// another pod), so the page's own report decides; only a renderer that cannot report one (the
-// Cloudflare renderer, an old page bundle) falls back to the payload this worker built.
-function renderedVisitSummary(pageReport, localData) {
-  if (pageReport && typeof pageReport === 'object') {
-    return { source: pageReport.source ?? null, signature: lawnVisitSummaryRenderedSignature({ summary: pageReport.summary, summarySource: pageReport.source }) };
-  }
-  return { source: localData?.summarySource ?? null, signature: lawnVisitSummaryRenderedSignature(localData) };
-}
-
-// The Visit Summary signature the render URL asks /data to match: only while the gate is live, only for a
-// lawn render with a canonical answer, and never for a delivery pinned to a different assessment (that
-// render is never cached, and the key's component describes the canonical assessment).
-function expectedVisitSummaryFor(canonical, { isDeliveryPin = false, effectivePin = null } = {}) {
-  const deliveryPinDiffers = isDeliveryPin && effectivePin !== canonical?.pin;
-  const live = require('../../config/feature-gates').lawnVisitSummaryV2Live?.() === true;
-  if (!live || deliveryPinDiffers || !canonical || canonical.pin == null || typeof canonical.visitSummarySignature !== 'string') return undefined;
-  return canonical.visitSummarySignature;
-}
-
-// The /data route's side of that binding: with a `vs` the PDF renderer sent, the payload about to be
-// returned must carry the summary the key names (same precedence rule as the render fence), else the
-// route answers 409 and the page never renders, so the renderer fails and nothing is cached.
-// An explicit `vs` is the renderer's expectation, so it is validated whatever
-// the RECEIVING pod's gate says (pre-push P1): during a rollout a gate-on worker
-// can reach a gate-off pod, which builds the plain recap; that mismatch must 409,
-// not pass. Without `vs` (or outside pdf mode) nothing is checked.
-function visitSummaryDataMismatch({ mode, expected, data }) {
-  if (mode !== 'pdf' || typeof expected !== 'string' || !expected) return false;
-  return visitSummaryRenderMismatch({
-    live: true,
-    pinned: true,
-    renderedSource: data?.summarySource ?? null,
-    renderedSignature: lawnVisitSummaryRenderedSignature(data),
-    keySignature: expected === 'none' ? '' : expected,
-  });
-}
-
-function visitSummaryRenderMismatch({ live, pinned, renderedSource, renderedSignature, keySignature }) {
-  if (!live || !pinned) return false;
-  if (renderedSource != null && renderedSource !== 'lawn_visit_summary' && renderedSource !== 'recap') return false;
-  return (renderedSignature || '') !== (keySignature || '');
-}
-
 module.exports = {
-  visitSummaryRenderMismatch,
-  visitSummaryDataMismatch,
-  expectedVisitSummaryFor,
-  renderedVisitSummary,
   CLAIM_LIMIT,
   // Shared with the ops queue so its stale-claim rule cannot drift from
   // recoverStalePdfRenderClaims.

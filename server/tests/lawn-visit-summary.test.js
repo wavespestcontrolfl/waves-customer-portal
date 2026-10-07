@@ -1,13 +1,14 @@
 // PROTOTYPE ONLY. Lawn Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2), FIXED SENTENCES, NO MODEL
 // (owner 2026-10-07): the facts builder, the closed phrase tables and the composer, the
-// first-writer-wins freeze and the read-time guard. Synthetic data only.
+// first-writer-wins freeze and the read-time guard. No watering sentence: the report's watering
+// banner owns the watering step. Synthetic data only.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 
 const { dispatchWithFallback } = require('../services/llm/call');
 const summary = require('../services/service-report/lawn-visit-summary');
-const { gatherVisitSummaryFacts, wateringFacts, seasonOf } = require('../services/service-report/lawn-visit-summary-inputs');
+const { gatherVisitSummaryFacts, seasonOf } = require('../services/service-report/lawn-visit-summary-inputs');
 const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
 const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
 const { splitSentences } = require('../services/service-report/next-visit-claims');
@@ -27,16 +28,26 @@ const CASES = {
         { name: 'Stonewall 0.43% + 15-0-15', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent' },
         { name: 'Arena 50 WDG', activeIngredient: 'clothianidin', kind: 'insecticide' },
       ],
-      areas: areas({ weed_pressure: 'strong', coverage: 'healthy', color_vigor: 'healthy', damage_disease_signals: 'watch' }),
+      areas: areas({ weed_pressure: 'strong', coverage: 'strong', color_vigor: 'healthy', damage_disease_signals: 'watch' }),
       findings: [],
-      watering: { state: 'water_in', inches: 0.5, hours: 24 },
       watchNext: [],
     },
     expected: 'Today we applied a feeding with a pre-emergent weed barrier and insect control, which fits the fall season. '
-      + 'Our photo read shows few weeds, thick coverage and good color, along with a few areas showing stress we are keeping an eye on. '
+      + 'Our photo read shows very few weeds, thick coverage and healthy color, along with a few areas showing stress we are keeping an eye on. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. '
       + 'At the next visit we will look at stressed areas.',
+  },
+  healthyBandsStayDistinct: {
+    facts: {
+      season: 'fall',
+      applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }],
+      areas: areas({ weed_pressure: 'healthy', coverage: 'healthy', color_vigor: 'strong' }),
+      findings: [],
+      watchNext: [],
+    },
+    expected: 'Today we applied a feeding, which fits the fall season. '
+      + 'Our photo read shows weeds well in check, good coverage overall with only minor thinning and strong color. '
+      + 'Results from treatments like these build gradually, and each visit adds to the last one.',
   },
   insectOnlySummer: {
     facts: {
@@ -44,55 +55,48 @@ const CASES = {
       applied: [{ name: 'Insecticide X', kind: 'insecticide' }],
       areas: areas({ damage_disease_signals: 'watch' }),
       findings: [{ label: 'general lawn stress', confidence: 'moderate' }],
-      watering: { state: 'water_in', inches: 0.25, hours: 24 },
       watchNext: [],
     },
     expected: 'Today we applied insect control, which fits the summer season. '
       + 'In the photos we noticed some general lawn stress. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please water the treated lawn in with 0.25 inches of water within 24 hours of today’s visit. '
       + 'At the next visit we will look at stressed areas.',
   },
-  fungicideOnlyWaterIn: {
-    facts: { season: 'spring', applied: [{ name: 'Fungicide Y', kind: 'fungicide' }], areas: [], findings: [], watering: { state: 'water_in', inches: 1, hours: 12 }, watchNext: [] },
+  fungicideOnly: {
+    facts: { season: 'spring', applied: [{ name: 'Fungicide Y', kind: 'fungicide' }], areas: [], findings: [], watchNext: [] },
     expected: 'Today we applied disease protection, which fits the spring season. '
-      + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please water the treated lawn in with 1 inch of water within 12 hours of today’s visit.',
+      + 'Results from treatments like these build gradually, and each visit adds to the last one.',
   },
-  holdWithFinding: {
+  weedFindingWithMowing: {
     facts: {
       season: 'winter',
       applied: [{ name: 'Liquid Z', kind: 'herbicide' }],
       areas: areas({ weed_pressure: 'watch' }),
       findings: [{ label: 'weed pressure', confidence: 'high' }],
-      watering: { state: 'hold' },
       watchNext: ['mowing'],
     },
     expected: 'Today we applied weed control, which fits the winter season. '
       + 'In the photos we noticed some weed pressure. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please hold off on watering the treated lawn for now and follow the watering note in this report for when to start again. '
       + 'At the next visit we will look at weeds and mowing height.',
   },
-  holdThenWaterIn: {
+  twoHedgedFindings: {
     facts: {
       season: 'fall',
       applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }, { name: 'Micro blend', kind: 'supplement' }],
       areas: areas({ color_vigor: 'needs_attention', coverage: 'watch' }),
       findings: [{ label: 'color and nutrient stress', confidence: 'low' }, { label: 'thinning turf', confidence: 'unknown' }],
-      watering: { state: 'hold_then_water_in' },
       watchNext: [],
     },
     expected: 'Today we applied a feeding and a micronutrient and color boost, which fits the fall season. '
       + 'In the photos we noticed what may be some color and nutrient stress and what may be some thinning turf. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please follow the watering note in this report: hold off first, then water the treatment in when it says. '
       + 'At the next visit we will look at thin areas and lawn color.',
   },
-  noFindingsNoWatering: {
-    facts: { season: 'fall', applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }], areas: areas({ weed_pressure: 'healthy' }), findings: [], watering: null, watchNext: [] },
+  noFindings: {
+    facts: { season: 'fall', applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }], areas: areas({ weed_pressure: 'strong' }), findings: [], watchNext: [] },
     expected: 'Today we applied a feeding, which fits the fall season. '
-      + 'Our photo read shows few weeds. '
+      + 'Our photo read shows very few weeds. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one.',
   },
   lowConfidenceThinning: {
@@ -101,11 +105,10 @@ const CASES = {
       applied: [{ name: 'LESCO 24-0-11', kind: 'fertilizer' }],
       areas: areas({ coverage: 'watch', color_vigor: 'healthy' }),
       findings: [{ label: 'thinning turf', confidence: 'low' }],
-      watering: null,
       watchNext: [],
     },
     expected: 'Today we applied a feeding, which fits the fall season. '
-      + 'Our photo read shows good color. '
+      + 'Our photo read shows healthy color. '
       + 'In the photos we noticed what may be some thinning turf. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
       + 'At the next visit we will look at thin areas.',
@@ -116,11 +119,11 @@ for (const c of Object.values(CASES)) c.facts = { ...c.facts, recurring: true, n
 const composeCase = (name) => summary.composeVisitSummary(CASES[name].facts);
 
 const DIGIT_RE = /\d/;
-const WATERING_SENTENCE_RE = /^Please /;
 const TIME_WORD_RE = /\b(?:today|tomorrow|yesterday|tonight|week|weeks|month|months|day|days|soon|shortly|within\s+\d+\s+(?:days?|weeks?)|by\s+(?:next|the\s+next)|in\s+\d+)\b/i;
 const FUTURE_TREATMENT_RE = /\bwe(?:['’]ll|\s+will)\s+(?!look at\b)|\bwill\s+(?:apply|treat|spray|return|come|schedule|re-?treat)|\bnext\s+(?:application|treatment|round)\b|\bfollow[\s-]?up\b/i;
 const ALL_CLEAR_RE = /\bno\s+(?:\w+\s+)?(?:issues?|problems?|concerns?|pests?|damage|weeds?|disease|stress)\b|\bnothing\s+(?:wrong|to\s+worry|of\s+concern)|\ball\s+clear\b|\bperfect|\bflawless|significant|healthy\s+lawn|pest[\s-]?free|guarantee/i;
 const RETIRED_NAME_RE = /&\s*lawn\s*care|lawn\s*care\s*&|Waves Pest Control & /i;
+const WATERING_RE = /\b(?:water|watering|irrigat\w*|sprinkler\w*|hold off)\b/i;
 
 // Every rule the owner asked the paragraph to hold, on one composed text.
 function expectOwnerRules(text) {
@@ -128,11 +131,9 @@ function expectOwnerRules(text) {
   expect(sentences.length).toBeLessThanOrEqual(6);
   expect(text.split(/\s+/).length).toBeLessThanOrEqual(150);
   for (const name of PRODUCT_WORDS) expect(text).not.toContain(name);
-  // Digits: only the frozen watering amounts, in a watering sentence.
-  for (const s of sentences) if (!WATERING_SENTENCE_RE.test(s)) expect(s).not.toMatch(DIGIT_RE);
-  // Time words: none outside the watering sentence ("today" opens the applied line and the visit possessive).
+  expect(text).not.toMatch(DIGIT_RE); // no digits at all: the watering step is the banner's
+  expect(text).not.toMatch(WATERING_RE);
   for (const s of sentences) {
-    if (WATERING_SENTENCE_RE.test(s)) continue;
     expect(lawnResultTimingViolation(s, { carePlanExempt: false })).toBe(false);
     expect(s.replace(/^Today we applied/, '')).not.toMatch(TIME_WORD_RE);
   }
@@ -169,18 +170,44 @@ describe('the paragraphs the owner reads', () => {
   });
 
   test('a visit with a photo read and no product still gets one (no applied line, no results line)', () => {
-    const r = summary.composeVisitSummary({ areas: areas({ weed_pressure: 'strong' }) });
-    expect(r.paragraph).toBe('Our photo read shows few weeds.');
+    expect(summary.composeVisitSummary({ areas: areas({ weed_pressure: 'strong' }) }).paragraph).toBe('Our photo read shows very few weeds.');
+  });
+
+  test('there is no watering sentence, whatever the facts carry', () => {
+    const noisy = { ...CASES.noFindings.facts, watering: { state: 'water_in', inches: 0.5, hours: 24 } };
+    expect(summary.composeVisitSummary(noisy).paragraph).toBe(CASES.noFindings.expected);
+    expect(Object.keys(summary.normalizeFacts(noisy))).not.toContain('watering');
+    expect(Object.keys(summary.buildSlots(noisy))).not.toContain('watering');
+  });
+});
+
+describe('strong and healthy bands stay distinct (Codex r9)', () => {
+  const photoRead = (areaKey, status) => summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: areaKey, status }] }).paragraph;
+
+  test('coverage: strong is thick; healthy admits the minor thinning the report card describes', () => {
+    expect(photoRead('coverage', 'strong')).toContain('thick coverage');
+    const healthy = photoRead('coverage', 'healthy');
+    expect(healthy).toContain('good coverage overall with only minor thinning');
+    expect(healthy).not.toContain('thick');
+  });
+
+  test('weeds and color keep two phrases too, and every card has a phrase for each of its four bands (stress: the two concern bands)', () => {
+    expect(photoRead('weed_pressure', 'strong')).not.toBe(photoRead('weed_pressure', 'healthy'));
+    expect(photoRead('color_vigor', 'strong')).not.toBe(photoRead('color_vigor', 'healthy'));
+    for (const key of ['weed_pressure', 'coverage', 'color_vigor']) {
+      expect(Object.keys(summary.AREA_PHRASES[key]).sort()).toEqual(['healthy', 'needs_attention', 'strong', 'watch']);
+    }
+    expect(Object.keys(summary.AREA_PHRASES.damage_disease_signals).sort()).toEqual(['needs_attention', 'watch']);
   });
 });
 
 describe('what the facts can and cannot say', () => {
   test('a photo finding prints only while the report’s own card for that topic shows a concern', () => {
     const base = { applied: [{ name: 'x', kind: 'fertilizer' }], findings: [{ label: 'thinning turf', confidence: 'low' }] };
-    // Coverage reads healthy: "thick coverage" and "may be thinning turf" would contradict, so no finding.
+    // Coverage reads healthy: "good coverage" and "may be thinning turf" would contradict, so no finding.
     const healthy = summary.composeVisitSummary({ ...base, areas: areas({ coverage: 'healthy' }) }).paragraph;
-    expect(healthy).toContain('thick coverage');
-    expect(healthy).not.toMatch(/thinning/);
+    expect(healthy).toContain('good coverage overall');
+    expect(healthy).not.toMatch(/thinning turf/);
     // No card at all: no finding either.
     expect(summary.composeVisitSummary({ ...base, areas: [] }).paragraph).not.toMatch(/thinning/);
     // A concern on the card: the finding prints, hedged, and the card's own phrase steps aside.
@@ -204,9 +231,10 @@ describe('what the facts can and cannot say', () => {
     expect(f('weed pressure')).toHaveLength(1);
   });
 
-  test('a healthy stress card says nothing (no "no stress" all clear); a watch stress card says so', () => {
+  test('a strong or healthy stress card says nothing (no "no stress" all clear); a watch stress card says so', () => {
     const t = (status) => summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], areas: areas({ damage_disease_signals: status, weed_pressure: 'strong' }) }).paragraph;
     expect(t('healthy')).not.toMatch(/stress/);
+    expect(t('strong')).not.toMatch(/stress/);
     expect(t('watch')).toContain('a few areas showing stress we are keeping an eye on');
     expect(t('needs_attention')).toContain('some areas showing stress that need more attention');
   });
@@ -230,7 +258,7 @@ describe('what the facts can and cannot say', () => {
     expect(t([{ name: 'Wetter', kind: 'other' }])).toContain('Today we applied a lawn treatment.');
   });
 
-  test('the technician note, program line, headline, product names and rain are not inputs: passing them changes nothing', () => {
+  test('the technician note, program line, headline, product names, rain and watering are not inputs: passing them changes nothing', () => {
     const facts = CASES.stonewallCombinationFall.facts;
     const noisy = {
       ...facts,
@@ -238,83 +266,17 @@ describe('what the facts can and cannot say', () => {
       programLine: 'In October the program targets large patch and grubs.',
       headline: 'Your lawn is in good shape',
       recentRain: true,
+      watering: { state: 'hold' },
       knownProductNames: ['Celsius WG'],
     };
     expect(summary.composeVisitSummary(noisy).paragraph).toBe(CASES.stonewallCombinationFall.expected);
-    expect(Object.keys(summary.normalizeFacts(noisy)).sort()).toEqual(['applied', 'areas', 'findings', 'nextVisitBooked', 'recurring', 'season', 'watchNext', 'watering']);
+    expect(Object.keys(summary.normalizeFacts(noisy)).sort()).toEqual(['applied', 'areas', 'findings', 'nextVisitBooked', 'recurring', 'season', 'watchNext']);
   });
 
   test('a product enters the facts as its kind only: no name, active or rate survives', () => {
     const f = summary.normalizeFacts({ applied: [{ name: 'Stonewall 0.43% + 15-0-15', activeIngredient: 'prodiamine', kind: 'pre_emergent' }] });
     expect(f.applied).toEqual([{ kind: 'pre_emergent', alsoFeeds: true }]);
     expect(JSON.stringify(f)).not.toMatch(/Stonewall|prodiamine|0\.43/);
-  });
-});
-
-describe('watering comes from the frozen instruction only', () => {
-  const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z' };
-
-  test('hours are the frozen deadline rounded DOWN, never up', () => {
-    expect(wateringFacts(instruction)).toMatchObject({ state: 'water_in', inches: 0.5, hours: 24 });
-    // 23 h 30 min left: 23, not 24.
-    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-07T14:10:00Z' })).toMatchObject({ state: 'water_in', inches: 0.5, hours: 23 });
-    // A same-day cap shortens the window.
-    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T23:59:00Z' })).toMatchObject({ state: 'water_in', inches: 0.5, hours: 9 });
-    // Under an hour, an unreadable deadline or no inches: no step (the banner owns it).
-    expect(wateringFacts({ ...instruction, waterInBy: '2026-10-06T15:20:00Z' })).toBeNull();
-    expect(wateringFacts({ ...instruction, waterInBy: null })).toBeNull();
-    expect(wateringFacts({ ...instruction, waterInInches: null })).toBeNull();
-  });
-
-  test('the watering rule\'s own maximum window is honored: 96 h and 168 h keep their step, 169 h does not', () => {
-    const at = '2026-10-06T14:00:00Z';
-    const by = (h) => new Date(Date.parse(at) + h * 3600000).toISOString();
-    const facts = (h) => summary.normalizeFacts({ watering: wateringFacts({ ...instruction, completedAt: at, waterInBy: by(h) }) }).watering;
-    expect(facts(96)).toMatchObject({ state: 'water_in', inches: 0.5, hours: 96 });
-    expect(facts(168).hours).toBe(168);
-    expect(facts(169)).toBeNull();
-    const text = summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], watering: facts(96) }).paragraph;
-    expect(text).toContain('Please water the treated lawn in with 0.5 inches of water within 96 hours of today’s visit.');
-    expect(require('../services/service-report/lawn-watering-rule').MAX_HOURS).toBe(168);
-  });
-
-  test('hold has no numbers; none, null and an unknown state give no step', () => {
-    expect(wateringFacts({ state: 'hold' })).toMatchObject({ state: 'hold' });
-    // A hold before a water-in carries its own release condition in the report's note: no amounts here.
-    expect(wateringFacts({ state: 'hold_then_water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z', holdUntil: '2026-10-06T20:00:00Z' })).toMatchObject({ state: 'hold_then_water_in' });
-    expect(wateringFacts({ state: 'none' })).toBeNull();
-    expect(wateringFacts({ state: null })).toBeNull();
-    expect(wateringFacts(null)).toBeNull();
-  });
-
-  test('a half-known water-in step is dropped, never guessed', () => {
-    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0.5 } }).watering).toBeNull();
-    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0, hours: 24 } }).watering).toBeNull();
-    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 9, hours: 24 } }).watering).toBeNull();
-    expect(summary.normalizeFacts({ watering: { state: 'bogus' } }).watering).toBeNull();
-    expect(summary.normalizeFacts({ watering: { state: 'hold' } }).watering).toMatchObject({ state: 'hold', inches: null, hours: null });
-    expect(summary.normalizeFacts({ watering: { state: 'hold_then_water_in', inches: 0.5, hours: 24 } }).watering).toMatchObject({ state: 'hold_then_water_in', inches: null, hours: null });
-    // A fractional hour from a hand-built fact floors.
-    expect(summary.normalizeFacts({ watering: { state: 'water_in', inches: 0.5, hours: 23.9 } }).watering.hours).toBe(23);
-  });
-
-  test('each state says its own action: water in, hold, or hold then water in', () => {
-    const t = (watering) => summary.composeVisitSummary({ applied: [{ kind: 'fertilizer', name: 'a' }], watering }).paragraph;
-    const waterIn = t({ state: 'water_in', inches: 0.5, hours: 24 });
-    expect(waterIn).toContain('Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit.');
-    expect(waterIn).not.toMatch(/hold/);
-    const hold = t({ state: 'hold' });
-    expect(hold).toMatch(/hold off on watering/);
-    expect(hold).not.toMatch(/\d/);
-    expect(hold).not.toMatch(/water (?:it )?in/);
-    // Hold then water in: the frozen hold's release condition and the deadline live in the report's
-    // note, so the sentence defers to it, in order, with no amount, hour or clock time of its own.
-    const both = t({ state: 'hold_then_water_in', inches: 1, hours: 24 });
-    expect(both).toContain('Please follow the watering note in this report: hold off first, then water the treatment in when it says.');
-    expect(both).not.toMatch(/\d|within|at first/);
-    expect(both.indexOf('hold off')).toBeLessThan(both.indexOf('water the treatment in'));
-    // No instruction: no watering sentence at all.
-    expect(t(null)).not.toMatch(/water/i);
   });
 
   test('seasonOf', () => {
@@ -332,12 +294,13 @@ describe('the closed tables', () => {
     ...Object.values(T.TOPIC_PHRASES),
   ];
 
-  test('no phrase carries a digit, a product name, a time word, an all clear or a promise', () => {
+  test('no phrase carries a digit, a product name, a time word, an all clear, a promise or watering words', () => {
     for (const phrase of everyPhrase()) {
       expect(phrase).not.toMatch(DIGIT_RE);
       expect(phrase).not.toMatch(TIME_WORD_RE);
       expect(phrase).not.toMatch(ALL_CLEAR_RE);
       expect(phrase).not.toMatch(FUTURE_TREATMENT_RE);
+      expect(phrase).not.toMatch(WATERING_RE);
       expect(phrase).not.toMatch(/\b(?:rain|forecast)\b/i);
       for (const name of PRODUCT_WORDS) expect(phrase).not.toContain(name);
     }
@@ -359,71 +322,35 @@ describe('the closed tables', () => {
     }
   });
 
-  test('every watering sentence, for 1 and for many inches and hours, passes the screens', () => {
-    for (const [inches, hours] of [[0.25, 1], [0.5, 24], [1, 12], [1.5, 72]]) {
-      for (const text of [
-        T.WATERING_SENTENCE.water_in(`${inches} ${inches === 1 ? 'inch' : 'inches'}`, `${hours} ${hours === 1 ? 'hour' : 'hours'}`),
-        T.WATERING_SENTENCE.hold_then_water_in(),
-        T.WATERING_SENTENCE.hold(),
-      ]) {
-        expect(customerCopyViolations(text)).toEqual([]);
-        expect(lawnResultTimingViolation(text)).toBe(false);
-        expect(text).not.toMatch(FUTURE_TREATMENT_RE);
-      }
-    }
-  });
-
-  test('the longest paragraph any valid slots can render fits the cap and the screens (recurring, next visit, hold, finding, area)', () => {
+  test('the longest paragraph any valid slots can render fits the cap and the screens (recurring, next visit, finding, area)', () => {
     const slots = {
       season: 'winter',
       applied: ['combo_insecticide', 'supplement', 'herbicide', 'fungicide'],
-      areas: [{ key: 'weed_pressure', band: 'needs_attention' }, { key: 'coverage', band: 'needs_attention' }, { key: 'color_vigor', band: 'needs_attention' }, { key: 'damage_disease_signals', band: 'needs_attention' }],
+      areas: [{ key: 'weed_pressure', band: 'needs_attention' }, { key: 'coverage', band: 'healthy' }, { key: 'color_vigor', band: 'needs_attention' }, { key: 'damage_disease_signals', band: 'needs_attention' }],
       findings: [{ label: 'color and nutrient stress', hedged: true }, { label: 'a lawn condition we are monitoring', hedged: true }, { label: 'general lawn stress', hedged: true }],
       recurring: true,
       nextVisit: true,
-      watering: { state: 'hold' },
       watch: ['weeds', 'thin', 'color'],
     };
     const sentences = summary.renderSentences(slots);
-    expect(sentences).toHaveLength(6);
+    expect(sentences).toHaveLength(5);
     const text = sentences.join(' ');
-    expect(splitSentences(text)).toHaveLength(6);
+    expect(splitSentences(text)).toHaveLength(5);
     expect(text.length).toBeLessThanOrEqual(summary.MAX_TEXT_CHARS);
     expect(summary._test.textProblem(text)).toBeNull();
   });
 
-  test('every watering template is ONE sentence, and no combination of slots passes six sentences', () => {
-    const T = summary;
-    for (const text of [T.WATERING_SENTENCE.hold(), T.WATERING_SENTENCE.hold_then_water_in(), T.WATERING_SENTENCE.water_in('0.5 inches', '24 hours')]) {
-      expect(splitSentences(text)).toHaveLength(1);
-    }
-    const base = {
-      season: 'fall',
-      applied: ['fertilizer'],
-      areas: [{ key: 'weed_pressure', band: 'good' }],
-      findings: [{ label: 'thinning turf', hedged: true }],
-      watch: ['weeds'],
-    };
+  test('no combination of slots passes the six-sentence cap', () => {
+    const base = { season: 'fall', applied: ['fertilizer'], areas: [{ key: 'weed_pressure', band: 'strong' }], findings: [{ label: 'thinning turf', hedged: true }], watch: ['weeds'] };
     for (const recurring of [true, false]) {
       for (const nextVisit of [true, false]) {
-        for (const watering of [null, { state: 'hold' }, { state: 'hold_then_water_in' }, { state: 'water_in', inches: 1, hours: 12 }]) {
-          const text = T.render({ ...base, recurring, nextVisit, watering });
-          expect(splitSentences(text).length).toBeLessThanOrEqual(T.MAX_SENTENCES);
-        }
+        expect(splitSentences(T.render({ ...base, recurring, nextVisit })).length).toBeLessThanOrEqual(T.MAX_SENTENCES);
       }
     }
   });
 
-  test('every status band of every area has the phrase the renderer needs, or none by design', () => {
-    for (const key of Object.keys(T.AREA_PHRASES)) {
-      const bands = Object.keys(T.AREA_PHRASES[key]);
-      expect(bands).toEqual(expect.arrayContaining(['watch', 'needs_attention']));
-    }
-    expect(T.AREA_PHRASES.damage_disease_signals.good).toBeUndefined();
-  });
-
   test('a render never prints an id outside the tables', () => {
-    const text = summary.render({ season: 'monsoon', applied: ['__proto__', 'constructor', 'rodenticide'], areas: [{ key: 'toString', band: 'good' }], findings: [{ label: 'chinch bugs', hedged: false }], watering: { state: 'water_in', inches: 99, hours: 1000 }, watch: ['nothing'] });
+    const text = summary.render({ season: 'monsoon', applied: ['__proto__', 'constructor', 'rodenticide'], areas: [{ key: 'toString', band: 'strong' }, { key: 'coverage', band: 'good' }], findings: [{ label: 'chinch bugs', hedged: false }], watch: ['nothing'] });
     expect(text).toBe('');
   });
 });
@@ -446,28 +373,28 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
     },
   };
   const RECORD = { id: 's1', technician_notes: 'Chinch bugs by the driveway.', service_date: '2026-10-06', conditions: { rain_24h_in: 1.2 } };
-  const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: '2026-10-07T14:40:00Z' };
   const reads = [];
-  const fakeKnex = () => (table) => {
+  const knexWith = (reviewed, extra = {}) => (table) => {
     reads.push(table);
     if (table !== 'lawn_assessments' && table !== 'lawn_assessment_runs') throw new Error(`unexpected read of ${table}`);
     const q = { where: () => q };
     q.first = async () => (table === 'lawn_assessments'
       ? { id: 77, customer_id: 9, confirmed_by_tech: true }
-      : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: [{ label: 'thinning turf', confidence: 'low', keep: true }, { label: 'chinch bugs', confidence: 'high', keep: true }], added_details: [] });
+      : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: reviewed, added_details: [], ...extra });
     return q;
   };
+  const DEFAULT_REVIEWED = [{ label: 'thinning turf', confidence: 'low', keep: true }, { label: 'chinch bugs', confidence: 'high', keep: true }];
+  const fakeKnex = () => knexWith(DEFAULT_REVIEWED);
 
-  test('facts are kinds, statuses, kept symptom findings, topics and the frozen watering step; no catalog read', async () => {
+  test('facts are kinds, statuses, kept symptom findings and topics; no catalog read, no watering', async () => {
     reads.length = 0;
-    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction, knex: fakeKnex() });
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, knex: fakeKnex() });
     expect(reads).toEqual(['lawn_assessments', 'lawn_assessment_runs']);
     expect(facts).toEqual({
       season: 'fall',
       applied: [{ kind: 'fertilizer', alsoFeeds: false }],
       findings: [{ label: 'thinning turf', confidence: 'low', canDetermine: true }],
       areas: [{ key: 'coverage', status: 'watch' }, { key: 'color_vigor', status: 'strong' }],
-      watering: { state: 'water_in', inches: 0.5, hours: 24, expiresAt: null },
       watchNext: ['weeds'],
       recurring: false,
       nextVisitBooked: false,
@@ -477,24 +404,18 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
   });
 
   test('the composed paragraph for that visit (recurring plan visit, next visit booked)', async () => {
-    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction, programVisit: true, nextVisitBooked: true, knex: fakeKnex() });
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, programVisit: true, nextVisitBooked: true, knex: fakeKnex() });
     const { paragraph } = summary.composeVisitSummary(facts);
     expect(paragraph).toBe('Today we applied a feeding, which fits the fall season. '
-      + 'Our photo read shows good color. '
+      + 'Our photo read shows strong color. '
       + 'In the photos we noticed what may be some thinning turf. '
       + 'Results from treatments like these build gradually, and each visit adds to the last one. '
-      + 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. '
       + 'At the next visit we will look at weeds and thin areas.');
     expectOwnerRules(paragraph);
   });
 
-  describe('photo findings only (Codex r3)', () => {
-    const knexWithRun = (run) => (table) => {
-      const q = { where: () => q };
-      q.first = async () => (table === 'lawn_assessments' ? { id: 77, customer_id: 9, confirmed_by_tech: true } : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', ...run });
-      return q;
-    };
-    const gather = (run) => gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction: null, knex: knexWithRun(run) });
+  describe('photo findings only', () => {
+    const gather = (run) => gatherVisitSummaryFacts({ record: RECORD, data: DATA, knex: knexWith(run.reviewed_findings, run) });
 
     test('a technician-added detail has no photo provenance and never becomes "In the photos we noticed"', async () => {
       const facts = await gather({
@@ -502,34 +423,33 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
         added_details: [{ label: 'weed pressure', confidence: 'high' }, { label: 'color stress', confidence: 'high' }],
       });
       expect(facts.findings.map((f) => f.label)).toEqual(['thinning turf']);
-      const added = await gather({ reviewed_findings: [], added_details: [{ label: 'thinning turf', confidence: 'high' }] });
-      expect(added.findings).toEqual([]);
-      // A finding the technician unchecked is not kept either.
+      expect((await gather({ reviewed_findings: [], added_details: [{ label: 'thinning turf', confidence: 'high' }] })).findings).toEqual([]);
       expect((await gather({ reviewed_findings: [{ label: 'thinning turf', confidence: 'high', keep: false }], added_details: [] })).findings).toEqual([]);
     });
 
     test('a finding the photos could not determine is always hedged, whatever its confidence', async () => {
       const facts = await gather({ reviewed_findings: [{ label: 'thinning turf', confidence: 'high', can_determine: false, keep: true }], added_details: [] });
       expect(facts.findings).toEqual([{ label: 'thinning turf', confidence: 'high', canDetermine: false }]);
-      expect(summary.composeVisitSummary({ ...facts, applied: [{ kind: 'fertilizer', name: 'a' }] }).paragraph).toContain('we noticed what may be some thinning turf');
-      // The same finding, determinable and high confidence, speaks plainly.
+      expect(summary.composeVisitSummary({ ...facts, applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'coverage', status: 'watch' }] }).paragraph).toContain('we noticed what may be some thinning turf');
       const plain = await gather({ reviewed_findings: [{ label: 'thinning turf', confidence: 'high', keep: true }], added_details: [] });
-      expect(summary.composeVisitSummary({ ...plain, applied: [{ kind: 'fertilizer', name: 'a' }] }).paragraph).toContain('we noticed some thinning turf');
+      expect(summary.composeVisitSummary({ ...plain, applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'coverage', status: 'watch' }] }).paragraph).toContain('we noticed some thinning turf');
     });
 
-    test('the same label twice keeps the more cautious read', () => {
-      const f = summary.normalizeFacts({ findings: [{ label: 'thinning turf', confidence: 'high' }, { label: 'thinning turf', confidence: 'low', canDetermine: false }] }).findings;
-      expect(f).toEqual([{ label: 'thinning turf', confidence: 'low', canDetermine: false }]);
+    test('duplicate labels keep the least-confident read, in either order', async () => {
+      for (const order of [['high', 'low'], ['low', 'high']]) {
+        const facts = await gather({ reviewed_findings: order.map((confidence) => ({ label: 'thinning turf', confidence, keep: true })), added_details: [] });
+        expect(facts.findings).toEqual([{ label: 'thinning turf', confidence: 'low', canDetermine: true }]);
+      }
+      expect(summary.normalizeFacts({ findings: [{ label: 'thinning turf', confidence: 'high' }, { label: 'thinning turf', confidence: 'low', canDetermine: false }] }).findings)
+        .toEqual([{ label: 'thinning turf', confidence: 'low', canDetermine: false }]);
     });
   });
 
-  describe('recurring-plan promises (Codex r4)', () => {
-    // nextVisit: the property-scoped answer the report build hands the gate (true = a scheduled booking).
-    const NEXT = true;
+  describe('recurring-plan promises', () => {
     const paragraphFor = async ({ programVisit, nextVisit }) => {
       // snapshot.nextVisit is customer-wide while copy v6 is off: it is never the source.
       const data = { ...DATA, reportV2: { ...DATA.reportV2, snapshot: { ...DATA.reportV2.snapshot, nextVisit: { label: 'Oct 20', source: 'scheduled' } } } };
-      const facts = await gatherVisitSummaryFacts({ record: RECORD, data, instruction: null, programVisit, nextVisitBooked: nextVisit, knex: fakeKnex() });
+      const facts = await gatherVisitSummaryFacts({ record: RECORD, data, programVisit, nextVisitBooked: nextVisit, knex: fakeKnex() });
       return { facts, text: summary.composeVisitSummary(facts).paragraph };
     };
     const RESULTS = 'each visit adds to the last one';
@@ -537,7 +457,7 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
 
     test('a one-time visit gets neither the results line nor the next-visit line, even with another visit booked', async () => {
       for (const programVisit of [false, undefined]) {
-        const { facts, text } = await paragraphFor({ programVisit, nextVisit: NEXT });
+        const { facts, text } = await paragraphFor({ programVisit, nextVisit: true });
         expect(facts).toMatchObject({ recurring: false, nextVisitBooked: true });
         expect(text).not.toContain(RESULTS);
         expect(text).not.toContain(NEXT_LINE);
@@ -545,13 +465,13 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
       }
     });
 
-    test('a recurring plan visit with a booked next visit gets both', async () => {
-      const { text } = await paragraphFor({ programVisit: true, nextVisit: NEXT });
+    test('a recurring plan visit with a booked next visit at this property gets both', async () => {
+      const { text } = await paragraphFor({ programVisit: true, nextVisit: true });
       expect(text).toContain(RESULTS);
       expect(text).toContain(NEXT_LINE);
     });
 
-    test('a recurring plan visit with no booking (or only a cadence estimate) gets results but no next-visit line', async () => {
+    test('a recurring plan visit with no booking at this property gets results but no next-visit line', async () => {
       for (const nextVisit of [false, undefined]) {
         const { facts, text } = await paragraphFor({ programVisit: true, nextVisit });
         expect(facts).toMatchObject({ recurring: true, nextVisitBooked: false });
@@ -560,53 +480,30 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
       }
     });
 
-    test('the decision is frozen in the slots: read-time equality holds, and a flipped flag no longer matches the text', async () => {
-      const { facts } = await paragraphFor({ programVisit: true, nextVisit: NEXT });
+    test('the decision is frozen in the slots: a flipped flag no longer matches the text', async () => {
+      const { facts } = await paragraphFor({ programVisit: true, nextVisit: true });
       const { slots, paragraph } = summary.composeVisitSummary(facts);
       expect(slots).toMatchObject({ recurring: true, nextVisit: true });
-      const one = summary.composeVisitSummary({ ...facts, recurring: false });
-      expect(one.slots).toMatchObject({ recurring: false, nextVisit: false, watch: [] });
+      expect(summary.composeVisitSummary({ ...facts, recurring: false }).slots).toMatchObject({ recurring: false, nextVisit: false, watch: [] });
       expect(summary.render({ ...slots, recurring: false })).not.toBe(paragraph);
-    });
-  });
-
-  describe('duplicate findings keep the least-confident evidence (Codex r4)', () => {
-    const knexWith = (reviewed) => (table) => {
-      const q = { where: () => q };
-      q.first = async () => (table === 'lawn_assessments' ? { id: 77, customer_id: 9, confirmed_by_tech: true } : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: reviewed, added_details: [] });
-      return q;
-    };
-    const gather = (reviewed) => gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction: null, knex: knexWith(reviewed) });
-    const row = (confidence) => ({ label: 'thinning turf', confidence, keep: true });
-
-    test('high then low, and low then high, are both hedged', async () => {
-      for (const order of [['high', 'low'], ['low', 'high']]) {
-        const facts = await gather(order.map(row));
-        expect(facts.findings).toEqual([{ label: 'thinning turf', confidence: 'low', canDetermine: true }]);
-        expect(summary.composeVisitSummary({ ...facts, applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'coverage', status: 'watch' }] }).paragraph).toContain('what may be some thinning turf');
-      }
-      // Two high-confidence rows stay plain.
-      expect((await gather(['high', 'moderate'].map(row))).findings[0].confidence).toMatch(/high|moderate/);
     });
   });
 
   test('gather then compose keeps a combination product\'s feeding (normalization is idempotent)', async () => {
     const data = { ...DATA, reportV2: { ...DATA.reportV2, treatment: { products: [{ name: 'Stonewall 0.43% + 15-0-15', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent' }] } } };
-    const facts = await gatherVisitSummaryFacts({ record: RECORD, data, instruction, knex: fakeKnex() });
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data, knex: fakeKnex() });
     expect(facts.applied).toEqual([{ kind: 'pre_emergent', alsoFeeds: true }]);
     expect(summary.normalizeFacts(summary.normalizeFacts(facts))).toEqual(facts);
     expect(summary.composeVisitSummary(facts).paragraph).toContain('Today we applied a feeding with a pre-emergent weed barrier, which fits the fall season.');
   });
 
-  test('a failed product read writes nothing, with the watering gate off (no instruction, no productsLoadFailed)', async () => {
+  test('a failed product read writes nothing, with the watering gate off', async () => {
     const degraded = { ...DATA, lawnAssessment: { assessmentId: 77, productsReadFailed: true } };
-    expect(await gatherVisitSummaryFacts({ record: RECORD, data: degraded, instruction: null, knex: fakeKnex() })).toBeNull();
-    // Through the completion step: nothing frozen.
-    const notes = { current: {} };
-    const knex = Object.assign(() => ({ where: () => ({ first: async () => ({ structured_notes: notes.current }) }) }), { raw: () => ({}) });
+    expect(await gatherVisitSummaryFacts({ record: RECORD, data: degraded, knex: fakeKnex() })).toBeNull();
+    const knex = Object.assign(() => ({ where: () => ({ first: async () => ({ structured_notes: {} }) }) }), { raw: () => ({}) });
     const out = await summary.createAndFreezeVisitSummary({
       serviceRecordId: 's1', assessmentId: 77, structuredNotes: {}, knex,
-      gatherInputs: () => gatherVisitSummaryFacts({ record: RECORD, data: degraded, instruction: null, knex: fakeKnex() }),
+      gatherInputs: () => gatherVisitSummaryFacts({ record: RECORD, data: degraded, knex: fakeKnex() }),
     });
     expect(out.status).toBe('no_inputs');
     expect(out.entry).toBeUndefined();
@@ -616,6 +513,23 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
     expect(await gatherVisitSummaryFacts({ record: RECORD, data: { ...DATA, lawnAssessment: { assessmentId: 77, lawnCopyV6Unfrozen: true } }, knex: fakeKnex() })).toBeNull();
     expect(await gatherVisitSummaryFacts({ record: RECORD, data: { reportV2: DATA.reportV2, lawnAssessment: {} }, knex: fakeKnex() })).toBeNull();
     expect(await gatherVisitSummaryFacts({ record: RECORD, data: {}, knex: fakeKnex() })).toBeNull();
+  });
+});
+
+describe('the PDF path keeps the whole frozen summary', () => {
+  test('reconciliation shortens todaysResult to a first sentence but leaves data.summary and its source whole', () => {
+    const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
+    const { paragraph } = composeCase('stonewallCombinationFall');
+    const data = {
+      serviceLine: 'lawn',
+      summary: paragraph,
+      summarySource: 'lawn_visit_summary',
+      reportV2: { insights: [{ category: 'damage', status: 'watch', headline: 'Stress watch' }], snapshot: {} },
+    };
+    applyLawnReportReconciliation(data, null);
+    expect(data.summary).toBe(paragraph);
+    expect(data.summarySource).toBe('lawn_visit_summary');
+    expect(String(data.reportV2.todaysResult).length).toBeLessThan(paragraph.length);
   });
 });
 
@@ -638,8 +552,8 @@ describe('freeze and read-back', () => {
     knex.raw = (sql, bindings) => ({ sql, bindings });
     return { knex, state };
   }
-  const freeze = (knex, facts = CASES.stonewallCombinationFall.facts, extra = {}) => summary.createAndFreezeVisitSummary({
-    serviceRecordId: 's1', assessmentId: 77, getStructuredNotes: async () => (await knex('x').first()).structured_notes, gatherInputs: async () => facts, knex, ...extra,
+  const freeze = (knex, facts = CASES.stonewallCombinationFall.facts) => summary.createAndFreezeVisitSummary({
+    serviceRecordId: 's1', assessmentId: 77, getStructuredNotes: async () => (await knex('x').first()).structured_notes, gatherInputs: async () => facts, knex,
   });
 
   test('freezes { text, slots } under lawnVisitSummary[assessmentId]; a retry changes nothing; the render reads it back', async () => {
@@ -649,12 +563,25 @@ describe('freeze and read-back', () => {
     const entry = state.notes.lawnVisitSummary['77'];
     expect(entry).toMatchObject({ v: summary.FREEZE_VERSION, assessmentId: '77', text: CASES.stonewallCombinationFall.expected });
     expect(entry.slots).toMatchObject({ season: 'fall', applied: ['combo_pre_emergent', 'insecticide'] });
-    expect(entry).not.toHaveProperty('sources');
-    expect((await freeze(knex, CASES.holdWithFinding.facts)).status).toBe('already_frozen');
-    expect(state.notes.lawnVisitSummary['77'].text).toBe(CASES.stonewallCombinationFall.expected);
+    expect(entry.slots).not.toHaveProperty('watering');
+    expect((await freeze(knex, CASES.weedFindingWithMowing.facts)).status).toBe('already_frozen');
     expect(summary.readFrozenVisitSummary(state.notes, 77)).toBe(CASES.stonewallCombinationFall.expected);
     expect(summary.visitSummarySignature(state.notes, 77)).toMatch(/^:tp=[0-9a-f]{8}$/);
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('a read depends only on the record: no gate, no clock', async () => {
+    const { knex, state } = fakeKnex();
+    await freeze(knex);
+    const reads = [];
+    for (const gate of [undefined, 'true', 'false']) {
+      if (gate === undefined) delete process.env.GATE_LAWN_VISIT_SUMMARY_V2; else process.env.GATE_LAWN_VISIT_SUMMARY_V2 = gate;
+      reads.push(summary.readFrozenVisitSummary(state.notes, 77), summary.visitSummarySignature(state.notes, 77));
+    }
+    delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
+    expect(new Set(reads.filter((v, i) => i % 2 === 0)).size).toBe(1);
+    expect(new Set(reads.filter((v, i) => i % 2 === 1)).size).toBe(1);
+    expect(reads[0]).toBe(CASES.stonewallCombinationFall.expected);
   });
 
   test('nothing to ground freezes nothing; a failed fact read freezes nothing', async () => {
@@ -667,51 +594,6 @@ describe('freeze and read-back', () => {
     expect(b.state.notes.lawnVisitSummary).toBeUndefined();
   });
 
-  describe('an expired watering note is no longer commanded (Codex r3)', () => {
-    const EXPIRES = '2026-10-07T14:40:00.000Z';
-    const before = new Date('2026-10-07T10:00:00Z');
-    const after = new Date('2026-10-07T15:00:00Z');
-    const frozenWith = async (watering) => {
-      const { knex, state } = fakeKnex();
-      await freeze(knex, { ...CASES.stonewallCombinationFall.facts, watering });
-      return JSON.parse(JSON.stringify(state.notes));
-    };
-    const WATER_SENTENCE = 'Please water the treated lawn in with 0.5 inches of water within 24 hours of today’s visit. ';
-
-    test('before expiry the watering sentence shows; after it the paragraph is the same minus that sentence', async () => {
-      const notes = await frozenWith({ state: 'water_in', inches: 0.5, hours: 24, expiresAt: EXPIRES });
-      const full = CASES.stonewallCombinationFall.expected;
-      expect(summary.readFrozenVisitSummary(notes, 77, before)).toBe(full);
-      const expired = summary.readFrozenVisitSummary(notes, 77, after);
-      expect(expired).toBe(full.replace(WATER_SENTENCE, ''));
-      expect(expired).not.toMatch(/water/i);
-      expectOwnerRules(expired);
-    });
-
-    test('a hold ends the same way; with no known expiry (a drying hold) it stays', async () => {
-      const hold = await frozenWith({ state: 'hold', expiresAt: EXPIRES });
-      expect(summary.readFrozenVisitSummary(hold, 77, before)).toContain('hold off on watering');
-      expect(summary.readFrozenVisitSummary(hold, 77, after)).not.toMatch(/hold off|water/i);
-      const dry = await frozenWith({ state: 'hold', expiresAt: null });
-      expect(summary.readFrozenVisitSummary(dry, 77, after)).toContain('hold off on watering');
-    });
-
-    test('the PDF key follows what prints, and the strict guard still applies after expiry', async () => {
-      const notes = await frozenWith({ state: 'water_in', inches: 0.5, hours: 24, expiresAt: EXPIRES });
-      expect(summary.visitSummarySignature(notes, 77, before)).not.toBe(summary.visitSummarySignature(notes, 77, after));
-      expect(summary.visitSummarySignature(notes, 77, after)).toMatch(/^:tp=[0-9a-f]{8}$/);
-      notes.lawnVisitSummary['77'].text = notes.lawnVisitSummary['77'].text.replace('few weeds', 'hardly any weeds');
-      expect(summary.readFrozenVisitSummary(notes, 77, after)).toBeNull();
-    });
-
-    test('the facts carry the frozen instruction\'s expiry', () => {
-      const instruction = { state: 'water_in', waterInInches: 0.5, completedAt: '2026-10-06T14:40:00Z', waterInBy: EXPIRES, expiresAt: EXPIRES };
-      expect(wateringFacts(instruction).expiresAt).toBe(EXPIRES);
-      expect(wateringFacts({ state: 'hold', expiresAt: EXPIRES }).expiresAt).toBe(EXPIRES);
-      expect(wateringFacts({ state: 'hold' }).expiresAt).toBeNull();
-    });
-  });
-
   describe('the read-time guard prints nothing for an entry that no longer matches', () => {
     const entryOf = async () => {
       const { knex, state } = fakeKnex();
@@ -720,11 +602,12 @@ describe('freeze and read-back', () => {
     };
     const read = (notes) => summary.readFrozenVisitSummary(notes, 77);
 
-    test('a hand-edited text (banned copy, an all clear, a product name)', async () => {
+    test('a hand-edited text (banned copy, an all clear, a product name, a table change)', async () => {
       for (const edit of [
-        (t) => t.replace('Our photo read shows few weeds', 'There are no issues'),
+        (t) => t.replace('very few weeds', 'no issues'),
         (t) => `${t} We guarantee results.`,
         (t) => t.replace('a feeding', 'Stonewall'),
+        (t) => t.replace('very few weeds', 'hardly any weeds'),
       ]) {
         const notes = await entryOf();
         notes.lawnVisitSummary['77'].text = edit(notes.lawnVisitSummary['77'].text);
@@ -734,22 +617,16 @@ describe('freeze and read-back', () => {
 
     test('edited slots, a missing slots object, an old version or another assessment', async () => {
       let notes = await entryOf();
-      notes.lawnVisitSummary['77'].slots.watering.inches = 2;
+      notes.lawnVisitSummary['77'].slots.recurring = false;
       expect(read(notes)).toBeNull();
       notes = await entryOf();
       delete notes.lawnVisitSummary['77'].slots;
       expect(read(notes)).toBeNull();
       notes = await entryOf();
-      notes.lawnVisitSummary['77'].v = 1;
+      notes.lawnVisitSummary['77'].v = 2; // the earlier prototype shape (with a watering sentence)
       expect(read(notes)).toBeNull();
       notes = await entryOf();
       expect(summary.readFrozenVisitSummary(notes, 78)).toBeNull();
-    });
-
-    test('a table change after the freeze: the stored text no longer equals what the tables render', async () => {
-      const notes = await entryOf();
-      notes.lawnVisitSummary['77'].text = notes.lawnVisitSummary['77'].text.replace('few weeds', 'hardly any weeds');
-      expect(read(notes)).toBeNull();
     });
 
     test('an unchanged entry reads back', async () => {
@@ -758,26 +635,8 @@ describe('freeze and read-back', () => {
   });
 });
 
-describe('the PDF path keeps the whole frozen summary (Codex r5)', () => {
-  test('reconciliation shortens todaysResult to a first sentence but leaves data.summary and its source whole', () => {
-    const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
-    const { paragraph } = composeCase('stonewallCombinationFall');
-    const data = {
-      serviceLine: 'lawn',
-      summary: paragraph,
-      summarySource: 'lawn_visit_summary',
-      reportV2: { insights: [{ category: 'damage', status: 'watch', headline: 'Stress watch' }], snapshot: {} },
-    };
-    applyLawnReportReconciliation(data, null);
-    expect(data.summary).toBe(paragraph);
-    expect(data.summarySource).toBe('lawn_visit_summary');
-    // The reconciled result is only the lead sentence: the document must print data.summary for this source.
-    expect(String(data.reportV2.todaysResult).length).toBeLessThan(paragraph.length);
-  });
-});
-
 describe('the gate', () => {
-  test('dark by default, strict opt-in, read at call time', () => {
+  test('dark by default, strict opt-in, read at call time (it controls only the freeze)', () => {
     delete process.env.GATE_LAWN_VISIT_SUMMARY_V2;
     expect(featureGates.lawnVisitSummaryV2Live()).toBe(false);
     for (const v of ['1', 'on', 'TRUE', 'yes', '']) { process.env.GATE_LAWN_VISIT_SUMMARY_V2 = v; expect(featureGates.lawnVisitSummaryV2Live()).toBe(false); }
