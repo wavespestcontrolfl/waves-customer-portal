@@ -100,9 +100,15 @@ function sameProperty(pair) {
   return unit(pair.draft_address) === unit(pair.sent_address);
 }
 
+// A real send. Report click-to-estimate and plan-restart mints stamp sent_at
+// at mint time with nothing delivered (publish-without-delivery), so they
+// count only once deliveryState records a delivery — the same witness the
+// unworked-comms watcher uses for these two sources.
 const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND ${alias}.status <> 'draft'
-  AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}`;
+  AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}
+  AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
+       OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
 // Archive one draft, clear a lead link to it, and mark its open "draft
 // ready" bells done, in one transaction. The sent estimate is read FOR SHARE first, so a concurrent
@@ -114,7 +120,7 @@ async function retireOneDraft(trx, pair) {
   // deadlock with this sweep.
   const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().select('id');
   const sent = await trx.raw(`
-    SELECT id, status FROM estimates s
+    SELECT id, status, archived_at FROM estimates s
      WHERE s.id = ?
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
@@ -125,6 +131,10 @@ async function retireOneDraft(trx, pair) {
   // An ACCEPTED replacement would need the lead converted; that is the
   // acceptance flow's decision, not this sweep's. Keep a lead-linked draft.
   const sentStatus = sent.rows[0].status;
+  // Only a live courtship is replayed for the lead (the backfill's own rule:
+  // unarchived sent/viewed rows); a declined, expired or archived replacement
+  // still retires the draft, and the lead is only unlinked.
+  const replaySend = !sent.rows[0].archived_at && ['sent', 'viewed'].includes(sentStatus);
   if (leads.length && sentStatus === 'accepted') return null;
   // Every draft predicate re-checked on the row itself: a draft edited,
   // sent, claimed or newly linked since the read is left alone.
@@ -160,7 +170,7 @@ async function retireOneDraft(trx, pair) {
     // send is accounted for, and a replay would only re-record it there.
     // A viewed replacement then replays the view, as the backfill does.
     const sentOwned = await trx('leads').where({ estimate_id: pair.sent_id }).first('id');
-    if (!sentOwned) {
+    if (replaySend && !sentOwned) {
       const link = require('./lead-estimate-link');
       const replay = { estimateId: pair.sent_id, performedBy: 'estimate-draft-retire', database: trx, originatingNotAfter: pair.sent_at };
       await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at });

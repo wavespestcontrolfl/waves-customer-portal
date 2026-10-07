@@ -256,6 +256,23 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(other)).archived_at).not.toBeNull();
   });
 
+  test('an undelivered report or restart mint is not a send; a declined replacement unlinks without a replay', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(90) });
+    await estimate(c, { status: 'sent', source: 'service_report_cta', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    await estimate(c, { status: 'sent', source: 'plan_restart', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    const c2 = await customer();
+    const draft2 = await estimate(c2, { createdAt: minutesAgo(90), customer_phone: '+12025550199' });
+    await estimate(c2, { status: 'declined', createdAt: minutesAgo(20), sentAt: minutesAgo(10), customer_phone: '+12025550199' });
+    const leadId = randomUUID();
+    await mockPg('leads').insert({ id: leadId, estimate_id: draft2, status: 'new', phone: '+12025550199', first_name: 'Fixture', last_name: 'Retire', created_at: minutesAgo(120) });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(draft)).archived_at).toBeNull();
+    const lead = await mockPg('leads').where({ id: leadId }).first();
+    expect(lead.estimate_id).toBeNull();
+    expect(lead.status).toBe('new');
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
