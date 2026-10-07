@@ -12864,7 +12864,11 @@ const CallRecordingProcessor = {
     // changes on its own — an advisory card carries both numbers and asks the office to
     // swap. (A new customer from this call already got the text number as its phone.)
     // The confirmation for THIS call still goes to the text number, never the ANI (see
-    // smsRecipient). Fail-soft: a card failure never blocks the pass.
+    // smsRecipient). A card failure never blocks the pass. When the account phone IS the
+    // ANI (the number that cannot take texts), the ANI also gets the number-keyed SMS hold,
+    // so reminders and every other sender skip it (email fallback) until the office swaps
+    // the account phone; the swap card does not clear it, since the line cannot take texts.
+    let holdAniForSwap = false;
     if (callTextNumberWrites && customerId && !createdCustomerFromCall) {
       try {
         const linkedForText = await db('customers').where({ id: customerId }).first('phone');
@@ -12885,9 +12889,25 @@ const CallRecordingProcessor = {
             .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
             .ignore();
           if (!bridgeNeedsConfirmation.includes('text_number_differs')) bridgeNeedsConfirmation.push('text_number_differs');
+          holdAniForSwap = samePhone(linkedForText.phone, contactPhone);
         }
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    }
+    if (holdAniForSwap) {
+      try {
+        const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
+          phone: contactPhone, customerId, callLogId: call.id, procToken, procGeneration,
+        });
+        if (armed?.claimLost) return abandonToPeer('the text-number hold write');
+      } catch (holdErr) {
+        // Fail closed like the decision-point hold: a Knex message can render the bound phone.
+        const code = holdErr.code || holdErr.name || 'db_error';
+        logger.error(`[call-proc] text-number hold write failed for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+        const failClosed = new Error(`disclaimed-number hold write failed (${code})`);
+        failClosed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+        throw failClosed;
       }
     }
 

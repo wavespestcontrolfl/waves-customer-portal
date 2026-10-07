@@ -249,7 +249,7 @@ describe('replay repair — windowless reused rows register the placeholder (Cod
     // Confirmation repairs (sweep re-arm AND the email leg) are scoped to
     // visits that still have an arrival time per the fresh read, with a
     // write-time windows_preclosed belt on the re-arm.
-    expect(callProc).toContain('if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent) {');
+    expect(callProc).toContain('if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent && !callAniCannotText) {');
     expect(callProc).toContain('.where({ scheduled_service_id: svc.id, cancelled: false, windows_preclosed: false })');
   });
 

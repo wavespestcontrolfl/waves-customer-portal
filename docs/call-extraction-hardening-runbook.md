@@ -85,8 +85,9 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   `customers.phone` and the calling number as `customers.secondary_phone`; an
   EXISTING linked customer is never rewritten, the processor files the advisory
   `text_number_differs` card (payload `text_phone`, `ani_phone`, `customer_phone`)
-  asking the office to swap; this call's confirmation goes to the text number,
-  never the ANI. With no usable text number: `callback_number_needed` (same hold
+  asking the office to swap; when the account phone is the ANI, that number also
+  gets the number-keyed SMS hold (reminders skip it, email fallback) until the
+  swap; this call's confirmation goes to the text number, never the ANI. With no usable text number: `callback_number_needed` (same hold
   and card as a disclaimed caller ID). The booking-link text lane sends only to
   the text number, and only with explicit SMS consent; otherwise it skips.
   Customer and card writes need V2 primary; the confirmation recipient does not.

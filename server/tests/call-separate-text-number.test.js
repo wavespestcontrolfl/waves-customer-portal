@@ -186,6 +186,16 @@ describe('processor wiring (source pins)', () => {
     expect(src.slice(blockStart, blockEnd)).not.toMatch(/db\('customers'\)[\s\S]*\.update\(/);
   });
 
+  test('an existing customer whose account phone is the ANI gets the number-keyed hold on it, so reminders skip it', () => {
+    expect(src).toContain('holdAniForSwap = samePhone(linkedForText.phone, contactPhone);');
+    const at = src.indexOf('if (holdAniForSwap) {');
+    expect(at).toBeGreaterThan(-1);
+    const section = src.slice(at, at + 700);
+    expect(section).toContain('armDisclaimedNumberHold({');
+    expect(section).toContain('phone: contactPhone');
+    expect(section).toContain("abandonToPeer('the text-number hold write')");
+  });
+
   test('the stranded-confirmation replay repair never re-arms a call whose ANI cannot take texts', () => {
     expect(src).toContain('if (replaySlotVerified && replaySlotStart && !v2SmsBlocked && !v2SmsClearedByImpliedConsent && !callAniCannotText) {');
   });
