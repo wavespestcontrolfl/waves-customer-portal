@@ -373,9 +373,18 @@ function lawnProtocolEntries() {
     .filter(Boolean);
 }
 
+// What a corpus marker says its chunks hold: 'legacy' for the old program, or 'v13:' plus the sorted
+// track keys of the v13 recipe. The track set is part of the marker so a recipe that gains or loses a
+// track (v13 dropped bahia) marks an already-indexed corpus stale, and the next 15-minute reconcile
+// rebuilds it, instead of waiting for the nightly sync with the removed text still searchable.
+function lawnCorpusMarker(v13) {
+  if (!v13) return 'legacy';
+  return `v13:${Object.keys(require('../config/lawn-protocol-v13.json')).sort().join(',')}`;
+}
+
 // The index corpora still on the other program (a corpus with no chunks is never stale).
 async function staleCorpora(gateOn) {
-  const want = gateOn ? 'v13' : 'legacy';
+  const want = lawnCorpusMarker(gateOn);
   const keys = Object.values(LAWN_CORPUS_MARKERS);
   const stored = Object.fromEntries((await db('system_settings').whereIn('key', keys).select('key', 'value')).map((row) => [row.key, row.value]));
   const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => stored[LAWN_CORPUS_MARKERS[source]] !== want);
@@ -1042,11 +1051,11 @@ const KnowledgeBaseService = {
   // mid-sync can only make the marker conservative: 'protocol' loads lawnProtocols() (the
   // gate); 'kb' loads the stored KB entries (what their tags say they hold).
   async lawnCorpusProgram(source) {
-    if (source === 'protocol') return require('../config/feature-gates').lawnV13Live?.() === true ? 'v13' : 'legacy';
+    if (source === 'protocol') return lawnCorpusMarker(require('../config/feature-gates').lawnV13Live?.() === true);
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
     // What the stored entries hold does not depend on the gate: the complete v13 set (its own tracks) all tagged v13.
     const v13Slugs = Object.keys(require('../config/lawn-protocol-v13.json')).map((trackId) => `protocol-${slugify(trackId)}`);
-    return rows.length === v13Slugs.length && rows.every((row) => v13Slugs.includes(row.slug) && normalizeTags(row.tags).includes(LAWN_V13_TAG)) ? 'v13' : 'legacy';
+    return lawnCorpusMarker(rows.length === v13Slugs.length && rows.every((row) => v13Slugs.includes(row.slug) && normalizeTags(row.tags).includes(LAWN_V13_TAG)));
   },
 
   // Called by syncCorpus for the 'protocol' and 'kb' corpora after a sync that really ran
