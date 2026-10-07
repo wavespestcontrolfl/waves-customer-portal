@@ -6931,6 +6931,11 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   return out;
 }
 
+// Unit-level language beyond condo/apartment: a commercial suite, bay or
+// multi-tenant center has a unit even for a whole-structure service, so its
+// unit card stays (same safeguard the business whole-building waiver keeps).
+const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|center|centre)|plaza|shopping (?:center|centre)|multi-tenant|tenant space|space\s*#?\s*\d+)\b|#\s*\d+/i;
+
 // Card-only companion to the waiver above (owner 2026-10-07): true when EVERY
 // view of the call's service resolves to a whole-structure catalog row (slab
 // pre-treat, trenching, WDO inspection), the property is not typed as a condo
@@ -6953,7 +6958,8 @@ function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = nu
       extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
     });
     if (!isWholeStructureService({ serviceKey: row?.service_key || null })) return false;
-    return !UNIT_LEVEL_WORDING_RE.test([transcription, view.call_summary, view.requested_service].filter(Boolean).join(' '));
+    const text = [transcription, view.call_summary, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
+    return !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
 }
 

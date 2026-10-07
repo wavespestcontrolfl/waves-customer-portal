@@ -407,6 +407,16 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, null, 'the slab for the new apartment building')).toBe(false);
   });
 
+  test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
+    const wdo = { specific_service_name: 'WDO Inspection (Termite Letter)' };
+    const commercial = { property: { property_type: 'commercial' } };
+    expect(run(wdo, commercial, 'we need a WDO inspection for our suite')).toBe(false);
+    expect(run({ ...wdo, address_line2: 'Suite 4' }, commercial)).toBe(false);
+    expect(run(wdo, commercial, 'it is bay 3 in the plaza')).toBe(false);
+    expect(run({ ...wdo, address_line1: '100 Example Rd #12' }, commercial)).toBe(false);
+    expect(run({ specific_service_name: 'Slab Pre-Treat Termite Service' }, commercial, 'new construction lot, slab pours Monday')).toBe(true);
+  });
+
   test('the V1 service heard before V2 adoption must agree, and an unclear-service call never counts', () => {
     const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
     const interior = { matched_service: 'General Pest Control', requested_service: 'roaches inside' };
