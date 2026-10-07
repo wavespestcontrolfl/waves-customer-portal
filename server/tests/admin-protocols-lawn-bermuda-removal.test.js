@@ -77,7 +77,7 @@ async function lawnMix(query) {
   expect(next).not.toHaveBeenCalled();
   return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
 }
-const itemFor = (body, name) => body.items.find((item) => item.product?.name === name);
+const itemFor = (body, name) => (body.items || []).find((item) => item.product?.name === name);
 const blockCodes = (body) => body.blocks.map((block) => block.code);
 
 function stage(rows) {
@@ -265,7 +265,8 @@ test.each([
   const body = await lawnMix(query);
   expect(itemFor(body, REC)).toBeUndefined();
   expect(itemFor(body, FUS)).toBeUndefined();
-  expect(operatingLayer.getProtocolWindowContext).toHaveBeenCalledWith(db, expect.not.objectContaining({ includeBermudaRemoval: true }));
+  // (A bahia lawn has no v13 program, so the loader may not be called at all; whenever it is, never with the flag.)
+  for (const [, options] of operatingLayer.getProtocolWindowContext.mock.calls) expect(options).not.toMatchObject({ includeBermudaRemoval: true });
 });
 
 describe('the account decides, on the server', () => {
@@ -541,9 +542,11 @@ describe('the account decides, on the server', () => {
         return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
       };
       // No track, a blank lawn type, and a stale track from the customer's lawn_type all get the mix.
-      for (const query of [{}, { lawnType: '' }, { track: 'st_augustine' }, { lawnType: 'Bermuda' }, { track: 'bahia' }]) {
+      for (const query of [{}, { lawnType: '' }, { track: 'st_augustine' }, { lawnType: 'Bermuda' }]) {
         expect((await ask(query)).actions.filter((a) => a.group)).toHaveLength(3);
       }
+      // A bahia request gets no program at all under v13 (main's rule), whatever the profile says.
+      expect(await ask({ track: 'bahia' })).toMatchObject({ code: 'lawn_v13_bahia_no_program' });
       // Without a booked visit the request's track is all there is: no step, as before.
       expect((await ask({ scheduledServiceId: undefined, track: 'zoysia' })).actions.filter((a) => a.group)).toEqual([]);
       // A profile of another grass opens nothing, whatever the request says.

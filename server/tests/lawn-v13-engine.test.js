@@ -85,7 +85,7 @@ describe('gate and loader', () => {
   test('gate off: the protocol reader and the engine see no addOns anywhere', () => {
     withGate('true', () => {
       expect(JSON.stringify(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }))).not.toContain('addOns');
-      for (const grass of GRASSES) {
+      for (const grass of V13_GRASSES) { // bahia has no v13 program at all
         for (const month of [4, 6]) {
           const got = engine.selectProtocolVisit({ track_key: grass }, new Date(Date.UTC(2026, month - 1, 15, 16)));
           expect(got.visit).not.toHaveProperty('addOns');
