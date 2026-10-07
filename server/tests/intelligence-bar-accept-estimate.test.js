@@ -396,6 +396,7 @@ describe('Confirm', () => {
         expected: {
           estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: CUSTOMER_ID,
           customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
+          customerBilling: 'per_application||Bronze|active_customer|',
           noLinkedVisits: true, noOpenTermiteAgreement: false,
         },
       },

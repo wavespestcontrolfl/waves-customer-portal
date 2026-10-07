@@ -1958,10 +1958,15 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     accepted_at: null, updated_at: new Date('2026-10-06T12:00:00.000Z'), monthly_total: '90.00', onetime_total: null,
     waveguard_tier: 'Silver', ...overrides,
   });
-  const customerRow = (overrides = {}) => ({ id: 'customer-pins', updated_at: new Date('2026-10-05T09:00:00.000Z'), monthly_rate: '55.00', ...overrides });
+  const customerRow = (overrides = {}) => ({
+    id: 'customer-pins', updated_at: new Date('2026-10-05T09:00:00.000Z'), monthly_rate: '55.00',
+    billing_mode: 'per_application', per_application_fee: 49, waveguard_tier: null, pipeline_stage: 'active_customer', property_type: null,
+    ...overrides,
+  });
   const pins = {
     estimateVersion: '2026-10-06T12:00:00.000Z', estimateStatus: 'sent', customerId: 'customer-pins',
     customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: ledgerPin([], '55.00'),
+    customerBilling: 'per_application|49||active_customer|',
   };
   function dbWith(estimate, customer, { linkedVisit = null, openAgreements = [] } = {}) {
     const made = makeDb(estimate);
@@ -2003,6 +2008,7 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     ['the estimate was accepted elsewhere', estimateRow({ status: 'accepted' }), customerRow()],
     ['the customer row changed', estimateRow(), customerRow({ updated_at: new Date('2026-10-06T13:00:00.000Z') })],
     ['the bill changed', estimateRow(), customerRow({ monthly_rate: '60.00' })],
+    ['the per-application fee changed with the same timestamp and bill', estimateRow(), customerRow({ per_application_fee: 62 })],
   ])('refuses with preview_changed and writes nothing when %s', async (_name, estimate, customer) => {
     const { database, updates, inserts } = dbWith(estimate, customer);
     const converter = { convertEstimate: jest.fn() };

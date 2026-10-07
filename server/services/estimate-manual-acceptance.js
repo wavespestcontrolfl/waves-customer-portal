@@ -545,12 +545,21 @@ async function openTermiteAgreementsForAccept(conn, customerId, estimate) {
   return rows.filter((row) => Termite.classifyExistingAgreement(row, estimate) !== 'ignore');
 }
 
+// The customer billing fields the accept reads and rewrites; the converter
+// changes them without moving updated_at, so the card pins them directly.
+const CUSTOMER_BILLING_PIN_FIELDS = ['billing_mode', 'per_application_fee', 'waveguard_tier', 'pipeline_stage', 'property_type'];
+function customerBillingPin(customer = {}) {
+  return CUSTOMER_BILLING_PIN_FIELDS.map((k) => (customer[k] == null ? '' : String(customer[k]))).join('|');
+}
+
 // Same property-preferences advisory then customer row order as the
 // annual-prepay guard in markEstimateManuallyAccepted (and convertEstimate).
 async function assertExpectedCustomerBill(trx, customerId, expected) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
-  const customer = await trx('customers').where({ id: customerId }).forUpdate().first('updated_at', 'monthly_rate');
+  const customer = await trx('customers').where({ id: customerId }).forUpdate()
+    .first('updated_at', 'monthly_rate', ...CUSTOMER_BILLING_PIN_FIELDS);
   if (!customer || versionText(customer.updated_at) !== expected.customerVersion) throw cardChanged();
+  if (expected.customerBilling != null && customerBillingPin(customer) !== expected.customerBilling) throw cardChanged();
   if (expected.ledgerPin != null) {
     const { loadComponents } = require('./plan-rate-ledger');
     const { ledgerPin } = require('./intelligence-bar/rate-change');
@@ -1319,6 +1328,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   MANUAL_ACCEPTABLE_STATUSES,
   markEstimateManuallyAccepted,
   estimateLinkedVisitsQuery,
+  customerBillingPin,
   openTermiteAgreementsForAccept,
   oneTapPurchaseRefusal,
   manualAcceptRowRefusal,
