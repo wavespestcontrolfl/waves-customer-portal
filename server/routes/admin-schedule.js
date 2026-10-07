@@ -13108,7 +13108,8 @@ function retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate) {
   return vouched;
 }
 
-router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
+router.put('/:id/update-details', requireAdmin, scheduleUpdateDetailsHandler);
+async function scheduleUpdateDetailsHandler(req, res, next) {
   try {
     // First statement, before any read: see negativePricePosted.
     if (negativePricePosted(req.body || {})) {
@@ -16801,7 +16802,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+}
+
+// The Schedule-screen visit edit without an HTTP request — the Intelligence
+// Bar's reprice_future_visits tool (owner ruling 2026-10-07) saves each
+// visit's new price through this so the bar and the Edit appointment screen
+// share one writer (validation, the re-price block, CAS, post-commit
+// effects). It runs the router-level catalog prime (as router.use above
+// does, failures ignored), then the handler with the only request fields it
+// reads (params.id, body, technicianId, techRole), and resolves the reply it
+// would send: { status, json }. An error the handler passes to next() rejects.
+async function updateVisitDetails({ id, body, actor }) {
+  await primePercentDiscountExclusions().catch(() => {});
+  const req = { params: { id }, body, technicianId: actor.technicianId, techRole: 'admin' };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    scheduleUpdateDetailsHandler(req, res, reject).catch(reject);
+  });
+}
 
 // POST /api/admin/schedule/:id/update-details/preview — structural round on
 // #4657 (replaces the recurring "mirror the server" P1s :3526/:2394):
@@ -28419,3 +28441,5 @@ module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionCo
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;
+// Same handler as PUT /:id/update-details — see updateVisitDetails above.
+module.exports.updateVisitDetails = updateVisitDetails;
