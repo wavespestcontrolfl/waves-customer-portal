@@ -18,7 +18,7 @@ const RUN = (over = {}) => ({
 const ASSESSMENT = (over = {}) => ({ id: 77, customer_id: 9, confirmed_by_tech: true, ...over });
 
 // A table-keyed fake: knex('t').where(...).first(...) / .select(...)
-function fakeKnex({ assessments = {}, runs = {}, catalog = [{ name: 'Arena 50 WDG' }, { name: 'Celsius WG' }], fail = null } = {}) {
+function fakeKnex({ assessments = {}, runs = {}, fail = null } = {}) {
   const knex = (table) => {
     const q = { criteria: {} };
     q.where = (c) => { q.criteria = c; return q; };
@@ -28,7 +28,6 @@ function fakeKnex({ assessments = {}, runs = {}, catalog = [{ name: 'Arena 50 WD
       if (table === 'lawn_assessment_runs') return runs[q.criteria.assessment_id] || null;
       return null;
     };
-    q.select = async () => { if (fail === table) throw new Error(`${table} read failed`); return catalog; };
     return q;
   };
   return knex;
@@ -69,54 +68,28 @@ describe('keptFindings', () => {
 describe('gatherTechParagraphInputs', () => {
   const knex = () => fakeKnex({ assessments: { 77: ASSESSMENT() }, runs: { 77: RUN() } });
 
-  test('builds the inputs from the finished report: note verbatim, applied products only, findings, headline, watering', async () => {
-    const inputs = await gatherTechParagraphInputs({
-      record: RECORD, data: REPORT(), instruction: { lines: ['Water in today’s treatment.', 'Run each zone briefly.', 'third'] }, knex: knex(),
+  test('builds the fixed-sentence inputs: note verbatim, applied product names only, low-confidence findings by key', async () => {
+    const inputs = await gatherTechParagraphInputs({ record: RECORD, data: REPORT(), knex: knex() });
+    expect(inputs).toEqual({
+      technicianNote: RECORD.technician_notes,
+      products: [{ name: 'Arena 50 WDG' }], // the support product makes no claim; no ingredient, target or method
+      findings: [{ key: 'thinning_turf' }], // only the LOW-confidence kept finding; moderate ones print in the report's own block
     });
-    expect(inputs.technicianNote).toBe(RECORD.technician_notes);
-    expect(inputs).not.toHaveProperty('firstName');
-    expect(inputs.products.map((p) => p.name)).toEqual(['Arena 50 WDG']); // the support product makes no claim
-    expect(inputs.products[0]).toMatchObject({ method: 'broadcast spray', targets: ['Southern chinch bugs'] });
-    expect(inputs.scores.overall).toBe(94);
-    expect(inputs.findings.map((f) => f.label)).toEqual(['thinning turf', 'color stress', 'general lawn stress']);
-    expect(inputs.facts).toEqual({ headline: 'Looking great', watering: 'Water in today’s treatment. Run each zone briefly.' });
-    expect(inputs.knownProductNames).toEqual(['Arena 50 WDG', 'Celsius WG']);
-    expect(JSON.stringify(inputs)).not.toMatch(/RAW FREE TEXT|Example Street|Example\b/);
+    expect(JSON.stringify(inputs)).not.toMatch(/RAW FREE TEXT|Example Street|Example\b|Sam|clothianidin|Looking great|94/);
   });
 
-  test('the last visit: date, products, watched topics (not the banner-owned ones) and its kept findings', async () => {
-    const sinceLast = {
-      priorDate: '2026-08-16', priorAssessmentId: 70,
-      applied: [{ name: 'Prior Fertilizer', kind: 'fertilizer', targets: [] }],
-      checks: [{ key: 'weeds', status: 'watch' }, { key: 'water', status: 'watch' }, { key: 'coverage', status: 'watch' }],
-    };
-    const k = fakeKnex({
-      assessments: { 77: ASSESSMENT(), 70: ASSESSMENT({ id: 70 }) },
-      runs: { 77: RUN(), 70: RUN({ assessment_id: 70, added_details: [], reviewed_findings: [{ label: 'weed pressure', confidence: 'moderate' }] }) },
+  test('both color labels map to nutrient stress, the generic monitoring label to nothing, unknown confidence counts as low', async () => {
+    const run = RUN({
+      reviewed_findings: [
+        { label: 'color stress', confidence: 'low' },
+        { label: 'color and nutrient stress', confidence: 'unknown' },
+        { label: 'a lawn condition we are monitoring', confidence: 'low' },
+        { label: 'general lawn stress', confidence: 'high' },
+      ],
+      added_details: [],
     });
-    const inputs = await gatherTechParagraphInputs({ record: RECORD, data: REPORT({ sinceLast }), knex: k });
-    expect(inputs.prior).toEqual({
-      date: '2026-08-16',
-      products: [expect.objectContaining({ name: 'Prior Fertilizer' })],
-      watched: ['weeds'],
-      findings: [{ label: 'weed pressure', confidence: 'moderate' }],
-    });
-  });
-
-  test('progress lines are the fixed density / weed / stress sentences only: never color, never the overall line', async () => {
-    const sinceLast = { priorDate: '2026-08-16', priorAssessmentId: 70, applied: [{ name: 'Prior Fertilizer', kind: 'fertilizer', targets: [] }], checks: [] };
-    const sinceCopy = require('../services/service-report/lawn-since-last-copy');
-    const k = fakeKnex({ assessments: { 77: ASSESSMENT(), 70: ASSESSMENT({ id: 70 }) }, runs: {} });
-    // The module destructures at load: re-require it over a stubbed builder.
-    jest.resetModules();
-    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-    jest.doMock('../services/service-report/lawn-since-last-copy', () => ({ ...sinceCopy, buildSinceLastCopy: () => ({ priorDate: '2026-08-16', lines: ['Last visit we applied fertilizer.', 'Your overall lawn score is up since then.', 'Color is ahead of schedule.', 'Thickness is on track.', 'Weed pressure is holding steady.'] }) }));
-    const fresh = require('../services/service-report/lawn-tech-paragraph-inputs');
-    const data = REPORT({ sinceLast });
-    data.reportV2.progress = { eligible: true };
-    const inputs = await fresh.gatherTechParagraphInputs({ record: RECORD, data, knex: k });
-    expect(inputs.progressLines).toEqual(['Thickness is on track.', 'Weed pressure is holding steady.']);
-    jest.dontMock('../services/service-report/lawn-since-last-copy');
+    const inputs = await gatherTechParagraphInputs({ record: RECORD, data: REPORT(), knex: fakeKnex({ assessments: { 77: ASSESSMENT() }, runs: { 77: run } }) });
+    expect(inputs.findings).toEqual([{ key: 'nutrient_stress' }]);
   });
 
   test('a degraded build, no assessment, or no report writes no inputs', async () => {
@@ -125,10 +98,13 @@ describe('gatherTechParagraphInputs', () => {
     expect(await gatherTechParagraphInputs({ record: RECORD, data: degraded, knex: knex() })).toBeNull();
     expect(await gatherTechParagraphInputs({ record: RECORD, data: { reportV2: REPORT().reportV2 }, knex: knex() })).toBeNull();
     expect(await gatherTechParagraphInputs({ record: RECORD, data: null, knex: knex() })).toBeNull();
+    // A failed product read, flagged by the report build whatever the copy-v6 gate (Codex r4).
+    const noProducts = REPORT();
+    Object.defineProperty(noProducts.lawnAssessment, 'productsReadFailed', { value: true, enumerable: false });
+    expect(await gatherTechParagraphInputs({ record: RECORD, data: noProducts, knex: knex() })).toBeNull();
   });
 
-  test('fail closed: a failed findings or catalog read propagates (the step stores no paragraph)', async () => {
+  test('fail closed: a failed findings read propagates (the step stores no paragraph)', async () => {
     await expect(gatherTechParagraphInputs({ record: RECORD, data: REPORT(), knex: fakeKnex({ assessments: { 77: ASSESSMENT() }, runs: { 77: RUN() }, fail: 'lawn_assessment_runs' }) })).rejects.toThrow('read failed');
-    await expect(gatherTechParagraphInputs({ record: RECORD, data: REPORT(), knex: fakeKnex({ assessments: { 77: ASSESSMENT() }, runs: { 77: RUN() }, fail: 'products_catalog' }) })).rejects.toThrow('read failed');
   });
 });

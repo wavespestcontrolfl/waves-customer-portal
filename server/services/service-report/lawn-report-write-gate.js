@@ -32,7 +32,7 @@ function hasFrozenWateringInstruction(record) {
 
 // The paragraph step on its own: never throws, returns { [assessmentId]: entry }
 // for the caller's in-memory structured_notes, or null.
-async function freezeTechParagraphFor({ record, data, instruction, service, knex }) {
+async function freezeTechParagraphFor({ record, data, service, knex }) {
   try {
     const tech = require('./lawn-tech-paragraph');
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
@@ -43,7 +43,7 @@ async function freezeTechParagraphFor({ record, data, instruction, service, knex
       // The row's CURRENT notes, read inside the step's one deadline: a retried
       // completion finds the freeze and spends no second call.
       getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
-      gatherInputs: () => require('./lawn-tech-paragraph-inputs').gatherTechParagraphInputs({ record, data, instruction, knex }),
+      gatherInputs: () => require('./lawn-tech-paragraph-inputs').gatherTechParagraphInputs({ record, data, knex }),
       knex,
     });
     if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
@@ -61,8 +61,9 @@ async function freezeTechParagraphFor({ record, data, instruction, service, knex
 // { [assessmentId]: entry } for the caller's in-memory structured_notes, or null.
 // It reads the watering instruction the record is FROZEN to (the persisted
 // freeze when there is one), so a replay or a later rule edit changes nothing.
-// A degraded product read writes none (the facts would be partial).
+// A degraded product read writes none (the facts would be partial). Gate off: no read.
 async function freezeVisitSummaryFor({ record, data, instructionOut, wateringFreeze, service, knex }) {
+  if (!featureGates.lawnVisitSummaryV2Live()) return null;
   try {
     const summary = require('./lawn-visit-summary');
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
@@ -83,6 +84,11 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, wateringFre
     logger.warn(`[lawn-visit-summary] step failed for service_record ${service && service.id}: ${err.message}`);
     return null;
   }
+}
+
+// The result with the Visit Summary's freeze added only when one exists.
+function withVisitSummary(result, visitSummaryFreeze) {
+  return visitSummaryFreeze ? { ...result, visitSummaryFreeze } : result;
 }
 
 /**
@@ -194,15 +200,15 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
         .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
     }
 
-    // "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH): ONE model call,
-    // here, frozen first-writer-wins under its own top-level key (never inside
-    // lawnReportV2, whose write above replaces the whole object). A render only
-    // reads the frozen text. Any miss, slow call or rejection stores nothing and
-    // costs the completion nothing but the call's own deadline. Gate off: no
-    // read and no call.
+    // "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH, fixed sentences):
+    // at most ONE model call, here, frozen first-writer-wins under its own top-level
+    // key (never inside lawnReportV2, whose write above replaces the whole object).
+    // A render only reads the frozen text. A miss falls back to the deterministic
+    // lines; nothing to say freezes a text-less marker so a resume makes no second
+    // call. Gate off: no read and no call.
     let techParagraphFreeze = null;
     if (featureGates.lawnTechParagraphLive()) {
-      techParagraphFreeze = await freezeTechParagraphFor({ record, data, instruction: instructionOut.instruction, service, knex });
+      techParagraphFreeze = await freezeTechParagraphFor({ record, data, service, knex });
     }
 
     // Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY): fixed sentences
@@ -210,17 +216,13 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     // call, so it is synchronous with this awaited step: it lands before the
     // completion path queues the report email (whose worker rebuilds the PDF at
     // send time). The report swaps it in for the generic recap; the completion
-    // SMS keeps the short customerRecap. Gate off: no read.
-    let visitSummaryFreeze = null;
-    if (featureGates.lawnVisitSummaryV2Live()) {
-      visitSummaryFreeze = await freezeVisitSummaryFor({ record, data, instructionOut, wateringFreeze, service, knex });
-    }
+    // SMS keeps the short customerRecap.
+    const visitSummaryFreeze = await freezeVisitSummaryFor({ record, data, instructionOut, wateringFreeze, service, knex });
 
-    return {
+    return withVisitSummary({
       smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,
       ...(techParagraphFreeze ? { techParagraphFreeze } : {}),
-      ...(visitSummaryFreeze ? { visitSummaryFreeze } : {}),
-    };
+    }, visitSummaryFreeze);
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);
     return empty;

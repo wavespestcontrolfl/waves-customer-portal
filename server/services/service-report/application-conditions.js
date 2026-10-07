@@ -1,3 +1,4 @@
+const { openMeteoForecastUrl, openMeteoArchiveAvailable, openMeteoCoversDate } = require('../open-meteo-endpoint');
 const logger = require('../logger');
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -200,6 +201,10 @@ function normalizeForecastPayload(payload) {
       humidity_pct: roundedNumber(rh[i]),
       wind_mph: roundedNumber(wind[i], 1),
       wind_gust_mph: roundedNumber(gust[i], 1),
+      // Unrounded readings, for callers that test a label limit with a strict
+      // comparison (exactReadings); dropped from the returned rows otherwise.
+      temperature_raw_f: finiteNumber(temp[i]),
+      wind_raw_mph: finiteNumber(wind[i]),
     });
   });
   const c = payload?.current;
@@ -249,7 +254,7 @@ function planForecastFetch(nowMs, fromMs, toMs) {
 }
 
 function propertyForecastUrl({ keyLat, keyLon, standard, startDate, endDate }) {
-  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  const url = openMeteoForecastUrl();
   url.searchParams.set('latitude', String(keyLat));
   url.searchParams.set('longitude', String(keyLon));
   url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,weather_code');
@@ -274,7 +279,9 @@ function usablePropertyPoint(lat, lon) {
   return lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0);
 }
 
-function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal = false }) {
+function sliceForecast(entry, cached, {
+  fromMs, toMs, keyLat, keyLon, exactTotal = false, exactReadings = false,
+}) {
   // Instantaneous readings (temperature, humidity, wind) are the hour stamps in [from, to).
   const rows = entry.hourly.filter((r) => r.ms >= fromMs && r.ms < toMs);
   // Open-Meteo's hourly `precipitation` is "sum of the preceding hour": the value
@@ -308,7 +315,16 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal
     longitude: keyLon,
     window: { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() },
     current: entry.current,
-    hourly: rows.map(({ ms, precipitation_raw_in, ...rest }) => ({ ...rest, at: new Date(ms).toISOString() })),  
+    hourly: rows.map(({
+      ms, precipitation_raw_in, temperature_raw_f, wind_raw_mph, ...rest
+    }) => ({
+      ...rest,
+      // Opt-in (exactReadings): unrounded temperature and wind, so a reading
+      // just past a label limit (10.04 mph vs a 10 mph max) is not rounded
+      // onto it and passed by a strict comparison.
+      ...(exactReadings ? { temperature_f_exact: temperature_raw_f, wind_mph_exact: wind_raw_mph } : {}),
+      at: new Date(ms).toISOString(),
+    })),  
     precipitationInTotal: complete ? roundedNumber(total, 2) : null,
     // Opt-in (exactTotal): the same total, summed from the unrounded readings
     // and not rounded, for a threshold test. Absent otherwise, so every
@@ -339,6 +355,7 @@ function sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal
 // always fetch, the result is still cached for others).
 async function fetchPropertyForecast({
   latitude, longitude, from, to, timeoutMs = FORECAST_TIMEOUT_MS, maxAgeMs = FORECAST_CACHE_TTL_MS, now, exactTotal = false,
+  exactReadings = false,
 } = {}) {
   try {
     const lat = toCoordinate(latitude);
@@ -359,7 +376,9 @@ async function fetchPropertyForecast({
     const keyLon = Number(lon.toFixed(FORECAST_KEY_DECIMALS));
     const key = `${keyLat.toFixed(FORECAST_KEY_DECIMALS)},${keyLon.toFixed(FORECAST_KEY_DECIMALS)}|${standard ? 'std' : `${startDate}..${endDate}`}`;
 
-    const slice = (entry, cached) => sliceForecast(entry, cached, { fromMs, toMs, keyLat, keyLon, exactTotal });
+    const slice = (entry, cached) => sliceForecast(entry, cached, {
+      fromMs, toMs, keyLat, keyLon, exactTotal, exactReadings,
+    });
 
     const hit = _forecastCache.get(key);
     if (hit && maxAgeMs > 0 && nowMs - hit.fetchedAtMs < maxAgeMs && nowMs >= hit.fetchedAtMs
@@ -416,7 +435,7 @@ async function fetchPropertyRainQuarterHours({
     if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs || toMs - fromMs > QUARTER_MAX_WINDOW_MS) {
       return forecastUnavailable('bad_window');
     }
-    const url = new URL('https://api.open-meteo.com/v1/forecast');
+    const url = openMeteoForecastUrl();
     url.searchParams.set('latitude', String(Number(lat.toFixed(FORECAST_KEY_DECIMALS))));
     url.searchParams.set('longitude', String(Number(lon.toFixed(FORECAST_KEY_DECIMALS))));
     url.searchParams.set('minutely_15', 'precipitation');
@@ -787,8 +806,12 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   const mrmsPromise = mode !== 'off'
     ? require('../mrms-qpe').fetchMrmsDailyRain({ latitude: lat, longitude: lon, start: range.start, end: range.end }).catch(() => null)
     : Promise.resolve(null);
+  // Paid key, week older than the forecast endpoint keeps: no Open-Meteo
+  // source exists (Standard has no archive), so ask nothing and settle on
+  // MRMS rain without ET₀ (Codex #6052 r1).
+  const omCovers = openMeteoCoversDate(range.start, etTodayYmd());
   const [om, mrms] = await Promise.all([
-    fetchOpenMeteoServiceWeek({ lat, lon, range, empty }),
+    omCovers ? fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) : empty,
     mrmsPromise,
   ]);
   let value = om;
@@ -808,7 +831,9 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
       ? Math.round((mrmsWeek - omWeek) * 100) / 100
       : null;
     logger.info(`[rain-engine] mode=${mode} mrms=${mrmsWeek ?? 'unavailable'} om=${omWeek ?? 'unavailable'} delta=${delta ?? 'n/a'} source=${merged ? merged.rainSource : 'open_meteo_only'} loc=${loc} end=${range.end}`);
-    if (merged && mode === 'live') value = merged;
+    // A week past Open-Meteo's reach has no model to shadow against: MRMS
+    // is its only rain, in shadow mode too (Codex #6052 r3).
+    if (merged && (mode === 'live' || !omCovers)) value = merged;
     if (!merged && mode === 'live') {
       logger.warn(`[rain-engine] mode=live but MRMS unusable for ${range.start}..${range.end} loc=${loc} — Open-Meteo fallback`);
     }
@@ -820,11 +845,16 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     // (merge failed → modeled, or gap days filled by the model) retries the
     // primary source so IEM's late backfills upgrade it instead of being
     // pinned behind the 6h TTL.
-    const missingIndependentInput = value.et0Inches == null
+    // ET₀ that no source can supply (an old week on the paid key) is not
+    // "missing": retrying cannot fill it, so it keeps the full TTL.
+    const missingIndependentInput = (value.et0Inches == null && omCovers)
       || (mode === 'live' && value.rainSource !== 'mrms');
     const effectiveTtlMs = missingIndependentInput ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
     _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value, windowClosed });
   }
+  // Paid key, a week past Open-Meteo's reach and no MRMS rain: no source
+  // can ever answer it, so the caller may settle it instead of retrying
+  // (Codex #6052 r2).
   return { ...value, windowClosed };
 }
 
@@ -843,7 +873,7 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
 // if the archive ever fails or returns an untrusted window we degrade to
 // exactly the previous behaviour rather than to nothing.
 const OPEN_METEO_ARCHIVE = 'https://archive-api.open-meteo.com/v1/archive';
-const OPEN_METEO_FORECAST = 'https://api.open-meteo.com/v1/forecast';
+
 
 function openMeteoWeekUrl(base, grid, range) {
   const url = new URL(base);
@@ -867,14 +897,17 @@ async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
   // reason mergeMrmsIntoWeek refuses to let an MRMS "so far" total cap the
   // model on the unclosed day. Same rule here: a window ending today keeps the
   // forecast endpoint, which carries a full-day model value (codex #3153 P1).
-  const windowClosed = range.end < etTodayYmd();
+  // The paid Standard plan (OPEN_METEO_API_KEY) has no archive API: the
+  // forecast endpoint answers every window; MRMS already supplies closed-day
+  // rain first (mergeMrmsIntoWeek).
+  const windowClosed = range.end < etTodayYmd() && openMeteoArchiveAvailable();
   const attempts = windowClosed
     ? [
       { endpoint: 'archive', url: openMeteoWeekUrl(OPEN_METEO_ARCHIVE, grid, range) },
-      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+      { endpoint: 'forecast', url: openMeteoWeekUrl(openMeteoForecastUrl(), grid, range) },
     ]
     : [
-      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+      { endpoint: 'forecast', url: openMeteoWeekUrl(openMeteoForecastUrl(), grid, range) },
     ];
 
   for (let i = 0; i < attempts.length; i += 1) {
@@ -975,7 +1008,7 @@ async function fetchRecentMinTempF({ latitude, longitude, pastDays = 7 } = {}) {
   const cached = _rainCache.get(key);
   if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
 
-  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  const url = openMeteoForecastUrl();
   url.searchParams.set('latitude', String(lat));
   url.searchParams.set('longitude', String(lon));
   url.searchParams.set('daily', 'temperature_2m_min');

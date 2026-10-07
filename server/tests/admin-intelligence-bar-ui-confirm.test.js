@@ -23,6 +23,7 @@ const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
+const mockSendSmsProposalRefusal = jest.fn(async () => null);
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
@@ -34,6 +35,7 @@ const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, 
 const mockIbBookingOverlapProposal = jest.fn(async () => null);
 // Who the overlapping visit is (card text only): nobody named by default.
 const mockIbBookingOverlapWho = jest.fn(async () => []);
+const mockRateChangeProposal = jest.fn(async () => null);
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -42,6 +44,10 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
 })));
 
 jest.mock('../models/db', () => jest.fn(() => ({ insert: mockDbInsert })));
+jest.mock('../services/intelligence-bar/rate-change', () => ({
+  rateChangeProposal: (...a) => mockRateChangeProposal(...a),
+  money: (n) => `$${Number(n || 0).toFixed(2)}`,
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/intelligence-bar/circuit-breaker', () => ({
   getBreaker: jest.fn(() => ({
@@ -85,6 +91,7 @@ jest.mock('../services/intelligence-bar/review-tools', () => ({
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
+  sendSmsProposalRefusal: (...args) => mockSendSmsProposalRefusal(...args),
 }));
 jest.mock('../services/intelligence-bar/tax-tools', () => ({ TAX_TOOLS: [], executeTaxTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/leads-tools', () => ({
@@ -892,6 +899,52 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test('send_sms to a number the send path will refuse: no card, the tool refusal goes back to the model (opt-out at the proposal)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'cust-9', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockSendSmsProposalRefusal.mockResolvedValueOnce({
+      success: false, error: 'Recipient has opted out of SMS (sms_enabled=false on notification_prefs)', blocked: true, code: 'SMS_OPTED_OUT',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { customer_id: 'cust-9', message: 'hi', message_type: 'manual' } }],
+      [{ type: 'text', text: 'They have opted out of texts.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text Alpha', context: 'comms' });
+      // The refusal is asked with the pinned params, after the recipient pin.
+      expect(mockSendSmsProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'cust-9', phone: '+19415551234', message: 'hi' }));
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ blocked: true, code: 'SMS_OPTED_OUT' });
+      expect(toolResult.error).toMatch(/opted out of SMS/);
+    });
+  });
+
+  test.each([
+    ['opted-out', { success: false, error: 'Recipient has opted out of SMS (sms_enabled=false on notification_prefs)', blocked: true, code: 'SMS_OPTED_OUT' }],
+  ])('send_sms to a direct %s number with no customer: the proposal refusal still runs, no card', async (_label, refusal) => {
+    mockSendSmsProposalRefusal.mockResolvedValueOnce(refusal);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'send_sms', input: { phone: '+19415550123', message: 'hi', message_type: 'manual' } }],
+      [{ type: 'text', text: 'That number cannot be texted right now.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'text 941-555-0123', context: 'comms' });
+      expect(mockResolveCommsCustomer).not.toHaveBeenCalled();
+      expect(mockSendSmsProposalRefusal).toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415550123', message: 'hi' }));
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ blocked: true, code: refusal.code });
+    });
+  });
+
   test('create_appointment by tech name: pinned technician_id in stored params, tech NAME on the card', async () => {
     mockResolveTechnician.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
     scriptModelTurns([
@@ -1480,6 +1533,61 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(toolName).toBe('bulk_update_leads');
       expect(params.dry_run).toBe(false);
       expect(params._approved_lead_ids).toEqual(['l1', 'l2']);
+    });
+  });
+});
+
+
+// Owner 2026-10-06: a monthly-rate edit names the service that changes and the
+// card shows the whole bill (rate-change.js has the rules; this is the wiring).
+describe('update_customer monthly-rate proposals', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_IB_UI_CONFIRM = 'true';
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
+    mockCreatePendingAction.mockResolvedValue({
+      id: PENDING_ID, tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString(),
+    });
+  });
+  afterEach(() => { delete process.env.GATE_IB_UI_CONFIRM; });
+
+  test('a refused rate edit makes no card', async () => {
+    mockRateChangeProposal.mockResolvedValueOnce({ error: 'monthly_rate is this customer\'s whole monthly bill', code: 'rate_family_required' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { monthly_rate: 60.33 } } }],
+      [{ type: 'text', text: 'Which service?' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'set her rate', context: 'customers' });
+      expect(mockRateChangeProposal).toHaveBeenCalledWith('c1', 60.33, undefined);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a split rate edit pins the line and the ledger, drops rate_service, and lists the bill on the card', async () => {
+    mockRateChangeProposal.mockResolvedValueOnce({
+      family: 'lawn_care',
+      pin: '41.33|pest_control=41.33',
+      display: {
+        billing_mode: 'monthly_membership', replaces_whole_bill: false,
+        lines: [{ label: 'Pest control', before: 41.33, after: 41.33 }, { label: 'Lawn care', before: 0, after: 61.33 }],
+        total_before: 41.33, total_after: 102.66,
+      },
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { monthly_rate: 102.66 }, rate_service: 'lawn' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'add lawn', context: 'customers' });
+      expect(mockRateChangeProposal).toHaveBeenCalledWith('c1', 102.66, 'lawn');
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      const { params, contract } = mockCreatePendingAction.mock.calls[0][0];
+      expect(params).toMatchObject({ _rate_family: 'lawn_care', _rate_ledger_pin: '41.33|pest_control=41.33' });
+      expect(params).not.toHaveProperty('rate_service');
+      const labels = contract.effects.map((e) => e.label);
+      expect(labels).toContain('Lawn care: $0.00 → $61.33 a month');
+      expect(labels).toContain('Monthly bill total: $41.33 → $102.66');
     });
   });
 });

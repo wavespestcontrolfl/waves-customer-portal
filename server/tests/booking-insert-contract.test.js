@@ -82,8 +82,10 @@ const CONTRACT_MODULE_CERTIFIED_WRITES = ['data.idempotency_key = idempotencyKey
 // multiset. Shrink-only.
 const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
   'server/routes/admin-schedule.js': [
-    "post / :: const [childRow] = await trx( scheduled_services').insert(childData",
-    "post / :: const [boosterRow] = await trx( scheduled_services').insert(boosterData",
+    // Same two POST / sites; the scope label follows the handler's name
+    // (scheduleCreateHandler, shared with createScheduleBooking).
+    "scheduleCreateHandler :: const [childRow] = await trx( scheduled_services').insert(childData",
+    "scheduleCreateHandler :: const [boosterRow] = await trx( scheduled_services').insert(boosterData",
     "put /:id/update-details :: const [childRow] = await trx( scheduled_services').insert(childData",
     "reconcileRecurringSeriesVisitCount :: const [row] = await trx( scheduled_services').insert(data",
     "extendSeriesOnceLocked :: const [autoExtRow] = await conn( scheduled_services').insert(nextData",

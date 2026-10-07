@@ -36,6 +36,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const OFFER_SOURCES = require('./sms-offer-sources');
 const {
   REPLY_RESERVATION_HOLD_HOURS,
   preserveSoleAcceptedReplyReceipts,
@@ -240,9 +241,14 @@ function isEscalationIntent(intent) {
  * because the composer card and the send-handler ownership check both match
  * on them; without either, the card could never surface or be verified.
  */
-// The pickers an SMS offer can come from (sms-shadow-drafter *_OFFER_SOURCE)
+// The pickers an SMS offer can come from (sms-offer-sources.js)
 // and the id each one's send-time recheck asks it about.
-const PICKER_OFFER_ID_FIELD = Object.freeze({ scheduler: 'scheduledServiceId', estimate: 'estimateId', book: 'serviceKey' });
+const PICKER_OFFER_ID_FIELD = Object.freeze({
+  [OFFER_SOURCES.SCHEDULER_OFFER_SOURCE]: 'scheduledServiceId',
+  [OFFER_SOURCES.ESTIMATE_OFFER_SOURCE]: 'estimateId',
+  [OFFER_SOURCES.BOOK_OFFER_SOURCE]: 'serviceKey',
+  [OFFER_SOURCES.WEBSITE_OFFER_SOURCE]: 'serviceKey',
+});
 
 /**
  * GATE_SMS_SCHEDULING_SUGGEST (dark), read at call time. Owner 2026-10-02:

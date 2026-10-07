@@ -785,7 +785,6 @@ const LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
 const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_nutra_tech', 'LESCO Nutra-TECH T&O Micronutrient Package', 'fertilizer', 'micronutrient support'],
   ['v13_stonewall_4fl', 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
-  ['v13_stonewall_15_0_15', 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
   ['v13_dimension_2ew', 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
   ['v13_dimension_18_0_10', 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
   ['v13_lesco_24_0_11', 'LESCO 24-0-11 with PolyPlus OPTI', 'fertilizer', 'fertilizer'],
