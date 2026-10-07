@@ -192,9 +192,17 @@ describe('PDF cache key reads the frozen verdict', () => {
 
   test('a partial lookup row and a full render row compute the same key', async () => {
     process.env[KEY] = 'true';
-    const full = { ...svc, customer_latitude: 27.4, customer_longitude: -82.5, structured_notes: '{}' };
-    expect(await sig(svc, verdict(true))).toBe(await sig(full, verdict(true)));
-    expect(await sig(svc, verdict(false))).toBe(await sig(full, verdict(false)));
+    const full = (notes) => ({ ...svc, customer_latitude: 27.4, customer_longitude: -82.5, structured_notes: notes });
+    expect(await sig(svc, verdict(true))).toBe(await sig(full(verdict(true)), verdict(true)));
+    expect(await sig(svc, verdict(false))).toBe(await sig(full(verdict(false)), verdict(false)));
+  });
+
+  test('the key uses the render row\'s own notes snapshot, not a fresher record read (codex #6089)', async () => {
+    process.env[KEY] = 'true';
+    const noVerdictKey = await sig(svc, '{}');
+    // Row loaded before the freeze committed; the record now holds defaultsOnly true.
+    const staleRow = { ...svc, structured_notes: '{}' };
+    expect(await sig(staleRow, verdict(true))).toBe(noVerdictKey);
   });
 
   test('turning the gate off re-keys back (rollback)', async () => {

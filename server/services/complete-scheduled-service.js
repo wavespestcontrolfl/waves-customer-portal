@@ -9098,6 +9098,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         areaLabels: completionAreas,
         zoneShapes: Array.isArray(zoneShapes) ? zoneShapes : [],
       });
+      // A partial sync (a submitted shape or label skipped, e.g. no zone letter
+      // left) is not a complete picture either: no coverage freeze (codex #6089).
+      if (Array.isArray(zoneSync.skipped) && zoneSync.skipped.length) zoneSyncOk = false;
       if (zoneSync.created || zoneSync.updated || zoneSync.shapesApplied || zoneSync.skipped.length) {
         logger.info('[completion] property zones synced', { serviceId: svc.id, ...zoneSync });
       }

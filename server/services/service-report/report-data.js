@@ -2842,8 +2842,12 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // marked zones) keeps its key; an unreadable record stamps a one-off key.
   if (featureGates.lawnCoverageHideDefaultZonesLive()) {
     try {
-      const row = await knex('service_records').where({ id: service.id }).first('structured_notes');
-      irrigationStamp += coverageVerdictStamp(row?.structured_notes);
+      // The same notes snapshot the render reads (codex #6089): the caller's row
+      // when it carries structured_notes, the record only for a partial lookup row.
+      const notes = Object.prototype.hasOwnProperty.call(service, 'structured_notes')
+        ? service.structured_notes
+        : (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes;
+      irrigationStamp += coverageVerdictStamp(notes);
     } catch {
       irrigationStamp += `:covhide=err${crypto.randomBytes(4).toString('hex')}`;
     }
