@@ -127,6 +127,44 @@ function bypassesLedgerSplit(estimate, customer, addOnContext) {
   return crossProperty && addOnContext.sameFamilyAtOtherProperty !== false;
 }
 
+// The lawn profile writes the converter makes (lawnProfileWrites + the size
+// target rule in lawn-size-sync): the grass type fills only an empty profile,
+// and the confirmed estimate size is written only for the primary property.
+// Returns the card line (null when nothing changes) and the pin.
+async function lawnProfileChange({ estimate, estimateData, customer }) {
+  const Converter = require('../estimate-converter');
+  const LawnSize = require('../lawn-size-sync');
+  const writes = Converter.lawnProfileWrites(Converter.recurringServicesFromEstimateData(estimateData), estimateData);
+  if (!writes.grass && !writes.writesLawnSize) return { line: null, pin: null };
+  const turf = await db('customer_turf_profiles').where({ customer_id: customer.id }).first('grass_type', 'lawn_sqft');
+  const primary = await db('customer_properties').where({ customer_id: customer.id, is_primary: true, active: true }).first();
+  const pin = await require('../estimate-manual-acceptance').lawnProfilePin(db, customer.id);
+  const grassBefore = turf?.grass_type || null;
+  const grassAfter = grassBefore || writes.grass || null;
+  const sqft = writes.writesLawnSize ? LawnSize.confirmedLawnSqftFromEstimate(estimateData).sqft : null;
+  const sizeBefore = turf?.lawn_sqft ?? null;
+  const sizeAfter = sqft != null && LawnSize.estimateTargetsPrimary(estimate, customer, primary).match ? sqft : sizeBefore;
+  if (grassBefore === grassAfter && Number(sizeBefore) === Number(sizeAfter)) return { line: null, pin };
+  const sizeText = (v) => (v == null ? 'none' : `${Number(v).toLocaleString('en-US')} sq ft`);
+  return { line: `Lawn profile: grass type ${grassBefore || 'none'} → ${grassAfter || 'none'}; lawn size ${sizeText(sizeBefore)} → ${sizeText(sizeAfter)}`, pin };
+}
+
+// What approval binds: any change before Confirm refuses the card. The bill
+// pins (ledger, lawn profile, add-on evidence, no linked visit) exist only
+// when the accept converts (a recurring monthly total).
+function cardPins({ estimate, customer, bill }) {
+  return {
+    estimate_version: iso(estimate.updated_at),
+    estimate_status: estimate.status,
+    customer_version: iso(customer.updated_at),
+    customer_billing: require('../estimate-manual-acceptance').customerBillingPin(customer),
+    ledger: bill?.pin ?? null,
+    lawn_profile: bill?.lawn.pin ?? null,
+    plan_rows: bill?.plan_rows ?? null,
+    no_linked_visits: !!bill,
+  };
+}
+
 async function billPlan({ estimate, estimateData, customer, monthlyRate }) {
   const Converter = require('../estimate-converter');
   const previousScalar = round2(customer.monthly_rate);
@@ -156,8 +194,10 @@ async function billPlan({ estimate, estimateData, customer, monthlyRate }) {
     }
   }
   const families = [...new Set([...before.keys(), ...after.keys()])];
+  const lawn = await lawnProfileChange({ estimate, estimateData, customer });
   return {
     pin: ledgerPin(components, previousScalar),
+    lawn,
     // The add-on classifier's evidence, re-checked under the accept's locks.
     plan_rows: await Converter.otherPlanRowsPin(db, { customerId: customer.id, estimateId: estimate.id }),
     slices,
@@ -482,6 +522,7 @@ function serviceAndBillLines(preview) {
   lines.push({ kind: 'billing', label: `Bill total: ${money(bill.total_before)} → ${money(bill.total_after)} a month${addOn}`, before: money(bill.total_before), after: money(bill.total_after) });
   if (!bill.split_by_service) lines.push({ kind: 'billing', label: 'Bill note: this accept is not split by service (grouped or other-property estimate)' });
   if (preview.per_application) lines.push({ kind: 'billing', label: preview.per_application });
+  if (bill.lawn_profile) lines.push({ kind: 'customer', label: bill.lawn_profile });
   if (bill.review_alert) lines.push({ kind: 'operational', label: 'Admin bell: plan-rate review — check the new monthly total after the accept' });
   for (const notice of preview.office_notices) lines.push({ kind: 'operational', label: notice });
   return lines;
@@ -553,6 +594,7 @@ async function planAccept(input) {
     bill: bill && {
       lines: bill.lines, total_before: bill.total_before, total_after: bill.total_after,
       add_on: bill.add_on, split_by_service: bill.split_by_service, review_alert: bill.review_alert,
+      lawn_profile: bill.lawn.line,
     },
     billing_lane: { before: lt.laneBefore && laneLabel(lt.laneBefore), after: lt.laneAfter && laneLabel(lt.laneAfter) },
     tier: { before: lt.tierBefore, after: lt.tierAfter },
@@ -566,15 +608,7 @@ async function planAccept(input) {
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),
     // Approval binds these: any change before Confirm refuses the card.
-    pins: {
-      estimate_version: iso(estimate.updated_at),
-      estimate_status: estimate.status,
-      customer_version: iso(customer.updated_at),
-      customer_billing: require('../estimate-manual-acceptance').customerBillingPin(customer),
-      ledger: bill ? bill.pin : null,
-      plan_rows: bill ? bill.plan_rows : null,
-      no_linked_visits: converts,
-    },
+    pins: cardPins({ estimate, customer, bill }),
     note_to_operator: 'PREVIEW ONLY — nothing was changed. Confirm runs the estimate page\'s Mark accepted.',
   };
   preview.card_lines = cardLines(preview);
@@ -595,6 +629,7 @@ function expectedFrom(approved) {
     customerVersion: approved.pins.customer_version,
     customerBilling: approved.pins.customer_billing,
     ledgerPin: approved.pins.ledger,
+    lawnProfile: approved.pins.lawn_profile,
     planRows: approved.pins.plan_rows,
     noLinkedVisits: approved.pins.no_linked_visits === true,
   };

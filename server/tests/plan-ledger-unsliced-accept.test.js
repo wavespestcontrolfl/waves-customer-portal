@@ -51,6 +51,7 @@ function makeAcceptDb({
   ledgerRows = [],
   updateReturnedRate = null,
   ledgerDelError = null,
+  linkedVisitCount = 0,
 }) {
   const ledgerStore = ledgerRows.map((r) => ({ ...r }));
   const customerUpdates = [];
@@ -91,7 +92,7 @@ function makeAcceptDb({
         q[m] = () => q;
       });
       q.where = (...args) => { if (typeof args[0] === 'function') args[0](nestedBuilder()); return q; };
-      q.first = async () => ({ count: 0 });
+      q.first = async () => ({ count: linkedVisitCount });
       q.then = (resolve, reject) => Promise.resolve(planRows.map((r) => ({ ...r }))).then(resolve, reject);
       return q;
     }
@@ -325,5 +326,32 @@ describe('unsliced authoritative accepts (codex #3245 r16 + r22)', () => {
     // Kill-switch semantics: with the gate off nothing reads the components
     // and the empty-slices accept must not touch them.
     expect(db.ledgerStore).toEqual(staleRows);
+  });
+});
+
+// The Intelligence Bar accept_estimate card pins "no visit linked to this
+// estimate"; markEstimateManuallyAccepted then passes refuseLinkedVisits, and
+// the converter's OWN reservation read decides inside the accept transaction:
+// a linked row (booking.js can link one outside the accept's locks) throws
+// preview_changed so the whole accept rolls back; none converts as usual.
+describe('refuseLinkedVisits (the bar card\'s "books none" promise)', () => {
+  const customer = {
+    id: 'cust-1', first_name: 'Pat', last_name: 'Customer',
+    pipeline_stage: 'active_customer', monthly_rate: '95', member_since: '2025-01-01', waveguard_tier: 'Bronze',
+  };
+
+  test('a visit linked to the estimate since the card refuses the conversion with preview_changed', async () => {
+    const db = makeAcceptDb({ estimate: unpricedEstimate([UNPRICED_PEST_LINE]), customer, linkedVisitCount: 1 });
+    await expect(EstimateConverter.convertEstimate('est-unsliced', {
+      ...CONVERT_OPTS_BASE, database: db, refuseLinkedVisits: true,
+    })).rejects.toMatchObject({ code: 'preview_changed', statusCode: 409, isOperational: true });
+  });
+
+  test('no linked visit converts as usual', async () => {
+    const db = makeAcceptDb({ estimate: unpricedEstimate([UNPRICED_PEST_LINE]), customer, planRows: [LIVE_PEST_ROW] });
+    const result = await EstimateConverter.convertEstimate('est-unsliced', {
+      ...CONVERT_OPTS_BASE, database: db, refuseLinkedVisits: true,
+    });
+    expect(result.customerId).toBe('cust-1');
   });
 });

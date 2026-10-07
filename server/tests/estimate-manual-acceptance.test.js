@@ -2038,6 +2038,41 @@ describe('the bar card pins (expected) are re-checked under the accept locks', (
     expect(converter.convertEstimate).not.toHaveBeenCalled();
   });
 
+  test('the "no linked visit" pin asks the converter to refuse a visit it finds; without the pin nothing is asked', async () => {
+    const { database } = dbWith(estimateRow(), customerRow());
+    const pinned = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
+    await accept(database, pinned, { noLinkedVisits: true });
+    expect(pinned.convertEstimate.mock.calls[0][1]).toMatchObject({ refuseLinkedVisits: true });
+    const { database: db2 } = dbWith(estimateRow(), customerRow());
+    const unpinned = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };
+    await accept(db2, unpinned);
+    expect(unpinned.convertEstimate.mock.calls[0][1]).not.toHaveProperty('refuseLinkedVisits');
+  });
+
+  test('a visit the converter finds rolls the accept back as preview_changed: no audit row, no lead won', async () => {
+    const { database, inserts } = dbWith(estimateRow(), customerRow());
+    const refusal = Object.assign(new Error('The estimate, the customer or the bill changed after the card was shown. Nothing was changed.'), {
+      code: 'preview_changed', statusCode: 409, isOperational: true,
+    });
+    const converter = { convertEstimate: jest.fn().mockRejectedValue(refusal) };
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn() };
+    await expect(markEstimateManuallyAccepted({
+      estimateId: 'estimate-pins', adminUserId: 'admin-1', source: 'verbal_yes', expected: { ...pins, noLinkedVisits: true },
+      database, estimateConverter: converter, leadLinkService,
+    })).rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(inserts).toEqual([]);
+    expect(leadLinkService.markLinkedLeadEstimateAccepted).not.toHaveBeenCalled();
+  });
+
+  test('a lawn profile changed since the card refuses under the locks', async () => {
+    const { database, updates } = dbWith(estimateRow(), customerRow());
+    const converter = { convertEstimate: jest.fn() };
+    await expect(accept(database, converter, { lawnProfile: 'st_augustine|6500|prop-1|6500' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'preview_changed' });
+    expect(updates).toEqual([]);
+    expect(converter.convertEstimate).not.toHaveBeenCalled();
+  });
+
   test('with no linked visit the pin lets the accept through', async () => {
     const { database } = dbWith(estimateRow(), customerRow());
     const converter = { convertEstimate: jest.fn().mockResolvedValue({ customerId: 'customer-pins' }) };

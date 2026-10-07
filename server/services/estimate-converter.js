@@ -1811,6 +1811,34 @@ async function otherPlanRowsPin(conn, { customerId, estimateId }) {
     .join(',');
 }
 
+// The lawn profile writes an accept makes (convertEstimate 1b/1c): the grass
+// type to fill (COALESCE — only when the profile has none) and whether the
+// estimate's confirmed lawn size is applied (a recurring lawn service;
+// lawn-size-sync applyEstimateLawnSqft then decides the target). Pure;
+// exported so the Intelligence Bar accept_estimate card shows the same writes.
+function lawnProfileWrites(recurringServices, estimateData) {
+  const services = Array.isArray(recurringServices) ? recurringServices : [];
+  // Fail-soft like both writes: a bad payload means no write, never a broken accept.
+  try {
+    return {
+      grass: grassTypeToPersist(services, estimateData),
+      writesLawnSize: services.some((svc) => recurringServiceKey(svc) === 'lawn_care'),
+    };
+  } catch (err) {
+    logger.warn?.(`[estimate-converter] lawn profile writes skipped: ${err.message}`);
+    return { grass: null, writesLawnSize: false };
+  }
+}
+
+function linkedVisitsAfterCardError() {
+  const err = new Error('The estimate, the customer or the bill changed after the card was shown. Nothing was changed.');
+  err.code = 'preview_changed';
+  err.isOperational = true;
+  err.status = 409;
+  err.statusCode = 409;
+  return err;
+}
+
 // A commercial recurring line (convertEstimate's hasCommercialRecurring).
 function hasCommercialRecurringLine(services = []) {
   return services.some((svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_'));
@@ -5854,8 +5882,9 @@ const EstimateConverter = {
     //     ungated write would stamp a fake default on non-lawn customers.
     //     Fail-soft + COALESCE — never clobber an admin-set value, never break
     //     acceptance.
+    const lawnWrites = lawnProfileWrites(recurringServices, estimateData);
     try {
-      const grass = grassTypeToPersist(recurringServices, estimateData);
+      const grass = lawnWrites.grass;
       if (grass) {
         // Customer-lock fence (#3391): a first-profile insert must not race
         // the click-to-estimate mint's turf revalidation. `database` may
@@ -5886,9 +5915,7 @@ const EstimateConverter = {
     //     or another property writes nothing). It reprices no one: it writes
     //     the size plus an audit row and nothing else.
     try {
-      const hasRecurringLawn = (Array.isArray(recurringServices) ? recurringServices : [])
-        .some((svc) => recurringServiceKey(svc) === 'lawn_care');
-      if (hasRecurringLawn) {
+      if (lawnWrites.writesLawnSize) {
         const lawnSize = await require('./lawn-size-sync').applyEstimateLawnSqft(database, {
           customerId, estimate, estimateData, trigger: 'acceptance',
         });
@@ -6009,6 +6036,12 @@ const EstimateConverter = {
       .count('id as count')
       .first();
     const reservationRowsExist = Number(existingFromReservation?.count || 0) > 0;
+    // The Intelligence Bar card promised no visit linked to this estimate
+    // (opts.refuseLinkedVisits, set by markEstimateManuallyAccepted from the
+    // card's pin): a row linked since — booking.js can link one outside the
+    // accept's locks — rolls the whole accept back instead of taking the
+    // reservation path the card did not show.
+    if (opts.refuseLinkedVisits === true && reservationRowsExist) throw linkedVisitsAfterCardError();
     // Loaded here rather than inside the reservation branch so the multi-unit
     // lock pre-pass below can read the reserved row's service identity before
     // any seeding unit processes.
@@ -9029,6 +9062,7 @@ module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimate
 module.exports.FL_COMMERCIAL_TAX_RATE = FL_COMMERCIAL_TAX_RATE;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.otherPlanRowsPin = otherPlanRowsPin;
+module.exports.lawnProfileWrites = lawnProfileWrites;
 module.exports.hasCommercialRecurringLine = hasCommercialRecurringLine;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
 module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;

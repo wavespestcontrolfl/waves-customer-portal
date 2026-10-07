@@ -228,6 +228,43 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(fresh.some((l) => l.startsWith('Office notice: tier review'))).toBe(false);
   });
 
+  describe('lawn profile writes', () => {
+    const lawnEstimate = {
+      property_id: 'prop-1', monthly_total: 55, annual_total: 495,
+      estimate_data: {
+        grassType: 'st_augustine',
+        customerSelection: { frequency: 'monthly' },
+        engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', lawnSqFt: 6500, turfBasis: 'measuredTurfSf', visitsPerYear: 9, monthly: 55, annual: 495 }] },
+      },
+    };
+    afterEach(() => { tables.customer_turf_profiles = []; tables.customer_properties = []; });
+
+    test('an empty lawn profile is filled, and the card says from what to what', async () => {
+      seed({ estimate: lawnEstimate, ledger: [] });
+      tables.customer_turf_profiles = [];
+      tables.customer_properties = [{ id: 'prop-1', customer_id: CUSTOMER_ID, active: true, is_primary: true, property_sqft: null }];
+      const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(preview.error).toBeUndefined();
+      expect(labels(card(preview))).toContain('Lawn profile: grass type none → st_augustine; lawn size none → 6,500 sq ft');
+      expect(preview.pins.lawn_profile).toBe('||prop-1|');
+    });
+
+    test('a profile that already holds these values shows no lawn line, but is still pinned', async () => {
+      seed({ estimate: lawnEstimate, ledger: [] });
+      tables.customer_turf_profiles = [{ customer_id: CUSTOMER_ID, grass_type: 'st_augustine', lawn_sqft: 6500 }];
+      tables.customer_properties = [{ id: 'prop-1', customer_id: CUSTOMER_ID, active: true, is_primary: true, property_sqft: 6500 }];
+      const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(preview.error).toBeUndefined();
+      expect(labels(card(preview)).some((l) => l.startsWith('Lawn profile'))).toBe(false);
+      expect(preview.pins.lawn_profile).toBe('st_augustine|6500|prop-1|6500');
+    });
+
+    test('a non-lawn estimate has no lawn line and no lawn pin', async () => {
+      const preview = await executeEstimateAcceptTool('accept_estimate', INPUT);
+      expect(preview.pins.lawn_profile).toBeNull();
+    });
+  });
+
   test('the tier is the one the accept activates, not only what the quote says', async () => {
     // A legacy quote still says Silver, but with the live lawn plan the accept
     // counts three services and activates Gold; the card says Gold.
@@ -407,6 +444,7 @@ describe('Confirm', () => {
           customerVersion: '2026-10-05T09:00:00.000Z', ledgerPin: approved.pins.ledger,
           customerBilling: 'per_application||Bronze|active_customer|',
           planRows: '',
+          lawnProfile: null,
           noLinkedVisits: true,
         },
       },

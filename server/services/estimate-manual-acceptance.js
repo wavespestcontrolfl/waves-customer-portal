@@ -579,9 +579,30 @@ const CARD_PIN_CHECKS = [
       customerId: estimate.customer_id, estimateId: estimate.id,
     })) === expected.planRows,
   },
+  {
+    phase: 'customer',
+    key: 'lawnProfile',
+    holds: async ({ trx, estimate, expected }) => (await lawnProfilePin(trx, estimate.customer_id)) === expected.lawnProfile,
+  },
   // Still no visit linked to the estimate (the reservation path the card cannot show).
   { phase: 'customer', key: 'noLinkedVisits', holds: async ({ trx, estimate }) => !(await estimateLinkedVisitsQuery(trx, estimate.id).first('id')) },
 ];
+
+// What the card's pins ask of the conversion itself: with "no linked visit"
+// pinned, the converter's own reservation read refuses a row linked since
+// (booking.js links outside this accept's locks), rolling the accept back.
+function cardConvertOptions(expected) {
+  return expected && expected.noLinkedVisits === true ? { refuseLinkedVisits: true } : {};
+}
+
+// The lawn profile values the accept's lawn writes read (customer_turf_profiles
+// grass type and lawn size, the primary property's size), as one string.
+// Exported for the Intelligence Bar card, which pins it.
+async function lawnProfilePin(conn, customerId) {
+  const turf = await conn('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type', 'lawn_sqft');
+  const primary = await conn('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first('id', 'property_sqft');
+  return [turf?.grass_type, turf?.lawn_sqft, primary?.id, primary?.property_sqft].map((v) => (v == null ? '' : String(v))).join('|');
+}
 
 async function checkCardPins(trx, phase, ctx) {
   const { expected } = ctx;
@@ -1037,6 +1058,7 @@ async function markEstimateManuallyAccepted({
           // GLOBAL pool — defer it so a rolled-back Mark Won can't page staff
           // about an unaccepted estimate. Dispatched post-commit below.
           deferCommercialScheduleNotification: true,
+          ...cardConvertOptions(expected),
         };
         if (annualPrepaySelected) {
           // Re-run the one-time guard on the row THIS transaction claimed:
@@ -1350,6 +1372,7 @@ module.exports = { MANUAL_ACCEPT_ACTIVE_SQL,
   markEstimateManuallyAccepted,
   estimateLinkedVisitsQuery,
   customerBillingPin,
+  lawnProfilePin,
   oneTapPurchaseRefusal,
   manualAcceptRowRefusal,
   manualAcceptLockedRowRefusal,
