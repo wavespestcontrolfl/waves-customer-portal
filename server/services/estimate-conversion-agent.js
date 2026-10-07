@@ -864,6 +864,8 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
 }
 
 module.exports = {
+  // The open-estimate status set (also read by IB start_program).
+  OPEN_ESTIMATE_STATUSES,
   CUSTOMER_SMS_TRIAGE_AGENT_NAME,
   CUSTOMER_SMS_TRIAGE_WORKFLOW,
   WORKFLOW,

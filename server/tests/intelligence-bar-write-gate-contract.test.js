@@ -617,7 +617,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         id: '00000000-0000-0000-0000-00000000e001', first_name: 'Dana', last_name: 'Example', version: 'v1',
         monthly_rate: '41.33', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', payer_id: null, deleted_at: null,
       }],
-      services: [{ id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', is_active: true, default_duration_minutes: 60 }],
+      services: [{ id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', billing_type: 'recurring', is_active: true, default_duration_minutes: 60 }],
       technicians: [{ id: '00000000-0000-0000-0000-00000000e0aa', name: 'Sam Tech' }],
       scheduled_services: [],
       estimates: [],
@@ -853,6 +853,11 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
           reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
         },
       }) : null;
+    // start_program's overlap probe takes the occupancy advisory lock through
+    // trx.raw, which this recorder has no answer for (its own coverage is in
+    // intelligence-bar-start-program.test.js).
+    const overlapProbe = toolName === 'start_program'
+      ? jest.spyOn(require('../services/scheduling/window-rules'), 'probeSlotOverlap').mockResolvedValue([]) : null;
     const receiptResolvers = toolName === 'resend_receipt'
       ? [
         jest.spyOn(require('../services/invoice-email'), 'resolveReceiptEmailRecipient')
@@ -879,6 +884,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     try { result = await executor(toolName, input); } finally {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();
+      overlapProbe?.mockRestore();
       receiptResolvers.forEach((spy) => spy.mockRestore());
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
       if (outsideFixture) {

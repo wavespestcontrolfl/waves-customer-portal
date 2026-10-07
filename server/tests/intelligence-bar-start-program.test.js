@@ -22,6 +22,9 @@ const db = require('../models/db');
 const PlanRateLedger = require('../services/plan-rate-ledger');
 const Welcome = require('../services/new-recurring-welcome-sms');
 const Existing = require('../services/waveguard-existing-services');
+const Sync = require('../services/self-booking-plan-sync');
+const WindowRules = require('../services/scheduling/window-rules');
+const DatetimeEt = require('../utils/datetime-et');
 const { createScheduleBooking } = require('../routes/admin-schedule');
 const { executeCustomerLifecycleTool, CUSTOMER_LIFECYCLE_TOOLS } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { buildContract } = require('../services/intelligence-bar/authorization-contract');
@@ -33,6 +36,8 @@ const PEST_LINE = [{ family_key: 'pest_control', monthly_rate: '41.33' }];
 
 let tables;
 let writes;
+let calls;
+const CUSTOMER_COLUMNS = { active: {}, pipeline_stage: {}, pipeline_stage_changed_at: {}, waveguard_tier: {}, waveguard_tier_source: {}, member_since: {}, monthly_rate: {} };
 
 function fakeDb() {
   function builder(table) {
@@ -44,10 +49,11 @@ function fakeDb() {
           return (resolve) => resolve(state.single ? rows[0] : rows);
         }
         if (prop === 'first') return () => { state.single = true; return b; };
+        if (prop === 'columnInfo') return async () => (table === 'customers' ? CUSTOMER_COLUMNS : {});
         if (prop === 'update' || prop === 'insert' || prop === 'del') {
           return (data) => { writes.push({ table, op: prop, data }); return b; };
         }
-        return () => b;
+        return (...args) => { calls.push({ table, method: String(prop), args }); return b; };
       },
     });
     return b;
@@ -63,7 +69,8 @@ function memberCustomer(overrides = {}) {
   return {
     id: CUSTOMER_ID, first_name: 'Dana', last_name: 'Example', version: '2026-10-06 10:00:00.123456+00',
     monthly_rate: '41.33', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze',
-    waveguard_tier_source: 'manual', payer_id: null, deleted_at: null, ...overrides,
+    waveguard_tier_source: 'manual', payer_id: null, deleted_at: null,
+    active: true, pipeline_stage: 'active_customer', member_since: '2024-01-01', ...overrides,
   };
 }
 
@@ -83,10 +90,14 @@ const run = (input, ctx = {}) => executeCustomerLifecycleTool('start_program', i
 beforeEach(() => {
   process.env.GATE_IB_START_PROGRAM = 'true';
   writes = [];
+  calls = [];
   tables = {
     customers: [memberCustomer()],
     customer_properties: [{ id: 'prop-1' }],
-    services: [{ id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', is_active: true, default_duration_minutes: 60 }],
+    services: [
+      { id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', billing_type: 'recurring', is_active: true, default_duration_minutes: 60 },
+      { id: 'svc-mosq-1x', name: 'Mosquito One Time', service_key: 'mosquito_one_time', billing_type: 'one_time', is_active: true },
+    ],
     technicians: [{ id: TECH_ID, name: 'Sam Tech' }],
     estimates: [],
   };
@@ -97,6 +108,10 @@ beforeEach(() => {
   jest.spyOn(Existing, 'loadLiveRecurringObligationRows').mockResolvedValue([
     { id: 'series-pest', service_type: 'General Pest Control', service_key: 'pest_general_quarterly', is_recurring: true },
   ]);
+  jest.spyOn(Sync, 'scheduledServiceRowsForCustomer').mockResolvedValue([
+    { id: 'series-pest', service_type: 'General Pest Control', service_key: 'pest_general_quarterly', scheduled_date: '2099-02-01', is_recurring: true, status: 'pending' },
+  ]);
+  jest.spyOn(WindowRules, 'probeSlotOverlap').mockResolvedValue([]);
   createScheduleBooking.mockReset();
 });
 
@@ -130,14 +145,18 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
       'Visits carry no price: the monthly bill covers them (dues-billed plan visits)',
       'Billing lane: stays monthly membership',
     ]);
-    expect(lines(preview, 'customer')).toEqual(['WaveGuard tier: Bronze -> Silver (set by hand, so the nightly tier check keeps it)']);
+    expect(lines(preview, 'customer')).toEqual([
+      "Booking's WaveGuard plan sync (runs with the booking): tier Bronze -> Silver",
+      'WaveGuard tier: Bronze -> Silver (set by hand, so the nightly tier check keeps it)',
+    ]);
+    expect(preview.plan_sync).toEqual({ waveguard_tier: 'Silver' });
     expect(lines(preview, 'operational')[0]).toBe('Series: Lawn Care, monthly, ongoing, no end date (the first 4 visits are booked now, as on the Schedule screen)');
     expect(lines(preview, 'operational')[1]).toBe('First visit: Tue, Mar 3, 2099, 9:00 AM-10:00 AM, technician Sam Tech');
     expect(lines(preview, 'comms')).toEqual([
-      'Texts: a booking confirmation for the first visit (Tue, Mar 3, 2099, 9:00 AM-10:00 AM) goes out by text or email, per their settings',
-      'Texts: no welcome text (this customer already had a recurring service)',
+      'Texts: a booking confirmation for the first visit goes out by text or email, per their settings. It gives the arrival window Tue, Mar 3, 2099, 9:00 AM - 11:00 AM',
+      'Texts and email: no welcome text or welcome email (this customer already had a recurring service)',
       'Texts: visit reminders before each visit, set up as the Schedule screen sets them up',
-      'Texts: no membership email is sent',
+      'Email: the membership-started email is not sent',
     ]);
     expect(preview.notifies_customer).toBe(true);
     expect(typeof preview._version).toBe('string');
@@ -205,7 +224,7 @@ describe('send_texts (owner D3)', () => {
   test('on, for a first recurring service: the welcome text is named', async () => {
     Welcome.isNewRecurringSignupCandidate.mockResolvedValue(true);
     const preview = await run(BASE_INPUT);
-    expect(lines(preview, 'comms')).toContain('Texts: the new-customer welcome text is queued about 1 hour after booking (sent once ever)');
+    expect(lines(preview, 'comms')).toContain('Texts and email: the new-customer welcome is queued for about 1 hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows');
   });
 });
 
@@ -223,6 +242,24 @@ describe('refusals', () => {
     const result = await run(BASE_INPUT);
     expect(result.code).toBe('program_open_estimate');
     expect(result.error).toContain('Mark the estimate accepted on the estimate page');
+    const estimateCalls = calls.filter((c) => c.table === 'estimates');
+    expect(estimateCalls).toContainEqual({ table: 'estimates', method: 'whereNull', args: ['archived_at'] });
+    const statuses = estimateCalls.find((c) => c.method === 'whereIn').args[1];
+    expect(statuses).toEqual(expect.arrayContaining(['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed']));
+  });
+
+  test('a one-time catalog service cannot start a program', async () => {
+    expect(await run({ ...BASE_INPUT, service: 'Mosquito One Time' })).toMatchObject({ code: 'program_service_not_recurring' });
+  });
+
+  test('a first window that already passed today is refused before the card', async () => {
+    jest.spyOn(DatetimeEt, 'sameDayWindowElapsed').mockReturnValue(true);
+    expect(await run(BASE_INPUT)).toMatchObject({ code: 'window_elapsed' });
+  });
+
+  test('a plan-sync case the card cannot predict is refused', async () => {
+    jest.spyOn(Sync, 'isAutoDerivedTierLabelRow').mockReturnValue(true);
+    expect(await run(BASE_INPUT)).toMatchObject({ code: 'program_plan_sync_unpredictable' });
   });
 
   test('a monthly total below the other services (D4)', async () => {
@@ -335,13 +372,56 @@ describe('commit', () => {
     PlanRateLedger.loadComponents
       .mockResolvedValueOnce(PEST_LINE)
       .mockResolvedValueOnce([{ family_key: 'pest_control', monthly_rate: '45.00' }]);
+    // The booking's own plan sync raised the tier before the second step.
+    createScheduleBooking.mockImplementation(async () => {
+      tables.customers = [memberCustomer({ waveguard_tier: 'Silver', waveguard_tier_source: 'auto' })];
+      return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+    });
     const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
     expect(result).toMatchObject({ success: true, partial: true, not_done: ['waveguard_tier', 'monthly_bill'] });
+    expect(result.customer_now).toEqual({ waveguard_tier: 'Silver', monthly_rate: 41.33 });
+    expect(result.warning).toContain('Now the tier is Silver and the monthly bill is $41.33');
     expect(result.series_booked).toMatchObject({ series_id: 'series-1', visits_booked: 4 });
     expect(result.warning).toContain('PARTLY DONE');
-    expect(result.warning).toContain('NOT changed');
+    expect(result.warning).toContain('NOT done by this card: the tier Silver and the monthly bill $102.66');
     expect(executionOutcome(result)).toBe('partially_completed');
     expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+  });
+
+  test('fewer visits than the card promised: tier and bill are not applied, the shortfall is named', async () => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 201, json: {
+      id: 'series-1', recurringCreated: 2, appointments: [],
+      warnings: ['Recurring plan requested 4 visits but only 2 could be placed.'],
+    } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ success: true, partial: true, not_done: ['waveguard_tier', 'monthly_bill'] });
+    expect(result.warning).toContain('booked 2 of the 4 visits');
+    expect(result.warning).toContain('Add the missing visits on the Schedule screen');
+    expect(executionOutcome(result)).toBe('partially_completed');
+    expect(writes.filter((w) => w.table === 'customers')).toEqual([]);
+    expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+  });
+
+  test('an overlap is shown on the card; a new overlap after the card refuses with preview_changed', async () => {
+    tables.scheduled_services = [{ id: 'visit-9', first_name: 'Pat', last_name: 'Sample' }];
+    const existing = { id: 'visit-9', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Pest Control' };
+    WindowRules.probeSlotOverlap.mockResolvedValue([existing]);
+    const preview = await run(BASE_INPUT);
+    expect(lines(preview, 'operational')).toContain('Overlap: the first visit overlaps a visit already on the schedule (Pat Sample, Pest Control, 9:00 AM-10:00 AM). The booking goes ahead, as on the Schedule screen');
+    expect(preview.slot_overlap.with).toEqual([{ customer: 'Pat Sample', service: 'Pest Control', window: '9:00 AM-10:00 AM' }]);
+    WindowRules.probeSlotOverlap.mockResolvedValue([existing, { id: 'visit-10', window_start: '09:00:00', window_end: '10:00:00', service_type: 'Lawn Care' }]);
+    const result = await run({ ...BASE_INPUT, _verified_program_version: preview._version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('a changed plan-sync prediction after the card refuses with preview_changed', async () => {
+    const version = await approvedVersion();
+    Sync.scheduledServiceRowsForCustomer.mockResolvedValue([]);
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
   });
 
   test('a thrown booking error is reported as unknown, with the tier and bill untouched', async () => {

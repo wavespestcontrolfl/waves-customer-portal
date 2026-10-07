@@ -52,8 +52,6 @@ const CADENCES = {
 };
 // The Schedule screen books an ongoing series as its first 4 visits.
 const ONGOING_PRESEED = 4;
-// Same set the address and email fan-outs treat as an open estimate.
-const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
 const LEDGER_SOURCE = 'ib_update';
 
 function startProgramLive() {
@@ -142,8 +140,11 @@ function planBill({ components, previousScalar, family, monthly, monthlyTotal, r
 // the bar is a pending owner decision (Q5), so an open quote for the service
 // refuses instead of booking around it. An unreadable estimate fails closed.
 async function openEstimateForFamily(customerId, family) {
+  // The estimate lifecycle's open set (sending included); an archived row keeps
+  // its status but is no longer an offer.
+  const { OPEN_ESTIMATE_STATUSES } = require('../estimate-conversion-agent');
   const rows = await db('estimates').where({ customer_id: customerId })
-    .whereIn('status', OPEN_ESTIMATE_STATUSES).select('id', 'status', 'estimate_data');
+    .whereIn('status', OPEN_ESTIMATE_STATUSES).whereNull('archived_at').select('id', 'status', 'estimate_data');
   if (!rows.length) return null;
   const { acceptedRecurringBillingLines } = require('../plan-rate-ledger');
   const { serviceFamilyKeyForAdoption } = require('../../routes/estimate-public');
@@ -242,12 +243,22 @@ async function resolveProgramService(serviceText) {
   const RateChange = require('./rate-change');
   const services = await db('services').where({ is_active: true })
     .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type', 'default_duration_minutes');
-  const match = require('./tools').resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceText);
+  const { resolveBookingCatalogRow } = require('./tools');
+  const all = Array.isArray(services) ? services : [];
+  // Only a recurring catalog row can start a program: the catalog's own
+  // marker, read the way the Schedule screen reads it (inferServiceCadence:
+  // any billing_type other than 'recurring' books one time).
+  const isRecurringRow = (r) => String(r.billing_type || '').toLowerCase().replace(/[\s-]+/g, '_') === 'recurring';
+  const match = resolveBookingCatalogRow(all.filter(isRecurringRow), serviceText);
   if (match.ambiguous) {
     return refusal(`"${serviceText}" names several catalog services (${match.ambiguous.map((r) => r.name).join(', ')}). Use the exact service name. Nothing was proposed.`);
   }
   const catalogRow = match.row;
-  if (!catalogRow) return refusal(`"${serviceText}" is not a catalog service. Use the service's exact catalog name. Nothing was proposed.`);
+  if (!catalogRow) {
+    return resolveBookingCatalogRow(all, serviceText).row
+      ? refusal(`"${serviceText}" is a one-time catalog service, not a recurring program. Book a single visit with create_appointment, or name the recurring service. Nothing was proposed.`, 'program_service_not_recurring')
+      : refusal(`"${serviceText}" is not a catalog service. Use the service's exact catalog name. Nothing was proposed.`);
+  }
   const family = RateChange.resolveFamily(catalogRow.name, []) || RateChange.resolveFamily(catalogRow.service_key, []);
   if (!family) {
     return refusal(`"${catalogRow.name}" is not a service this tool can put on the monthly bill. Nothing was proposed.`, 'rate_family_unknown');
@@ -313,19 +324,61 @@ function resolveRepriceLines(rawLines, components, currentLines) {
 
 // The first visit's window: the start the operator gave, the service's
 // default length (the handler's own duration rule), the shared admin rules.
-function firstVisitWindow(start, catalogRow) {
-  const { deriveWindowEnd } = require('../../utils/datetime-et');
+function firstVisitWindow(firstDate, start, catalogRow) {
+  const { deriveWindowEnd, sameDayWindowElapsed } = require('../../utils/datetime-et');
   const { assertAdminAppointmentWindow } = require('../scheduling/window-rules');
   const duration = Number(catalogRow.default_duration_minutes) > 0 ? Number(catalogRow.default_duration_minutes) : 60;
   const windowEnd = deriveWindowEnd(start, duration);
   if (!windowEnd) return refusal('That window would cross midnight. Pick an earlier start.', 'invalid_appointment_window');
   try {
     const window = assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes: duration });
+    // The same elapsed-window guard create_appointment runs.
+    if (sameDayWindowElapsed(firstDate, window.window_end || start)) {
+      return refusal('That time has already passed today. Pick a later window or a future date. Nothing was proposed.', 'window_elapsed');
+    }
     return { duration, windowStart: window.window_start, windowEnd: window.window_end };
   } catch (err) {
     if (err?.status === 422) return refusal(err.message, 'invalid_appointment_window');
     throw err;
   }
+}
+
+// The booking handler runs the WaveGuard plan sync inside its own
+// transaction (syncCustomerWaveGuardPlanFromScheduledServices), which can set
+// the tier, active, pipeline_stage and member_since. The card predicts it with
+// the sync's own member-branch builder over today's schedule plus the series
+// being booked. Cases outside the member branch (enrollment of a non-member,
+// an auto-derived label) or a predicted rate change are refused.
+async function predictPlanSync(customer, catalogRow, firstDate, cadence) {
+  const Sync = require('../self-booking-plan-sync');
+  const { isMembershipCustomerRow } = require('../waveguard-existing-services');
+  const unpredictable = refusal('The Schedule screen\'s WaveGuard plan sync would change this customer in a way this card cannot show. Book from the Schedule screen and set the tier and bill on the profile. Nothing was proposed.', 'program_plan_sync_unpredictable');
+  if (!isMembershipCustomerRow(customer) || Sync.isAutoDerivedTierLabelRow(customer)) return unpredictable;
+  const columns = await db('customers').columnInfo();
+  const rows = await Sync.scheduledServiceRowsForCustomer(db, customer.id);
+  const seriesRow = {
+    id: 'planned-series', customer_id: customer.id, service_id: catalogRow.id, service_type: catalogRow.name,
+    service_key: catalogRow.service_key, service_name: catalogRow.name, catalog_billing_type: catalogRow.billing_type,
+    scheduled_date: firstDate, status: 'pending', is_recurring: true, recurring_pattern: cadence, is_callback: false, source: null,
+  };
+  const { etDateString } = require('../../utils/datetime-et');
+  const { alignment } = Sync.memberAlignmentFromRows(customer, [...(rows || []), seriesRow], columns || {}, etDateString());
+  const { pipeline_stage_changed_at: _stamp, ...updates } = alignment.updates || {};
+  if (updates.monthly_rate !== undefined) return unpredictable;
+  return { updates };
+}
+
+// Visits that already overlap the first visit's window (create_appointment's
+// probe and fact shape, #6047): shown on the card and pinned, so an overlap
+// that appears after the card refuses as preview_changed.
+async function firstVisitOverlap(firstDate, window) {
+  const { probeSlotOverlap } = require('../scheduling/window-rules');
+  const rows = await db.transaction((trx) => probeSlotOverlap({
+    trx, date: firstDate, windowStart: window.windowStart, windowEnd: window.windowEnd,
+  }));
+  if (!rows || !rows.length) return [];
+  const facts = await require('./tools').bookingOverlapFacts(db, rows, firstDate);
+  return facts.sort((a, b) => (a.fact < b.fact ? -1 : a.fact > b.fact ? 1 : 0));
 }
 
 /**
@@ -361,8 +414,16 @@ async function buildProgramPlan(input) {
   const tech = await resolveTechnician(input);
   if (!tech) return refusal('No active technician matches. Nothing was proposed.', 'program_technician_required');
   if (tech.error) return { ...tech };
-  const window = firstVisitWindow(args.start, catalogRow);
+  const window = firstVisitWindow(args.firstDate, args.start, catalogRow);
   if (window.error) return window;
+  let overlap;
+  try {
+    overlap = await firstVisitOverlap(args.firstDate, window);
+  } catch {
+    return refusal('Could not check the schedule for visits that overlap the first visit. Try again in a moment. Nothing was proposed.');
+  }
+  const planSync = await predictPlanSync(customer, catalogRow, args.firstDate, args.cadence);
+  if (planSync.error) return planSync;
 
   // D3: the Schedule screen's texts. The new-recurring welcome text has no
   // switch on that screen either, so a "no texts" card is refused when the
@@ -389,7 +450,7 @@ async function buildProgramPlan(input) {
       tierChanges: tierBefore !== args.tier || customer.waveguard_tier_source !== 'manual',
       cadence: args.cadence, visitCount: args.visitCount, firstDate: args.firstDate, ...window,
       tech: techPin, sendTexts: args.sendTexts, welcomeCandidate, welcomeDelay: WELCOME_DELAY_MINUTES,
-      bill, reprice, ledgerPin,
+      bill, reprice, ledgerPin, overlap, planSyncUpdates: planSync.updates,
       // Every input the commit trusts, as one string: the customer row
       // version, the bill, the tier, the series and the texts. The route pins
       // it at proposal (VERIFIED_VERSION_PARAMS) and the executor compares it
@@ -398,6 +459,7 @@ async function buildProgramPlan(input) {
         customer.version, ledgerPin, tierBefore, customer.waveguard_tier_source || null, customer.billing_mode || null,
         customer.payer_id || null, catalogRow.id, family, args.tier, args.cadence, args.visitCount, args.firstDate,
         window.windowStart, window.windowEnd, techPin.id, args.sendTexts, welcomeCandidate, bill.steps, propertyIds,
+        overlap.map((o) => o.fact), planSync.updates,
       ])).digest('hex'),
     },
   };
@@ -417,6 +479,10 @@ function cardLines(plan) {
   add('operational', `First visit: ${when}, technician ${plan.tech.name}`);
   add('operational', 'Order: the visits are booked first. Then the tier and the monthly bill change together. If that second step fails, the visits stay booked and the receipt says what did not change');
   add('operational', `After booking: ask the bar to optimize ${plan.tech.name}'s route on ${dateLabel(plan.firstDate)} (a second card)`);
+  if (plan.overlap.length) {
+    const who = plan.overlap.map((o) => [o.customer, o.service, o.window].filter(Boolean).join(', ')).join('; ');
+    add('operational', `Overlap: the first visit overlaps a visit already on the schedule (${who}). The booking goes ahead, as on the Schedule screen`);
+  }
 
   const total = plan.bill.lines.length + 1;
   plan.bill.lines.forEach((l, i) => {
@@ -430,20 +496,31 @@ function cardLines(plan) {
   add('billing', 'Visits carry no price: the monthly bill covers them (dues-billed plan visits)');
   add('billing', 'Billing lane: stays monthly membership');
 
+  const sync = plan.planSyncUpdates || {};
+  const syncParts = [
+    sync.waveguard_tier !== undefined && `tier ${plan.tierBefore || 'none'} -> ${sync.waveguard_tier}`,
+    sync.active !== undefined && 'marks the customer active',
+    sync.pipeline_stage !== undefined && `stage -> ${String(sync.pipeline_stage).replace(/_/g, ' ')}`,
+    sync.member_since !== undefined && `member since ${sync.member_since}`,
+  ].filter(Boolean);
+  add('customer', syncParts.length
+    ? `Booking's WaveGuard plan sync (runs with the booking): ${syncParts.join('; ')}`
+    : 'Booking\'s WaveGuard plan sync (runs with the booking): no change to the customer');
   add('customer', plan.tierChanges
     ? `WaveGuard tier: ${plan.tierBefore || 'none'} -> ${plan.tier} (set by hand, so the nightly tier check keeps it)`
     : `WaveGuard tier: ${plan.tier} (no change)`);
 
+  const { arrivalWindowRange, formatSmsTimeRange } = require('../../utils/sms-time-format');
   if (plan.sendTexts) {
-    add('comms', `Texts: a booking confirmation for the first visit (${when}) goes out by text or email, per their settings`);
+    add('comms', `Texts: a booking confirmation for the first visit goes out by text or email, per their settings. It gives the arrival window ${dateLabel(plan.firstDate)}, ${formatSmsTimeRange(arrivalWindowRange(plan.windowStart))}`);
   } else {
     add('comms', 'Texts: no booking confirmation is sent (send texts is off)');
   }
   add('comms', plan.welcomeCandidate
-    ? `Texts: the new-customer welcome text is queued about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking (sent once ever)`
-    : 'Texts: no welcome text (this customer already had a recurring service)');
+    ? `Texts and email: the new-customer welcome is queued for about ${Math.round(plan.welcomeDelay / 60) || 1} hour after booking. It sends the welcome text and the welcome email (welcome.new_recurring), once ever, by the channels the customer allows`
+    : 'Texts and email: no welcome text or welcome email (this customer already had a recurring service)');
   add('comms', 'Texts: visit reminders before each visit, set up as the Schedule screen sets them up');
-  add('comms', 'Texts: no membership email is sent');
+  add('comms', 'Email: the membership-started email is not sent');
   return lines;
 }
 
@@ -464,6 +541,8 @@ function previewFromPlan(plan) {
       total_before: plan.bill.totalBefore,
       total_after: plan.bill.totalAfter,
     },
+    ...(plan.overlap.length ? { slot_overlap: { with: plan.overlap.map(({ id: _id, fact: _fact, ...shown }) => shown) } } : {}),
+    plan_sync: plan.planSyncUpdates,
     send_texts: plan.sendTexts,
     notifies_customer: plan.sendTexts || plan.welcomeCandidate,
     card_lines: lines,
@@ -550,6 +629,55 @@ async function applyTierAndBill(plan) {
   });
 }
 
+// The customer row as it is after the booking (its plan sync may have moved
+// the tier), for a partial receipt that reports the real state.
+async function customerStateAfterBooking(customerId) {
+  try {
+    return await db('customers').where('id', customerId).first('waveguard_tier', 'monthly_rate');
+  } catch {
+    return null;
+  }
+}
+
+function partialReceipt(plan, booked, state, reason) {
+  const tierNow = state ? (state.waveguard_tier || 'none') : 'unknown (could not read the customer)';
+  const billNow = state ? money(state.monthly_rate) : 'unknown (could not read the customer)';
+  return {
+    success: true,
+    partial: true,
+    series_booked: booked,
+    not_done: ['waveguard_tier', 'monthly_bill'],
+    customer_now: state ? { waveguard_tier: state.waveguard_tier || null, monthly_rate: round(state.monthly_rate) } : null,
+    warning: `PARTLY DONE. Booked: ${booked.visits_booked} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}. NOT done by this card: the tier ${plan.tier} and the monthly bill ${money(plan.bill.totalAfter)}. Now the tier is ${tierNow} and the monthly bill is ${billNow}. Reason: ${reason}.`,
+    message: 'Partly done: visits booked; this card did not set the tier or the monthly bill.',
+  };
+}
+
+// Step 1. Returns { result } when the booking did not land (refused: nothing
+// changed; threw: unknown), else the handler's { status, json }.
+async function bookSeries(plan, actionContext) {
+  const { createScheduleBooking } = require('../../routes/admin-schedule');
+  let booking;
+  try {
+    booking = await createScheduleBooking({ body: scheduleBody(plan), actor: await actorFor(actionContext) });
+  } catch (err) {
+    logger.error(`[intelligence-bar] start_program booking threw for customer ${plan.customerId}: ${err.message}`);
+    return { result: {
+      outcome_unknown: true,
+      error: `The booking step failed with an unexpected error (${err.message}). Check this customer on the Schedule screen before trying again. The tier and the monthly bill were NOT changed.`,
+    } };
+  }
+  if (booking.status !== 201) {
+    const body = booking.json || {};
+    return { result: {
+      error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
+      ...(body.code ? { code: body.code } : {}),
+      nothing_changed: true,
+    } };
+  }
+  return booking;
+}
+
 async function commitProgram(input, actionContext) {
   const approved = typeof input._verified_program_version === 'string' ? input._verified_program_version : null;
   if (!approved) {
@@ -563,25 +691,8 @@ async function commitProgram(input, actionContext) {
   }
 
   // Step 1: the series, through the Schedule screen's own handler.
-  const { createScheduleBooking } = require('../../routes/admin-schedule');
-  let booking;
-  try {
-    booking = await createScheduleBooking({ body: scheduleBody(plan), actor: await actorFor(actionContext) });
-  } catch (err) {
-    logger.error(`[intelligence-bar] start_program booking threw for customer ${plan.customerId}: ${err.message}`);
-    return {
-      outcome_unknown: true,
-      error: `The booking step failed with an unexpected error (${err.message}). Check this customer on the Schedule screen before trying again. The tier and the monthly bill were NOT changed.`,
-    };
-  }
-  if (booking.status !== 201) {
-    const body = booking.json || {};
-    return {
-      error: `The Schedule screen refused the booking: ${body.error || `status ${booking.status}`}. Nothing was booked and nothing else changed.`,
-      ...(body.code ? { code: body.code } : {}),
-      nothing_changed: true,
-    };
-  }
+  const booking = await bookSeries(plan, actionContext);
+  if (booking.result) return booking.result;
   const created = booking.json || {};
   const booked = {
     series_id: created.id,
@@ -591,19 +702,25 @@ async function commitProgram(input, actionContext) {
   };
   const warnings = Array.isArray(created.warnings) ? created.warnings : [];
 
+  // Fewer visits than the card promised (blackout days, closed weekdays):
+  // the program is not what was approved, so the tier and bill stay as they
+  // are and the receipt names the shortfall.
+  const planned = plan.visitCount ?? ONGOING_PRESEED;
+  const createdCount = Number(created.recurringCreated) || 0;
+  if (createdCount < planned) {
+    const state = await customerStateAfterBooking(plan.customerId);
+    return partialReceipt(plan, booked, state,
+      `the Schedule screen booked ${createdCount} of the ${planned} visits on the card${warnings.length ? ` (${warnings.join(' ')})` : ''}. Add the missing visits on the Schedule screen (check days off and blackout dates), then set the tier and bill with update_customer`);
+  }
+
   // Step 2: tier + bill, one transaction.
   try {
     await applyTierAndBill(plan);
   } catch (err) {
     logger.error(`[intelligence-bar] start_program tier/bill step failed for customer ${plan.customerId} after booking ${created.id}: ${err.message}`);
-    return {
-      success: true,
-      partial: true,
-      series_booked: booked,
-      not_done: ['waveguard_tier', 'monthly_bill'],
-      warning: `PARTLY DONE. Booked: ${created.recurringCreated} ${plan.catalogRow.name} visit(s), first on ${dateLabel(plan.firstDate)}. NOT changed: the tier (still ${plan.tierBefore || 'none'}) and the monthly bill (still ${money(plan.bill.totalBefore)}), because ${err.drift ? err.message : `the update failed (${err.code || err.message})`}. Set them with update_customer, or cancel the series on the Schedule screen.`,
-      message: `Partly done: visits booked; tier and monthly bill NOT changed.${warnings.length ? ` Booking warnings: ${warnings.join(' ')}` : ''}`,
-    };
+    const state = await customerStateAfterBooking(plan.customerId);
+    return partialReceipt(plan, booked, state,
+      `${err.drift ? err.message : `the update failed (${err.code || err.message})`} Set them with update_customer, or cancel the series on the Schedule screen`);
   }
   logger.info(`[intelligence-bar] start_program: customer ${plan.customerId}, series ${created.id}, ${plan.family} ${money(plan.bill.newLine)}, tier ${plan.tier}`);
   return {
