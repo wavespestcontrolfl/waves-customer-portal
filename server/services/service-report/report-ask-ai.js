@@ -1367,6 +1367,9 @@ function statesUnknownIngredient(text, { facts }) {
   const clauses = splitSentences(matchForm(text)).flatMap((sentence) => sentence.split(/\s*[;:]\s*|\s+(?:while|whereas|but)\s+/i));
   return clauses.some((clause) => {
     const named = products.filter((product) => mentions(clause, product));
+    // Each named product must hold the ingredient: "Alpine WSG and Taurus SC
+    // contain fipronil" fails on Alpine (Codex P1 #5964 r53).
+    if (named.length > 1) return named.some((product) => claimsUnknownIngredient(clause, ingredientWords([product])));
     return claimsUnknownIngredient(clause, ingredientWords(named.length ? named : products));
   });
 }
@@ -1477,8 +1480,14 @@ function contradictsPressure(text, facts) {
   const trendText = `${fact?.trend || ''} ${fact?.trend_summary || ''}`.toLowerCase();
   return clausesOf(text).some((sentence) => {
     const lower = sentence.toLowerCase();
+    if (UNCERTAIN_RE.test(lower)) return false;
+    // "Pressure was not low" denies a Low gauge (Codex P1 #5964 r53).
+    const negated = NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower);
+    if (negated) {
+      if (!fact || !/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/i.test(text)) return false;
+      return PRESSURE_LEVELS.filter(([, re]) => re.test(lower)).some(([name]) => name === label);
+    }
     // "Activity may stay up for a few days" is the normal flush, not the gauge.
-    if (NOT_CONFIRMED_RE.test(lower)) return false;
     // A later clause ("it was high") carries the subject of the first.
     if (!/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/.test(lower) && !/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/i.test(text)) return false;
     if (!fact) return PRESSURE_LEVELS.some(([, re]) => re.test(lower)) || PRESSURE_UP.test(lower) || PRESSURE_DOWN.test(lower);
@@ -1501,6 +1510,14 @@ function namesWrongTechnician(text, facts) {
   const known = new Set(normalizeKey(facts?.technician_first_name || '').split(' ').filter(Boolean));
   for (const product of asArray(facts?.products)) for (const word of normalizeKey(product.name).split(' ')) known.add(word);
   known.add('waves');
+  // The recorded technician may not be denied: "Alex was not your technician"
+  // (Codex P1 #5964 r53).
+  const first = normalizeKey(facts?.technician_first_name || '').split(' ')[0];
+  if (first && clausesOf(text).some((clause) => {
+    const lower = clause.toLowerCase();
+    return new RegExp(`\\b${first}\\b`).test(lower) && (NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower)) && !UNCERTAIN_RE.test(lower)
+      && /\b(?:technician|tech|complet\w*|perform\w*|servic\w*|visit\w*|treat\w*|came|did)\b/.test(lower);
+  })) return true;
   return TECH_NAME_CLAIMS.some((re) => [...matchForm(text).matchAll(re)].some((m) => {
     const name = String(m[1] || m[2] || '').toLowerCase();
     return name && !known.has(name) && !SENTENCE_WORDS.has(name) && !TECH_NAME_STOP.has(name) && !MONTH_OR_DAY_WORD.test(name);
@@ -1526,6 +1543,8 @@ const HEALTH_DIMENSIONS = [
 // (Codex P1 #5964 r42).
 const clausesOf = (text) => splitSentences(matchForm(text))
   .flatMap((sentence) => sentence.split(/[;,:]\s*|\s+(?:but|and|while|whereas|though|although|yet)\s+|\s+[—–-]\s+/i)).filter(Boolean);
+const GROUP_NEEDS_CARE = /needs\s+attention|urgent|watch|deficit|declin|poor|stress/i;
+const GROUP_FINE = /healthy|strong|stable|good|excellent|thriving/i;
 const PLANT_SUBJECT = /\b(?:plants?|shrubs?|trees?|hedges?|palms?|beds?|landscape)\b/i;
 const HEALTH_BAD = ['poor', 'unhealthy', 'bad', 'struggling', 'stressed', 'declining', 'thin', 'thinning', 'sparse', 'weak', 'sick', 'dying', 'dead', 'patchy', 'bare', 'damaged', 'diseased', 'worse', 'worsening', 'failing', 'suffering'];
 const HEALTH_GOOD = ['healthy', 'good', 'great', 'excellent', 'thriving', 'lush', 'strong', 'thick', 'dense', 'vibrant', 'perfect'];
@@ -1552,7 +1571,12 @@ function contradictsHealth(text, facts) {
     const plantScore = facts?.tree_shrub_report?.plant_health_score_out_of_100;
     const overall = PLANT_SUBJECT.test(lower) && plantScore != null ? [plantScore]
       : [facts?.lawn_assessment?.overall_out_of_100 ?? plantScore];
-    const pool = scores.length ? scores : overall;
+    // A named plant group is judged on its own status card (Codex P1 #5964 r53).
+    const groupScores = asArray(facts?.tree_shrub_report?.plant_groups)
+      .filter((group) => group.group && normalizeKey(group.group).split(' ').filter((word) => word.length > 3).some((word) => lower.includes(word.replace(/e?s$/, ''))))
+      .map((group) => (GROUP_NEEDS_CARE.test(String(group.status || '')) ? 40 : GROUP_FINE.test(String(group.status || '')) ? 85 : null))
+      .filter((value) => value != null);
+    const pool = groupScores.length ? groupScores : scores.length ? scores : overall;
     const known = pool.filter((value) => value != null && Number.isFinite(Number(value))).map(Number);
     const used = (words) => words.filter((word) => new RegExp(`\\b${word}\\b`).test(lower));
     // A score that plainly disagrees wins over any sheet wording; between the

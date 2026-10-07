@@ -1946,3 +1946,34 @@ describe('answer screen, pre-push audit on round 52', () => {
     expect(ask('Pests scored 55 out of 100.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 53', () => {
+  test('a named plant group is judged on its own status', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 82 }, plantGroups: [{ label: 'Hibiscus', status: 'needs_attention' }] } };
+    expect(screenAskAnswer('The hibiscus plants are healthy.', { question: 'How is the hibiscus?', data, facts: buildReportAskFacts({ data }) })).toBe('health_claim');
+  });
+
+  const data = pestData({
+    technicianName: 'Alex Rivera',
+    pestPressure: { label: 'Low', trend: 'stable' },
+    applications: [
+      { product: { name: 'Alpine WSG', activeIngredient: 'dinotefuran' }, applicationArea: 'Outside' },
+      { product: { name: 'Taurus SC', activeIngredient: 'fipronil' }, applicationArea: 'Outside' },
+    ],
+  });
+  const facts = buildReportAskFacts({ question: 'What did you use?', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'What did you use?', data, facts });
+
+  test('each named product must hold the ingredient', () => {
+    expect(ask('Alpine WSG and Taurus SC contain fipronil.')).toBe('ingredient_claim');
+    expect(ask('Taurus SC contains fipronil.')).toBeNull();
+  });
+
+  test.each(['Pest pressure was not low.', 'No, the pest pressure was not low.'])('a denial of the recorded pressure is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('pressure_claim');
+  });
+
+  test.each(['Alex was not your technician.', 'Your technician was not Alex.', 'Alex did not complete your service.'])('a denial of the recorded technician is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('technician_name');
+  });
+});
