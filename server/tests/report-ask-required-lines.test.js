@@ -2270,3 +2270,8 @@ describe('answer screen, Codex round 61', () => {
     expect(screenAskAnswer('We observed scale insects on the hibiscus.', { question, data, facts })).toBeNull();
   });
 });
+
+test.each([['low', 'The lawn received enough water this week.'], ['high', 'The lawn did not get enough water this week.']])('the lawn card status %s is read as the builder writes it (pre-push audit)', (status, answer) => {
+  const data = lawnData({ reportV2: { aftercare: {}, water: { status, explanation: 'Water card.' } } });
+  expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('lawn_status_claim');
+});

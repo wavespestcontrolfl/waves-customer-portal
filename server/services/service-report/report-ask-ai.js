@@ -1988,7 +1988,10 @@ function contradictsMowing(clause, mow) {
 }
 function contradictsLawnStatus(text, facts) {
   // The Tree & Shrub landscape water card too (Codex P1 #5964 r58).
-  const water = String(facts?.lawn_report?.water_this_week?.status || facts?.tree_shrub_report?.water?.status || '').toLowerCase();
+  // The lawn card says low/high; the Tree & Shrub card deficit/surplus
+  // (pre-push audit, #5964).
+  const rawWater = String(facts?.lawn_report?.water_this_week?.status || facts?.tree_shrub_report?.water?.status || '').toLowerCase();
+  const water = ({ low: 'deficit', high: 'surplus' })[rawWater] || rawWater;
   const mow = String(facts?.lawn_report?.mowing?.status || '').toLowerCase().replace(/_/g, ' ');
   return clausesOf(text).some((clause) => {
     if (UNCERTAIN_RE.test(clause)) return false;
