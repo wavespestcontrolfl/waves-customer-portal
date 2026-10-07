@@ -247,7 +247,7 @@ async function assertAutoClockInVisit(trx, technicianId, jobId) {
   // same transaction, after the visit lock above).
   const now = new Date();
   const eligible = isAutoClockInJobEligible(job, technicianId, now)
-    && (await liveVisitsAtCustomer(trx, technicianId, job, now)).length === 1;
+    && (await liveVisitsAtCustomer(trx, technicianId, job.customer_id, now)).length === 1;
   if (!eligible) {
     throw Object.assign(new Error('This visit is not yours to start today.'), { code: 'auto_clock_in_ineligible' });
   }

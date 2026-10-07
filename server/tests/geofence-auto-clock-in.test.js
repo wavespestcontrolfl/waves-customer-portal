@@ -301,6 +301,7 @@ describe('geofence auto clock-in (handler)', () => {
     matcher.getTechByImei.mockResolvedValue({ id: 'tech-1' });
     matcher.findNearbyCustomers.mockResolvedValue([{ id: 'cust-1' }, { id: 'cust-2' }]);
     matcher.findScheduledJob.mockImplementation(async (_t, customerId) => job(`job-${customerId}`, 'tech-1'));
+    matcher.findLiveVisitsOn.mockImplementation(async (_c, _t, customerId) => [job(`job-${customerId}`, 'tech-1')]);
 
     await geofenceHandler.handleGeozoneEvent({
       imei: 'imei-1',
@@ -378,5 +379,101 @@ describe('matcher.findLiveVisitsOn query shape', () => {
       ['whereNull', 'track_state'],
       ['orWhereNotIn', 'track_state', NOT_LIVE.trackStates],
     ]));
+  });
+});
+
+describe('matching the live visit (gate on)', () => {
+  const liveRow = (id, extra = {}) => ({
+    id, technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', track_state: 'scheduled',
+    scheduled_date: today(), visit_id: null, ...extra,
+  });
+  const skippedRow = liveRow('job-skipped', { status: 'skipped' });
+  const enter = () => geofenceHandler.handleGeozoneEvent({
+    imei: 'imei-1',
+    geozone: { event: 'ENTER', location: { lat: 27.1, lon: -82.4 }, timestamp: new Date().toISOString() },
+  });
+
+  beforeEach(() => {
+    matcher.getTechByImei.mockResolvedValue({ id: 'tech-1' });
+    matcher.findNearbyCustomers.mockResolvedValue([{ id: 'cust-1', first_name: 'Pat', last_name: 'Sample' }]);
+    // the old lookup would return the EARLIEST row, here a skipped one
+    matcher.findScheduledJob.mockResolvedValue(skippedRow);
+  });
+
+  test('an earlier skipped visit does not hide the live one: no-shift tech is auto clocked in on the LIVE visit', async () => {
+    matcher.findLiveVisitsOn.mockResolvedValue([liveRow('job-live')]);
+    await enter();
+
+    expect(matcher.findScheduledJob).not.toHaveBeenCalled();
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-live', expect.objectContaining({
+      geofenceArrival: true, autoClockIn: expect.objectContaining({ source: 'geofence_auto' }),
+    }));
+  });
+
+  test('an already clocked-in tech starts the LIVE visit normally (no skipped_job_not_live)', async () => {
+    matcher.getShiftStateToday.mockResolvedValue({ active: true, anyToday: true });
+    matcher.findLiveVisitsOn.mockResolvedValue([liveRow('job-live')]);
+    await enter();
+
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-live', expect.not.objectContaining({ autoClockIn: expect.anything() }));
+    expect(lastAction()).toBe('timer_started');
+    expect(insertedNotifications[0].message).toBe('Timer started at Pat Sample');
+  });
+
+  test('several live stops: the selection prompt, nothing started', async () => {
+    matcher.findLiveVisitsOn.mockResolvedValue([liveRow('job-a', { visit_id: 'v1' }), liveRow('job-b', { visit_id: 'v2' })]);
+    await enter();
+
+    expect(timeTracking.startJob).not.toHaveBeenCalled();
+    expect(insertedNotifications).toHaveLength(1);
+    expect(insertedNotifications[0].type).toBe('geofence_arrival_select');
+    expect(JSON.parse(insertedNotifications[0].payload).candidates.map((c) => c.job_id)).toEqual(['job-a', 'job-b']);
+  });
+
+  test('rows of one grouped visit (same visit_id) are ONE stop: it proceeds on the primary row', async () => {
+    matcher.findLiveVisitsOn.mockResolvedValue([liveRow('job-pest', { visit_id: 'v1' }), liveRow('job-lawn', { visit_id: 'v1' })]);
+    await enter();
+
+    expect(insertedNotifications.find((n) => n.type === 'geofence_arrival_select')).toBeUndefined();
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-pest', expect.anything());
+  });
+
+  test('no live visit for this tech: today\'s findScheduledJob result is used unchanged', async () => {
+    matcher.findLiveVisitsOn.mockResolvedValue([]);
+    const other = liveRow('job-other-tech', { technician_id: 'tech-2' });
+    matcher.findScheduledJob.mockResolvedValue(other);
+    timeTracking.startJob.mockRejectedValue(NOT_CLOCKED());
+    await enter();
+
+    expect(matcher.findScheduledJob).toHaveBeenCalledWith('tech-1', 'cust-1', expect.any(Date));
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-other-tech', expect.not.objectContaining({ autoClockIn: expect.anything() }));
+  });
+
+  test('an unreadable live-visit query falls back to today\'s lookup', async () => {
+    matcher.findLiveVisitsOn.mockRejectedValue(new Error('db down'));
+    matcher.findScheduledJob.mockResolvedValue(liveRow('job-live'));
+    await enter();
+
+    expect(matcher.findScheduledJob).toHaveBeenCalled();
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-live', expect.anything());
+  });
+
+  test('gate off: findScheduledJob only, the live query is never read', async () => {
+    delete process.env[GATE];
+    matcher.findScheduledJob.mockResolvedValue(liveRow('job-first'));
+    await enter();
+
+    expect(matcher.findLiveVisitsOn).not.toHaveBeenCalled();
+    expect(matcher.findScheduledJob).toHaveBeenCalledTimes(1);
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-first', { lat: 27.1, lng: -82.4 });
+  });
+
+  test('collapseGroupedStops keeps rows with no visit_id and the first row of each group', () => {
+    const { collapseGroupedStops } = require('../services/geofence-auto-clock-in');
+    const rows = [
+      { id: 1, visit_id: null }, { id: 2, visit_id: null },
+      { id: 3, visit_id: 'v' }, { id: 4, visit_id: 'v' }, { id: 5, visit_id: 'w' },
+    ];
+    expect(collapseGroupedStops(rows).map((r) => r.id)).toEqual([1, 2, 3, 5]);
   });
 });

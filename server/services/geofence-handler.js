@@ -14,7 +14,7 @@ const timeTracking = require('./time-tracking');
 const trackTransitions = require('./track-transitions');
 const auditLog = require('./audit-log');
 const { parseETDateTime } = require('../utils/datetime-et');
-const { arrivalStartOptions } = require('./geofence-auto-clock-in');
+const { arrivalStartOptions, findArrivalJobs } = require('./geofence-auto-clock-in');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
 
 /**
@@ -129,10 +129,12 @@ async function handleGeozoneEvent(payload) {
   }
 
   // Attach today's scheduled job (if any) to each candidate
-  const withJobs = await Promise.all(candidates.map(async (c) => ({
-    customer: c,
-    job: await matcher.findScheduledJob(tech.id, c.id, eventTime),
-  })));
+  // Gate on: each customer expands to its LIVE visits for this tech (several
+  // live stops become several candidates, so the tech is asked to pick). Gate
+  // off: the one findScheduledJob row, exactly as before.
+  const withJobs = (await Promise.all(candidates.map(async (c) => (
+    (await findArrivalJobs({ tech, customer: c, eventTime })).map((job) => ({ customer: c, job }))
+  )))).flat();
 
   // Preferred pick for EXIT + single-customer cases: one with a scheduled job, else nearest
   const scheduled = withJobs.filter((x) => x.job);

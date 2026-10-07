@@ -53,14 +53,51 @@ function isFreshEvent(eventTime, now = Date.now()) {
   return Number.isFinite(age) && age >= -MAX_EVENT_FUTURE_SKEW_MS && age <= MAX_EVENT_AGE_MS;
 }
 
+// A grouped visit is several scheduled_services rows (pest + lawn, say) sharing
+// one visit_id: ONE physical stop, one timer on its primary member. It counts
+// once, so a grouped stop is never mistaken for "which visit?". Rows without a
+// visit_id are each their own stop.
+function collapseGroupedStops(rows) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    if (row.visit_id == null) return true;
+    const key = String(row.visit_id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /**
  * More than one live visit for this tech at this customer today: which one the
  * tech is arriving for is a guess (the matcher returns the first row), so the
  * clock-in must not pick. Used by the pre-check (returns the visits for the
  * selection reminder) and again inside startJob's locked transaction.
  */
-async function liveVisitsAtCustomer(conn, technicianId, job, now = new Date()) {
-  return matcher.findLiveVisitsOn(conn, technicianId, job.customer_id, now, NOT_LIVE);
+async function liveVisitsAtCustomer(conn, technicianId, customerId, now = new Date()) {
+  return collapseGroupedStops(
+    await matcher.findLiveVisitsOn(conn, technicianId, customerId, now, NOT_LIVE),
+  );
+}
+
+/**
+ * The visits an ENTER at this customer could be for. Gate on: this tech's LIVE
+ * visits at the customer today (one shared query, the same NOT_LIVE rules as
+ * everything above), so an earlier skipped, rescheduled or tracker-finished row
+ * never hides the live one. One live stop = one entry; several = the caller
+ * (handleGeozoneEvent) gets several candidates and sends the selection prompt;
+ * none, or the gate off, or a read error = today's findScheduledJob, unchanged.
+ */
+async function findArrivalJobs({ tech, customer, eventTime }) {
+  if (featureGates.geofenceAutoClockInLive()) {
+    try {
+      const live = await liveVisitsAtCustomer(db, tech.id, customer.id, eventTime);
+      if (live.length) return live;
+    } catch {
+      // unreadable: fall through to today's lookup
+    }
+  }
+  return [await matcher.findScheduledJob(tech.id, customer.id, eventTime)];
 }
 
 /**
@@ -80,7 +117,7 @@ async function requestAutoClockIn({ tech, job, eventTime }) {
   if (!state || state.active || state.anyToday) return null;
   let visits;
   try {
-    visits = await liveVisitsAtCustomer(db, tech.id, job);
+    visits = await liveVisitsAtCustomer(db, tech.id, job.customer_id);
   } catch {
     return null;
   }
@@ -111,6 +148,8 @@ module.exports = {
   NOT_LIVE_STATUSES,
   NOT_LIVE_TRACK_STATES,
   liveVisitsAtCustomer,
+  collapseGroupedStops,
+  findArrivalJobs,
   isLiveVisit,
   isAutoClockInJobEligible,
   isFreshEvent,

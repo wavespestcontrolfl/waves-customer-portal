@@ -254,6 +254,12 @@ describe('two live visits at the same customer', () => {
     expect(entry.clocked_in_shift_id).toBeDefined();
   });
 
+  test('rows of one grouped visit (same visit_id) count as one stop: clocks in', async () => {
+    state.liveVisits = [{ id: 'job-1', visit_id: 'v1' }, { id: 'job-2', visit_id: 'v1' }];
+    const entry = await timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: AUTO });
+    expect(entry.clocked_in_shift_id).toBeDefined();
+  });
+
   test('without an auto clock-in request the count is not consulted (today)', async () => {
     state.activeShift = { id: 'shift-manual', technician_id: 'tech-1' };
     state.liveVisits = twoVisits();
