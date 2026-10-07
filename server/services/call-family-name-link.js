@@ -203,10 +203,13 @@ async function phoneOnAnyLiveAccount(conn, phone) {
  * The processor files the cards (it owns buildTriageItem and the card context).
  */
 async function resolveFamilyNameLink({
-  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhones = [], statedAddress = null, allowLink = true, conn = db,
+  callLogId, procToken, callerRelationship, caller, secondaryContacts, callerPhones = [], statedAddress = null, allowLink = true, v1HolderKey = null, conn = db,
 }) {
   const holder = pickNamedAccountHolder({ callerRelationship, caller, secondaryContacts });
   if (!holder) return { status: 'not_applicable' };
+  // The V1 reading may only agree or stay silent: a V1 secondary contact naming a different person
+  // makes the call ambiguous.
+  if (v1HolderKey && v1HolderKey !== holder.key) return { status: 'conflict', holder, candidates: [] };
   for (const callerPhone of callerPhones) {
     if (await phoneOnAnyLiveAccount(conn, callerPhone)) return { status: 'phone_on_file', holder };
   }
@@ -272,6 +275,7 @@ const CANDIDATE_REASONS = Object.freeze({
   uncorroborated: 'The caller named this account but gave no matching address. Confirm before linking.',
   voicemail: 'The caller named this account in a voicemail. A voicemail never links a call to an account. Confirm before linking.',
 });
+const LINKED_REASON = 'The caller said they were calling for a family member, gave that person\'s full name and the address on file. Exactly one live account matches. The caller was not saved on the account and no confirmation text was sent. Add them as a contact on this account if that is right. Relink the call if this is the wrong account.';
 
 // The one entry point for the processor's Step 3. Returns null when nothing was linked, else
 // { customer, context } (context = what the later steps need to protect the holder's record).
@@ -282,63 +286,34 @@ async function linkFamilyCall({
 }) {
   try {
     if (!require('../config/feature-gates').callFamilyNameLinkLive() || !v2Primary || isOutbound) return null;
-    const callerName = [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null;
     // The holder comes from the canonical V2 record only: the V2 family_member relationship and the
-    // V2 secondary contact(s). The V1 reading may only agree or stay silent: a V1 secondary contact
-    // naming a different person makes the call ambiguous.
+    // V2 secondary contact(s); V1 can only agree (resolveFamilyNameLink).
     const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
-    const v2Contacts = [canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)].filter(Boolean);
-    const holderV2 = pickNamedAccountHolder({
-      callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
-      caller: { first_name: extracted.first_name, last_name: extracted.last_name },
-      secondaryContacts: v2Contacts,
-    });
-    const v1Key = fullNameKey(extracted.secondary_contact);
-    if (holderV2 && v1Key && v1Key !== holderV2.key) {
-      await fileCard(call.id, 'family_account_candidates', v2CanonicalExtraction, {
-        account_holder_name: displayName(holderV2),
-        caller_name: callerName,
-        caller_phone: call.from_phone || null,
-        candidates: [],
-        reason: CANDIDATE_REASONS.conflict,
-      }, conn);
-      return null;
-    }
     const result = await resolveFamilyNameLink({
       callLogId: call.id,
       procToken,
       callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
       caller: { first_name: extracted.first_name, last_name: extracted.last_name },
-      secondaryContacts: v2Contacts,
+      secondaryContacts: [canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)].filter(Boolean),
+      v1HolderKey: fullNameKey(extracted.secondary_contact),
       // Both numbers: the dictated callback number AND the inbound caller ID.
       callerPhones: [phone, call.from_phone],
       statedAddress,
       allowLink: !extracted.is_voicemail,
       conn,
     });
-    const caller = {
-      caller_name: callerName,
+    const linked = result.status === 'linked';
+    const reason = linked ? LINKED_REASON : CANDIDATE_REASONS[result.status];
+    if (!reason) return null; // not_applicable, phone_on_file, customer_gone, claim_lost: nothing to say
+    await fileCard(call.id, linked ? 'family_account_linked' : 'family_account_candidates', v2CanonicalExtraction, {
+      account_holder_name: displayName(result.holder),
+      caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
       caller_phone: call.from_phone || null,
       caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
-    };
-    if (CANDIDATE_REASONS[result.status]) {
-      await fileCard(call.id, 'family_account_candidates', v2CanonicalExtraction, {
-        account_holder_name: displayName(result.holder),
-        ...caller,
-        candidates: result.candidates,
-        reason: CANDIDATE_REASONS[result.status],
-      }, conn);
-      return null;
-    }
-    if (result.status !== 'linked') return null;
-    logger.info(`[call-family-link] linked call ${call.id} to customer ${result.customer.id} by the spoken account-holder name`);
-    await fileCard(call.id, 'family_account_linked', v2CanonicalExtraction, {
-      linked_customer_id: String(result.customer.id),
-      account_holder_name: displayName(result.holder),
-      ...caller,
-      reason: 'The caller said they were calling for a family member, gave that person\'s full name and the address on file. Exactly one live account matches. The caller was not saved on the account and no confirmation text was sent. Add them as a contact on this account if that is right. Relink the call if this is the wrong account.',
+      reason,
+      ...(linked ? { linked_customer_id: String(result.customer.id) } : { candidates: result.candidates }),
     }, conn).catch((err) => logger.warn(`[call-family-link] card insert failed for call ${call.id}: ${err.code || err.name || 'db_error'}`));
-    return { customer: result.customer, context: contextFor(result.customer.id, result.holder) };
+    return linked ? { customer: result.customer, context: contextFor(result.customer.id, result.holder) } : null;
   } catch (e) {
     logger.warn(`[call-family-link] skipped for call ${call.id}: ${e.code || e.name || 'error'}`);
     return null;
