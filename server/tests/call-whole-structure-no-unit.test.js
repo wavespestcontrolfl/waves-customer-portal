@@ -413,7 +413,16 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, null)).toBe(false);
     expect(run(slab, { property: { property_type: 'commercial', whole_building_occupancy: false } })).toBe(false);
     expect(run(slab, { property: { property_type: 'commercial' }, service_request: { secondary_categories: ['pest_general'] } })).toBe(false);
-    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['termite'] } })).toBe(true);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['termite'] } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['wdo'] } })).toBe(true);
+  });
+
+  test('only the caller\'s words count, and a plain denial is not unit evidence', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    const commercial = { property: { property_type: 'commercial' } };
+    expect(run(slab, commercial, 'Agent: Do you have a suite or unit number?\nCaller: No, it is the whole new building.')).toBe(true);
+    expect(run(slab, commercial, 'Agent: Which one?\nCaller: It is suite 4.')).toBe(false);
+    expect(run(slab, commercial, 'Caller: there is no unit number, it is a new lot')).toBe(true);
   });
 
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {

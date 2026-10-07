@@ -6936,8 +6936,21 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
 // unit card stays (same safeguard the business whole-building waiver keeps).
 const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|center|centre)|plaza|shopping (?:center|centre)|multi-tenant|tenant space|space\s*#?\s*\d+)\b|#\s*\d+/i;
 
+// Only the caller's own turns count as unit evidence: an agent asking "do you
+// have a suite or unit number?" proves nothing. An unlabeled transcript is
+// used whole (fails closed). A plain denial ("no suite", "it's not a unit")
+// is removed before the wording checks.
+const NEGATED_UNIT_RE = /\b(?:no|not\s+an?|isn'?t\s+an?|there'?s\s+no|without\s+an?)\s+(?:suite|unit|apartment|apt|condo|bay)s?(?:\s+numbers?)?\b/gi;
+function callerWordsForUnitCheck(transcription) {
+  const lines = String(transcription || '').split('\n');
+  if (!lines.some((l) => /^\s*(?:Agent|Caller)\s*:/i.test(l))) return String(transcription || '');
+  return lines.filter((l) => /^\s*Caller\s*:/i.test(l)).join('\n');
+}
+
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
-const WHOLE_STRUCTURE_CATEGORIES = new Set(['termite', 'wdo', 'inspection_only']);
+// 'termite' is NOT here: the coarse category also covers spot, foam and bait
+// work that can target one unit (WHOLE_STRUCTURE_SERVICE_KEYS keeps those held).
+const WHOLE_STRUCTURE_CATEGORIES = new Set(['wdo', 'inspection_only']);
 
 // Card-only companion to the waiver above (owner 2026-10-07): true when EVERY
 // view of the call's service resolves to a whole-structure catalog row (slab
@@ -6968,7 +6981,8 @@ function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = nu
       extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
     });
     if (!isWholeStructureService({ serviceKey: row?.service_key || null })) return false;
-    const text = [transcription, view.call_summary, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
+    const text = [callerWordsForUnitCheck(transcription), view.requested_service, view.address_line1, view.address_line2]
+      .filter(Boolean).join(' ').replace(NEGATED_UNIT_RE, ' ');
     return !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
 }
