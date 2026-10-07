@@ -218,6 +218,31 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await mockPg('lead_activities').where({ lead_id: sentLead }).count('* as n').first()).n).toBe(before.n);
   });
 
+  test('a draft with an uncertain send attempt is kept', async () => {
+    const c = await customer();
+    const uncertain = await estimate(c, { createdAt: minutesAgo(90), data: { manualSendAttempts: [{ key: 'k1', startedAt: minutesAgo(80).toISOString() }] } });
+    const resolved = await estimate(c, { createdAt: minutesAgo(90), data: { manualSendAttempts: [{ key: 'k2', startedAt: minutesAgo(80).toISOString(), result: { sent: false } }] } });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(uncertain)).archived_at).toBeNull();
+    expect((await row(resolved)).archived_at).not.toBeNull();
+  });
+
+  test('a viewed replacement advances the lead to viewed; an accepted one keeps a lead-linked draft', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(90), customer_phone: '+12025550188' });
+    await estimate(c, { status: 'viewed', createdAt: minutesAgo(20), sentAt: minutesAgo(10), customer_phone: '+12025550188' });
+    const leadId = randomUUID();
+    await mockPg('leads').insert({ id: leadId, estimate_id: draft, status: 'new', phone: '+12025550188', first_name: 'Fixture', last_name: 'Retire', created_at: minutesAgo(120) });
+    const c2 = await customer();
+    const keptDraft = await estimate(c2, { createdAt: minutesAgo(90) });
+    await estimate(c2, { status: 'accepted', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    await mockPg('leads').insert({ id: randomUUID(), estimate_id: keptDraft, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await mockPg('leads').where({ id: leadId }).first()).status).toBe('estimate_viewed');
+    expect((await row(keptDraft)).archived_at).toBeNull();
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();

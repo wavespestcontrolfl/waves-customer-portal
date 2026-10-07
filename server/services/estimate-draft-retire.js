@@ -60,6 +60,17 @@ const NO_LIVE_DEPENDENTS_SQL = `(
   )
 )`;
 
+// A send that started with no recorded result may have reached the customer;
+// the send route refuses another send until staff check it (the
+// SEND_OUTCOME_UNCERTAIN rule in admin-estimates.js). Such a draft is kept.
+const NO_UNCERTAIN_SEND_SQL = `NOT EXISTS (
+  SELECT 1 FROM jsonb_array_elements(
+    CASE WHEN jsonb_typeof(estimates.estimate_data->'manualSendAttempts') = 'array'
+      THEN estimates.estimate_data->'manualSendAttempts' ELSE '[]'::jsonb END) a
+   WHERE COALESCE(a->>'startedAt', '') <> ''
+     AND COALESCE(a->'result', 'null'::jsonb) IN ('null'::jsonb, 'false'::jsonb)
+)`;
+
 const DRAFT_ELIGIBLE_SQL = `
   status = 'draft'
   AND archived_at IS NULL
@@ -69,6 +80,7 @@ const DRAFT_ELIGIBLE_SQL = `
   AND price_locked_at IS NULL
   AND COALESCE(source, '') NOT IN ('one_tap_purchase', 'quote_wizard')
   AND ${NO_LIVE_DEPENDENTS_SQL}
+  AND ${NO_UNCERTAIN_SEND_SQL}
   AND ${ASSESSMENT_EXCEPTION_ABSENT_SQL}
   AND ${DELIVERY_CLAIM_NOT_LIVE_SQL}
   AND ${DRAFT_HOLD_MARKERS_ABSENT_SQL}
@@ -102,7 +114,7 @@ async function retireOneDraft(trx, pair) {
   // deadlock with this sweep.
   const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().select('id');
   const sent = await trx.raw(`
-    SELECT id FROM estimates s
+    SELECT id, status FROM estimates s
      WHERE s.id = ?
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
@@ -110,6 +122,10 @@ async function retireOneDraft(trx, pair) {
      FOR SHARE
   `, [pair.sent_id, pair.sent_property_id, pair.sent_address]);
   if (!sent?.rows?.length) return null;
+  // An ACCEPTED replacement would need the lead converted; that is the
+  // acceptance flow's decision, not this sweep's. Keep a lead-linked draft.
+  const sentStatus = sent.rows[0].status;
+  if (leads.length && sentStatus === 'accepted') return null;
   // Every draft predicate re-checked on the row itself: a draft edited,
   // sent, claimed or newly linked since the read is left alone.
   const result = await trx.raw(`
@@ -142,15 +158,14 @@ async function retireOneDraft(trx, pair) {
     // single unambiguous open lead, as of the send time. Lead state only; it
     // sends nothing. Skipped when a lead already owns the sent estimate: that
     // send is accounted for, and a replay would only re-record it there.
+    // A viewed replacement then replays the view, as the backfill does.
     const sentOwned = await trx('leads').where({ estimate_id: pair.sent_id }).first('id');
-    if (!sentOwned) await require('./lead-estimate-link').markLinkedLeadEstimateSent({
-      estimateId: pair.sent_id,
-      sendMethod: 'backfill',
-      performedBy: 'estimate-draft-retire',
-      database: trx,
-      originatingNotAfter: pair.sent_at,
-      respondedAt: pair.sent_at,
-    });
+    if (!sentOwned) {
+      const link = require('./lead-estimate-link');
+      const replay = { estimateId: pair.sent_id, performedBy: 'estimate-draft-retire', database: trx, originatingNotAfter: pair.sent_at };
+      await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at });
+      if (sentStatus === 'viewed') await link.markLinkedLeadEstimateViewed(replay);
+    }
   }
   await trx('notifications')
     .whereRaw("metadata->>'estimateId' = ?", [String(row.id)])
