@@ -202,3 +202,34 @@ it("uses comfortable shared controls for turf profile editing and preserves save
     ].every((control) => control.classList.contains("ui-control")),
   ).toBe(true);
 });
+
+it("a new grass resets the track key: its own track, none for centipede, and a stale key is sent as null", async () => {
+  const put = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url, options = {}) => {
+      if (url.endsWith("/admin/lawn-assessment/customers")) return response({ customers: [customer] });
+      if (url.endsWith("/admin/customers/customer-1/turf-profile")) {
+        if (options.method === "PUT") {
+          put.push(JSON.parse(options.body));
+          return response({ profile: { grass_type: "centipede" } });
+        }
+        return response({ irrigation_home_changed_at: "2026-09-01T12:00:00Z", profile: { grass_type: "bahia", track_key: "bahia" } });
+      }
+      throw new Error(`Unexpected request: ${options.method || "GET"} ${url}`);
+    }),
+  );
+  render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
+  await screen.findByRole("heading", { name: /Turf Profile/ });
+  const trackInput = () => screen.getByLabelText("Track key (e.g. st_augustine)");
+  expect(trackInput().value).toBe("bahia");
+
+  fireEvent.change(screen.getByLabelText("Grass type"), { target: { value: "zoysia" } });
+  expect(trackInput().value).toBe("zoysia");
+  fireEvent.change(screen.getByLabelText("Grass type"), { target: { value: "centipede" } });
+  expect(trackInput().value).toBe("");
+  fireEvent.click(screen.getByRole("button", { name: "Save Turf Profile" }));
+  await waitFor(() => expect(put).toHaveLength(1));
+  expect(put[0]).toMatchObject({ grass_type: "centipede", track_key: null, grass_confirmed: true });
+});

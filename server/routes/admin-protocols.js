@@ -1013,7 +1013,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // The rig, derived once: carrier, tank size, and the coverage one tank gives.
     const [carrier, tankCapacity] = ['carrier_gal_per_1000', 'tank_capacity_gal'].map((key) => Number((calibration || {})[key] || 0));
     const tankCoverageSqft = carrier ? (tankCapacity / carrier) * 1000 : 0;
-    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1 };
+    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, turfSpecies: turf?.species };
     const areaContext = {
       plan: req.query.plan,
       weedPressure: req.query.weedPressure,

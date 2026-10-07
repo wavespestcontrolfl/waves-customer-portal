@@ -77,6 +77,10 @@ const TURF_PROFILE_OPTIONS = {
   irrigation_type: ["in_ground", "manual", "none", "mixed"],
 };
 
+// The grasses that have a lawn track of their own (the track key is the grass key). Any other grass,
+// centipede included, has none, so a track key left from a previous grass must not outlive the change.
+const GRASSES_WITH_OWN_TRACK = new Set(["st_augustine", "bermuda", "zoysia", "bahia"]);
+
 const EMPTY_TURF_PROFILE = {
   grass_type: "",
   track_key: "",
@@ -119,6 +123,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   // what lets the weekly watering plan trust the profile county again.
   const [countyTouched, setCountyTouched] = useState(false);
   const [grassTouched, setGrassTouched] = useState(false);
+  const [trackReset, setTrackReset] = useState(false);
   // Move stamp the loaded turf form was rendered against (freshness token
   // echoed on save — codex #3565 gh-r44).
   const profileHomeStampRef = useRef(null);
@@ -370,6 +375,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       ...Object.fromEntries(
         Object.entries(turfProfile).filter(([, v]) => v !== "" && v !== null),
       ),
+      ...(trackReset && turfProfile.track_key === "" ? { track_key: null } : {}),
       county_confirmed: countyTouched,
       grass_confirmed: grassTouched,
       confirmed_as_of: profileHomeStampRef.current ?? null,
@@ -386,6 +392,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       alert("Turf profile saved");
       setCountyTouched(false);
       setGrassTouched(false);
+      setTrackReset(false);
       // Reflect the saved row back into form state so the user sees
       // any server-applied normalisation immediately.
       const p = d.profile;
@@ -407,6 +414,17 @@ export default function LawnAssessmentPanel({ embedded = false }) {
 
   const updateProfileField = (key, value) =>
     setTurfProfile((prev) => ({ ...prev, [key]: value }));
+
+  // A new grass takes its own track (or none), so the plan follows the grass staff picked
+  // and not a track key left over from the old one. The save sends an emptied key as null.
+  const changeGrass = (grass) => {
+    setTrackReset(true);
+    setTurfProfile((prev) => ({
+      ...prev,
+      grass_type: grass,
+      track_key: GRASSES_WITH_OWN_TRACK.has(grass) ? grass : "",
+    }));
+  };
 
   const backToSelect = () => {
     setStep("select");
@@ -963,7 +981,11 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                         setGrassTouched(true);
                     }}
                     onChange={(e) => {
-                      if (key === "grass_type") setGrassTouched(true);
+                      if (key === "grass_type") {
+                        setGrassTouched(true);
+                        changeGrass(e.target.value);
+                        return;
+                      }
                       updateProfileField(key, e.target.value);
                     }}
                   >

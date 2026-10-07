@@ -385,6 +385,9 @@ describe('the February atrazine option on the sheet follows the lawn the sheet i
     expect(itemFor(body, ATRAZINE).jobMix).toMatchObject({ amount: 40, amountUnit: 'lb' });
     expect(body.blocks).toEqual([]);
     expect(body.selectedItems.map((item) => item.product.name)).toEqual([ATRAZINE]);
+    // An allowed lawn gets no species warning (the plan's own gate context carries the grass).
+    expect(body.warnings.filter((w) => w.gate === 'turfOnly')).toEqual([]);
+    expect(itemFor(body, ATRAZINE).gateNotes.map((note) => note.key)).not.toContain('turfOnly');
   });
 
   test.each(['mixed', 'unknown', 'bahia', 'bermuda', 'zoysia'])('a visit on a %s lawn: no atrazine amount, a block, the default bag stays', async (grass) => {
@@ -393,6 +396,7 @@ describe('the February atrazine option on the sheet follows the lawn the sheet i
     const body = await lawnMix({ ...febQuery, scheduledServiceId: VISIT });
     expect(itemFor(body, ATRAZINE).jobMix).toBeNull();
     expect(body.blocks.map((block) => block.code)).toEqual(['lawn_v13_turf_species']);
+    expect(body.warnings.filter((w) => w.gate === 'turfOnly')).toHaveLength(1);
     expect(body.selectedItems.map((item) => item.product.name).sort()).toEqual([ATRAZINE, F24].sort());
     expect(itemFor(body, F24).jobMix).toBeTruthy();
   });

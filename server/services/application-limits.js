@@ -92,17 +92,16 @@ class ApplicationLimitChecker {
     // Product-specific history
     // Retracted rows (recap deselection corrections) never count toward
     // application limits.
-    const historyQuery = database('property_application_history')
+    // Applications on or before the day judged, as the shared cap reads them: a backdated
+    // completion is not held against an application that had not happened yet. The treated
+    // property and the visit being planned scope this history exactly as they scope the shared
+    // cap below; a caller that passes neither reads the customer's whole history.
+    const priorApplications = () => scopeHistoryToTreatment(database('property_application_history')
       .where({ customer_id: customerId, product_id: productId })
-      .where('application_date', '>=', yearStart)
-      // Applications on or before the day judged, as the shared cap reads them: a backdated
-      // completion is not held against an application that had not happened yet.
       .where('application_date', '<=', etCalendarDayOf(proposedDate))
-      .whereNull('retracted_at');
-    // The treated property and the visit being planned scope this history exactly as they
-    // scope the shared cap below; a caller that passes neither reads the customer's whole year.
-    scopeHistoryToTreatment(historyQuery, database, opts, 'property_application_history');
-    const history = await historyQuery.orderBy('application_date', 'desc');
+      .whereNull('retracted_at'), database, opts, 'property_application_history')
+      .orderBy('application_date', 'desc');
+    const history = await priorApplications().where('application_date', '>=', yearStart);
 
     // MOA group history
     const moaHistory = product.moa_group ? await database('property_application_history')
@@ -120,9 +119,14 @@ class ApplicationLimitChecker {
         }) : [];
 
     const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits];
+    // A minimum interval spans the new year (a December application and a February one are 50
+    // days apart): it reads the latest earlier application whatever its calendar year. This
+    // year's newest row is that application when there is one; only an empty year looks back.
+    const needsInterval = allLimits.some((limit) => limit.limit_type === 'min_interval_days');
+    const lastApplication = history[0] || (needsInterval ? await priorApplications().first() : null);
 
     for (const limit of allLimits) {
-      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
+      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, lastApplication, ...opts });
 
       if (check.violated) {
         const entry = { type: limit.limit_type, matchType: limit.match_type || null, matchValue: limit.match_value || null, message: check.message, description: limit.description, current: check.current, max: check.max };
@@ -154,12 +158,13 @@ class ApplicationLimitChecker {
       }
 
       case 'min_interval_days': {
-        if (!history.length) return { violated: false };
+        const last = ctx.lastApplication || history[0];
+        if (!last) return { violated: false };
         // pg `date` columns arrive as JS Date objects (no type parser is
         // configured) — normalize to YYYY-MM-DD before building the anchor.
         // Both operands are ET calendar days anchored at noon UTC so the
         // interval is whole days regardless of the proposed instant's clock.
-        const lastApp = new Date(etCalendarDayOf(history[0].application_date) + 'T12:00:00Z');
+        const lastApp = new Date(etCalendarDayOf(last.application_date) + 'T12:00:00Z');
         // proposedDate may itself be a hydrated pg DATE (admin-dispatch passes
         // svc.scheduled_date) — etCalendarDayOf keeps its literal calendar day.
         const proposedDay = new Date(etCalendarDayOf(proposedDate) + 'T12:00:00Z');

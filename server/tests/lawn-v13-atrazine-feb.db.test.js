@@ -6,9 +6,11 @@ const { buildPlanForService } = engine;
 const migration = require('../models/migrations/20261007160000_lawn_v13_atrazine_feb_option');
 const { turfRestrictedProductsBlock } = require('../services/complete-scheduled-service');
 const { allowedTurfFor } = require('../services/lawn-turf-restrictions');
+const stampMigration = require('../models/migrations/20261007162000_lawn_v13_atrazine_label_stamp');
 const fillMigration = require('../models/migrations/20261007161000_lawn_v13_atrazine_catalog_fill');
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
 const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+const applicationLimits = require('../services/application-limits');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const v13 = require('../config/lawn-protocol-v13.json');
 const fs = require('fs');
@@ -281,6 +283,53 @@ describeDb('the atrazine option through PostgreSQL', () => {
     });
   });
 
+  describe('the hard limits read the atrazine history by property, visit and across the new year', () => {
+    const atrazineId = async () => (await knex('products_catalog').where({ name: ATRAZINE }).first()).id;
+    const applied = async (customerId, date, extra = {}) => knex('property_application_history').insert({
+      customer_id: customerId, product_id: await atrazineId(), application_date: date, application_rate: 4, rate_unit: 'lb', active_ingredient: 'Atrazine', ...extra,
+    });
+    const check = async (customerId, date, opts = {}) => applicationLimits.checkLimits(customerId, await atrazineId(), new Date(`${date}T16:00:00Z`), knex, opts);
+    const types = (result) => result.blocks.map((b) => b.type);
+
+    test('a December application and a February proposal 50 days later: the 60-day interval blocks; 61 days later it does not', async () => {
+      const { customerId } = await fixture(knex);
+      await applied(customerId, '2025-12-20');
+      const fifty = await check(customerId, '2026-02-08');
+      expect(types(fifty)).toEqual(['min_interval_days']);
+      expect(fifty.blocks[0]).toMatchObject({ current: 50, max: 60 });
+      expect(types(await check(customerId, '2026-02-18'))).toEqual([]); // 60 days: the minimum is met
+      expect(types(await check(customerId, '2026-02-19'))).toEqual([]); // 61 days
+      expect(types(await check(customerId, '2026-02-17'))).toEqual(['min_interval_days']);
+    });
+
+    test('the yearly count keeps the calendar year: two 2025 applications do not count in February 2026, two 2026 ones do', async () => {
+      const { customerId } = await fixture(knex);
+      await applied(customerId, '2025-01-05');
+      await applied(customerId, '2025-04-10');
+      expect(types(await check(customerId, '2026-02-12'))).toEqual([]);
+      const other = await fixture(knex);
+      await applied(other.customerId, '2026-01-02');
+      await applied(other.customerId, '2026-03-10');
+      expect(types(await check(other.customerId, '2026-06-01'))).toEqual(['annual_max_apps']);
+    });
+
+    test('property scope: an application at another property of the customer blocks neither count nor interval; the same property does; the visit\'s own ledger row is left out', async () => {
+      const { customerId, property } = await fixture(knex);
+      const [other] = await knex('customer_properties').insert({ customer_id: customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const ledgered = async (propertyId, date) => {
+        const [past] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: propertyId, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+        const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: past.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+        await applied(customerId, date, { service_record_id: record.id });
+        return past;
+      };
+      const atOther = await ledgered(other.id, '2026-01-20');
+      expect(types(await check(customerId, '2026-02-12', { propertyId: property.id }))).toEqual([]);
+      expect(types(await check(customerId, '2026-02-12', { propertyId: other.id }))).toEqual(['min_interval_days']);
+      // Planning that other property's own completed visit leaves its own row out.
+      expect(types(await check(customerId, '2026-02-12', { propertyId: other.id, excludeScheduledServiceId: atOther.id }))).toEqual([]);
+    });
+  });
+
   describe('migration 20261007161000: fills a catalog row that already existed', () => {
     const catalogRow = () => knex('products_catalog').where({ name: ATRAZINE }).first();
     const fillLog = () => knex('lawn_protocol_audit_log').where({ action: 'v13_atrazine_catalog_fill' });
@@ -331,6 +380,32 @@ describeDb('the atrazine option through PostgreSQL', () => {
           best_price: original.best_price, needs_pricing: original.needs_pricing, max_label_rate_per_1000: original.max_label_rate_per_1000, inventory_on_hand: original.inventory_on_hand,
         });
       }
+    });
+  });
+
+  describe('migration 20261007162000: the label stamp the job card needs to show the dose', () => {
+    const catalogRow = () => knex('products_catalog').where({ name: ATRAZINE }).first();
+    test('the stamp is written once, cites the EPA 10404-94 label, and down clears only its own stamp', async () => {
+      expect((await catalogRow()).label_verified_at).toBeNull();
+      await stampMigration.up(knex);
+      const stamped = await catalogRow();
+      expect(stamped.label_verified_at).toBeTruthy();
+      expect(stamped.label_verified_by).toMatch(/EPA Reg\. 10404-94 label read/);
+      await stampMigration.up(knex); // a second run keeps the first stamp
+      expect((await catalogRow()).label_verified_at).toEqual(stamped.label_verified_at);
+
+      await stampMigration.down(knex);
+      expect(await catalogRow()).toMatchObject({ label_verified_at: null, label_verified_by: null });
+    });
+
+    test('a stamp someone else wrote is never replaced, and down leaves it', async () => {
+      const when = new Date('2026-09-01T12:00:00Z');
+      await knex('products_catalog').where({ name: ATRAZINE }).update({ label_verified_at: when, label_verified_by: 'someone else' });
+      await stampMigration.up(knex);
+      expect(await catalogRow()).toMatchObject({ label_verified_by: 'someone else', label_verified_at: when });
+      await stampMigration.down(knex);
+      expect(await catalogRow()).toMatchObject({ label_verified_by: 'someone else' });
+      await knex('products_catalog').where({ name: ATRAZINE }).update({ label_verified_at: null, label_verified_by: null });
     });
   });
 });
