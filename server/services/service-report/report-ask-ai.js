@@ -1747,8 +1747,18 @@ function contradictsHealth(text, facts) {
 
 // A grass named as the lawn's type must be the recorded one (Codex P1 #5964 r42).
 const GRASS_NAMES = ['st\\.?\\s*augustine', 'floratam', 'bermuda', 'zoysia', 'bahia', 'centipede', 'paspalum', 'fescue', 'rye\\s*grass', 'ryegrass', 'kikuyu', 'buffalo\\s*grass', 'carpet\\s*grass', 'empire', 'palmetto', 'celebration', 'argentine'];
+// A direct grass identity must be the recorded one, named or not on the list:
+// "Your grass is CitraBlue" on a Floratam lawn (Codex P1 #5964 r63).
+const GRASS_IDENTITY_RE = /\b(?:[Yy]our|[Tt]he|[Tt]his)\s+(?:grass|lawn|turf)(?:\s+type)?\s+(?:is|was|looks\s+like|appears\s+to\s+be)\s+(?:a\s+|an\s+)?(?:variety\s+of\s+|type\s+of\s+)?([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})|\b(?:[Gg]rass\s+type|[Tt]urf\s+type|[Cc]ultivar|[Vv]ariety)\s+(?:is|was)\s+([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})/g;
+function namesWrongGrassIdentity(text, recorded) {
+  return [...matchForm(text).matchAll(GRASS_IDENTITY_RE)].some((m) => {
+    const said = normalizeKey((m[1] || m[2]).replace(/\bSt\.?\s*/i, 'st ')).split(' ').filter((word) => word && word !== 'grass');
+    return said.length > 0 && !NOT_CONFIRMED_RE.test(m[0]) && said.some((word) => !normalizeKey(recorded).split(' ').includes(word));
+  });
+}
 function namesWrongGrass(text, facts) {
   const recorded = String(facts?.lawn_assessment?.grass_type || '').toLowerCase();
+  if (recorded && namesWrongGrassIdentity(text, recorded)) return true;
   // "St. Augustine" is one name, not a sentence end.
   return clausesOf(String(text).replace(/\bSt\.\s+(?=Augustine)/gi, 'St ')).some((clause) => {
     const lower = clause.toLowerCase();
@@ -2335,6 +2345,7 @@ function asksAboutSchedule(question) {
 // "Can I mow now?", "Is it necessary to fertilize?": a care decision the
 // model has no ground for keeps the fixed answer (Codex P1 #5964 r57).
 const CARE_PERMISSION_QUESTION = /\b(?:can|could|may|should|shall)\s+(?:i|we|you)\b[^?.!]{0,30}\b(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|overseed|aerat\w*|trim|prune|cut|weed|rake|sod|dethatch|edge|plant)\w*|\b(?:is\s+it|it['’]s)\s+(?:ok|okay|safe|fine|necessary|needed|time|alright|a\s+good\s+idea|too\s+(?:early|soon|late))\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|overseed|aerat\w*|trim|prune|cut|weed|rake|sod|dethatch|edge|plant)|\b(?:do|should)\s+(?:i|we)\s+(?:need|have)\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|aerat\w*|trim|prune|cut|weed|rake)|\bwhen\s+(?:can|should|do)\s+(?:i|we)\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|aerat\w*|trim|prune|cut|weed|rake)/i;
+const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
 // The reason a question keeps the fixed-rule answer with no model call, or
@@ -2376,6 +2387,23 @@ function asksAboutUnrecordedProduct(question, data = {}) {
   });
 }
 
+// Topics and questions whose fixed answer is the only safe one:
+// - next_visit: the rule answer states the scheduled date and window; the
+//   fact sheet carries no appointment (Codex P1s on #6020, #5964 and #6016);
+// - reentry: the safety instruction word for word (Codex security P1 #5964 r59);
+// - watering: the recorded hold or plan word for word; an added "Go ahead now"
+//   would override it (Codex P1 #5964 r63);
+// - photos: photo text is not on the fact sheet (Codex P1 #5964 r63);
+// - next_steps: the report's own instructions are the answer, and the model
+//   has no ground for care steps or care permission (Codex P1s #5964 r31, r57).
+const FIXED_TOPICS = new Set(['next_visit', 'reentry', 'watering', 'next_steps']);
+function fixedAnswerTopic(topic, question) {
+  if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
+  if (FIXED_TOPICS.has(topic)) return topic;
+  if (PHOTO_QUESTION.test(question)) return 'photos';
+  return CARE_PERMISSION_QUESTION.test(question) ? 'next_steps' : null;
+}
+
 function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question = '') {
   if (!AI_SERVICE_LINES.has(data.serviceLine)) return 'service_line';
   // A question about a product the report does not record ("Did you use
@@ -2388,16 +2416,8 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
   if (require('../../../shared/specialty-service-closeouts').specialtyServiceKey({
     serviceKey: data.serviceKey, serviceType: data.serviceType || data.serviceDisplayName,
   })) return 'specialty_service';
-  // The rule answer states the scheduled date and window exactly; an AI
-  // answer states no date and the fact sheet carries no appointment (Codex
-  // P1s on #6020, #5964 and #6016).
-  if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
-  // Re-entry is a safety instruction: the fixed answer gives it word for word
-  // (Codex security P1 #5964 r59).
-  if (topic === 'reentry') return 'reentry';
-  // "What should I do?": the report's own instructions are the answer, and
-  // the model has no grounding to add care steps (Codex P1 #5964 r31).
-  if (topic === 'next_steps' || CARE_PERMISSION_QUESTION.test(String(question || ''))) return 'next_steps';
+  const fixedTopic = fixedAnswerTopic(topic, String(question || ''));
+  if (fixedTopic) return fixedTopic;
   if (data.typedReport) return 'typed_report';
   if (asArray(data.companionReports).some((companion) => companion && companion.internalOnly !== true)) return 'companion_reports';
   if (asArray(requiredLines).some((line) => line?.source !== 'system')) return 'technician_line';

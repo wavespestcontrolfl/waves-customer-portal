@@ -89,8 +89,8 @@ not detectable), screened, with the fixed-rule answer as the reply on
 any model miss
 (`server/services/service-report/report-ask-ai.js`). It serves Pest, Lawn and
 Tree & Shrub reports (`data.serviceLine`) on every topic except next-visit,
-next-steps (care-permission questions included) and re-entry, which keep the
-fixed-rule answer word for word. Termite, rodent,
+next-steps (care-permission questions included), re-entry and watering,
+which keep the fixed-rule answer word for word, and photo questions. Termite, rodent,
 mosquito and specialty reports, any report a typed snapshot drives
 (`data.typedReport`) and any report with a customer-visible companion section
 (`data.companionReports`) keep the fixed-rule answer, with no model call. The

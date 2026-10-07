@@ -2297,3 +2297,18 @@ describe('answer screen, Codex round 62', () => {
     expect(screenAskAnswer("Your technician's name is Alex.", { question: 'Who was my technician?', data, facts: pf })).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 63', () => {
+  test('photo and watering questions keep the fixed answer', () => {
+    expect(ruleAnswerReason(lawnData(), [], 'results', 'What did the photos show?')).toBe('photos');
+    expect(ruleAnswerReason(lawnData(), [], 'watering', 'Can I turn my sprinklers back on?')).toBe('watering');
+  });
+
+  test('a grass identity must be the recorded one, listed name or not', () => {
+    const data = lawnData({ lawnAssessment: { scores: { overallScore: 82 }, turfProfile: { grassType: 'st_augustine', cultivar: 'Floratam' } }, reportV2: { aftercare: {} } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'What is my grass type?', data, facts });
+    expect(ask('Your grass is CitraBlue.')).toBe('grass_type');
+    expect(ask('Your grass is St. Augustine Floratam.')).toBeNull();
+  });
+});
