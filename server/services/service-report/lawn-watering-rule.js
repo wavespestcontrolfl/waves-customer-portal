@@ -213,4 +213,5 @@ module.exports = {
   validateRule,
   deriveDefaultRule,
   resolveWateringRule,
+  isPreEmergent,
 };

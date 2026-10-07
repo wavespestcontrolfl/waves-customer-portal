@@ -77,7 +77,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { FIRST_VISIT_DEFAULT_RATING, confirmFirstVisitUnderLock, firstVisitDefaultRating } = require('../services/pest-pressure/first-visit');
 const { activityScaleNames } = require('../services/pest-pressure/label');
 const { pestPressureConfigAllowsTechnicianRating } = require('../services/pest-pressure/technician-rating-gate');
-const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
+const { buildCompletionAdvisory, approvedReportProductFacts, withApplicationHold } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
@@ -1296,6 +1296,23 @@ function packetPhotoUploadRequiredError(uploadResult) {
 // formatRescheduleTemplateVars was removed with the inline single-reschedule
 // send — that path now routes through admin-schedule's
 // sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
+
+// The report facts frozen per applied product at completion. A v13 protocol row that holds watering
+// and mowing after the use (Acelepryn on caterpillars, gate delayWateringOrMowingHours) freezes its
+// hold into the product's facts, so the customer's instruction carries it (grub use takes none).
+function freezeReportProductFacts({ productIds, submitted = [], catalogById, plan }) {
+  const protocolRows = plan?.protocol?.structured?.products || [];
+  const facts = {};
+  for (const productId of productIds) {
+    const use = (submitted || []).find((p) => canonicalProductId(p?.productId) === productId);
+    const row = protocolRows.find((r) => canonicalProductId(r?.productId) === productId && r?.gates?.delayWateringOrMowingHours);
+    facts[productId] = withApplicationHold(
+      approvedReportProductFacts(catalogById.get(productId) || null),
+      { hours: row?.gates?.delayWateringOrMowingHours, targets: use?.targets },
+    );
+  }
+  return facts;
+}
 
 async function actualProductBlackoutBlocks(svc, submittedProducts = [], database = db) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
@@ -5326,6 +5343,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               message: advisorySafeMessage(block.message),
               productId: block.productId || null,
               productName: block.productName || null,
+              ...(block.evidence ? { evidence: block.evidence } : {}),
             })),
           };
       }
@@ -6621,12 +6639,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );
-          const reportProductFactsSnapshot = {};
-          for (const productId of snapshotProductIds) {
-            reportProductFactsSnapshot[productId] = approvedReportProductFacts(
-              completionCatalogRowsById.get(productId) || null,
-            );
-          }
+          const reportProductFactsSnapshot = freezeReportProductFacts({
+            productIds: snapshotProductIds, submitted: products, catalogById: completionCatalogRowsById, plan: waveguardPlan,
+          });
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
             visit: snapshotVisitRow,
             customer: snapshotCustomerRow || null,
@@ -15258,6 +15273,7 @@ module.exports = {
   completeScheduledService,
   actualProductBlackoutBlocks,
   heldProductBlocks,
+  freezeReportProductFacts,
   deliveryUnverifiedProviderOutcome,
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,

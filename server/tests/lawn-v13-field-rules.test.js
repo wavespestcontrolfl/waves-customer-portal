@@ -5,7 +5,7 @@
 
 const v13 = require('../config/lawn-protocol-v13.json');
 const engine = require('../services/waveguard-plan-engine');
-const { heldProductBlocks } = require('../services/complete-scheduled-service');
+const { heldProductBlocks, freezeReportProductFacts } = require('../services/complete-scheduled-service');
 const rules = require('../models/migrations/20261007150000_lawn_v13_field_rules');
 
 const TRACKS = Object.keys(v13);
@@ -177,5 +177,64 @@ describe('completion flags a recording of a held product like the nitrogen ban',
     expect(heldProductBlocks({ protocol: { base: [{ product: { id: 'nutra' }, selectionReason: 'x' }] } }, [{ productId: 'nutra' }])).toEqual([]);
     expect(heldProductBlocks(null, [{ productId: 'nutra' }])).toEqual([]);
     expect(heldProductBlocks({}, undefined)).toEqual([]);
+  });
+});
+
+describe('Acelepryn caterpillar hold reaches the customer instruction', () => {
+  const { approvedReportProductFacts, withApplicationHold } = require('../services/service-report/report-data');
+  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const acelepryn = { name: 'Acelepryn Insecticide', category: 'insecticide', epa_reg_number: '100-1489', approved_for_service_report: true };
+  const AT = '2026-08-12T14:00:00.000Z';
+  const instruct = (facts) => buildWateringInstruction({ rules: [{ name: facts.name, rule: facts.wateringRule, mowHoldDays: facts.mowHoldDays }], completedAt: AT });
+
+  test('the catalog alone says nothing about watering or mowing for Acelepryn', () => {
+    const facts = approvedReportProductFacts(acelepryn);
+    expect(facts.wateringRule).toBeNull();
+    expect(instruct(facts)).toMatchObject({ state: null, lines: [], mowHold: null });
+  });
+
+  test('a caterpillar use with the row gate freezes a 24-hour hold: skip watering and no mowing for a day', () => {
+    const facts = withApplicationHold(approvedReportProductFacts(acelepryn), { hours: 24, targets: ['caterpillars'] });
+    expect(facts.wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'label' });
+    expect(facts.mowHoldDays).toBe(1);
+    const instruction = instruct(facts);
+    expect(instruction.state).toBe('hold');
+    expect(instruction.lines[0]).toMatch(/^Skip your turf watering until /);
+    expect(instruction.mowHold).toMatchObject({ days: 1 });
+    expect(instruction.mowHold.line).toMatch(/^Mowing: hold off until .*, 1 day after today's treatment\.$/);
+  });
+
+  test('a grub use (target says grubs) or a row with no gate is unchanged, so the water-in is not contradicted', () => {
+    const base = approvedReportProductFacts(acelepryn);
+    expect(withApplicationHold(base, { hours: 24, targets: ['White grubs'] })).toBe(base);
+    expect(withApplicationHold(base, { hours: undefined, targets: ['caterpillars'] })).toBe(base);
+    expect(withApplicationHold(base, {})).toBe(base);
+  });
+
+  test('the completion freeze applies the applied protocol row gate and the use target', () => {
+    const id = '7f1e2d3c-0000-4000-8000-000000000001';
+    const catalogById = new Map([[id, { id, ...acelepryn }]]);
+    const plan = { protocol: { structured: { products: [{ productId: id, gates: { trigger: 'caterpillars', delayWateringOrMowingHours: 24 } }] } } };
+    const frozen = (submitted, p = plan) => freezeReportProductFacts({ productIds: [id], submitted, catalogById, plan: p })[id];
+    expect(frozen([{ productId: id, targets: ['caterpillars'] }]).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+    expect(frozen([{ productId: id }]).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+    // A grub use, or a plan whose row carries no hold, freezes the catalog's silence as before.
+    expect(frozen([{ productId: id, targets: ['grubs'] }]).wateringRule).toBeNull();
+    expect(frozen([{ productId: id, targets: ['caterpillars'] }], { protocol: { structured: { products: [{ productId: id, gates: {} }] } } }).wateringRule).toBeNull();
+    expect(frozen([{ productId: id }], null).wateringRule).toBeNull();
+  });
+
+  test('a product with its own catalog rule keeps it, and a product not approved for reports stays unapproved', () => {
+    const withRule = approvedReportProductFacts({ ...acelepryn, post_application_watering: { mode: 'water_in', source: 'label' } });
+    expect(withApplicationHold(withRule, { hours: 24, targets: ['caterpillars'] })).toBe(withRule);
+    expect(withApplicationHold(null, { hours: 24 })).toBeNull();
+  });
+});
+
+describe('the April customer line', () => {
+  test('claims the feeding only where it fits the property (North Port April has none)', () => {
+    const { PROGRAM_LINES_V13 } = require('../services/service-report/lawn-program-line');
+    expect(PROGRAM_LINES_V13[4].line).toContain('a light feeding where it fits the property');
+    expect(PROGRAM_LINES_V13[4].claims.feed).toBe('a light feeding where it fits the property');
   });
 });

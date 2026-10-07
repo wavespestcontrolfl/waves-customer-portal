@@ -1,4 +1,5 @@
 const { savepointRead } = require('../utils/savepoint-read');
+const { isPreEmergent } = require('./service-report/lawn-watering-rule');
 
 function normalizeText(value) {
   return String(value || '')
@@ -73,10 +74,45 @@ async function latestComparableGroupApplication(knex, customerId, product, group
       if (product?.category) query.where('sp.product_category', product.category);
     })
     .orderBy('sr.service_date', 'desc')
-    .select('sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group')
+    .select('sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group', 'sp.targets')
     .limit(1))
     .catch((err) => { if (strict) throw err; return []; });
   return rows[0] || null;
+}
+
+// The repeat-group rule is a rotation rule for curative sequences on one target (owner 2026-10-06):
+//   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
+//   take_all_artavia_pair: the labeled take-all pair is Artavia twice, about 28 days apart (up to
+//     TAKE_ALL_PAIR_MAX_DAYS between visits);
+//   different_target: both applications recorded a target and the targets share none.
+// With no target recorded on either side the rule applies as before.
+const TAKE_ALL_PAIR_MAX_DAYS = 45;
+
+function dayNumber(value) {
+  const time = Date.parse(`${String(value instanceof Date ? value.toISOString() : value || '').slice(0, 10)}T00:00:00Z`);
+  return Number.isFinite(time) ? Math.round(time / 86400000) : null;
+}
+
+function targetSet(value) {
+  const list = Array.isArray(value) ? value : [];
+  return new Set(list.map(normalizeText).filter(Boolean));
+}
+
+function productIsPreEmergent(product, plan) {
+  const rows = plan?.protocol?.structured?.products || [];
+  return rows.some((row) => String(row?.productId) === String(product?.id) && /pre_emergent/.test(String(row?.role || '')))
+    || isPreEmergent(product || {});
+}
+
+function rotationExemption({ product, plan, groupType, groupValue, last, input, serviceDate }) {
+  if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
+  const apart = dayNumber(serviceDate) - dayNumber(last.service_date);
+  if (/\bartavia\b/.test(normalizeText(product.name)) && normalizeText(last.product_name) === normalizeText(product.name)
+    && apart > 0 && apart <= TAKE_ALL_PAIR_MAX_DAYS) return 'take_all_artavia_pair';
+  const now = targetSet(input.targets);
+  const before = targetSet(last.targets);
+  if (now.size && before.size && ![...now].some((target) => before.has(target))) return 'different_target';
+  return null;
 }
 
 function latestAssessmentStressed(plan) {
@@ -191,6 +227,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
           ? [last?.catalog_group, last?.catalog_group_secondary]
           : [last?.catalog_group];
       if (!last || !lastGroups.some((lastGroup) => String(lastGroup || '') === String(groupValue))) continue;
+      if (rotationExemption({ product, plan, groupType, groupValue, last, input, serviceDate })) continue;
       const code = groupType === 'frac' && normalizeText(product.category).includes('fungicide')
         ? 'fungicide_frac_rotation_approval'
         : `repeat_${groupType}_group`;
@@ -200,6 +237,16 @@ async function evaluateWaveGuardManagerApprovals(knex, {
         productId: product.id,
         productName: product.name,
         message: `${product.name} repeats ${groupType.toUpperCase()} ${groupValue}; last matching application was ${last.product_name || 'unknown product'} on ${String(last.service_date).slice(0, 10)}.`,
+        // What the rotation check read, kept with the finding: the group, the last application, and the
+        // targets (empty = none recorded, so the rule applied as before).
+        evidence: {
+          groupType,
+          groupValue: String(groupValue),
+          lastProduct: last.product_name || null,
+          lastDate: String(last.service_date).slice(0, 10),
+          targets: [...targetSet(input.targets)],
+          lastTargets: [...targetSet(last.targets)],
+        },
       });
     }
   }
@@ -246,6 +293,7 @@ function managerApprovalSummary(approval, blocks, actor) {
       message: block.message,
       productId: block.productId || null,
       productName: block.productName || null,
+      ...(block.evidence ? { evidence: block.evidence } : {}),
     })),
   };
 }

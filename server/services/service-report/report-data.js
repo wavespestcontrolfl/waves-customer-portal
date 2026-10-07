@@ -41,7 +41,7 @@ const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-se
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
-const { resolveWateringRule } = require('./lawn-watering-rule');
+const { resolveWateringRule, validateRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
 const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
@@ -255,6 +255,24 @@ function approvedReportProductFacts(catalog = {}) {
     // key: that is no claim, never a live catalog fallback.
     mowHoldDays: normalizeMowHoldDays(catalog.mow_hold_days),
   };
+}
+
+// A v13 protocol row can hold watering and mowing after ONE use of a product whose catalog rule is
+// silent for it (Acelepryn on caterpillars, row gate delayWateringOrMowingHours: label "delay
+// watering (irrigation) or mowing for 24 hours after application"; its grub use needs the opposite,
+// the water-in, so the catalog carries no rule). The completion freezes the use's hold into the
+// facts, so the report's instruction carries it. Facts with a catalog rule already keep it, a grub
+// use takes nothing, and facts of a product not approved for reports (null) stay null.
+function withApplicationHold(facts, { hours, targets } = {}) {
+  const wait = Number(hours);
+  if (!facts || facts.wateringRule || !(wait > 0)) return facts;
+  if ((Array.isArray(targets) ? targets : []).some((target) => /grub/i.test(String(target)))) return facts;
+  const checked = validateRule({
+    mode: 'hold', hold_hours: wait, source: 'label',
+    label_note: `Label: delay watering (irrigation) or mowing for ${wait} hours after application (caterpillar use).`,
+  });
+  if (!checked.valid) return facts;
+  return { ...facts, wateringRule: checked.rule, mowHoldDays: facts.mowHoldDays ?? normalizeMowHoldDays(Math.ceil(wait / 24)) };
 }
 
 // frozenFacts: the completion-time { [productId]: facts|null } map from the
@@ -2694,7 +2712,7 @@ class PinnedAssessmentUnavailable extends Error {
 // p10: the lawn PDF no longer prints the "Hold irrigation until" product-advisory
 // line or a clean-visit "No lawn issues" row beside a finding, and the v6 "What
 // to expect" block drops repeated sentences. Cached lawn PDFs must re-key.
-const LAWN_RENDER_STRATEGY = 'p10-lawn-report-consistency-20261005';
+const LAWN_RENDER_STRATEGY = 'p10-lawn-field-rules-20261007';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
@@ -7532,6 +7550,7 @@ module.exports = {
   methodFromProduct,
   inferCatalogProductType,
   approvedReportProductFacts,
+  withApplicationHold,
   attachApprovedReportProductFacts,
   completedProtocolActionLabels,
   completedProtocolActionEntries,
