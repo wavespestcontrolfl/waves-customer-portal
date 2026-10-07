@@ -34,7 +34,7 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
-const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer } = require('../services/intelligence-bar/comms-tools');
+const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer, sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
@@ -1236,6 +1236,15 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
+    if (toolUse.name === 'send_sms') {
+      // No card for a text that cannot go out: an opted-out or suppressed number,
+      // or a repeat of a text whose provider outcome is still unknown. Runs for a
+      // pinned customer AND for a direct phone with no customer. The refusal
+      // carries the send tool's own wording; the execution-time check stays (a
+      // customer can opt out between the card and the confirm).
+      const sendRefusal = await sendSmsProposalRefusal(params);
+      if (sendRefusal) return { failed: true, modelResult: sendRefusal };
+    }
     if (toolUse.name === 'create_appointment' && (params.technician_id || params.technician_name)) {
       // Pin the technician like send_sms pins the recipient: resolution
       // happens NOW, so the card names the exact tech the visit binds to
@@ -1341,6 +1350,30 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // notes writer advances updated_at (Codex r3).
       params._ib_notes_before = current.crm_notes ?? null;
       notesReadVersion = current.version;
+    }
+    if (toolUse.name === 'update_customer') {
+      // monthly_rate is the customer's WHOLE monthly bill (owner 2026-10-06):
+      // a rate edit names the one service whose price changes, the card lists
+      // every line before and after, and a total below the other lines is
+      // refused (rate-change.js). rate_service is model input only: it is
+      // resolved here into the pinned _rate_family, never stored as itself.
+      const rateService = params.rate_service;
+      delete params.rate_service;
+      if (params.customer_id && params.updates && params.updates.monthly_rate !== undefined) {
+        let rate;
+        try {
+          rate = await require('../services/intelligence-bar/rate-change')
+            .rateChangeProposal(String(params.customer_id), params.updates.monthly_rate, rateService);
+        } catch {
+          return { failed: true, modelResult: { error: 'Could not read this customer\'s monthly bill — nothing was proposed. Try again in a moment.' } };
+        }
+        if (rate?.error) return { failed: true, modelResult: { error: rate.error, ...(rate.code ? { code: rate.code } : {}) } };
+        if (rate) {
+          params._rate_family = rate.family;
+          params._rate_ledger_pin = rate.pin;
+        }
+        if (rate?.display) preview = { ...preview, rate_change: rate.display };
+      }
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like
@@ -1791,7 +1824,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // Live rows only (pre-push r11 P1): a soft-deleted/merged customer
       // must never ride a proposal — the executors refuse or skip them,
       // but the card must not name them as approved targets either.
-      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name');
+      const rows = await db('customers').whereIn('id', ids).whereNull('deleted_at').select('id', 'first_name', 'last_name', 'monthly_rate');
+      // A bulk rate edit writes one number as each customer's WHOLE monthly
+      // bill (owner 2026-10-06): on a customer who already has a bill that
+      // would replace every service line. Only first rates go in bulk; an
+      // existing bill is edited one customer at a time, naming the service.
+      if (params.updates && params.updates.monthly_rate !== undefined) {
+        const billedIds = await require('../services/intelligence-bar/rate-change').customersWithBill(db, rows);
+        const billed = rows.filter((r) => billedIds.has(String(r.id)));
+        if (billed.length) {
+          const names = billed.slice(0, 5).map((r) => `${r.first_name || ''} ${r.last_name || ''}`.trim() || r.id).join(', ');
+          return { failed: true, modelResult: { error: `${billed.length} of these customers already have a monthly bill (${names}${billed.length > 5 ? ', …' : ''}). A bulk rate would replace their whole bill. Change each one with update_customer and rate_service, or leave them out. Nothing was proposed.`, code: 'bulk_rate_over_existing_bill' } };
+        }
+      }
       const nameById = new Map(rows.map((r) => [String(r.id), `${r.first_name || ''} ${r.last_name || ''}`.trim() || String(r.id)]));
       const missing = ids.filter((id) => !nameById.has(id));
       if (missing.length) {
@@ -1838,7 +1883,9 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
     });
-    if (target.error) return { failed: true, modelResult: target };
+    // A refused target leaves no card and writes nothing; the model is told so
+    // in plain words, so its reply can never read as a recorded change.
+    if (target.error) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
     if (toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
@@ -2428,7 +2475,7 @@ ENGINE BASICS (so you can explain numbers):
 - Loaded labor rate: $35/hr
 - Pest frequencies: quarterly (~90d), bimonthly (~60d), monthly (~30d)
 - Lawn tracks: st_augustine, bermuda, zoysia, bahia. Tiers: basic, enhanced, premium
-- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+) — discount applies automatically based on service count
+- WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+). The tier is a label the office sets; changing it changes NO price. Prices change only through a new estimate or a monthly-rate edit, so never tell the operator a discount "will apply" after a tier change. monthly_rate is the customer's whole monthly bill (all services summed; get_customer_detail shows the lines as monthly_bill).
 - Default sqft if unknown: 2000. Default lot: 4× home sqft.
 
 OUT-OF-SCOPE EXAMPLES (do not draft):
@@ -2523,8 +2570,23 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 // on EVERY admin context regardless of role (INFRA_TOOLS below), so this
 // filter is the ONLY place that keeps these out of a non-full-access list —
 // there is no per-module QUERY-only export to fall back to.
+// Core tools on EVERY admin page (EVERY_PAGE_TOOL_NAMES in
+// action-registry.js; owner IB history 10-06: asks failed with "no tool" on
+// the Customers page or dashboard). This legacy list carries the ones its
+// modules execute by name. The property writes are registry-only
+// (executePropertyTool refuses unless GATE_IB_PLATFORM), so they ride the
+// platform list only. Admin-only; never the tech or agent-estimate rails.
+// Only the offer widens: every write keeps its UI-confirm card.
+const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
+function withEveryPageTools(tools, context, isAdmin) {
+  if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
+  const present = new Set(tools.map(t => t.name));
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS]
+    .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
+}
+
 function getToolsForContext(context, isAdmin = false, fullAccess = false) {
-  const tools = toolsForContextUngated(context, isAdmin, fullAccess)
+  const tools = withEveryPageTools(toolsForContextUngated(context, isAdmin, fullAccess), context, isAdmin)
     // Defense in depth: catches a future red tool reaching a context list
     // through a module that forgot its own write-free "query" export
     // (banking-tools.js / seo-tools.js already build one for the branches

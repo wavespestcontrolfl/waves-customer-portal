@@ -46,12 +46,17 @@ describe('getDailyRainOutlookBounded', () => {
     resolveFetch({ ok: false });
     await flush();
     await flush();
+    // NWS failed, so the same lookup asks the Open-Meteo backup; it fails too.
+    expect(fetchCalls).toBe(2);
+    resolveFetch({ ok: false });
+    await flush();
+    await flush();
     expect(_test._dailyFailCooldown.size).toBe(1);
 
     // Cooled down: the next poll returns null immediately, no new fetch.
     const third = await getDailyRainOutlookBounded(27.42, -82.41, { deadlineMs: 10 });
     expect(third).toBeNull();
-    expect(fetchCalls).toBe(1);
+    expect(fetchCalls).toBe(2);
   });
 
   test('a successful lookup clears the cooldown and serves from cache', async () => {

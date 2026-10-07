@@ -17,6 +17,7 @@ const fixMigration = require('../models/migrations/20261005130000_lawn_v13_catal
 const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixes');
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
+const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
@@ -78,9 +79,10 @@ describe('the v13 recipe', () => {
 
   test('N targets parse from the visit notes and total the program', () => {
     const n = MONTHS.map((m) => engine.parseVisitNutrientTargets(visitFor(m).notes).targetNPer1000);
-    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.6, 0.75, 0.5]);
-    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.1);
-    expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.6);
+    // October is Dimension 18-0-10 at 4.04 lb per 1,000 sq ft (commercial label, Coastal South): 0.73 lb N, 0.40 lb K2O.
+    expect(n).toEqual([0, 0.75, 0, 0.5, 0, 0, 0, 0, 0, 0.73, 0.75, 0.5]);
+    expect(Number(n.reduce((a, b) => a + b, 0).toFixed(2))).toBe(3.23);
+    expect(engine.parseVisitNutrientTargets(visitFor(10).notes).targetKPer1000).toBe(0.4);
     // No N or P in Jun-Sep.
     for (const m of [6, 7, 8, 9]) expect(n[m - 1]).toBe(0);
   });
@@ -89,7 +91,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [N.STW15], [N.F24], [N.F24],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
     ]);
   });
 });
@@ -130,10 +132,45 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
   });
 });
 
+// ── October: Dimension 18-0-10 replaces the discontinued Stonewall 15-0-15 (20261007120500) ──
+describe('migration 20261007120500: the October recipe line and the staged row it writes agree', () => {
+  const NEW = octoberMigration.NEW_NAME;
+  test('same name, same rate, same N and K2O targets, in every grass track', () => {
+    for (const grass of GRASSES) {
+      const october = v13[grass].visits.find((v) => v.month === 'Oct');
+      const [line] = lines(october.primary);
+      expect(nameOfLine(line)).toBe(NEW);
+      expect(line).toContain(`${octoberMigration.OCT_RATE} lb per 1,000 sq ft`);
+      const targets = engine.parseVisitNutrientTargets(october.notes);
+      expect(`${targets.targetNPer1000} lb N/1000`).toBe(octoberMigration.NEW_GATES.targetN);
+      expect(`${targets.targetKPer1000} lb K2O/1000`).toBe(octoberMigration.NEW_GATES.targetK2O);
+      // Dithiopyr, not the prodiamine cap; the commercial label's figures.
+      expect(october.notes).toMatch(/Dithiopyr this year stays under the label yearly cap/);
+      expect(october.notes).toMatch(/0\.37 lb ai per acre: 4\.04 lb of product per 1,000 sq ft, the commercial label's Coastal South rate .* under its per-application maximum of 5\.46 lb/);
+      expect(october.notes).not.toMatch(/prodiamine|1\.5 lb ai per acre cap/i);
+    }
+    expect(octoberMigration.OCT_RATE).toBe(4.04);
+    expect(octoberMigration.MAX_LABEL).toBe(5.46);
+  });
+
+  test('the 9x April step is untouched: still the derived 2.78 lb from the 0.5 lb N target', () => {
+    const [line] = lines(visitFor(4).cadenceVariants['9'].primary);
+    expect(line).toMatch(/2\.78 lb per 1,000 sq ft \(0\.5 lb N\), spreader$/);
+    expect(engine.parseVisitNutrientTargets(visitFor(4).notes).targetNPer1000).toBe(0.5);
+  });
+
+  test('the product limits it adds are the label\'s: 3 applications a year, 60 days between, both hard blocks', () => {
+    expect(octoberMigration.PRODUCT_LIMITS.map((l) => [l.limit_type, l.limit_value, l.limit_unit, l.severity])).toEqual([
+      ['annual_max_apps', 3, 'applications', 'hard_block'],
+      ['min_interval_days', 60, 'days', 'hard_block'],
+    ]);
+  });
+});
+
 // ── The recipe names only catalog rows the migrations know ───────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
-const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE];
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, octoberMigration.NEW_NAME];
 
 describe('every v13 line names a catalog row the migrations know', () => {
   test('the recipe names only catalog names the migration knows', () => {
@@ -263,7 +300,8 @@ describe('staged migration 20261005120000', () => {
     for (const month of MONTHS) {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
-      const whole = rowsForWindow.filter((s) => s[6]).map((s) => s[0]);
+      // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
+      const whole = rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0]));
       const spots = rowsForWindow.filter((s) => !s[6]).map((s) => s[0]);
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());

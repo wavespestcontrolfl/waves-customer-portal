@@ -173,9 +173,21 @@ function discover(input, scope) {
   };
 }
 
+// Core reads/writes preloaded on EVERY admin page (owner IB history 10-06:
+// ~25 asks — stock counts, a second property, a lead's name, an estimate's
+// line prices, open slots — failed with "no tool" because the operator was on
+// the Customers page or dashboard). Only the OFFERED list widens: allowed()
+// still applies role/context, and every write keeps its ui_confirm card.
+const EVERY_PAGE_TOOL_NAMES = Object.freeze([
+  'add_customer_property', 'set_primary_property', 'update_customer_property',
+  'update_lead_contact', 'update_lead_status',
+  'query_stock', 'adjust_stock', 'query_products',
+  'get_estimate_detail', 'find_available_slots',
+]);
+
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
-  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads', 'list_gap_reports', 'needs_me']);
+  const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
@@ -210,4 +222,4 @@ function execute(name, input, { role, context, techContext, actionContext = {} }
   return action.executor(name, executionInput, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
 }
 
-module.exports = { actions, policyErrors, DISCOVERY_TOOL, initialTools, discover, validateInput, allowed, execute };
+module.exports = { actions, policyErrors, DISCOVERY_TOOL, EVERY_PAGE_TOOL_NAMES, initialTools, discover, validateInput, allowed, execute };

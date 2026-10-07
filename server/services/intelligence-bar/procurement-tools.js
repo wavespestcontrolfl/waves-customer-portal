@@ -1792,8 +1792,19 @@ async function adjustStock(input, actionContext) {
   const fields = { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
     unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
   if (!actionContext.confirmed) return inventory.previewStockAdjustment(resolved.product.id, fields);
-  const result = await inventory.adjustStock(resolved.product.id, fields,
-    inventoryWriteOptions(input, actionContext, 'intelligence_bar_adjust_stock'));
+  let result;
+  try {
+    result = await inventory.adjustStock(resolved.product.id, fields,
+      inventoryWriteOptions(input, actionContext, 'intelligence_bar_adjust_stock'));
+  } catch (err) {
+    // A refusal the writer raised itself (stale preview, missing approval,
+    // bad unit, saved count mismatch) rolled its transaction back, so the
+    // receipt says the stock was not written: a confirmed card that changed
+    // nothing must never read as done. Any other error keeps the generic path.
+    if (!err.isOperational && err.code !== 'approval_required') throw err;
+    return { success: false, written: false, code: err.code, preview_changed: err.code === 'preview_changed',
+      error: `${err.message} Stock was not written.` };
+  }
   return { success: true, state: 'completed', product: inventory.productIdentity(result.product),
     movement_type: result.movement.movement_type, stock_before: toNumber(result.movement.stock_before),
     stock_after: toNumber(result.movement.stock_after), change: toNumber(result.movement.metadata.delta),

@@ -99,14 +99,27 @@ const BERMUDA_PROGRAM = 'bermuda_removal';
 // the product being judged itself.
 const isBermudaProgramRow = (limit) => limit.match_value === BERMUDA_PROGRAM;
 
-// The treated property only: a ledger row at another of the customer's properties does
-// not count. A row whose property is unknown (no visit, or a visit with no property)
-// cannot be proven elsewhere, so it still counts. `query` selects from
-// property_application_history as pah.
-function scopeToProperty(query, propertyId) {
-  return query.leftJoin('service_records as sr', 'pah.service_record_id', 'sr.id')
-    .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-    .where(function sameProperty() { this.whereNull('ss.property_id').orWhere('ss.property_id', propertyId); });
+// Narrows a property_application_history query to the treated property and leaves one
+// visit's own ledger rows out. `table` is the history table or its alias in the query.
+// A row whose property is unknown (no visit, or a visit with no property) cannot be proven
+// elsewhere, so it still counts. No option, no change.
+function scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId } = {}, table) {
+  if (propertyId) {
+    query.whereNotExists(function elsewhere() {
+      this.select(database.raw('1')).from('service_records as sr_scope')
+        .join('scheduled_services as ss_scope', 'sr_scope.scheduled_service_id', 'ss_scope.id')
+        .whereRaw('sr_scope.id = ??.service_record_id', [table])
+        .whereNotNull('ss_scope.property_id')
+        .whereNot('ss_scope.property_id', propertyId);
+    });
+  }
+  if (excludeScheduledServiceId) {
+    query.where(function notThisVisit() {
+      this.whereNull(`${table}.service_record_id`)
+        .orWhereNotIn(`${table}.service_record_id`, database('service_records').where({ scheduled_service_id: excludeScheduledServiceId }).select('id'));
+    });
+  }
+  return query;
 }
 
 class ApplicationLimitChecker {
@@ -114,9 +127,10 @@ class ApplicationLimitChecker {
   // cap shared across formulations counts it with the season's earlier ones. A
   // caller that reads AFTER the application was ledgered (completion, the compliance
   // page) passes none, so the application is never counted twice.
-  // opts.excludeScheduledServiceId leaves that visit's own ledger rows out of the
-  // shared cap, for a plan rebuilt after the visit completed. opts.propertyId limits the
-  // shared cap to the treated property (no property: every property of the customer).
+  // opts.excludeScheduledServiceId leaves that visit's own ledger rows out of the product
+  // history and the shared cap, for a plan rebuilt after the visit completed. opts.propertyId
+  // limits both to the treated property (no property: every property of the customer).
+  // Both read applications up to the proposed ET day only.
   async checkLimits(customerId, productId, proposedDate = new Date(), database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };
@@ -129,11 +143,17 @@ class ApplicationLimitChecker {
     // Product-specific history
     // Retracted rows (recap deselection corrections) never count toward
     // application limits.
-    const history = await database('property_application_history')
+    const historyQuery = database('property_application_history')
       .where({ customer_id: customerId, product_id: productId })
       .where('application_date', '>=', yearStart)
-      .whereNull('retracted_at')
-      .orderBy('application_date', 'desc');
+      // Applications on or before the day judged, as the shared cap reads them: a backdated
+      // completion is not held against an application that had not happened yet.
+      .where('application_date', '<=', etCalendarDayOf(proposedDate))
+      .whereNull('retracted_at');
+    // The treated property and the visit being planned scope this history exactly as they
+    // scope the shared cap below; a caller that passes neither reads the customer's whole year.
+    scopeHistoryToTreatment(historyQuery, database, opts, 'property_application_history');
+    const history = await historyQuery.orderBy('application_date', 'desc');
 
     // MOA group history
     const moaHistory = product.moa_group ? await database('property_application_history')
@@ -194,13 +214,7 @@ class ApplicationLimitChecker {
       // April is not withheld by a June spray that had not happened yet.
       .where('pah.application_date', '<=', etCalendarDayOf(proposedDate))
       .whereNull('pah.retracted_at');
-    if (propertyId) scopeToProperty(query, propertyId);
-    if (excludeScheduledServiceId) {
-      query.where(function notThisVisit() {
-        this.whereNull('pah.service_record_id')
-          .orWhereNotIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: excludeScheduledServiceId }).select('id'));
-      });
-    }
+    scopeHistoryToTreatment(query, database, { propertyId, excludeScheduledServiceId }, 'pah');
     return query.select('pah.*').orderBy('pah.application_date', 'desc');
   }
 
@@ -331,13 +345,7 @@ class ApplicationLimitChecker {
       })
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
         'pl.limit_value', 'pl.limit_unit', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
-    if (ctx.propertyId) scopeToProperty(query, ctx.propertyId);
-    if (ctx.excludeScheduledServiceId) {
-      query.where(function notThisVisit() {
-        this.whereNull('pah.service_record_id')
-          .orWhereNotIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: ctx.excludeScheduledServiceId }).select('id'));
-      });
-    }
+    scopeHistoryToTreatment(query, database, ctx, 'pah');
     const history = await query;
 
     let used = 0;

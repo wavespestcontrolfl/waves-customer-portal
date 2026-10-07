@@ -7716,7 +7716,8 @@ async function assertNoCallBookingConflict(guard) {
   if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
 }
 
-router.post('/', requireAdmin, async (req, res, next) => {
+router.post('/', requireAdmin, scheduleCreateHandler);
+async function scheduleCreateHandler(req, res, next) {
   try {
     const {
       customerId, technicianId, scheduledDate, windowStart: windowStartRaw, windowEnd: windowEndRaw,
@@ -9853,7 +9854,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+}
+
+// The Schedule-screen create without an HTTP request — the Intelligence Bar's
+// start-a-recurring-program tool (owner 2026-10-06) runs this so the bar and
+// this screen book through the SAME handler. It runs the router-level catalog
+// prime (as router.use above does, failures ignored), then the handler with
+// the only request fields it reads, and resolves the reply it would send:
+// { status, json }. An error the handler passes to next() rejects.
+async function createScheduleBooking({ body, actor }) {
+  await primePercentDiscountExclusions().catch(() => {});
+  const req = { body, technicianId: actor.technicianId, technician: { name: actor.technicianName } };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    scheduleCreateHandler(req, res, reject).catch(reject);
+  });
+}
 
 // GET /api/admin/schedule/list — paginated list view with filters
 router.get('/list', async (req, res, next) => {
@@ -28396,3 +28416,6 @@ module.exports.topUpScopeInput = topUpScopeInput;
 // Test surface for the per-service completion payload fields (the T&S Fast
 // Complete flag needs the gate AND the requesting user's flag).
 module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionContextByServiceId;
+
+// Same handler as POST / — see createScheduleBooking above.
+module.exports.createScheduleBooking = createScheduleBooking;
