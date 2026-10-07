@@ -227,6 +227,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   // The Visit Summary the render built, taken before reconciliation can touch the text.
   let vsRenderedSignature = '';
+  let vsRenderedSource = null;
   // Same contract for the cockroach program state: the store key carries the
   // state the render actually used (stamped on the payload), so a render
   // that fell closed is never stored under the lookup's correct-state key.
@@ -272,6 +273,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, lawnPhotoFindings: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     vsRenderedSignature = lawnVisitSummaryRenderedSignature(data);
+    vsRenderedSource = data?.summarySource ?? null;
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
     renderedData = data;
@@ -411,7 +413,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // The Visit Summary the render printed must be the one the key names (the key is derived from
     // the same loaded row; a summary that expired its watering note since, or a row older than the
     // render, differs). Only compared while the gate is live and the key carries a component.
-    if (require('../../config/feature-gates').lawnVisitSummaryV2Live() && canonical.pin != null && vsRenderedSignature !== (canonical.visitSummarySignature || '')) {
+    // Only while the Visit Summary or the plain recap won the summary slot (codex
+    // #6087 r6): when a higher-precedence source (the technician report, a typed
+    // narrative) won, the summary is not printed and there is nothing to compare.
+    if (visitSummaryRenderMismatch({
+      live: require('../../config/feature-gates').lawnVisitSummaryV2Live(),
+      pinned: canonical.pin != null,
+      renderedSource: vsRenderedSource,
+      renderedSignature: vsRenderedSignature,
+      keySignature: canonical.visitSummarySignature,
+    })) {
       logger.warn(`[service-report-pdf] visit summary rendered differs from the key's for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }
@@ -953,7 +964,19 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
   return summary;
 }
 
+// True when a render must not be cached because the Visit Summary it printed is
+// not the one the PDF key names. Only while the gate is live, the render is
+// pinned, and the Visit Summary or the plain recap won the summary slot: a
+// higher-precedence source (technician report, typed narrative) prints no
+// summary, so there is nothing to compare (codex #6087 r6).
+function visitSummaryRenderMismatch({ live, pinned, renderedSource, renderedSignature, keySignature }) {
+  if (!live || !pinned) return false;
+  if (renderedSource != null && renderedSource !== 'lawn_visit_summary' && renderedSource !== 'recap') return false;
+  return (renderedSignature || '') !== (keySignature || '');
+}
+
 module.exports = {
+  visitSummaryRenderMismatch,
   CLAIM_LIMIT,
   // Shared with the ops queue so its stale-claim rule cannot drift from
   // recoverStalePdfRenderClaims.
