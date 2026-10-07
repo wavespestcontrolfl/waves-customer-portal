@@ -8884,6 +8884,16 @@ async function scheduleCreateHandler(req, res, next) {
         if (adminCreateClash.length) {
           bookingWarnings.push(slotOverlapWarning(dateOnly(scheduledDate)));
         }
+        // Intelligence Bar start_program (approvedOverlapFacts, set only by
+        // createScheduleBooking): an overlapping visit the card did not show
+        // refuses under this lock. The Schedule screen never sets it.
+        if (Array.isArray(req.approvedOverlapFacts) && adminCreateClash.length) {
+          const approvedFacts = new Set(req.approvedOverlapFacts);
+          const liveFacts = await require('../services/intelligence-bar/tools').bookingOverlapFacts(trx, adminCreateClash, dateOnly(scheduledDate));
+          if (liveFacts.some((f) => !approvedFacts.has(f.fact))) {
+            throw Object.assign(httpError(409, 'Another visit now overlaps the first visit. Nothing was booked.'), { code: 'OVERLAP_CHANGED' });
+          }
+        }
       }
 
       // Booking stamping contract (B-track adoption of the admin create
@@ -9882,9 +9892,14 @@ async function scheduleCreateHandler(req, res, next) {
 // creditFreeCard: the caller's card promised no inspection credit; the
 // handler re-checks that under the credit lock and stamps the booking event
 // credit-free (create_appointment's mechanism).
-async function createScheduleBooking({ body, actor, creditFreeCard = false }) {
+// approvedOverlapFacts: the overlapping visits the caller's card showed
+// (bookingOverlapFacts facts); any other overlap refuses under the lock.
+async function createScheduleBooking({ body, actor, creditFreeCard = false, approvedOverlapFacts }) {
   await primePercentDiscountExclusions().catch(() => {});
-  const req = { body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true };
+  const req = {
+    body, technicianId: actor.technicianId, technician: { name: actor.technicianName }, creditFreeCard: creditFreeCard === true,
+    ...(Array.isArray(approvedOverlapFacts) ? { approvedOverlapFacts } : {}),
+  };
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,

@@ -166,6 +166,34 @@ describe('createScheduleBooking runs the POST / handler', () => {
     expect(markBookingForInspectionCredit).not.toHaveBeenCalled();
   });
 
+  describe('approvedOverlapFacts (Intelligence Bar start_program)', () => {
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    const clash = { id: 'visit-9', scheduled_date: '2099-07-03', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed', service_type: 'Pest Control' };
+    const approvedFact = 'visit-9||Pest Control|2099-07-03|10:00 AM-11:00 AM';
+
+    test('the Schedule screen path books through an overlap with a warning', async () => {
+      findConflictingVisits.mockResolvedValue([clash]);
+      const result = await createScheduleBooking({ body: oneOff, actor });
+      expect(result.status).toBe(201);
+      findConflictingVisits.mockResolvedValue([]);
+    });
+
+    test('an overlap the card showed books through', async () => {
+      findConflictingVisits.mockResolvedValue([clash]);
+      const result = await createScheduleBooking({ body: oneOff, actor, approvedOverlapFacts: [approvedFact] });
+      expect(result.status).toBe(201);
+      findConflictingVisits.mockResolvedValue([]);
+    });
+
+    test('an overlap the card did not show refuses with OVERLAP_CHANGED', async () => {
+      findConflictingVisits.mockResolvedValue([clash]);
+      const result = await createScheduleBooking({ body: oneOff, actor, approvedOverlapFacts: [] });
+      expect(result.status).toBe(409);
+      expect(result.json.code).toBe('OVERLAP_CHANGED');
+      findConflictingVisits.mockResolvedValue([]);
+    });
+  });
+
   test('an error the handler passes to next() rejects', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(createScheduleBooking({ body: oneOff, actor })).rejects.toThrow('db down');

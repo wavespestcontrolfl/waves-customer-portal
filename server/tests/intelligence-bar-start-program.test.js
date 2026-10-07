@@ -94,10 +94,12 @@ beforeEach(() => {
   calls = [];
   tables = {
     customers: [memberCustomer()],
-    customer_properties: [{ id: 'prop-1' }],
+    customer_properties: [{ id: 'prop-1', address_line1: '1 Example St', city: 'Sarasota', state: 'FL', zip: '34201' }],
     services: [
       { id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', billing_type: 'recurring', is_active: true, default_duration_minutes: 60 },
       { id: 'svc-mosq-1x', name: 'Mosquito One Time', service_key: 'mosquito_one_time', billing_type: 'one_time', is_active: true },
+      { id: 'svc-mosq-seasonal', name: 'Mosquito Seasonal', service_key: 'mosquito_seasonal', billing_type: 'recurring', frequency: 'every_6_weeks', visits_per_year: 9, is_active: true },
+      { id: 'svc-tree', name: 'Tree & Shrub Care', service_key: 'tree_shrub_quarterly', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, is_active: true },
     ],
     technicians: [{ id: TECH_ID, name: 'Sam Tech' }],
     estimates: [],
@@ -153,7 +155,7 @@ describe('pest member starts monthly lawn at Silver: the card', () => {
     ]);
     expect(preview.plan_sync).toEqual({ waveguard_tier: 'Silver' });
     expect(lines(preview, 'operational')[0]).toBe('Series: Lawn Care, monthly, ongoing, no end date (the first 4 visits are booked now, as on the Schedule screen)');
-    expect(lines(preview, 'operational')[1]).toBe('First visit: Tue, Mar 3, 2099, 9:00 AM-10:00 AM, technician Sam Tech');
+    expect(lines(preview, 'operational')[1]).toBe('First visit: Tue, Mar 3, 2099, 9:00 AM-10:00 AM, technician Sam Tech, at 1 Example St, Sarasota, FL 34201');
     expect(lines(preview, 'comms')).toEqual([
       'Texts: a booking confirmation for the first visit goes out by text or email, per their settings. It gives the arrival window Tue, Mar 3, 2099, 9:00 AM - 11:00 AM',
       'Texts and email: no welcome text or welcome email (this customer already had a recurring service)',
@@ -270,6 +272,25 @@ describe('refusals', () => {
     expect(await run({ ...BASE_INPUT, visit_count: 12 })).toMatchObject({ code: 'program_visit_count_refused' });
   });
 
+  test('seasonal mosquito needs the Feb-Oct schedule this tool cannot book: refused', async () => {
+    const result = await run({ ...BASE_INPUT, service: 'Mosquito Seasonal' });
+    expect(result.code).toBe('program_cadence_mismatch');
+    expect(result.error).toContain('Start this program from the Schedule screen');
+  });
+
+  test('an operator cadence that conflicts with the catalog row is refused', async () => {
+    const result = await run({ ...BASE_INPUT, service: 'Tree & Shrub Care', cadence: 'monthly' });
+    expect(result.code).toBe('program_cadence_mismatch');
+    expect(result.error).toContain('books quarterly, not monthly');
+  });
+
+  test('bill lines that do not add up to the rate are refused, no remainder line invented', async () => {
+    tables.customers = [memberCustomer({ monthly_rate: '50.00' })];
+    const result = await run(BASE_INPUT);
+    expect(result.code).toBe('program_bill_lines_mismatch');
+    expect(result.error).toContain('Fix the rate on the customer page first');
+  });
+
   test('a one-time catalog service cannot start a program', async () => {
     expect(await run({ ...BASE_INPUT, service: 'Mosquito One Time' })).toMatchObject({ code: 'program_service_not_recurring' });
   });
@@ -337,6 +358,7 @@ describe('commit', () => {
     });
     expect(actor).toEqual({ technicianId: TECH_ID, technicianName: 'Sam Tech' });
     expect(createScheduleBooking.mock.calls[0][0].creditFreeCard).toBe(true);
+    expect(createScheduleBooking.mock.calls[0][0].approvedOverlapFacts).toEqual([]);
     // The handler queues its texts after it replies: queued, never "sent".
     expect(result.message).toContain('Booking confirmation queued (sent shortly by text or email per their settings; a failure is logged).');
     expect(result.message).not.toMatch(/\bsent per\b|confirmation sent/);
@@ -457,6 +479,37 @@ describe('commit', () => {
     expect(result).toMatchObject({ code: 'INSPECTION_CREDIT_CHANGED', preview_changed: true, nothing_changed: true });
     expect(writes).toEqual([]);
     expect(PlanRateLedger.setLineForScalarWrite).not.toHaveBeenCalled();
+  });
+
+  test('the handler finds a new overlap under its lock: refused, nothing booked, preview_changed', async () => {
+    const version = await approvedVersion();
+    createScheduleBooking.mockResolvedValue({ status: 409, json: { error: 'Another visit now overlaps the first visit. Nothing was booked.', code: 'OVERLAP_CHANGED' } });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result).toMatchObject({ code: 'OVERLAP_CHANGED', preview_changed: true, nothing_changed: true });
+    expect(writes).toEqual([]);
+  });
+
+  test('the service address is pinned: a changed address refuses with preview_changed', async () => {
+    const version = await approvedVersion();
+    tables.customer_properties = [{ id: 'prop-1', address_line1: '9 Other Rd', city: 'Venice', state: 'FL', zip: '34285' }];
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.preview_changed).toBe(true);
+    expect(createScheduleBooking).not.toHaveBeenCalled();
+  });
+
+  test('partial receipt: a tier the plan sync already set (manual) is not listed as not done', async () => {
+    const version = await approvedVersion();
+    PlanRateLedger.loadComponents
+      .mockResolvedValueOnce(PEST_LINE)
+      .mockResolvedValueOnce([{ family_key: 'pest_control', monthly_rate: '45.00' }]);
+    createScheduleBooking.mockImplementation(async () => {
+      tables.customers = [memberCustomer({ waveguard_tier: 'Silver', waveguard_tier_source: 'manual' })];
+      return { status: 201, json: { id: 'series-1', recurringCreated: 4, appointments: [] } };
+    });
+    const result = await run({ ...BASE_INPUT, _verified_program_version: version }, { confirmed: true });
+    expect(result.not_done).toEqual(['monthly_bill']);
+    expect(result.warning).toContain('NOT done by this card: the monthly bill $102.66.');
+    expect(result.warning).not.toContain('the tier Silver and');
   });
 
   test('a first-ever recurring customer: the receipt says the welcome is queued', async () => {
