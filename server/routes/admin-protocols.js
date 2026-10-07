@@ -1022,7 +1022,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // The plan's own application-limit decision for a sheet opened from a visit: a capped
     // product gets no amount and its limit message (a block beside the apply-alone ones, not
     // holding the rest of the mix), a warning-level limit a sheet warning.
-    const limitCheck = await v13VisitLimits(db, scheduled, resolvedLines, v13Rows);
+    const limitCheck = await v13VisitLimits(db, scheduled, resolvedLines, v13Rows, nutrientTargets);
     const items = resolvedLines.map((line) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get

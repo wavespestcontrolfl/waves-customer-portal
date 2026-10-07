@@ -219,12 +219,7 @@
       ]
     },
     "W6-dev-09": {
-      "outcome": "fail",
-      "point": "proposal",
-      "code": "card_shown_for_a_send_that_will_be_blocked",
-      "failures": [
-        "proposal:card_shown_for_a_send_that_will_be_blocked"
-      ]
+      "outcome": "pass"
     },
     "W6-dev-10": {
       "outcome": "not_runnable",
@@ -257,22 +252,15 @@
     },
     "W7-dev-05": {
       "outcome": "fail",
-      "point": "receipt",
-      "code": "unknown_outcome_not_recorded",
+      "point": "recovery",
+      "code": "resend_before_reconciliation",
       "failures": [
-        "receipt:unknown_outcome_not_recorded",
-        "receipt:unknown_outcome_retry_allowed",
         "recovery:resend_before_reconciliation",
         "side_effect:guard_send_count_not_declared"
       ]
     },
     "W7-dev-06": {
-      "outcome": "fail",
-      "point": "proposal",
-      "code": "card_shown_for_a_send_that_will_be_blocked",
-      "failures": [
-        "proposal:card_shown_for_a_send_that_will_be_blocked"
-      ]
+      "outcome": "pass"
     },
     "W7-dev-07": {
       "outcome": "pass"
