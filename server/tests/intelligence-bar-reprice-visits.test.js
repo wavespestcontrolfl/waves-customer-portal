@@ -230,6 +230,22 @@ describe('the card', () => {
     expect(tool.input_schema.properties.through_date.format).toBe('date');
   });
 
+  test('a visit with several invoices shows the same one whatever order the rows come back in', async () => {
+    tables.invoices = [
+      { id: 'inv-b', scheduled_service_id: 'v-inv', invoice_number: 'WPC-2099-0002', status: 'sent' },
+      { id: 'inv-c', scheduled_service_id: 'v-inv', invoice_number: 'WPC-2099-0003', status: 'void' },
+      { id: 'inv-a', scheduled_service_id: 'v-inv', invoice_number: 'WPC-2099-0001', status: 'draft' },
+    ];
+    const reason = async () => (await preview()).left_alone.find((v) => v.id === 'v-inv').reason;
+    const first = await reason();
+    tables.invoices.reverse();
+    expect(await reason()).toBe(first);
+    // A live row before a void one, then by invoice id.
+    expect(first).toBe('invoiced (WPC-2099-0001, draft)');
+    tables.invoices = [{ id: 'inv-0', scheduled_service_id: 'v-inv', invoice_number: 'WPC-2099-0000', status: 'void' }, ...tables.invoices];
+    expect(await reason()).toBe('invoiced (WPC-2099-0001, draft)');
+  });
+
   test('more than the cap is refused, never truncated', async () => {
     tables.scheduled_services = Array.from({ length: MAX_VISITS + 1 }, (_, i) => visit(`c-${i}`, `2099-04-${String(i + 1).padStart(2, '0')}`));
     const res = await preview();
@@ -342,6 +358,17 @@ describe('the confirmed run', () => {
     const card = await preview();
     const res = await confirm(ask(), card._version);
     expect(res).toMatchObject({ preview_changed: true, code: 'preview_changed', failed_visit: { id: 'v-1' } });
+  });
+
+  test('an ID-only discount stamp added to a later visit during the earlier saves stops the batch', async () => {
+    const card = await preview();
+    Schedule.updateVisitDetails.mockImplementationOnce(async () => {
+      Object.assign(tables.scheduled_services.find((r) => r.id === 'v-2'), { discount_id: 'disc-late', row_version: 'v-2:v2' });
+      return { status: 200, json: { success: true } };
+    });
+    const res = await confirm(ask(), card._version);
+    expect(res.failed_visit).toMatchObject({ id: 'v-2', code: 'preview_changed' });
+    expect(Schedule.updateVisitDetails).toHaveBeenCalledTimes(1);
   });
 
   test('a later visit invoiced during the earlier saves is not saved', async () => {

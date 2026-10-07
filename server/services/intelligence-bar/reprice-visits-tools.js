@@ -133,6 +133,9 @@ function visitPin(row) {
     prepaid_amount: cents(row.prepaid_amount),
     prepaid_at: iso(row.prepaid_at),
     annual_prepay_term_id: row.annual_prepay_term_id == null ? null : String(row.annual_prepay_term_id),
+    // Every discount field the card's replaced-discount note reads: a stamp
+    // added after the card is drift, never adopted between saves.
+    discount: Object.fromEntries(STORED_DISCOUNT_FIELDS.map((f) => [f, row[f] == null || row[f] === '' ? null : String(row[f])])),
     row_version: row.row_version || null,
   };
 }
@@ -208,9 +211,17 @@ async function loadUpcomingVisits(customerId, today, through) {
   return q;
 }
 
+// The invoice shown for a visit with several: a live row before a void /
+// refunded / cancelled one (those hold no money — findBillingCoveredVisits'
+// NO_MONEY_HELD set), then by invoice id, so the card is the same whatever
+// order the rows come back in.
+const NO_MONEY_HELD = new Set(['void', 'refunded', 'canceled', 'cancelled']);
 async function linkedInvoices(ids) {
   if (!ids.length) return new Map();
-  const rows = await db('invoices').whereIn('scheduled_service_id', ids).select('scheduled_service_id', 'invoice_number', 'status');
+  const rows = await db('invoices').whereIn('scheduled_service_id', ids)
+    .select('id', 'scheduled_service_id', 'invoice_number', 'status').orderBy('id', 'asc');
+  rows.sort((a, b) => (NO_MONEY_HELD.has(String(a.status)) - NO_MONEY_HELD.has(String(b.status)))
+    || String(a.id).localeCompare(String(b.id)));
   const out = new Map();
   for (const r of rows) {
     const key = String(r.scheduled_service_id);
