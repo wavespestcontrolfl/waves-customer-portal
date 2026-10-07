@@ -295,14 +295,24 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     inFlightRef.current.add(action.id);
     setStatus(action.id, "choosing");
     try {
-      const body = await adminFetch("/admin/intelligence-bar/choose-product", {
-        method: "POST",
-        body: JSON.stringify({
-          pending_action_id: action.id,
-          product_id: productId,
-          ...(action.contract_hash ? { contract_hash: action.contract_hash } : {}),
-        }),
-      });
+      // A lost response may follow a choice the server already made: the same
+      // request is replayable and answers with the card that choice made, so a
+      // network failure is retried once.
+      let body;
+      for (let attempt = 0; !body; attempt += 1) {
+        try {
+          body = await adminFetch("/admin/intelligence-bar/choose-product", {
+            method: "POST",
+            body: JSON.stringify({
+              pending_action_id: action.id,
+              product_id: productId,
+              ...(action.contract_hash ? { contract_hash: action.contract_hash } : {}),
+            }),
+          });
+        } catch (err) {
+          if (!(err instanceof TypeError) || attempt > 0) throw err;
+        }
+      }
       setStatus(action.id, "chosen");
       addFollowUp(action, body.pendingAction);
     } catch (err) {

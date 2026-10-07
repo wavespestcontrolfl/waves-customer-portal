@@ -2175,6 +2175,7 @@ async function proposeChosenProduct(req, action, productId) {
     await PendingActions.recordResult(action.id, result);
     return { status: 409, body: result };
   }
+  await attachDerivedCard(action, proposed.clientPayload.id, getAdminActorId(req));
   const name = proposed.modelResult?.product?.name || 'The product';
   await PendingActions.recordResult(action.id, { success: true, state: 'completed', written: false, chosen_product_id: productId,
     next_action_id: proposed.clientPayload.id,
@@ -2184,10 +2185,45 @@ async function proposeChosenProduct(req, action, productId) {
   return { status: 200, body: { success: true, outcome: 'completed', chosen_product_id: productId, pendingAction: proposed.clientPayload } };
 }
 
+// A card made from another card (a product choice, Show again) joins the
+// source card's conversation exchange, so history and recall show the action
+// that actually ran. Best-effort, like the /query path.
+async function attachDerivedCard(source, newId, actor) {
+  const seq = source.thread_turn_seq == null ? null : Number(source.thread_turn_seq);
+  if (!source.thread_id || !Number.isInteger(seq)) return;
+  try {
+    await PendingActions.attachThread([newId], source.thread_id, seq, actor);
+  } catch (err) {
+    logger.warn(`[intelligence-bar:pending] Could not attach ${newId} to its thread (code=${err.code || 'unknown'})`);
+  }
+}
+
+// The card shape the client renders, from a stored pending row.
+function cardPayload(row) {
+  return { id: row.id, tool: row.tool_name, summary: row.summary, params: {},
+    contract: (typeof row.contract === 'string' ? JSON.parse(row.contract) : row.contract) || null, contract_hash: row.contract_hash || null, expiresAt: row.expires_at,
+    expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()) };
+}
+
+// The picker card was already used. When this operator used it for this same
+// product, answer with the card that choice made (from the picker's durable
+// receipt); otherwise it stays a plain "already used" refusal.
+async function replayProductChoice(id, actor, productId) {
+  const row = await PendingActions.getPendingRow(id, actor);
+  const result = typeof row?.result === 'string' ? JSON.parse(row.result) : row?.result;
+  const nextId = result?.chosen_product_id === productId ? result.next_action_id : null;
+  const next = nextId ? await PendingActions.getPendingRow(nextId, actor) : null;
+  if (!next) return { status: 409, body: { error: claimErrorMessage('already_used') } };
+  return { status: 200, body: { success: true, outcome: 'completed', replayed: true, chosen_product_id: productId, pendingAction: cardPayload(next) } };
+}
+
 // Why /show-again refuses before retiring the card, or null.
 async function showAgainRefusal(req, row) {
   if (!row) return { status: 404, body: { error: 'Pending action not found' } };
   if (!UI_GATED_WRITE_TOOL_NAMES.has(row.tool_name)) return { status: 409, body: { error: 'This card cannot be shown again. Ask again instead.' } };
+  // A task owns its cards and its outcome: a standalone copy would run outside
+  // it and leave the task reporting the step as cancelled.
+  if (row.task_id) return { status: 409, body: { error: 'This card belongs to a task — continue it from the task.', code: 'task_owned' } };
   const role = cardRoleRefusal(req, row.tool_name);
   if (role) return { status: role.status, body: { error: role.error } };
   if (row.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
@@ -4481,6 +4517,11 @@ router.post('/choose-product', async (req, res, next) => {
     const refusal = pickerChoiceRefusal(req, await PendingActions.getPendingRow(id, actor), productId);
     if (refusal) return res.status(refusal.status).json(refusal.body);
     const claim = await PendingActions.claimForConfirm(id, actor, { contractHash: req.body.contract_hash ? String(req.body.contract_hash).trim() : null });
+    if (claim.error === 'already_used') {
+      // A retry after a lost response gets the card that choice already made.
+      const replay = await replayProductChoice(id, actor, productId);
+      return res.status(replay.status).json(replay.body);
+    }
     if (claim.error) return res.status(claimErrorStatus(claim.error)).json({ error: claimErrorMessage(claim.error) });
     const chosen = await proposeChosenProduct(req, claim.action, productId);
     return res.status(chosen.status).json(chosen.body);
@@ -4514,6 +4555,7 @@ router.post('/show-again', async (req, res, next) => {
     if (proposed.failed || !proposed.clientPayload) {
       return res.status(409).json({ error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code });
     }
+    await attachDerivedCard(retired, proposed.clientPayload.id, actor);
     logger.info(`[intelligence-bar:pending] Expired action ${id} shown again as ${proposed.clientPayload.id}`);
     return res.json({ success: true, pendingAction: proposed.clientPayload });
   } catch (err) {

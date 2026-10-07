@@ -264,3 +264,17 @@ test('a card that runs out of time while open offers Show again; a refusal stays
   expect(screen.getByRole('button', { name: 'Show again' })).toBeEnabled();
   expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
 });
+
+test('a lost choose response replays the same request and shows the card the server already made', async () => {
+  const fetch = vi.fn().mockRejectedValueOnce(new TypeError('Network lost'))
+    .mockResolvedValueOnce(response({ success: true, replayed: true, pendingAction: NEXT_CARD }));
+  vi.stubGlobal('fetch', fetch);
+  render(<PendingActionsCard actions={[PICKER]} variant="light" />);
+  fireEvent.click(screen.getAllByRole('radio')[1]);
+  fireEvent.click(screen.getByRole('button', { name: 'Use this product' }));
+  expect(await screen.findByText('Product chosen. Confirm the new card below.')).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(fetch.mock.calls[1][0]).toContain('/admin/intelligence-bar/choose-product');
+  expect(fetch.mock.calls[1][1].body).toBe(fetch.mock.calls[0][1].body);
+  expect(screen.getByText(/on hand 0 → 78 fl_oz/)).toBeInTheDocument();
+});

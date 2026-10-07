@@ -54,18 +54,40 @@ beforeEach(() => {
 test('an operator phrase that fits two active products lists both, with on hand before and after; never an inactive one', async () => {
   useCatalog([ZEN_10, ZEN_20, ZEN_OLD, GUARD]);
   const picked = await productChoicesFor({ input: restock(), prompt: 'Add 78 oz of Zentrovex' });
-  expect(picked.phrase).toBe('zentrovex');
+  expect(picked.phrase).toBe('Zentrovex');
   expect(picked.choices.map((c) => c.product_id)).toEqual([ZEN_10.id, ZEN_20.id]);
   expect(picked.choices[0]).toMatchObject({ name: 'Zentrovex 10% SC', container_size: '78 fl oz', unit: 'fl_oz', on_hand: 20, stock_after: 98, selectable: true });
   // An untracked product shows no on-hand number, not a made-up zero.
   expect(picked.choices[1]).toMatchObject({ on_hand: null, stock_after: 78, selectable: true });
 });
 
-test('words of the model phrase the operator never typed are not searched', async () => {
+test('the model phrase may widen the search, but the operator typed product word ranks first', async () => {
   useCatalog([ZEN_10, ZEN_20, GUARD]);
-  expect(await productChoicesFor({ input: restock(), prompt: 'Add a bottle of the Guard' })).toBeNull();
-  const guard = await productChoicesFor({ input: restock({ product_name: 'the Guard' }), prompt: 'Add 32 oz of the Guard' });
-  expect(guard.choices.map((c) => c.product_id)).toEqual([GUARD.id]);
+  const picked = await productChoicesFor({ input: restock(), prompt: 'Add a bottle of the Guard' });
+  expect(picked.choices.map((c) => c.product_id)).toEqual([GUARD.id, ZEN_10.id, ZEN_20.id]);
+});
+
+test('a receipt in the operator words gets a picker: "We got 78 oz of Zentrovex"', async () => {
+  useCatalog([ZEN_10, ZEN_20]);
+  const picked = await productChoicesFor({ input: restock(), prompt: 'We got 78 oz of Zentrovex' });
+  expect(picked.choices.map((c) => c.product_id)).toEqual([ZEN_10.id, ZEN_20.id]);
+});
+
+test('model words never decide whether a picker is offered', async () => {
+  useCatalog([ZEN_10, ZEN_20]);
+  // A hallucinated product phrase that repeats the note words cannot launder them.
+  expect(await productChoicesFor({ input: restock({ product_name: 'notes customer request Zentrovex' }),
+    prompt: 'Add notes for this customer: Request 2 lb of Zentrovex' })).toBeNull();
+});
+
+test.each([
+  ['an order is not a receipt', 'Order 78 oz of Zentrovex', {}],
+  ['buying is not a receipt', 'Please buy 78 oz of Zentrovex', {}],
+  ['a count correction gets no picker', 'Add 78 oz of Zentrovex', { movement_type: 'correction' }],
+  ['a write-off gets no picker', 'Add 78 oz of Zentrovex', { movement_type: 'damaged_lost' }],
+])('%s', async (_label, prompt, extra) => {
+  useCatalog([ZEN_10, ZEN_20]);
+  expect(await productChoicesFor({ input: restock(extra), prompt })).toBeNull();
 });
 
 test.each([

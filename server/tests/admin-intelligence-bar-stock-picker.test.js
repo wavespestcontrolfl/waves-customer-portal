@@ -23,6 +23,7 @@ const mockClaimForConfirm = jest.fn();
 const mockRecordResult = jest.fn(async () => true);
 const mockGetPendingRow = jest.fn();
 const mockRetireExpiredAction = jest.fn();
+const mockAttachThread = jest.fn(async () => 1);
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -84,6 +85,7 @@ jest.mock('../services/intelligence-bar/pending-actions', () => ({
   recordResult: (...args) => mockRecordResult(...args),
   getPendingRow: (...args) => mockGetPendingRow(...args),
   retireExpiredAction: (...args) => mockRetireExpiredAction(...args),
+  attachThread: (...args) => mockAttachThread(...args),
   getActionReceipt: jest.fn(async () => null),
 }));
 jest.mock('../services/inspection-credit', () => ({ projectRedeemableOfferAmount: jest.fn(async () => ({ amount: 0 })) }));
@@ -292,6 +294,37 @@ describe('/choose-product', () => {
   });
 });
 
+describe('/choose-product replay and history', () => {
+  const nextRow = { id: NEW_ID, tool_name: 'adjust_stock', status: 'pending', summary: 'adjust_stock', contract_hash: 'hash-next',
+    contract: { action_label: 'Adjust inventory stock', effects: [] }, expires_at: new Date(Date.now() + 300000).toISOString() };
+
+  test('a retry after a lost response gets the card the same choice already made', async () => {
+    const used = pickerRow({ status: 'confirmed', result: { success: true, chosen_product_id: PRODUCT_B, next_action_id: NEW_ID } });
+    mockGetPendingRow.mockImplementation(async (id) => (id === NEW_ID ? nextRow : used));
+    mockClaimForConfirm.mockResolvedValue({ error: 'already_used' });
+    await withServer(async (baseUrl) => {
+      const replay = await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_B });
+      expect(replay.status).toBe(200);
+      expect(replay.body).toMatchObject({ replayed: true, pendingAction: { id: NEW_ID, contract_hash: 'hash-next' } });
+      const other = await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_A });
+      expect(other.status).toBe(409);
+      expect(other.body.pendingAction).toBeUndefined();
+    });
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
+  });
+
+  test('the card a choice makes joins the picker card thread exchange', async () => {
+    const row = pickerRow({ thread_id: 'thread-1', thread_turn_seq: 4 });
+    mockGetPendingRow.mockResolvedValue(row);
+    mockClaimForConfirm.mockResolvedValue({ action: { ...row, status: 'confirmed' } });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_A })).status).toBe(200);
+    });
+    expect(mockAttachThread).toHaveBeenCalledWith([NEW_ID], 'thread-1', 4, 'admin-1');
+  });
+});
+
 describe('/show-again', () => {
   const expiredStock = () => ({
     id: CHOICE_ID, tool_name: 'adjust_stock', status: 'pending', context: 'procurement',
@@ -353,6 +386,27 @@ describe('/show-again', () => {
     expect(mockProductChoicesFor).toHaveBeenCalledWith(expect.objectContaining({ seedIds: [PRODUCT_A, PRODUCT_B], prompt: null }));
     expect(mockCreatePendingAction.mock.calls[0][0].params._ib_product_choices).toEqual([PRODUCT_A, PRODUCT_B]);
     expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
+  });
+
+  test('a task-owned card is not shown again outside its task', async () => {
+    mockGetPendingRow.mockResolvedValue({ ...expiredStock(), task_id: 'task-1' });
+    await withServer(async (baseUrl) => {
+      const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ code: 'task_owned', error: 'This card belongs to a task — continue it from the task.' });
+    });
+    expect(mockRetireExpiredAction).not.toHaveBeenCalled();
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+  });
+
+  test('a shown-again card joins the expired card thread exchange', async () => {
+    const row = { ...expiredStock(), thread_id: 'thread-2', thread_turn_seq: 7 };
+    mockGetPendingRow.mockResolvedValue(row);
+    mockRetireExpiredAction.mockResolvedValue({ ...row, status: 'cancelled' });
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID })).status).toBe(200);
+    });
+    expect(mockAttachThread).toHaveBeenCalledWith([NEW_ID], 'thread-2', 7, 'admin-1');
   });
 
   test('another operator card is not found', async () => {

@@ -1663,12 +1663,18 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
 // rounds), so this list is only a SHORTLIST. The operator's click is what
 // names the product, and the server accepts only an id it listed here.
 //
-// The shortlist comes from the OPERATOR's words, never from the model alone:
-// only the words of the model's product phrase that the operator actually
-// typed are searched, and the rest of the operator's text must be stock
-// vocabulary (the same closed-vocabulary rule productsNamedIn uses). So
-// "Email this customer: Request 2 lb of Taurus SC" or a note body never
-// produces a stock card, and a question never does either.
+// WHETHER a picker is offered depends only on the OPERATOR's text, never on
+// model-supplied words (Codex #6111 r1; #5941 and #6097 showed that letting
+// model text steer the grounding never converges):
+//   - the text is an instruction, not a question (isNotAnInstruction);
+//   - it asks for a receipt of a restock, the same operationMatches check the
+//     exact-name grounding uses ("Order 78 oz of X" gets no picker);
+//   - once every word that belongs to an ACTIVE catalog product name or alias
+//     is removed, the rest is stock vocabulary (CLOSED_VOCAB). The removed
+//     words come from the server's catalog, not the model, so a note or
+//     message body ("Add notes for this customer: ...") still refuses.
+// The SEARCH may use the model's product_name too: the operator picks from
+// the list and then confirms a second card that names one exact product.
 const PRODUCT_CHOICE_LIMIT = 8;
 
 function adjustmentFields(input) {
@@ -1676,30 +1682,47 @@ function adjustmentFields(input) {
     unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
 }
 
-// The product ids the operator's own words point at, best first: products
-// the text names outright, then active products sharing the most of the
-// model phrase's words that the operator typed. null when the text is not a
-// plain stock instruction about a product phrase (see the note above).
-async function operatorShortlist(prompt, phraseSource) {
+// Active catalog identity words (product names and aliases), normalized.
+async function catalogIdentityWords() {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
+  const aliases = await db('product_aliases as pa').join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true).select('pa.alias_name');
+  const words = new Set([...products.map((p) => p.name), ...aliases.map((a) => a.alias_name)]
+    .flatMap((name) => normalizeForMatch(name).split(' ')).filter(Boolean));
+  return { products, words };
+}
+
+// Spans of the operator's words that are catalog identity words.
+function identitySpans(text, words) {
+  return [...text.matchAll(/[A-Za-z0-9]+/g)].filter((m) => words.has(m[0].toLowerCase()))
+    .map((m) => ({ start: m.index, end: m.index + m[0].length }));
+}
+
+// The product ids to list, best first, or null when the operator's text does
+// not qualify for a picker (see the note above). Products the text names
+// outright come first, then active products ranked by how many distinctive
+// operator-typed catalog words (x2) and model phrase words they share.
+async function operatorShortlist(prompt, input, phraseSource) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
   const text = String(prompt);
   if (!text.trim() || isNotAnInstruction(text)) return null;
-  const words = [...new Set(normalizeForMatch(phraseSource).split(' ').filter(Boolean))];
-  const present = words.filter((word) => findPhraseSpansInRawText(text, [word]).length > 0);
-  const tokens = present.filter(isCandidateToken);
-  if (!tokens.length) return null;
-  if (!isClosedVocabResidual(text, present.flatMap((word) => findPhraseSpansInRawText(text, [word])))) return null;
+  if (!operationMatches('adjust_stock', [text], { movement_type: input.movement_type ?? null })) return null;
+  const { products, words } = await catalogIdentityWords();
+  if (!isClosedVocabResidual(text, identitySpans(text, words))) return null;
+  const operatorTokens = [...new Set(normalizeForMatch(text).split(' '))].filter((w) => words.has(w) && isCandidateToken(w));
+  const modelTokens = [...new Set(normalizeForMatch(phraseSource).split(' '))].filter(isCandidateToken);
   const ids = [...(await productsNamedIn(text)).named].map((id) => String(id).toLowerCase());
-  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
   products
     .map((p) => {
       const nameWords = new Set(normalizeForMatch(p.name).split(' '));
-      return { id: String(p.id).toLowerCase(), name: p.name, hits: tokens.filter((t) => nameWords.has(t)).length };
+      const score = 2 * operatorTokens.filter((t) => nameWords.has(t)).length + modelTokens.filter((t) => nameWords.has(t)).length;
+      return { id: String(p.id).toLowerCase(), name: p.name, score };
     })
-    .filter((p) => p.hits > 0)
-    .sort((a, b) => (b.hits - a.hits) || a.name.localeCompare(b.name))
+    .filter((p) => p.score > 0)
+    .sort((a, b) => (b.score - a.score) || a.name.localeCompare(b.name))
     .forEach((p) => ids.push(p.id));
-  return { phrase: present.join(' '), ids };
+  return { phrase: phraseSource || operatorTokens.join(' '), ids };
 }
 
 // One shortlist row with this amount's fresh before -> after. A product the
@@ -1729,7 +1752,7 @@ async function productChoicesFor({ input = {}, prompt = null, previewProductName
   let phrase = String(input.product_name || previewProductName || '').trim();
   const ids = seedIds.map((id) => String(id).toLowerCase());
   if (prompt != null) {
-    const found = await operatorShortlist(prompt, phrase);
+    const found = await operatorShortlist(prompt, input, phrase);
     if (!found) return null;
     phrase = found.phrase;
     ids.push(...found.ids);
