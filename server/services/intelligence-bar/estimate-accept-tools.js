@@ -37,8 +37,8 @@ const ESTIMATE_ACCEPT_TOOLS = [
   {
     name: 'accept_estimate',
     description: `Mark ONE sent or viewed estimate accepted from the bar — exactly what the estimate page's "Mark accepted" does for a verbal yes. Use it when the operator says a customer accepted a quote ("he accepted", "she said yes to the estimate", "set him up recurring from the estimate"); it is also how a customer's FIRST program starts. Never fake an acceptance with update_customer or create_appointment.
-The first call is a PREVIEW and changes nothing. The confirmation card shows the estimate (customer, tier, totals), each service the plan starts with its visits a year and monthly price, the monthly bill before and after line by line, the billing lane and tier change, which visits it books (Mark accepted books none; visits already booked from the estimate keep their follow-ups), and every message the customer gets. Confirm marks the estimate accepted, locks its price, makes the customer an active customer, starts the plan's billing, marks a linked lead won and may email the customer a "membership started" email. No text and no invoice. It cannot be undone from the bar.
-Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, and every estimate the page itself refuses (it says why). Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only.
+The first call is a PREVIEW and changes nothing. The confirmation card shows the estimate (customer, tier, totals), each service the plan starts with its visits a year and monthly price, the monthly bill before and after line by line, the billing lane and tier change, which visits it books (none — book them on the calendar after), and every message the customer gets. Confirm marks the estimate accepted, locks its price, makes the customer an active customer, starts the plan's billing, marks a linked lead won and may email the customer a "membership started" email. No text and no invoice. It cannot be undone from the bar.
+Refused before any card: an estimate that is already accepted, declined, expired, archived, a draft, or not linked to the named customer, every estimate the page itself refuses (it says why), and three the card cannot show yet: a termite annual plan (annual prepay only), an estimate with visits already booked from it, and a quote that also re-prices the customer's existing services. Commercial proposals are won from the proposal page. Annual prepay is not offered here. Admin only. Relay a refusal as it is.
 Use for: "Pat accepted the lawn quote", "mark her estimate accepted", "he said yes, set him up from the estimate".`,
     input_schema: {
       type: 'object',
@@ -350,8 +350,8 @@ function laneAndTier({ customer, converts, tierAfter, totalAfter, pinnedLegacyRo
   return { laneBefore, laneAfter, tierBefore, tierAfter };
 }
 
-// Visits already booked from this estimate (its booking link): the accept
-// keeps them and seeds their follow-ups. Otherwise Mark accepted books none.
+// Visits already booked from this estimate (its booking link), the rows the
+// converter's reservation path starts from.
 async function bookedFromEstimate(estimateId) {
   const rows = await db('scheduled_services').where({ source_estimate_id: estimateId }).whereNotNull('customer_id')
     .whereNull('reservation_expires_at').whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
@@ -391,7 +391,6 @@ function beforeAfterLine(topic, { before, after }, changedNote) {
 function cardLines(preview) {
   const e = preview.estimate;
   const oneTime = e.one_time_total > 0 ? `, ${money(e.one_time_total)} one-time` : '';
-  const booked = preview.visits.booked_from_estimate;
   return [
     { kind: 'customer', label: `Accepts ${e.label} for ${preview.customer_name || preview.customer_id}: ${money(e.monthly_total)} a month${oneTime}` },
     ...serviceAndBillLines(preview),
@@ -403,12 +402,7 @@ function cardLines(preview) {
       before: preview.property_type.before, after: preview.property_type.after,
     }]),
     { kind: 'billing', label: 'No setup invoice, no charge and no receipt now' },
-    {
-      kind: 'operational',
-      label: booked.length
-        ? `Visits: keeps ${booked.length} visit(s) already booked from this estimate (first ${booked[0].date}) and seeds their follow-ups`
-        : 'Visits: books none — book the first visit on the calendar after',
-    },
+    { kind: 'operational', label: 'Visits: books none — book the first visit on the calendar after' },
     {
       kind: 'operational',
       label: preview.converts
@@ -440,7 +434,13 @@ async function planAccept(input) {
   if (blocked) return blocked;
   const bill = converts ? await billPlan({ estimate, estimateData, customer, monthlyRate }) : null;
   const lt = laneAndTier({ customer, converts, tierAfter: tier, totalAfter: bill?.total_after, pinnedLegacyRodentOnlyPlan });
+  // Visits already booked from this estimate send the converter down its
+  // reservation path, which can add visits for the other services and rewrite
+  // the booked ones — more than this card can show yet.
   const booked = converts ? await bookedFromEstimate(estimate.id) : [];
+  if (booked.length) {
+    return refuse(`${booked.length} visit(s) are already booked from this estimate (first ${booked[0].date}). Accepting it can add and change visits that this card cannot show yet; use Mark accepted on the estimate page.`, 'booked_from_estimate');
+  }
   const { collectTermiteFacts, autosendGateOn } = require('../termite-program-agreement');
   const termiteProgram = { has_program: !!collectTermiteFacts(estimateData)?.hasProgram, autosend: autosendGateOn() };
   const messages = customerMessages({ customer, prefs, converts, commercialOnly, lane: lt.laneAfter, termiteProgram });
@@ -463,7 +463,7 @@ async function planAccept(input) {
       before: customer.property_type || null,
       after: commercialStamp && customer.property_type !== 'commercial' ? 'commercial' : (customer.property_type || null),
     },
-    visits: { booked_from_estimate: booked, books_new: false },
+    visits: { books_new: false },
     customer_messages: messages,
     notifies_customer: messages.some((m) => m.will_send),
     // Approval binds these: any change before Confirm refuses the card.
@@ -504,7 +504,7 @@ function acceptedResult(preview, json) {
     monthly_rate_now: json.conversion?.monthlyRate ?? null,
     tier_now: json.conversion?.tier ?? null,
     warnings: Array.isArray(json.warnings) ? json.warnings : [],
-    message: `${preview.customer_name || 'The customer'}'s ${preview.estimate.label} is accepted.${preview.visits.booked_from_estimate.length ? '' : ' No visits were booked — book the first visit on the calendar.'}`,
+    message: `${preview.customer_name || 'The customer'}'s ${preview.estimate.label} is accepted. No visits were booked — book the first visit on the calendar.`,
   };
 }
 

@@ -184,10 +184,11 @@ describe('the card for a lawn customer saying yes to a pest + mosquito add-on', 
     expect(labels(contract)).toContain('Message: No "membership started" email: this customer turned email messages off');
   });
 
-  test('visits already booked from the estimate are kept and named with their first date', async () => {
+  test('an estimate with visits already booked from it is refused (the reservation path can add and change visits)', async () => {
     seed({ booked: [{ id: 'svc-1', scheduled_date: '2026-10-14', service_type: 'Pest Control' }] });
-    const lines = labels(card(await executeEstimateAcceptTool('accept_estimate', INPUT)));
-    expect(lines).toContain('Visits: keeps 1 visit(s) already booked from this estimate (first 2026-10-14) and seeds their follow-ups');
+    const result = await executeEstimateAcceptTool('accept_estimate', INPUT);
+    expect(result.code).toBe('booked_from_estimate');
+    expect(result.error).toMatch(/1 visit\(s\) are already booked from this estimate \(first 2026-10-14\)/);
   });
 
   test('a termite program estimate says whether the agreement goes to the customer', async () => {
