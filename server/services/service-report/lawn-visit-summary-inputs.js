@@ -18,7 +18,6 @@
 
 const { appliedFromProducts } = require('./lawn-visit-memory');
 const { selectPhotoFindings } = require('./lawn-photo-findings');
-const { keptRunRows } = require('./tip-library');
 const { normalizeFacts } = require('./lawn-visit-summary');
 
 // Florida seasons by visit month.
@@ -92,9 +91,9 @@ async function readKeptFindingsFor(knex, assessmentId) {
   const run = await knex('lawn_assessment_runs')
     .where({ assessment_id: assessmentId, customer_id: assessment.customer_id })
     .first('assessment_id', 'customer_id', 'reviewed_findings', 'added_details', 'reviewed_at');
-  const confidenceOf = new Map();
-  for (const row of keptRunRows(run).reviewed) if (row && !confidenceOf.has(row.label)) confidenceOf.set(row.label, row.confidence);
-  return selectPhotoFindings(run, assessment).map((f) => ({ label: f.label, confidence: confidenceOf.get(f.label), canDetermine: f.canDetermine }));
+  // Confidence and canDetermine ride on EACH selected row, so the composer's dedupe by label
+  // keeps the least-confident evidence.
+  return selectPhotoFindings(run, assessment).map((f) => ({ label: f.label, confidence: f.confidence, canDetermine: f.canDetermine }));
 }
 
 /**
@@ -102,10 +101,11 @@ async function readKeptFindingsFor(knex, assessmentId) {
  * @param {object} args.record       the customer-joined service record (service_date)
  * @param {object} args.data         buildReportV1Data output (reportV2, lawnAssessment)
  * @param {object} [args.instruction] the visit's frozen watering instruction
+ * @param {boolean} [args.programVisit] the report's own resolveProgramVisit answer: a recurring lawn plan visit
  * @param {object} args.knex
  * @returns {Promise<object|null>} normalized facts, or null when the visit cannot support a summary
  */
-async function gatherVisitSummaryFacts({ record, data, instruction = null, knex }) {
+async function gatherVisitSummaryFacts({ record, data, instruction = null, programVisit = false, knex }) {
   const reportV2 = data && data.reportV2;
   const lawnAssessment = data && data.lawnAssessment;
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
@@ -119,6 +119,11 @@ async function gatherVisitSummaryFacts({ record, data, instruction = null, knex 
     areas: areaFacts(reportV2),
     watering: wateringFacts(instruction),
     watchNext: watchTopics(reportV2),
+    // Recurring-plan promises ("each visit adds to the last one", "at the next visit") need a recurring
+    // plan visit; the next-visit line also needs a real booking (the report's own scheduled next visit,
+    // never a cadence estimate).
+    recurring: programVisit === true,
+    nextVisitBooked: !!(reportV2.snapshot && reportV2.snapshot.nextVisit && reportV2.snapshot.nextVisit.source === 'scheduled'),
   });
 }
 

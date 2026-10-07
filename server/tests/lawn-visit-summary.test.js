@@ -111,6 +111,8 @@ const CASES = {
       + 'At the next visit we will look at thin areas.',
   },
 };
+// Every case below is a recurring plan visit with a booked next visit, unless a test says otherwise.
+for (const c of Object.values(CASES)) c.facts = { ...c.facts, recurring: true, nextVisitBooked: true };
 const composeCase = (name) => summary.composeVisitSummary(CASES[name].facts);
 
 const DIGIT_RE = /\d/;
@@ -239,7 +241,7 @@ describe('what the facts can and cannot say', () => {
       knownProductNames: ['Celsius WG'],
     };
     expect(summary.composeVisitSummary(noisy).paragraph).toBe(CASES.stonewallCombinationFall.expected);
-    expect(Object.keys(summary.normalizeFacts(noisy)).sort()).toEqual(['applied', 'areas', 'findings', 'season', 'watchNext', 'watering']);
+    expect(Object.keys(summary.normalizeFacts(noisy)).sort()).toEqual(['applied', 'areas', 'findings', 'nextVisitBooked', 'recurring', 'season', 'watchNext', 'watering']);
   });
 
   test('a product enters the facts as its kind only: no name, active or rate survives', () => {
@@ -441,13 +443,16 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
       areas: [{ key: 'coverage', status: 'watch' }, { key: 'color_vigor', status: 'strong' }],
       watering: { state: 'water_in', inches: 0.5, hours: 24, expiresAt: null },
       watchNext: ['weeds'],
+      recurring: false,
+      nextVisitBooked: false,
     });
     const json = JSON.stringify(facts);
     for (const leak of ['LESCO', 'nitrogen', 'Chinch', 'large patch', 'good shape', '1.2']) expect(json).not.toContain(leak);
   });
 
-  test('the composed paragraph for that visit', async () => {
-    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction, knex: fakeKnex() });
+  test('the composed paragraph for that visit (recurring plan visit, next visit booked)', async () => {
+    const booked = { ...DATA, reportV2: { ...DATA.reportV2, snapshot: { ...DATA.reportV2.snapshot, nextVisit: { label: 'Oct 20', source: 'scheduled' } } } };
+    const facts = await gatherVisitSummaryFacts({ record: RECORD, data: booked, instruction, programVisit: true, knex: fakeKnex() });
     const { paragraph } = summary.composeVisitSummary(facts);
     expect(paragraph).toBe('Today we applied a feeding, which fits the fall season. '
       + 'Our photo read shows good color. '
@@ -490,6 +495,71 @@ describe('gatherVisitSummaryFacts reads the report data the render uses', () => 
     test('the same label twice keeps the more cautious read', () => {
       const f = summary.normalizeFacts({ findings: [{ label: 'thinning turf', confidence: 'high' }, { label: 'thinning turf', confidence: 'low', canDetermine: false }] }).findings;
       expect(f).toEqual([{ label: 'thinning turf', confidence: 'low', canDetermine: false }]);
+    });
+  });
+
+  describe('recurring-plan promises (Codex r4)', () => {
+    const NEXT = { label: 'Oct 20', source: 'scheduled' };
+    const dataWith = (nextVisit) => ({ ...DATA, reportV2: { ...DATA.reportV2, snapshot: { ...DATA.reportV2.snapshot, ...(nextVisit ? { nextVisit } : {}) } } });
+    const paragraphFor = async ({ programVisit, nextVisit }) => {
+      const facts = await gatherVisitSummaryFacts({ record: RECORD, data: dataWith(nextVisit), instruction: null, programVisit, knex: fakeKnex() });
+      return { facts, text: summary.composeVisitSummary(facts).paragraph };
+    };
+    const RESULTS = 'each visit adds to the last one';
+    const NEXT_LINE = 'At the next visit we will look at';
+
+    test('a one-time visit gets neither the results line nor the next-visit line, even with another visit booked', async () => {
+      for (const programVisit of [false, undefined]) {
+        const { facts, text } = await paragraphFor({ programVisit, nextVisit: NEXT });
+        expect(facts).toMatchObject({ recurring: false, nextVisitBooked: true });
+        expect(text).not.toContain(RESULTS);
+        expect(text).not.toContain(NEXT_LINE);
+        expect(text).toContain('Today we applied a feeding');
+      }
+    });
+
+    test('a recurring plan visit with a booked next visit gets both', async () => {
+      const { text } = await paragraphFor({ programVisit: true, nextVisit: NEXT });
+      expect(text).toContain(RESULTS);
+      expect(text).toContain(NEXT_LINE);
+    });
+
+    test('a recurring plan visit with no booking (or only a cadence estimate) gets results but no next-visit line', async () => {
+      for (const nextVisit of [null, { label: 'Nov 3', source: 'estimated', cadenceWeeks: 6 }]) {
+        const { facts, text } = await paragraphFor({ programVisit: true, nextVisit });
+        expect(facts).toMatchObject({ recurring: true, nextVisitBooked: false });
+        expect(text).toContain(RESULTS);
+        expect(text).not.toContain(NEXT_LINE);
+      }
+    });
+
+    test('the decision is frozen in the slots: read-time equality holds, and a flipped flag no longer matches the text', async () => {
+      const { facts } = await paragraphFor({ programVisit: true, nextVisit: NEXT });
+      const { slots, paragraph } = summary.composeVisitSummary(facts);
+      expect(slots).toMatchObject({ recurring: true, nextVisit: true });
+      const one = summary.composeVisitSummary({ ...facts, recurring: false });
+      expect(one.slots).toMatchObject({ recurring: false, nextVisit: false, watch: [] });
+      expect(summary.render({ ...slots, recurring: false })).not.toBe(paragraph);
+    });
+  });
+
+  describe('duplicate findings keep the least-confident evidence (Codex r4)', () => {
+    const knexWith = (reviewed) => (table) => {
+      const q = { where: () => q };
+      q.first = async () => (table === 'lawn_assessments' ? { id: 77, customer_id: 9, confirmed_by_tech: true } : { assessment_id: 77, customer_id: 9, reviewed_at: '2026-10-06T10:00:00Z', reviewed_findings: reviewed, added_details: [] });
+      return q;
+    };
+    const gather = (reviewed) => gatherVisitSummaryFacts({ record: RECORD, data: DATA, instruction: null, knex: knexWith(reviewed) });
+    const row = (confidence) => ({ label: 'thinning turf', confidence, keep: true });
+
+    test('high then low, and low then high, are both hedged', async () => {
+      for (const order of [['high', 'low'], ['low', 'high']]) {
+        const facts = await gather(order.map(row));
+        expect(facts.findings).toEqual([{ label: 'thinning turf', confidence: 'low', canDetermine: true }]);
+        expect(summary.composeVisitSummary({ ...facts, applied: [{ kind: 'fertilizer', name: 'a' }], areas: [{ key: 'coverage', status: 'watch' }] }).paragraph).toContain('what may be some thinning turf');
+      }
+      // Two high-confidence rows stay plain.
+      expect((await gather(['high', 'moderate'].map(row))).findings[0].confidence).toMatch(/high|moderate/);
     });
   });
 

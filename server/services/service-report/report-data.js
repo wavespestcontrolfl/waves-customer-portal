@@ -5563,16 +5563,22 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // nitrogen applied (no line beats a wrong line; codex P1 pre-push).
       let nitrogenApplied = null;
       let programVisit = false;
-      if (typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()) {
+      const expectationsLive = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive();
+      if (expectationsLive) {
         nitrogenApplied = await resolveNitrogenApplied({
           applications,
           productsLoadFailed,
           loadCatalogRows: (ids) => knex('products_catalog').whereIn('id', ids).select('id', 'analysis_n', 'category', 'product_type', 'subcategory'),
         });
-        // Only a recurring lawn plan visit gets the program line: the visit's
-        // catalog service identity must be a recurring lawn plan (never the
-        // WaveGuard tier, which is a bundle discount, not a lawn program).
-        // One-time lawn jobs, callbacks and unresolved identities get null.
+      }
+      // Only a recurring lawn plan visit gets the program line: the visit's
+      // catalog service identity must be a recurring lawn plan (never the
+      // WaveGuard tier, which is a bundle discount, not a lawn program).
+      // One-time lawn jobs, callbacks and unresolved identities get null.
+      // The Visit Summary's write gate (programVisitOut) asks for the same answer
+      // with the program-line gate off, so it never invents its own.
+      const programVisitOut = opts.programVisitOut && typeof opts.programVisitOut === 'object' ? opts.programVisitOut : null;
+      if (expectationsLive || programVisitOut) {
         programVisit = await resolveProgramVisit({
           // Frozen completion identity first (a later repoint of the scheduled
           // row cannot change a permanent report); live resolution only for
@@ -5582,6 +5588,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           isCallback: !!service.is_callback,
           loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),
         });
+        if (programVisitOut) programVisitOut.programVisit = programVisit;
       }
       // GATE_LAWN_V13: the program line's v13 sentences are for a visit whose plan
       // resolved the staged v13 version only. The version the closeout recorded
@@ -5590,7 +5597,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // attributed) passes none and keeps the legacy sentences. An unreadable
       // record means no line.
       let pinnedProtocolVersion = null;
-      if (programVisit && typeof featureGates.lawnV13Live === 'function' && featureGates.lawnV13Live()) {
+      if (expectationsLive && programVisit && typeof featureGates.lawnV13Live === 'function' && featureGates.lawnV13Live()) {
         try {
           pinnedProtocolVersion = await resolveRecordedProtocolVersion(knex, service);
         // read-failure-exempt: only the program line depends on the pin; an unreadable pin drops it (old season note), no treatment-memory input.

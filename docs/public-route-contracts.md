@@ -2716,7 +2716,13 @@ topic shows a concern), the visit's frozen water-in step with its exact inches a
 (hours rounded down from the frozen deadline, up to the watering rule's own 168-hour
 maximum; a hold, or a hold before a water-in,
 sends the reader to the report's own watering note and states no amounts), and the
-topics for the next visit.
+topics for the next visit. The two recurring-plan sentences ("each visit adds to the
+last one" and "At the next visit we will look at ...") print only for a recurring
+lawn plan visit, by the program line's own `resolveProgramVisit` answer (a one-time
+visit gets neither), and the next-visit sentence also needs a real scheduled next
+visit (`snapshot.nextVisit.source` `'scheduled'`, never a cadence estimate); both
+decisions freeze in the slots. When duplicate findings share a label, the
+least-confident read wins.
 The technician note, the program line, the headline and rain are not inputs. It
 freezes first-writer-wins under `structured_notes.lawnVisitSummary[assessmentId]`
 (its own top-level key) as `{ text, slots }`; a render only reads it, from the record

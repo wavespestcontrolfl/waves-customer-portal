@@ -62,7 +62,7 @@ async function freezeTechParagraphFor({ record, data, service, knex }) {
 // It reads the watering instruction the record is FROZEN to (the persisted
 // freeze when there is one), so a replay or a later rule edit changes nothing.
 // A degraded product read writes none (the facts would be partial). Gate off: no read.
-async function freezeVisitSummaryFor({ record, data, instructionOut, wateringFreeze, service, knex }) {
+async function freezeVisitSummaryFor({ record, data, instructionOut, programVisitOut, wateringFreeze, service, knex }) {
   if (!featureGates.lawnVisitSummaryV2Live()) return null;
   try {
     const summary = require('./lawn-visit-summary');
@@ -73,7 +73,7 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, wateringFre
       serviceRecordId: service.id,
       assessmentId,
       getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
-      gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, instruction, knex }),
+      gatherInputs: () => require('./lawn-visit-summary-inputs').gatherVisitSummaryFacts({ record, data, instruction, programVisit: programVisitOut && programVisitOut.programVisit === true, knex }),
       knex,
     });
     if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
@@ -84,6 +84,15 @@ async function freezeVisitSummaryFor({ record, data, instructionOut, wateringFre
     logger.warn(`[lawn-visit-summary] step failed for service_record ${service && service.id}: ${err.message}`);
     return null;
   }
+}
+
+// The report build's options. The recurring-plan answer (the program line's own
+// resolveProgramVisit) is asked for only while the Visit Summary gate is live, so a gate-off
+// build does no extra read.
+function buildOptions(instructionOut, programVisitOut) {
+  return featureGates.lawnVisitSummaryV2Live()
+    ? { wateringInstructionOut: instructionOut, programVisitOut }
+    : { wateringInstructionOut: instructionOut };
 }
 
 // The result with the Visit Summary's freeze added only when one exists.
@@ -118,7 +127,8 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     const record = joined || service;
     const token = await ensureReportToken(service.id, knex);
     const instructionOut = {};
-    const data = await buildReportV1Data(record, token, knex, { wateringInstructionOut: instructionOut }).catch(() => null);
+    const programVisitOut = {};
+    const data = await buildReportV1Data(record, token, knex, buildOptions(instructionOut, programVisitOut)).catch(() => null);
     const reportV2 = data && data.reportV2;
     if (!reportV2) return empty;
 
@@ -217,7 +227,7 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     // completion path queues the report email (whose worker rebuilds the PDF at
     // send time). The report swaps it in for the generic recap; the completion
     // SMS keeps the short customerRecap.
-    const visitSummaryFreeze = await freezeVisitSummaryFor({ record, data, instructionOut, wateringFreeze, service, knex });
+    const visitSummaryFreeze = await freezeVisitSummaryFor({ record, data, instructionOut, programVisitOut, wateringFreeze, service, knex });
 
     return withVisitSummary({
       smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,

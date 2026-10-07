@@ -15,9 +15,10 @@
  *   1. What we did:   "Today we applied {categories}, which fits the {season} season."
  *   2. Photo read:    area reads as closed (area, status) phrases.
  *   3. Findings:      kept photo findings, by their own symptom label, hedged by confidence.
- *   4. Results build: one fixed sentence (no time words).
+ *   4. Results build: one fixed sentence (no time words), recurring lawn plan visits only.
  *   5. Watering:      from the FROZEN watering instruction only.
- *   6. Next visit:    "At the next visit we will look at {topics}."
+ *   6. Next visit:    "At the next visit we will look at {topics}." Only for a recurring plan visit
+ *                     with a real scheduled next visit; a one-time visit promises neither line.
  *
  * Choices (each one pinned by a test):
  *   - The technician's note is NOT an input. Free text is never copied.
@@ -271,6 +272,8 @@ function normalizeFacts(input) {
     areas: cleanAreas(raw.areas),
     watering: cleanWatering(raw.watering),
     watchNext: (Array.isArray(raw.watchNext) ? raw.watchNext : []).filter((t) => Object.prototype.hasOwnProperty.call(TOPIC_PHRASES, t)),
+    recurring: raw.recurring === true,
+    nextVisitBooked: raw.nextVisitBooked === true,
   };
 }
 
@@ -323,7 +326,10 @@ function buildSlots(rawFacts) {
     areas,
     findings,
     watering: facts.watering,
-    watch: topicSlots(facts, findings),
+    // The recurring-plan promises are decided here and frozen, so a read renders the same.
+    recurring: facts.recurring,
+    nextVisit: facts.recurring && facts.nextVisitBooked,
+    watch: facts.recurring && facts.nextVisitBooked ? topicSlots(facts, findings) : [],
   };
 }
 
@@ -375,6 +381,7 @@ function wateringSentence(slots) {
 }
 
 function nextVisitSentence(slots) {
+  if (slots.nextVisit !== true) return null;
   const topics = (Array.isArray(slots.watch) ? slots.watch : []).filter((t) => Object.hasOwn(TOPIC_PHRASES, t)).map((t) => TOPIC_PHRASES[t]);
   return topics.length ? SENTENCE.nextVisit(joinList(topics)) : null;
 }
@@ -387,7 +394,7 @@ function renderSentences(slots) {
     applied,
     photoReadSentence(slots),
     findingsSentence(slots),
-    applied ? SENTENCE.results : null,
+    applied && slots.recurring === true ? SENTENCE.results : null,
     wateringSentence(slots),
     nextVisitSentence(slots),
   ].filter(Boolean);

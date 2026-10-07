@@ -24,6 +24,8 @@ const FACTS = {
   areas: [{ key: 'weed_pressure', status: 'watch' }],
   watering: { state: 'water_in', inches: 0.5, hours: 24 },
   watchNext: [],
+  recurring: true,
+  nextVisitBooked: true,
 };
 const TEXT = 'Today we applied a feeding, which fits the fall season. '
   + 'In the photos we noticed some weed pressure. '
@@ -70,6 +72,12 @@ beforeEach(() => {
 });
 afterAll(() => { delete process.env.GATE_LAWN_VISIT_SUMMARY_V2; });
 
+test('gate off: the report build is not asked for the plan identity (no extra read)', async () => {
+  const { knex } = fakeKnex({});
+  await run(knex);
+  expect(buildReportV1Data.mock.calls[0][3]).toEqual({ wateringInstructionOut: expect.any(Object) });
+});
+
 test('gate off: no read, no model call, no extra key in the result or the record', async () => {
   const { knex, state } = fakeKnex({});
   const result = await run(knex);
@@ -93,6 +101,19 @@ describe('gate on', () => {
     await run(knex);
     expect(gatherVisitSummaryFacts).toHaveBeenCalledTimes(1); // the second run finds the freeze first
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('the report\'s own recurring-plan answer reaches the facts; absent means not recurring', async () => {
+    buildReportV1Data.mockImplementation(async (_record, _token, _knex, opts) => {
+      opts.programVisitOut.programVisit = true;
+      return { lawnAssessment: { assessmentId: 77 }, reportV2: { smsSummary: 'sms', snapshot: {} } };
+    });
+    await run(fakeKnex({}).knex);
+    expect(gatherVisitSummaryFacts.mock.calls[0][0].programVisit).toBe(true);
+    gatherVisitSummaryFacts.mockClear();
+    buildReportV1Data.mockImplementation(async () => ({ lawnAssessment: { assessmentId: 77 }, reportV2: { smsSummary: 'sms', snapshot: {} } }));
+    await run(fakeKnex({}).knex);
+    expect(gatherVisitSummaryFacts.mock.calls[0][0].programVisit).toBe(false);
   });
 
   test('nothing to ground completes with no summary', async () => {
