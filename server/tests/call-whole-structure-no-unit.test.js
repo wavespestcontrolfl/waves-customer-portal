@@ -407,6 +407,24 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, null, 'the slab for the new apartment building')).toBe(false);
   });
 
+  test('the V1 service heard before V2 adoption must agree, and an unclear-service call never counts', () => {
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
+    const interior = { matched_service: 'General Pest Control', requested_service: 'roaches inside' };
+    expect(callIsWholeStructureService({ extracted: slab, preAdoptionExtracted: interior, services: CATALOG })).toBe(false);
+    expect(callIsWholeStructureService({ extracted: slab, preAdoptionExtracted: { ...slab }, services: CATALOG })).toBe(true);
+    const unclear = { triage_flags: ['ambiguous_pest_or_service'], property: { property_type: 'commercial' } };
+    expect(callIsWholeStructureService({ extracted: slab, v2Extraction: unclear, services: CATALOG, unclearServiceAssessment: true })).toBe(false);
+  });
+
+  test('the shadow bridge applies the same rule before filing its reasons', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const bridge = src.indexOf('= deriveCallReviewBridge({');
+    const rule = src.indexOf("needsConfirmation.splice(needsConfirmation.indexOf('missing_unit_number'), 1);", bridge);
+    const filing = src.indexOf('bridgeNeedsConfirmation.push(...needsConfirmation);', bridge);
+    expect(rule).toBeGreaterThan(bridge);
+    expect(filing).toBeGreaterThan(rule);
+  });
+
   test('the card filter drops only missing_unit_number when told the service is whole-structure', () => {
     const ext = { scheduling: { status: 'requested' }, caller: {}, service_request: { service_intent: 'preventative_one_time' } };
     expect(dropUnneededCallCards(['missing_unit_number', 'commercial_requires_quote'], ext, { wholeStructureService: true }).flags)

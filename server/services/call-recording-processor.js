@@ -6937,10 +6937,14 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
 // or apartment, and nothing on the call says condo/apartment. Commercial jobs
 // count — a new-construction slab has no unit. Used only to skip the advisory
 // missing_unit_number card; it never changes an address hold.
-function callIsWholeStructureService({ extracted = {}, v2Extraction = null, transcription = '', services = [] } = {}) {
+function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
+  // Same conservative views as wholeStructureUnitWaiverForCall: a call the
+  // unclear-service rule may book as a Waves Assessment is not whole-structure,
+  // and the V1 service as heard BEFORE V2-primary adoption must agree too.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return false;
   const propertyType = String(v2Extraction?.property?.property_type || '').toLowerCase();
   if (propertyType === 'condo' || propertyType === 'apartment') return false;
-  const views = [extracted];
+  const views = preAdoptionExtracted ? [preAdoptionExtracted, extracted] : [extracted];
   const finalView = v2BookingServiceView(extracted, v2Extraction);
   if (finalView) views.push(finalView);
   return views.every((view) => {
@@ -11576,7 +11580,10 @@ const CallRecordingProcessor = {
           const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, {
             canonicalStreet: extracted?.address_line1,
             wholeStructureService: finalFlags.includes('missing_unit_number')
-              && callIsWholeStructureService({ extracted, v2Extraction, transcription, services: bookableCallServices }),
+              && callIsWholeStructureService({
+                extracted, preAdoptionExtracted, v2Extraction, transcription,
+                services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+              }),
           }).dropped);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
@@ -11989,6 +11996,15 @@ const CallRecordingProcessor = {
           v2Extraction: v2Result?.status === 'valid' ? v2Ext : null,
           addressRecovery,
         });
+        // Shadow posture gets the same whole-structure rule as the enforce
+        // card filter: no "which unit?" card or unit ask on a slab, trench or
+        // WDO job (owner 2026-10-07).
+        if (needsConfirmation.includes('missing_unit_number') && callIsWholeStructureService({
+          extracted, preAdoptionExtracted, v2Extraction: v2Result?.status === 'valid' ? v2Ext : null, transcription,
+          services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
+        })) {
+          needsConfirmation.splice(needsConfirmation.indexOf('missing_unit_number'), 1);
+        }
         // Decoder-only email evidence: when the primary extraction captured
         // NO email (empty email + email_raw) the bridge's email review stays
         // silent, which would drop the decoder's candidates/question on the
