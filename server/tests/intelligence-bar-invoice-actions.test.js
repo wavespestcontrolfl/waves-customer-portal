@@ -213,7 +213,7 @@ describe('send_invoice card', () => {
     expect(p.email).toBe('Email to r***@example.com: the invoice email (template invoice.sent), subject "Invoice WPC-2099-0001 — $129.00", with the invoice PDF and the pay link.');
     const lines = cardLines('send_invoice', p).map((l) => l.text);
     expect(lines).toEqual(expect.arrayContaining(['Amount due: $129.00 (invoice total $129.00)', 'Line: Quarterly Pest Control $99.00', p.text, p.email,
-      'No account credit is applied by this send. If the visit is cancelled before the send runs, the Invoices page send voids the invoice instead of sending it.']));
+      'No account credit is applied by this send. If the visit is cancelled before the send runs, nothing is sent and the invoice is held for review (never voided by the bar).']));
     expect(JSON.stringify(p)).not.toContain('9415550100');
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
   });
@@ -239,7 +239,7 @@ describe('send_invoice card', () => {
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({ error: text });
   });
 
-  test('a linked visit that never ran is refused (the Send handler would void the invoice instead)', async () => {
+  test('a linked visit that never ran is refused with the route text', async () => {
     state.invoices[0] = invoiceRow({ scheduled_service_id: 'svc-1' });
     state.scheduled_services = [{ id: 'svc-1', status: 'cancelled' }];
     await expect(preview('send_invoice', { invoice_id: INV })).resolves.toMatchObject({
@@ -314,6 +314,12 @@ describe('send_invoice commit', () => {
     mutate();
     await expect(run()).resolves.toMatchObject({ preview_changed: true });
     expect(Invoices.sendInvoiceFromBar).not.toHaveBeenCalled();
+  });
+
+  test('a visit cancelled between the check and the send: the handler refuses (held for review), nothing voided or sent', async () => {
+    Invoices.sendInvoiceFromBar.mockResolvedValue({ status: 409, json: { ok: false, code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', error: 'Linked visit is cancelled; delivery not attempted' } });
+    const { run } = await confirmWith('send_invoice', { invoice_id: INV }, '_verified_invoice_send_version');
+    await expect(run()).resolves.toMatchObject({ code: 'INVOICE_VISIT_TERMINAL_UNVOIDED', preview_changed: true, error: 'Nothing was sent: Linked visit is cancelled; delivery not attempted' });
   });
 
   test('without the card pin, or after a throw, it never invites a retry', async () => {

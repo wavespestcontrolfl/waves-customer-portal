@@ -57,8 +57,9 @@ describe('sendInvoiceFromBar', () => {
     expect(barCall[0]).toBe('inv-1');
     // Same call as the page, except the bar never draws credit and never takes the
     // page's operator dispute-hold exemption, and it carries the approved total + recipients.
-    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, expectedRecipients: recipients, skipAccountCreditAutoApply: true, holdExempt: null });
+    expect(barCall[1]).toEqual({ ...pageCall[1], expectedTotal: 129, expectedRecipients: recipients, skipAccountCreditAutoApply: true, holdExempt: null, refuseTerminalVoid: true });
     expect(pageCall[1].holdExempt).toBe('operator');
+    expect(pageCall[1].refuseTerminalVoid).toBeUndefined();
     expect(pageCall[1].expectedTotal).toBeUndefined();
     expect(pageCall[1].skipAccountCreditAutoApply).toBeUndefined();
     expect(pageCall[1]).toMatchObject({ requestReview: false, operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: 'staff-1', firstDeliveryOnly: false, overridesReviewHold: false });
@@ -84,7 +85,19 @@ describe('the approved recipients reach each send leg (source contract)', () => 
     expect(fn).toContain('...(expectedRecipients ? { expectedSmsPhone: expectedRecipients.phone } : {}),');
     expect(fn).toContain('...(expectedRecipients ? { expectedEmail: expectedRecipients.email } : {}),');
     // Both re-entries (the zero-due retry and the renewal gate) keep the pins.
-    expect(fn.slice(0, fn.indexOf('let packetClaim')).match(/^\s+expectedRecipients,$/gm)).toHaveLength(2);
+    expect(fn.slice(0, fn.indexOf('let packetClaim')).match(/^\s+expectedRecipients, refuseTerminalVoid,$/gm)).toHaveLength(2);
+  });
+
+  test('refuseTerminalVoid: a terminal visit at send is held for review, never voided, on both void paths', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/invoice.js'), 'utf8');
+    const fn = src.slice(src.indexOf('  async sendViaSMSAndEmail('));
+    const refuseIdx = fn.indexOf('if (claimed && refuseTerminalVoid) {');
+    const voidIdx = fn.indexOf('voidOpenInvoicesForCancelledService(');
+    expect(refuseIdx).toBeGreaterThan(-1);
+    expect(refuseIdx).toBeLessThan(voidIdx);
+    expect(fn.slice(refuseIdx, voidIdx)).toContain('terminalVisitVoided = false;');
+    expect(fn.match(/zeroDueWrapperOutcomeIfDetected\(invoiceId, err, allowClaimed, _zeroDueRetried \? null : retryOnce, \{ refuseTerminalVoid \}\)/g)).toHaveLength(2);
+    expect(src).toContain('const voided = refuseTerminalVoid ? false : await voidTerminalZeroDueInvoice(invoiceId, outcome.scheduledServiceId);');
   });
 });
 

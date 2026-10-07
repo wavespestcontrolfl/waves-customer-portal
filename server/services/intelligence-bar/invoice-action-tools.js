@@ -167,8 +167,8 @@ async function sendRefusal(invoice, dueCents) {
   // An annual-plan invoice's send re-enters under the renewal gate, which does not
   // carry the bar's approved total or its no-credit rule: it stays on the Invoices page.
   if (invoice.annual_prepay_term_id) return refusal('This is an annual-plan invoice. Send it from the Invoices page.', 'annual_plan_invoice', at);
-  // A linked visit that never ran: the Send handler would void the invoice instead
-  // of sending it, an effect the bar never takes (the route's own refusal text).
+  // A linked visit that never ran: the route's own refusal text. (If it is cancelled
+  // after this check, the send refuses under its claim and never voids for the bar.)
   const visitId = await require('../invoice').linkedScheduledServiceId(invoice, db);
   const visit = visitId ? await db('scheduled_services').where({ id: visitId }).first('status') : null;
   const terminal = neverRanVisitStatus(visit?.status);
@@ -231,7 +231,7 @@ async function buildSendPlan(input, { forSend = false } = {}) {
     send_note: invoice.sent_at ? `Already sent on ${etStamp(invoice.sent_at)}. This sends it again.` : 'Not sent before.',
     review_request: 'No review request is sent.',
     // The Send handler's own effects the card must name (the bar skips the credit step).
-    effects_note: 'No account credit is applied by this send. If the visit is cancelled before the send runs, the Invoices page send voids the invoice instead of sending it.',
+    effects_note: 'No account credit is applied by this send. If the visit is cancelled before the send runs, nothing is sent and the invoice is held for review (never voided by the bar).',
     _version: {
       invoice_id: invoice.id,
       status: invoice.status,
@@ -275,9 +275,6 @@ function sendOutcome(plan, status, json = {}) {
   // Both channels failed (or the route refused before sending).
   if (status !== 200) {
     return { ...base, error: `The invoice was not sent: ${json.error || 'send failed'}`, code: json.code || 'send_failed', failed: true, text, email };
-  }
-  if (json.voided) {
-    return { ...base, partial: true, code: json.code, note: 'The invoice was not sent: its visit is closed, so the Invoices page send voided the invoice instead.' };
   }
   if (NOOP_SEND_KEYS.some((key) => json[key])) {
     const note = json.covered_by_credit ? 'Nothing was sent: account credit now covers this invoice.' : 'Nothing new was sent: the invoice was already delivered or is being delivered.';
