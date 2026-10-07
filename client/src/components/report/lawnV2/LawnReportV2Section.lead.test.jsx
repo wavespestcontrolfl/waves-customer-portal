@@ -331,13 +331,13 @@ describe('LawnReportV2Section lead mode', () => {
 
 describe('program detail (GATE_LAWN_PROGRAM_DETAIL)', () => {
   const PROGRAM = 'In October the program focuses on the fall feeding with iron, plus fall disease prevention where the lawn needs it and a thatch check.';
-  const DETAIL = { whyNow: 'Soil cools and winter weeds start to sprout.', whatYouSee: 'Growth slows as the days get shorter.' };
+  const DETAIL = { whyNow: 'Soil cools and winter weeds start to sprout.' };
 
-  it('renders why now and what you will see under the program line', () => {
+  it('renders why now under the program line', () => {
     render(<LawnReportV2Section data={payload({ snapshot: { ...SNAPSHOT, seasonalNote: PROGRAM, seasonalNoteSource: 'program', seasonalDetail: DETAIL } })} />);
     expect(screen.getByText('Why now')).toBeInTheDocument();
     expect(screen.getByText(DETAIL.whyNow)).toBeInTheDocument();
-    expect(screen.getByText('What you will see')).toBeInTheDocument();
+    expect(screen.queryByText('What you will see')).toBeNull();
     expect(screen.getByText(DETAIL.whyNow).style.fontSize).toBe('16px');
   });
 

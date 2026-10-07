@@ -373,15 +373,22 @@ describe('resolveProgramVisit: only recurring lawn plan visits get the line', ()
 });
 
 describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
+  const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
+
+  test('regional variants stay true: March names no micronutrient step, April feeding is qualified (codex #6091 r6)', () => {
+    expect(PROGRAM_DETAIL_V13[3].whyNow).not.toMatch(/micronutrient/i);
+    expect(PROGRAM_DETAIL_V13[4].whyNow).toMatch(/where local fertilizer rules allow/);
+  });
+
   const { PROGRAM_DETAIL_V13, buildProgramDetail } = require('../services/service-report/lawn-program-line');
   const withBoth = (detail, fn, lead = 'true') => withEnv({ [GATE]: 'true', GATE_LAWN_V13: 'true', GATE_LAWN_REPORT_LEAD: lead === null ? undefined : lead, GATE_LAWN_PROGRAM_DETAIL: detail }, fn);
 
-  test('every month has why-now and what-you-will-see lines, and no watering advice (codex #6091 r5)', () => {
+  test('every month has a why-now line and nothing else: no watering advice, no outcome timing (codex #6091 r5, r6)', () => {
     for (let m = 1; m <= 12; m += 1) {
       const d = PROGRAM_DETAIL_V13[m];
       expect(d.whyNow).toEqual(expect.any(String));
-      expect(d.whatYouSee).toEqual(expect.any(String));
-      expect(d).not.toHaveProperty('watering');
+      expect(Object.keys(d)).toEqual(['whyNow']);
+      expect(lawnResultTimingViolation(d.whyNow)).toBe(false);
     }
   });
 
@@ -393,7 +400,7 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
   test('no detail without a program line; gate is strict and needs the lead layout', () => {
     withBoth('true', () => {
       expect(buildProgramDetail({ month: 10, programLine: null })).toBeUndefined();
-      expect(buildProgramDetail({ month: 10, programLine: 'x' })).toEqual({ whyNow: PROGRAM_DETAIL_V13[10].whyNow, whatYouSee: PROGRAM_DETAIL_V13[10].whatYouSee });
+      expect(buildProgramDetail({ month: 10, programLine: 'x' })).toEqual({ whyNow: PROGRAM_DETAIL_V13[10].whyNow });
     });
     for (const loose of ['1', 'on', 'TRUE']) withBoth(loose, () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined());
     withBoth('true', () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined(), null);
@@ -415,7 +422,7 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
     expect(on.snapshot.seasonalNoteSource).toBe('program');
     const d = on.snapshot.seasonalDetail;
     expect(d.whyNow).toBe(PROGRAM_DETAIL_V13[10].whyNow);
-    expect(d.whatYouSee).toBe(PROGRAM_DETAIL_V13[10].whatYouSee);
+    expect(d).toEqual({ whyNow: PROGRAM_DETAIL_V13[10].whyNow });
   });
 
   test('gate on without the program line (expectations off): no detail', () => {

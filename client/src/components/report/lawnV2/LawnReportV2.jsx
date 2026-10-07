@@ -470,8 +470,8 @@ export function LawnProgramLine({ snapshot = null }) {
   );
 }
 
-// GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06): the month's why-now and what you
-// will see, under the program line. The server
+// GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06): the month's "Why now", under
+// the program line. The server
 // sends snapshot.seasonalDetail only while the gate is live.
 function ProgramDetail({ detail }) {
   const paragraph = (text) => <p style={{ margin: 0, fontSize: 16, color: BODY, lineHeight: 1.55 }}>{text}</p>;
@@ -484,7 +484,6 @@ function ProgramDetail({ detail }) {
   return (
     <>
       {detail.whyNow ? section('Why now', paragraph(detail.whyNow)) : null}
-      {detail.whatYouSee ? section('What you will see', paragraph(detail.whatYouSee)) : null}
     </>
   );
 }
