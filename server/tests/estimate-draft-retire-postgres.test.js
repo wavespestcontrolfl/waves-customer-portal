@@ -261,6 +261,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const draft = await estimate(c, { createdAt: minutesAgo(90) });
     await estimate(c, { status: 'sent', source: 'service_report_cta', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     await estimate(c, { status: 'sent', source: 'plan_restart', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    await estimate(c, { status: 'sent', source: 'quote_wizard', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     const c2 = await customer();
     const draft2 = await estimate(c2, { createdAt: minutesAgo(90), customer_phone: '+12025550199' });
     await estimate(c2, { status: 'declined', createdAt: minutesAgo(20), sentAt: minutesAgo(10), customer_phone: '+12025550199' });

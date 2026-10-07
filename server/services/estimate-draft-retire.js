@@ -100,13 +100,18 @@ function sameProperty(pair) {
   return unit(pair.draft_address) === unit(pair.sent_address);
 }
 
-// A real send. Report click-to-estimate and plan-restart mints stamp sent_at
+// A real send by staff or a verified flow. Website quote rows (quote_wizard)
+// never count: /api/public/quote/calculate is unauthenticated, so a caller
+// who knows a prospect's email and address could otherwise mint a "sent" row
+// that archives that customer's staff drafts (codex security review).
+// Report click-to-estimate and plan-restart mints stamp sent_at
 // at mint time with nothing delivered (publish-without-delivery), so they
 // count only once deliveryState records a delivery — the same witness the
 // unworked-comms watcher uses for these two sources.
 const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND ${alias}.status <> 'draft'
   AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}
+  AND COALESCE(${alias}.source, '') <> 'quote_wizard'
   AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
