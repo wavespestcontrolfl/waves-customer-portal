@@ -724,12 +724,15 @@ function rawLawnBermudaCost(result) {
   return lawn ? lawn.costs.annualBermudaRemoval : undefined;
 }
 
-// The bermuda removal cost the audit adds to a lawn line: stored on the result, on the raw lawn
-// line itself (which carries it from whichever container it came from), or derived from the
-// marker and the lawn area. The WHOLE lookup is gated on GATE_LAWN_BERMUDA_REMOVAL (off = 0 whatever is stored), and an authored proposal, which is the
-// accepted quote, takes none from the retained result.
-function bermudaRemovalCostOf(raw, result, dimensions, proposalAuthoritative) {
+// The bermuda removal cost the audit adds to a lawn line. A line's OWN stored cost always counts.
+// The result-wide sources (the result's lawnMeta cost, a raw lawn line of the result, the cost
+// derived from the marker and the lawn area) speak for THE lawn line only when the audit has exactly
+// one: with several lawn lines a line with no cost of its own is 0, never another line's cost. The
+// WHOLE lookup is gated on GATE_LAWN_BERMUDA_REMOVAL (off = 0 whatever is stored), and an authored
+// proposal, which is the accepted quote, takes none from the retained result.
+function bermudaRemovalCostOf(raw, result, dimensions, { proposalAuthoritative, lawnLineCount }) {
   if (proposalAuthoritative || require('../config/feature-gates').lawnBermudaRemovalLive?.() !== true) return 0;
+  if (lawnLineCount !== 1) return Number(raw.bermudaRemovalStored) || 0;
   return Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
     ?? raw.bermudaRemovalStored ?? rawLawnBermudaCost(result) ?? derivedBermudaCost(result, dimensions.lawnSqFt)) || 0;
 }
@@ -1150,6 +1153,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   const inventory = context.inventory || await loadInventoryCostRows();
   const lines = [];
 
+  const lawnLineCount = rawLines.filter((line) => line.serviceKey === 'lawn_care').length;
   for (const raw of rawLines) {
     const protocol = raw.skipCogs ? null : protocolFor(raw);
     const cogs = raw.skipCogs
@@ -1163,7 +1167,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // Bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL): its two yearly sprays are
     // not in the lawn inventory registry, so the quote's own cost line joins the
     // lawn COGS. Absent (gate off, no add-on) = 0.
-    const bermudaRemovalCost = raw.serviceKey === 'lawn_care' ? bermudaRemovalCostOf(raw, result, dimensions, proposalLines.length > 0) : 0;
+    const bermudaRemovalCost = raw.serviceKey === 'lawn_care' ? bermudaRemovalCostOf(raw, result, dimensions, { proposalAuthoritative: proposalLines.length > 0, lawnLineCount }) : 0;
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);
     const margin = raw.price > 0 ? Math.round((grossProfit / raw.price) * 1000) / 1000 : null;

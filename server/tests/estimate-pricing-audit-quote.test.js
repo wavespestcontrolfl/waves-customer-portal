@@ -285,6 +285,21 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     });
   });
 
+  test('with two lawn lines, a line with no cost of its own never takes another lawn line\'s cost: the total bermuda cost is counted once', async () => {
+    await withRemovalGate('true', async () => {
+      const audit = (lineItems) => buildEstimatePricingAudit({ id: 'est-two-lawns', status: 'sent', source: 'quote_wizard', monthly_total: '110.00', annual_total: '1320.00', onetime_total: null, estimate_data: { engineResult: { lineItems } } });
+      const lawn = (name, extra = {}) => ({ service: 'lawn_care', name, monthly: 55, annual: 660, frequency: 9, ...extra });
+      const built = await audit([lawn('Front lawn', { costs: { annualBermudaRemoval: 71.25 } }), lawn('Back lawn', { monthly: 60, annual: 720 })]);
+      const lawns = built.lines.filter((l) => l.serviceKey === 'lawn_care');
+      expect(lawns).toHaveLength(2);
+      const costs = lawns.map((l) => l.cogs.bermudaRemovalCost || 0).sort((a, b) => a - b);
+      expect(costs).toEqual([0, 71.25]);
+      // One lawn line keeps the result-wide sources: the lone line takes its own cost.
+      const single = await audit([lawn('Lawn', { costs: { annualBermudaRemoval: 71.25 } })]);
+      expect(single.lines.find((l) => l.serviceKey === 'lawn_care').cogs.bermudaRemovalCost).toBe(71.25);
+    });
+  });
+
   test('the current container\'s raw lines make a stale older row of the same service consume-only: one lawn line, at the current price', async () => {
     const audit = (data) => buildEstimatePricingAudit({ id: 'est-stale', status: 'sent', source: 'manual', monthly_total: '60.00', annual_total: '720.00', onetime_total: null, estimate_data: data });
     const lawnLines = async (data) => (await audit(data)).lines.filter((l) => l.serviceKey === 'lawn_care');
