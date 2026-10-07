@@ -2358,3 +2358,21 @@ test('an ideal value grounds only an ideal claim (pre-push audit)', () => {
   expect(screenAskAnswer('The measured mowing height was 4 inches.', { question: 'q', data, facts })).toBe('unstated_number');
   expect(screenAskAnswer('The mower is at 3 inches, and the ideal range is 3.5 to 4 inches.', { question: 'q', data, facts })).toBeNull();
 });
+
+describe('answer screen, Codex round 65', () => {
+  const lawn = lawnData({ reportV2: { aftercare: {}, banner: { mowHold: { line: 'Wait 3 days before mowing so the product can work.' } }, trends: { overall: [{ label: 'Jun', value: 60 }, { label: 'Aug', value: 65 }, { label: 'Oct', value: 80 }] } } });
+  const facts = buildReportAskFacts({ data: lawn });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'q', data: lawn, facts });
+
+  test('a displayed mowing hold is on the sheet, may not be denied, and keeps mowing questions fixed', () => {
+    expect(facts.lawn_report.mowing_hold).toBe('Wait 3 days before mowing so the product can work.');
+    expect(ask('The report does not mention a mowing hold.')).toBe('denies_recorded_term');
+    expect(ruleAnswerReason(lawn, [], 'unrouted', 'What does the mowing banner say?')).toBe('mow_hold');
+  });
+
+  test('every trend reading is on the sheet as a past reading', () => {
+    expect(facts.lawn_report.trends.overall_out_of_100.readings).toEqual([{ month: 'Aug', value: 65 }]);
+    expect(ask('The middle overall reading was 65 out of 100.')).toBeNull();
+    expect(ask('Your overall score is 65 out of 100.')).toBe('unstated_number');
+  });
+});

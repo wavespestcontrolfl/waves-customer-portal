@@ -717,7 +717,11 @@ function trendEnds(series) {
   const points = asArray(series)
     .map((point) => ({ month: cleanText(point?.label), value: inchesOf(point?.value) }))
     .filter((point) => point.value !== null);
-  return points.length >= 2 ? { from: points[0], to: points[points.length - 1] } : null;
+  if (points.length < 2) return null;
+  // Every reading the chart draws (Codex P1 #5964 r65); the middle ones are
+  // past readings, like the first.
+  const readings = points.slice(1, -1);
+  return { from: points[0], to: points[points.length - 1], ...(readings.length ? { readings } : {}) };
 }
 function lawnTrendFacts(trends) {
   return orNull(dropEmpty(Object.fromEntries(LAWN_TRENDS.map(([name, key]) => [name, trendEnds(trends[key])]))));
@@ -741,6 +745,8 @@ function lawnV2Facts(data = {}, keep = () => true) {
     water_this_week: v2.water ? lawnWaterFacts(objectOr(v2.water), text, v2.aftercare) : null,
     rain_by_day_last_7_days: lawnRainFacts(v2),
     mowing: v2.mowing ? lawnMowingFacts(objectOr(v2.mowing), text) : null,
+    // The mowing hold the banner shows, so no answer can deny it (Codex P1 #5964 r65).
+    mowing_hold: text(v2.banner?.mowHold?.line, 240),
     trends: lawnTrendFacts(objectOr(v2.trends)),
   }));
 }
@@ -1255,7 +1261,7 @@ function numberIsKnown(value, after, sentence, known) {
   // "the measured height was 4 inches" may not borrow the ideal maximum
   // (pre-push audit, #5964).
   const idealClaim = IDEAL_CLAIM_RE.test(sentence);
-  known = known.filter((fact) => fitsRow(fact) && (pastClaim || !/\.trends\.[^.]+\.from\./.test(fact.key))
+  known = known.filter((fact) => fitsRow(fact) && (pastClaim || !/\.trends\.[^.]+\.(?:from|readings)\./.test(fact.key))
     && (idealClaim || !/(?:^|\.)(?:ideal_|target_)/.test(fact.key)));
   if (!kind) {
     // A number from report text grounds only a claim about the same thing:
@@ -2083,6 +2089,8 @@ function deniesRecordedTerm(text, { data, facts }) {
     const named = terms.filter((label) => sentenceNames(sentence, label));
     const specific = named.filter((label) => !named.some((other) => other !== label && other.includes(label)));
     if (specific.some((label) => visit.includes(label))) return true;
+    // The banner's mowing hold may not be called missing (Codex P1 #5964 r65).
+    if (facts?.lawn_report?.mowing_hold && /\b(?:mow\w*\s+(?:hold|wait|restriction|pause)|hold\s+on\s+mowing|banner)\b/i.test(sentence)) return true;
     // A recorded measurement may not be called missing either: "does not
     // show weekly rainfall" over a rain figure (Codex P1 #5964 r62).
     return MEASURED_WORDS.some(([wordRe, keyRe]) => wordRe.test(sentence) && keys.some((key) => keyRe.test(key)));
@@ -2429,10 +2437,13 @@ function asksAboutUnrecordedProduct(question, data = {}) {
 // - next_steps: the report's own instructions are the answer, and the model
 //   has no ground for care steps or care permission (Codex P1s #5964 r31, r57).
 const FIXED_TOPICS = new Set(['next_visit', 'reentry', 'watering', 'next_steps']);
-function fixedAnswerTopic(topic, question) {
+function fixedAnswerTopic(topic, question, data = {}) {
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   if (FIXED_TOPICS.has(topic)) return topic;
   if (PHOTO_QUESTION.test(question)) return 'photos';
+  // A displayed mowing hold is a label interval: a mowing question keeps the
+  // fixed answer while one shows (Codex P1 #5964 r65).
+  if (data.reportV2?.banner?.mowHold && /\b(?:mow\w*|cut(?:ting)?\s+(?:the\s+)?(?:grass|lawn)|banner|hold)\b/i.test(question)) return 'mow_hold';
   return CARE_PERMISSION_QUESTION.test(question) ? 'next_steps' : null;
 }
 
@@ -2448,7 +2459,7 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
   if (require('../../../shared/specialty-service-closeouts').specialtyServiceKey({
     serviceKey: data.serviceKey, serviceType: data.serviceType || data.serviceDisplayName,
   })) return 'specialty_service';
-  const fixedTopic = fixedAnswerTopic(topic, String(question || ''));
+  const fixedTopic = fixedAnswerTopic(topic, String(question || ''), data);
   if (fixedTopic) return fixedTopic;
   if (data.typedReport) return 'typed_report';
   if (asArray(data.companionReports).some((companion) => companion && companion.internalOnly !== true)) return 'companion_reports';
