@@ -2090,3 +2090,35 @@ test('the drying guidance exempts only its own clause (pre-push audit)', () => {
   expect(screenAskAnswer('Keep pets off treated areas until dry and water the lawn daily.', { question: 'q', data, facts })).toBe('own_instruction');
   expect(screenAskAnswer('Keep kids and pets off treated areas until dry.', { question: 'q', data, facts })).toBeNull();
 });
+
+describe('answer screen, Codex round 57', () => {
+  test('a multiword credential is masked whole', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'The gate opens with BLUE MOON and ants by the pool' } });
+    expect(facts.customer_concern).toBe('The gate opens with [redacted] and ants by the pool');
+  });
+
+  test('the water gap improves toward zero', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, trends: { waterGap: [{ label: 'Aug', value: 1 }, { label: 'Oct', value: 0.2 }] } } });
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer('The water gap got worse.', { question: 'q', data, facts })).toBe('trend_claim');
+    expect(screenAskAnswer('The water gap improved.', { question: 'q', data, facts })).toBeNull();
+  });
+
+  test.each(['Was Roundup the product?', 'Did you put Roundup down?'])('a product identity question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(pestData({ applications: [{ product: { name: 'Alpine WSG' } }] }), [], 'unrouted', question)).toBe('unrecorded_product');
+  });
+
+  test('serviced areas ground coverage answers', () => {
+    const data = pestData({ applications: [], areasServiced: ['Garage', 'Exterior perimeter'] });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Did you do the garage?', data, facts });
+    expect(facts.areas_serviced).toEqual(['Garage', 'Exterior perimeter']);
+    expect(ask('The garage was not serviced.')).toBe('unrecorded_work');
+    expect(ask('We did not inspect the garage.')).toBe('unrecorded_work');
+    expect(ask('We inspected the garage.')).toBeNull();
+  });
+
+  test.each(['Can I mow now?', 'Is it necessary to fertilize?'])('a care-permission question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', question)).toBe('next_steps');
+  });
+});

@@ -383,7 +383,7 @@ const CHAIN_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|
 // #5964 r55).
 // A word credential after an opening phrase: "the side gate opens with
 // SUNSET" (Codex P2 #5964 r56).
-const ACCESS_PHRASE = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\b[^.?!]{0,20}?\b(?:opens?|unlocks?|opened|unlocked)\s+(?:with|using|by)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+)/gi;
+const ACCESS_PHRASE = /\b((?:gate|door|lock|keypad|key\s*pad|garage|entry|lockbox|lock\s*box|box)\b[^.?!]{0,20}?\b(?:opens?|unlocks?|opened|unlocked)\s+(?:with|using|by)\s+(?:the\s+)?(?:code\s+|word\s+|password\s+|passcode\s+)?)(?!\[)([a-z0-9#*-]+(?:\s+(?!(?:and|then|but|so|or|if|when|after|before|please|thanks?)\b)[a-z0-9#*-]+){0,3})/gi;
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
@@ -756,6 +756,8 @@ function buildReportAskFacts({
     report_sections: sections,
     visit_summary: sections.length || !keep(summary) ? null : summary,
     findings,
+    // The serviced-area labels the report shows (Codex P1 #5964 r57).
+    areas_serviced: asArray(data.areasServiced).map((area) => cleanText(typeof area === 'string' ? area : area?.label)).filter(Boolean).slice(0, 12),
     lawn_assessment: lawnAssessmentFacts(data, keep),
     tree_shrub_report: treeShrubFacts(data, keep),
     lawn_report: lawnV2Facts(data, keep),
@@ -1674,12 +1676,14 @@ function namesWrongGrass(text, facts) {
 // Work the visit did besides applying: inspecting, sealing, removing. A
 // past-tense claim needs the report to name that work (Codex P1 #5964 r42).
 const WORK_CLAIMS = [
+  ['service', /\bservic(?:ed|ing)\b/],
   ['inspect', /\b(?:inspect(?:ed|ing)?|check(?:ed)?|look(?:ed)?\s+(?:at|in|under|over|around|for)|examin\w*|survey\w*|went\s+(?:through|over|into))\b/],
   ['seal', /\b(?:seal(?:ed|ing)?|caulk\w*|plugg?(?:ed|ing)|patch(?:ed|ing)|block(?:ed|ing)\s+(?:off|up)|exclu\w*|screen(?:ed|ing))\b/],
   ['remov', /\b(?:remov\w*|took\s+(?:out|away|down)|knock(?:ed)?\s+down|clear(?:ed)?\s+(?:out|away)|clean(?:ed)?\s+(?:out|up)|vacuum\w*|haul\w*)\b/],
   ['repair', /\b(?:repair\w*|fix(?:ed)?|replac\w*|install\w*|set\s+(?:up\s+)?traps?|trapp?(?:ed|ing)|cut\s+back|trimm?(?:ed|ing)|prun(?:ed|ing))\b/],
 ];
 const WORK_FACT_WORDS = {
+  service: /\bservic(?:ed|ing)\b/,
   inspect: /inspect|check|look|exam|survey/, seal: /seal|caulk|plug|patch|exclu|screen|block/,
   remov: /remov|took|knock|clear|clean|vacuum|haul/, repair: /repair|fix|replac|install|trap|cut back|trim|prun/,
 };
@@ -1687,13 +1691,18 @@ const WORK_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathrooms?|b
 const WORK_ACTOR = /\b(?:we|i|our|tech\w*|technician|crew|team|[A-Z][a-z]+)\b|\b(?:was|were|has\s+been|have\s+been|got)\s+\w+ed\b|^\s*(?:yes|yep|correct)\b/;
 function claimsUnrecordedWork(text, facts) {
   const sheet = JSON.stringify([facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.products, facts?.areas_serviced]).toLowerCase();
+  const areas = asArray(facts?.areas_serviced).join(' ').toLowerCase();
   return clausesOf(text).some((clause) => {
     const lower = clause.toLowerCase();
     if (/\b(?:will|would|can|could|should|may|might|next\s+visit|if)\b/.test(lower)) return false;
     // The place or thing worked on must be on the sheet too: an ant trail on
     // the lanai grounds no attic inspection (Codex P1 #5964 r43).
     const places = (lower.match(WORK_PLACE_RE) || []).map((place) => place.replace(/\s+/g, ' '));
-    const recorded = (kind) => WORK_FACT_WORDS[kind].test(sheet) && places.every((place) => sheet.includes(place.replace(/e?s$/, '')));
+    // A serviced area on the report counts as inspected and serviced there
+    // (Codex P1 #5964 r57).
+    const inAreas = places.length > 0 && places.every((place) => areas.includes(place.replace(/e?s$/, '')));
+    const recorded = (kind) => ((kind === 'inspect' || kind === 'service') && inAreas)
+      || (WORK_FACT_WORDS[kind].test(sheet) && places.every((place) => sheet.includes(place.replace(/e?s$/, ''))));
     // A denial of recorded work fails: "We did not inspect the attic" when the
     // report says we did (Codex P1 #5964 r47).
     if (NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause)) return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && recorded(kind));
@@ -1729,7 +1738,7 @@ function deniesRecordedApplication(text, facts) {
 // to 80" on an 80 -> 50 trend fails (Codex P1 #5964 r46).
 const TREND_UP = /\b(?:improv\w*|increas\w*|ros(?:e|en)|rising|climb\w*|grew|grow(?:ing|n|s)?|went\s+up|gone\s+up|up\b|higher|better|gain\w*)\b/i;
 const TREND_DOWN = /\b(?:declin\w*|decreas\w*|dropp?\w*|fell|fall(?:en|ing|s)?|went\s+down|gone\s+down|down\b|lower|worse|slipp?\w*|los[st]\w*)\b/i;
-const TREND_KEYS = [[/\bfoliage\b/i, 'foliage_out_of_100'], [/\b(?:water\s+stress|drought)\b/i, 'water_stress_out_of_100'], [/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_cleanliness_out_of_100']];
+const TREND_KEYS = [[/\bwater\s+(?:gap|balance)\b/i, 'water_gap_inches'], [/\bfoliage\b/i, 'foliage_out_of_100'], [/\b(?:water\s+stress|drought)\b/i, 'water_stress_out_of_100'], [/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_cleanliness_out_of_100']];
 // The trend a clause speaks about: a named series, else the overall one.
 function trendEndsFor(clause, trends) {
   const key = (TREND_KEYS.find(([re]) => re.test(clause)) || [])[1]
@@ -1737,7 +1746,9 @@ function trendEndsFor(clause, trends) {
   const trend = key && trends[key];
   const from = Number(trend?.from?.value);
   const to = Number(trend?.to?.value);
-  return Number.isFinite(from) && Number.isFinite(to) ? { from, to } : null;
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  // The water gap improves toward zero, from either side (Codex P1 #5964 r57).
+  return key === 'water_gap_inches' ? { from: -Math.abs(from), to: -Math.abs(to), gap: true } : { from, to };
 }
 function contradictsTrend(text, facts) {
   // Tree & Shrub trends too (Codex P1 #5964 r51).
@@ -1749,7 +1760,7 @@ function contradictsTrend(text, facts) {
     if (!ends) return false;
     const { from, to } = ends;
     // Endpoints in the wrong order: "from 50 to 80" on 80 -> 50.
-    const span = /\bfrom\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b[^.?!]*?\bto\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b/i.exec(clause);
+    const span = ends.gap ? null : /\bfrom\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b[^.?!]*?\bto\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b/i.exec(clause);
     if (span && Number(span[1]) === to && Number(span[2]) === from && from !== to) return true;
     const up = TREND_UP.test(clause);
     if (up === TREND_DOWN.test(clause)) return false;
@@ -2181,6 +2192,9 @@ function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(text) || BOOKING_QUESTION.test(text);
 }
 
+// "Can I mow now?", "Is it necessary to fertilize?": a care decision the
+// model has no ground for keeps the fixed answer (Codex P1 #5964 r57).
+const CARE_PERMISSION_QUESTION = /\b(?:can|could|may|should|shall)\s+(?:i|we|you)\b[^?.!]{0,30}\b(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|overseed|aerat\w*|trim|prune|cut|weed|rake|sod|dethatch|edge|plant)\w*|\b(?:is\s+it|it['’]s)\s+(?:ok|okay|safe|fine|necessary|needed|time|alright|a\s+good\s+idea|too\s+(?:early|soon|late))\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|overseed|aerat\w*|trim|prune|cut|weed|rake|sod|dethatch|edge|plant)|\b(?:do|should)\s+(?:i|we)\s+(?:need|have)\s+to\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|aerat\w*|trim|prune|cut|weed|rake)|\bwhen\s+(?:can|should|do)\s+(?:i|we)\s+(?:\w+\s+)?(?:mow|water|irrigat\w*|fertiliz\w*|spray|seed|aerat\w*|trim|prune|cut|weed|rake)/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
 // The reason a question keeps the fixed-rule answer with no model call, or
@@ -2196,8 +2210,13 @@ const GENERIC_PRODUCT_WORDS = new Set(('it this that anything something any some
 // Alpine-only report still names an unrecorded one (Codex P1 #5964 r19).
 // "Was Roundup applied?", "Did you have roundup sprayed?" (Codex P1 #5964 r23).
 const PASSIVE_PRODUCT_QUESTION_RE = /\b(?:was|were|is|are|has|have|had)\s+(?:any\s+|some\s+|the\s+|both\s+)?([A-Za-z][\w-]*(?:\s+(?:and\s+|or\s+)?[A-Za-z][\w-]*){0,4}?)\s+(?:\w+\s+)?(?:applied|used|sprayed|put\s+down|spread|placed)\b/i;
+// "Was Roundup the product?", "Did you put Roundup down?" (Codex P1 #5964 r57).
+const IDENTITY_PRODUCT_QUESTION_RE = /\b(?:[Ww]as|[Ii]s|[Ww]ere|[Aa]re)\s+([A-Z][\w-]*(?:\s+[A-Z0-9][\w-]*)*)\s+(?:the|what|one\s+of\s+the)\s+(?:\w+\s+)?(?:product|treatment|chemical|pesticide|insecticide|herbicide|fertilizer|bait)s?\b|\b(?:[Pp]ut|[Ll]ay|[Ll]aid|[Ss]pread|[Tt]hrow|[Tt]hrew)\s+(?:some\s+|the\s+|any\s+)?([A-Z][\w-]*(?:\s+[A-Z0-9][\w-]*)*)\s+(?:down|out|on)\b/g;
 function asksAboutUnrecordedProduct(question, data = {}) {
   const text = String(question || '');
+  const identityNames = [...text.matchAll(IDENTITY_PRODUCT_QUESTION_RE)].map((m) => m[1] || m[2])
+    .filter((name) => !GENERIC_PRODUCT_WORDS.has(name.split(/\s+/)[0].toLowerCase()));
+  if (identityNames.some((name) => !productsNamedIn(name, asArray(data.applications).map(productFacts).filter(Boolean)).length)) return true;
   // Every passive mention and every product it lists ("Were Alpine WSG and
   // Roundup applied?") (Codex P1 #5964 r31).
   const recordedProducts = asArray(data.applications).map(productFacts).filter(Boolean);
@@ -2235,7 +2254,7 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   // "What should I do?": the report's own instructions are the answer, and
   // the model has no grounding to add care steps (Codex P1 #5964 r31).
-  if (topic === 'next_steps') return 'next_steps';
+  if (topic === 'next_steps' || CARE_PERMISSION_QUESTION.test(String(question || ''))) return 'next_steps';
   if (data.typedReport) return 'typed_report';
   if (asArray(data.companionReports).some((companion) => companion && companion.internalOnly !== true)) return 'companion_reports';
   if (asArray(requiredLines).some((line) => line?.source !== 'system')) return 'technician_line';
