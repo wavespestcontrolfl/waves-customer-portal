@@ -3414,6 +3414,16 @@ const gates = {
   // time. Kill switch: unset — chips show the model's numbers.
   bestTimesRoadTimes: gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES'),
 
+  // Booking rain rank (owner 2026-10-06): the New Appointment best-times rows
+  // rank by rain fit before drive. Outdoor bookings (pest, lawn, T&S,
+  // mosquito, termite treatment) sort hours with a 60%+ NWS chance in the
+  // visit or the 2 hours after it below dry hours; rain-OK bookings
+  // (assessments, estimates, WDO/termite inspections, rodent/trapping,
+  // interior-only) sort them first. Next 3 days only. OFF in every
+  // environment; scheduling/find-time-hints.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset — drive-only order.
+  bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
