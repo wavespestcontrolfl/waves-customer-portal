@@ -152,13 +152,14 @@ test('citations on table, expanded and nested component elements count', async (
   dataforseo.request.mockResolvedValue(serp([{ type: 'ai_overview', markdown: 'x', references: [], items: [
     { type: 'ai_overview_table_element', references: [{ url: 'https://rival0.example/t' }] },
     { type: 'ai_overview_video_element', url: 'https://video.example/v' },
+    { type: 'ai_overview_element', text: 'Pic', images: [{ url: 'https://img.example/i' }] },
     { type: 'ai_overview_expanded_element', components: [
       { type: 'ai_overview_expanded_component', text: 'Nested', references: [{ url: 'https://www.wavespestcontrol.com/lawn-care/' }] },
     ] },
   ] }]));
   await runPinnedCaptures({ pass: 'am' });
   const row = mockInserts[0];
-  expect(JSON.parse(row.elements).flatMap((e) => e.urls)).toEqual(['https://rival0.example/t', 'https://video.example/v', 'https://www.wavespestcontrol.com/lawn-care/']);
+  expect(JSON.parse(row.elements).flatMap((e) => e.urls)).toEqual(['https://rival0.example/t', 'https://video.example/v', 'https://img.example/i', 'https://www.wavespestcontrol.com/lawn-care/']);
   expect(row.waves_cited).toBe(true);
 });
 

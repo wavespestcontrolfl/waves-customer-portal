@@ -481,7 +481,9 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
   const remaining = await db('seo_aio_sweep_results').where({ run_id: run.id }).whereIn('status', ['pending', 'running']).count({ n: '*' }).first();
   if (!Number(remaining?.n)) {
     if (await finishRun(run.id, 'done')) summary.status = 'done';
-  } else if (runCost + EST_CALL_COST_USD > maxCost) {
+  } else if (!aborted && runCost + EST_CALL_COST_USD > maxCost) {
+    // An aborted chunk keeps the run open, so recoverInterrupted can settle its
+    // unbooked 'running' row on a later tick.
     if (await finishRun(run.id, 'stopped_budget')) {
       logger.warn(`[aio-sweep] run ${run.id} stopped: $${runCost.toFixed(4)} leaves no room under the $${maxCost} cap; ${remaining.n} rows pending`);
       summary.status = 'stopped_budget';

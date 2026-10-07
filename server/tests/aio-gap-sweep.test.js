@@ -500,6 +500,15 @@ describe('processSweepChunk', () => {
     expect(mockState.runs[0].status).toBe('open');
   });
 
+  test('an aborted chunk near the cap leaves the run open for recovery', async () => {
+    openRun({ max_cost_usd: 1.01 });
+    for (let i = 0; i < 3; i += 1) pendingRow(`q${i}`, { impressions_90d: 100 - i });
+    mockState.failResultUpdates = 1000;
+    dataforseo.request.mockResolvedValue(serp([], { cost: 1 }));
+    await sweep.processSweepChunk({ chunkSize: 3 });
+    expect(mockState.runs[0].status).toBe('open');
+  });
+
   test('a failure log names the row id, never the search text', async () => {
     const logger = require('../services/logger');
     openRun();
