@@ -8431,7 +8431,7 @@ export function ProtocolPanel({ service, onClose }) {
                             {" "}
                             <div
                               style={{
-                                fontSize: 11,
+                                fontSize: 14,
                                 fontWeight: 500,
                                 color: D.muted,
                                 textTransform: "uppercase",
@@ -8445,7 +8445,7 @@ export function ProtocolPanel({ service, onClose }) {
                               <div
                                 key={`${step.step}-${step.productId}`}
                                 style={{
-                                  fontSize: 11,
+                                  fontSize: 14,
                                   color: D.text,
                                   marginBottom: 3,
                                 }}
@@ -20680,12 +20680,12 @@ export function CompletionPanel({
                           ))}
                     </select>
                     {bermudaConditionLines.map((line) => (
-                      <div key={line} style={{ fontFamily: font, fontSize: 12, color: M.ink3, marginTop: 6 }}>
+                      <div key={line} style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
                         {line}
                       </div>
                     ))}
                     {protocolActionWarningLines.map((line) => (
-                      <div key={line} role="note" style={{ fontFamily: font, fontSize: 12, color: M.ink3, marginTop: 6 }}>
+                      <div key={line} role="note" style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginTop: 6 }}>
                         {line}
                       </div>
                     ))}
@@ -23209,10 +23209,10 @@ export function CompletionPanel({
                         ))}
                   </select>
                   {bermudaConditionLines.map((line) => (
-                    <div key={line} style={{ fontSize: 11, color: D.muted }}>{line}</div>
+                    <div key={line} style={{ fontSize: 14, color: D.muted }}>{line}</div>
                   ))}
                   {protocolActionWarningLines.map((line) => (
-                    <div key={line} role="note" style={{ fontSize: 11, color: D.muted }}>{line}</div>
+                    <div key={line} role="note" style={{ fontSize: 14, color: D.muted }}>{line}</div>
                   ))}
                   {selectedProtocolActionCount > 0 && (
                     <div style={{ fontSize: 11, color: D.muted }}>
