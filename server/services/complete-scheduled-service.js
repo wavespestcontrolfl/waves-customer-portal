@@ -9087,6 +9087,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // txn nor poison later statements in it. The service itself no-ops for
     // customers with no zone rows and no incoming shapes, so prod reports
     // stay on the schematic defaults until a map is actually marked.
+    // The lawn coverage verdict (GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES) is frozen
+    // later from the zone rows; a failed sync must not let it freeze stale or
+    // partial rows (codex #6089), so the outcome rides to the write gate.
+    let zoneSyncOk = true;
     try {
       const zoneSync = await PropertyZones.upsertZonesForCompletion(db, {
         customerId: svc.customer_id,
@@ -9098,6 +9102,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         logger.info('[completion] property zones synced', { serviceId: svc.id, ...zoneSync });
       }
     } catch (zoneErr) {
+      zoneSyncOk = false;
       logger.warn(`[completion] property-zone sync failed (non-blocking): ${zoneErr.message}`);
     }
 
@@ -13555,7 +13560,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
       try {
         const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
-        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
+        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db, zoneSyncOk });
         // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
         // fold the frozen synthesis back in so the later sending/sent writes (which
         // spread recordStructuredNotes) don't clobber it.

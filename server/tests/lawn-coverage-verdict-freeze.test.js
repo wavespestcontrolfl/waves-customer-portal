@@ -92,6 +92,15 @@ describe('freeze at completion (write gate)', () => {
     expect(state.notes).not.toHaveProperty('lawnCoverageVerdict');
   });
 
+  test('a failed completion zone sync freezes nothing (codex #6089)', async () => {
+    process.env[KEY] = 'true';
+    buildWith({ readOk: true, defaultsOnly: true });
+    const { knex, state } = fakeKnex({});
+    const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
+    await finalizeLawnReportSynthesis({ service: { id: 'svc-1', service_line: 'lawn', structured_notes: '{}' }, knex, zoneSyncOk: false });
+    expect(state.notes).not.toHaveProperty('lawnCoverageVerdict');
+  });
+
   test('gate off: no verdict statement is issued', async () => {
     buildWith({ readOk: true, defaultsOnly: true });
     const { knex, state } = fakeKnex({});
