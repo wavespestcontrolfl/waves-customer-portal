@@ -149,6 +149,32 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
+// Unlink, never re-point: the sent estimate may already belong to another
+// lead (by FK or by its estimate_data mirror), and staff can link it. Then
+// replay the send for the now-unlinked lead the way the send backfill does
+// (scripts/backfill-estimate-sent-lead-status.js): the canonical resolver
+// links and advances it only when it is the sent estimate's single
+// unambiguous open lead, as of the send time. Lead state only; it sends
+// nothing. Replayed only for a live courtship (the backfill's own rule:
+// unarchived sent/viewed rows) that no lead owns yet: an owned send is
+// accounted for, and a replay would only re-record it there. A viewed
+// replacement then replays the view.
+async function detachLeads(trx, { pair, draftId, leads, sentRow }) {
+  await trx('leads').whereIn('id', leads.map((l) => l.id)).where({ estimate_id: draftId })
+    .update({ estimate_id: null, updated_at: trx.fn.now() });
+  if (sentRow.archived_at || !['sent', 'viewed'].includes(sentRow.status)) return;
+  if (await trx('leads').where({ estimate_id: pair.sent_id }).first('id')) return;
+  const link = require('./lead-estimate-link');
+  const replay = { estimateId: pair.sent_id, performedBy: RETIRE_CLOSER, database: trx, originatingNotAfter: pair.sent_at };
+  // Only the channels the delivery record proves count for the contact-wide
+  // answered stamp; with no record, none (an empty list stamps nothing)
+  // rather than assuming both.
+  const recorded = sentRow.sent_channels;
+  const sentChannels = Array.isArray(recorded) ? recorded.filter((ch) => ch === 'sms' || ch === 'email') : [];
+  await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at, sentChannels });
+  if (sentRow.status === 'viewed') await link.markLinkedLeadEstimateViewed(replay);
+}
+
 // Archive one draft, clear a lead link to it, and mark its open "draft
 // ready" bells done, in one transaction. The sent estimate is locked FOR
 // UPDATE NOWAIT first: a revise (address move), a linkage invalidation or a
@@ -165,7 +191,16 @@ async function retireOneDraft(trx, pair) {
   // a wait here could deadlock a customer's request. A busy row means "not
   // this tick" (lock_not_available is skipped by the caller).
   await trx.raw("SET LOCAL lock_timeout = '1500ms'");
-  const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().select('id');
+  // Draft, then its leads, then the sent estimate — every lock NOWAIT, so
+  // the sweep never waits on one row while holding another, whatever order
+  // another writer uses (call-linkage reconciliation: draft then lead; an
+  // estimate save: lead then draft; acceptance: estimate then lead).
+  const held = await trx.raw('SELECT id FROM estimates WHERE id = ? FOR UPDATE NOWAIT', [pair.draft_id]);
+  if (!held?.rows?.length) return null;
+  const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().noWait().select('id', 'deleted_at');
+  // A soft-deleted lead keeps its estimate_id; it is unlinked like the rest
+  // but is not a live opportunity for the accepted-estimate hold.
+  const hasLiveLead = () => leads.some((l) => !l.deleted_at);
   const sent = await trx.raw(`
     SELECT id, status, archived_at, estimate_data #> '{deliveryState,sentChannels}' AS sent_channels FROM estimates s
      WHERE s.id = ?
@@ -179,11 +214,7 @@ async function retireOneDraft(trx, pair) {
   // An ACCEPTED replacement would need the lead converted; that is the
   // acceptance flow's decision, not this sweep's. Keep a lead-linked draft.
   const sentStatus = sent.rows[0].status;
-  // Only a live courtship is replayed for the lead (the backfill's own rule:
-  // unarchived sent/viewed rows); a declined, expired or archived replacement
-  // still retires the draft, and the lead is only unlinked.
-  const replaySend = !sent.rows[0].archived_at && ['sent', 'viewed'].includes(sentStatus);
-  if (leads.length && sentStatus === 'accepted') return null;
+  if (hasLiveLead() && sentStatus === 'accepted') return null;
   // Every draft predicate re-checked on the row itself: a draft edited,
   // sent, claimed or newly linked since the read is left alone.
   const result = await trx.raw(`
@@ -208,12 +239,12 @@ async function retireOneDraft(trx, pair) {
   // A lead linked between the first lock (which locks nothing when no lead
   // points here yet) and the archive is picked up now, under the draft's row
   // lock. For an accepted replacement the whole retirement is undone.
-  const lateLeads = await trx('leads').where({ estimate_id: row.id }).whereNotIn('id', leads.map((l) => l.id)).forUpdate().select('id');
+  const lateLeads = await trx('leads').where({ estimate_id: row.id }).whereNotIn('id', leads.map((l) => l.id)).forUpdate().noWait().select('id', 'deleted_at');
   leads.push(...lateLeads);
   // With any lead on the draft (found at the first lock or just now), the
   // accepted-at-this-door hold is judged again on current rows: the first
   // read may predate the link or the acceptance. A hit undoes the archive.
-  if (leads.length) {
+  if (hasLiveLead()) {
     const acceptedNow = (await trx.raw(`
       SELECT a.property_id, a.address
         FROM estimates d
@@ -223,31 +254,7 @@ async function retireOneDraft(trx, pair) {
     `, [row.id]))?.rows || [];
     if (acceptedNow.some((a) => sameProperty({ ...pair, sent_property_id: a.property_id, sent_address: a.address }))) throw new KeepDraft();
   }
-  // Unlink, never re-point: the sent estimate may already belong to another
-  // lead (by FK or by its estimate_data mirror), and staff can link it.
-  if (leads.length) {
-    await trx('leads').whereIn('id', leads.map((l) => l.id)).where({ estimate_id: row.id })
-      .update({ estimate_id: null, updated_at: trx.fn.now() });
-    // Replay the send for the now-unlinked lead the way the send backfill
-    // does (scripts/backfill-estimate-sent-lead-status.js): the canonical
-    // resolver links and advances it only when it is the sent estimate's
-    // single unambiguous open lead, as of the send time. Lead state only; it
-    // sends nothing. Skipped when a lead already owns the sent estimate: that
-    // send is accounted for, and a replay would only re-record it there.
-    // A viewed replacement then replays the view, as the backfill does.
-    const sentOwned = await trx('leads').where({ estimate_id: pair.sent_id }).first('id');
-    if (replaySend && !sentOwned) {
-      const link = require('./lead-estimate-link');
-      const replay = { estimateId: pair.sent_id, performedBy: RETIRE_CLOSER, database: trx, originatingNotAfter: pair.sent_at };
-      // Only the channels the delivery record proves count for the
-      // contact-wide answered stamp; with no record, none (an empty list
-      // stamps nothing) rather than assuming both.
-      const recorded = sent.rows[0].sent_channels;
-      const sentChannels = Array.isArray(recorded) ? recorded.filter((ch) => ch === 'sms' || ch === 'email') : [];
-      await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at, sentChannels });
-      if (sentStatus === 'viewed') await link.markLinkedLeadEstimateViewed(replay);
-    }
-  }
+  if (leads.length) await detachLeads(trx, { pair, draftId: row.id, leads, sentRow: sent.rows[0] });
   // The canonical system close (notification-service done contract): the
   // closer is named, read state follows, a person's earlier Done is kept.
   const { doneColumns, openToCloser } = require('./notification-service')._private;
@@ -283,7 +290,7 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   const pairs = (await conn.raw(`
     SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
            s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address,
-           CASE WHEN EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id) THEN (
+           CASE WHEN EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id AND l.deleted_at IS NULL) THEN (
              SELECT json_agg(json_build_object('property_id', a.property_id, 'address', a.address))
                FROM estimates a
               WHERE a.customer_id = d.customer_id AND a.id <> d.id
@@ -291,7 +298,10 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
            ) END AS accepted_later
       FROM (SELECT * FROM estimates WHERE ${DRAFT_ELIGIBLE_SQL}) d
       CROSS JOIN LATERAL (
-        SELECT s.id, ${SENT_TIME_SQL('s')} AS sent_at, s.property_id, s.address
+        SELECT s.id, ${SENT_TIME_SQL('s')} AS sent_at, s.property_id, s.address,
+               ROW_NUMBER() OVER (ORDER BY COALESCE(s.property_id = d.property_id, false) DESC,
+                                           COALESCE(LOWER(TRIM(s.address)) = LOWER(TRIM(d.address)), false) DESC,
+                                           ${SENT_TIME_SQL('s')} DESC) AS rank
           FROM estimates s
          WHERE s.customer_id = d.customer_id
            AND s.id <> d.id
@@ -303,6 +313,7 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
                   ${SENT_TIME_SQL('s')} DESC
          LIMIT ${SENDS_PER_DRAFT}
       ) s
+     ORDER BY d.id, s.rank
   `))?.rows || [];
 
   // First matching send per draft (the lateral lists same-door sends first).
@@ -318,9 +329,12 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
     sent_property_id: accepted.property_id,
     sent_address: accepted.address,
   }));
-  const chosen = [...new Map(pairs
-    .filter((pair) => sameProperty(pair) && !acceptedAtDoor(pair))
-    .reverse().map((p) => [p.draft_id, p])).values()];
+  // Rows arrive ranked per draft (ORDER BY d.id, s.rank): keep the first match.
+  const byDraft = new Map();
+  for (const pair of pairs) {
+    if (!byDraft.has(pair.draft_id) && sameProperty(pair) && !acceptedAtDoor(pair)) byDraft.set(pair.draft_id, pair);
+  }
+  const chosen = [...byDraft.values()];
 
   const rows = [];
   // The kept-forever shape (a lead-linked draft whose replacement is accepted)

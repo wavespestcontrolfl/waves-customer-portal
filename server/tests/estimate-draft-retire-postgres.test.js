@@ -394,6 +394,18 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft2)).archived_at).toBeNull();
   });
 
+  test('a soft-deleted lead does not hold a draft against an accepted estimate; the newest same-door send is the one recorded', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(300) });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(250), sentAt: minutesAgo(240) });
+    const newest = await estimate(c, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
+    const leadId = randomUUID();
+    await mockPg('leads').insert({ id: leadId, estimate_id: draft, status: 'new', first_name: 'Fixture', last_name: 'Retire', deleted_at: minutesAgo(50) });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(newest);
+    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBeNull();
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
