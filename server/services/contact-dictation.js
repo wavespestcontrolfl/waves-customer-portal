@@ -449,6 +449,20 @@ function spelledNameDecision({ current = {}, dictation = null } = {}) {
 }
 
 /**
+ * The one caller name everything written or sent AFTER the customer/lead create
+ * sites uses (enrollment, greetings, alerts, newsletter, review-ask, booking
+ * text). A customer THIS pass created, or a caller with no customer (lead only),
+ * gets the decoder's spelled name; a customer that already existed keeps the name
+ * as extracted (the row is not this pass's to rename: the staged candidate and
+ * the correction lane decide). Pure.
+ */
+function callerNameForWrites({ extracted = {}, overrides = {}, createdByThisPass = false, hasCustomer = false } = {}) {
+  const resolves = createdByThisPass || !hasCustomer;
+  const pick = (f) => (resolves && overrides[f]?.value) || extracted[f];
+  return { first_name: pick('first_name'), last_name: pick('last_name') };
+}
+
+/**
  * Pure email adoption policy over the decoder output.
  *
  *   - exactly ONE usable candidate at/above ADOPT_CONFIDENCE, with NO declared
@@ -501,6 +515,7 @@ module.exports = {
   applyEmailDictationPolicy,
   applyNameDictationPolicy,
   spelledNameDecision,
+  callerNameForWrites,
   callerSpelledName,
   sanitizeEmailCandidates,
   sanitizeNameEntries,

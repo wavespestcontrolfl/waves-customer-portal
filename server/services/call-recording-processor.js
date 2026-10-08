@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, spelledNameDecision, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, spelledNameDecision, callerNameForWrites, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -12749,6 +12749,22 @@ const CallRecordingProcessor = {
         }
       } else if (!createNameFor('first_name')) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // ONE resolved caller name for everything written or sent from here on (automation
+    // enrollment, greeting / confirmation SMS, lead alert text, newsletter, review-ask and
+    // booking-link text, lead updates): a customer THIS pass created (or a caller with no
+    // customer, i.e. a lead only) gets the spelled name; an existing customer is untouched.
+    {
+      const resolvedName = callerNameForWrites({
+        extracted,
+        overrides: spelledNameOverrides,
+        createdByThisPass: createdCustomerFromCall,
+        hasCustomer: Boolean(customerId),
+      });
+      if (resolvedName.first_name !== extracted.first_name || resolvedName.last_name !== extracted.last_name) {
+        extracted = { ...extracted, ...resolvedName };
       }
     }
 

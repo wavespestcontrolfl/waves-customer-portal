@@ -9,6 +9,7 @@ const {
   applyEmailDictationPolicy,
   applyNameDictationPolicy,
   spelledNameDecision,
+  callerNameForWrites,
   callerSpelledName,
   sanitizeNameEntries,
   sanitizeEmailCandidates,
@@ -558,3 +559,48 @@ describe('processor wiring — one decision, used only where the canonical custo
     }
   });
 });
+
+describe('callerNameForWrites — one resolved name for everything after the create sites', () => {
+  const extracted = { first_name: 'Quentrell', last_name: 'Varnim' };
+  const overrides = { last_name: { value: 'Varnum', confidence: 0.95, quote: 'V-A-R-N-U-M' } };
+
+  test('a customer this pass created gets the spelled name (enrollment, greeting, alerts)', () => {
+    expect(callerNameForWrites({ extracted, overrides, createdByThisPass: true, hasCustomer: true }))
+      .toEqual({ first_name: 'Quentrell', last_name: 'Varnum' });
+  });
+  test('a lead-only caller (no customer) gets the spelled name', () => {
+    expect(callerNameForWrites({ extracted, overrides, createdByThisPass: false, hasCustomer: false }).last_name).toBe('Varnum');
+  });
+  test('an existing linked customer is untouched', () => {
+    expect(callerNameForWrites({ extracted, overrides, createdByThisPass: false, hasCustomer: true }))
+      .toEqual({ first_name: 'Quentrell', last_name: 'Varnim' });
+  });
+  test('no decision: the extracted name', () => {
+    expect(callerNameForWrites({ extracted, overrides: {}, createdByThisPass: true, hasCustomer: true })).toEqual(extracted);
+  });
+});
+
+describe('processor wiring — downstream consumers read the resolved name', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  test('the resolved name is computed once, right after the customer-create block, and before every downstream consumer', () => {
+    const at = src.indexOf('callerNameForWrites({\n        extracted,');
+    expect(at).toBeGreaterThan(0);
+    const block = src.slice(at, at + 700);
+    expect(block).toMatch(/overrides: spelledNameOverrides,/);
+    expect(block).toMatch(/createdByThisPass: createdCustomerFromCall,/);
+    expect(block).toMatch(/hasCustomer: Boolean\(customerId\),/);
+    expect(block).toMatch(/extracted = \{ \.\.\.extracted, \.\.\.resolvedName \};/);
+    // Consumers swept: each reads extracted names AFTER the resolved-name block.
+    const after = (needle) => src.indexOf(needle, at);
+    for (const needle of [
+      "const [newLead] = await db('leads').insert({",                 // new lead
+      'firstName: custRow.first_name || (extracted.first_name',      // booking SMS first name
+      'AutomationRunner.enrollCustomer(',                            // automation enrollment
+      'first_name: capitalizeName(extracted.first_name),',           // enrollment payload
+      "const callerName = [capitalizeName(extracted.first_name)",    // lead alert / summary text
+    ]) {
+      expect(after(needle)).toBeGreaterThan(at);
+    }
+  });
+});
+
