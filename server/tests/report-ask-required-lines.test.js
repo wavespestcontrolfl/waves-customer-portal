@@ -2656,3 +2656,25 @@ describe('answer screen, Codex round 77', () => {
     expect(concern('Ants near the garage door.')).toBe('Ants near the garage door.');
   });
 });
+
+describe('answer screen, Codex round 79', () => {
+  const data = pestData({ applications: [], findings: [{ title: 'Ants', detail: 'Ants found in the kitchen.' }, { title: 'Attic', detail: 'The attic was not inspected because access was blocked.' }] });
+  const question = 'What did you find?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['The report lists ants in the bedroom.', 'There was ant activity in the bedroom.'])('a nominal finding claim keeps the recorded place: %s', (answer) => {
+    expect(ask(answer)).toBe('target_list');
+  });
+
+  test('a recorded negative grounds the negative, not the work', () => {
+    expect(ask('We inspected the attic.')).toBe('unrecorded_work');
+    expect(ask('The attic was not inspected.')).toBeNull();
+    expect(ask('The report lists ants in the kitchen.')).toBeNull();
+  });
+
+  const lawn = lawnData({ applications: [{ product: { name: 'Merit' } }], reportV2: { aftercare: {} } });
+  test.each([['Can I mow now', 'next_steps'], ['May I fertilize now', 'next_steps'], ['Did you spray the front palms?', 'product_location'], ['Did you treat the back beds?', 'product_location'], ['When is my return service?', 'next_visit']])('%s keeps the fixed answer (%s)', (q, reason) => {
+    expect(ruleAnswerReason(lawn, [], 'unrouted', q)).toBe(reason);
+  });
+});

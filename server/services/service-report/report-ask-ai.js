@@ -1062,14 +1062,20 @@ function ungroundedFinding(text, terms, visitOnly, findings = []) {
   // another's pest (Codex P1 #5964 r59).
   const records = findings.map((finding) => stemmedTerms(`${finding?.title || ''} ${finding?.detail || ''}`));
   return splitSentences(text).some((sentence) => {
-    if (!FINDING_CLAIM.test(sentence) || UNCERTAIN_RE.test(sentence)) return false;
+    if (UNCERTAIN_RE.test(sentence)) return false;
     const named = terms.filter((label) => sentenceNames(sentence, label));
-    if (named.some((label) => !visitOnly.includes(label))) return true;
     const places = (sentence.toLowerCase().match(FINDING_PLACE_RE) || []).map((place) => stemmedTerms(place).trim());
-    if (!named.length || !places.length) return false;
-    if (places.some((place) => !visitOnly.includes(place))) return true;
     const own = records.filter((record) => named.some((label) => record.includes(label)));
-    return own.length > 0 && !own.some((record) => places.every((place) => record.includes(place)));
+    const wrongPair = own.length > 0 && places.length > 0 && !own.some((record) => places.every((place) => record.includes(place)));
+    if (!FINDING_CLAIM.test(sentence)) {
+      // A nominal claim keeps the place too: "The report lists ants in the
+      // bedroom", "There was ant activity in the bedroom" (Codex P1 #5964
+      // r79). Treatment and customer-report sentences speak of other places.
+      return wrongPair && NOMINAL_FINDING.test(sentence) && !APPLICATION_VERB.test(sentence) && !ATTRIBUTED_TO_CUSTOMER.test(sentence);
+    }
+    if (named.some((label) => !visitOnly.includes(label))) return true;
+    if (!named.length || !places.length) return false;
+    return places.some((place) => !visitOnly.includes(place)) || wrongPair;
   });
 }
 
@@ -1105,6 +1111,7 @@ function leaksTargetList(text, {
     && terms.some((label) => sentenceNames(sentence, label) && !inVisit.includes(label)
       && !(inConcern.includes(label) && ATTRIBUTED_TO_CUSTOMER.test(sentence))));
 }
+const NOMINAL_FINDING = /\b(?:lists?|shows?|records?|notes?|mentions?|reports?|there\s+(?:was|were|is|are)|activity|trails?|signs?|evidence|presence)\b/i;
 const ATTRIBUTED_TO_CUSTOMER = /\b(?:you|your)\b[^.?!]*\b(?:report\w*|mention\w*|told|said|saw|seen|notic\w*|spott\w*|ask\w*|flagg\w*|concern\w*|worr\w*|rais\w*|describ\w*|call\w*\s+about)\b|\b(?:concern|worry|question)\s+(?:about|was|is)\b|\b(?:treat\w*|appl\w*|spray\w*|address\w*|target\w*)\b[^.?!]*\bfor\s+(?:the|your|that|those)\b/i;
 const FINDING_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathroom|bedroom|closet|pantry|laundry|cabinet|sink|baseboard|wall|ceiling|eave|soffit|vent|window|door|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|lawn|bed|tree|shrub|palm|hedge|driveway|sidewalk|basement|living\s+room|dining\s+room|office|stairs?)s?\b/g;
 const FINDING_CLAIM = /\b(?:we|i|our\s+tech\w*|the\s+tech\w*|your\s+tech\w*|technician|crew|team)\s+(?:\w+\s+){0,2}?(?:found|find|saw|spott\w*|observ\w*|noted|discover\w*|confirm\w*|identif\w*|detect\w*|located|turned\s+up)\b|\b(?:was|were|been|got)\s+(?:\w+\s+)?(?:found|seen|spotted|observed|noted|discovered|confirmed|identified|detected|located)\b/i;
@@ -1925,6 +1932,7 @@ const WORK_ACTOR = /\b(?:we|i|our|tech\w*|technician|crew|team|[A-Z][a-z]+)\b|\b
 function claimsUnrecordedWork(text, facts) {
   const sheet = JSON.stringify([facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.products, facts?.areas_serviced]).toLowerCase();
   const areas = asArray(facts?.areas_serviced).join(' ').toLowerCase();
+  const sheetClauses = sheet.split(/[.;!?"]+|\\n/).filter(Boolean);
   return clausesOf(text).some((clause) => {
     const lower = clause.toLowerCase();
     if (/\b(?:will|would|can|could|should|may|might|next\s+visit|if)\b/.test(lower)) return false;
@@ -1934,8 +1942,11 @@ function claimsUnrecordedWork(text, facts) {
     // A serviced area on the report counts as inspected and serviced there
     // (Codex P1 #5964 r57).
     const inAreas = places.length > 0 && places.every((place) => areas.includes(place.replace(/e?s$/, '')));
-    const recorded = (kind) => ((kind === 'inspect' || kind === 'service') && inAreas)
-      || (WORK_FACT_WORDS[kind].test(sheet) && places.every((place) => sheet.includes(place.replace(/e?s$/, ''))));
+    // The recorded clause's own polarity counts: "The attic was not inspected
+    // because access was blocked" records no inspection (Codex P1 #5964 r79).
+    const clauseFor = (kind, negated) => sheetClauses.some((part) => WORK_FACT_WORDS[kind].test(part)
+      && places.every((place) => part.includes(place.replace(/e?s$/, ''))) && NEGATION_RE.test(part) === negated);
+    const recorded = (kind) => ((kind === 'inspect' || kind === 'service') && inAreas) || clauseFor(kind, false);
     // A denial of recorded work fails: "We did not inspect the attic" when the
     // report says we did (Codex P1 #5964 r47).
     if (NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause)) return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && recorded(kind));
@@ -2062,7 +2073,10 @@ function deniesRecordedFindings(text, facts) {
   if (!findings.length) return false;
   // A named finding may not be denied either: "The report does not show
   // termite tubes" when it does (Codex P1 #5964 r58).
-  const titles = findings.map((finding) => normalizeKey(finding.title || '').split(' ').filter((word) => word.length > 3 && !FINDING_TITLE_STOP.has(word)))
+  // A finding that itself records a negative ("The attic was not inspected")
+  // may be repeated as a negative.
+  const titles = findings.filter((finding) => !NEGATION_RE.test(`${finding.title || ''} ${finding.detail || ''}`))
+    .map((finding) => normalizeKey(finding.title || '').split(' ').filter((word) => word.length > 3 && !FINDING_TITLE_STOP.has(word)))
     .filter((words) => words.length);
   return clausesOf(text).some((clause) => {
     const lower = normalizeKey(clause);
@@ -2499,7 +2513,7 @@ function defaultCallModel(payload, options) {
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
 const SCHEDULE_QUESTION = /\b(?:when\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)\s+(?:is|will\s+be)|(?:service|visit|appointment|treatment)\s+date|date\s+of\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|appointment|treatment)|(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?<!\bdid\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back|in|into|inside))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?<!\b(?:did|when)\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit(?:ing)?\b|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
 // Next-visit intents in other words (Codex P1 #5964 r68).
-const NEXT_VISIT_QUESTION = /\b(?:due\s+back|return\s+(?:date|visit|trip)|future\s+(?:visit|service|treatment|appointment)|revisit|\b(?:you|y['’]?all|we|tech\w*|technician|someone|somebody|waves|team|crew)\s+(?:\w+\s+)?(?:come|coming|be)\s+back|next\s+(?:visit|service|treatment|appointment|time\s+you)|follow[\s-]?up\s+(?:visit|date|appointment)|another\s+(?:visit|treatment|service|appointment)|see\s+you\s+again|return\s+to)\b/i;
+const NEXT_VISIT_QUESTION = /\b(?:due\s+back|return\s+(?:date|visit|trip|service|treatment|appointment)|future\s+(?:visit|service|treatment|appointment)|revisit|\b(?:you|y['’]?all|we|tech\w*|technician|someone|somebody|waves|team|crew)\s+(?:\w+\s+)?(?:come|coming|be)\s+back|next\s+(?:visit|service|treatment|appointment|time\s+you)|follow[\s-]?up\s+(?:visit|date|appointment)|another\s+(?:visit|treatment|service|appointment)|see\s+you\s+again|return\s+to)\b/i;
 // Passive booking questions: "Is another treatment booked?" (Codex P1 #5964 r47).
 const BOOKING_QUESTION = /\b(?:is|are|was|were|has|have|do|does|did)\s+(?:there\s+)?(?:another|a|any|my|our|the\s+next|(?:a|the)\s+follow[\s-]?up|more|a\s+second|a\s+return)\s+(?:\w+\s+)?(?:treatments?|visits?|services?|appointments?)\s+(?:\w+\s+)?(?:booked|scheduled|set\s+up|lined\s+up|planned|arranged|confirmed|reserved|coming)\b|\b(?:another|next|follow[\s-]?up|return|second)\s+(?:\w+\s+)?(?:treatment|visit|service|appointment)\s+(?:\w+\s+)?(?:booked|scheduled|planned|coming)\b|\bany\s+(?:more|other|upcoming|future)\s+(?:treatments?|visits?|services?|appointments?)\b/i;
 function asksAboutSchedule(question) {
@@ -2510,13 +2524,13 @@ function asksAboutSchedule(question) {
 // "Can I mow now?", "Is it necessary to fertilize?": a care decision the
 // model has no ground for keeps the fixed answer (Codex P1 #5964 r57).
 const CARE_VERB_Q = '(?:mow\\w*|water\\w*|irrigat\\w*|fertiliz\\w*|spray\\w*|seed\\w*|overseed\\w*|aerat\\w*|trim\\w*|prun\\w*|cut\\w*|weed\\w*|rak\\w*|sod\\w*|dethatch\\w*|edg(?:e|ing)|plant\\w*|sprinkler\\w*)';
-const CARE_PERMISSION_QUESTION = new RegExp(`\\b${CARE_VERB_Q}\\b[^?.!]*\\b(?:ok(?:ay)?|fine|allowed|alright|all\\s+right|safe|problem|issue|good\\s+idea|bad\\s+idea|permitted|necessary|needed|time|wait|too\\s+(?:soon|early|late))\\b|\\b(?:can|could|may|should|shall|would|will|do|does|is|are|when)\\b[^?.!]{0,40}\\b${CARE_VERB_Q}\\b[^.!]*\\?`, 'i');
+const CARE_PERMISSION_QUESTION = new RegExp(`\\b${CARE_VERB_Q}\\b[^?.!]*\\b(?:ok(?:ay)?|fine|allowed|alright|all\\s+right|safe|problem|issue|good\\s+idea|bad\\s+idea|permitted|necessary|needed|time|wait|too\\s+(?:soon|early|late))\\b|\\b(?:can|could|may|should|shall|would|will|do|does|is|are|when)\\b[^?.!]{0,40}\\b${CARE_VERB_Q}\\b[^.!?]*(?:\\?|$)`, 'i');
 const REENTRY_PLACE = '(?:yard|patio|lawn|grass|lanai|pool|deck|porch|rooms?|kitchen|garage|house|home|areas?|spaces?|zones?|spots?|outside|inside|playset|play\\s*area|garden|beds?)';
 const REENTRY_QUESTION = new RegExp(`\\b(?:usable|re-?ent\\w*|ready\\s+(?:to|for)\\s+(?:use|go|enter|play)|dry\\s+(?:yet|time|enough))\\b|\\b(?:use|enter|go\\s+(?:back\\s+)?(?:in|into|on|onto|out|outside)|walk\\s+on|play\\s+(?:in|on)|step\\s+on|sit\\s+on|be\\s+(?:in|on))\\s+(?:the|our|my|treated|that|this)\\s+(?:\\w+\\s+)?${REENTRY_PLACE}\\b|\\b(?:ok(?:ay)?|safe|fine|alright)\\s+(?:to|for)\\s+(?:\\w+\\s+){0,3}?(?:enter|go|use|walk|play|be|come|return)\\b|\\bhow\\s+long\\b[^?.!]*\\b(?:dry|wait|stay\\s+off|keep\\s+off|before)\\b|\\bwhen\\s+(?:can|is|are|will|may)\\b[^?.!]*\\b(?:${REENTRY_PLACE}|pets?|dogs?|cats?|kids?|children|family)\\b[^?.!]*\\b(?:usable|ready|use|back|out|in|on|go|play|enter|ok(?:ay)?|safe|dry)\\b`, 'i');
 const LAWN_PROGRESS_QUESTION = /\b(?:chang\w*|progress\w*|improv\w*|since|trend\w*|compar\w*|better|worse|before|first\s+(?:visit|assessment)|over\s+time|history)\b/i;
 const GRASS_TYPE_QUESTION = /\b(?:grass|turf|sod|lawn)\s+(?:type|kind|variety|species|cultivar)\b|\b(?:what|which)\s+(?:kind|type|variety|sort|species)\s+of\s+(?:grass|turf|sod|lawn)\b|\bcultivar\b|\b(?:bermuda|zoysia|st\.?\s*augustine|bahia|centipede|floratam|paspalum|fescue|citrablue|palmetto)\b/i;
 const LAWN_SIZE_QUESTION = /\bhow\s+(?:big|large|much\s+(?:lawn|turf|grass|yard))\b|\b(?:lawn|turf|yard|property)\s+size\b|\bsize\s+of\s+(?:my|the|our)\b|\bsquare\s+f(?:ee|oo)t(?:age)?\b|\bsq\.?\s*ft\b|\bacres?\b|\bacreage\b/i;
-const PRODUCT_LOCATION_QUESTION = /\b(?:used|applied|sprayed|spread|put|treated|placed)\b[^?.!]*\b(?:on|in|at|around|near|along|to|by)\s+(?:the\s+|my\s+|our\s+)?(?:\w+\s+){0,2}?(?:front|back|side|yard|lawn|beds?|palms?|trees?|shrubs?|hedges?|zones?|areas?|sections?|driveway|fence|patio|pool|garden|property|perimeter)\b|\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
+const PRODUCT_LOCATION_QUESTION = /\b(?:spray\w*|treat\w*|do|did|cover\w*|hit|get|got|fertiliz\w*)\s+(?:you\s+)?(?:\w+\s+)?(?:the\s+|my\s+|our\s+)(?:\w+\s+){0,2}?(?:front|back|side|beds?|palms?|trees?|shrubs?|hedges?|zones?|sections?|driveway|fence\s*line|garden|perimeter)\b|\b(?:used|applied|sprayed|spread|put|treated|placed)\b[^?.!]*\b(?:on|in|at|around|near|along|to|by)\s+(?:the\s+|my\s+|our\s+)?(?:\w+\s+){0,2}?(?:front|back|side|yard|lawn|beds?|palms?|trees?|shrubs?|hedges?|zones?|areas?|sections?|driveway|fence|patio|pool|garden|property|perimeter)\b|\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
 // Results, pest pressure and weather asked in any words (owner 2026-10-08).
 const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|precipitation|conditions?|shape|status|outlook|how\s+(?:is|are|was|were|did|does|do|has|have)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?|effective\w*|efficacy|successful\w*|success|work(?:ed|ing|s)?\s*\?|(?:treatment|product|spray|application|visit|service|it)\s+(?:help(?:ed|ing)?|work(?:ed|ing)?|do\s+(?:any|its)\s+\w+)|help(?:ed|ing)?\s*\?|do(?:ing)?\s+any\s+good|make\s+a\s+difference)\b/i;
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
