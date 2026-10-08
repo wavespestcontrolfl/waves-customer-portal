@@ -98,7 +98,9 @@ function buildCustomerFieldCandidates({ callId, customerId = null, extraction, v
         extracted_value: String(value),
         enriched_value: String(value),
         final_recommended_value: String(value),
-        evidence_quote: evidence?.quote || override?.quote || null,
+        // A decoder override carries the DECODER entry's quote (the entry that supplied the
+        // value and confidence), never the extractor's evidence quote for the misheard value.
+        evidence_quote: override ? (override.quote || null) : (evidence?.quote || null),
         source: override ? 'contact_dictation' : source,
         confidence: override ? override.confidence : confidenceForField(v2Extraction, field),
         reason_code: override ? 'spelled_out' : (evidence ? 'evidence_pinned' : 'observed_only'),

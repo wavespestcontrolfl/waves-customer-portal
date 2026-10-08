@@ -12,6 +12,7 @@ const {
   callerNameForWrites,
   callerSpelledName,
   sanitizeNameEntries,
+  qualifyingNameEntry,
   sanitizeEmailCandidates,
   buildDecoderPrompt,
   CONTACT_DICTATION_TRANSCRIPTION_PROMPT,
@@ -309,7 +310,7 @@ describe('spelled-name decoding', () => {
 
   test('decodeDictatedContacts returns sanitized, grounded names and keeps emails/addresses', async () => {
     const out = await decodeDictatedContacts({
-      transcript: 'Caller: Varnum, V-A-R-N-U-M. And my sister is Tobias, T-O-B-I-A-S.',
+      transcript: 'Caller: my last name is Varnum, V-A-R-N-U-M. And my sister is Tobias, T-O-B-I-A-S.',
       deps: {
         fetchResponse: async (prompt) => {
           expect(prompt).toMatch(/NAME RULES/);
@@ -329,55 +330,81 @@ describe('spelled-name decoding', () => {
       },
     });
     expect(out.names).toEqual([
-      { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.9, name_context: false },
-      { raw_spoken: 'T-O-B-I-A-S', spelled_value: 'Tobias', field: 'first_name', whose: 'other', confidence: 1, name_context: false },
+      { raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.9, qualifies: true },
+      { raw_spoken: 'T-O-B-I-A-S', spelled_value: 'Tobias', field: 'first_name', whose: 'other', confidence: 1, qualifies: false },
     ]);
   });
 
-  describe('name context (filling an empty name)', () => {
-    const ctx = (turn, raw, spelled = 'Jones', field = 'last_name') => sanitizeNameEntries(
-      [{ raw_spoken: raw, spelled_value: spelled, field, whose: 'caller', confidence: 0.95 }], [turn],
-    )[0]?.name_context;
+  describe('qualifyingNameEntry — the one rule, every audited case', () => {
+    const E = (raw, spelled, over = {}) => ({ raw_spoken: raw, spelled_value: spelled, field: 'last_name', whose: 'caller', confidence: 0.95, ...over });
+    const cases = [
+      // [label, entry, sources, qualifies]
+      ['caller states the last name', E('J-O-N-E-S', 'Jones'), ['Caller: my last name is J-O-N-E-S'], true],
+      ['first name, "my name is"', E('Q-U-E-N-T', 'Quent', { field: 'first_name' }), ['Caller: my name is Quent, Q-U-E-N-T'], true],
+      ['surname wording', E('V-A-R-N-U-M', 'Varnum'), ['Caller: the surname is V-A-R-N-U-M'], true],
+      ['intro "this is <name>, <spelling>"', E('V-A-R-N-U-M', 'Varnum'), ['Caller: this is Varnum, V-A-R-N-U-M'], true],
+      ['spelling right after an agent asks for the name', E('S-M-Y-T-H', 'Smyth'), ['Agent: what is your last name?\nCaller: S-M-Y-T-H'], true],
+      ['name context only in the contact-pass source', E('J-O-N-E-S', 'Jones'), ['Caller: J-O-N-E-S', 'Caller: my last name is J-O-N-E-S'], true],
+      ['name context only in a later occurrence', E('J-O-N-E-S', 'Jones'), ['Caller: sure J-O-N-E-S\nCaller: my last name is J-O-N-E-S'], true],
+      ['two-letter name anchored by the spoken name (Li, L-I)', E('L-I', 'Li'), ['Caller: my last name is Li, L-I'], true],
+      ['MCLOUGHLIN spelled, cased by the repo rule', E('M-C-L-O-U-G-H-L-I-N', 'MCLOUGHLIN'), ['Caller: my last name is M-C-L-O-U-G-H-L-I-N'], true],
+      ['phonetic markers', E('V as in Victor, A, R', 'Var'), ['Caller: my last name is V as in Victor, A, R'], true],
+      // Rejected: the audited failures from rounds 2-9.
+      ['email local part spelled (J-O-N-E-S at gmail dot com)', E('J-O-N-E-S', 'Jones'), ['Caller: my email is J-O-N-E-S at gmail dot com'], false],
+      ['email wording AFTER a name-worded spelling', E('J-O-N-E-S', 'Jones'), ['Caller: my last name is spelled J-O-N-E-S at gmail dot com'], false],
+      ['agent read-back', E('S-M-Y-T-H', 'Smyth'), ['Agent: your last name is spelled S-M-Y-T-H, correct?'], false],
+      ['agent read-back without a question', E('S-M-Y-T-H', 'Smyth'), ['Agent: your last name is S-M-Y-T-H'], false],
+      ['unlabeled transcript', E('S-M-Y-T-H', 'Smyth'), ['my last name is S-M-Y-T-H'], false],
+      ['Speaker-N label (also what an outbound swap looks like)', E('S-M-Y-T-H', 'Smyth'), ['Speaker 1: my last name is S-M-Y-T-H'], false],
+      ['bare "spelled" is not name wording', E('J-O-N-E-S', 'Jones'), ['Caller: it is spelled J O N E S'], false],
+      ['bare "spell" (dry spell)', E('J-O-N-E-S', 'Jones'), ['Caller: we had a dry spell, then J-O-N-E-S'], false],
+      ['no wording at all', E('J-O-N-E-S', 'Jones'), ['Caller: sure, J-O-N-E-S'], false],
+      ['street name', E('P-I-N-E', 'Pine'), ['Caller: the street name is P-I-N-E'], false],
+      ['company name', E('A-C-M-E', 'Acme'), ['Caller: my company name is A-C-M-E'], false],
+      ['business name', E('A-C-M-E', 'Acme'), ['Caller: the business name is A-C-M-E'], false],
+      ['pet name', E('R-E-X-X', 'Rexx'), ['Caller: my dog\'s pet name is R-E-X-X'], false],
+      ['possessive (wife\'s name)', E('S-M-Y-T-H', 'Smyth'), ['Caller: my wife\'s last name is S-M-Y-T-H'], false],
+      ['agent asked about the street, not the person', E('P-I-N-E', 'Pine'), ['Agent: what is the street name?\nCaller: P-I-N-E'], false],
+      ['name wording far from the spelling in an earlier turn', E('J-O-N-E-S', 'Jones'), ['Caller: my name is Bob.\nCaller: ok? J-O-N-E-S'], false],
+      ['spelling not in the transcript (ungrounded)', E('J-O-N-E-S', 'Jones'), ['Caller: my last name is S-M-I-T-H'], false],
+      ['letters do not make the value', E('V-A-R-N-U-M', 'Jones'), ['Caller: my last name is V-A-R-N-U-M'], false],
+      ['said, not spelled', E('Varnum', 'Varnum'), ['Caller: my last name is Varnum'], false],
+      ['model says it is someone else\'s name', E('S-M-Y-T-H', 'Smyth', { whose: 'other' }), ['Caller: my last name is S-M-Y-T-H'], false],
+      ['below the adopt confidence', E('S-M-Y-T-H', 'Smyth', { confidence: 0.6 }), ['Caller: my last name is S-M-Y-T-H'], false],
+      ['wrong field label', E('S-M-Y-T-H', 'Smyth', { field: 'nickname' }), ['Caller: my last name is S-M-Y-T-H'], false],
+    ];
+    test.each(cases)('%s', (_label, entry, sources, expected) => {
+      expect(Boolean(qualifyingNameEntry(entry, sources))).toBe(expected);
+    });
 
-    test('true right after name wording in the caller turn', () => {
-      expect(ctx('Agent: how do you spell that?\nCaller: my last name is Jones, J-O-N-E-S', 'J-O-N-E-S')).toBe(true);
-      expect(ctx('Caller: it is spelled J O N E S', 'J O N E S')).toBe(true);
+    test('the normalized entry carries the repo casing and the same entry\'s confidence and quote', () => {
+      expect(qualifyingNameEntry(E('M-C-L-O-U-G-H-L-I-N', 'MCLOUGHLIN', { confidence: 0.91 }), ['Caller: my last name is M-C-L-O-U-G-H-L-I-N']))
+        .toEqual({ raw_spoken: 'M-C-L-O-U-G-H-L-I-N', spelled_value: 'McLoughlin', field: 'last_name', whose: 'caller', confidence: 0.91 });
     });
-    test('an agent read-back never counts, and neither does an unlabeled or Speaker-N line', () => {
-      const e = [{ raw_spoken: 'S-M-Y-T-H', spelled_value: 'Smyth', field: 'last_name', whose: 'caller', confidence: 0.95 }];
-      const nc = (...src) => sanitizeNameEntries(e, src)[0].name_context;
-      expect(nc('Agent: your last name is spelled S-M-Y-T-H, correct?')).toBe(false);
-      expect(nc('Agent: your last name is spelled S-M-Y-T-H')).toBe(false);
-      expect(nc('Speaker 1: my last name is S-M-Y-T-H')).toBe(false);
-      expect(nc('my last name is S-M-Y-T-H')).toBe(false);
-      expect(nc('Agent: your last name is S-M-Y-T-H\nCaller: yes my last name is S-M-Y-T-H')).toBe(true);
+
+    test('one entry per field: disagreeing qualifying entries decide nothing; a non-qualifying entry never lends its context', () => {
+      const src = ['Caller: my last name is V-A-R-N-U-M or maybe V-A-R-N-E-M\nCaller: sure V-A-R-N-I-M'];
+      const names = sanitizeNameEntries([
+        E('V-A-R-N-U-M', 'Varnum'), E('V-A-R-N-E-M', 'Varnem'), // both qualify, disagree
+      ], src);
+      expect(callerSpelledName({ names }, 'last_name')).toBeNull();
+      // High-confidence entry WITHOUT context + low-confidence entry WITH context: neither qualifies, so nothing combines.
+      const split = sanitizeNameEntries([
+        E('V-A-R-N-I-M', 'Varnim', { confidence: 0.95 }),
+        E('V-A-R-N-U-M', 'Varnum', { confidence: 0.5 }),
+      ], src);
+      expect(callerSpelledName({ names: split }, 'last_name')).toBeNull();
+      // A single qualifying entry wins, with its OWN confidence and quote.
+      const one = sanitizeNameEntries([E('V-A-R-N-U-M', 'Varnum', { confidence: 0.88 }), E('V-A-R-N-I-M', 'Varnim', { confidence: 0.99 })], src);
+      expect(callerSpelledName({ names: one }, 'last_name')).toEqual({ value: 'Varnum', confidence: 0.88, quote: 'V-A-R-N-U-M' });
     });
-    test('scans every source and every occurrence until one qualifies', () => {
-      const entry = [{ raw_spoken: 'J-O-N-E-S', spelled_value: 'Jones', field: 'last_name', whose: 'caller', confidence: 0.95 }];
-      expect(sanitizeNameEntries(entry, ['Caller: J-O-N-E-S', 'Caller: my last name is J-O-N-E-S'])[0].name_context).toBe(true);
-      expect(sanitizeNameEntries(entry, ['Caller: sure J-O-N-E-S\nCaller: my last name is J-O-N-E-S'])[0].name_context).toBe(true);
-      expect(sanitizeNameEntries(entry, ['Caller: sure J-O-N-E-S', 'Caller: yes J-O-N-E-S'])[0].name_context).toBe(false);
-    });
-    test('false with no name wording, or in an email context', () => {
-      expect(ctx('Caller: sure, J-O-N-E-S', 'J-O-N-E-S')).toBe(false);
-      expect(ctx('Caller: my email is J-O-N-E-S at gmail dot com', 'J-O-N-E-S')).toBe(false);
-      expect(ctx('Caller: my name is Bob. The email is, J-O-N-E-S, at example dot com', 'J-O-N-E-S')).toBe(false);
-      expect(ctx('Caller: my name is Bob.\nCaller: ok? J-O-N-E-S', 'J-O-N-E-S')).toBe(false);
-      // Email wording AFTER the spelling, in the same turn.
-      expect(ctx('Caller: my last name is spelled J-O-N-E-S at gmail dot com', 'J-O-N-E-S')).toBe(false);
-      // ...but email wording in a later turn does not count.
-      expect(ctx('Caller: my last name is J-O-N-E-S\nCaller: and my email is x at gmail dot com', 'J-O-N-E-S')).toBe(true);
-    });
-    test('an empty name is NOT filled from a spelling with no name context (the J-O-N-E-S email case)', () => {
-      const names = sanitizeNameEntries(
-        [{ raw_spoken: 'J-O-N-E-S', spelled_value: 'Jones', field: 'last_name', whose: 'caller', confidence: 0.95 }],
-        ['Caller: my email is J-O-N-E-S at example dot com'],
-      );
+
+    test('an empty or near-match name is NOT changed from a spelling with no qualifying context (J-O-N-E-S email case)', () => {
+      const names = sanitizeNameEntries([E('J-O-N-E-S', 'Jones')], ['Caller: my email is J-O-N-E-S at example dot com']);
       const d = { emails: [], addresses: [], names };
       expect(applyNameDictationPolicy({ current: { first_name: 'Quentrell', last_name: null }, dictation: d })).toEqual({});
-      // One rule for fill and replace: a near-match name is not rewritten without name context either.
       expect(applyNameDictationPolicy({ current: { last_name: 'Jonas' }, dictation: d })).toEqual({});
-      expect(applyNameDictationPolicy({ current: { first_name: 'Quentrell', last_name: 'Jonas' }, dictation: d })).toEqual({});
+      expect(spelledNameDecision({ current: { last_name: 'Jonas' }, dictation: d })).toEqual({});
     });
   });
 
@@ -460,7 +487,7 @@ describe('spelled-name decoding', () => {
   test('never applies when two caller spellings of one field disagree', () => {
     expect(applyNameDictationPolicy({
       current: { last_name: 'Varnim' },
-      dictation: dictation(entry({ spelled_value: 'Varnum' }), entry({ spelled_value: 'Varnem', confidence: 0.5 })),
+      dictation: dictation(entry({ spelled_value: 'Varnum' }), entry({ spelled_value: 'Varnem' })),
     })).toEqual({});
     // A spelling labeled "other" for the same field is a different person, not a disagreement.
     expect(applyNameDictationPolicy({
@@ -471,7 +498,7 @@ describe('spelled-name decoding', () => {
 
   test('callerSpelledName carries the decoder confidence and quote', () => {
     const d = dictation(entry({ spelled_value: 'Varnum', confidence: 0.91 }));
-    expect(callerSpelledName(d, 'last_name')).toMatchObject({ value: 'Varnum', confidence: 0.91, quote: expect.stringContaining('V-A-R-N-U-M'), nameContext: true });
+    expect(callerSpelledName(d, 'last_name')).toMatchObject({ value: 'Varnum', confidence: 0.91, quote: expect.stringContaining('V-A-R-N-U-M') });
     expect(callerSpelledName(d, 'first_name')).toBeNull();
   });
 

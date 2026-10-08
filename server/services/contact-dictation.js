@@ -297,49 +297,108 @@ function spelledLetterRuns(raw) {
   return runs;
 }
 
-// Name wording right before a spelled run, and email wording that makes the
-// run an address, not a name.
-const NAME_WORDING_RE = /\b(?:first name|last name|surname|name|spelled|spelling|spell)\b/g;
-const EMAIL_WORDING_RE = /e-?mail|@|\bdot\b|\bat\b[^\n]{0,25}\b(?:dot|gmail|yahoo|outlook|hotmail|icloud)/;
+// ── The one qualifying rule ──────────────────────────────────────────────────
+// qualifyingNameEntry is the single predicate every consumer uses. A decoder
+// name entry qualifies only when ALL of these hold for that SAME entry:
+//   - shape: field first_name|last_name, letters-only spelled_value;
+//   - whose === "caller" (the model's judgment; "other" never qualifies);
+//   - confidence >= ADOPT_CONFIDENCE;
+//   - grounded: raw_spoken appears in a source transcript and the letters it
+//     spells equal spelled_value;
+//   - person-name context: in an explicitly labeled `Caller:` turn, the spelling
+//     follows unambiguous person-name wording ("my name", "my first/last name",
+//     "surname", "I'm / this is <name>") or follows an agent turn asking for the
+//     caller's name; any other noun before "name" (street, company, business,
+//     pet, email, address ...) or a possessive ("wife's name") disqualifies; and
+//     no email wording (email, @, dot, at gmail ...) from the wording to the end
+//     of the turn. Bare "spell / spelled / spelling" is NOT name wording.
 
-// True when the entry's spelling sits in the caller's turn right after name
-// wording ("my last name is ...", "it's spelled ...") with no email wording
-// from that wording on. Filling an EMPTY name needs this; correcting an
-// existing near-match does not.
-function spelledAfterNameWording(raw, sources) {
-  const flat = (v) => String(v || '').toLowerCase().replace(/[ \t]+/g, ' ');
-  const needle = flat(raw).trim().replace(/\s*\n\s*/g, ' ');
-  // Every occurrence in every source counts: the same spelling can appear
-  // bare in one transcript and after name wording in the other.
+const EMAIL_WORDING_RE = /e-?mail|@|\bdot\b|\bat\b[^\n]{0,25}\b(?:dot|gmail|yahoo|outlook|hotmail|icloud)/;
+const PERSON_NAME_WORDING_RE = /\bmy\s+(?:(?:first|last|full)\s+)?name\b|\b(?:first|last|full)\s+name\b|\bsurname\b/g;
+const INTRO_WORDING_RE = /\b(?:i'?m|i am|this is)\b/g;
+const AGENT_ASKS_NAME_RE = /\b(?:your|the)\s+(?:(?:first|last|full)\s+)?(?:name|surname)\b/;
+// The word right before "name" must be one of these (or a possessive pronoun the
+// caller owns); anything else ("street name", "company's name") is another noun.
+const PERSON_NAME_MODIFIERS = new Set(['my', 'your', 'first', 'last', 'full', 'the']);
+
+// True when the LAST "<word> name" in the text is not a person-name modifier.
+const OTHER_PERSON_NAME_RE = /\b(?:wife|husband|spouse|son|daughter|mother|mom|father|dad|sister|brother|friend|neighbor|tenant|buyer|seller|boss|his|her|their)(?:['’]s)?\s+(?:(?:first|last|full)\s+)?(?:name|surname)\b|['’]s\s+(?:(?:first|last|full)\s+)?(?:name|surname)\b/;
+
+function otherNounBeforeName(text) {
+  if (OTHER_PERSON_NAME_RE.test(text)) return true;
+  const all = [...text.matchAll(/([\p{L}'’]+)\s+(?:name|surname)\b/gu)];
+  const last = all[all.length - 1];
+  if (!last) return false;
+  const word = last[1].toLowerCase();
+  return /['’]s?$/.test(word) || !PERSON_NAME_MODIFIERS.has(word);
+}
+
+// Does the text before a spelling carry person-name wording, with the gap to the spelling bounded?
+function personNameWordingBefore(pre) {
+  if (otherNounBeforeName(pre)) return false;
+  const named = [...pre.matchAll(PERSON_NAME_WORDING_RE)].pop();
+  if (named) return pre.length - (named.index + named[0].length) <= 100;
+  const intro = [...pre.matchAll(INTRO_WORDING_RE)].pop();
+  return Boolean(intro) && pre.length - (intro.index + intro[0].length) <= 40;
+}
+
+const flatText = (v) => String(v || '').toLowerCase().replace(/[ \t]+/g, ' ');
+
+// True when some occurrence of the spelling sits in a qualifying Caller: turn.
+function spelledWithPersonNameContext(raw, sources) {
+  const needle = flatText(raw).trim().replace(/\s*\n\s*/g, ' ');
+  if (!needle) return false;
   return sources.some((src) => {
-    const text = flat(src);
+    const text = flatText(src);
     for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) {
       const turnStart = text.lastIndexOf('\n', at) + 1;
-      const turn = text.slice(turnStart, at + needle.length);
-      // Only a turn explicitly labeled Caller: counts. An agent read-back
-      // ("Agent: your last name is spelled ...") or an unlabeled / Speaker-N
-      // line never evidences the caller's own name.
+      const turnEndIdx = text.indexOf('\n', at + needle.length);
+      const turn = text.slice(turnStart, turnEndIdx < 0 ? text.length : turnEndIdx);
+      // Only a turn explicitly labeled Caller: counts (no agent read-back, no unlabeled / Speaker-N line).
       if (!/^\s*caller\s*:/.test(turn)) continue;
-      const wording = [...turn.matchAll(NAME_WORDING_RE)].pop();
-      const tail = wording ? turn.slice(wording.index + wording[0].length) : '';
-      // Email wording anywhere from the name wording to the END of the turn counts:
-      // "... J-O-N-E-S at gmail dot com" spells an address, whatever came before.
-      const turnEnd = text.indexOf('\n', at + needle.length);
-      const rest = text.slice(turnStart + (wording?.index ?? 0), turnEnd < 0 ? text.length : turnEnd);
-      if (wording && tail.length <= 100 && !/[?!]/.test(tail) && !EMAIL_WORDING_RE.test(rest)) return true;
+      // Up to the END of the spelling: raw_spoken may itself carry the wording before the letters.
+      const pre = text.slice(turnStart, at + needle.length);
+      const tail = text.slice(at + needle.length, turnEndIdx < 0 ? text.length : turnEndIdx);
+      if (EMAIL_WORDING_RE.test(`${pre} ${tail}`) || /[?!]/.test(tail)) continue;
+      if (personNameWordingBefore(pre)) return true;
+      // A spelling right after an agent turn asking for the caller's name.
+      const prevStart = text.lastIndexOf('\n', Math.max(0, turnStart - 2)) + 1;
+      const prev = turnStart > 0 ? text.slice(prevStart, turnStart - 1) : '';
+      if (/^\s*agent\s*:/.test(prev) && AGENT_ASKS_NAME_RE.test(prev) && !otherNounBeforeName(prev) && !otherNounBeforeName(pre)) return true;
     }
     return false;
   });
 }
 
 /**
- * Filter decoder name entries to the shape the name policy trusts: a real
- * letters-only value, field first_name|last_name, whose "caller" only when the
- * model said so (anything else is "other"), confidence clamped to [0,1] —
- * and GROUNDED: raw_spoken must appear in a source transcript (whitespace and
- * case normalized), and the letters it spells must equal spelled_value, or the
- * entry is dropped (the model's label and value alone never reach a record).
- * name_context records whether the spelling follows name wording in its turn.
+ * The qualifying rule as ONE pure predicate. `entry` is a raw decoder name entry,
+ * `sources` the transcript(s) it must be grounded in. Returns the normalized entry
+ * (spelled_value in the repo's proper case) or null. See the block comment above.
+ */
+function qualifyingNameEntry(entry, sources = [], { minConfidence = ADOPT_CONFIDENCE } = {}) {
+  const srcs = (Array.isArray(sources) ? sources : [sources]).filter(Boolean);
+  const spelled = String(entry?.spelled_value || '').trim().replace(/\s+/g, ' ');
+  if (!NAME_FIELDS.includes(entry?.field) || !SPELLED_NAME_RE.test(spelled)) return null;
+  if (entry.whose !== 'caller') return null;
+  const confidence = Math.max(0, Math.min(1, Number(entry.confidence) || 0));
+  if (confidence < minConfidence) return null;
+  const raw = squash(entry.raw_spoken);
+  if (!raw || !srcs.map(squash).some((h) => h.includes(raw))) return null;
+  if (!spelledLetterRuns(entry.raw_spoken).includes(spelled.toLowerCase().replace(/[^\p{L}]/gu, ''))) return null;
+  if (!spelledWithPersonNameContext(entry.raw_spoken, srcs)) return null;
+  return {
+    raw_spoken: String(entry.raw_spoken).slice(0, 300),
+    spelled_value: properCase(spelled),
+    field: entry.field,
+    whose: 'caller',
+    confidence,
+  };
+}
+
+/**
+ * Keep the decoder's name entries that are well formed and GROUNDED (kept for
+ * the audit trail), and mark each with `qualifies`: the result of
+ * qualifyingNameEntry on that same entry. Nothing downstream re-derives it.
  */
 function sanitizeNameEntries(entries, sources = []) {
   const srcs = (Array.isArray(sources) ? sources : []).filter(Boolean);
@@ -350,15 +409,14 @@ function sanitizeNameEntries(entries, sources = []) {
     if (!NAME_FIELDS.includes(n?.field) || !SPELLED_NAME_RE.test(spelled)) continue;
     const raw = squash(n?.raw_spoken);
     if (!raw || !haystacks.some((h) => h.includes(raw))) continue;
-    const key = spelled.toLowerCase().replace(/[^\p{L}]/gu, '');
-    if (!spelledLetterRuns(n.raw_spoken).includes(key)) continue;
+    if (!spelledLetterRuns(n.raw_spoken).includes(spelled.toLowerCase().replace(/[^\p{L}]/gu, ''))) continue;
     out.push({
       raw_spoken: String(n.raw_spoken).slice(0, 300),
       spelled_value: properCase(spelled),
       field: n.field,
       whose: n?.whose === 'caller' ? 'caller' : 'other',
       confidence: Math.max(0, Math.min(1, Number(n?.confidence) || 0)),
-      name_context: spelledAfterNameWording(n.raw_spoken, srcs),
+      qualifies: Boolean(qualifyingNameEntry(n, srcs)),
     });
   }
   return out;
@@ -388,21 +446,14 @@ function sameNameMisheard(current, spelled) {
   return editDistance(a, b) <= Math.min(2, Math.floor(Math.max(a.length, b.length) / 3));
 }
 
-// The one value the caller spelled for a field, or null: only entries the
-// model marked whose:"caller" count, two caller spellings that disagree cancel
-// each other, and the surviving value needs ADOPT_CONFIDENCE.
+// The ONE decoder entry for a field, or null: only entries that qualify (see
+// qualifyingNameEntry) count, two qualifying readings that disagree cancel each
+// other, and value, confidence and quote all come from that same entry.
 function callerSpelledName(dictation, field) {
-  const entries = (dictation?.names || []).filter((n) => n.whose === 'caller' && n.field === field);
+  const entries = (dictation?.names || []).filter((n) => n.qualifies === true && n.field === field);
   if (new Set(entries.map((n) => nameKey(n.spelled_value))).size !== 1) return null;
   const best = entries.reduce((a, b) => (b.confidence > a.confidence ? b : a));
-  return best.confidence >= ADOPT_CONFIDENCE
-    ? {
-      value: best.spelled_value,
-      confidence: best.confidence,
-      quote: best.raw_spoken,
-      nameContext: entries.some((n) => n.name_context === true),
-    }
-    : null;
+  return { value: best.spelled_value, confidence: best.confidence, quote: best.raw_spoken };
 }
 
 /**
@@ -421,8 +472,8 @@ function applyNameDictationPolicy({ current = {}, dictation = null } = {}) {
     const existing = String(current[field] || '').trim();
     // Same letters (any casing) already: keep the extracted value as it is.
     if (!spelled || nameKey(existing) === nameKey(spelled.value)) continue;
-    // One rule for fill and replace: no name context, no change.
-    if (spelled.nameContext && (!existing || sameNameMisheard(existing, spelled.value))) changes[field] = spelled.value;
+    // One rule for fill and replace: only a qualifying entry (callerSpelledName) changes anything.
+    if (!existing || sameNameMisheard(existing, spelled.value)) changes[field] = spelled.value;
   }
   return changes;
 }
@@ -441,7 +492,7 @@ function spelledNameDecision({ current = {}, dictation = null } = {}) {
   for (const field of NAME_FIELDS) {
     const spelled = callerSpelledName(dictation, field);
     const existing = String(current[field] || '').trim();
-    if (!spelled?.nameContext) continue;
+    if (!spelled) continue;
     const value = changes[field] || (existing && nameKey(existing) === nameKey(spelled.value) ? existing : null);
     if (value) out[field] = { value, confidence: spelled.confidence, quote: spelled.quote };
   }
@@ -517,6 +568,7 @@ module.exports = {
   spelledNameDecision,
   callerNameForWrites,
   callerSpelledName,
+  qualifyingNameEntry,
   sanitizeEmailCandidates,
   sanitizeNameEntries,
   buildDecoderPrompt,

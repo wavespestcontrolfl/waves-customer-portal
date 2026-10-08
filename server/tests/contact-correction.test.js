@@ -4267,7 +4267,7 @@ describe('round-61 hardening', () => {
 describe('runCallContactCorrection — surname the caller spelled out', () => {
   const { buildCustomerFieldCandidates } = require('../services/call-field-candidates');
 
-  const stagedFrom = (quote, { override = true } = {}) => buildCustomerFieldCandidates({
+  const stagedFrom = (quote, { override = true, decoderQuote = 'R-I-V-E-R-S-O-N' } = {}) => buildCustomerFieldCandidates({
     callId: CALL_ID,
     customerId: CUSTOMER_ID,
     extraction: {},
@@ -4278,7 +4278,7 @@ describe('runCallContactCorrection — surname the caller spelled out', () => {
       confidence: { caller_identity: 0.4 },
       evidence: [{ field_path: '/caller/last_name', quote }],
     },
-    nameOverrides: override ? { last_name: { value: 'Riverson', confidence: 0.95, quote: 'R-I-V-E-R-S-O-N' } } : {},
+    nameOverrides: override ? { last_name: { value: 'Riverson', confidence: 0.95, quote: decoderQuote } } : {},
   }).filter((r) => r.field_name === 'last_name')
     .map((r, i) => ({ id: `staged-${i}`, ...r }));
 
@@ -4295,6 +4295,8 @@ describe('runCallContactCorrection — surname the caller spelled out', () => {
 
   it('stages the spelled value with the decoder confidence and provenance, not the extractor score', () => {
     const [row] = stagedFrom('my last name is misspelled, it is Riverson, R-I-V-E-R-S-O-N');
+    // The extractor's evidence quote for the misheard value is NOT carried over.
+    expect(row.evidence_quote).toBe('R-I-V-E-R-S-O-N');
     expect(row).toMatchObject({
       final_recommended_value: 'Riverson',
       confidence: 0.95,
@@ -4316,7 +4318,8 @@ describe('runCallContactCorrection — surname the caller spelled out', () => {
 
   it('auto-applies once the caller says the stored name is wrong and says the name on the same line (judged at 0.95, not 0.4)', async () => {
     const line = 'my last name is misspelled, it is Riverson, R-I-V-E-R-S-O-N';
-    const { res, knex } = await run(stagedFrom(line), line);
+    // The staged quote is the DECODER entry's (here its raw_spoken covers the whole stated turn).
+    const { res, knex } = await run(stagedFrom(line, { decoderQuote: line }), line);
     expect(res.applied).toEqual([{ field: 'last_name', oldValue: 'Riverz', newValue: 'Riverson', quote: line }]);
     expect(knex._data.customers[0].last_name).toBe('Riverson');
     expect(knex._data.customer_field_candidates[0].status).toBe('auto_applied');
