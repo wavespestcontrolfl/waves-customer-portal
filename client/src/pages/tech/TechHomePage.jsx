@@ -1776,7 +1776,7 @@ function RainOutSheet({ service, onClose, onDone }) {
                             fontSize: 14, fontWeight: 500,
                             color: opt.rainChance >= 50 ? '#854d0e' : '#1c1917',
                           }}>
-                            {opt.rainChance}% 🌧
+                            {opt.rainChance}% 🌧{opt.rainScope === 'day' ? ' day' : ''}
                           </span>
                         )}
                       </span>

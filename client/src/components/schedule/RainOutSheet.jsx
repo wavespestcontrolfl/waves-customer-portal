@@ -555,6 +555,11 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // server applies it while choosing, so no chip ever advertises an
     // hour that goes customElapsed the moment it's tapped.
     sameDayFloorMin: minTodayStartMin,
+    // The same two best-times rows as New Appointment (owner 2026-10-08):
+    // road-priced chips with the chance of rain for each hour, ranked by
+    // rain fit for this visit's service (GATE_BOOKING_RAIN_RANK).
+    serviceTypes: [service.serviceType || service.service_type].filter(Boolean),
+    bestRows: true,
   });
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):
@@ -790,7 +795,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                         )}
                         {opt.rainChance != null && (
                           <span style={{ fontSize: 12, fontWeight: 500, color: opt.rainChance >= 50 ? '#B45309' : '#15803D' }}>
-                            {opt.rainChance}% rain
+                            {opt.rainChance}% rain{opt.rainScope === 'day' ? ' that day' : ''}
                           </span>
                         )}
                       </span>
@@ -870,6 +875,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
+              bestRows
             />
             <BestTimeHint
               bestTimes={bestTimes}
