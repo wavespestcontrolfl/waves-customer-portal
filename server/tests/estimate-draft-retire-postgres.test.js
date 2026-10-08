@@ -167,6 +167,9 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     await mockPg('booking_intents').insert({ id: randomUUID(), phone: '+12025550123', pricing_estimate_id: handoff, suppressed: false });
     await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'pending', flags: JSON.stringify({ estimate_id: clarify }) });
+    // A merged bedroom ask keeps targeting its original draft through bedroom_estimate_id.
+    const bedroom = await estimate(c, { createdAt: minutesAgo(60) });
+    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'pending', flags: JSON.stringify({ estimate_id: randomUUID(), bedroom_estimate_id: bedroom }) });
     // A rejected (terminal) clarification is history, not a live dependent.
     const oldClarify = await estimate(c, { createdAt: minutesAgo(60) });
     await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'rejected', flags: JSON.stringify({ estimate_id: oldClarify }) });
@@ -177,7 +180,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(staffDraft)).archived_at).not.toBeNull();
     expect((await row(autoDraft)).archived_at).toBeNull();
     expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBe(autoDraft);
-    for (const id of [handoff, clarify, wizard, assessmentLinked]) expect((await row(id)).archived_at).toBeNull();
+    for (const id of [handoff, clarify, bedroom, wizard, assessmentLinked]) expect((await row(id)).archived_at).toBeNull();
     const bell = await mockPg('notifications').where({ id: bellId }).first();
     expect(bell.done_at).not.toBeNull();
     expect(bell.done_by).toBe('estimate-draft-retire');
@@ -373,8 +376,11 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const bad = await customer();
     const replaced = await estimate(bad, { createdAt: minutesAgo(200) });
     await estimate(bad, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { lastDeliveredAt: '2026-not-a-date', attemptedAt: '2026-also-bad', sentChannels: ['sms'] } }, viewed_at: minutesAgo(80) });
+    // An invalid claim timestamp on a draft is a dead claim, not a query error.
+    const badClaim = await estimate(bad, { createdAt: minutesAgo(200), data: { estimatorEngine: { delivering_at: '2026-not-a-date' } } });
     const { autoDraft } = await sentAfterTwoDrafts();
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBeGreaterThanOrEqual(2);
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBeGreaterThanOrEqual(3);
+    expect((await row(badClaim)).archived_at).not.toBeNull();
     expect((await row(autoDraft)).archived_at).not.toBeNull();
     // The unreadable row falls back to its first view time, which is after the draft: still a real send.
     expect((await row(replaced)).archived_at).not.toBeNull();

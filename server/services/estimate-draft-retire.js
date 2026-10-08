@@ -59,7 +59,8 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
 // A draft with its own live lifecycle is never retired: an assessment-linked
 // pre-draft (ASSESSMENT_EXCEPTION_ABSENT_SQL, kept for staff to price after
 // the visit), a booking-page handoff (booking_intents, which the public
-// capture can re-open), a staged clarification text, or ANY lead that is not
+// capture can re-open), a staged clarification text (by its estimate_id or,
+// for a merged bedroom ask, its bedroom_estimate_id), or ANY lead that is not
 // soft-deleted (owner 2026-10-08: a lead's draft stays for staff, and the
 // sweep never writes to leads). Both link forms count: leads.estimate_id and
 // the draft's own estimate_data.lead_id mirror, which the estimator engine
@@ -78,7 +79,8 @@ const NO_LIVE_DEPENDENTS_SQL = `(
   AND NOT EXISTS (
     SELECT 1 FROM message_drafts m
      WHERE m.intent = 'estimate_clarify'
-       AND m.flags->>'estimate_id' = estimates.id::text
+       AND (m.flags->>'estimate_id' = estimates.id::text
+            OR m.flags->>'bedroom_estimate_id' = estimates.id::text)
        AND m.status IN ('pending', 'approved', 'revised')
        AND m.sent_at IS NULL
   )
