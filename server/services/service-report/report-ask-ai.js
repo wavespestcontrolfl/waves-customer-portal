@@ -416,11 +416,10 @@ function maskAccessSentences(text) {
   return splitSentences(text).map((sentence) => (isAccessSentence(sentence) ? '[access details removed]' : sentence)).join(' ');
 }
 function isAccessSentence(sentence) {
-  if (!ACCESS_DEVICE.test(sentence) || !ACCESS_ACTION.test(sentence)) return false;
-  // An earlier pass may have masked the wrong words and left the value:
-  // "The password [redacted] the [redacted] gate is blue moon".
-  if (/\b(?:password|passcode|code|combo|combination|pin|word)\b[^.?!]*?\b(?:is|was|=|:)\s+(?!\[)\S+/i.test(sentence)) return true;
-  return !/\[(?:redacted|access details removed)\]/.test(sentence);
+  // One masked value does not show that every credential in the sentence is
+  // gone ("Use lockbox [redacted] and tell the guard blue moon"), so the
+  // sentence leaves whole either way (pre-push audit, #5964).
+  return ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence);
 }
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');

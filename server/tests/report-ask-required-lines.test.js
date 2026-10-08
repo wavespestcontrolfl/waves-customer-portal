@@ -779,7 +779,7 @@ describe('answer screen, Codex round 7', () => {
   test.each(['lockbox 42', 'lock box A2', 'keypad #7', 'Key-box 1234'])('the shorthand %s is masked', (credential) => {
     const facts = buildReportAskFacts({ question: `The ${credential} is by the side gate`, data: pestData({ customerConcern: `Use ${credential} to get in` }) });
     expect(JSON.stringify(facts)).not.toMatch(/\b(?:42|A2|#7|1234)\b/);
-    expect(facts.customer_concern).toContain('[redacted]');
+    expect(facts.customer_concern).toMatch(/\[(?:redacted|access details removed)\]/);
   });
 
   test('ordinary lockbox words stay', () => {
@@ -935,7 +935,7 @@ describe('answer screen, Codex round 10', () => {
 describe('answer screen, Codex round 11', () => {
   test.each(['lockbox BLUE', 'lock box XY', 'keypad AB'])('alphabetic shorthand %s is masked', (credential) => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: `Use ${credential} to get in` }) });
-    expect(facts.customer_concern).toContain('[redacted]');
+    expect(facts.customer_concern).toMatch(/\[(?:redacted|access details removed)\]/);
     expect(facts.customer_concern).not.toMatch(/\b(?:BLUE|XY|AB)\b/);
   });
 
@@ -1290,7 +1290,7 @@ describe('answer screen, Codex round 26', () => {
 
   test('whitespace-separated lockbox segments mask whole', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Use lockbox 12 34 by the door. lockbox BLUE RED.' }) });
-    expect(facts.customer_concern).toBe('Use lockbox [redacted] by the door. lockbox [redacted].');
+    expect(facts.customer_concern).toBe('[access details removed] lockbox [redacted].');
   });
 });
 
@@ -1392,7 +1392,7 @@ describe('answer screen, Codex round 30', () => {
 
   test('all-caps lockbox values mask even when they spell a word', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Use lockbox ON RED. Use lockbox IN BLUE. The lockbox is on the gate.' }) });
-    expect(facts.customer_concern).toBe('Use lockbox [redacted]. Use lockbox [redacted]. The lockbox is on the gate.');
+    expect(facts.customer_concern).toBe('[access details removed] [access details removed] The lockbox is on the gate.');
   });
 
   test.each(['My dog got a mouthful of bait.', 'My child had a sip of pesticide.'])('got / had a mouthful is ingestion: %s', (question) => {
@@ -1564,7 +1564,7 @@ describe('answer screen, Codex round 38', () => {
 describe('answer screen, Codex round 39', () => {
   test.each(['Gate code one-two-three-four', 'Gate code 1-2-3-4'])('a hyphen-joined code is masked whole: %s', (concern) => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `${concern}, ants in kitchen` } });
-    expect(facts.customer_concern).toBe('Gate code [redacted], ants in kitchen');
+    expect(facts.customer_concern).toBe('[access details removed]');
   });
 
   test('a hyphenated word is not a code', () => {
@@ -2078,7 +2078,7 @@ describe('answer screen, Codex round 56', () => {
   test('a word credential after an opening phrase is masked and never repeated', () => {
     const data = lawnData({ customerConcern: 'The side gate opens with SUNSET, ants by the pool', reportV2: { aftercare: {} } });
     const facts = buildReportAskFacts({ data });
-    expect(facts.customer_concern).toBe('The side gate opens with [redacted], ants by the pool');
+    expect(facts.customer_concern).toBe('[access details removed]');
     expect(screenAskAnswer('The side gate opens with SUNSET.', { question: 'q', data, facts })).toBe('access_phrase');
   });
 });
@@ -2093,7 +2093,7 @@ test('the drying guidance exempts only its own clause (pre-push audit)', () => {
 describe('answer screen, Codex round 57', () => {
   test('a multiword credential is masked whole', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'The gate opens with BLUE MOON and ants by the pool' } });
-    expect(facts.customer_concern).toBe('The gate opens with [redacted] and ants by the pool');
+    expect(facts.customer_concern).toBe('[access details removed]');
   });
 
   test('the water gap improves toward zero', () => {
@@ -2165,7 +2165,7 @@ describe('answer screen, Codex round 59', () => {
 
   test('a long credential is masked whole, and a stated gate word too', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'The gate opens with BLUE MOON SECRET WORD ALPHA, ants by the pool. Gate word is ZEBRA.' } });
-    expect(facts.customer_concern).toBe('The gate opens with [redacted], ants by the pool. Gate word is [redacted].');
+    expect(facts.customer_concern).toBe('[access details removed] [access details removed]');
   });
 
   test('temperature and wind words must fit the readings', () => {
@@ -2245,7 +2245,7 @@ describe('answer screen, Codex round 60', () => {
 
   test('a credential before the access verb is masked and never repeated', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Use BLUE MOON to unlock the side gate. Ants by the pool.' } });
-    expect(facts.customer_concern).toBe('Use [redacted] to unlock the side gate. Ants by the pool.');
+    expect(facts.customer_concern).toBe('[access details removed] Ants by the pool.');
     expect(screenAskAnswer('Enter BLUE MOON at the gate.', { question: 'q', data: pestData({ applications: [] }), facts })).toBe('access_phrase');
   });
 });
@@ -2596,4 +2596,9 @@ describe('answer screen, Codex round 74', () => {
   test.each(['The service type is not listed on this report.', 'The report does not specify the service type.'])('a recorded service may not be called missing: %s', (answer) => {
     expect(ask(answer)).toBe('service_kind');
   });
+});
+
+test('one masked value does not exempt an access sentence (pre-push audit)', () => {
+  const facts = buildReportAskFacts({ data: lawnData({ customerConcern: 'Use lockbox 42 and tell the guard blue moon. Weeds by the fence.', reportV2: { aftercare: {} } }) });
+  expect(facts.customer_concern).toBe('[access details removed] Weeds by the fence.');
 });
