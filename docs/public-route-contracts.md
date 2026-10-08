@@ -88,7 +88,9 @@ emails, codes and street addresses, but a customer name written in prose is
 not detectable), screened, with the fixed-rule answer as the reply on
 any model miss
 (`server/services/service-report/report-ask-ai.js`). It serves Pest, Lawn and
-Tree & Shrub reports (`data.serviceLine`) on every topic except next-visit,
+Tree & Shrub reports (`data.serviceLine`) for product, finding and summary
+questions. Results, score, trend, pest-pressure and weather questions keep the
+fixed-rule answer (owner 2026-10-08), as do next-visit,
 next-steps (care-permission questions included), re-entry and watering,
 which keep the fixed-rule answer word for word, and photo, lawn-size and
 lawn/tree product-location questions. Termite, rodent,

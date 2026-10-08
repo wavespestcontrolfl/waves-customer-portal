@@ -684,10 +684,10 @@ describe('which questions reach the model', () => {
   });
 
   test('a lawn report and a tree & shrub report still use the model', async () => {
-    const lawn = await ask(lawnData({ reportV2: { water: { weekPlan: null }, aftercare: {} } }), 'How is my lawn doing?', []);
+    const lawn = await ask(lawnData({ reportV2: { water: { weekPlan: null }, aftercare: {} } }), 'What did you do on this visit?', []);
     expect(lawn.callModel).toHaveBeenCalledTimes(1);
     expect(lawn.out.answer).toBe('We took care of it on this visit.');
-    const tree = await ask(pestData({ serviceLine: 'tree_shrub', reportV2: { snapshot: { overallScore: 72, statusHeadline: 'Mostly healthy' } } }), 'How are my shrubs?', []);
+    const tree = await ask(pestData({ serviceLine: 'tree_shrub', reportV2: { snapshot: { overallScore: 72, statusHeadline: 'Mostly healthy' } } }), 'What did you do on this visit?', []);
     expect(tree.callModel).toHaveBeenCalledTimes(1);
     expect(tree.callModel.mock.calls[0][0].text).toContain('plant_health_score_out_of_100');
   });
@@ -2301,7 +2301,7 @@ describe('answer screen, Codex round 62', () => {
 
 describe('answer screen, Codex round 63', () => {
   test('photo and watering questions keep the fixed answer', () => {
-    expect(ruleAnswerReason(lawnData(), [], 'results', 'What did the photos show?')).toBe('photos');
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', 'What did the photos show?')).toBe('photos');
     expect(ruleAnswerReason(lawnData(), [], 'watering', 'Can I turn my sprinklers back on?')).toBe('watering');
   });
 
@@ -2527,4 +2527,25 @@ test('a concern-only condition is repeated as what the customer said, never as f
   const facts = buildReportAskFacts({ question, data });
   expect(screenAskAnswer('Your lawn has root rot.', { question, data, facts })).toBe('target_list');
   expect(screenAskAnswer('You mentioned a concern about root rot.', { question, data, facts })).toBeNull();
+});
+
+// Owner 2026-10-08 ("fixed answers"): results, pest pressure and weather keep
+// the fixed answer with no model call.
+describe('results, pest pressure and weather keep the fixed answer', () => {
+  test.each([
+    ['results', 'Is it working?'],
+    ['unrouted', 'How is my lawn doing?'],
+    ['unrouted', 'How are my shrubs?'],
+    ['unrouted', 'Was pest pressure high?'],
+    ['unrouted', 'What was the weather during the visit?'],
+    ['unrouted', 'Did it rain?'],
+    ['unrouted', 'What is my lawn health score?'],
+    ['unrouted', 'Is my lawn improving?'],
+  ])('%s: %s', (topic, question) => {
+    expect(ruleAnswerReason(lawnData(), [], topic, question)).toBe('results');
+  });
+
+  test.each(['What was applied today?', 'What did you find?', 'What did you do on this visit?'])('the model still answers: %s', (question) => {
+    expect(ruleAnswerReason(lawnData({ reportV2: { aftercare: {} } }), [], 'applied', question)).toBeNull();
+  });
 });

@@ -2478,6 +2478,8 @@ const REENTRY_QUESTION = new RegExp(`\\b(?:usable|re-?ent\\w*|ready\\s+(?:to|for
 const LAWN_PROGRESS_QUESTION = /\b(?:chang\w*|progress\w*|improv\w*|since|trend\w*|compar\w*|better|worse|before|first\s+(?:visit|assessment)|over\s+time|history)\b/i;
 const LAWN_SIZE_QUESTION = /\bhow\s+(?:big|large|much\s+(?:lawn|turf|grass|yard))\b|\b(?:lawn|turf|yard|property)\s+size\b|\bsize\s+of\s+(?:my|the|our)\b|\bsquare\s+f(?:ee|oo)t(?:age)?\b|\bsq\.?\s*ft\b|\bacres?\b|\bacreage\b/i;
 const PRODUCT_LOCATION_QUESTION = /\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
+// Results, pest pressure and weather asked in any words (owner 2026-10-08).
+const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|how\s+(?:is|are|was|did|does|do)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?)\b/i;
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
@@ -2529,7 +2531,10 @@ function asksAboutUnrecordedProduct(question, data = {}) {
 // - photos: photo text is not on the fact sheet (Codex P1 #5964 r63);
 // - next_steps: the report's own instructions are the answer, and the model
 //   has no ground for care steps or care permission (Codex P1s #5964 r31, r57).
-const FIXED_TOPICS = new Set(['next_visit', 'reentry', 'watering', 'next_steps']);
+// - results: owner 2026-10-08 ("fixed answers"): lawn and plant results, pest
+//   pressure and weather keep the fixed answer, so no AI wording can contradict
+//   a score, a trend, the gauge or a weather reading.
+const FIXED_TOPICS = new Set(['next_visit', 'reentry', 'watering', 'next_steps', 'results']);
 function fixedAnswerTopic(topic, question, data = {}) {
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   if (FIXED_TOPICS.has(topic)) return topic;
@@ -2539,6 +2544,7 @@ function fixedAnswerTopic(topic, question, data = {}) {
   // A legacy lawn page (no reportV2) draws its own trend and "since first
   // assessment" delta, which the sheet does not carry (Codex P1 #5964 r70).
   if (data.serviceLine === 'lawn' && !data.reportV2 && LAWN_PROGRESS_QUESTION.test(question)) return 'legacy_progress';
+  if (RESULTS_QUESTION.test(question)) return 'results';
   if (PHOTO_QUESTION.test(question)) return 'photos';
   // The blog card's title is not on the fact sheet (Codex P1 #5964 r71).
   if (/\b(?:blog|article|post|reading|read\s+more)\b/i.test(question)) return 'blog';
