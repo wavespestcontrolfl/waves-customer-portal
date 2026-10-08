@@ -1535,9 +1535,16 @@ const ONE_TIME = {
 // materialPer1000 = product cost at the rate used, $ per 1,000 sq ft
 // (SiteOne catalog prices, 2026-10-08). Labor minutes are ESTIMATES, not
 // measured times — recalibrate against completed jobs before re-pricing.
-// maxPerYear is the most applications a property may be sold in 12 months
-// (label ceiling or owner ruling); it caps the quote, it does not track
-// what was applied.
+// Version 1 sells ONE application per estimate (owner ruling 2026-10-08): a
+// second application is a new estimate. maxPerYear is label-limit METADATA
+// only (label ceiling or owner ruling, most applications a property may be
+// sold in 12 months): the catalog payload gives it to the estimator screen,
+// and nothing in the pricer reads it.
+// serviceKey is the add-on's own `services` catalog key (migration
+// 20261008200000): the engine line and the mapped row carry it so nothing
+// downstream guesses a service from the display name. category is the
+// service family (web sweep = pest control, the rest = lawn maintenance, owner
+// ruling 2026-10-08): it drives tax, the invoice label and the service mix.
 const AREA_ADDONS = {
   targetMargin: 0.60,
   adminPerJob: 8,             // booking + invoicing per one-time job
@@ -1546,6 +1553,8 @@ const AREA_ADDONS = {
     // year to pest customers (label: 600 lb/acre per 12 months, 60 days apart).
     bed_pre_emergent: {
       name: 'Bed Pre-Emergent Weed Control',
+      serviceKey: 'area_addon_bed_pre_emergent',
+      category: 'lawn_care',
       areaLabel: 'bed',
       materialPer1000: 10.32,
       setupMin: 6,
@@ -1561,6 +1570,8 @@ const AREA_ADDONS = {
     // the TREATED area (damage plus the green edge), not the dead patch.
     lawn_insect_spot: {
       name: 'Lawn Insect Spot Treatment',
+      serviceKey: 'area_addon_lawn_insect_spot',
+      category: 'lawn_care',
       areaLabel: 'treated lawn',
       materialPer1000: 1.45,
       setupMin: 8,
@@ -1574,6 +1585,8 @@ const AREA_ADDONS = {
     // Topchoice at 2 lb/1,000 ($1.83/lb), broadcast once a year.
     fire_ant_yard: {
       name: 'Fire Ant Yard Treatment',
+      serviceKey: 'area_addon_fire_ant_yard',
+      category: 'lawn_care',
       areaLabel: 'lawn',
       materialPer1000: 3.66,
       setupMin: 6,
@@ -1584,6 +1597,8 @@ const AREA_ADDONS = {
     // Acelepryn at 0.184 fl oz/1,000 ($14.14/fl oz), once a year (April).
     lawn_insect_preventive: {
       name: 'Yearly Lawn Insect Preventive',
+      serviceKey: 'area_addon_lawn_insect_preventive',
+      category: 'lawn_care',
       areaLabel: 'lawn',
       materialPer1000: 2.60,
       setupMin: 8,
@@ -1597,6 +1612,8 @@ const AREA_ADDONS = {
     // 6-month soil residual (indaziflam): hard surfaces and bare ground only.
     hardscape_weed: {
       name: 'Shell, Rock & Paver Weed Control',
+      serviceKey: 'area_addon_hardscape_weed',
+      category: 'lawn_care',
       areaLabel: 'treated',
       materialPer1000: 18.48,
       setupMin: 8,
@@ -1608,6 +1625,8 @@ const AREA_ADDONS = {
     // one flat job (no area tiers).
     web_sweep: {
       name: 'Web Sweep',
+      serviceKey: 'area_addon_web_sweep',
+      category: 'pest_control',
       areaLabel: null,
       materialPer1000: 0,
       setupMin: 25,
@@ -1617,6 +1636,16 @@ const AREA_ADDONS = {
     },
   },
 };
+
+// The AREA_ADDONS item a priced or mapped row stands for, or null. Rows are
+// identified by their add-on key, never by display name: "Fire Ant Yard
+// Treatment" reads as a pest job to every name matcher. Own-property lookup
+// so a key like "constructor" is not an add-on.
+function areaAddOnConfig(row) {
+  if (!row || typeof row !== 'object' || row.service !== 'area_addon') return null;
+  const key = typeof row.addOnKey === 'string' ? row.addOnKey : null;
+  return key && Object.prototype.hasOwnProperty.call(AREA_ADDONS.items, key) ? AREA_ADDONS.items[key] : null;
+}
 
 // ============================================================
 // SPECIALTY SERVICES
@@ -2487,7 +2516,7 @@ module.exports = {
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
-  ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
+  ONE_TIME, AREA_ADDONS, areaAddOnConfig, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,

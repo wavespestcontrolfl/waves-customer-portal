@@ -8471,27 +8471,23 @@ function isPlainAreaAddOnObject(value) {
 // The ONE validator for an add-on request. priceAreaAddOn (direct callers) and
 // the estimate engine's services.areaAddOns block both call it, so the rules
 // cannot drift between the two doors: known key (exact, case-sensitive),
-// visitContext, whole-number applications, and a positive area for tiered
-// keys. An area above the largest tier or applications above maxPerYear are
-// VALID input (they price as a custom quote), not errors. It does not check
-// the gate and prices nothing.
+// visitContext and a positive area for tiered keys. An area above the largest
+// tier is VALID input (it prices as a custom quote), not an error. Version 1
+// sells one application per estimate, so there is no count to validate. It
+// does not check the gate and prices nothing.
 function normalizeAreaAddOnInput(addOnKey, options = {}) {
   assertEnum(addOnKey, Object.keys(AREA_ADDONS.items), 'addOnKey');
   if (!isPlainAreaAddOnObject(options)) {
     throw buildPricingError('Area add-on options must be an object', { field: 'areaAddOns', addOnKey });
   }
   const cfg = AREA_ADDONS.items[addOnKey];
+  // Not silently priced as one: a caller asking for several applications
+  // would be quoted a single visit.
+  if (options.applications !== undefined) {
+    throw buildPricingError('applications is not supported: each area add-on is one application per estimate, and a second application is a new estimate', { field: 'applications', addOnKey });
+  }
   const visitContext = options.visitContext ?? 'standalone';
   assertEnum(visitContext, AREA_ADDON_VISIT_CONTEXTS, 'visitContext');
-  const rawApplications = options.applications;
-  const scalarApplications = typeof rawApplications === 'number'
-    || (typeof rawApplications === 'string' && rawApplications.trim() !== '');
-  const applications = rawApplications === undefined
-    ? 1
-    : (scalarApplications ? Number(rawApplications) : NaN);
-  if (!Number.isInteger(applications) || applications < 1) {
-    throw buildPricingError('applications must be a whole number of 1 or more', { field: 'applications', value: options.applications });
-  }
   let areaSqFt = null;
   let tierSqFt = null;
   if (cfg.tiers) {
@@ -8508,14 +8504,15 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
   }
   // Alias match only: an unknown or missing grass is null, never a default.
   const grassTrack = matchGrassTrack(options.grassType ?? options.track);
-  return { addOnKey, cfg, visitContext, applications, areaSqFt, tierSqFt, grassTrack };
+  return { addOnKey, cfg, visitContext, areaSqFt, tierSqFt, grassTrack };
 }
 
 // One-time add-on treatment priced from AREA_ADDONS (see constants.js for
 // the formula and the owner rulings). `areaSqFt` is the TREATED area; the
 // line prices at the top of the tier that holds it. An area above the
-// largest tier, or more applications than maxPerYear, returns an unpriced
-// custom-quote line instead of extrapolating.
+// largest tier returns an unpriced custom-quote line instead of extrapolating.
+// One application per estimate (owner ruling 2026-10-08): the price is for one
+// visit and bills once; a second application is a new estimate.
 //
 // visitContext 'sameTripAddOn' drops the drive minutes, so it is only true
 // when a host visit exists. This function cannot see the rest of the
@@ -8526,7 +8523,7 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
 function priceAreaAddOn(addOnKey, options = {}) {
   assertAreaAddOnsEnabled();
   const {
-    cfg, visitContext, applications, areaSqFt, tierSqFt, grassTrack,
+    cfg, visitContext, areaSqFt, tierSqFt, grassTrack,
   } = normalizeAreaAddOnInput(addOnKey, options);
 
   const base = {
@@ -8534,8 +8531,10 @@ function priceAreaAddOn(addOnKey, options = {}) {
     addOnKey,
     name: cfg.name,
     visitContext,
-    applications,
-    maxPerYear: cfg.maxPerYear,
+    // The add-on's own catalog identity and family travel on the line so
+    // nothing downstream guesses a service from the display name.
+    catalogServiceKey: cfg.serviceKey,
+    addOnCategory: cfg.category,
     // No recurring-customer perk and no WaveGuard percentage on add-ons.
     discountable: false,
   };
@@ -8558,9 +8557,6 @@ function priceAreaAddOn(addOnKey, options = {}) {
   if (cfg.tiers && tierSqFt === null) {
     return customQuote('area_addon_area_above_largest_tier', { areaSqFt, tierSqFt: null });
   }
-  if (applications > cfg.maxPerYear) {
-    return customQuote('area_addon_applications_above_yearly_limit', { areaSqFt, tierSqFt });
-  }
 
   const tierK = (tierSqFt || 0) / 1000;
   const materialCost = tierK * cfg.materialPer1000;
@@ -8568,20 +8564,15 @@ function priceAreaAddOn(addOnKey, options = {}) {
   const driveMin = visitContext === 'standalone' ? GLOBAL.DRIVE_TIME : 0;
   const laborCost = (onSiteMin + driveMin) * GLOBAL.LABOR_RATE / 60;
   const cost = materialCost + laborCost + AREA_ADDONS.adminPerJob;
-  const perApplication = roundUpToNine(cost / (1 - AREA_ADDONS.targetMargin));
-  const price = perApplication * applications;
+  const price = roundUpToNine(cost / (1 - AREA_ADDONS.targetMargin));
 
   const detailParts = [];
   if (tierSqFt) detailParts.push(`Up to ${tierSqFt.toLocaleString()} sq ft ${cfg.areaLabel} area`);
   detailParts.push(visitContext === 'sameTripAddOn' ? 'Same visit as a booked service' : 'Own visit');
-  // Unit price rides the detail so downstream copy can say "per application"
-  // (AGENTS.md: customer-facing units read per application, never per visit).
-  if (applications > 1) detailParts.push(`${applications} applications at $${perApplication} per application`);
 
   return {
     ...base,
     price,
-    perApplication,
     areaSqFt,
     tierSqFt,
     manualReviewReasons: [],
@@ -8592,16 +8583,16 @@ function priceAreaAddOn(addOnKey, options = {}) {
       admin: AREA_ADDONS.adminPerJob,
       onSiteMin: roundMoney(onSiteMin),
       driveMin,
-      perApplication: roundMoney(cost),
+      total: roundMoney(cost),
     },
-    margin: Math.round((perApplication - cost) / perApplication * 1000) / 1000,
+    margin: Math.round((price - cost) / price * 1000) / 1000,
   };
 }
 
 // Prices a whole services.areaAddOns list for the estimate engine: every
 // entry is validated in full FIRST (so a commercial property cannot turn an
 // unknown key or a bad value into a manual-quote line), a key may appear once
-// (a repeat would sidestep maxPerYear; the count belongs in `applications`),
+// (version 1 sells one application per estimate; a second application is a new estimate),
 // then each entry is priced unless `isCommercialManualQuote(entry, family)`
 // claims it (web sweep = pest control family, the rest = lawn care).
 // `grassSources` name the estimate's grass for entries that do not carry one.
@@ -8614,7 +8605,7 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
     .find((value) => value !== undefined && value !== null && value !== '');
   if (entries === undefined) return { lines: [], requests: [] };
   if (!Array.isArray(entries)) {
-    throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt, visitContext, applications }', { field: 'areaAddOns' });
+    throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt, visitContext }', { field: 'areaAddOns' });
   }
   if (entries.length > 0) assertAreaAddOnsEnabled();
   const seenKeys = new Set();
@@ -8625,7 +8616,7 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
     const options = { ...entry, grassType: entry.grassType ?? entry.track ?? grassType };
     const normalized = normalizeAreaAddOnInput(entry.key, options);
     if (seenKeys.has(normalized.addOnKey)) {
-      throw buildPricingError(`services.areaAddOns lists ${normalized.addOnKey} more than once - send one entry per add-on and put the count in applications`, { field: 'areaAddOns', index, key: normalized.addOnKey });
+      throw buildPricingError(`services.areaAddOns lists ${normalized.addOnKey} more than once - each add-on is sold once per estimate (a second application is a new estimate)`, { field: 'areaAddOns', index, key: normalized.addOnKey });
     }
     seenKeys.add(normalized.addOnKey);
     return { entry, options, normalized };

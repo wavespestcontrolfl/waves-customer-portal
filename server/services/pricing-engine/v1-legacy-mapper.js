@@ -199,21 +199,21 @@ function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
 // so the row name must come from the line's own `name`.
 const PLAN_LABELED_SERVICES = new Set(['trap_only_retainer', 'area_addon']);
 
-// Identity of an area add-on row (which add-on, how many applications, which
-// tier) so a stored row can be told apart from its siblings. Empty otherwise.
+// Identity of an area add-on row (which add-on, which tier, which catalog
+// service) so a stored row can be told apart from its siblings and nothing
+// downstream guesses from the display name. One application per estimate, so
+// `price` is the whole charge. Empty for any other service.
 function areaAddOnFields(li = {}) {
   if (li.service !== 'area_addon') return {};
   return {
     addOnKey: li.addOnKey,
-    applications: li.applications,
-    // Unit price: `price` is the total for all applications, so downstream
-    // copy needs this to say "$139 per application" (AGENTS.md per-application
-    // rule). Null on an unpriced custom-quote row.
-    perApplication: li.perApplication ?? null,
-    maxPerYear: li.maxPerYear ?? null,
+    catalogServiceKey: li.catalogServiceKey ?? null,
+    addOnCategory: li.addOnCategory ?? null,
     areaSqFt: li.areaSqFt ?? null,
     tierSqFt: li.tierSqFt ?? null,
     visitContext: li.visitContext,
+    // Engine on-site minutes (no drive): the booked visit's duration floor.
+    onSiteMinutes: li.costs?.onSiteMin ?? null,
     discountable: false,
   };
 }

@@ -63,7 +63,7 @@ describe('area add-on treatment pricing', () => {
     expect(own.costs.driveMin).toBe(GLOBAL.DRIVE_TIME);
     expect(same.costs.driveMin).toBe(0);
     expect(own.costs.material).toBe(same.costs.material);
-    expect(own.costs.perApplication - same.costs.perApplication)
+    expect(own.costs.total - same.costs.total)
       .toBeCloseTo(GLOBAL.DRIVE_TIME * GLOBAL.LABOR_RATE / 60, 2);
   });
 
@@ -74,17 +74,28 @@ describe('area add-on treatment pricing', () => {
     expect(priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn' }).price).toBe(59);
   });
 
-  test('shell, rock and paver weed kill stops at the label limit of two a year', () => {
-    expect(priceAreaAddOn('hardscape_weed', { areaSqFt: 1000, applications: 2 }).price).toBe(238);
-    expect(priceAreaAddOn('hardscape_weed', { areaSqFt: 1000, applications: 3 })).toMatchObject({
-      price: null,
-      customQuoteReason: 'area_addon_applications_above_yearly_limit',
-    });
+  test('version 1 sells one application: no application count exists, and a caller that sends one is refused', () => {
+    const line = priceAreaAddOn('hardscape_weed', { areaSqFt: 1000 });
+    expect(line.price).toBe(119);
+    for (const key of ['applications', 'perApplication', 'maxPerYear']) expect(line).not.toHaveProperty(key);
+    expect(JSON.stringify(line)).not.toMatch(/per application/i);
+    for (const applications of [1, 2, 0, '2', null]) {
+      expect(() => priceAreaAddOn('hardscape_weed', { areaSqFt: 1000, applications }))
+        .toThrow(/applications is not supported/);
+    }
+    expect(() => generateEstimate({ ...HOME, services: { areaAddOns: [{ key: 'web_sweep', applications: 2 }] } }))
+      .toThrow(expect.objectContaining({ statusCode: 400, failClosed: true }));
   });
 
-  test('two bed pre-emergent applications price at twice one application', () => {
-    const line = priceAreaAddOn('bed_pre_emergent', { areaSqFt: 1000, applications: 2 });
-    expect(line).toMatchObject({ price: 198, perApplication: 99, applications: 2 });
+  test('every add-on names its own catalog service key and family', () => {
+    const keys = Object.values(AREA_ADDONS.items).map((cfg) => cfg.serviceKey);
+    expect(new Set(keys).size).toBe(6);
+    for (const [key, cfg] of Object.entries(AREA_ADDONS.items)) {
+      expect(cfg.serviceKey).toBe(`area_addon_${key}`);
+      expect(cfg.category).toBe(key === 'web_sweep' ? 'pest_control' : 'lawn_care');
+      const line = priceAreaAddOn(key, { areaSqFt: cfg.tiers ? cfg.tiers[0] : undefined, grassType: 'st_augustine' });
+      expect(line).toMatchObject({ catalogServiceKey: cfg.serviceKey, addOnCategory: cfg.category });
+    }
   });
 
   test('the line never takes a discount pass', () => {
@@ -97,17 +108,6 @@ describe('area add-on treatment pricing', () => {
       price: null,
       requiresCustomQuote: true,
       customQuoteReason: 'area_addon_area_above_largest_tier',
-    });
-  });
-
-  test('more applications than the yearly limit is a custom quote', () => {
-    // Two half-rate Arena applications equal the season limit; a third passes it.
-    expect(priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 2, grassType: 'st_augustine' }).price).toBe(158);
-    const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 3, grassType: 'st_augustine' });
-    expect(line).toMatchObject({
-      price: null,
-      requiresCustomQuote: true,
-      customQuoteReason: 'area_addon_applications_above_yearly_limit',
     });
   });
 
@@ -136,24 +136,18 @@ describe('area add-on treatment pricing', () => {
     expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt: -5 })).toThrow(/areaSqFt is required/);
     expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000, visitContext: 'builderBatch' }))
       .toThrow(/visitContext must be one of/);
-    expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000, applications: 0 }))
-      .toThrow(/applications must be a whole number/);
     // Number(true) is 1 and Number([1200]) is 1200: neither is an area.
     for (const areaSqFt of [true, [1200], {}, '', '  ', null]) {
       expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt })).toThrow(/areaSqFt is required/);
     }
-    for (const applications of [true, [1], '', null]) {
-      expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000, applications }))
-        .toThrow(/applications must be a whole number/);
-    }
-    expect(priceAreaAddOn('fire_ant_yard', { areaSqFt: '3000', applications: '1' }).price).toBe(99);
+    expect(priceAreaAddOn('fire_ant_yard', { areaSqFt: '3000' }).price).toBe(99);
   });
 });
 
 // Synthetic property only: no customer data.
 const HOME = { homeSqFt: 2000, lotSqFt: 7500 };
 const TWO_ADDONS = [
-  { key: 'bed_pre_emergent', areaSqFt: 1500, applications: 2 },
+  { key: 'bed_pre_emergent', areaSqFt: 1500 },
   { key: 'web_sweep', visitContext: 'sameTripAddOn' },
 ];
 const addOnLines = (estimate) => estimate.lineItems.filter((l) => l.service === 'area_addon');
@@ -180,8 +174,8 @@ describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
   test('two add-ons on one estimate are two line items and sum into the one-time total', () => {
     const estimate = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
     const lines = addOnLines(estimate);
-    expect(lines.map((l) => [l.addOnKey, l.price])).toEqual([['bed_pre_emergent', 278], ['web_sweep', 59]]);
-    expect(estimate.summary.oneTimeTotal).toBe(337);
+    expect(lines.map((l) => [l.addOnKey, l.price])).toEqual([['bed_pre_emergent', 139], ['web_sweep', 59]]);
+    expect(estimate.summary.oneTimeTotal).toBe(198);
   });
 
   test('a recurring customer gets no discount on an add-on, at any tier', () => {
@@ -209,7 +203,7 @@ describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
     expect(withAddOns.waveGuard.tier).toBe(without.waveGuard.tier);
     expect(withAddOns.waveGuard.activeServices).toEqual(without.waveGuard.activeServices);
     expect(withAddOns.summary.recurringAnnualAfterDiscount).toBe(without.summary.recurringAnnualAfterDiscount);
-    expect(withAddOns.summary.oneTimeTotal).toBe(without.summary.oneTimeTotal + 337);
+    expect(withAddOns.summary.oneTimeTotal).toBe(without.summary.oneTimeTotal + 198);
     // Add-ons alone are not a qualifying service.
     const alone = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
     expect(alone.waveGuard.activeServices).toEqual([]);
@@ -221,8 +215,8 @@ describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
       manualDiscount: { type: 'PERCENT', value: 10 },
       services: { areaAddOns: TWO_ADDONS },
     });
-    expect(addOnLines(estimate).map((l) => l.price)).toEqual([278, 59]);
-    expect(estimate.summary.oneTimeTotal).toBe(337);
+    expect(addOnLines(estimate).map((l) => l.price)).toEqual([139, 59]);
+    expect(estimate.summary.oneTimeTotal).toBe(198);
   });
 
   test.each([
@@ -279,23 +273,18 @@ describe('area add-on input rules in the estimate engine', () => {
     name: 'PricingError', statusCode: 400, failClosed: true, ...(message ? { message: expect.stringMatching(message) } : {}),
   }));
 
-  test('the same key twice is refused, so maxPerYear cannot be split across rows', () => {
-    // 2 + 2 = 4 applications of a 2-a-year weed kill would each pass maxPerYear on its own row.
+  test('the same key twice is refused: each add-on is sold once per estimate (a second application is a new estimate)', () => {
     throwsFailClosed(() => run([
-      { key: 'hardscape_weed', areaSqFt: 1000, applications: 2 },
-      { key: 'hardscape_weed', areaSqFt: 1000, applications: 2 },
+      { key: 'hardscape_weed', areaSqFt: 1000 },
+      { key: 'hardscape_weed', areaSqFt: 1000 },
     ]), /more than once/);
     throwsFailClosed(() => run([{ key: 'web_sweep' }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }]), /more than once/);
-    // The count goes in applications; over the yearly limit that is one custom-quote row.
-    const [line] = addOnLines(run([{ key: 'hardscape_weed', areaSqFt: 1000, applications: 4 }]));
-    expect(line).toMatchObject({ price: null, customQuoteReason: 'area_addon_applications_above_yearly_limit' });
   });
 
   test('a commercial property validates the entry first: unknown key or bad value throws, never a manual-quote line', () => {
     const commercial = { propertyType: 'commercial' };
     throwsFailClosed(() => run([{ key: 'aeration', areaSqFt: 1000 }], commercial), /addOnKey must be one of/);
     throwsFailClosed(() => run([{ key: 'fire_ant_yard' }], commercial), /areaSqFt is required/);
-    throwsFailClosed(() => run([{ key: 'web_sweep', applications: 0 }], commercial), /applications must be a whole number/);
     throwsFailClosed(() => run([{ key: 'web_sweep', visitContext: 'builderBatch' }], commercial), /visitContext must be one of/);
     throwsFailClosed(() => run([{ key: 'web_sweep' }, 'web_sweep'], commercial), /must be an object/);
     // A valid entry is still the commercial manual-quote line.
@@ -316,10 +305,8 @@ describe('area add-on input rules in the estimate engine', () => {
     expect(addOnLines(run([{ key: 'web_sweep', note: 'ignored' }])).map((l) => l.price)).toEqual([89]);
   });
 
-  test('web sweep takes applications up to its yearly limit and ignores an area', () => {
-    expect(addOnLines(run([{ key: 'web_sweep', applications: 12, areaSqFt: 'x' }]))[0].price).toBe(89 * 12);
-    expect(addOnLines(run([{ key: 'web_sweep', applications: 13 }]))[0]).toMatchObject({ price: null, requiresCustomQuote: true });
-    throwsFailClosed(() => run([{ key: 'web_sweep', applications: 1.5 }]), /applications must be a whole number/);
+  test('web sweep is one flat job that ignores an area', () => {
+    expect(addOnLines(run([{ key: 'web_sweep', areaSqFt: 'x' }]))[0].price).toBe(89);
   });
 });
 
@@ -363,7 +350,7 @@ describe('same-visit area add-ons need a host visit on the same estimate', () =>
   test('an unpriced line is never a host: a custom-quote add-on, a commercial manual quote, or a priced-nothing estimate', () => {
     // standalone add-on over the top tier = custom quote, no price
     expect(() => run([{ key: 'fire_ant_yard', areaSqFt: 9000 }, SAME_TRIP_SWEEP])).toThrow(HOST_ERROR);
-    expect(() => run([{ key: 'web_sweep', applications: 13 }, { key: 'bed_pre_emergent', areaSqFt: 1000, visitContext: 'sameTripAddOn' }])).toThrow(HOST_ERROR);
+    expect(() => run([{ key: 'bed_pre_emergent', areaSqFt: 9000 }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }])).toThrow(HOST_ERROR);
     // commercial: the add-on lines are manual quotes, so even a standalone one hosts nothing
     expect(() => run([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, SAME_TRIP_SWEEP], {}, { propertyType: 'commercial' })).toThrow(HOST_ERROR);
   });
@@ -386,13 +373,21 @@ describe('area add-ons through the legacy mapper', () => {
     const estimate = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
     const mapped = mapV1ToLegacyShape(estimate);
     expect(mapped.oneTime.items.map((i) => [i.service, i.name, i.price, i.addOnKey])).toEqual([
-      ['area_addon', 'Bed Pre-Emergent Weed Control', 278, 'bed_pre_emergent'],
+      ['area_addon', 'Bed Pre-Emergent Weed Control', 139, 'bed_pre_emergent'],
       ['area_addon', 'Web Sweep', 59, 'web_sweep'],
     ]);
-    expect(mapped.oneTime.items[0]).toMatchObject({ applications: 2, tierSqFt: 2000, discountable: false });
+    expect(mapped.oneTime.items[0]).toMatchObject({
+      tierSqFt: 2000,
+      discountable: false,
+      catalogServiceKey: 'area_addon_bed_pre_emergent',
+      addOnCategory: 'lawn_care',
+      visitContext: 'standalone',
+    });
+    expect(mapped.oneTime.items[0].onSiteMinutes).toBeCloseTo(6 + 8 * 2, 5);
+    expect(mapped.oneTime.items[1]).toMatchObject({ catalogServiceKey: 'area_addon_web_sweep', addOnCategory: 'pest_control' });
     expect(mapped.oneTime.specItems).toEqual([]);
-    expect(mapped.oneTime.total).toBe(337);
-    expect(mapped.oneTime.otSubtotal).toBe(337);
+    expect(mapped.oneTime.total).toBe(198);
+    expect(mapped.oneTime.otSubtotal).toBe(198);
     expect(mapped.hasOneTime).toBe(true);
   });
 
@@ -420,29 +415,23 @@ describe('area add-ons through the legacy mapper', () => {
   });
 });
 
-describe('area add-on unit price through the mapper', () => {
-  test('a two-application row carries perApplication on the item, and its detail names the per-application price', () => {
+describe('area add-on rows carry one price and the catalog key through the mapper', () => {
+  test('no row carries an application count or a unit price, and an unpriced custom-quote row keeps its catalog key', () => {
     const estimate = generateEstimate({
       ...HOME,
-      services: { areaAddOns: [{ key: 'fire_ant_yard', areaSqFt: 5000, applications: 1 }, { key: 'bed_pre_emergent', areaSqFt: 1500, applications: 2 }] },
+      services: { areaAddOns: [{ key: 'fire_ant_yard', areaSqFt: 9000 }, { key: 'hardscape_weed', areaSqFt: 1000 }] },
     });
     const mapped = mapV1ToLegacyShape(estimate);
-    const bed = mapped.oneTime.items.find((i) => i.addOnKey === 'bed_pre_emergent');
-    expect(bed).toMatchObject({ price: 278, applications: 2, perApplication: 139, maxPerYear: AREA_ADDONS.items.bed_pre_emergent.maxPerYear });
-    expect(bed.detail).toContain('2 applications at $139 per application');
-    expect(bed.detail).not.toMatch(/per visit/i);
-    expect(mapped.oneTime.items.find((i) => i.addOnKey === 'fire_ant_yard')).toMatchObject({ applications: 1, perApplication: 129 });
-  });
-
-  test('the final projection keeps perApplication, and an unpriced custom-quote row carries null', () => {
-    const estimate = generateEstimate({
-      ...HOME,
-      services: { areaAddOns: [{ key: 'fire_ant_yard', areaSqFt: 9000 }, { key: 'hardscape_weed', areaSqFt: 1000, applications: 2 }] },
-    });
-    const mapped = mapV1ToLegacyShape(estimate);
-    expect(mapped.oneTime.specItems).toEqual([expect.objectContaining({ addOnKey: 'fire_ant_yard', perApplication: null })]);
-    expect(mapped.specItems.find((i) => i.addOnKey === 'fire_ant_yard')).toMatchObject({ perApplication: null });
-    expect(mapped.oneTime.items[0]).toMatchObject({ addOnKey: 'hardscape_weed', perApplication: 119, applications: 2 });
+    const spec = mapped.oneTime.specItems.find((i) => i.addOnKey === 'fire_ant_yard');
+    expect(spec).toMatchObject({ catalogServiceKey: 'area_addon_fire_ant_yard', addOnCategory: 'lawn_care', price: null });
+    expect(mapped.specItems.find((i) => i.addOnKey === 'fire_ant_yard')).toMatchObject({ catalogServiceKey: 'area_addon_fire_ant_yard' });
+    const weed = mapped.oneTime.items[0];
+    expect(weed).toMatchObject({ addOnKey: 'hardscape_weed', price: 119 });
+    for (const row of [spec, weed]) {
+      expect(row).not.toHaveProperty('applications');
+      expect(row).not.toHaveProperty('perApplication');
+    }
+    expect(weed.detail).not.toMatch(/per application|per visit/i);
   });
 });
 
