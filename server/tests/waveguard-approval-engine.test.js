@@ -54,7 +54,9 @@ class FakeQuery {
   // The frozen-property scope: COALESCE(pah_scope.property_id, ss.property_id) = ? / IS NULL. A fake row carries the
   // visit's property_id and, for a ledgered row, the property frozen at completion (frozen_property_id).
   whereRaw(sql, bindings) {
-    this.filters.push({ column: '__treated_property', op: /IS NULL/i.test(sql) ? 'null' : '=', value: Array.isArray(bindings) ? bindings[0] : undefined });
+    // "= ? OR ... IS NULL" (the take-all count): this property's rows and the rows that name no property.
+    const op = /=\s*\?\s+OR\b/i.test(sql) ? 'equalOrNull' : (/IS NULL/i.test(sql) ? 'null' : '=');
+    this.filters.push({ column: '__treated_property', op, value: Array.isArray(bindings) ? bindings[0] : undefined });
     return this;
   }
 
@@ -112,6 +114,7 @@ class FakeQuery {
     return this.filters.every(({ column, op, value }) => {
       const rowValue = valueForColumn(row, column);
       if (op === 'null') return rowValue == null;
+      if (op === 'equalOrNull') return rowValue == null || String(rowValue) === String(value);
       if (op === 'in') return value.map(String).includes(String(rowValue));
       if (op === '<') return String(rowValue) < String(value);
       return String(rowValue) === String(value);
@@ -423,6 +426,8 @@ describe('waveguard approval engine', () => {
       expect(await codes([artavia('2026-05-13', undefined)], at('A'))).toEqual(['fungicide_frac_rotation_approval']);
       expect(await codes([artavia('2026-05-13', undefined)], { service_type: 'Lawn Care' })).toEqual([]);
       expect(await codes([artavia('2026-05-13', 'A')], { service_type: 'Lawn Care' })).toEqual(['fungicide_frac_rotation_approval']);
+      // An older spray that names no property may have been at this property: it makes this one a third, not the pair.
+      expect(await codes([artavia('2026-05-13', 'A'), artavia('2026-04-11', undefined)], at('A'))).toEqual(['fungicide_frac_rotation_approval']);
     });
 
     test('every other same-group repeat behaves as on main, whatever targets were recorded; the finding keeps what was read', async () => {

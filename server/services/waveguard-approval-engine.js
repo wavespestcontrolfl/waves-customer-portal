@@ -81,10 +81,13 @@ function productGroups(product) {
 // completion: a later address correction on the visit must not move it); a legacy row with no frozen property falls
 // back to its visit's property (the same rule application-limits.js scopeHistoryToTreatment applies). The query
 // needs `sp` and `sr`; `joinVisit` adds the visit when the query has not joined it.
-function scopeToTreatedProperty(query, propertyId, { joinVisit = false } = {}) {
+// includeUnplaced: an application with no property at all (no frozen property, no visit property) also counts at
+// `propertyId`. It may have been made there, so a count that withholds an exemption takes it (the safe side).
+function scopeToTreatedProperty(query, propertyId, { joinVisit = false, includeUnplaced = false } = {}) {
   if (joinVisit) query.leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id');
   query.leftJoin('property_application_history as pah_scope', 'pah_scope.service_product_id', 'sp.id');
-  if (propertyId) query.whereRaw('COALESCE(pah_scope.property_id, ss.property_id) = ?', [propertyId]);
+  if (propertyId && includeUnplaced) query.whereRaw('(COALESCE(pah_scope.property_id, ss.property_id) = ? OR COALESCE(pah_scope.property_id, ss.property_id) IS NULL)', [propertyId]);
+  else if (propertyId) query.whereRaw('COALESCE(pah_scope.property_id, ss.property_id) = ?', [propertyId]);
   else query.whereRaw('COALESCE(pah_scope.property_id, ss.property_id) IS NULL');
   return query;
 }
@@ -224,7 +227,8 @@ async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate
   const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-    .modify((query) => scopeToTreatedProperty(query, propertyId))
+    // v13: unplaced history counts at every property (it can only withhold the exemption). Gate off: as before.
+    .modify((query) => scopeToTreatedProperty(query, propertyId, { includeUnplaced: v13 }))
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
