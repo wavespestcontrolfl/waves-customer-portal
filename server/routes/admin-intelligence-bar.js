@@ -1393,6 +1393,26 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         }
         if (rate?.display) preview = { ...preview, rate_change: rate.display };
       }
+      // Tier-upgrade email (owner 2026-10-08, GATE_IB_TIER_UPGRADE_EMAIL): a
+      // card that raises the WaveGuard tier and changes the billed monthly
+      // rate emails the customer after commit. Decided once here; the pin is
+      // server-owned (a model-supplied copy is dropped first) and the card
+      // names the email. Gate off, not eligible or an unreadable customer:
+      // no pin, no card line, no email.
+      const TierUpgradeEmail = require('../services/intelligence-bar/tier-upgrade-email');
+      delete params[TierUpgradeEmail.PIN_PARAM];
+      if (preview?.rate_change) {
+        let tierEmail = null;
+        try {
+          tierEmail = await TierUpgradeEmail.proposal(String(params.customer_id), params.updates);
+        } catch (err) {
+          logger.warn(`[intelligence-bar] tier upgrade email proposal read failed: ${err.message}`);
+        }
+        if (tierEmail) {
+          params[TierUpgradeEmail.PIN_PARAM] = tierEmail.pin;
+          preview = { ...preview, tier_upgrade_email: tierEmail.display };
+        }
+      }
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
       // The visit's price (owner 2026-09-27: the Intelligence Bar books like

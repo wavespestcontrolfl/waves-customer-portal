@@ -411,7 +411,8 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'create_customer': return await createCustomer(input);
       case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version,
         Object.prototype.hasOwnProperty.call(input, '_ib_notes_before') ? { value: input._ib_notes_before } : null,
-        input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null);
+        input._rate_family ? { family: input._rate_family, ledgerPin: input._rate_ledger_pin } : null,
+        input._tier_upgrade_email ? { pin: input._tier_upgrade_email, operationId: actionContext.operationId } : null);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -1324,7 +1325,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null) {
+async function updateCustomer(customerId, updates, expectedVersion, notesPin = null, ratePin = null, tierEmailPin = null) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
@@ -1400,6 +1401,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // transaction's arrow function since its own `decision` const is local to
   // that scope.
   let churnRepairDecision = null;
+  // The rows this write commits, for the tier-upgrade email's own recheck
+  // after commit (tier-upgrade-email.js): the locked row, and that row with
+  // every field the UPDATE below writes.
+  let committedRows = null;
   try {
     await db.transaction(async (trx) => {
       // Membership-affecting writes join the customer-comms serialization
@@ -1505,6 +1510,7 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
+      committedRows = { before: lockedBefore, after: { ...lockedBefore, ...clean } };
       // Coords cleared atomically with the address/move-stamp write — never
       // the former home's lat/lng beside the new address (codex #3565 gh-r46).
       if (addressSubmitted) {
@@ -1636,6 +1642,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   const logChanges = changes.notes ? { ...changes, notes: '[redacted]' } : changes;
   logger.info(`[intelligence-bar] Updated customer ${customerId}:`, logChanges);
 
+  // Tier-upgrade email the card promised (GATE_IB_TIER_UPGRADE_EMAIL): sent
+  // after commit, fire-and-forget, only when the committed rows still pass the
+  // rules the card was built on. null = this card promised no email.
+  const tierEmailResult = tierEmailPin
+    ? require('./tier-upgrade-email').afterCommit({ ...tierEmailPin, customerId, ...committedRows })
+    : null;
+
   if (impliedLaneStamp) {
     // Post-commit review card for the auto-stamped lane — the shape a
     // mis-keyed duplicate takes, so the owner eyeballs it before the next
@@ -1698,6 +1711,10 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       billing_wound_down_fields: ['active', 'autopay_enabled', 'next_charge_date', 'payment_methods.autopay_enabled', 'payments.next_retry_at'],
       message: 'Billing wound down: Auto Pay off (customer + saved methods), next charge date and armed retries cleared.',
     }) : {}),
+    // The card promised a tier-upgrade email: 'sending', or 'not_sent' with a
+    // `warning` the card shows, so the operator never assumes an email that
+    // did not go. The record update itself stands either way.
+    ...tierEmailResult,
   };
 }
 

@@ -864,6 +864,26 @@ async function sendAppIntro({ customerId, sourceId = null, trackToken = null, tr
   });
 }
 
+// The rate-change sentence for every case EXCEPT "billed monthly before and
+// after": it never states a previous monthly figure, and off the monthly lane
+// it states no monthly figure at all. Shared by membership.updated and
+// membership.tier_upgraded so the two emails cannot describe a lane differently.
+function rateChangeSentenceWithoutPriorMonthlyRate(billingLane, newMonthlyRate) {
+  if (billingLane === 'monthly_membership') {
+    // Moved INTO the monthly lane: state the new charge without inventing a
+    // previous monthly rate the customer never paid.
+    return `Your plan is now billed monthly at ${money(newMonthlyRate)}.`;
+  }
+  if (billingLane === 'annual_prepay') {
+    return 'Your plan pricing was updated. Your plan is prepaid for the year, so nothing changes about how you pay.';
+  }
+  if (billingLane === 'per_application') {
+    return 'Your plan pricing was updated — you are billed per application, and each visit is charged after it is completed.';
+  }
+  // per_visit / one_time: invoice-on-complete lanes.
+  return 'Your plan pricing was updated — each service is billed after it is completed.';
+}
+
 async function sendMembershipUpdated({
   customerId,
   before = {},
@@ -897,17 +917,8 @@ async function sendMembershipUpdated({
     // application" is wrong for prepaid and per-visit customers too).
     if (monthlyBothSides) {
       changes.push(`Monthly rate: ${money(before.monthly_rate)} to ${money(after.monthly_rate)}`);
-    } else if (billingLane === 'monthly_membership') {
-      // Moved INTO the monthly lane: state the new charge without inventing a
-      // previous monthly rate the customer never paid.
-      changes.push(`Your plan is now billed monthly at ${money(after.monthly_rate)}.`);
-    } else if (billingLane === 'annual_prepay') {
-      changes.push('Your plan pricing was updated. Your plan is prepaid for the year, so nothing changes about how you pay.');
-    } else if (billingLane === 'per_application') {
-      changes.push('Your plan pricing was updated — you are billed per application, and each visit is charged after it is completed.');
     } else {
-      // per_visit / one_time: invoice-on-complete lanes.
-      changes.push('Your plan pricing was updated — each service is billed after it is completed.');
+      changes.push(rateChangeSentenceWithoutPriorMonthlyRate(billingLane, after.monthly_rate));
     }
   }
   const summary = changes.join('; ') || 'Your membership details were updated.';
@@ -940,6 +951,126 @@ async function sendMembershipUpdated({
     idempotencyKey: idempotencyKey || `membership.updated:${customerId}:${stableEventKey(effectiveDate)}:${hashValue({ before, after })}`,
     categories: ['membership_updated'],
     metadata: { before, after },
+  });
+}
+
+// WaveGuard tiers, lowest first, from the pricing constants (never a typed
+// list): -1 for a blank, sentinel ("None", "Commercial") or unknown tier.
+function waveguardTierRank(value) {
+  const { WAVEGUARD } = require('./pricing-engine/constants');
+  const { membershipTierKey } = require('./membership-state');
+  const order = Object.entries(WAVEGUARD.tiers)
+    .sort((a, b) => Number(a[1].minServices) - Number(b[1].minServices))
+    .map(([key]) => key);
+  return order.indexOf(membershipTierKey(value));
+}
+
+function tierDisplayName(value) {
+  const key = require('./membership-state').membershipTierKey(value);
+  return key ? key.charAt(0).toUpperCase() + key.slice(1) : '';
+}
+
+// 0.1 -> "10", 0.125 -> "12.5"; '' for anything that is not a positive share.
+function percentText(fraction) {
+  const n = Number(fraction);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return String(Number((n * 100).toFixed(1)));
+}
+
+// The benefit figures of a WaveGuard tier, read from the pricing constants at
+// send time (the pricing-config bridge can change them): the tier's recurring
+// discount, the recurring-customer one-time perk, and the per-palm credit from
+// the tier that earns it up. '' = this tier does not have that benefit.
+function tierBenefitFigures(tierValue) {
+  const { WAVEGUARD, PALM } = require('./pricing-engine/constants');
+  const key = require('./membership-state').membershipTierKey(tierValue);
+  const palmCredit = Number(PALM.flatCreditPerPalm);
+  const earnsPalmCredit = waveguardTierRank(key) >= 0
+    && waveguardTierRank(PALM.flatCreditMinTier) >= 0
+    && waveguardTierRank(key) >= waveguardTierRank(PALM.flatCreditMinTier)
+    && Number.isFinite(palmCredit) && palmCredit > 0;
+  return {
+    recurringDiscountPct: percentText(WAVEGUARD.tiers[key]?.discount),
+    oneTimeDiscountPct: percentText(WAVEGUARD.recurringCustomerOneTimePerk),
+    palmCredit: earnsPalmCredit ? (Number.isInteger(palmCredit) ? `$${palmCredit}` : money(palmCredit)) : '',
+  };
+}
+
+// membership.tier_upgraded — "your WaveGuard plan moved up" (owner-approved
+// copy 2026-10-08). The caller decides WHEN this may send (today only the
+// Intelligence Bar update_customer card, services/intelligence-bar/
+// tier-upgrade-email.js); this sender decides what the email may truthfully
+// say, and refuses when it has nothing true to say:
+//   - not a move to a HIGHER WaveGuard tier (a first tier is a membership
+//     start, not an upgrade) -> skipped;
+//   - the new tier has no recurring discount, or the one-time perk is off ->
+//     skipped (the template's "% off" lines would be untrue);
+//   - the per-palm credit line renders only from the tier that earns it;
+//   - a monthly figure appears only for a customer billed monthly, and a
+//     previous monthly figure only when both sides were billed monthly — the
+//     same lane rule and sentences as sendMembershipUpdated.
+// `before` / `after` are the committed customer rows of the change.
+async function sendMembershipTierUpgraded({
+  customerId,
+  before = {},
+  after = {},
+  idempotencyKey,
+  sourceId = null,
+} = {}) {
+  const fromRank = waveguardTierRank(before.waveguard_tier);
+  const toRank = waveguardTierRank(after.waveguard_tier);
+  if (fromRank < 0 || toRank < 0 || toRank <= fromRank) {
+    return { ok: false, skipped: true, reason: 'not_a_tier_upgrade' };
+  }
+  const figures = tierBenefitFigures(after.waveguard_tier);
+  if (!figures.recurringDiscountPct || !figures.oneTimeDiscountPct) {
+    return { ok: false, skipped: true, reason: 'tier_benefit_unavailable' };
+  }
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+
+  const { resolveBillingLane } = require('./billing-lane');
+  const billingLane = resolveBillingLane({ ...customer, ...after }).mode;
+  const billingLaneBefore = resolveBillingLane({ ...customer, ...before }).mode;
+  const monthlyBothSides = billingLane === 'monthly_membership' && billingLaneBefore === 'monthly_membership';
+  const rateChanged = Math.round(Number(before.monthly_rate || 0) * 100) !== Math.round(Number(after.monthly_rate || 0) * 100);
+  let rateSentence = '';
+  if (rateChanged) {
+    rateSentence = monthlyBothSides
+      ? `Your monthly rate: ${money(after.monthly_rate)} (was ${money(before.monthly_rate)})`
+      : rateChangeSentenceWithoutPriorMonthlyRate(billingLane, after.monthly_rate);
+  }
+
+  const fromTier = tierDisplayName(before.waveguard_tier);
+  const toTier = tierDisplayName(after.waveguard_tier);
+  const facts = {
+    from_tier: fromTier,
+    to_tier: toTier,
+    monthly_rate_before: before.monthly_rate ?? null,
+    monthly_rate_after: after.monthly_rate ?? null,
+    billing_lane: billingLane,
+  };
+  return sendTemplate({
+    customerId,
+    templateKey: 'membership.tier_upgraded',
+    eventType: 'membership.tier_upgraded',
+    payload: {
+      old_membership_tier: fromTier,
+      new_membership_tier: toTier,
+      recurring_discount_pct: figures.recurringDiscountPct,
+      one_time_discount_pct: figures.oneTimeDiscountPct,
+      // A whole line, blank below the tier that earns the credit: the list
+      // block drops an item that resolves blank.
+      palm_credit_line: figures.palmCredit
+        ? `A ${figures.palmCredit} per palm credit each year on palm injections`
+        : '',
+      // A whole sentence, blank when the stored rate did not move: the
+      // paragraph block drops when it resolves blank.
+      rate_sentence: rateSentence,
+    },
+    idempotencyKey: idempotencyKey || `membership.tier_upgraded:${customerId}:${hashValue(facts)}`,
+    categories: ['membership_tier_upgraded'],
+    metadata: { source_id: sourceId, ...facts },
   });
 }
 
@@ -1155,6 +1286,7 @@ module.exports = {
   buildMembershipStartedSection,
   sendAppIntro,
   sendMembershipUpdated,
+  sendMembershipTierUpgraded,
   sendMembershipRenewalReminder,
   sendTermiteRenewalReminder,
   findAcceptedTermiteRenewalReminder,
@@ -1170,5 +1302,8 @@ module.exports = {
     propertyLabel,
     sendTemplate,
     stableEventKey,
+    tierBenefitFigures,
+    tierDisplayName,
+    waveguardTierRank,
   },
 };
