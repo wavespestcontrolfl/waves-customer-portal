@@ -1927,6 +1927,180 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
   };
 }
 
+// Hard product-level count limits (annual_max_apps, min_interval_days), judged AFTER a closeout
+// recorded its products. The plan keeps the hard block (prevention before the visit); the closeout
+// never refuses for a count or interval limit, because a product that was physically applied must
+// stay in the application ledger and the FDACS export. An over-limit application is FLAGGED for the
+// office instead (an advisory on the completion plus an admin notification), and a limits read that
+// fails is flagged too ('application_limit_check_unavailable'). Lawn visits under GATE_LAWN_V13 only.
+const HARD_COUNT_LIMIT_LABELS = {
+  annual_max_apps: 'yearly application limit',
+  min_interval_days: 'minimum days between applications',
+};
+const MAX_RAW_SUBMITTED_PRODUCTS = 200;
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// An oversized products array is refused up front (a 400), before anything reads it.
+function rawProductsTooManyPayload(products) {
+  if (!Array.isArray(products) || products.length <= MAX_RAW_SUBMITTED_PRODUCTS) return null;
+  return {
+    error: `Too many products on one visit (${products.length}; the most allowed is ${MAX_RAW_SUBMITTED_PRODUCTS}).`,
+    code: 'too_many_submitted_products',
+    max: MAX_RAW_SUBMITTED_PRODUCTS,
+  };
+}
+
+function overLimitFinding(productId, productName, block) {
+  const label = HARD_COUNT_LIMIT_LABELS[block.type] || 'limit';
+  return {
+    code: 'application_limit_exceeded',
+    productId,
+    productName,
+    limitType: block.type,
+    current: block.current ?? null,
+    max: block.max ?? null,
+    message: `Recorded. The office will review: ${productName || 'a product'} is over its ${label}.`,
+  };
+}
+
+function limitCheckUnavailableFinding(productId = null) {
+  return {
+    code: 'application_limit_check_unavailable',
+    productId,
+    message: 'Recorded. The office will review: product limits could not be checked for this visit.',
+  };
+}
+
+// The catalog names of the given ids that carry a hard product-level count limit: two batched
+// reads whatever the list length (an unknown id costs nothing more).
+async function hardLimitedProductNames(database, ids) {
+  const rows = await savepointRead(database, (k) => k('products_catalog').whereIn('id', ids).select('id', 'name'));
+  const known = (rows || []).map((row) => String(row.id));
+  if (!known.length) return new Map();
+  const limitRows = await savepointRead(database, (k) => k('product_limits')
+    .whereIn('product_id', known)
+    .where({ match_type: 'product', severity: 'hard_block' })
+    .whereIn('limit_type', Object.keys(HARD_COUNT_LIMIT_LABELS))
+    .select('product_id'));
+  const limited = new Set((limitRows || []).map((row) => String(row.product_id)));
+  // The v13 count caps (Arena, Certainty, Blindside, Celsius) live in code, not in a stored row.
+  const { v13CapEntryFor } = require('../config/lawn-v13-count-caps');
+  const found = new Map();
+  for (const row of rows) {
+    if (limited.has(String(row.id)) || await v13CapEntryFor(database, row.id, row.name)) found.set(String(row.id), row.name);
+  }
+  return found;
+}
+
+// Every finding for one product: one per violated hard limit (the yearly count and the minimum
+// interval are reported separately), or one 'unavailable' finding when the audit read fails. The audit
+// covers the whole calendar year of the service date and the nearest applications on both sides,
+// so a backdated closeout is judged against the applications recorded after it too.
+async function productLimitFindings({ svc, productId, productName, serviceDate, database }) {
+  try {
+    const violations = await savepointRead(database, (k) => require('../services/application-limits')
+      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id }));
+    return violations.map((violation) => overLimitFinding(productId, productName, violation));
+  } catch (err) {
+    logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
+    return [limitCheckUnavailableFinding(productId)];
+  }
+}
+
+// Every finding for the products a closeout recorded (ids from its ledger rows or its submitted
+// list). Never throws: a failed batch read is one 'unavailable' finding.
+async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db } = {}) {
+  if (!svc || require('../config/feature-gates').lawnV13Live?.() !== true) return [];
+  if (detectServiceLine(svc.service_type) !== 'lawn') return [];
+  const ids = [...new Set((productIds || []).filter(Boolean).map(String))].filter((id) => UUID_SHAPE.test(id));
+  if (!ids.length) return [];
+  let limited;
+  try {
+    limited = await hardLimitedProductNames(database, ids);
+  } catch (err) {
+    logger.warn('completion application limits: batch read failed, flagging for the office', { serviceId: svc.id, error: err?.message });
+    return [limitCheckUnavailableFinding()];
+  }
+  const day = serviceDateOnly(serviceDate || svc.scheduled_date);
+  const findings = [];
+  for (const [productId, productName] of limited) {
+    findings.push(...await productLimitFindings({ svc, productId, productName, serviceDate: day, database }));
+  }
+  return findings;
+}
+
+// The findings for the products a committed closeout recorded, read from its ledger rows (so a
+// resume re-derives them). Lawn visits under GATE_LAWN_V13 only. Never throws: ANY failure on the
+// way (the ledger lookup included) is one 'unavailable' finding, so the closeout still carries the
+// flag and the office still hears about it.
+async function recordedProductLimitFindings({ svc, record, database = db } = {}) {
+  if (!svc || !record?.id) return [];
+  if (require('../config/feature-gates').lawnV13Live?.() !== true || detectServiceLine(svc.service_type) !== 'lawn') return [];
+  try {
+    const rows = await savepointRead(database, (k) => k('property_application_history')
+      .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id'));
+    return await submittedProductLimitFindings({
+      svc,
+      productIds: (rows || []).map((row) => row.product_id),
+      serviceDate: serviceDateOnly(record.service_date),
+      database,
+    });
+  } catch (err) {
+    logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
+    return [limitCheckUnavailableFinding()];
+  }
+}
+
+// The office's side of a finding: one admin notification per product and finding code (deduped, so
+// a retry or a resume rings once). Never throws and never blocks the closeout.
+const limitFigure = (finding) => (finding.limitType === 'min_interval_days'
+  ? `only ${finding.current} days from another application, minimum ${finding.max}`
+  : `${finding.current} of ${finding.max} already used`);
+
+// One bell per record, finding code, product AND limit type (a product over both its yearly count and
+// its minimum interval rings for each).
+const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}:${finding.limitType || 'all'}`;
+
+async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
+  const { raiseAdminAlert } = require('../services/admin-alert-compose');
+  for (const finding of findings) {
+    try {
+      const over = finding.code === 'application_limit_exceeded';
+      const fullName = finding.productName || 'a product';
+      // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
+      const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
+      const fullText = over
+        ? `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${HARD_COUNT_LIMIT_LABELS[finding.limitType]} (${limitFigure(finding)}). Review it and report it if needed.`
+        : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
+      const why = !over ? 'A lawn visit was recorded, but its product limits could not be checked.'
+        : finding.limitType === 'min_interval_days'
+          ? `${name}: only ${finding.current} days since another application, minimum ${finding.max}.`
+          : `${name} is over its yearly limit: ${finding.current} of ${finding.max} already used.`;
+      const dedupeKey = limitFindingDedupeKey(record, finding);
+      const created = await raiseAdminAlert('service', {
+        area: 'Schedule',
+        action: over ? `review ${name} over its limit` : 'review product limits not checked',
+        why,
+        severity: 'needs-you',
+        who: 'person',
+        link: `/admin/customers?customerId=${svc.customer_id}`,
+        subject: { type: 'visit', id: String(svc.id) },
+        doneWhen: over ? 'limit_overage_reviewed' : 'limits_checked',
+      }, {
+        bell: true,
+        dedupeKey,
+        detail: fullText,
+        metadata: { ...finding, scheduledServiceId: svc.id, serviceRecordId: record.id, customerId: svc.customer_id, dedupeKey },
+      });
+      // The composer returns null (no throw) when notifyAdmin's dedupe lock or insert fails; a deduped
+      // repeat returns the standing row. The advisory on the completion stands either way.
+      if (!created) logger.error(`[dispatch] application-limit finding bell NOT recorded for record ${record.id} (admin alert returned null)`);
+    } catch (err) {
+      logger.error(`[dispatch] application-limit finding notification failed (non-blocking): ${err.message}`);
+    }
+  }
+}
+
 function completionOwnershipError({ role, actorTechnicianId, assignedTechnicianId }) {
   if (role === 'admin') return null;
   if (
@@ -2773,6 +2947,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // change takes too (service-photos.js lockStagedPhotoForChange).
       photoCaptionsSeen,
     } = completionInput.body;
+    // An oversized products array is refused before anything reads it (no claim, no writes).
+    const tooManyProducts = rawProductsTooManyPayload(products);
+    if (tooManyProducts) return ({ status: 400, body: tooManyProducts });
     const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -8982,6 +9159,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
+    // Hard count limits (yearly applications, minimum interval) on what this closeout recorded.
+    // The closeout never refuses for one: the products are already in the ledger. An over-limit
+    // application, or a limits read that failed, is flagged on the completion (tech-facing line,
+    // never an instruction to remove anything) and sent to the office as an admin notification
+    // (deduped per record, so a retry or a resume rings once). Never blocks.
+    if (record?.id && !issuedInvoiceCloseout) {
+      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db });
+      if (limitFindings.length) {
+        applicationLimitAdvisory = {
+          advisory: true,
+          blocks: [...(applicationLimitAdvisory?.blocks || []), ...limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId }))],
+        };
+        await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
+      }
+    }
+
     if (!isIncompleteVisit && (!resumingCommittedCompletion || packetEffects) && products?.length) {
       const writeMoaAlerts = async (trx = null) => {
         const connection = trx || db;
@@ -9007,7 +9200,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const alertedMoa = new Set();
         for (const p of products) {
           if (!p.productId) continue;
-          const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, proposedDate, connection);
+          const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, proposedDate, connection, { propertyId: svc.property_id || null });
           // checkLimits returns blocks (hard_block severity) and
           // warnings (warn/info severity). We surface BOTH for MOA
           // violations — operationally the difference is that hard
@@ -9119,6 +9312,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // txn nor poison later statements in it. The service itself no-ops for
     // customers with no zone rows and no incoming shapes, so prod reports
     // stay on the schematic defaults until a map is actually marked.
+    // The lawn coverage verdict (GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES) is frozen
+    // later from the zone rows; a failed sync must not let it freeze stale or
+    // partial rows (codex #6089), so the outcome rides to the write gate.
+    let zoneSyncOk = true;
     try {
       const zoneSync = await PropertyZones.upsertZonesForCompletion(db, {
         customerId: svc.customer_id,
@@ -9126,10 +9323,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         areaLabels: completionAreas,
         zoneShapes: Array.isArray(zoneShapes) ? zoneShapes : [],
       });
+      // A partial sync (a submitted shape or label skipped, e.g. no zone letter
+      // left) is not a complete picture either: no coverage freeze (codex #6089).
+      if (Array.isArray(zoneSync.skipped) && zoneSync.skipped.length) zoneSyncOk = false;
       if (zoneSync.created || zoneSync.updated || zoneSync.shapesApplied || zoneSync.skipped.length) {
         logger.info('[completion] property zones synced', { serviceId: svc.id, ...zoneSync });
       }
     } catch (zoneErr) {
+      zoneSyncOk = false;
       logger.warn(`[completion] property-zone sync failed (non-blocking): ${zoneErr.message}`);
     }
 
@@ -13587,7 +13788,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
       try {
         const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
-        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
+        // The coverage verdict is a COMPLETION-time fact: only the original run
+        // with a successful zone sync may freeze it, never a resumed retry
+        // (which would derive a later verdict from live zones).
+        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db, coverageFreezeAllowed: zoneSyncOk && !resumingCommittedCompletion });
         // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
         // fold the frozen synthesis back in so the later sending/sent writes (which
         // spread recordStructuredNotes) don't clobber it.
@@ -15308,6 +15512,10 @@ module.exports = {
   pestPressureConfigAllowsTechnicianRating,
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
+  submittedProductLimitFindings,
+  recordedProductLimitFindings,
+  rawProductsTooManyPayload,
+  notifyOfficeOfLimitFindings,
   completionOwnershipError,
   techTipsGateOn,
   reportReconcileBlockPayload,

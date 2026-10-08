@@ -52,7 +52,7 @@ jest.mock('../services/intelligence-bar/procurement-tools', () => {
   return {
     PROCUREMENT_TOOLS: actual.PROCUREMENT_TOOLS,
     executeProcurementTool: (...args) => mockExecuteProcurementTool(...args),
-    resolveInventoryWriteTarget: (...args) => mockResolveInventoryWriteTarget(...args),
+    stockProposalTarget: (...args) => mockResolveInventoryWriteTarget(...args),
   };
 });
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
@@ -149,7 +149,8 @@ test('a resolved target shows the card naming the product and on hand before and
 });
 
 test('a refused target leaves no card and tells the model plainly that nothing was written', async () => {
-  mockResolveInventoryWriteTarget.mockResolvedValue({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
+  // The stock layer's refusal shape (procurement-tools stockProposalTarget).
+  mockResolveInventoryWriteTarget.mockResolvedValue({ failed: true, modelResult: { error: 'Choose the exact product or restock request for this action. Nothing was written and no confirmation card was created.', code: 'target_clarification_required' } });
   scriptModelTurns([[adjust()], [{ type: 'text', text: 'Which product did you mean?' }]]);
   await withServer(async (baseUrl) => {
     const { status, body } = await postQuery(baseUrl, { prompt: 'Add 2 gallons of the Guard to inventory', context: 'procurement', pageData: { route: '/admin/inventory' } });

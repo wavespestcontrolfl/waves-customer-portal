@@ -61,6 +61,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/schedule/AutoDispatchLockBox";
 import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
@@ -2096,6 +2097,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return derived != null ? String(derived) : "";
     })(),
   });
+  // Auto-dispatch lock (recurring occurrences only). Sent with the save as
+  // the box's value and the value it opened with; the server acts only on a
+  // flip, and may also set the lock itself when the date or time changes.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveErrorState] = useState("");
@@ -3704,6 +3710,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          // The auto-dispatch box and the value it opened with; the server acts only on a flip.
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
           // A shared stop: the server runs the choice in this one request.
           comboMove: comboSlotChanged ? comboMove : undefined,
           // The stop this form showed; the server refuses if it changed.
@@ -6358,6 +6367,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
+              <AutoDispatchLockBox
+                service={service}
+                checked={autoDispatchLocked}
+                onChange={setAutoDispatchLocked}
+                disabled={saving}
+                helperColor={D.muted}
+                rowProps={{ style: { marginBottom: 14 } }}
+              />
               <div
                 style={{
                   display: "flex",
@@ -25541,10 +25558,19 @@ const TRACK_SAFETY_RULES = {
   ],
 };
 
+/* Overrides for a lawn payload that carries its own safety_rules (the v13 program,
+   GATE_LAWN_V13): Celsius is limited to 2 applications a year there. The base list above keeps the
+   legacy wording (3) for the gate-off protocol. */
+const PRODUCT_DESCRIPTIONS_V13 = {
+  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
+  celsius: "selective weed killer for warm-season grass (max 2x/year)",
+};
+
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */
 export {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 };

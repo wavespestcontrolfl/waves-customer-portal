@@ -149,6 +149,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.querySelector('svg')).toBeNull();
   });
 
+  it('lawnCoverageHidden (GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES) prints no generated map or zone legend', () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 340"><rect/></svg>';
+    const base = { ...BASE_DATA, mapSvg: svg, zones: [{ letter: 'A', label: 'Front perimeter' }] };
+    const shown = render(<ServiceReportDocument data={base} token="tok123" />);
+    expect(shown.container.textContent).toContain('Where we treated');
+    expect(shown.container.textContent).toContain('Front perimeter');
+    shown.unmount();
+    const { container } = render(<ServiceReportDocument data={{ ...base, lawnCoverageHidden: true }} token="tok123" />);
+    expect(container.textContent).not.toContain('Where we treated');
+    expect(container.textContent).not.toContain('A — Front perimeter');
+    expect(container.querySelector('img[src^="data:image/svg+xml"]')).toBeNull();
+  });
+
+  it('lawnCoverageHidden still prints a real technician-traced map', () => {
+    const data = { ...BASE_DATA, lawnCoverageHidden: true, treatmentMap: { traced: { snapshotUrl: 'https://cdn.example.com/trace.png' } } };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(document.querySelector('img[src="https://cdn.example.com/trace.png"]')).toBeTruthy();
+  });
+
   it('embeds the technician-traced treatment map when one exists', () => {
     const data = { ...BASE_DATA, treatmentMap: { traced: { snapshotUrl: 'https://cdn.example.com/trace.png' }, footer: 'Technician-reported service zones.' } };
     render(<ServiceReportDocument data={data} token="tok123" />);

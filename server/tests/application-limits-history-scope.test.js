@@ -16,7 +16,7 @@ function chain({ rows = [], first: firstVal } = {}) {
   const calls = [];
   const q = { calls };
   for (const m of ['where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNot', 'orWhereNull', 'orWhereNotIn',
-    'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'from', 'count', 'whereNotExists']) {
+    'andWhere', 'orWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'join', 'from', 'count', 'whereNotExists']) {
     q[m] = jest.fn((...args) => {
       calls.push([m, ...args]);
       if (typeof args[0] === 'function') args[0].call(q);
@@ -61,10 +61,16 @@ describe('checkLimits: the product history honors the treated property and the p
     const history = mockDb([]);
     await applicationLimits.checkLimits('cust-1', 'prod-1', new Date('2026-10-12T16:00:00Z'), db, { propertyId: 'prop-A' });
     const scope = history.calls.filter((call) => call[0] === 'whereNotExists');
-    expect(scope).toHaveLength(1);
+    // Two reads share the scope: this year's history, and (the year being empty and a minimum interval set) the look-back to the latest earlier application.
+    expect(scope).toHaveLength(2);
     expect(history.calls).toContainEqual(['whereRaw', 'sr_scope.id = ??.service_record_id', ['property_application_history']]);
     expect(history.calls).toContainEqual(['whereNotNull', 'ss_scope.property_id']);
     expect(history.calls).toContainEqual(['whereNot', 'ss_scope.property_id', 'prop-A']);
+    // The treated property frozen on the ledger row decides first: a row placed here or unplaced passes the
+    // predicate; the visit join only judges legacy rows that carry no frozen property.
+    expect(history.calls).toContainEqual(['whereNull', 'property_application_history.property_id']);
+    expect(history.calls).toContainEqual(['orWhere', 'property_application_history.property_id', 'prop-A']);
+    expect(history.calls).toContainEqual(['whereRaw', '??.property_id is null', ['property_application_history']]);
   });
 
   test('excludeScheduledServiceId: the visit\'s own ledger rows are left out (a row with no service record still counts)', async () => {

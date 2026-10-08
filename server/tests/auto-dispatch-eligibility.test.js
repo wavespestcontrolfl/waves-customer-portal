@@ -203,9 +203,12 @@ describe('isPersonPlacedVisit', () => {
   // An in-memory reschedule_log. Rows are filtered by the predicates the
   // query sends, so a wrong column or value makes a test miss the row; the
   // newest-placement subquery is evaluated like PostgreSQL would.
-  function fakeDb({ log = [], fail = false } = {}) {
+  function fakeDb({ log = [], fail = false, row = null } = {}) {
     const slotChanged = (r) => r.original_date !== r.new_date || r.original_window !== r.new_window;
     return (table) => {
+      if (table === 'scheduled_services') {
+        return { where: () => ({ first: async () => { if (fail) throw new Error('connection reset'); return row; } }) };
+      }
       if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
       const preds = [];
       const chain = {
@@ -324,6 +327,23 @@ describe('isPersonPlacedVisit', () => {
   test('a Date scheduled_date compares as its calendar date', async () => {
     expect(await isPersonPlacedVisit({ ...visit, scheduled_date: new Date('2026-10-18T04:00:00Z') }, fakeDb({ log: [row()] })))
       .toMatchObject({ placed: true });
+  });
+
+  test('a staff lock on the row protects the visit', async () => {
+    expect(await isPersonPlacedVisit({ ...visit, auto_dispatch_locked: true }, fakeDb({ log: [] })))
+      .toMatchObject({ placed: true, reason_code: 'MANUALLY_LOCKED' });
+  });
+
+  test('refresh re-reads the lock and stamp the snapshot does not have (edit screen after pass 1)', async () => {
+    const locked = fakeDb({ log: [], row: { auto_dispatch_locked: true } });
+    expect(await isPersonPlacedVisit(visit, locked)).toEqual({ placed: false }); // snapshot only
+    expect(await isPersonPlacedVisit(visit, locked, { refresh: true })).toMatchObject({ placed: true, reason_code: 'MANUALLY_LOCKED' });
+    const stamped = fakeDb({ log: [], row: { auto_dispatch_locked: false, date_exception: true, date_exception_source: 'admin', date_exception_at: '2026-10-07T01:00:00Z' } });
+    expect(await isPersonPlacedVisit(visit, stamped, { refresh: true })).toMatchObject({ placed: true, reason_description: 'Date chosen by staff (date edit)' });
+  });
+
+  test('refresh fails closed and degraded on a read error', async () => {
+    expect(await isPersonPlacedVisit(visit, fakeDb({ fail: true }), { refresh: true })).toMatchObject({ placed: true, degraded: true });
   });
 
   test('fails closed and degraded on a read error', async () => {

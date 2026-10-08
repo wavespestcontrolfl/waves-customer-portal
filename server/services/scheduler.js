@@ -122,7 +122,7 @@ const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
-const { isEnabled, gateEnvValue } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue, aioGapSweepMonthlyLive } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { registerDeployKillRetry, retryDeployKilledJobs } = require('../utils/deploy-kill-retry');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -2528,6 +2528,37 @@ function initScheduledJobs() {
       } catch (err) { logger.error(`AI Overview pinned captures (${pass}) failed: ${err.message}`); }
     }, { timezone: 'America/New_York' });
   }
+
+  // EVERY 10 MIN — AI Overview gap sweep: when a sweep run is open, make the
+  // next chunk of mobile SERP checks. The open-run check is one cheap read, so
+  // an idle tick takes no lock and makes no DataForSEO call. The run's own
+  // max_cost_usd stops it. A run is started by an admin (POST
+  // /api/admin/seo/aio-sweep) or by the monthly job below.
+  cron.schedule('*/10 * * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    try {
+      const open = await db('seo_aio_sweep_runs').where({ status: 'open' }).first('id');
+      if (!open) return;
+      await runExclusive('aio-gap-sweep', async () => {
+        const { processSweepChunk } = require('./seo/aio-gap-sweep');
+        await processSweepChunk();
+      });
+    } catch (err) { logger.error(`AI Overview gap sweep chunk failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // MONTHLY, 2ND 4:10 AM ET — start the AI Overview gap sweep. Dark: only when
+  // GATE_AIO_GAP_SWEEP_MONTHLY is exactly 'true'. startSweep refuses while a
+  // run is still open.
+  cron.schedule('10 4 2 * *', async () => {
+    if (!isEnabled('seoIntelligence') || !aioGapSweepMonthlyLive()) return;
+    logger.info('Running: AI Overview gap sweep (monthly start)');
+    try {
+      await runExclusive('aio-gap-sweep-start', async () => {
+        const { startSweep } = require('./seo/aio-gap-sweep');
+        await startSweep({ trigger: 'monthly' });
+      });
+    } catch (err) { logger.error(`AI Overview gap sweep monthly start failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
 
   // =========================================================================
   // MONTHLY, 1ST–7TH 6:20 AM ET — Annual rate review ranking batch (plan

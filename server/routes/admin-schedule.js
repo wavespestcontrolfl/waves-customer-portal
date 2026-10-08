@@ -1,4 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
+const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -6429,6 +6430,7 @@ router.get('/', async (req, res, next) => {
         weatherAdvisory: s.weather_advisory,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
+        autoDispatchLocked: s.auto_dispatch_locked === true,
         recurringPattern: s.recurring_pattern || null,
         recurringOngoing: s.recurring_ongoing ?? null,
         recurringNth: s.recurring_nth ?? null,
@@ -6658,6 +6660,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
+          'scheduled_services.auto_dispatch_locked',
           'scheduled_services.recurring_parent_id',
           'scheduled_services.recurring_pattern',
           'scheduled_services.recurring_ongoing',
@@ -6994,6 +6997,7 @@ router.get('/week', async (req, res, next) => {
           technicianName: s.tech_name,
           isRecurring: s.is_recurring,
           recurringParentId: s.recurring_parent_id || null,
+          autoDispatchLocked: s.auto_dispatch_locked === true,
           recurringPattern: s.recurring_pattern || null,
           recurringOngoing: s.recurring_ongoing ?? null,
           recurringNth: s.recurring_nth ?? null,
@@ -7098,6 +7102,7 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
         'scheduled_services.is_recurring',
+        'scheduled_services.auto_dispatch_locked',
         'scheduled_services.recurring_parent_id',
         'scheduled_services.recurring_pattern',
         'scheduled_services.recurring_ongoing',
@@ -7181,6 +7186,7 @@ router.get('/month', async (req, res, next) => {
         duration: s.estimated_duration_minutes || 30,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
+        autoDispatchLocked: s.auto_dispatch_locked === true,
         recurringPattern: s.recurring_pattern || null,
         recurringOngoing: s.recurring_ongoing ?? null,
         recurringNth: s.recurring_nth ?? null,
@@ -13152,6 +13158,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       assignmentScope,
+      // The edit form's "Keep auto-dispatch off this visit" box and the value it
+      // opened with (auto-dispatch/staff-edit-lock.js).
+      autoDispatchLocked, autoDispatchLockedWas,
       // Apply this save's PRICE / primary-SERVICE change to the rest of the
       // series ('following') or keep it per-visit ('this_only', the default).
       // Only honored behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — see the
@@ -13228,7 +13237,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         }
       }
     }
-    const updates = {};
+    // A flipped "Keep auto-dispatch off this visit" box is a change in itself.
+    const updates = { ...autoDispatchBoxPatch({ now: autoDispatchLocked, was: autoDispatchLockedWas }) };
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
     // filters, and the catalog's own type/amount as the authority. Without
@@ -14527,6 +14537,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
+        // A staff date/window choice locks the occurrence from auto-dispatch
+        // (this path writes no reschedule_log row the person-placed guard reads).
+        Object.assign(updates, staffEditLockPatch(occRow, updates));
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)

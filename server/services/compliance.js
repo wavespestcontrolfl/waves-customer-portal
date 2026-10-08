@@ -3,6 +3,7 @@ const logger = require('./logger');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
+const { capIdMap, withEntryCaps, syntheticCountLimit } = require('../config/lawn-v13-count-caps');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
 // JSON string — the writer must never throw on a malformed capture.
@@ -65,6 +66,102 @@ function areaTreatedSqft(sp) {
 // instead, so it never counts. The category is compared case-insensitively:
 // older history rows copied "Fertilizer" from the catalog before categories
 // were lowercased.
+const { worstPropertyCount } = require('../utils/property-counts');
+
+// The treated property of a ledger row: the one frozen on the row when it was written; a legacy row
+// without one falls back to its visit's property (null = unplaced, counted at every property).
+const placeOnTheLedgerProperty = (rows) => rows.map((row) => ({ ...row, treated_property_id: row.property_id || row.visit_property_id || null }));
+
+const isProductCountRow = (limit) => limit.limit_type === 'annual_max_apps' && limit.match_type === 'product';
+
+// Every product_limits row (hard ones only when asked) with the product name, as the summaries read
+// it. While GATE_LAWN_V13 is on the v13 yearly caps are applied by product id, the way application-limits
+// enforces them: a stored product row is lowered and made hard_block (in memory), and a capped product
+// with no stored row joins as a synthetic hard_block row. Gate off: the rows exactly as stored.
+async function limitRowsWithV13Caps({ hardOnly = false } = {}) {
+  const rows = await db('product_limits')
+    .leftJoin('products_catalog', 'product_limits.product_id', 'products_catalog.id')
+    .select('product_limits.*', 'products_catalog.name as product_name');
+  const withCaps = await applyV13ToRows(rows);
+  // The hard-only filter comes AFTER the caps: a stored warning row under a v13 cap is a hard cap.
+  return hardOnly ? withCaps.filter((limit) => limit.severity === 'hard_block') : withCaps;
+}
+
+async function applyV13ToRows(rows) {
+  if (require('../config/feature-gates').lawnV13Live?.() !== true) return rows;
+  const capIds = await capIdMap(db);
+  const capped = rows.map((limit) => (isProductCountRow(limit) && capIds.has(String(limit.product_id))
+    ? withEntryCaps(capIds.get(String(limit.product_id)), [limit], limit.product_id)[0]
+    : limit));
+  const stored = new Set(capped.filter(isProductCountRow).map((limit) => String(limit.product_id)));
+  const synthetic = [...capIds].filter(([id]) => !stored.has(id))
+    .map(([id, entry]) => ({ ...syntheticCountLimit(entry, id), product_name: entry.name }));
+  return [...capped, ...synthetic];
+}
+
+// For each product, the largest per-lawn count any one customer has this year, computed in SQL:
+// applications grouped by customer + effective property (the property frozen on the ledger row, a
+// legacy row's visit property), unplaced rows (no property at all) added to the customer's busiest
+// property, the maximum over customers. Same reading as worstPropertyCount, without pulling rows.
+async function busiestLawnByProduct(productIds, yearStart) {
+  if (!productIds.length) return new Map();
+  const result = await db.raw(`
+    WITH per_lawn AS (
+      SELECT pah.product_id, pah.customer_id,
+             COALESCE(pah.property_id, ss_prop.property_id) AS lawn, COUNT(*)::int AS n
+        FROM property_application_history pah
+        LEFT JOIN service_records sr_prop ON sr_prop.id = pah.service_record_id
+        LEFT JOIN scheduled_services ss_prop ON ss_prop.id = sr_prop.scheduled_service_id
+       WHERE pah.product_id = ANY(?::uuid[])
+         AND pah.application_date >= ?
+         AND pah.retracted_at IS NULL
+       GROUP BY pah.product_id, pah.customer_id, COALESCE(pah.property_id, ss_prop.property_id)
+    ), per_customer AS (
+      SELECT product_id, customer_id,
+             COALESCE(SUM(n) FILTER (WHERE lawn IS NULL), 0) + COALESCE(MAX(n) FILTER (WHERE lawn IS NOT NULL), 0) AS worst
+        FROM per_lawn GROUP BY product_id, customer_id
+    )
+    SELECT product_id, MAX(worst)::int AS busiest FROM per_customer GROUP BY product_id`,
+  [productIds.map(String), yearStart]);
+  return new Map(result.rows.map((row) => [String(row.product_id), Number(row.busiest)]));
+}
+
+// The applications a limit counts: its product's, its MOA group's, or every nitrogen one.
+function matchingApplications(limit, apps) {
+  if (limit.match_type === 'product' && limit.product_id) return apps.filter((a) => a.product_id === limit.product_id);
+  if (limit.match_type === 'moa_group') return apps.filter((a) => a.moa_group === limit.match_value);
+  if (limit.match_type === 'nitrogen') return apps.filter(isNitrogenApplication);
+  return [];
+}
+
+// Is a seasonal blackout in force today for this customer's county? Incomplete windows (nullable
+// endpoints) are skipped, as application-limits does. Compared as ET calendar MM-DD, not UTC dates
+// (blackouts are legal dates); pg `date` columns arrive as JS Date objects, so normalize first. A
+// county ordinance applies only to that county's customers (county, 'all' or unset).
+function blackoutInForce(limit, today, customerCounty) {
+  if (limit.limit_type !== 'seasonal_blackout' || !limit.season_start || !limit.season_end) return false;
+  const mmdd = (s) => etCalendarDayOf(s).slice(5, 10);
+  const startMMDD = mmdd(limit.season_start);
+  const endMMDD = mmdd(limit.season_end);
+  const todayMMDD = today.slice(5, 10);
+  const inRange = startMMDD <= endMMDD
+    ? todayMMDD >= startMMDD && todayMMDD <= endMMDD
+    : todayMMDD >= startMMDD || todayMMDD <= endMMDD; // window wraps year boundary
+  const j = limit.jurisdiction;
+  return inRange && (!j || j === 'all' || j === customerCounty);
+}
+
+// One limit's status and current usage. A yearly count is per lawn (the treated property), the way
+// application-limits enforces it: the busiest property, plus any application that cannot be placed at one.
+function limitStatus(limit, matchingApps, { today, customerCounty }) {
+  if (limit.limit_type === 'annual_max_apps') {
+    const current = worstPropertyCount(matchingApps);
+    if (current >= limit.limit_value) return { status: 'exceeded', current };
+    return { status: current >= limit.limit_value - 1 ? 'warning' : 'ok', current };
+  }
+  return { status: blackoutInForce(limit, today, customerCounty) ? 'blackout_active' : 'ok', current: matchingApps.length };
+}
+
 function isNitrogenApplication(app = {}) {
   const category = String(app.category || '').trim().toLowerCase();
   if (category === 'lawn') return true;
@@ -108,6 +205,14 @@ const ComplianceService = {
     const tech = sr.technician_id
       ? await k('technicians').where({ id: sr.technician_id }).first()
       : null;
+
+    // The treated property, frozen on the ledger at this moment: a later address correction on the
+    // visit must not move the application to another lawn (per-lawn caps read this column). A record
+    // with no visit, or a visit with no property, stays unplaced (NULL).
+    const visit = sr.scheduled_service_id
+      ? await k('scheduled_services').where({ id: sr.scheduled_service_id }).first('property_id')
+      : null;
+    const treatedPropertyId = visit?.property_id || null;
 
     // Rows already ledgered for this record. New-style rows are identified
     // by service_product_id; legacy rows (NULL there) by catalog product.
@@ -155,6 +260,7 @@ const ComplianceService = {
         customer_id: sr.customer_id,
         service_record_id: serviceRecordId,
         service_product_id: sp.id,
+        property_id: treatedPropertyId,
         product_id: productId,
         technician_id: sr.technician_id,
         application_date: sr.service_date || etDateString(),
@@ -365,7 +471,7 @@ const ComplianceService = {
   },
 
   /**
-   * Check product limits for a customer (Celsius 3-app cap, nitrogen blackout, etc.)
+   * Check product limits for a customer (Celsius 2-app cap, nitrogen blackout, etc.)
    */
   async getProductLimits(customerId) {
     const customer = await db('customers').where({ id: customerId }).first();
@@ -378,52 +484,24 @@ const ComplianceService = {
     const customerCounty = inferCountyFromZipInternal(customer.zip) || applicationLimits.getCounty(customer);
 
     // Get all applications this year for the customer
+    // treated_property_id: the property the application's visit was booked at, by the same
+    // join application-limits scopes its history with (null = the row cannot be placed).
     const apps = await db('property_application_history')
-      .where({ customer_id: customerId })
-      .where('application_date', '>=', yearStart)
+      .where({ 'property_application_history.customer_id': customerId })
+      .where('property_application_history.application_date', '>=', yearStart)
       .whereNull('property_application_history.retracted_at')
       .leftJoin('products_catalog', 'property_application_history.product_id', 'products_catalog.id')
-      .select('property_application_history.*', 'products_catalog.name as product_name');
+      .leftJoin('service_records as sr_prop', 'property_application_history.service_record_id', 'sr_prop.id')
+      .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
+      .select('property_application_history.*', 'products_catalog.name as product_name', 'ss_prop.property_id as visit_property_id')
+      .then(placeOnTheLedgerProperty);
 
-    // Get all product limits
-    const limits = await db('product_limits');
+    // Get all product limits, the v13 caps applied while the gate is on.
+    const limits = await limitRowsWithV13Caps();
 
     const results = [];
     for (const limit of limits) {
-      let matchingApps = [];
-      if (limit.match_type === 'product' && limit.product_id) {
-        matchingApps = apps.filter(a => a.product_id === limit.product_id);
-      } else if (limit.match_type === 'moa_group') {
-        matchingApps = apps.filter(a => a.moa_group === limit.match_value);
-      } else if (limit.match_type === 'nitrogen') {
-        matchingApps = apps.filter(isNitrogenApplication);
-      }
-
-      let status = 'ok';
-      let current = matchingApps.length;
-
-      if (limit.limit_type === 'annual_max_apps') {
-        if (current >= limit.limit_value) status = 'exceeded';
-        else if (current >= limit.limit_value - 1) status = 'warning';
-      } else if (limit.limit_type === 'seasonal_blackout' && limit.season_start && limit.season_end) {
-        // Incomplete windows (nullable endpoints) are skipped — same as
-        // application-limits.js seasonal_blackout.
-        // Compare ET calendar MM-DD, not UTC Date objects — blackout windows
-        // are legal dates, not absolute timestamps.
-        // pg `date` columns deserialize as JS Date objects — normalize first.
-        const mmdd = (s) => etCalendarDayOf(s).slice(5, 10);
-        const startMMDD = mmdd(limit.season_start);
-        const endMMDD = mmdd(limit.season_end);
-        const todayMMDD = today.slice(5, 10);
-        const inRange = startMMDD <= endMMDD
-          ? todayMMDD >= startMMDD && todayMMDD <= endMMDD
-          : todayMMDD >= startMMDD || todayMMDD <= endMMDD; // window wraps year boundary
-        // County ordinances only apply to that county's customers (mirrors
-        // application-limits' jurisdiction scoping: county, 'all', or unset).
-        const j = limit.jurisdiction;
-        const applies = !j || j === 'all' || j === customerCounty;
-        if (inRange && applies) status = 'blackout_active';
-      }
+      const { status, current } = limitStatus(limit, matchingApplications(limit, apps), { today, customerCounty });
 
       results.push({
         limitId: limit.id,
@@ -544,19 +622,12 @@ const ComplianceService = {
       .count('* as count');
 
     // Warnings: check product limits that are approaching or exceeded
-    const limits = await db('product_limits')
-      .where({ severity: 'hard_block' });
-    let warningCount = 0;
-    for (const limit of limits) {
-      if (limit.limit_type === 'annual_max_apps' && limit.product_id) {
-        const [usage] = await db('property_application_history')
-          .where({ product_id: limit.product_id })
-          .where('application_date', '>=', yearStart)
-          .whereNull('retracted_at')
-          .count('* as count');
-        if (parseInt(usage.count) >= limit.limit_value - 1) warningCount++;
-      }
-    }
+    const limits = await limitRowsWithV13Caps({ hardOnly: true });
+    // annual_max_apps is a per-lawn cap: each customer's busiest lawn, never the company-wide total of
+    // the product. One grouped query for every capped product; no application row reaches Node.
+    const capped = limits.filter((limit) => limit.limit_type === 'annual_max_apps' && limit.product_id);
+    const busiest = await busiestLawnByProduct(capped.map((limit) => limit.product_id), yearStart);
+    const warningCount = capped.filter((limit) => (busiest.get(String(limit.product_id)) ?? 0) >= Number(limit.limit_value) - 1).length;
 
     // Tech license status
     const techs = await db('technicians')
@@ -616,4 +687,6 @@ module.exports = ComplianceService;
 // Exported for testing — verifies ZIP→county inference is unchanged after the
 // shared-array extraction.
 module.exports.inferCountyFromZipInternal = inferCountyFromZipInternal;
+module.exports.worstPropertyCount = worstPropertyCount;
+module.exports.limitRowsWithV13Caps = limitRowsWithV13Caps;
 module.exports.isNitrogenApplication = isNitrogenApplication;

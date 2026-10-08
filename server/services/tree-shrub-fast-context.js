@@ -337,8 +337,8 @@ function buildTreeShrubWarnings({ catalogRows, applications, visitDate }) {
   return warnings;
 }
 
-// The ledger has no property column: scope through the record's visit, and keep
-// rows whose property cannot be determined (more warnings, never fewer).
+// Scope to the treated property: the one frozen on the ledger row, a legacy row without one through the
+// record's visit; keep rows whose property cannot be determined (more warnings, never fewer).
 async function loadRecentApplications(svc, visitDate, knex) {
   const since = new Date((dayNumber(visitDate) - PALM_FERTILIZER_SPACING_DAYS) * 86400000).toISOString().slice(0, 10);
   const query = knex('property_application_history as pah')
@@ -352,7 +352,11 @@ async function loadRecentApplications(svc, visitDate, knex) {
     .whereNull('pah.retracted_at')
     .where('pah.application_date', '>=', since)
     .where((q) => q.whereNull('ss.id').orWhereNot('ss.id', svc.id));
-  if (svc.property_id) query.where((q) => q.whereNull('ss.property_id').orWhere('ss.property_id', svc.property_id));
+  if (svc.property_id) {
+    query.where((q) => q.where('pah.property_id', svc.property_id)
+      .orWhere((legacy) => legacy.whereNull('pah.property_id')
+        .andWhere((visit) => visit.whereNull('ss.property_id').orWhere('ss.property_id', svc.property_id))));
+  }
   return query.select(
     'pah.application_date', 'pah.product_id', 'pah.moa_group as history_moa_group',
     knex.raw('COALESCE(pc.name, sp.product_name) as product_name'),
