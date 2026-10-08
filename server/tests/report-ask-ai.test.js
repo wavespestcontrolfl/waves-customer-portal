@@ -1229,15 +1229,27 @@ describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
     store.shutdown?.();
   });
 
-  test('an expired counter no longer blocks', async () => {
+  test('concurrent reservations cannot pass the cap', async () => {
+    const rateLimit = require('express-rate-limit');
     const { takeReportAskBudget } = require('../routes/reports-public');
-    const ended = new Date(Date.now() - 1000);
-    const hits = { 'report:expired': { totalHits: 9, resetTime: ended } };
-    const store = {
-      get: async (key) => hits[key],
-      increment: async (key) => { hits[key] = { totalHits: 1, resetTime: new Date(Date.now() + 60000) }; return hits[key]; },
-    };
-    expect(await takeReportAskBudget([['report:expired', 3]], store)).toBe(true);
-    expect(hits['report:expired'].totalHits).toBe(1);
+    const store = new rateLimit.MemoryStore();
+    store.init({ windowMs: 60 * 1000 });
+    const results = await Promise.all(Array.from({ length: 100 }, (_, i) => takeReportAskBudget([['report:burst', 40], [`ip:burst-${i}`, 120]], store)));
+    expect(results.filter(Boolean)).toHaveLength(40);
+    expect((await store.get('report:burst')).totalHits).toBe(40);
+    store.shutdown?.();
+  });
+
+  test('an expired window starts a new count', async () => {
+    const rateLimit = require('express-rate-limit');
+    const { takeReportAskBudget } = require('../routes/reports-public');
+    const store = new rateLimit.MemoryStore();
+    store.init({ windowMs: 20 });
+    const keys = [['report:expiring', 1]];
+    expect(await takeReportAskBudget(keys, store)).toBe(true);
+    expect(await takeReportAskBudget(keys, store)).toBe(false);
+    await new Promise((resolve) => { setTimeout(resolve, 40); });
+    expect(await takeReportAskBudget(keys, store)).toBe(true);
+    store.shutdown?.();
   });
 });

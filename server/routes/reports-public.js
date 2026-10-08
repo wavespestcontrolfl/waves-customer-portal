@@ -227,13 +227,14 @@ const reportLimiter = rateLimit({
 const reportAskBudgetStore = new rateLimit.MemoryStore();
 reportAskBudgetStore.init({ windowMs: 24 * 60 * 60 * 1000 });
 async function takeReportAskBudget(keys, store = reportAskBudgetStore) {
-  const used = await Promise.all(keys.map(([key]) => store.get(key)));
-  // get() can return a counter whose window has ended (only increment()
-  // resets it), so an expired entry counts as unused (pre-push audit, #5964).
-  const live = (entry) => (entry && !(entry.resetTime && entry.resetTime.getTime() <= Date.now()) ? entry.totalHits || 0 : 0);
-  if (keys.some(([, cap], i) => live(used[i]) >= cap)) return false;
-  await Promise.all(keys.map(([key]) => store.increment(key)));
-  return true;
+  // Reserve first, then check: increment() is the store's atomic step (and it
+  // restarts an expired window), so concurrent requests cannot all read the
+  // same old count (Codex security P2 #5964 r78). A refused call gives its
+  // reservations back on every key.
+  const taken = await Promise.all(keys.map(([key]) => store.increment(key)));
+  if (!keys.some(([, cap], i) => (taken[i]?.totalHits || 0) > cap)) return true;
+  await Promise.all(keys.map(([key]) => store.decrement(key)));
+  return false;
 }
 
 // Ask Waves privacy headers (audit "Additional gaps"): both report ask
