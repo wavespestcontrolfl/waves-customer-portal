@@ -392,7 +392,7 @@ describe('ConfirmEvidence — family account suggestions', () => {
   };
   it('shows the caller, the named holder, each account with the address mark, and an Open customer link per account', () => {
     render(<ConfirmEvidence reasonCode="family_account_candidates" payload={payload} />);
-    expect(screen.getByText(/Dana Lee · \+19415550101/)).toBeInTheDocument();
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101/)).toBeInTheDocument();
     expect(screen.getByText('Angelina Testerson')).toBeInTheDocument();
     expect(screen.getByText('Angelina Testerson · Sarasota · address matches')).toBeInTheDocument();
     expect(screen.getByText('Angelina Testerson · Bradenton')).toBeInTheDocument();
@@ -400,6 +400,19 @@ describe('ConfirmEvidence — family account suggestions', () => {
     expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
     expect(screen.getByRole('link', { name: 'Open customer 2' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
     expect(screen.queryByText(/Add first name on/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/more accounts share this name/)).not.toBeInTheDocument();
+  });
+  it('shows BOTH numbers when the calling number and the dictated callback differ', () => {
+    render(<ConfirmEvidence reasonCode="family_account_candidates" payload={{ ...payload, caller_callback_phone: '+19415550102' }} />);
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101 · callback \+19415550102/)).toBeInTheDocument();
+  });
+  it('says so when more accounts share the name than the card lists', () => {
+    render(<ConfirmEvidence reasonCode="family_account_candidates" payload={{ ...payload, more_accounts: true }} />);
+    expect(screen.getByText(/more accounts share this name — search by name/)).toBeInTheDocument();
+  });
+  it('opens the server-resolved survivor for a merged candidate', () => {
+    render(<ConfirmEvidence reasonCode="family_account_candidates" payload={payload} openCustomerIds={[B, A]} />);
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
   });
 });
 

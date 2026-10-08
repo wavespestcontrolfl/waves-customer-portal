@@ -107,7 +107,7 @@ function statedAddressCorroborates(stated, customer) {
   return !(statedUnit && statedUnit !== onFileUnit);
 }
 
-const CARD_REASON = 'Confirm, then link the call to this account.';
+const CARD_REASON = 'Confirm, then link the call to this account. A customer record and visit may exist under the caller: move the visit to the account holder when you link.';
 
 /**
  * The suggestion for one processed call: { holder, candidates } or null when no card is due.
@@ -127,10 +127,13 @@ async function suggestFamilyAccounts({
   for (const phone of phones) {
     if (await knownCallerPhoneExists(conn, phone)) return null;
   }
-  const matches = await findLiveCustomersByFullName(conn, holder);
-  if (!matches.length) return null;
+  // One more than the card lists, so a truncated list can say so.
+  const found = await findLiveCustomersByFullName(conn, holder, { limit: MAX_CANDIDATES + 1 });
+  if (!found.length) return null;
+  const matches = found.slice(0, MAX_CANDIDATES);
   return {
     holder,
+    more_accounts: found.length > MAX_CANDIDATES,
     candidates: matches.map((m) => ({
       id: String(m.id),
       name: displayName(m),
@@ -162,6 +165,7 @@ async function fileFamilyAccountCard({
           caller_phone: call.from_phone || null,
           caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
           holder_candidates: suggestion.candidates,
+          more_accounts: suggestion.more_accounts,
           customer_ids: suggestion.candidates.map((c) => c.id),
           reason: CARD_REASON,
         },

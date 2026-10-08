@@ -138,12 +138,13 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     // family_account_candidates (suggest-only): who called, who they named, and each live account with
     // that name. The "Open customer" links below use the same customer_ids shape; staff confirm, then
     // link the call with the existing relink action.
-    reasonCode === "family_account_candidates" && p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone || p.caller_callback_phone].filter(Boolean).join(" · ") },
+    reasonCode === "family_account_candidates" && p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`].filter(Boolean).join(" · ") },
     reasonCode === "family_account_candidates" && p.account_holder_name && { label: "Named", value: p.account_holder_name },
     ...(reasonCode === "family_account_candidates" && Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
       label: i === 0 ? "Account" : `Account (${i + 1})`,
       value: [c.name, c.city, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
     })),
+    reasonCode === "family_account_candidates" && p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
     reasonCode === "family_account_candidates" && p.reason && { label: "Next", value: p.reason },
     reasonCode !== "family_account_candidates" && firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
@@ -1130,15 +1131,18 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               </Button>
                             ) : null
                           ) : isFamilyCard ? (
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={actioning === busyKey}
-                              onClick={() => resolveItem(item)}
-                            >
-                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Saving…" : "Resolve"}
-                            </Button>
+                            // Admin-only (the server hides the card from techs and 403s their Resolve).
+                            isAdmin ? (
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                disabled={actioning === busyKey}
+                                onClick={() => resolveItem(item)}
+                              >
+                                <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                                {actioning === busyKey ? "Saving…" : "Resolve"}
+                              </Button>
+                            ) : null
                           ) : isFollowUpCard ? (
                             <Button
                               size="sm"

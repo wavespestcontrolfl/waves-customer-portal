@@ -18,6 +18,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Cards only an admin sees and settles: property-role proposals embed the customer's other property
+// addresses, and a family-account suggestion lists customers and the caller's number for the office to
+// link. Hidden from the tech list and counts, and refused on every shared transition.
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];
+
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
 // Match the booking/estimate address-confirmation notices before applying the
@@ -254,7 +259,7 @@ router.get('/', async (req, res) => {
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('triage_items.reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS);
       })
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
@@ -295,7 +300,7 @@ router.get('/', async (req, res) => {
       .select('status')
       .count('* as n')
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('reason_code', ADMIN_ONLY_REASONS);
       })
       .groupBy('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, dismissed: 0 };
@@ -344,7 +349,7 @@ router.get('/', async (req, res) => {
 
     // A first-name card's "Open customer" links must reach an editable record: a listed customer
     // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
-    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
+    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name' || i.reason_code === 'family_account_candidates');
     if (nameCards.length) {
       const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
       for (const item of nameCards) {
@@ -765,7 +770,7 @@ async function transition(req, res, nextStatus) {
   // property correction through these shared transitions either.
   if (req.techRole !== 'admin') {
     const guarded = await db('triage_items').where({ id }).first('reason_code');
-    if (guarded && guarded.reason_code === 'property_role_confirm') {
+    if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {
       return res.status(403).json({ error: 'Admin access required' });
     }
     // A missing first name is settled on the customer record, which only an admin edits:

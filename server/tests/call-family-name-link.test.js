@@ -137,6 +137,18 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(at).toBeGreaterThan(0);
     expect(triage.slice(at, at + 700)).toContain("'family_account_candidates'");
   });
+  test('techs: the card is hidden from the list and counts and refused on every transition (admin-only reasons)', () => {
+    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];");
+    expect(triage).toContain("q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS)");
+    expect(triage).toContain("q.whereNotIn('reason_code', ADMIN_ONLY_REASONS)");
+    expect(triage).toContain('if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {');
+    const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
+    const branch = client.slice(client.indexOf(') : isFamilyCard ? ('));
+    expect(branch.slice(0, 200)).toContain('isAdmin ? (');
+  });
+  test('a merged candidate opens its survivor: the list resolves customer_ids for this card too', () => {
+    expect(triage).toContain("i.reason_code === 'missing_first_name' || i.reason_code === 'family_account_candidates'");
+  });
   test('the inbox shows Resolve, not Accept / Deny, on the card', () => {
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toContain('const isFamilyCard = isTriage && item.reason_code === "family_account_candidates";');
@@ -214,6 +226,28 @@ const SKIP = !process.env.DATABASE_URL;
     expect(row.customer_id).toBeNull();
     expect(row.metadata).toEqual({});
     expect(await trx('recipient_optin').where({ customer_id: mom })).toHaveLength(0);
+  });
+
+  test('the card says a customer record and visit may exist under the caller, and to move the visit', async () => {
+    await customer();
+    const callLogId = await call();
+    await fileFamilyAccountCard(input(callLogId));
+    const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+    expect(card.payload.reason).toContain('A customer record and visit may exist under the caller: move the visit to the account holder when you link.');
+  });
+
+  test('more than five same-name accounts: five listed and the card says more exist; five or fewer does not', async () => {
+    for (let i = 0; i < 6; i += 1) await customer({ city: `City${i}` });
+    const many = await suggestFamilyAccounts(input(await call()));
+    expect(many.candidates).toHaveLength(5);
+    expect(many.more_accounts).toBe(true);
+    const callLogId = await call();
+    await fileFamilyAccountCard(input(callLogId));
+    const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+    expect(card.payload.more_accounts).toBe(true);
+    expect(card.payload.customer_ids).toHaveLength(5);
+    await trx('customers').where({ city: 'City5' }).update({ deleted_at: new Date() });
+    expect((await suggestFamilyAccounts(input(await call()))).more_accounts).toBe(false);
   });
 
   test('a second filing for the same call adds no second card', async () => {
