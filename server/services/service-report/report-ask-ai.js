@@ -2691,6 +2691,17 @@ const FIXED_INTENTS = [
   ['mow_hold', (question, data) => Boolean(data.reportV2?.banner?.mowHold) && /\b(?:mow\w*|cut(?:ting)?\s+(?:the\s+)?(?:grass|lawn)|banner|hold)\b/i.test(question)],
   ['next_steps', (question) => CARE_PERMISSION_QUESTION.test(question)],
 ];
+// The topic whose own rule answer a generically routed question should get,
+// or null. Narrow on purpose: only intents with a dedicated rule answer and
+// no reading as a question about the completed visit ("What date was this
+// service?" is not a next-visit question) (pre-push audit, #5964).
+function reroutedTopic(question) {
+  const text = String(question || '');
+  if (REENTRY_QUESTION.test(text)) return 'reentry';
+  if ((NEXT_VISIT_QUESTION.test(text) || BOOKING_QUESTION.test(text)) && !SERVICE_DATE_QUESTION.test(text)) return 'next_visit';
+  return CARE_PERMISSION_QUESTION.test(text) ? 'next_steps' : null;
+}
+
 function fixedAnswerTopic(topic, question, data = {}) {
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   if (FIXED_TOPICS.has(topic)) return topic;
@@ -2817,6 +2828,7 @@ async function answerReportQuestionWithAI({
 }
 
 module.exports = {
+  reroutedTopic,
   fixedAnswerTopic,
   PROMPT_VERSION,
   SYSTEM_PROMPT,

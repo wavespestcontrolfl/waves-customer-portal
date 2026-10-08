@@ -2762,3 +2762,16 @@ test('a weather question keeps the rule router\'s own answer, never the lawn-sco
   expect(forced).toEqual(first);
   expect(forced.answer).not.toMatch(/lawn health/i);
 });
+
+describe('reroutedTopic: which generic questions get a dedicated rule answer (pre-push audit)', () => {
+  const { reroutedTopic } = require('../services/service-report/report-ask-ai');
+  test.each([
+    ['Can we use the patio?', 'reentry'], ['Are you due back?', 'next_visit'], ['Is another treatment booked?', 'next_visit'], ['Can I mow now', 'next_steps'],
+  ])('%s -> %s', (question, topic) => {
+    expect(reroutedTopic(question)).toBe(topic);
+  });
+
+  test.each(['What date was this service?', 'What day did you treat?', 'Did it rain?', 'What was applied?', 'How is my lawn doing?'])('%s is not re-routed', (question) => {
+    expect(reroutedTopic(question)).toBeNull();
+  });
+});
