@@ -2860,3 +2860,17 @@ test('typed text: any gate or door sentence leaves whole; reviewed product wordi
   expect(facts.customer_concern).toBe('[access details removed] Weeds by the fence.');
   expect(facts.products[0].what_it_does).toBe('Alpine WSG slows ants at entry points.');
 });
+
+describe('answer screen, Codex round 85', () => {
+  test.each(['Did you spray the lawn?', 'Did you spray the yard?', 'Did you treat the turf?'])('a direct-object lawn location question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(lawnData(), [], 'applied', question)).toBe('product_location');
+  });
+
+  test.each(["I'm having trouble seeing the treatment map", 'I have difficulty seeing the photos'])('trouble seeing something on the report is no symptom: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+
+  test('trouble seeing after the treatment is still a symptom', () => {
+    expect(medicalExposureAnswer('I am having trouble seeing after the treatment')).toBeTruthy();
+  });
+});

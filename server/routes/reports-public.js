@@ -217,15 +217,8 @@ const reportLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
-// Daily ceiling on paid Ask Waves model answers (Codex P1s #5964 r74, r77):
-// reportLimiter alone allows 20 a minute for one report link. Same
-// express-rate-limit store as the limiters above, with a 24-hour window.
-// takeReportAskBudget is called only when a call is about to reach the model;
-// past any key's cap it returns false and the fixed-rule answer stands (no
-// 429). Like every limiter in this file the store is per process: a second
-// replica or a restart gets its own count.
-const reportAskBudgetStore = new rateLimit.MemoryStore();
-reportAskBudgetStore.init({ windowMs: 24 * 60 * 60 * 1000 });
+// Daily ceiling on paid Ask Waves model answers (Codex P1s #5964 r74 to r83):
+// reportLimiter alone allows 20 a minute for one report link.
 // The shared, atomic reservation (Codex P1 #5964 r83 and the pre-push audit):
 // before a model call, one transaction takes an advisory lock for the report
 // and one for the IP, counts the last 24 hours of `report_ask_model_call`
@@ -234,8 +227,7 @@ reportAskBudgetStore.init({ windowMs: 24 * 60 * 60 * 1000 });
 // them, and two concurrent requests cannot both take the last slot. The row
 // is written only when a call is about to reach the model. No migration:
 // event_name is free text and every reader of the table filters by name.
-// A failed transaction (the test doubles, a database fault) falls back to
-// the in-process reservation below, so the model is never unbounded.
+// A failed transaction keeps the fixed-rule answer: no count, no model call.
 const REPORT_ASK_DAILY = { report: 40, ip: 120 };
 const REPORT_ASK_CALL_EVENT = 'report_ask_model_call';
 async function reserveSharedReportAskBudget(service, ipHash, dbConn = db) {
@@ -264,19 +256,11 @@ async function reportAskBudgetFor(service, req, deps = {}) {
   try {
     return await (deps.reserveShared || reserveSharedReportAskBudget)(service, ipHash);
   } catch (err) {
-    logger.warn(`[reports-public] shared report ask budget unavailable (${err.message}); using the in-process reservation`);
-    return takeReportAskBudget([[`report:${service.id}`, REPORT_ASK_DAILY.report], [`ip:${ipHash}`, REPORT_ASK_DAILY.ip]], deps.store);
+    // Fail closed: without the shared count the ceiling cannot be kept, so the
+    // fixed-rule answer stands and no model call is made (pre-push audit).
+    logger.warn(`[reports-public] shared report ask budget unavailable (${err.message}); keeping the fixed-rule answer`);
+    return false;
   }
-}
-async function takeReportAskBudget(keys, store = reportAskBudgetStore) {
-  // Reserve first, then check: increment() is the store's atomic step (and it
-  // restarts an expired window), so concurrent requests cannot all read the
-  // same old count (Codex security P2 #5964 r78). A refused call gives its
-  // reservations back on every key.
-  const taken = await Promise.all(keys.map(([key]) => store.increment(key)));
-  if (!keys.some(([, cap], i) => (taken[i]?.totalHits || 0) > cap)) return true;
-  await Promise.all(keys.map(([key]) => store.decrement(key)));
-  return false;
 }
 
 // Ask Waves privacy headers (audit "Additional gaps"): both report ask
@@ -2787,6 +2771,5 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
-module.exports.takeReportAskBudget = takeReportAskBudget;
 module.exports.reportAskBudgetFor = reportAskBudgetFor;
 module.exports.reserveSharedReportAskBudget = reserveSharedReportAskBudget;

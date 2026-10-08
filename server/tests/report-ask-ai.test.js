@@ -939,6 +939,13 @@ function mockDb() {
     if (table === 'activity_log') return chain();
     throw new Error(`Unexpected table query: ${table}`);
   });
+  // The shared Ask budget reserves inside a transaction: no prior calls, and
+  // the reservation row is accepted.
+  const budgetTable = () => {
+    const api = { where: () => api, count: () => api, first: async () => ({ n: 0 }), insert: async () => {} };
+    return api;
+  };
+  db.transaction = jest.fn(async (work) => work(Object.assign(budgetTable, { raw: async () => {} })));
   return { eventInsert };
 }
 
@@ -1248,20 +1255,6 @@ describe('street-address scrub keeps prose', () => {
 });
 
 describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
-  test('stops at each key\'s cap on the express-rate-limit store', async () => {
-    const rateLimit = require('express-rate-limit');
-    const { takeReportAskBudget } = require('../routes/reports-public');
-    const store = new rateLimit.MemoryStore();
-    store.init({ windowMs: 60 * 1000 });
-    const keys = [['report:budget-test', 3], ['ip:budget-test', 5]];
-    const taken = [];
-    for (let i = 0; i < 4; i += 1) taken.push(await takeReportAskBudget(keys, store));
-    expect(taken).toEqual([true, true, true, false]);
-    // The refused call consumed nothing on the other key.
-    expect((await store.get('ip:budget-test')).totalHits).toBe(3);
-    store.shutdown?.();
-  });
-
   // A stand-in for the transaction: one queue, so the lock, the counts and
   // the insert run one request at a time, as the advisory locks make them.
   function fakeSharedDb(rows = []) {
@@ -1301,37 +1294,9 @@ describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
     expect(await reserveSharedReportAskBudget({ id: 'svc-4' }, 'ip-a', fakeSharedDb(old))).toBe(true);
   });
 
-  test('a failed shared reservation falls back to the in-process one', async () => {
+  test('a failed shared reservation keeps the fixed answer (no model call)', async () => {
     const { reportAskBudgetFor } = require('../routes/reports-public');
-    const rateLimit = require('express-rate-limit');
-    const store = new rateLimit.MemoryStore();
-    store.init({ windowMs: 60 * 1000 });
-    const deps = { store, reserveShared: async () => { throw new Error('db down'); } };
-    expect(await reportAskBudgetFor({ id: 'svc-fallback' }, { ip: '203.0.113.9', headers: {} }, deps)).toBe(true);
-    store.shutdown?.();
-  });
-
-  test('concurrent reservations cannot pass the cap', async () => {
-    const rateLimit = require('express-rate-limit');
-    const { takeReportAskBudget } = require('../routes/reports-public');
-    const store = new rateLimit.MemoryStore();
-    store.init({ windowMs: 60 * 1000 });
-    const results = await Promise.all(Array.from({ length: 100 }, (_, i) => takeReportAskBudget([['report:burst', 40], [`ip:burst-${i}`, 120]], store)));
-    expect(results.filter(Boolean)).toHaveLength(40);
-    expect((await store.get('report:burst')).totalHits).toBe(40);
-    store.shutdown?.();
-  });
-
-  test('an expired window starts a new count', async () => {
-    const rateLimit = require('express-rate-limit');
-    const { takeReportAskBudget } = require('../routes/reports-public');
-    const store = new rateLimit.MemoryStore();
-    store.init({ windowMs: 20 });
-    const keys = [['report:expiring', 1]];
-    expect(await takeReportAskBudget(keys, store)).toBe(true);
-    expect(await takeReportAskBudget(keys, store)).toBe(false);
-    await new Promise((resolve) => { setTimeout(resolve, 40); });
-    expect(await takeReportAskBudget(keys, store)).toBe(true);
-    store.shutdown?.();
+    const deps = { reserveShared: async () => { throw new Error('db down'); } };
+    expect(await reportAskBudgetFor({ id: 'svc-fail' }, { ip: '203.0.113.9', headers: {} }, deps)).toBe(false);
   });
 });
