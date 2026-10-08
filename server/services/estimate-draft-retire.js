@@ -128,9 +128,12 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
 // Archive one draft, clear a lead link to it, and mark its open "draft
-// ready" bells done, in one transaction. The sent estimate is read FOR SHARE first, so a concurrent
-// revise (address move) or linkage invalidation of it either commits
-// before this check or waits until the archive commits.
+// ready" bells done, in one transaction. The sent estimate is locked FOR
+// UPDATE NOWAIT first: a revise (address move), a linkage invalidation or a
+// Pipeline link of it (which takes FOR SHARE) either committed before this
+// check or cannot proceed until the archive commits, so nothing changes its
+// owner between the owner check and the send replay below. A busy row skips
+// this draft for the tick.
 async function retireOneDraft(trx, pair) {
   // Lead first, then estimates — the order createOrReuseAdminEstimate takes
   // (lead, then its estimate), so a staff save of the same lead cannot
@@ -147,7 +150,7 @@ async function retireOneDraft(trx, pair) {
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
        AND ${SENT_EVIDENCE_SQL('s')}
-     FOR SHARE NOWAIT
+     FOR UPDATE NOWAIT
   `, [pair.sent_id, pair.sent_property_id, pair.sent_address]);
   if (!sent?.rows?.length) return null;
   // An ACCEPTED replacement would need the lead converted; that is the
