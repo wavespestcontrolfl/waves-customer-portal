@@ -66,8 +66,6 @@ export default function RescheduleConfirmModal({
   customerId, // optional — enables the advisory best-times hint
   durationMinutes, // optional — best-times hint duration (engine defaults 60)
   technicianId, // optional — scope the hint to the landing tech's route
-  serviceTypes, // optional — what the visit books (visitServiceArgs), for the rows' rain ranking
-  serviceKeys,
   onConfirm,
   onCancel,
 }) {
@@ -138,8 +136,7 @@ export default function RescheduleConfirmModal({
     pickedEnd: toEnd || undefined,
     rangeFrom: etDateString(),
     // The same two best-times rows as New Appointment (owner 2026-10-08).
-    serviceTypes,
-    serviceKeys,
+    // The server reads what the visit books from its own rows (serviceId).
     bestRows: true,
   });
 

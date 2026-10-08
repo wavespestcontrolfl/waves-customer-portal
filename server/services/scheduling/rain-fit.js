@@ -141,14 +141,55 @@ async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = 
   return out;
 }
 
+// What an existing visit books, from its rows: { own, siblings }, each a
+// list of { name, key }. `siblings` are the other live services on a shared
+// stop (empty when the move takes this service alone), add-ons included.
+// null when the visit cannot be read: the caller keeps what the screen sent.
+async function storedVisitServices(serviceId, { moveAlone = false } = {}, db) {
+  try {
+    const row = await db('scheduled_services').where({ id: serviceId })
+      .first('id', 'service_type', 'service_key_snapshot', 'visit_id');
+    if (!row) return null;
+    const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
+    const others = row.visit_id && !moveAlone
+      ? await db('scheduled_services').where({ visit_id: row.visit_id }).whereNot('id', row.id)
+        .whereNotIn('status', TERMINAL_ROW_STATUSES).select('id', 'service_type', 'service_key_snapshot')
+      : [];
+    const addOns = await db('scheduled_service_addons')
+      .whereIn('scheduled_service_id', [row.id, ...others.map((o) => o.id)])
+      .select('scheduled_service_id', 'service_name', 'service_key_snapshot');
+    const item = (name, key) => ({ name, key: key || '' });
+    const withAddOns = (r) => [
+      item(r.service_type, r.service_key_snapshot),
+      ...addOns.filter((a) => String(a.scheduled_service_id) === String(r.id)).map((a) => item(a.service_name, a.service_key_snapshot)),
+    ];
+    return { own: withAddOns(row), siblings: others.flatMap(withAddOns) };
+  } catch (err) {
+    logger.warn(`[rain-fit] visit services lookup failed (the screen's list used): ${err.message}`);
+    return null;
+  }
+}
+
 // The find-time request's services for the ranking: the primary service and
 // the rest of the booking, each with the catalog key the screen sent
 // (`serviceKeys`, parallel to `serviceTypes`). Deduplicated and capped.
 // Empty unless the request asks for the best-times rows, the only reader.
-function bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys }, db) {
+// For an existing visit (`serviceId`: Edit, Quick Move, the reschedule
+// dialogs) the visit's own rows say what moves, so no screen can leave a
+// service out: the stored primary service and add-ons, unless the screen
+// sent its own list (the edit form's unsaved services), plus every live
+// service that shares the stop, unless the move takes this one alone.
+async function bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys, serviceId, moveAlone = false }, db) {
   if (bestRows !== true) return [];
-  const names = Array.isArray(serviceTypes) ? serviceTypes : [];
-  const keys = Array.isArray(serviceKeys) && serviceKeys.length === names.length ? serviceKeys : [];
+  let names = Array.isArray(serviceTypes) ? serviceTypes : [];
+  let keys = Array.isArray(serviceKeys) && serviceKeys.length === names.length ? serviceKeys : [];
+  const stored = serviceId ? await storedVisitServices(serviceId, { moveAlone }, db) : null;
+  if (stored) {
+    const sent = names.some((name) => typeof name === 'string' && name.trim());
+    const list = [...(sent ? names.map((name, i) => ({ name, key: keys[i] })) : stored.own), ...stored.siblings];
+    names = list.map((item) => item.name);
+    keys = list.map((item) => item.key || '');
+  }
   const seen = new Map();
   let overflow = false;
   const add = (name, key) => {
@@ -260,4 +301,4 @@ function rainTierOf(fit, hourly, today) {
   return (chip) => rainTier(fit, isWetWindow(hourly, chip, today), inRainHorizon(chip.date, today));
 }
 
-module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, storedVisitServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };

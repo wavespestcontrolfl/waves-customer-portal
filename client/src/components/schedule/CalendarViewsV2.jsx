@@ -30,7 +30,6 @@ import {
   pointerWithin,
 } from '@dnd-kit/core';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
-import { visitServiceArgs } from './visitServiceArgs';
 import { SERIES_ACK_REQUIRED, apiErrorMessage, parseSeriesAckError } from './seriesMove';
 import { etDateString } from '../../lib/timezone';
 
@@ -630,7 +629,6 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
         toMinutes={pending?.toMinutes}
         isRecurring={!!pending?.svc?.isRecurring}
         serviceId={pending?.svc?.id}
-        {...visitServiceArgs(pending?.svc)}
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
         durationMinutes={pending?.svc?.duration || 30}

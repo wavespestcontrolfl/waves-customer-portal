@@ -243,14 +243,12 @@ it('choosing Separate is the same one request with that choice', async () => {
   expect(body(0)).toMatchObject({ comboMove: 'separate', scheduledDate: '2035-01-03' });
 });
 
-it('the best-times rows rank for the services the save moves: the whole stop together, this service alone when separate', () => {
+it('the best-times rows rank for the form\'s services and carry the move choice; the server adds the shared stop', () => {
   const dialog = openCombo();
-  expect(bestTimesState.args).toMatchObject({ bestRows: true });
-  expect(bestTimesState.args.serviceTypes).toEqual(['Pest Control', 'Lawn Care']);
-  expect(bestTimesState.args.serviceKeys).toHaveLength(bestTimesState.args.serviceTypes.length);
+  expect(bestTimesState.args).toMatchObject({ bestRows: true, serviceId: 'fixture-visit', moveScope: 'together', serviceTypes: ['Pest Control'], serviceKeys: [''] });
   setDate(dialog, '2035-01-03');
   fireEvent.click(screen.getByLabelText('Separate: move only this service'));
-  expect(bestTimesState.args.serviceTypes).toEqual([service.serviceType]);
+  expect(bestTimesState.args).toMatchObject({ moveScope: 'separate', serviceTypes: ['Pest Control'] });
 });
 
 it('a technician-only change on a combo asks too (owner ruling), and the request carries the choice and the technician', async () => {

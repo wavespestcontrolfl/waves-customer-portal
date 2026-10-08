@@ -438,7 +438,10 @@ router.post('/', async (req, res) => {
       // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
       // Each name carries its catalog key when the catalog holds it, so the
       // ranking reads the service's identity, not the words in its name.
-      serviceTypes: await bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys }, db),
+      // An existing visit's own rows say what moves (rain-fit.js bookingServices).
+      serviceTypes: await bookingServices({
+        bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
+      }, db),
     });
     const pickedOut = built.picked;
 
