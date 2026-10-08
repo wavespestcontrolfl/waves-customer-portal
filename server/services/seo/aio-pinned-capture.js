@@ -23,13 +23,35 @@ const DEVICES = ['desktop', 'mobile'];
 const MAX_PINNED_CALLS_PER_PASS = 12;
 const ORGANIC_TOP_N = 10;
 
+// DataForSEO's organic SERP takes location_coordinate as "lat,lng,radius" with
+// radius 199..199999 (docs example 200); dataforseo.serpLocation's default 20
+// is below that, so these calls set the radius themselves. Mobile os is "ios".
+const SERP_RADIUS = 200;
+const SERP_RADIUS_MIN = 199;
+const SERP_RADIUS_MAX = 199999;
+function serpPoint(location) {
+  const m = String(location || '').trim().match(/^(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:,\s*(\d+(?:\.\d+)?))?$/);
+  if (!m) return { location_name: location };
+  // A stored radius inside the accepted range is kept; a missing or
+  // out-of-range one gets the default.
+  const r = Number(m[3]);
+  const radius = r >= SERP_RADIUS_MIN && r <= SERP_RADIUS_MAX ? m[3] : SERP_RADIUS;
+  return { location_coordinate: `${m[1]},${m[2]},${radius}` };
+}
+const osFor = (device) => (device === 'desktop' ? 'macos' : 'ios');
+
 const arr = (v) => (Array.isArray(v) ? v : []);
 // pg turns a JS array into a Postgres array, which a jsonb column rejects.
 const json = (v) => (v == null ? null : JSON.stringify(v));
 
 function parseSerp(items) {
   const list = arr(items);
-  const aio = list.find((i) => i?.type === 'ai_overview') || null;
+  // An overview can also arrive inside the knowledge panel, as a
+  // knowledge_graph_ai_overview_item with the same element children.
+  const aio = list.find((i) => i?.type === 'ai_overview')
+    || list.filter((i) => i?.type === 'knowledge_graph').flatMap((i) => arr(i.items)).find((i) => i?.type === 'knowledge_graph_ai_overview_item')
+    || list.find((i) => i?.type === 'knowledge_graph_ai_overview_item')
+    || null;
 
   const organicTop = list
     .filter((i) => i?.type === 'organic')
@@ -51,17 +73,31 @@ function parseSerp(items) {
 
   if (!aio) return { aio: null, organicTop, paa, localPack };
 
-  const elements = arr(aio.items)
-    .filter((e) => e?.type === 'ai_overview_element' && (e.text || e.markdown))
+  // Every answer part can carry citations: plain, table, video and expanded
+  // elements, and the components nested in an expanded element.
+  const parts = [];
+  const walk = (list) => {
+    for (const e of arr(list)) {
+      if (/^ai_overview_\w*(element|component)$/.test(e?.type || '')) parts.push(e);
+      walk(e?.items);
+      walk(e?.components);
+    }
+  };
+  walk(aio.items);
+  const elements = parts
     .map((e) => ({
       title: e.title || null,
       text: e.text || e.markdown || '',
-      urls: [...arr(e.references), ...arr(e.links)].map((r) => r?.url).filter(Boolean),
-    }));
+      // Sources can also be images; a video element cites its video in its own url field.
+      urls: [...arr(e.references), ...arr(e.links), ...arr(e.images), ...(e.type === 'ai_overview_video_element' ? [e] : [])].map((r) => r?.url).filter(Boolean),
+    }))
+    .filter((e) => e.text || e.urls.length);
   const references = arr(aio.references).map((r) => ({
     url: r?.url || null, title: r?.title || null, domain: r?.domain || null, text: r?.text || r?.snippet || null,
   }));
-  const markdown = aio.markdown || arr(aio.items).map((e) => e?.text || '').filter(Boolean).join('\n');
+  // Without a top-level markdown, the answer is every part's text, nested
+  // components included.
+  const markdown = aio.markdown || parts.map((e) => e?.text || e?.markdown || '').filter(Boolean).join('\n');
   // Only URLs attached to an answer element prove a citation; top-level
   // references are pages Google MAY have used (same contract as
   // googleAnswerProbe in llm-mention-prober.js).
@@ -75,10 +111,10 @@ async function captureOne(queryRow, device, pass) {
   const base = { query_id: queryRow.id, query: queryRow.query, pass, device, location };
   const data = await dataforseo.request(SERP_PATH, [{
     keyword: queryRow.query,
-    ...dataforseo.serpLocation(location),
+    ...serpPoint(location),
     language_name: 'English',
     device,
-    os: device === 'desktop' ? 'macos' : 'iOS',
+    os: osFor(device),
     load_async_ai_overview: true,
   }]);
 
@@ -162,4 +198,4 @@ async function runPinnedCaptures({ pass = 'am' } = {}) {
   return summary;
 }
 
-module.exports = { runPinnedCaptures, parseSerp, MAX_PINNED_CALLS_PER_PASS, DEFAULT_LOCATION };
+module.exports = { runPinnedCaptures, parseSerp, serpPoint, osFor, MAX_PINNED_CALLS_PER_PASS, DEFAULT_LOCATION };

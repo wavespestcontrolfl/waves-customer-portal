@@ -55,12 +55,21 @@ test('desktop and mobile are both called; a coordinate pin_location becomes loca
   await runPinnedCaptures({ pass: 'am' });
   expect(dataforseo.request).toHaveBeenCalledTimes(2);
   const bodies = dataforseo.request.mock.calls.map((c) => c[1][0]);
-  expect(bodies.map((b) => [b.device, b.os])).toEqual([['desktop', 'macos'], ['mobile', 'iOS']]);
+  expect(bodies.map((b) => [b.device, b.os])).toEqual([['desktop', 'macos'], ['mobile', 'ios']]);
   for (const b of bodies) {
-    expect(b).toMatchObject({ keyword: 'best pest control in Exampleville', location_coordinate: '27.5870,-82.4248,10', language_name: 'English', load_async_ai_overview: true });
+    expect(b).toMatchObject({ keyword: 'best pest control in Exampleville', location_coordinate: '27.5870,-82.4248,200', language_name: 'English', load_async_ai_overview: true });
     expect(b.location_name).toBeUndefined();
   }
   expect(dataforseo.request.mock.calls[0][0]).toBe('/serp/google/organic/live/advanced');
+});
+
+test('a coordinate always goes out with a radius DataForSEO accepts (199..199999)', () => {
+  const { serpPoint } = require('../services/seo/aio-pinned-capture');
+  expect(serpPoint('27.3364,-82.5307,10')).toEqual({ location_coordinate: '27.3364,-82.5307,200' });
+  expect(serpPoint('27.3364,-82.5307')).toEqual({ location_coordinate: '27.3364,-82.5307,200' });
+  expect(serpPoint('27.5870,-82.4248,20000')).toEqual({ location_coordinate: '27.5870,-82.4248,20000' });
+  expect(serpPoint('27.5870,-82.4248,500000')).toEqual({ location_coordinate: '27.5870,-82.4248,200' });
+  expect(serpPoint('Sarasota,Florida,United States')).toEqual({ location_name: 'Sarasota,Florida,United States' });
 });
 
 test('no pin_location uses the Bradenton place name', async () => {
@@ -136,6 +145,40 @@ test('a shown overview maps elements to urls, keeps reference titles and flags a
   expect(JSON.parse(row.aio_references)).toEqual([{ url: 'https://rival2.example/c', title: 'Source C', domain: 'rival2.example', text: 'snippet' }]);
   expect(JSON.parse(row.raw_item).type).toBe('ai_overview');
   expect(summary).toMatchObject({ shown: 2, costUsd: 0.008 });
+});
+
+test('with no top-level markdown, nested component text forms the answer', async () => {
+  mockQueries = [q()];
+  dataforseo.request.mockResolvedValue(serp([{ type: 'knowledge_graph_ai_overview_item', items: [
+    { type: 'ai_overview_expanded_element', components: [{ type: 'ai_overview_expanded_component', text: 'Waves Pest Control treats lawns.' }] },
+  ] }]));
+  await runPinnedCaptures({ pass: 'am' });
+  expect(mockInserts[0].answer_markdown).toBe('Waves Pest Control treats lawns.');
+});
+
+test('an overview inside the knowledge panel is read as shown', async () => {
+  mockQueries = [q()];
+  dataforseo.request.mockResolvedValue(serp([{ type: 'knowledge_graph', items: [
+    { type: 'knowledge_graph_ai_overview_item', markdown: 'Panel overview', items: [{ type: 'ai_overview_element', text: 'A', references: [{ url: 'https://rival0.example/k' }] }] },
+  ] }]));
+  await runPinnedCaptures({ pass: 'am' });
+  expect(mockInserts[0]).toMatchObject({ status: 'shown', answer_markdown: 'Panel overview' });
+});
+
+test('citations on table, expanded and nested component elements count', async () => {
+  mockQueries = [q()];
+  dataforseo.request.mockResolvedValue(serp([{ type: 'ai_overview', markdown: 'x', references: [], items: [
+    { type: 'ai_overview_table_element', references: [{ url: 'https://rival0.example/t' }] },
+    { type: 'ai_overview_video_element', url: 'https://video.example/v' },
+    { type: 'ai_overview_element', text: 'Pic', images: [{ url: 'https://img.example/i' }] },
+    { type: 'ai_overview_expanded_element', components: [
+      { type: 'ai_overview_expanded_component', text: 'Nested', references: [{ url: 'https://www.wavespestcontrol.com/lawn-care/' }] },
+    ] },
+  ] }]));
+  await runPinnedCaptures({ pass: 'am' });
+  const row = mockInserts[0];
+  expect(JSON.parse(row.elements).flatMap((e) => e.urls)).toEqual(['https://rival0.example/t', 'https://video.example/v', 'https://img.example/i', 'https://www.wavespestcontrol.com/lawn-care/']);
+  expect(row.waves_cited).toBe(true);
 });
 
 test('waves_cited is false when no cited url is a Waves domain', async () => {
