@@ -59,6 +59,28 @@ it('drag-drop confirm: a display-only strip, and the route warning it covers is 
   expect(screen.getByText(/Fixture Neighbor is already booked/)).toBeInTheDocument();
 });
 
+it('drag-drop confirm: asks for the best-times rows and shows them display-only', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({ enabled: false })));
+  hooks.availability = {
+    ...missAt('09:00'),
+    best: { day: [hour('11:00', { rainChance: 15 })], week: [hour('10:00', { date: '2035-01-03', rainChance: 65 })], weekCovered: true },
+  };
+  render(
+    <RescheduleConfirmModal
+      open customerName="Fixture Customer" fromDate="2035-01-01" fromMinutes={480} toDate={DATE} toMinutes={540}
+      serviceId="svc-1" technicianId="tech-1" toWindow="09:00-10:00" onConfirm={vi.fn()} onCancel={vi.fn()}
+    />,
+  );
+  const rows = await screen.findAllByTestId('best-row');
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveTextContent('15% rain');
+  expect(rows[1]).toHaveTextContent('65% rain');
+  for (const chip of screen.getAllByTestId('availability-hour')) expect(chip).toBeDisabled();
+  // The server reads the visit's services from its rows: the screen sends the visit, no list.
+  expect(hooks.bestTimesArgs).toMatchObject({ bestRows: true, serviceId: 'svc-1' });
+  expect(hooks.bestTimesArgs.serviceTypes).toBeUndefined();
+});
+
 it('drag-drop confirm with the gate off: no strip, the route warning stays', () => {
   vi.stubGlobal('fetch', vi.fn(async () => json({ enabled: false })));
   hooks.conflicts = [ROUTE_WARNING];
@@ -104,7 +126,8 @@ it('rain-out: asks for the best-times rows and shows each chip with its hourly r
   expect(rows).toHaveLength(2);
   expect(rows[0]).toHaveTextContent('15% rain');
   expect(rows[1]).toHaveTextContent('65% rain');
-  expect(hooks.bestTimesArgs).toMatchObject({ bestRows: true, serviceTypes: ['Fixture Lawn Care'] });
+  expect(hooks.bestTimesArgs).toMatchObject({ bestRows: true, serviceId: 'svc-1' });
+  expect(hooks.bestTimesArgs.serviceTypes).toBeUndefined();
   // A "later today" preset carries its own hour's chance; a day-level fallback says so.
   expect(screen.getByText('80% rain')).toBeInTheDocument();
   expect(screen.getByText('74% rain that day')).toBeInTheDocument();
