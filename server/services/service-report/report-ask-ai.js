@@ -616,6 +616,8 @@ function treeShrubFacts(data = {}, keep = () => true) {
     // The "From your technician" paragraph the hero shows (Codex P1 #5964 r61).
     tech_paragraph: text(v2.techParagraph, 700),
     status_headline: text(snapshot.statusHeadline, 200),
+    // The hero's peace-of-mind box (Codex P1 #5964 r72).
+    peace_of_mind: text(snapshot.peaceOfMind, 300),
     score_explanation: text(snapshot.scoreExplanation, 300),
     watching: asArray(snapshot.watching).slice(0, 3).map((item) => text(item, 160)).filter(Boolean),
     main_watch: text(snapshot.mainWatch, 240),
@@ -678,6 +680,8 @@ function lawnLeadFacts(v2, text) {
     your_part: texts(lead.yourPart, 2, 240),
     next: text(lead.next, 240),
     what_to_expect: text(lead.whatToExpect, 300),
+    // The seasonal note the hero or lead shows (Codex P1 #5964 r72).
+    seasonal_note: text(lead.seasonalNote || snapshot.seasonalNote, 300),
     watching: texts([lead.watching].flat(), 2, 200),
     from_your_technician: text(lead.techParagraph, 700),
     since_last_visit: texts(objectOr(lead.sinceLast).lines, 4, 200),

@@ -293,7 +293,9 @@ describe('the fact sheet and prompt carry required lines', () => {
         waves_next: 'Recheck the affected foliage next visit.',
       });
       const text = JSON.stringify(facts.tree_shrub_report);
-      expect(text).not.toMatch(/Test Insecticide|We found 2 items|%/);
+      expect(text).not.toMatch(/Test Insecticide|%/);
+      // The hero shows the peace-of-mind box, so the sheet carries it (Codex P1 #5964 r72).
+      expect(facts.tree_shrub_report.peace_of_mind).toBe('We found 2 items to address.');
       expect(facts.tree_shrub_report.insights).toHaveLength(2);
     });
 
@@ -2504,5 +2506,17 @@ describe('answer screen, Codex round 71', () => {
 
   test('a blog question keeps the fixed answer', () => {
     expect(ruleAnswerReason(data, [], 'unrouted', 'What is the blog post on my report?')).toBe('blog');
+  });
+});
+
+describe('answer screen, Codex round 72', () => {
+  test('the lawn seasonal note is on the sheet', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, snapshot: { seasonalNote: 'Growth slows as nights cool.' } } });
+    expect(buildReportAskFacts({ data }).lawn_report.seasonal_note).toBe('Growth slows as nights cool.');
+  });
+
+  test('the Tree & Shrub peace-of-mind text is on the sheet', () => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80, peaceOfMind: 'Your landscape is on a steady plan.' } } };
+    expect(buildReportAskFacts({ data }).tree_shrub_report.peace_of_mind).toBe('Your landscape is on a steady plan.');
   });
 });
