@@ -61,26 +61,53 @@ describe('pest forecast weather', () => {
 });
 
 describe('dispatch forecast analyzer', () => {
-  beforeEach(() => { jest.resetModules(); });
+  // 9 PM ET on Oct 8 is already Oct 9 in UTC (the server clock): Eastern
+  // "tomorrow" is Oct 9, and a 2 PM ET forecast hour is hour 18 in UTC.
+  const ONLY_DATE = { doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] };
+  beforeEach(() => {
+    jest.resetModules();
+    jest.useFakeTimers(ONLY_DATE);
+    jest.setSystemTime(new Date('2026-10-09T01:00:00Z'));
+  });
+  afterEach(() => { jest.useRealTimers(); });
 
-  test('reads the shared hourly reader (NWS, Open-Meteo when NWS fails)', async () => {
+  function load(hours, rows) {
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-    const row = { id: 's1', customer_id: 'c1', service_type: 'Assessment', first_name: 'Test', last_name: 'Person' };
-    const query = { where: () => query, whereIn: () => query, leftJoin: () => query, select: async () => [row] };
+    const where = jest.fn(() => query);
+    const query = { where, whereIn: () => query, leftJoin: () => query, select: async () => rows };
     jest.doMock('../models/db', () => jest.fn(() => query));
-    const getHourlyRainOutlook = jest.fn(async () => [
-      { startTime: '2026-10-09T14:00:00-04:00', rainChance: 80, temperatureF: 84.4, windMph: 12.2, shortForecast: null, source: 'open-meteo' },
-    ]);
+    const getHourlyRainOutlook = jest.fn(async () => hours);
     jest.doMock('../services/weather-forecast', () => ({ getHourlyRainOutlook }));
-    const analyzer = require('../services/forecast-analyzer');
-    const seen = [];
-    analyzer.analyzeServiceWeather = (service, forecast) => { seen.push(forecast); return { recommendation: 'GO' }; };
-    analyzer.buildSummary = () => 'summary';
+    return { analyzer: require('../services/forecast-analyzer'), getHourlyRainOutlook, where };
+  }
+
+  const visit = { id: 's1', customer_id: 'c1', service_type: 'General Pest Control', first_name: 'Test', last_name: 'Person', window_start: '14:00', window_end: '16:00' };
+
+  test('reads the shared hourly reader and judges the Eastern date and hours', async () => {
+    const { analyzer, getHourlyRainOutlook, where } = load([
+      // Tomorrow (ET) 2 PM, inside the window: 90% rain, from the backup.
+      { startTime: '2026-10-09T14:00:00-04:00', rainChance: 90, temperatureF: 84.4, windMph: 6.2, shortForecast: null, source: 'open-meteo' },
+      // Tomorrow 8 AM: outside the window.
+      { startTime: '2026-10-09T08:00:00-04:00', rainChance: 5, temperatureF: 74.6, windMph: 3, shortForecast: null },
+      // The day after at 2 PM: another date.
+      { startTime: '2026-10-10T14:00:00-04:00', rainChance: 0, temperatureF: 80, windMph: 3, shortForecast: null },
+    ], [visit]);
     const out = await analyzer.analyzeTomorrow();
     expect(getHourlyRainOutlook).toHaveBeenCalledWith(27.4217, -82.4065);
-    expect(seen[0][0]).toMatchObject({ temp_f: 84.4, wind_speed_mph: 12.2, rain_probability_pct: 80, rain_mm: 0 });
-    expect(seen[0][0].datetime.toISOString()).toBe('2026-10-09T18:00:00.000Z');
+    expect(out.date).toBe('2026-10-09');
+    expect(where).toHaveBeenCalledWith('scheduled_date', '2026-10-09');
+    expect(out.needsReschedule).toHaveLength(1);
+    expect(out.needsReschedule[0].issues[0].detail).toContain('90% rain');
+    // The summary covers the Eastern date only, with rounded temperatures.
+    expect(out.overallConditions.summary).toContain('75-84°F');
+    expect(out.overallConditions.summary).toContain('90% max rain chance');
+  });
+
+  test('no forecast: every visit proceeds (fail open)', async () => {
+    const { analyzer } = load(null, [visit]);
+    const out = await analyzer.analyzeTomorrow();
     expect(out.canProceed).toHaveLength(1);
+    expect(out.overallConditions.summary).toBe('Forecast unavailable.');
   });
 });
 
@@ -183,6 +210,24 @@ describe('portal Local Conditions tile', () => {
     const out = await get({ city: 'Venice', zip: '34285' });
     expect(global.fetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
     expect(out).toMatchObject({ temp: 80, forecast: 'Cloudy' });
+  });
+
+  test('NWS answers with an empty period list: the backup is used, not defaults', async () => {
+    const hour0 = Math.floor(Date.now() / 3600000) * 3600;
+    const times = Array.from({ length: 30 }, (_, i) => hour0 + i * 3600);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('/points/')) return { ok: true, json: async () => ({ properties: { forecast: 'https://api.weather.gov/gridpoints/TBW/1,1/forecast' } }) };
+      if (!isOpenMeteo(url)) return { ok: true, json: async () => ({ properties: { periods: [] } }) };
+      return {
+        ok: true,
+        json: async () => ({
+          current: { time: Math.floor(Date.now() / 1000), temperature_2m: 79, relative_humidity_2m: 66, wind_speed_10m: 4, weather_code: 0 },
+          hourly: { time: times, temperature_2m: times.map(() => 71), precipitation: times.map(() => 0) },
+        }),
+      };
+    });
+    const out = await get({ city: 'Bradenton', zip: '34205' });
+    expect(out).toMatchObject({ temp: 79, humidity: 66, forecast: 'Clear' });
   });
 
   test('both down: the seasonal fallback, as before', async () => {

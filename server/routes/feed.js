@@ -644,7 +644,9 @@ async function fetchNwsPeriods(place) {
   if (!forecastUrl) return null;
   const forecastRes = await fetch(forecastUrl, { headers, signal });
   if (!forecastRes.ok) return null;
-  return (await forecastRes.json()).properties?.periods || [];
+  // An empty or missing list is no answer: null sends the route to the backup.
+  const periods = (await forecastRes.json()).properties?.periods;
+  return Array.isArray(periods) && periods.length ? periods : null;
 }
 
 // NWS backup (owner 2026-10-08): current conditions from the shared
