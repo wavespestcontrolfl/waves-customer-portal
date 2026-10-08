@@ -212,6 +212,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
+const { flagCallBookingRain } = require('./call-booking-rain-flag');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { isAssessmentServiceRow } = require('./assessment-booking');
@@ -20163,6 +20164,13 @@ const CallRecordingProcessor = {
                     logger.warn(`[call-proc] booking-conflict admin notify failed for ${maskSid(callSid)}: ${notifyErr.message}`);
                   }
                 }
+                // Rain flag (GATE_CALL_BOOKING_RAIN_FLAG, dark): the same
+                // admin channel, one notice when this fresh visit is outdoor
+                // work in a rain window (call-booking-rain-flag.js). Advisory
+                // like the block above; it never throws and moves nothing.
+                await flagCallBookingRain({
+                  visit: svc, scheduledDate, windowStart, windowEnd, catalogRow: callBookingCatalogRow, callSid, db,
+                });
               }
               if ((attachedManualBookingId && attachSkippedFollowUpPlan) || disputeSkippedFollowUpPlan) {
                 // The call promised a follow-up treatment, but the primary is

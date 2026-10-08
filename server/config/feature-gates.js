@@ -3442,6 +3442,16 @@ const gates = {
   // gateEnvValue() at call time. Kill switch: unset — today's order.
   customerRainRank: gateEnvValue('GATE_CUSTOMER_RAIN_RANK'),
 
+  // Call booking rain flag (owner 2026-10-08): the call pipeline books the
+  // time a person agreed with the caller, so there is nothing to rank. When
+  // that fresh visit is outdoor work in a rain window (rain-fit.js: 60%+
+  // from the start through 2 h after the end, next 3 dates), the office gets
+  // one admin notification on the 'schedule' channel. Nothing is moved, no
+  // customer is texted, no triage card is created. OFF in every environment;
+  // call-booking-rain-flag.js reads it through gateEnvValue() at call time.
+  // Kill switch: unset.
+  callBookingRainFlag: gateEnvValue('GATE_CALL_BOOKING_RAIN_FLAG'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a
