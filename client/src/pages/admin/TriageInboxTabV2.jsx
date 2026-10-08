@@ -502,6 +502,49 @@ export function holdReadBackView(item) {
   };
 }
 
+// The actions of a Resolve-only card. A no-text line (text_number_differs) also gets its own
+// "Line can get texts" button (with its own confirm), apart from Resolve (phones updated: the line
+// stays blocked) and from the shared Dismiss (just closes the card).
+function ResolveOnlyActions({ item, busy, onResolve, onLineCanText }) {
+  return (
+    <>
+      <Button size="sm" variant="primary" disabled={busy} onClick={onResolve}>
+        <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+        {busy ? "Saving…" : RESOLVE_ONLY_LABELS[item.reason_code]}
+      </Button>
+      {item.reason_code === "text_number_differs" && (
+        <Button size="sm" variant="secondary" disabled={busy} onClick={onLineCanText}>Line can get texts</Button>
+      )}
+    </>
+  );
+}
+
+function LineCanTextDialog({ item, busy, onClose, onConfirm }) {
+  const line = item ? parsePayload(item.payload)?.ani_phone : null;
+  return (
+    <Dialog open={!!item} onClose={onClose} size="sm">
+      {item && (
+        <>
+          <DialogHeader>
+            <DialogTitle>Line can get texts — {callerName(item)}</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <p className="text-13 text-ink-secondary">
+              Texts to {line || "the calling line"} will resume. Confirm only if you checked that this line can get texts.
+            </p>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" size="sm" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => onConfirm(item)}>
+              {busy ? "Saving…" : "Texts will resume"}
+            </Button>
+          </DialogFooter>
+        </>
+      )}
+    </Dialog>
+  );
+}
+
 function HoldConfirmDialog({ item, readBack, onReadBackChange, actioning, onClose, onConfirm }) {
   const view = holdReadBackView(item);
   const busy = !!item && actioning === item.id;
@@ -566,6 +609,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
   const [error, setError] = useState("");
   const [actioning, setActioning] = useState(null);
   const [dismissFor, setDismissFor] = useState(null); // triage item being dismissed (note dialog)
+  const [lineCanTextFor, setLineCanTextFor] = useState(null); // no-text line card whose "Line can get texts" confirm is open
   const [confirmHoldFor, setConfirmHoldFor] = useState(null); // street-level address hold being confirmed (read-back dialog)
   const [holdReadBack, setHoldReadBack] = useState(false); // "I read this address back to the customer"
   const [denyFor, setDenyFor] = useState(null); // { item, kind } — field-picker dialog
@@ -765,11 +809,11 @@ export default function TriageInboxTabV2({ isAdmin }) {
   // Resolve a single item WITHOUT a call verdict — the action for
   // email_bounce_reverify cards, which aren't judgments on the call and are
   // rejected by the /verdict endpoint. Removes only the clicked row.
-  const resolveItem = (item) => {
+  const resolveItem = (item, extra) => {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/resolve`, {
       method: "PUT",
-      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+      body: JSON.stringify({ expected_updated_at: item.updated_at, ...extra }),
     })
       .then(() => {
         setActioning(null);
@@ -1140,15 +1184,12 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               </Button>
                             ) : null
                           ) : isFollowUpCard ? (
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={actioning === busyKey}
-                              onClick={() => resolveItem(item)}
-                            >
-                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Saving…" : RESOLVE_ONLY_LABELS[item.reason_code]}
-                            </Button>
+                            <ResolveOnlyActions
+                              item={item}
+                              busy={actioning === busyKey}
+                              onResolve={() => resolveItem(item)}
+                              onLineCanText={() => setLineCanTextFor(item)}
+                            />
                           ) : (
                             <>
                               <Button
@@ -1271,6 +1312,13 @@ export default function TriageInboxTabV2({ isAdmin }) {
       </Dialog>
 
       {/* Street-level address hold: read the address back, then confirm the visit */}
+      <LineCanTextDialog
+        item={lineCanTextFor}
+        busy={!!lineCanTextFor && actioning === lineCanTextFor.id}
+        onClose={() => setLineCanTextFor(null)}
+        onConfirm={(item) => { setLineCanTextFor(null); resolveItem(item, { line_can_get_texts: true }); }}
+      />
+
       <HoldConfirmDialog
         item={confirmHoldFor}
         readBack={holdReadBack}

@@ -958,7 +958,7 @@ const CONFIRM_REASON_TEXT = {
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
-  text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Dismiss if the line can get texts.",
+  text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.",
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -11002,7 +11002,7 @@ const CallRecordingProcessor = {
             text_phone: spokenText,
             // A snapshot only: the inbox shows the customer's LIVE phone (list query); this is the account phone at the time of the call.
             customer_phone_at_call: onFile?.phone || null,
-            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Dismiss if the line can get texts.`,
+            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.`,
           },
         });
         if (refresh) {
@@ -12125,7 +12125,7 @@ const CallRecordingProcessor = {
                     callLogId: call.id,
                     flag,
                     onFileAddress,
-                    extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                    extraction: noTextSafeExtraction(v2Result) || { meta: { call_summary: extracted.call_summary || null } },
                     severity: 'advisory',
                     // Google's resolved building when it has one (a corrected
                     // street/ZIP rides on this verdict shape), else what the
@@ -12154,7 +12154,7 @@ const CallRecordingProcessor = {
                   callLogId: call.id,
                   flag,
                   onFileAddress,
-                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                  extraction: noTextSafeExtraction(v2Result) || { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
                   // The surname card's filing-time names include the merged
                   // V1 extraction's — what backfillCustomerFromAppointmentContact

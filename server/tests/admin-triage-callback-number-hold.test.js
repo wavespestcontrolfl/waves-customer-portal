@@ -86,6 +86,10 @@ function makeFakeDb(seed = {}) {
       whereRaw(sql) {
         // The street-level address-hold exclusion: none of these fixtures holds one.
         if (sql.includes('street_level_address')) return api;
+        if (sql === "COALESCE(payload->>'no_text_hold', '') <> 'true'") {
+          rawPredicates.push((row) => row.payload?.no_text_hold !== true);
+          return api;
+        }
         if (sql !== "payload->'reschedule_proposal' IS NULL") throw new Error(`Unsupported test query: ${sql}`);
         rawPredicates.push((row) => row.payload?.reschedule_proposal == null);
         return api;
@@ -480,140 +484,131 @@ describe('POST /admin/triage/:id/verdict on a callback_number_needed card', () =
  * callback_number_needed card; the access rule is that card's rule (tech-or-admin, no extra
  * role gate), and no new endpoint exists.
  */
-describe('text_number_differs card releases the no-text hold', () => {
-  const textCard = (over = {}) => ({
-    id: CARD_ID, call_log_id: CALL_ID, reason_code: 'text_number_differs', status: 'open',
-    updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory', payload: {}, ...over,
+describe('text_number_differs card: Resolve keeps the no-text hold, only "Line can get texts" releases it', () => {
+  const base = { call_log_id: CALL_ID, status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory' };
+  const textCard = (over = {}) => ({ id: CARD_ID, reason_code: 'text_number_differs', payload: { no_text_hold: true }, ...base, ...over });
+  const cbCard = (over = {}) => ({ id: 'card-cb', reason_code: 'callback_number_needed', payload: {}, ...base, ...over });
+  const visitCleared = (tables) => tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID).call_sms_cleared_at;
+  const CLEARED = { __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined };
+  const run = async (triage_items, action, id, body) => {
+    const fx = fixture({ triage_items });
+    wireDb(db, { conn: fx.conn });
+    let json;
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${id}/${action}`, { expected_updated_at: base.updated_at, ...body });
+      expect(res.status).toBe(200);
+      json = await res.json();
+    });
+    return { ...fx, json };
+  };
+
+  test('RESOLVE (phones updated): the number hold stays, the visits\' clearance lifts, no other call is touched', async () => {
+    const { tables, json } = await run([textCard()], 'resolve', CARD_ID);
+    expect(tables.triage_items[0].status).toBe('resolved');
+    expect(json.callback_number).toMatchObject({ disclaimed_number_hold: 'kept', number_holds_cleared: 0 });
+    expect(numberHold(tables).cleared_at).toBeNull();
+    expect(visitCleared(tables)).toEqual(CLEARED);
+    expect(tables.scheduled_services.find((s) => s.id === OTHER_CALL_VISIT_ID).call_sms_cleared_at).toBeNull();
   });
 
-  test('DISMISS ("the line can get texts after all") lifts this call\'s number hold and its visit holds, and no other call\'s', async () => {
-    const { conn, tables } = fixture({ triage_items: [textCard()] });
-    wireDb(db, { conn });
-    await withServer(async (baseUrl) => {
-      const res = await put(baseUrl, `/${CARD_ID}/dismiss`, { note: 'It can get texts.' });
-      expect(res.status).toBe(200);
-      expect((await res.json()).callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', number_holds_cleared: 1 });
-    });
+  test('DISMISS just closes the card: the hold and the visits are untouched', async () => {
+    const { tables, json } = await run([textCard()], 'dismiss', CARD_ID);
     expect(tables.triage_items[0].status).toBe('dismissed');
+    expect(json.callback_number).toBeUndefined();
+    expect(numberHold(tables).cleared_at).toBeNull();
+    expect(visitCleared(tables)).toBeNull();
+  });
+
+  test('"Line can get texts" (resolve + line_can_get_texts) closes the card and releases this call\'s hold, no other call\'s', async () => {
+    const { tables, json } = await run([textCard()], 'resolve', CARD_ID, { line_can_get_texts: true });
+    expect(tables.triage_items[0].status).toBe('resolved');
+    expect(json.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', number_holds_cleared: 1 });
     expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
     expect(numberHold(tables).clear_reason).toBe('verified_same_number');
     expect(numberHold(tables, 'hold-other').cleared_at).toBeNull();
-    const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
-    expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
-    expect(tables.scheduled_services.find((s) => s.id === OTHER_CALL_VISIT_ID).call_sms_cleared_at).toBeNull();
+    expect(visitCleared(tables)).toEqual(CLEARED);
   });
 
-  test('RESOLVE ("the phones are updated") keeps the hold on the no-text line; only the visits\' clearance lifts', async () => {
-    const { conn, tables } = fixture({ triage_items: [textCard()] });
-    wireDb(db, { conn });
-    await withServer(async (baseUrl) => {
-      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Phones updated.' });
-      expect(res.status).toBe(200);
-      expect((await res.json()).callback_number).toMatchObject({ disclaimed_number_hold: 'kept', number_holds_cleared: 0 });
-    });
-    expect(tables.triage_items[0].status).toBe('resolved');
+  test('line_can_get_texts on any other card, or on a dismiss, does nothing', async () => {
+    const other = await run([cbCard({ payload: {} })], 'resolve', 'card-cb', { line_can_get_texts: true });
+    expect(other.tables.triage_items[0].status).toBe('resolved'); // its own Resolve (verified-same-number) as always
+    const dismissed = await run([textCard()], 'dismiss', CARD_ID, { line_can_get_texts: true });
+    expect(numberHold(dismissed.tables).cleared_at).toBeNull();
+  });
+
+  test('"Line can get texts" with a plain disclaimed callback card still open keeps the hold (that card\'s own Resolve decides)', async () => {
+    const { tables } = await run([textCard(), cbCard({ payload: {} })], 'resolve', CARD_ID, { line_can_get_texts: true });
     expect(numberHold(tables).cleared_at).toBeNull();
-    const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
-    expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
-    expect(tables.scheduled_services.find((s) => s.id === OTHER_CALL_VISIT_ID).call_sms_cleared_at).toBeNull();
   });
 
-  test.each(['open', 'in_progress'])('a %s callback_number_needed card on the same call owns the hold: this card leaves everything alone', async (status) => {
-    for (const action of ['resolve', 'dismiss']) {
-      const { conn, tables } = fixture({
-        triage_items: [textCard(), { ...textCard({ id: 'card-cb', reason_code: 'callback_number_needed', status }) }],
-      });
-      wireDb(db, { conn });
-      await withServer(async (baseUrl) => {
-        expect((await put(baseUrl, `/${CARD_ID}/${action}`)).status).toBe(200);
-      });
+  describe('closing callback_number_needed never clears a no-text hold (either order, any state of the text card)', () => {
+    test.each(['open', 'in_progress', 'dismissed', 'resolved'])('callback card marked no_text_hold, text card %s', async (status) => {
+      const { tables } = await run([cbCard({ payload: { no_text_hold: true } }), textCard({ id: 'card-text', status })], 'resolve', 'card-cb');
       expect(numberHold(tables).cleared_at).toBeNull();
-      expect(tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID).call_sms_cleared_at).toBeNull();
-    }
+      expect(visitCleared(tables)).toEqual(CLEARED);
+    });
+
+    test('callback card marked no_text_hold with NO text card on the call', async () => {
+      const { tables } = await run([cbCard({ payload: { no_text_hold: true } })], 'resolve', 'card-cb');
+      expect(numberHold(tables).cleared_at).toBeNull();
+    });
+
+    test('order 1: callback closed first, then the text card is Resolved: still held', async () => {
+      const fx = fixture({ triage_items: [cbCard({ payload: { no_text_hold: true } }), textCard({ id: 'card-text' })] });
+      wireDb(db, { conn: fx.conn });
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, '/card-cb/resolve')).status).toBe(200);
+        expect((await put(baseUrl, '/card-text/resolve', { expected_updated_at: base.updated_at })).status).toBe(200);
+      });
+      expect(numberHold(fx.tables).cleared_at).toBeNull();
+    });
+
+    test('order 2: text card Resolved first, then the callback card: still held', async () => {
+      const fx = fixture({ triage_items: [cbCard({ payload: { no_text_hold: true } }), textCard({ id: 'card-text' })] });
+      wireDb(db, { conn: fx.conn });
+      await withServer(async (baseUrl) => {
+        expect((await put(baseUrl, '/card-text/resolve', { expected_updated_at: base.updated_at })).status).toBe(200);
+        expect((await put(baseUrl, '/card-cb/resolve')).status).toBe(200);
+      });
+      expect(numberHold(fx.tables).cleared_at).toBeNull();
+    });
+
+    test('a plain disclaimed callback card (no marker) still clears as before', async () => {
+      const { tables } = await run([cbCard({ payload: {} })], 'resolve', 'card-cb');
+      expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+    });
   });
 
-  test.each(['dismissed', 'resolved'])('a %s callback_number_needed card from an earlier pass is ignored: Dismiss still releases', async (status) => {
-    const { conn, tables } = fixture({
-      triage_items: [textCard(), { ...textCard({ id: 'card-cb', reason_code: 'callback_number_needed', status }) }],
-    });
-    wireDb(db, { conn });
+  test('the card is version-bound: a stale expected_updated_at is refused and nothing changes', async () => {
+    const fx = fixture({ triage_items: [textCard()] });
+    wireDb(db, { conn: fx.conn });
     await withServer(async (baseUrl) => {
-      expect((await put(baseUrl, `/${CARD_ID}/dismiss`)).status).toBe(200);
+      const stale = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: '2030-01-01T00:00:00.000Z', line_can_get_texts: true });
+      expect(stale.status).toBe(409);
+      expect((await stale.json()).code).toBe('STALE_CARD_VERSION');
+      const missing = await put(baseUrl, `/${CARD_ID}/dismiss`);
+      expect(missing.status).toBe(409);
     });
-    expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+    expect(fx.tables.triage_items[0].status).toBe('open');
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
   });
 
-  test('closing callback_number_needed while an OPEN text_number_differs card says the line cannot get texts: visits clear, the number stays held', async () => {
-    const { conn, tables } = fixture({
-      triage_items: [
-        { id: 'card-cb', call_log_id: CALL_ID, reason_code: 'callback_number_needed', status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory', payload: {} },
-        textCard({ id: 'card-text' }),
-      ],
-    });
-    wireDb(db, { conn });
+  test('/verdict is refused on it; a call verdict on a sibling does not sweep it or touch the hold', async () => {
+    const fx = fixture({ triage_items: [textCard(), { id: 'card-sib', call_log_id: CALL_ID, reason_code: 'missing_last_name', status: 'open', updated_at: base.updated_at, category: 'name_review', severity: 'advisory', payload: {} }] });
+    wireDb(db, { conn: fx.conn });
     await withServer(async (baseUrl) => {
-      const res = await put(baseUrl, '/card-cb/resolve');
-      expect(res.status).toBe(200);
-      expect((await res.json()).callback_number).toMatchObject({ disclaimed_number_hold: 'kept', number_holds_cleared: 0 });
-    });
-    expect(numberHold(tables).cleared_at).toBeNull();
-    expect(tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID).call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
-  });
-
-  test.each(['dismissed', 'resolved', 'in_progress'])('closing callback_number_needed with a %s text_number_differs card: only an open one owns the hold', async (status) => {
-    const { conn, tables } = fixture({
-      triage_items: [
-        { id: 'card-cb', call_log_id: CALL_ID, reason_code: 'callback_number_needed', status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory', payload: {} },
-        textCard({ id: 'card-text', status }),
-      ],
-    });
-    wireDb(db, { conn });
-    await withServer(async (baseUrl) => {
-      expect((await put(baseUrl, '/card-cb/resolve')).status).toBe(200);
-    });
-    // in_progress counts as open; dismissed / resolved do not
-    if (status === 'in_progress') expect(numberHold(tables).cleared_at).toBeNull();
-    else expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
-  });
-
-  test('a call verdict on a sibling card does not sweep it or touch the hold', async () => {
-    const { conn, tables } = fixture({
-      triage_items: [
-        textCard(),
-        { id: 'card-sib', call_log_id: CALL_ID, reason_code: 'missing_last_name', status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'name_review', severity: 'advisory', payload: {} },
-      ],
-    });
-    wireDb(db, { conn });
-    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' })).status).toBe(400);
       await post(baseUrl, '/card-sib/verdict', { verdict: 'accept' });
     });
-    expect(tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('open');
-    expect(numberHold(tables).cleared_at).toBeNull();
+    expect(fx.tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('open');
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
   });
 
-  test('/verdict is refused on it (a verdict would close the card and leave the line blocked)', async () => {
-    const { conn, tables } = fixture({ triage_items: [textCard()] });
-    wireDb(db, { conn });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
-      expect(res.status).toBe(400);
-    });
-    expect(tables.triage_items[0].status).toBe('open');
-    expect(numberHold(tables).cleared_at).toBeNull();
-  });
-
-  test('technicians can resolve it exactly as they can the callback_number_needed card (no admin-only gate on either)', async () => {
+  test('technicians can use it exactly as they can the callback_number_needed card (no admin-only gate on either)', async () => {
     mockRole = 'technician';
-    const cb = fixture();
-    wireDb(db, { conn: cb.conn });
-    await withServer(async (baseUrl) => {
-      expect((await put(baseUrl, `/${CARD_ID}/resolve`)).status).toBe(200);
-    });
-    const tx = fixture({ triage_items: [textCard()] });
-    wireDb(db, { conn: tx.conn });
-    await withServer(async (baseUrl) => {
-      expect((await put(baseUrl, `/${CARD_ID}/dismiss`)).status).toBe(200);
-    });
+    const cb = await run([cbCard()], 'resolve', 'card-cb');
+    expect(cb.tables.triage_items[0].status).toBe('resolved');
+    const tx = await run([textCard()], 'resolve', CARD_ID, { line_can_get_texts: true });
     expect(numberHold(tx.tables).cleared_at).toBeInstanceOf(Date);
   });
 });

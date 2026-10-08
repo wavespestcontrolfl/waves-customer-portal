@@ -91,12 +91,16 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   get texts — texts go to X, calls to Y; update the customer's phones"). The
   `callback_number_needed` card is dropped for this case (same ask), kept if the caller also
   disclaimed the number. `text_number_differs` has its own Resolve; a call verdict on a
-  sibling card does not sweep it. RESOLVE ("Resolve when the phones are updated — the calling line stays
-  blocked for texts") keeps the number-keyed SMS hold on the calling line and lifts only the visits'
-  clearance; DISMISS ("Dismiss if the line can get texts") releases the hold, so a line wrongly marked
-  no-text is never held forever. Same release path and tech-or-admin access as the
-  `callback_number_needed` card, no new endpoint; both are skipped while a `callback_number_needed`
-  card is OPEN on the call (it owns the hold; a closed one from an earlier pass is ignored). A call
+  sibling card does not sweep it. RESOLVE ("Resolve when the phones are updated — the calling line stays blocked for texts") keeps the
+  number-keyed SMS hold on the calling line and lifts only the visits' clearance; DISMISS just closes
+  the card (nothing changes). Exactly ONE action releases the hold: the card's own "Line can get texts"
+  button (confirm copy "Texts to <number> will resume"; `PUT /:id/resolve` with `line_can_get_texts: true`),
+  so a line wrongly marked no-text is never held forever. Both cards of a no-text hold carry
+  `payload.no_text_hold` (stamped in `call-routing-gates.js`): closing `callback_number_needed` on a
+  marked card never releases it, in either close order and whatever the text card's state; the
+  explicit action also defers to a plain disclaimed `callback_number_needed` card that is still open.
+  The card is version-bound (`expected_updated_at`). Same tech-or-admin access as the
+  `callback_number_needed` card. A call
   vetoed for spam, out-of-area or do-not-contact gets neither the hold nor the card. The inbox shows
   the customer's live phone, with the phone at the time of the call only when it differs. The appointment-contact backfill never saves a no-text
   line into a blank `customers.phone`. The office updates the phones by hand.

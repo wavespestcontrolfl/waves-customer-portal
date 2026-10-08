@@ -102,6 +102,28 @@ describe('only a valid V2 payload speaks for the no-text fields', () => {
   });
 });
 
+describe('no_text_hold marker on both cards', () => {
+  const { buildTriageItem } = require('../services/call-routing-gates');
+  const payloadOf = (flag, caller) => {
+    const item = buildTriageItem({ callLogId: 'c1', flag, extraction: v2(caller), severity: 'advisory' });
+    return typeof item.payload === 'string' ? JSON.parse(item.payload) : item.payload;
+  };
+
+  test.each(['callback_number_needed', 'text_number_differs'])('%s carries no_text_hold only when the valid extraction says ani_cannot_text', (flag) => {
+    expect(payloadOf(flag, { ani_cannot_text: true }).no_text_hold).toBe(true);
+    expect(payloadOf(flag, { caller_id_disclaimed: true }).no_text_hold).toBeUndefined();
+    expect(payloadOf(flag, { ani_cannot_text: false }).no_text_hold).toBeUndefined();
+  });
+
+  test('the shadow bridge files its cards from the safe extraction, so an invalid payload never marks one', () => {
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = src.indexOf('for (const flag of needsConfirmation.slice(0, 10)) {');
+    const seg = src.slice(at, at + 4500);
+    expect(seg.split('extraction: noTextSafeExtraction(v2Result) ||').length - 1).toBe(2);
+    expect(seg).not.toContain('extraction: v2Result?.extraction ||');
+  });
+});
+
 describe('hard veto', () => {
   test('a no-text-only call with a canonical-write veto flag is vetoed; one that also disclaimed the number is not', () => {
     const { aniCannotTextOnly, hasCanonicalWriteBlock } = require('../services/call-triage-flags');
@@ -184,7 +206,7 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(at).toBeGreaterThan(-1);
     const section = src.slice(at, at + 1800);
     expect(section).not.toContain('!createdCustomerFromCall');
-    for (const key of ['ani_phone:', 'text_phone:', 'customer_phone_at_call:', 'note: `caller said this line cannot get texts', 'Resolve when the phones are updated — the calling line stays blocked for texts. Dismiss if the line can get texts.']) expect(section).toContain(key);
+    for (const key of ['ani_phone:', 'text_phone:', 'customer_phone_at_call:', 'note: `caller said this line cannot get texts', 'Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.']) expect(section).toContain(key);
     expect(section).toContain('isDialablePhone(callerForText?.text_phone_e164)');
     expect(section).not.toMatch(/db\('customers'\)[^;]*\.update\(/);
   });

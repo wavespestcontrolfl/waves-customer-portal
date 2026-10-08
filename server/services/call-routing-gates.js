@@ -894,6 +894,10 @@ const FLAG_PAYLOAD_STAMPS = [
     stamp: ({ extraction }) => ({ heard_name: { first_name: extraction?.caller?.first_name ?? null, last_name: extraction?.caller?.last_name ?? null } }) },
   { flags: ADDRESS_SNAPSHOT_FLAGS, stamp: ({ extraction }) => ({ heard_address: heardAddressSnapshot(extraction) }) },
   { flags: new Set(['missing_unit_number']), stamp: ({ extraction, addressValidation }) => ({ unit_ask_building: unitAskBuilding(extraction, addressValidation) }) },
+  // A hold armed because the VALID extraction said the line cannot get texts (ani_cannot_text) is marked on
+  // both of its cards, so closing callback_number_needed can tell it must not release that hold.
+  { flags: new Set(['callback_number_needed', 'text_number_differs']),
+    stamp: ({ extraction }) => (extraction?.caller?.ani_cannot_text === true ? { no_text_hold: true } : {}) },
 ];
 
 function buildTriageItem({

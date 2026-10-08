@@ -301,6 +301,32 @@ describe('no-text line card (text_number_differs)', () => {
     expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/tn/verdict', expect.anything());
   });
 
+  it('"Line can get texts" is its own button with its own confirm; confirming resolves with line_can_get_texts', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    // nothing is sent until the confirm; the copy names the line
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/tn/resolve', expect.anything());
+    expect(await screen.findByText(/Texts to \+19415550100 will resume/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at, line_can_get_texts: true }),
+    }));
+  });
+
+  it('Resolve ("Phones are updated") sends no line_can_get_texts, so the hold stays', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /phones are updated/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+  });
+
   it('shows the customer\'s LIVE phone from the list query, not the snapshot taken at the call', async () => {
     const live = { ...card, customer_phone: '+19415559876' };
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')

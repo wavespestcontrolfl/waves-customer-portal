@@ -106,29 +106,34 @@ const CALLBACK_CARD_VERDICT = Object.freeze({
   VERIFIED_SAME_NUMBER: 'verified_same_number',
   REPLACEMENT_NUMBER: 'replacement_number',
 });
-// Who owns the number-keyed hold on a call's line: the callback_number_needed card (the caller
-// disclaimed it) and the text_number_differs card (the caller said it cannot get texts) each speak for
-// it while OPEN. Closing one of them must not release the hold while the OTHER is still open and
-// still says the line is bad. A closed card from an earlier pass owns nothing.
-async function holdOwnedByOtherOpenCard(trx, callLogId, closingReason) {
-  const other = closingReason === 'text_number_differs' ? 'callback_number_needed' : 'text_number_differs';
+// A hold armed because the call's VALID extraction said the line cannot get texts (ani_cannot_text) is
+// marked payload.no_text_hold on both of its cards (call-routing-gates payload stamp). Exactly ONE thing
+// clears that hold: the explicit "Line can get texts" action on the text_number_differs card. Closing
+// callback_number_needed never does, in either close order, whatever the other card's state.
+function cardCarriesNoTextHold(item) {
+  let payload = item?.payload;
+  if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+  return payload?.no_text_hold === true;
+}
+
+// A callback_number_needed card still OPEN on the call that is NOT a no-text card: the caller also
+// disclaimed the number, and only that card's own Resolve verifies it.
+async function disclaimedCardOpen(trx, callLogId) {
   const open = await trx('triage_items')
-    .where({ call_log_id: callLogId, reason_code: other })
+    .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
     .whereIn('status', OPEN_STATES)
+    .whereRaw("COALESCE(payload->>'no_text_hold', '') <> 'true'")
     .first('id');
   return !!open;
 }
 
-async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict: requestedVerdict, closingReason = null } = {}) {
+async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict: requestedVerdict, noTextHold = false } = {}) {
   if (!Object.values(CALLBACK_CARD_VERDICT).includes(requestedVerdict)) {
     // Explicit by construction: a new caller must say which meaning it is.
     throw new Error(`clearCallbackNumberHold: unknown numberVerdict ${requestedVerdict}`);
   }
-  // A verified-same-number close is downgraded to the replacement meaning (visits clear, the number
-  // stays held) while the other card on this call still owns the hold.
-  const numberVerdict = requestedVerdict === CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER && closingReason
-    && await holdOwnedByOtherOpenCard(trx, callLogId, closingReason)
-    ? CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER : requestedVerdict;
+  // A no-text card's close is never a verified-same-number verdict: visits clear, the number stays held.
+  const numberVerdict = noTextHold ? CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER : requestedVerdict;
   const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
   const visits = await trx('scheduled_services')
     .where({ source_call_log_id: callLogId })
@@ -168,25 +173,25 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 }
 
 // text_number_differs card (owner ruling 2026-10-08): the caller's line cannot get texts.
-//   RESOLVE = "the phones are updated": nothing proved the line can get texts, so the number-keyed
-//     hold on it STAYS; only the visits' call-level clearance lifts (the replacement-number meaning).
-//   DISMISS = "this line can get texts after all": the hold is released like a verified number.
-// A callback_number_needed card still OPEN on the call owns the hold (its own Resolve decides); an
-// earlier pass's closed one does not. Returns the reply for the route, or `prior` when nothing ran.
-async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior) {
-  if (item.reason_code !== 'text_number_differs' || !item.call_log_id) return prior;
-  if (!['resolved', 'dismissed'].includes(nextStatus)) return prior;
-  if (await holdOwnedByOtherOpenCard(trx, item.call_log_id, 'text_number_differs')) return prior;
+//   RESOLVE = "the phones are updated": nothing proved the line can get texts, so the number-keyed hold
+//     STAYS; only the visits' call-level clearance lifts (the replacement-number meaning).
+//   DISMISS just closes the card: nothing changes, the hold stays.
+//   RESOLVE with lineCanGetTexts ("Line can get texts", its own button and confirm) closes the card and
+//     releases the hold, unless a plain disclaimed callback_number_needed card is open (its own Resolve).
+// Returns the reply for the route, or `prior` when nothing ran.
+async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineCanGetTexts) {
+  if (item.reason_code !== 'text_number_differs' || !item.call_log_id || nextStatus !== 'resolved') return prior;
+  const release = lineCanGetTexts === true && !(await disclaimedCardOpen(trx, item.call_log_id));
   const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
     clearedBy: assignedTo,
-    numberVerdict: nextStatus === 'dismissed' ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
+    numberVerdict: release ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
   });
   return callbackNumberReply(cleared.numberVerdict, cleared.numbers);
 }
 
 const NOT_A_VERDICT_MESSAGES = {
   missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
-  text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve or Dismiss.',
+  text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
 };
 
 // Upsert the single current verdict for a call (re-review overwrites). Links to
@@ -495,10 +500,15 @@ async function streetLevelHoldStillPending(conn, item) {
 }
 const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending visit: confirm the address with the customer, then confirm (or correct or cancel) the visit itself. It resolves when the visit does.';
 
+const VERSION_BOUND_REASONS = new Set([
+  'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
+  'auto_booking_skipped_after_approval', 'missing_first_name', 'text_number_differs',
+]);
+
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
-async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt, conn = db, requireVersion = false, beforeTransition, afterTransition }) {
+async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdatedAt, conn = db, requireVersion = false, beforeTransition, afterTransition, lineCanGetTexts = false }) {
   const item = await conn('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
@@ -573,15 +583,11 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // force-reprocess refreshes in place: "Follow-up booked" on the old
     // screen must not settle the newer obligation (pre-push audit P1 after
     // r27).
-    if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
-      || item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'attached_booking_followup_unbooked'
-      // …and the recovery task a settlement refreshes in place (window,
-      // address, retained visit) — a stale click must not close the newer
-      // obligation (codex r30 P1).
-      || item.reason_code === 'auto_booking_skipped_after_approval'
-      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
-      // Resolve / Dismiss must not settle a customer the operator never saw.
-      || item.reason_code === 'missing_first_name'
+    // (the VERSION_BOUND_REASONS set above lists them: property roles, promises, house-number conflict,
+    // owed follow-up, the recovery task a settlement refreshes in place (codex r30 P1), the owed-first-name
+    // card whose customer list a reprocess appends to, and the no-text line card whose payload a
+    // reprocess refreshes.)
+    if (VERSION_BOUND_REASONS.has(item.reason_code)
       // …and email review cards (codex round-3 P1): the client already
       // sends expected_updated_at on every resolve/dismiss, so a stale view
       // of a card whose evidence has since changed refuses instead of
@@ -667,11 +673,11 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // Round 7 P1: this is the VERIFIED_SAME_NUMBER meaning — the one
       // action that lifts the number-keyed row too (see the helper).
       const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
-        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, closingReason: 'callback_number_needed',
+        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, noTextHold: cardCarriesNoTextHold(item),
       });
       callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }
-    callbackNumber = await releaseNoTextHold(trx, item, nextStatus, assignedTo, callbackNumber);
+    callbackNumber = await releaseNoTextHold(trx, item, nextStatus, assignedTo, callbackNumber, lineCanGetTexts);
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
       // underlying call_commitments row and its outbox_messages row must
@@ -818,6 +824,7 @@ async function transition(req, res, nextStatus) {
   const result = await transitionCore({
     id, nextStatus, note, assignedTo: req.technicianId,
     expectedUpdatedAt: req.body?.expected_updated_at || null,
+    lineCanGetTexts: req.body?.line_can_get_texts === true,
   });
   return sendTransitionResult(res, result, id, nextStatus);
 }
