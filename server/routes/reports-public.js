@@ -1920,7 +1920,11 @@ router.post('/:token/ask', async (req, res, next) => {
     // model may not answer never falls to the generic summary (pre-push
     // audit, #5964).
     const fixedTopic = require('../services/service-report/report-ask-ai').fixedAnswerTopic(firstRoute.topic, question, data);
-    const routed = fixedTopic && fixedTopic !== firstRoute.topic
+    // The rule router's own re-entry, watering, advice and next-visit choices
+    // keep their precedence ("Can my dog go outside before your next visit?"
+    // stays re-entry): only a question it left generic may be re-routed.
+    const routerLeftGeneric = ['unrouted', 'applied', 'findings', 'summary'].includes(firstRoute.topic);
+    const routed = routerLeftGeneric && fixedTopic && fixedTopic !== firstRoute.topic
       ? routeServiceReportQuestion({ question, data, nextAppointment, forceTopic: fixedTopic })
       : firstRoute;
     const { topic } = routed;

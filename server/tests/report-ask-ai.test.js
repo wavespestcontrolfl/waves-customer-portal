@@ -1023,6 +1023,21 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
   });
 
+  test.each(['on', 'off'])('gate %s, the rule router keeps its re-entry answer when the question also names the next visit', async (gate) => {
+    process.env.GATE_REPORT_ASK_AI = gate === 'on' ? 'true' : 'false';
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can my dog go outside before your next visit?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport() });
+    expect(rules.topic).toBe('reentry');
+    const { eventInsert } = mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: rules.answer });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
+  });
+
   test('gate on, a recorded fixed wait trips the screen: the rule answer states it, no model call', async () => {
     process.env.GATE_REPORT_ASK_AI = 'true';
     const wait = 'Keep pets inside for 2 hours.';
