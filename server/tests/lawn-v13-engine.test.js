@@ -888,15 +888,16 @@ describe('chinch bug trigger wording (owner 2026-10-08: the edge of a damaged pa
 });
 
 describe('Arena at the label\'s low turf rate (owner 2026-10-08)', () => {
-  test('every Arena line states 0.147 oz (6.4 oz per acre) and the 8-week repeat; the program note says so once and cites the label, not a Florida sheet', () => {
+  test('every Arena line states 0.147 oz (6.4 oz per acre) and the 8-week repeat; the program note says so once, cites the label and names the current Florida 2(ee) sheet', () => {
     const arena = Array.from(new Set([4, 5, 6].flatMap((m) => lines(visitFor(m).secondary).filter((l) => l.startsWith('Arena 50 WDG')))));
     expect(arena).toHaveLength(2);
     for (const line of arena) expect(line).toMatch(/0\.147 oz per 1,000 sq ft \(6\.4 oz per acre\) in 4 gal per 1,000 sq ft into the thatch; a second application no sooner than 8 weeks later/);
-    expect(JSON.stringify(v13)).not.toMatch(/2\(ee\)|Valent/);
     for (const grass of V13_GRASSES) {
       const note = v13[grass].notes.find((n) => n.startsWith('Chinch bugs'));
       expect(note).toContain('Tetrino in May, then Arena, then bifenthrin, then Dylox 6.2 G. Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label\'s turf range; about 1.4 level teaspoons)');
       expect(note).toContain('up to 2 applications per lawn per year at least 8 weeks (56 days) apart (app-enforced)');
+      // The owner holds the current sheet (2026-10-08): the note gives its expiry and says to carry it.
+      expect(note).toContain("Valent's Florida 2(ee) recommendation for southern chinch bug (EPA Reg. No. 59639-152; expires December 31, 2028): keep a copy on the truck.");
       expect(note).not.toMatch(/never treat the same area twice/);
     }
   });
