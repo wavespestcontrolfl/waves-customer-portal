@@ -1218,7 +1218,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "A pest control or lawn care company the caller uses now or used before (the provider they are leaving or comparing Waves against). null for any other business named on the call: a home inspector, realtor or brokerage, builder, property manager, HOA, or whoever referred them."
         },
         "referral_source": {
           "type": [
