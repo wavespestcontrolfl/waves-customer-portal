@@ -2771,7 +2771,7 @@ describe('reroutedTopic: which generic questions get a dedicated rule answer (pr
     expect(reroutedTopic(question)).toBe(topic);
   });
 
-  test.each(['What date was this service?', 'What day did you treat?', 'Did it rain?', 'What was applied?', 'How is my lawn doing?'])('%s is not re-routed', (question) => {
+  test.each(['What date was this service?', 'What day did you treat?', 'Did it rain?', 'What was applied?', 'How is my lawn doing?', 'Does this spray contain dinotefuran?', 'When did you spray my yard?'])('%s is not re-routed', (question) => {
     expect(reroutedTopic(question)).toBeNull();
   });
 });
