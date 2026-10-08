@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef, useCallback, useId, createContext, useContext } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
@@ -9109,7 +9109,21 @@ const buildArticles = ({ celsiusMaxPerYear = null } = {}) => [
     tips: ['Damage looks like drought stress — yellowing then browning at edges', 'Peak season is July-September in the hottest, sunniest spots', 'Thatch buildup over 0.5" increases risk — ask us about dethatching', 'We rotate insecticide modes of action to prevent resistance'],
   },
 ];
-const ARTICLES = buildArticles();
+
+// The Learn articles with the figures the server owns. Nothing renders the article list today (the old
+// module-level ARTICLES constant was never used, so its Celsius tip could only ever have shown a bare
+// default); this is the one entry point to render it from: it reads the Celsius yearly limit from the
+// stats response (/services/stats/summary celsiusMaxPerYear), so the tip says 2 under the v13 lawn
+// program and 3 before it, and names no number until the stats arrive.
+function useLearnArticles() {
+  const [celsiusMaxPerYear, setCelsiusMaxPerYear] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.getServiceStats().then((d) => { if (live) setCelsiusMaxPerYear(d?.celsiusMaxPerYear ?? null); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  return useMemo(() => buildArticles({ celsiusMaxPerYear }), [celsiusMaxPerYear]);
+}
 
 // Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
 // server answers {available:false} off the gate and the existing
@@ -17669,4 +17683,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

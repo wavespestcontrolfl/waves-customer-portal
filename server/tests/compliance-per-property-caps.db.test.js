@@ -164,6 +164,30 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     expect((await ComplianceService.getDashboard()).warningCount).toBe(before);
   });
 
+  test('the dashboard cap usage is one grouped SQL query for all capped products, and no application row is pulled into Node', async () => {
+    const [p1] = await db('products_catalog').insert({ name: `Count cap sql a ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
+    const [p2] = await db('products_catalog').insert({ name: `Count cap sql b ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
+    made.products.push(p1.id, p2.id);
+    for (const p of [p1, p2]) {
+      const [l] = await db('product_limits').insert({ product_id: p.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 3, limit_unit: 'applications', severity: 'hard_block', description: 'fixture' }).returning('*');
+      made.limits.push(l.id);
+    }
+    const before = (await ComplianceService.getDashboard()).warningCount;
+    await customerWithTwoProperties([0, 0], p1); // 2 of 3 on one lawn: warns
+    await customerWithTwoProperties([0, 1], p2); // 1 + 1: does not
+    const seen = [];
+    const listener = (q) => { if (/property_application_history/.test(q.sql)) seen.push(q.sql); };
+    db.on('query', listener);
+    let dashboard;
+    try { dashboard = await ComplianceService.getDashboard(); } finally { db.removeListener('query', listener); }
+    expect(dashboard.warningCount).toBe(before + 1);
+    const grouped = seen.filter((sql) => /group by/i.test(sql) && /product_id/.test(sql) && /ANY\(/i.test(sql));
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0]).toMatch(/COALESCE\(pah\.property_id, ss_prop\.property_id\)/);
+    // The other ledger reads are the dashboard's own counts and the recent list, never a per-limit row dump.
+    expect(seen.filter((sql) => /select "?pah"?\."?customer_id"?/i.test(sql) && !/group by/i.test(sql))).toEqual([]);
+  });
+
   test('getDashboard: three customers with one application each never trip a per-lawn cap of 3 on the company total; two at one lawn of 3 does warn', async () => {
     const [capped] = await db('products_catalog').insert({ name: `Count cap dashboard ${randomUUID()}`, category: 'herbicide', active: true }).returning('*');
     made.products.push(capped.id);

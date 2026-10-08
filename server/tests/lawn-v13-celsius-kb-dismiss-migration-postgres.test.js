@@ -7,6 +7,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 
 const migration = require('../models/migrations/20261007177000_lawn_v13_cap_clamp_and_kb_dismiss');
+const keep = require('../models/migrations/20261007179500_lawn_v13_keep_dismiss_retired');
 const afterCap = require('../models/migrations/20261007176000_lawn_v13_celsius_kb_after_cap');
 const first = require('../models/migrations/20261007173000_lawn_v13_celsius_kb_article');
 
@@ -115,5 +116,40 @@ jest.setTimeout(30000);
     await database('knowledge_base').where({ slug: SLUG }).update({ content: (await article()).content.replace(NEXT, '- Dismiss: admin wording.') });
     await migration.down(database);
     expect((await article()).content).toContain('- Dismiss: admin wording.');
+  });
+
+  test('rolling back newest-first (179500 then 177000) never restores the retired Dismiss recommendation', async () => {
+    await insert();
+    await migration.up(database); // 177000's state
+    await chunk(SLUG, 0);
+    await keep.down(database);
+    const kept = (await article()).content;
+    expect(kept).toContain(keep._KEPT);
+    expect(kept).not.toContain(NEXT);
+    expect(await database('knowledge_embeddings').where({ source_id: SLUG })).toHaveLength(0);
+    expect(await events(keep._KB_ACTION)).toHaveLength(1);
+    await migration.down(database); // 177000's rollback now finds nothing to restore
+    const after = (await article()).content;
+    expect(after).toBe(kept);
+    expect(after).not.toContain(OLD);
+    expect(after).not.toMatch(/no annual cap concern/);
+    expect(after).toMatch(/Dismiss NXT .* retired/);
+    expect(await events(migration._KB_ACTION_DOWN)).toHaveLength(0);
+  });
+
+  test('179500: up changes nothing; down leaves an admin-edited line, a missing article and a repeat alone; the wording differs from 177000\'s line', async () => {
+    await insert();
+    await migration.up(database);
+    const before = (await article()).content;
+    await keep.up(database);
+    expect((await article()).content).toBe(before);
+    await database('knowledge_base').where({ slug: SLUG }).update({ content: before.replace(NEXT, '- Dismiss: admin wording.') });
+    await keep.down(database);
+    expect((await article()).content).toContain('- Dismiss: admin wording.');
+    expect(await events(keep._KB_ACTION)).toHaveLength(0);
+    await database('knowledge_base').del();
+    await expect(keep.down(database)).resolves.toBeUndefined();
+    expect(keep._KEPT.includes(NEXT)).toBe(false);
+    expect(NEXT.includes(keep._KEPT)).toBe(false);
   });
 });

@@ -1,12 +1,17 @@
 // GET /api/services/stats/summary sends celsiusMaxPerYear, which the portal's Celsius copy is built from.
 // It comes from the one canonical reader (config/lawn-v13-count-caps celsiusYtdCap, which lawn-expectations re-exports), not a second
 // "gate ? 2 : 3" copy: 2 under the v13 lawn program, 3 with GATE_LAWN_V13 off.
+jest.mock('../services/account-properties', () => ({
+  ...jest.requireActual('../services/account-properties'),
+  resolveSessionScope: jest.fn(async () => ({ scoped: false, property: null })),
+}));
 jest.mock('../models/db', () => {
   const rows = { count: '0' };
   const make = () => {
     const q = {};
     for (const m of ['where', 'whereNotNull', 'whereIn', 'whereNull', 'orderBy', 'select', 'leftJoin', 'join', 'count']) q[m] = jest.fn(() => q);
     q.first = jest.fn(async () => rows);
+    q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return q;
   };
   return jest.fn(() => make());

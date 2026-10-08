@@ -919,6 +919,52 @@ describeDb('v13 count caps through PostgreSQL', () => {
     });
   });
 
+  describe('the portal\'s Celsius count is per lawn (celsiusApplicationsThisYear)', () => {
+    const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
+    async function twoLawns(placements) {
+      const f = await fixture(knex);
+      const [other] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      const properties = [f.property.id, other.id];
+      for (const [index, date, frozen] of placements) {
+        let recordId = null;
+        if (index != null) {
+          const [past] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: properties[index], scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+          [{ id: recordId }] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: date, service_type: 'Lawn fixture' }).returning('id');
+        }
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[CELSIUS].id, application_date: date, application_rate: 0.1, rate_unit: 'oz', service_record_id: recordId, property_id: frozen === true ? properties[index] : null });
+      }
+      return { f, a: properties[0], b: properties[1] };
+    }
+
+    test('one application at each of two properties is 1, not 2 (busiest lawn); the selected property\'s own count with a scope', async () => {
+      const { f, a, b } = await twoLawns([[0, '2026-02-02', true], [1, '2026-03-16', true]]);
+      expect(await celsiusApplicationsThisYear(f.customerId, '2026-01-01', { knex })).toBe(1);
+      expect(await celsiusApplicationsThisYear(f.customerId, '2026-01-01', { propertyId: a, knex })).toBe(1);
+      expect(await celsiusApplicationsThisYear(f.customerId, '2026-01-01', { propertyId: b, knex })).toBe(1);
+    });
+
+    test('two at one lawn is 2 there and 0 at the other; moving a visit later does not change a frozen row; a legacy row follows its visit; an unplaced row counts everywhere', async () => {
+      const { f, a, b } = await twoLawns([[0, '2026-02-02', true], [0, '2026-03-16', true]]);
+      expect(await celsiusApplicationsThisYear(f.customerId, '2026-01-01', { knex })).toBe(2);
+      expect(await celsiusApplicationsThisYear(f.customerId, '2026-01-01', { propertyId: b, knex })).toBe(0);
+      await knex('scheduled_services').where({ customer_id: f.customerId }).update({ property_id: b });
+      expect(await celsiusApplicationsThisYear(f.customerId, '2026-01-01', { propertyId: a, knex })).toBe(2);
+      const legacy = await twoLawns([[0, '2026-02-02', false]]);
+      await knex('scheduled_services').where({ customer_id: legacy.f.customerId }).update({ property_id: legacy.b });
+      expect(await celsiusApplicationsThisYear(legacy.f.customerId, '2026-01-01', { propertyId: legacy.b, knex })).toBe(1);
+      expect(await celsiusApplicationsThisYear(legacy.f.customerId, '2026-01-01', { propertyId: legacy.a, knex })).toBe(0);
+      const unplaced = await twoLawns([[0, '2026-02-02', true], [null, '2026-03-16', false]]);
+      expect(await celsiusApplicationsThisYear(unplaced.f.customerId, '2026-01-01', { knex })).toBe(2);
+      expect(await celsiusApplicationsThisYear(unplaced.f.customerId, '2026-01-01', { propertyId: unplaced.b, knex })).toBe(1);
+    });
+
+    test('last year and retracted rows do not count', async () => {
+      const { f } = await twoLawns([[0, '2025-11-02', true], [0, '2026-03-16', true]]);
+      await knex('property_application_history').where({ customer_id: f.customerId, application_date: '2026-03-16' }).update({ retracted_at: new Date(), retraction_reason: 'fixture' });
+      expect(await celsiusApplicationsThisYear(f.customerId, '2026-01-01', { knex })).toBe(0);
+    });
+  });
+
   describe('a Blindside spot row wherever a v13 window lists Celsius (20261007179000)', () => {
     let protocolId;
     const blindsideRows = (windowId) => knex('lawn_protocol_products').where({ lawn_protocol_window_id: windowId, product_name: BLINDSIDE });

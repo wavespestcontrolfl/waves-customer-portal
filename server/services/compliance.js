@@ -99,6 +99,33 @@ async function applyV13ToRows(rows) {
   return [...capped, ...synthetic];
 }
 
+// For each product, the largest per-lawn count any one customer has this year, computed in SQL:
+// applications grouped by customer + effective property (the property frozen on the ledger row, a
+// legacy row's visit property), unplaced rows (no property at all) added to the customer's busiest
+// property, the maximum over customers. Same reading as worstPropertyCount, without pulling rows.
+async function busiestLawnByProduct(productIds, yearStart) {
+  if (!productIds.length) return new Map();
+  const result = await db.raw(`
+    WITH per_lawn AS (
+      SELECT pah.product_id, pah.customer_id,
+             COALESCE(pah.property_id, ss_prop.property_id) AS lawn, COUNT(*)::int AS n
+        FROM property_application_history pah
+        LEFT JOIN service_records sr_prop ON sr_prop.id = pah.service_record_id
+        LEFT JOIN scheduled_services ss_prop ON ss_prop.id = sr_prop.scheduled_service_id
+       WHERE pah.product_id = ANY(?::uuid[])
+         AND pah.application_date >= ?
+         AND pah.retracted_at IS NULL
+       GROUP BY pah.product_id, pah.customer_id, COALESCE(pah.property_id, ss_prop.property_id)
+    ), per_customer AS (
+      SELECT product_id, customer_id,
+             COALESCE(SUM(n) FILTER (WHERE lawn IS NULL), 0) + COALESCE(MAX(n) FILTER (WHERE lawn IS NOT NULL), 0) AS worst
+        FROM per_lawn GROUP BY product_id, customer_id
+    )
+    SELECT product_id, MAX(worst)::int AS busiest FROM per_customer GROUP BY product_id`,
+  [productIds.map(String), yearStart]);
+  return new Map(result.rows.map((row) => [String(row.product_id), Number(row.busiest)]));
+}
+
 // The applications a limit counts: its product's, its MOA group's, or every nitrogen one.
 function matchingApplications(limit, apps) {
   if (limit.match_type === 'product' && limit.product_id) return apps.filter((a) => a.product_id === limit.product_id);
@@ -596,29 +623,11 @@ const ComplianceService = {
 
     // Warnings: check product limits that are approaching or exceeded
     const limits = await limitRowsWithV13Caps({ hardOnly: true });
-    let warningCount = 0;
-    for (const limit of limits) {
-      if (limit.limit_type === 'annual_max_apps' && limit.product_id) {
-        // annual_max_apps is a per-lawn cap: judge each customer's busiest property, never the
-        // company-wide total of the product.
-        const rows = await db('property_application_history as pah')
-          .leftJoin('service_records as sr_prop', 'pah.service_record_id', 'sr_prop.id')
-          .leftJoin('scheduled_services as ss_prop', 'sr_prop.scheduled_service_id', 'ss_prop.id')
-          .where({ 'pah.product_id': limit.product_id })
-          .where('pah.application_date', '>=', yearStart)
-          .whereNull('pah.retracted_at')
-          .select('pah.customer_id', 'pah.property_id', 'ss_prop.property_id as visit_property_id')
-          .then(placeOnTheLedgerProperty);
-        const byCustomer = new Map();
-        for (const row of rows) {
-          const key = String(row.customer_id);
-          if (!byCustomer.has(key)) byCustomer.set(key, []);
-          byCustomer.get(key).push(row);
-        }
-        const near = [...byCustomer.values()].some((customerRows) => worstPropertyCount(customerRows) >= Number(limit.limit_value) - 1);
-        if (near) warningCount++;
-      }
-    }
+    // annual_max_apps is a per-lawn cap: each customer's busiest lawn, never the company-wide total of
+    // the product. One grouped query for every capped product; no application row reaches Node.
+    const capped = limits.filter((limit) => limit.limit_type === 'annual_max_apps' && limit.product_id);
+    const busiest = await busiestLawnByProduct(capped.map((limit) => limit.product_id), yearStart);
+    const warningCount = capped.filter((limit) => (busiest.get(String(limit.product_id)) ?? 0) >= Number(limit.limit_value) - 1).length;
 
     // Tech license status
     const techs = await db('technicians')
