@@ -113,6 +113,8 @@ describe('a report-flow sheet routed from a stale schedule row', () => {
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
     expect(await screen.findByText('This visit needs the full form.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Generate AI report' })).toBeNull();
+    // A visit the sheet can't open offers the full form in the header.
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
   });
 
   test('an answer without the field is not a yes: the visit is sent to the full form', async () => {
@@ -321,6 +323,27 @@ describe('generate and read', () => {
     expect(await screen.findByText('Writer is busy. Try again.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+  });
+
+  // Owner 2026-10-08: the sheet is the one form, as the lawn sheet is.
+  test('a plain visit shows no Full form button, before or after the report is written', async () => {
+    await openSheet(makeRequest());
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
+    await generate();
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
+  });
+
+  test('a report the writer could not write offers the Full form, so an outage leaves a way to complete', async () => {
+    const onFullForm = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={makeRequest({ report: Object.assign(new Error('Writer is busy.'), { status: 503 }) })} onClose={() => {}} onCompleted={() => {}} onFullForm={onFullForm} />);
+    await screen.findByText(/Taurus SC 4 fl oz/);
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText('Writer is busy. Try again.');
+    fireEvent.click(screen.getByRole('button', { name: 'Full form' }));
+    expect(onFullForm).toHaveBeenCalledTimes(1);
   });
 
   // Where product went down decides the indoor re-entry wait on the
@@ -1027,6 +1050,8 @@ describe('complete and send', () => {
     await generate();
     expect(screen.getByText('Taurus SC is a perimeter spray and this visit can’t be traced here. Use the Full form.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
+    // The hold names the full form, so the header offers it.
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
   });
 
   test('the trace step is left out when the map is off or the visit takes no trace', async () => {
@@ -1426,22 +1451,19 @@ describe('photos in the note\'s box (GATE_NOTE_BOX_PHOTOS)', () => {
     await waitFor(() => expect(addPhoto().disabled).toBe(false));
   });
 
-  test('Full form and the product picker wait while a description is open (codex local r3 on #5624)', async () => {
+  test('the product picker waits while a description is open, and a plain visit shows no Full form (codex local r3 on #5624)', async () => {
     const staged = stagedPhotos();
     render(<FastCompleteSheet service={NOTE_BOX} request={makeRequest({ photos: staged.photos, photoChange: staged.photoChange })} onClose={() => {}} onCompleted={() => {}} onFullForm={() => {}} />);
     await screen.findByText(/Taurus SC 4 fl oz/);
     await screen.findByText('Counter edge');
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    const fullForm = () => screen.getByRole('button', { name: 'Full form' });
     const otherProduct = () => screen.getByRole('button', { name: '+ Other product' });
-    expect(fullForm().disabled).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Full form' })).toBeNull();
     expect(otherProduct().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Describe photo 1' }));
-    expect(fullForm().disabled).toBe(true);
     expect(otherProduct().disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(fullForm().disabled).toBe(false));
-    expect(otherProduct().disabled).toBe(false);
+    await waitFor(() => expect(otherProduct().disabled).toBe(false));
   });
 
   test('a description the server refuses stays open with its words, and says why', async () => {

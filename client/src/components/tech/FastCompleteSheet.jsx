@@ -24,6 +24,10 @@
 // rates and areas. "Full form" opens the full completion screen — the
 // Dispatch CompletionPanel — before any attempt may have reached the
 // server; so does "+ Other product" when the product list did not load.
+// The sheet is the one form a tech sees (owner 2026-10-08, as the lawn sheet):
+// the Full form button shows only while the sheet says the visit needs the
+// full form (a hold that names it, a visit the sheet can't open) or a read
+// the sheet depends on failed (the report, the photos, the trace).
 //
 // Customer text (dark, GATE_FAST_COMPLETE_RECAP, `service.recapEnabled`): off,
 // the sheet pins sendCompletionSms / requestReview / includePayLink to false
@@ -495,6 +499,14 @@ function sheetTitle(reportFlow, visit, done) {
   return SHEET_TITLES[reportFlow && !isReserviceVisit(visit) ? 'service' : 'reservice'][done ? 1 : 0];
 }
 
+// Whether the header shows Full form: always on the older short form (a
+// re-service outside the report flow); in the report flow only while the form
+// says the visit needs it or the sheet could not open the visit.
+function fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx }) {
+  if (!reportFlow || fullFormNeeded) return true;
+  return !!(ctx.loadError || ctx.blockedReason);
+}
+
 export default function FastCompleteSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
@@ -537,6 +549,9 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   // Voice fill recording, transcribing or filling (the form's own hold, lifted
   // so Full form and Close wait on it too).
   const [voiceBusy, setVoiceBusy] = useState(false);
+  // The form's own word that this visit needs the full form (see the header).
+  const [fullFormNeeded, setFullFormNeeded] = useState(false);
+  const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx });
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
@@ -569,13 +584,13 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
         <TechServicePhotosModal serviceId={service?.id} customerName={customerNameOf(ctx.visit, service)} onClose={photoManager.close} />
       )) || sheetOverlay}
     >
-      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} />
+      <SheetHeader titleId={titleId} title={sheetTitle(reportFlow, ctx.visit, done)} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending || photoBusy || voiceBusy} submitting={submitting || voiceBusy} onFullForm={onFullForm} onClose={close} fullFormOffered={fullFormOffered} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photoManager} onOverlay={setSheetOverlay} dictationPending={dictationPending} onDictationPending={setDictationPending} onPhotoBusy={setPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={setFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} onVoiceBusy={setVoiceBusy} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, isMobile, voiceFillEnabled, onVoiceBusy }) {
+function SheetBody({ service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending, onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled, onVoiceBusy }) {
   const reportFlow = service?.reportFlow === true;
   // The report flow keeps its form mounted through the saved view: what the
   // tech marked shows there.
@@ -597,7 +612,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
   if (reportFlow) {
-    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
+    return <ReportFlowForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} onOverlay={onOverlay} dictationPending={dictationPending} onDictationPending={onDictationPending} onPhotoBusy={onPhotoBusy} onCompleted={onCompleted} onFullForm={onFullForm} onFullFormNeeded={onFullFormNeeded} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
   }
   return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} photos={photos} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} onVoiceBusy={onVoiceBusy} />;
 }
@@ -1017,6 +1032,14 @@ function reportCompletionBody({
 // inspections), so it needs no product (null: no hold).
 // The send holds per record mode: a lane visit's, a typed visit's, else the
 // pest visit's.
+// A hold whose own words send the tech to the full form.
+const namesFullForm = (reason) => /\bfull form\b/i.test(String(reason || ''));
+
+function reportFlowNeedsFullForm({ generateMissing, completeMissing, report, visitPhotos, trace }) {
+  if (namesFullForm(generateMissing.reason) || namesFullForm(completeMissing.reason)) return true;
+  return !!report.writeError || visitPhotos.failed === true || trace.failed === true;
+}
+
 const sendHoldsFor = (mode) => ({ lane: laneSendHolds, typed: typedSendHolds })[mode] || sendHolds;
 
 const NO_PRODUCT_HOLDS = {
@@ -1512,7 +1535,7 @@ function productLaneOf(service) {
 
 function ReportFlowForm({
   service, request, ctx, submission, locked, photos, onOverlay, dictationPending, onDictationPending,
-  onPhotoBusy, onCompleted, onFullForm, isMobile, voiceFillEnabled = false,
+  onPhotoBusy, onCompleted, onFullForm, onFullFormNeeded, isMobile, voiceFillEnabled = false,
 }) {
   // Only opened for a visit in the report flow (service.reportFlow), so the
   // service is always there.
@@ -1595,6 +1618,12 @@ function ReportFlowForm({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
+  // The header's Full form button: a hold that sends the tech to the full
+  // form, or a read this sheet can't finish without (the report, the photos,
+  // the trace), so an outage never leaves the visit with no way to complete.
+  const fullFormNeeded = reportFlowNeedsFullForm({ generateMissing, completeMissing, report, visitPhotos, trace });
+  useEffect(() => { onFullFormNeeded?.(fullFormNeeded); }, [fullFormNeeded, onFullFormNeeded]);
+  useEffect(() => () => onFullFormNeeded?.(false), [onFullFormNeeded]);
 
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
