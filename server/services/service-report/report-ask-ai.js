@@ -469,12 +469,15 @@ const SPOKEN_EMAIL = new RegExp(`\\b[a-z0-9_%+-]+(?:${SEP_DOT}[a-z0-9_%+-]+)*${S
   // list above, so prose ("at home. Then") is never masked.
   + `|\\b[a-z0-9_%+-]+(?:${SEP_DOT}[a-z0-9_%+-]+)*${SPOKEN_AT}[a-z0-9-]+(?:(?:${SPOKEN_DOT}|\\.)[a-z0-9-]+)*?(?:${SPOKEN_DOT}|\\.)[a-z]{2,24}\\b`, 'gi');
 
+// A PO box is a full mailing address in a few characters: "PO Box 42",
+// "P.O. Box forty-two", "post office box 7" (Codex P1 #5964 r86).
+const PO_BOX_RE = /\b(?:p\.?\s*o\.?|post\s+office)\s*box\s*(?:#|no\.?|number)?\s*[a-z0-9-]+(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine|zero|oh))*/gi;
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(ACCESS_VERB_DEVICE, '$1[redacted]').replace(ACCESS_VALUE_FIRST, '$1[redacted]').replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(PO_BOX_RE, '[address]').replace(ACCESS_VERB_DEVICE, '$1[redacted]').replace(ACCESS_VALUE_FIRST, '$1[redacted]').replace(ACCESS_PHRASE, '$1[redacted]').replace(ACCESS_WORD_IS, '$1[redacted]').replace(SPLIT_ACCESS_CODE, '$1[redacted]').replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(maskAccessSentences(masked), max);
 }
@@ -510,7 +513,11 @@ const TYPED_ACCESS_DEVICE = /\b(?:gates?|gatehouse|doors?|locks?|padlocks?|keypa
 const TYPED_ACCESS_PLACE = /\b(?:garages?|entrances?|entry(?!\s+points?)|entryways?)\b/i;
 const TYPED_ACCESS_WORD = /\b(?:access|requir\w*|needs?|opens?|unlock\w*|codes?|password|passcode|pass\s*phrase|keys?|enter(?:s|ed|ing)?|use[sd]?|using|say|tell|ask)\b/i;
 const TYPED_PEST_WORD = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|spiders?|wasps?|bees?|hornets?|termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?|fleas?|ticks?|weeds?|nests?|webs?|trails?|droppings|pests?|bugs?|insects?)\b/i;
+const COMPACT_ACCESS_LABEL = /\b(?:gates?|doors?|locks?|padlocks?|keypads?|key\s*pads?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|garages?|entrances?|entry|access|codes?|pin|password|passcode|combo)\s*(?:code|pin|word|password)?\s*[:=#]\s*\S|\b(?:gates?|doors?|locks?|keypads?|lockbox(?:es)?|garages?)\s+-\s+\S/i;
 function isTypedAccessSentence(sentence) {
+  // A compact label is a credential whatever its length: "Gate:blue moon",
+  // "Door=1234", "Lockbox - sunset" (Codex security P2 #5964 r87).
+  if (COMPACT_ACCESS_LABEL.test(sentence)) return true;
   if (sentence.trim().split(/\s+/).length < 3) return false;
   if (TYPED_ACCESS_DEVICE.test(sentence)) return true;
   return TYPED_ACCESS_PLACE.test(sentence) && (TYPED_ACCESS_WORD.test(sentence) || !TYPED_PEST_WORD.test(sentence));
@@ -2355,6 +2362,25 @@ function deniesRecordedTerm(text, { data, facts }) {
   });
 }
 
+// What a product does must come from its own approved wording: "Alpine WSG
+// keeps snakes away", "Alpine WSG fertilizes your plants" (Codex P1 #5964 r86).
+// Judged when the product is the subject of an active verb.
+const EFFECT_NEUTRAL_VERBS = new Set('was were is are went got has had contains contain uses used with and or plus from in on at for of to by'.split(' '));
+const EFFECT_STOP = new Set(('work works worked help helps helped target targets targeted treat treats treated around outside inside along near with from that this these those your their there here today also only '
+  + 'home house property yard lawn area areas visit service report product products pest pests insect insects common listed label labeled such other more many some them they which when where while after before during because through into onto over under').split(' '));
+function unsupportedProductEffect(text, facts) {
+  const visit = factText([facts?.report_sections, facts?.findings, facts?.visit_summary, facts?.waves_summary, facts?.customer_concern]);
+  return splitSentences(matchForm(text)).some((sentence) => asArray(facts?.products).some((product) => {
+    const name = String(product.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = name && new RegExp(`^${name}\\s+(?:also\\s+|then\\s+|still\\s+)?([a-z]+)\\b(.*)$`, 'i').exec(sentence.trim());
+    if (!m || EFFECT_NEUTRAL_VERBS.has(m[1].toLowerCase()) || NEGATION_RE.test(sentence)) return false;
+    const wording = stemmedTerms([product.what_it_does, product.labeled_for, product.active_ingredient, product.name].filter(Boolean).join(' '));
+    return stemmedTerms(`${m[1]} ${m[2]}`).trim().split(' ')
+      .filter((word) => word.length > 3 && !EFFECT_STOP.has(word))
+      .some((word) => !wording.includes(` ${word} `) && !visit.includes(` ${word} `));
+  }));
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
@@ -2413,6 +2439,7 @@ const ASK_CHECKS = [
   // water the lawn daily" still screens the watering (pre-push audit #5964).
   ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some(givesOwnCareInstruction)],
   ['denies_recorded_term', deniesRecordedTerm],
+  ['product_effect', (text, { facts }) => unsupportedProductEffect(text, facts)],
 ];
 
 function firstFailure(checks, text, context) {

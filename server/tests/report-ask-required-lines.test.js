@@ -2913,3 +2913,29 @@ describe('answer screen, Codex round 86', () => {
     expect(ruleAnswerReason(data, [], 'applied', 'Why was Advion used?')).toBe('product_purpose');
   });
 });
+
+describe('answer screen, Codex rounds 86 and 87', () => {
+  const concern = (text) => buildReportAskFacts({ data: lawnData({ customerConcern: text, reportV2: { aftercare: {} } }) }).customer_concern;
+
+  test.each(['Gate:blue moon', 'Door=1234'])('a compact access label leaves whole: %s', (text) => {
+    expect(concern(text)).toBe('[access details removed]');
+  });
+
+  test.each([['Mail goes to PO Box 42, ants in kitchen', 'Mail goes to [address], ants in kitchen'], ['P.O. Box 42', '[address]']])('a PO box is masked: %s', (text, expected) => {
+    expect(concern(text)).toBe(expected);
+  });
+
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG', report_copy: { how_it_works: 'Alpine WSG controls ants and roaches.' } }, applicationArea: 'Outside' }] });
+  const question = 'What does Alpine WSG do?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['Alpine WSG keeps snakes away.', 'Alpine WSG fertilizes your plants.', 'Alpine WSG sterilized the soil.'])('a product effect off its approved wording is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('product_effect');
+  });
+
+  test('the approved effect passes', () => {
+    expect(ask('Alpine WSG controls ants and roaches.')).toBeNull();
+    expect(ask('Alpine WSG was applied outside.')).toBeNull();
+  });
+});
