@@ -32,6 +32,23 @@ const CACHE_TTL_MS = 30 * 60 * 1000;
 // means most of a day's customers share a key.
 const _cache = new Map();
 
+// Size bound for the coordinate-keyed caches. Public routes pass caller-
+// chosen coordinates, and a TTL that is only checked on read never frees an
+// entry, so a caller varying the point could grow a cache without limit
+// (Codex #6126 r4). On a write past the bound: drop expired entries, then
+// the oldest (a Map keeps insertion order). 500 keys of the 2-decimal grid
+// cover far more than a day's real customers.
+const CACHE_MAX_ENTRIES = 500;
+function cachePut(cache, key, entry, ttlMs) {
+  cache.delete(key);
+  cache.set(key, entry);
+  if (cache.size <= CACHE_MAX_ENTRIES) return;
+  const now = Date.now();
+  const stampOf = (e) => (typeof e === 'number' ? e : e.at);
+  for (const [k, e] of cache) if (now - stampOf(e) >= ttlMs) cache.delete(k);
+  while (cache.size > CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value);
+}
+
 function cacheKey(lat, lng) {
   return `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
 }
@@ -228,7 +245,7 @@ async function getDailyRainOutlook(lat, lng) {
   const startedAt = Date.now();
   const byDate = (await nwsDaily(latNum, lngNum)) || (await openMeteoDailyBackup(latNum, lngNum, startedAt));
   if (!byDate) return null;
-  _cache.set(key, { at: Date.now(), value: byDate });
+  cachePut(_cache, key, { at: Date.now(), value: byDate }, CACHE_TTL_MS);
   return byDate;
 }
 
@@ -296,7 +313,7 @@ async function getDailyRainOutlookBounded(lat, lng, { deadlineMs = 1200 } = {}) 
     _dailyInFlight.set(key, lookup);
     lookup.then((value) => {
       _dailyInFlight.delete(key);
-      if (value === null) _dailyFailCooldown.set(key, Date.now());
+      if (value === null) cachePut(_dailyFailCooldown, key, Date.now(), DAILY_FAIL_COOLDOWN_MS);
       else _dailyFailCooldown.delete(key);
     });
   }
@@ -353,7 +370,7 @@ async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsB
   // A backup answer reached only because THIS caller capped NWS is not
   // cached: an uncapped reader (storm watch, Rain Out) must still try NWS,
   // the primary source (Codex #6102 r3).
-  if (nws || nwsBudgetMs >= TOTAL_BUDGET_MS) _hourlyCache.set(key, { at: Date.now(), value: hours });
+  if (nws || nwsBudgetMs >= TOTAL_BUDGET_MS) cachePut(_hourlyCache, key, { at: Date.now(), value: hours }, HOURLY_CACHE_TTL_MS);
   return hours;
 }
 
@@ -425,5 +442,5 @@ module.exports = {
   getHourlyRainOutlook,
   getOpenMeteoDaytime,
   forecastLinkForZip,
-  _test: { dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };

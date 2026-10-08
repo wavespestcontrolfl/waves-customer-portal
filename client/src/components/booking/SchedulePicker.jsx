@@ -158,10 +158,15 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
       const day = s.date ? byDate.get(s.date) : null;
       // slotId first (two technicians can share a date + start), else time.
       const panelSlot = day?.slots?.find((x) => (s.slotId ? x.slotId === s.slotId : x.start_time === s.start_time));
-      return panelSlot ? { s: panelSlot, day, i, nearby: !!panelSlot.nearby, rank: rankOf(panelSlot, s) } : null;
+      // display_tier (GATE_CUSTOMER_RAIN_RANK): the server's rain tier for
+      // this recommendation, sent only when above 0. It leads the sort, so a
+      // wet hour never shows ahead of a dry one for an outdoor booking just
+      // because it is nearby or has the better route rank.
+      return panelSlot ? { s: panelSlot, day, i, tier: Number(s.display_tier) || 0, nearby: !!panelSlot.nearby, rank: rankOf(panelSlot, s) } : null;
     })
     .filter(Boolean)
-    .sort((a, b) => (Number(b.nearby) - Number(a.nearby))
+    .sort((a, b) => (a.tier - b.tier)
+      || (Number(b.nearby) - Number(a.nearby))
       || ((a.rank != null && b.rank != null) ? a.rank - b.rank : 0)
       || (a.i - b.i))
     .slice(0, 3);

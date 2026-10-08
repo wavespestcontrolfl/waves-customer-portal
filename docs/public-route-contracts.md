@@ -1251,6 +1251,31 @@ booking tools never opt in and are unaffected. Default 0 is byte-identical
 to before this lane. A slotId minted before this v3 bump fails verification
 once (the same accepted trade the v1→v2 canonical-string bump already made)
 — the client's existing "pick another time" 409 recovery re-signs fresh.
+**Customer rain rank (`GATE_CUSTOMER_RAIN_RANK`, owner 2026-10-08; ships
+dark).** Every caller of `buildBookingAvailability` except the active
+re-service rank profile — `/api/booking/availability`, `/find-slots`, the
+`/capture-intent` revalidation, public inspection booking and public
+reschedule — ranks its candidates by rain fit before route score
+(`services/scheduling/customer-rain-rank.js`, rules in `rain-fit.js`): for an
+outdoor booking an hour with a 60%+ hourly chance of rain from its start
+through 2 h after its end, on the next 3 dates, sorts last; for a rain-OK
+booking (assessments, inspections, interior-only work: the explicit
+`RAIN_OK_KEYS` list) it sorts first; a dry hour and any later date keep
+their route order. Auth, gates, rate limits, the hours offered, `days[]`,
+`is_best_fit`'s shape, signed offers (`slot_sig`) and every commit check are
+unchanged; only which candidates the curated `slots` hold, their order, and
+which slot a day flags `is_best_fit` can differ. Payload: a curated slot
+whose tier is above 0 carries one new field, `display_tier` (integer 1-2),
+which the picker sorts by first; it is absent otherwise, so with the gate
+off, a neutral booking, no forecast, or no candidate inside the 3 dates the
+payload is byte-identical to today's. The forecast (NWS hourly, Open-Meteo
+when NWS fails) is read at the request's own coordinates under a 2.5 s
+bound, and never logged with coordinates. Outbound cost on these
+unauthenticated routes is bounded three ways: nothing is read until the
+slot search has produced a candidate inside the 3 dates; the coordinates
+must fall inside the service area's coarse box (`service-area.js`); and at
+most 60 reads start per minute per process, past which the build keeps
+today's order. Fail open on every error.
 **Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
 2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
 and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the
