@@ -21,7 +21,7 @@
  */
 
 const logger = require('./logger');
-const { etOffsetIso } = require('../utils/datetime-et');
+const { etOffsetIso, etParts, etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 const NWS_BASE = 'https://api.weather.gov';
 const USER_AGENT = '(wavespestcontrol.com, contact@wavespestcontrol.com)';
@@ -85,9 +85,8 @@ const FORECAST_BACKUP_MAX_MS = 3500;
 // before the shared client's cache is warm.
 const _backupInFlight = new Map();
 
-async function readOpenMeteoHours(latNum, lngNum, timeoutMs) {
+async function readOpenMeteoHours(latNum, lngNum, timeoutMs, fromMs = Math.floor(Date.now() / 3600000) * 3600000) {
   const { fetchPropertyForecast } = require('./service-report/application-conditions');
-  const fromMs = Math.floor(Date.now() / 3600000) * 3600000;
   const forecast = await fetchPropertyForecast({
     latitude: latNum,
     longitude: lngNum,
@@ -185,7 +184,17 @@ async function getOpenMeteoDaytime(lat, lng) {
   const latNum = Number(lat);
   const lngNum = Number(lng);
   if (lat == null || lng == null || !Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
-  const hours = await fetchOpenMeteoHours(latNum, lngNum, Date.now());
+  // While today's daytime period is running (6 AM-6 PM ET) the read starts
+  // at today's 6 AM, so today is a complete date here as it is among NWS's
+  // daytime periods; a read from the current hour would drop it and shift
+  // the six dates one day later (Codex #6119 r3). Its own read (another
+  // window than the hourly backup's), never thrown.
+  const now = new Date(Date.now());
+  const etHour = etParts(now).hour;
+  const fromMs = etHour >= 6 && etHour < 18
+    ? parseETDateTime(`${etDateString(now)}T06:00`).getTime()
+    : Math.floor(now.getTime() / 3600000) * 3600000;
+  const hours = await readOpenMeteoHours(latNum, lngNum, FORECAST_BACKUP_MAX_MS, fromMs).catch(() => null);
   const days = hours ? daytimeFromHours(hours) : [];
   return days.length ? days : null;
 }

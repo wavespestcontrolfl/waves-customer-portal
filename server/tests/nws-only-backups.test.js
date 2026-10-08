@@ -19,6 +19,46 @@ describe('weather-forecast getOpenMeteoDaytime', () => {
   });
 });
 
+describe('getOpenMeteoDaytime window (Codex #6119 r3)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.dontMock('../services/service-report/application-conditions');
+    jest.resetModules();
+  });
+
+  function load() {
+    jest.resetModules();
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const fetchPropertyForecast = jest.fn(async ({ from }) => {
+      const start = new Date(from).getTime();
+      return {
+        status: 'ok',
+        hourly: Array.from({ length: 60 }, (_, i) => ({
+          at: new Date(start + i * 3600000).toISOString(), precipitation_probability_pct: 30, temperature_f_exact: 80, wind_mph_exact: 5,
+        })),
+      };
+    });
+    jest.doMock('../services/service-report/application-conditions', () => ({ fetchPropertyForecast }));
+    return { getOpenMeteoDaytime: require('../services/weather-forecast').getOpenMeteoDaytime, fetchPropertyForecast };
+  }
+
+  test('at noon ET the read starts at today 6 AM, so today is a complete date', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-08T16:00:00Z'));
+    const { getOpenMeteoDaytime, fetchPropertyForecast } = load();
+    const days = await getOpenMeteoDaytime(27.5, -82.5);
+    expect(new Date(fetchPropertyForecast.mock.calls[0][0].from).toISOString()).toBe('2026-10-08T10:00:00.000Z');
+    expect(days[0].date).toBe('2026-10-08');
+  });
+
+  test('at 8 PM ET the read starts now, and the first date is tomorrow', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-09T00:00:00Z'));
+    const { getOpenMeteoDaytime, fetchPropertyForecast } = load();
+    const days = await getOpenMeteoDaytime(27.5, -82.5);
+    expect(new Date(fetchPropertyForecast.mock.calls[0][0].from).toISOString()).toBe('2026-10-09T00:00:00.000Z');
+    expect(days[0].date).toBe('2026-10-09');
+  });
+});
+
 describe('pest forecast weather', () => {
   beforeEach(() => { jest.resetModules(); });
   afterEach(() => { delete global.fetch; });
@@ -101,6 +141,21 @@ describe('dispatch forecast analyzer', () => {
     // The summary covers the Eastern date only, with rounded temperatures.
     expect(out.overallConditions.summary).toContain('75-84°F');
     expect(out.overallConditions.summary).toContain('90% max rain chance');
+  });
+
+  test('an hour with no temperature does not read as a 0°F low', async () => {
+    const { analyzer } = load([
+      { startTime: '2026-10-09T14:00:00-04:00', rainChance: 10, temperatureF: null, windMph: 4, shortForecast: null, source: 'open-meteo' },
+      { startTime: '2026-10-09T15:00:00-04:00', rainChance: 10, temperatureF: 82.2, windMph: 4, shortForecast: null, source: 'open-meteo' },
+    ], [visit]);
+    expect((await analyzer.analyzeTomorrow()).overallConditions.summary).toContain('82-82°F');
+  });
+
+  test('no hour has a temperature: the summary says so', async () => {
+    const { analyzer } = load([
+      { startTime: '2026-10-09T14:00:00-04:00', rainChance: 10, temperatureF: null, windMph: 4, shortForecast: null },
+    ], [visit]);
+    expect((await analyzer.analyzeTomorrow()).overallConditions.summary).toContain('Temperature unavailable, wind up to 4 mph');
   });
 
   test('no forecast: every visit proceeds (fail open)', async () => {

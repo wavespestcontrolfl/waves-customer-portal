@@ -140,12 +140,14 @@ class ForecastAnalyzer {
   buildSummary(forecast, etDate) {
     const hours = forecast.filter(h => h.et_date === etDate);
     if (!hours.length) return 'Forecast unavailable.';
-    // Rounded: the Open-Meteo backup carries unrounded readings.
-    const hi = Math.round(Math.max(...hours.map(h => h.temp_f)));
-    const lo = Math.round(Math.min(...hours.map(h => h.temp_f)));
+    // Finite readings only (the backup reports a missing hour as null, which
+    // Math.min would read as 0), rounded (its readings are unrounded).
+    const temps = hours.map(h => h.temp_f).filter(t => Number.isFinite(t));
+    const hi = temps.length ? Math.round(Math.max(...temps)) : null;
+    const lo = temps.length ? Math.round(Math.min(...temps)) : null;
     const maxWind = Math.max(...hours.map(h => h.wind_speed_mph));
     const maxRain = Math.max(...hours.map(h => h.rain_probability_pct));
-    return `${lo}-${hi}°F, wind up to ${maxWind} mph, ${maxRain}% max rain chance. ${maxRain > 80 ? 'Rain likely.' : maxRain > 50 ? 'Rain possible.' : 'Mostly dry.'}`;
+    return `${temps.length ? `${lo}-${hi}°F` : 'Temperature unavailable'}, wind up to ${maxWind} mph, ${maxRain}% max rain chance. ${maxRain > 80 ? 'Rain likely.' : maxRain > 50 ? 'Rain possible.' : 'Mostly dry.'}`;
   }
 }
 
