@@ -158,7 +158,7 @@ The call pipeline (`estimator-engine/draft-builder.js`) puts a trusted lookup pa
 | Key | Product basis | Area tiers (sq ft) | Own visit | Same trip | Max per year |
 |---|---|---|---|---|---|
 | `bed_pre_emergent` | Snapshot 2.5TG, 3.45 lb/1K | 1,000 / 2,000 / 3,500 | $99 / $139 / $199 | $69 / $109 / $169 | 2 |
-| `lawn_insect_spot` | Arena 50 WDG, 0.147 oz/1K (Florida 2(ee) rate, St. Augustine; treated area) | 1,000 / 2,000 / 3,500 | $79 / $89 / $109 | $49 / $59 / $79 | 2 |
+| `lawn_insect_spot` | Arena 50 WDG, 0.147 oz/1K (Florida 2(ee) rate; St. Augustine only, any other or unknown grass is a custom quote; treated area) | 1,000 / 2,000 / 3,500 | $79 / $89 / $109 | $49 / $59 / $79 | 2 |
 | `fire_ant_yard` | Topchoice, 2 lb/1K | 3,000 / 5,000 / 8,000 | $99 / $129 / $169 | $69 / $99 / $139 | 1 |
 | `lawn_insect_preventive` | Acelepryn, 0.184 fl oz/1K | 3,000 / 5,000 / 8,000 | $99 / $119 / $149 | $69 / $89 / $119 | 1 |
 | `hardscape_weed` | Roundup QuikPro SC Total, 16 fl oz/1K (label rate; hard surfaces and bare ground only) | 1,000 / 2,000 / 3,500 | $119 / $179 / $259 | $89 / $149 / $229 | 2 |

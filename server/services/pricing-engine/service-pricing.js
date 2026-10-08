@@ -8506,7 +8506,9 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
     }
     tierSqFt = cfg.tiers.find((top) => areaSqFt <= top) ?? null;
   }
-  return { addOnKey, cfg, visitContext, applications, areaSqFt, tierSqFt };
+  // Alias match only: an unknown or missing grass is null, never a default.
+  const grassTrack = matchGrassTrack(options.grassType ?? options.track);
+  return { addOnKey, cfg, visitContext, applications, areaSqFt, tierSqFt, grassTrack };
 }
 
 // One-time add-on treatment priced from AREA_ADDONS (see constants.js for
@@ -8524,7 +8526,7 @@ function normalizeAreaAddOnInput(addOnKey, options = {}) {
 function priceAreaAddOn(addOnKey, options = {}) {
   assertAreaAddOnsEnabled();
   const {
-    cfg, visitContext, applications, areaSqFt, tierSqFt,
+    cfg, visitContext, applications, areaSqFt, tierSqFt, grassTrack,
   } = normalizeAreaAddOnInput(addOnKey, options);
 
   const base = {
@@ -8548,6 +8550,11 @@ function priceAreaAddOn(addOnKey, options = {}) {
     customQuoteReason: reason,
   });
 
+  // A label-bound row (the Arena 2(ee) rate is St. Augustine only) prices
+  // only for that verified grass; another or unknown grass is a custom quote.
+  if (cfg.requiresGrassTrack && grassTrack !== cfg.requiresGrassTrack) {
+    return customQuote('area_addon_grass_not_covered_by_label_rate', { areaSqFt, tierSqFt, grassTrack });
+  }
   if (cfg.tiers && tierSqFt === null) {
     return customQuote('area_addon_area_above_largest_tier', { areaSqFt, tierSqFt: null });
   }
@@ -8577,6 +8584,7 @@ function priceAreaAddOn(addOnKey, options = {}) {
     perApplication,
     areaSqFt,
     tierSqFt,
+    manualReviewReasons: [],
     detail: detailParts.join(' | '),
     costs: {
       material: roundMoney(materialCost),
@@ -8588,6 +8596,61 @@ function priceAreaAddOn(addOnKey, options = {}) {
     },
     margin: Math.round((perApplication - cost) / perApplication * 1000) / 1000,
   };
+}
+
+// Prices a whole services.areaAddOns list for the estimate engine: every
+// entry is validated in full FIRST (so a commercial property cannot turn an
+// unknown key or a bad value into a manual-quote line), a key may appear once
+// (a repeat would sidestep maxPerYear; the count belongs in `applications`),
+// then each entry is priced unless `isCommercialManualQuote(entry, family)`
+// claims it (web sweep = pest control family, the rest = lawn care).
+// `grassSources` name the estimate's grass for entries that do not carry one.
+// Returns the priced lines and the normalized requests (for the host check).
+function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuote } = {}) {
+  // The estimate's grass: the first source (lawn service, request, property)
+  // that names one, by `track` then `grassType`.
+  const grassType = grassSources
+    .flatMap((source) => [source?.track, source?.grassType])
+    .find((value) => value !== undefined && value !== null && value !== '');
+  if (entries === undefined) return { lines: [], requests: [] };
+  if (!Array.isArray(entries)) {
+    throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt, visitContext, applications }', { field: 'areaAddOns' });
+  }
+  if (entries.length > 0) assertAreaAddOnsEnabled();
+  const seenKeys = new Set();
+  const requests = entries.map((entry, index) => {
+    if (!isPlainAreaAddOnObject(entry)) {
+      throw buildPricingError('Each services.areaAddOns entry must be an object', { field: 'areaAddOns', index });
+    }
+    const options = { ...entry, grassType: entry.grassType ?? entry.track ?? grassType };
+    const normalized = normalizeAreaAddOnInput(entry.key, options);
+    if (seenKeys.has(normalized.addOnKey)) {
+      throw buildPricingError(`services.areaAddOns lists ${normalized.addOnKey} more than once - send one entry per add-on and put the count in applications`, { field: 'areaAddOns', index, key: normalized.addOnKey });
+    }
+    seenKeys.add(normalized.addOnKey);
+    return { entry, options, normalized };
+  });
+  const lines = requests
+    .filter(({ entry, normalized }) => !isCommercialManualQuote?.(entry, normalized.addOnKey === 'web_sweep' ? 'pest_control' : 'lawn_care'))
+    .map(({ options, normalized }) => priceAreaAddOn(normalized.addOnKey, options));
+  return { lines, requests };
+}
+
+// Same-visit area add-ons ride a host visit: the price drops the drive
+// minutes, which is only true when a priced service shares the estimate. The
+// host is another PRICED line that is not an area add-on, or a PRICED add-on
+// that is standalone (it has its own visit). An unpriced line (custom quote,
+// commercial manual quote) is never a host. Call it on the FINAL line list.
+function assertAreaAddOnHostVisit(requests, lineItems) {
+  if (!requests.some(({ normalized }) => normalized.visitContext === 'sameTripAddOn')) return;
+  const isPriced = (line) => !!line
+    && line.quoteRequired !== true
+    && line.requiresCustomQuote !== true
+    && [line.annual, line.price, line.total].some((amount) => Number(amount) > 0);
+  const isHost = (line) => isPriced(line) && (line.service !== 'area_addon' || line.visitContext === 'standalone');
+  if (!lineItems.some(isHost)) {
+    throw buildPricingError('A same-visit area add-on needs a priced service on the same estimate (a recurring service, another one-time service, or a standalone add-on); price it as standalone or add the service it rides with', { field: 'areaAddOns', visitContext: 'sameTripAddOn' });
+  }
 }
 
 // ============================================================
@@ -9544,6 +9607,8 @@ module.exports = {
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
   priceAreaAddOn,
+  priceAreaAddOnList,
+  assertAreaAddOnHostVisit,
   normalizeAreaAddOnInput,
   isPlainAreaAddOnObject,
   assertAreaAddOnsEnabled,

@@ -1567,6 +1567,9 @@ const AREA_ADDONS = {
       minPer1000: 6,
       tiers: [1000, 2000, 3500],
       maxPerYear: 2,
+      // The 2(ee) rate and its two-application ceiling cover St. Augustine
+      // only: any other or unknown grass is a custom quote, never this price.
+      requiresGrassTrack: 'st_augustine',
     },
     // Topchoice at 2 lb/1,000 ($1.83/lb), broadcast once a year.
     fire_ant_yard: {

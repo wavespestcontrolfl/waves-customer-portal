@@ -36,15 +36,15 @@ describe('area add-on treatment pricing', () => {
     ['lawn_insect_preventive', 8000, 149, 119],
     ['hardscape_weed', 1000, 119, 89],
   ])('%s at %i sq ft is $%i own visit and $%i same trip', (key, areaSqFt, ownVisit, sameTrip) => {
-    expect(priceAreaAddOn(key, { areaSqFt }).price).toBe(ownVisit);
-    expect(priceAreaAddOn(key, { areaSqFt, visitContext: 'sameTripAddOn' }).price).toBe(sameTrip);
+    expect(priceAreaAddOn(key, { areaSqFt, grassType: 'st_augustine' }).price).toBe(ownVisit);
+    expect(priceAreaAddOn(key, { areaSqFt, grassType: 'st_augustine', visitContext: 'sameTripAddOn' }).price).toBe(sameTrip);
   });
 
   test('every priced tier keeps at least the target margin in both visit contexts', () => {
     for (const [key, cfg] of Object.entries(AREA_ADDONS.items)) {
       for (const areaSqFt of cfg.tiers || [undefined]) {
         for (const visitContext of ['standalone', 'sameTripAddOn']) {
-          const line = priceAreaAddOn(key, { areaSqFt, visitContext });
+          const line = priceAreaAddOn(key, { areaSqFt, visitContext, grassType: 'st_augustine' });
           expect(line.margin).toBeGreaterThanOrEqual(AREA_ADDONS.targetMargin);
           expect(line.price % 10).toBe(9);
         }
@@ -53,7 +53,7 @@ describe('area add-on treatment pricing', () => {
   });
 
   test('an area inside a tier prices at the top of that tier', () => {
-    const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1200 });
+    const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1200, grassType: 'St. Augustine' });
     expect(line).toMatchObject({ price: 89, tierSqFt: 2000, areaSqFt: 1200 });
   });
 
@@ -102,13 +102,32 @@ describe('area add-on treatment pricing', () => {
 
   test('more applications than the yearly limit is a custom quote', () => {
     // Two half-rate Arena applications equal the season limit; a third passes it.
-    expect(priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 2 }).price).toBe(158);
-    const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 3 });
+    expect(priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 2, grassType: 'st_augustine' }).price).toBe(158);
+    const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 3, grassType: 'st_augustine' });
     expect(line).toMatchObject({
       price: null,
       requiresCustomQuote: true,
       customQuoteReason: 'area_addon_applications_above_yearly_limit',
     });
+  });
+
+  test('the lawn insect spot prices for St. Augustine only (the Arena 2(ee) rate covers no other grass)', () => {
+    for (const grassType of ['bermuda', 'zoysia', 'bahia', 'paspalum', '', undefined, null]) {
+      expect(priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, grassType })).toMatchObject({
+        price: null,
+        requiresCustomQuote: true,
+        customQuoteReason: 'area_addon_grass_not_covered_by_label_rate',
+      });
+    }
+    // Through the engine the estimate's grass applies, and an entry's own grass wins.
+    const stAug = generateEstimate({ grassType: 'st_augustine', services: { areaAddOns: [{ key: 'lawn_insect_spot', areaSqFt: 1000 }] } });
+    expect(stAug.lineItems.find((l) => l.service === 'area_addon').price).toBe(79);
+    const zoysia = generateEstimate({ grassType: 'zoysia', services: { areaAddOns: [{ key: 'lawn_insect_spot', areaSqFt: 1000 }] } });
+    expect(zoysia.lineItems.find((l) => l.service === 'area_addon')).toMatchObject({ price: null, requiresCustomQuote: true });
+    const unknown = generateEstimate({ services: { areaAddOns: [{ key: 'lawn_insect_spot', areaSqFt: 1000 }] } });
+    expect(unknown.lineItems.find((l) => l.service === 'area_addon').price).toBeNull();
+    // A grass-free add-on is unaffected.
+    expect(priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000, grassType: 'bahia' }).price).toBe(99);
   });
 
   test('bad input is a 400 pricing error', () => {
