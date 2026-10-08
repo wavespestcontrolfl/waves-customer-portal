@@ -481,6 +481,17 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
 
 // ── planned products ────────────────────────────────────────────────────────
 
+// GATE_LAWN_SPOT_RULES: the rate the program approved for a line the plan gave no rate (a
+// spot row: the plan sizes none), from its staged protocol row (`ratePer1000` / `rateUnit`,
+// the values v13SpotReference prints), so the sheet figures a spot amount from it rather
+// than the catalog default. `{}` when the gate is off, the plan already carries a rate, the
+// row has none, or the row states a concentration (a surfactant figures nothing).
+function programRateFor(item, programRows) {
+  const row = programRows?.get(String(item.product.id));
+  if (!row || item.mix?.ratePer1000 != null || row.gates?.concentration) return {};
+  return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
+}
+
 // GATE_LAWN_SPOT_RULES: the weed add-ons as one cap-aware entry (see lawn-weed-mix.js), as
 // `{ weedMix }` to spread into plannedProducts, or `{}` (gate off, or no weed group). Its
 // limit read is caught inside (mode 'unavailable'); only a defect lands in the catch here.
@@ -521,6 +532,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
     const items = withProduct(plan?.completionDefaults?.items);
     const addOns = withProduct(plan?.completionDefaults?.addOns);
     const rows = await loadCatalogRows([...items, ...addOns].map((item) => String(item.product.id)), knex);
+    const programRows = featureGates.lawnSpotRulesLive() ? require('./waveguard-plan-engine').v13ProtocolRows(plan?.protocol?.structured) : null;
     const plannedItem = (item) => {
       const entry = productRuleEntry(String(item.product.id), rows.get(String(item.product.id)) || null);
       return {
@@ -537,6 +549,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
         areaUnit: item.mix?.treatedSqft != null ? 'sqft' : null,
         ratePer1000: item.mix?.ratePer1000 ?? null,
         rateUnit: item.mix?.rateUnit ?? null,
+        ...programRateFor(item, programRows),
         approvedForReport: entry.approvedForReport,
         wateringRule: entry.rule,
         wateringSummary: entry.ruleSummary,

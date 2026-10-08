@@ -373,6 +373,9 @@ function productRow(product, { planned = null, added = false, weedGroup = false 
     // plan's exactly as the plan gave it, and the first change to the row's
     // amount or amount unit (rateChanged) drops it.
     planRate: plannedRate(planned),
+    // The plan item's rate as the server sent it, for a spot row's figuring (figuringRate).
+    plannedRatePer1000: planned && Number(planned.ratePer1000) > 0 ? Number(planned.ratePer1000) : null,
+    plannedRateUnit: planned?.rateUnit || null,
     rateChanged: false,
     // The plan's method and the square feet it gives at that method, if any:
     // the plan's area stands only while the row is on the plan's method.
@@ -485,7 +488,11 @@ function convertAmount(amount, from, to, dimension) {
 // catalog's. A per-basis rate (per gallon, per acre, per spot) or one in mL
 // figures nothing.
 function figuringRate(row) {
-  const source = resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
+  // A spot row under the spot rules figures from the rate the program approved (the server
+  // sends it on the plan item when the plan gave none); only a row whose protocol line has
+  // none falls back to the catalog's. A unit the row cannot express still figures nothing.
+  const program = row.spotRule && onPlannedMethod(row) && row.plannedRatePer1000 ? { rate: row.plannedRatePer1000, rateUnit: row.plannedRateUnit } : null;
+  const source = program || resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
   const rate = Number(source?.rate);
   const rateUnit = String(source?.rateUnit || '').trim();
   if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;

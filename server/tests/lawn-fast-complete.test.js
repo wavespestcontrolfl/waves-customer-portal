@@ -12,7 +12,7 @@ jest.mock('../services/property-coordinates', () => ({ resolvePropertyCoordinate
 jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn() }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-const { buildPlanForService, v13VisitLimits } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, v13VisitLimits, v13ProtocolRows } = require('../services/waveguard-plan-engine');
 const { resolvePropertyCoordinates } = require('../services/property-coordinates');
 const { getCurrent } = require('../services/fawn-weather');
 const { recapVisitIdentityChanged, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('../services/pest-recap');
@@ -403,6 +403,39 @@ describe('buildLawnFastContext', () => {
       const ctx = await read();
       expect(ctx.plannedProducts.weedMix).toMatchObject({ mode: 'replacement', productIds: [P_BLIND] });
       expect(getCurrent).not.toHaveBeenCalled();
+    });
+
+    describe("a spot add-on carries the program's approved rate (the staged protocol row's)", () => {
+      const ROWS = new Map([
+        [P_LEAD, { productId: P_LEAD, ratePer1000: '0.085', rateUnit: 'oz', gates: { annualCounter: 'x' } }],
+        [P_SURF, { productId: P_SURF, ratePer1000: null, rateUnit: 'label_rate', gates: { concentration: '0.25% v/v' } }],
+        [P_BLIND, { productId: P_BLIND, ratePer1000: null, rateUnit: 'label_rate', gates: {} }],
+      ]);
+      beforeEach(() => v13ProtocolRows.mockReset().mockReturnValue(ROWS));
+      const rateOf = (ctx, id) => ctx.plannedProducts.addOns.find((a) => a.productId === id);
+
+      test('gate on: the row\'s rate and unit ride the add-on; a row with no rate or a concentration carries none', async () => {
+        process.env.GATE_LAWN_SPOT_RULES = 'true';
+        const ctx = await read();
+        expect(rateOf(ctx, P_LEAD)).toMatchObject({ ratePer1000: 0.085, rateUnit: 'oz' });
+        expect(rateOf(ctx, P_SURF)).toMatchObject({ ratePer1000: null, rateUnit: null });
+        expect(rateOf(ctx, P_BLIND)).toMatchObject({ ratePer1000: null, rateUnit: null });
+        expect(v13ProtocolRows).toHaveBeenCalledWith({ products: [] });
+      });
+
+      test('a rate the plan itself gave is kept', async () => {
+        process.env.GATE_LAWN_SPOT_RULES = 'true';
+        const plan = PLAN();
+        plan.completionDefaults.addOns[0].mix = { ratePer1000: 0.1, rateUnit: 'fl oz', amount: 1, amountUnit: 'fl oz' };
+        buildPlanForService.mockResolvedValue(plan);
+        expect(rateOf(await read(), P_LEAD)).toMatchObject({ ratePer1000: 0.1, rateUnit: 'fl oz' });
+      });
+
+      test('gate off: the protocol rows are not read and the add-on carries no rate', async () => {
+        const ctx = await read();
+        expect(rateOf(ctx, P_LEAD)).toMatchObject({ ratePer1000: null, rateUnit: null });
+        expect(v13ProtocolRows).not.toHaveBeenCalled();
+      });
     });
 
     test('gate on, a visit with no plan (one-time): spotRules only, no weedMix', async () => {

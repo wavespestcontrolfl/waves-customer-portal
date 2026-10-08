@@ -1233,6 +1233,14 @@ function aggregateApplicationArea(applications, preferredUnits = []) {
   }, 0);
 }
 
+// A spot-treatment row (the method the server normalizes, so "Spot treatment" and "spot_spray" agree):
+// backpack work on a few square feet, not part of the lawn the visit treated. The "Sq ft" metric
+// counts the whole-lawn rows only, so a 250 sq ft weed spot never reads as 6,250 beside a 6,000 sq ft lawn.
+function isSpotApplication(app) {
+  const { normalizeServiceReportApplicationMethod } = require('../complete-scheduled-service');
+  return normalizeServiceReportApplicationMethod(app?.method ?? app?.applicationMethod) === 'spot_treatment';
+}
+
 function metricValue(metric, context) {
   if (metric.key === 'on_site_min') return context.onSiteMin;
   if (metric.aggregate === 'count_zones') return `${context.treatedZoneIds.size}/${context.zones.length}`;
@@ -1247,7 +1255,7 @@ function metricValue(metric, context) {
     return total > 0 ? total : null;
   }
   if (metric.key === 'area_sqft') {
-    const total = Math.round(aggregateApplicationArea(context.applications, ['sqft']));
+    const total = Math.round(aggregateApplicationArea(context.applications.filter((app) => !isSpotApplication(app)), ['sqft']));
     return total > 0 ? total : null;
   }
   const value = context.serviceData?.[metric.key];
@@ -7641,6 +7649,7 @@ module.exports = {
   taggedNoteLines,
   minutesFromElapsed,
   methodFromProduct,
+  metricValue,
   inferCatalogProductType,
   approvedReportProductFacts,
   withApplicationHold,

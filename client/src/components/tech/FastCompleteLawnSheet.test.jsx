@@ -2162,6 +2162,56 @@ describe('weed spots and the spot area', () => {
     expect(within(editorFor('Cert Herbicide')).getByLabelText('Cert Herbicide').value).toBe('3');
   });
 
+  describe('the amount is figured from the program\'s rate, not the catalog default', () => {
+    const withLeadRate = (rate) => weedContext(MIX(), {
+      plannedProducts: {
+        source: 'plan', items: [PLANNED[0]], month: 10, weedMix: MIX(),
+        addOns: ADD_ONS.map((a) => (a.productId === P_LEAD ? { ...a, ...rate } : a)),
+      },
+    });
+    test('the protocol row\'s rate wins over a different catalog rate, and is the rate on the record', async () => {
+      // The catalog says 2 oz per 1,000; the program approved 0.5.
+      await open(withLeadRate({ ratePer1000: 0.5, rateUnit: 'oz' }));
+      expect(within(addons()).getByText(/Lead WG/)).toBeTruthy();
+      addWeedSpots();
+      fireEvent.click(within(weedArea()).getByRole('button', { name: '500 sq ft' }));
+      expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('0.25');
+      expect(within(editorFor('Lead WG')).getByText('0.5 oz per 1,000 sq ft × 500 sq ft')).toBeTruthy();
+      await analyze();
+      await submit();
+      expect(sentProduct(P_LEAD)).toMatchObject({ totalAmount: 0.25, amountUnit: 'oz', rate: 0.5, rateUnit: 'oz' });
+      // A member whose row has no rate still falls back to the catalog's.
+      expect(sentProduct(P_CERT)).toMatchObject({ totalAmount: 0.25, rate: 0.5, rateUnit: 'fl_oz' });
+    });
+    test('a weed row added on its own is figured the same way', async () => {
+      await open(weedContext(MIX({ mode: 'none', productIds: [], groupProductIds: [] }), {
+        plannedProducts: { source: 'plan', items: [PLANNED[0]], month: 10, weedMix: MIX({ mode: 'none', productIds: [], groupProductIds: [], surfactant: null }), addOns: [{ ...addOn(P_LEAD, 'Lead WG'), ratePer1000: 0.5, rateUnit: 'oz' }] },
+      }));
+      fireEvent.click(within(addons()).getByRole('button', { name: 'Add Lead WG' }));
+      const lead = editorFor('Lead WG');
+      fireEvent.click(within(lead).getByRole('button', { name: '1,000 sq ft' }));
+      expect(within(lead).getByLabelText('Lead WG').value).toBe('0.5');
+    });
+    test('a unit the row\'s amount cannot express figures nothing (no fallback to the catalog)', async () => {
+      await open(withLeadRate({ ratePer1000: 3, rateUnit: 'gal' }));
+      addWeedSpots();
+      fireEvent.click(within(weedArea()).getByRole('button', { name: '500 sq ft' }));
+      expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('');
+      expect(within(editorFor('Lead WG')).queryByText(/per 1,000 sq ft ×/)).toBeNull();
+      // The area is still on the row, so Complete is not held for it.
+      await analyze();
+      await submit();
+      expect(sentProduct(P_LEAD)).toMatchObject({ areaValue: 500, areaUnit: 'sqft' });
+      expect(sentProduct(P_LEAD).totalAmount).toBeUndefined();
+    });
+    test('a row with no program rate falls back to the catalog\'s', async () => {
+      await open();
+      addWeedSpots();
+      fireEvent.click(within(weedArea()).getByRole('button', { name: '500 sq ft' }));
+      expect(within(editorFor('Lead WG')).getByText('2 oz per 1,000 sq ft × 500 sq ft')).toBeTruthy();
+    });
+  });
+
   test('the quick sizes are 100, 250, 500 and 1,000 sq ft', async () => {
     await open();
     addWeedSpots();
