@@ -140,13 +140,15 @@ function sameProperty(pair) {
 const SENT_CHANNELS_SQL = (alias) => `(jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
   AND jsonb_array_length(${alias}.estimate_data #> '{deliveryState,sentChannels}') > 0
   AND ${alias}.viewed_at IS NOT NULL)`;
-// pg_input_is_valid, not a shape regex: an ISO-looking but invalid value on
-// one row must not abort the whole candidate query at the cast.
-const DELIVERED_AT_SQL = (alias) => `pg_input_is_valid(${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}', 'timestamptz')`;
+// Shape AND validity: the shape regex alone lets an ISO-looking but invalid
+// value abort the whole candidate query at the cast, and pg_input_is_valid
+// alone accepts special literals such as 'infinity'.
+const ISO_INSTANT_SQL = (expr) => `(${expr} ~ '^[0-9]{4}-' AND pg_input_is_valid(${expr}, 'timestamptz'))`;
+const DELIVERED_AT_SQL = (alias) => ISO_INSTANT_SQL(`(${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')`);
 const SENT_TIME_SQL = (alias) => `(CASE
   WHEN ${DELIVERED_AT_SQL(alias)}
     THEN (${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz
-  WHEN ${SENT_CHANNELS_SQL(alias)} AND pg_input_is_valid(${alias}.estimate_data #>> '{deliveryState,attemptedAt}', 'timestamptz')
+  WHEN ${SENT_CHANNELS_SQL(alias)} AND ${ISO_INSTANT_SQL(`(${alias}.estimate_data #>> '{deliveryState,attemptedAt}')`)}
     THEN LEAST((${alias}.estimate_data #>> '{deliveryState,attemptedAt}')::timestamptz, ${alias}.viewed_at)
   WHEN ${SENT_CHANNELS_SQL(alias)} THEN ${alias}.viewed_at
   ELSE ${alias}.sent_at END)`;

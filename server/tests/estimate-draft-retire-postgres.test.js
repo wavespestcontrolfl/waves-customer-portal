@@ -378,8 +378,15 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     await estimate(bad, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { lastDeliveredAt: '2026-not-a-date', attemptedAt: '2026-also-bad', sentChannels: ['sms'] } }, viewed_at: minutesAgo(80) });
     // An invalid claim timestamp on a draft is a dead claim, not a query error.
     const badClaim = await estimate(bad, { createdAt: minutesAgo(200), data: { estimatorEngine: { delivering_at: '2026-not-a-date' } } });
+    // 'infinity' is a valid timestamptz but not an application timestamp: not a delivery, not a live claim.
+    const inf = await customer();
+    const editedLater = await estimate(inf, { createdAt: minutesAgo(200), updatedAt: minutesAgo(30) });
+    await estimate(inf, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { lastDeliveredAt: 'infinity' } } });
+    const infClaim = await estimate(bad, { createdAt: minutesAgo(200), data: { estimatorEngine: { delivering_at: 'infinity' } } });
     const { autoDraft } = await sentAfterTwoDrafts();
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBeGreaterThanOrEqual(3);
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBeGreaterThanOrEqual(4);
+    expect((await row(editedLater)).archived_at).toBeNull();
+    expect((await row(infClaim)).archived_at).not.toBeNull();
     expect((await row(badClaim)).archived_at).not.toBeNull();
     expect((await row(autoDraft)).archived_at).not.toBeNull();
     // The unreadable row falls back to its first view time, which is after the draft: still a real send.

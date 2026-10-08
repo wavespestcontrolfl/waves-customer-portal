@@ -16,15 +16,18 @@
 // services/admin-estimate-persistence.js (same env-free default).
 const ESTIMATE_DELIVERY_CLAIM_TTL_MS = 10 * 60 * 1000;
 
-// pg_input_is_valid, not a shape regex: an ISO-looking but invalid value
-// would pass a regex and then abort the whole statement at the cast.
+// Shape AND validity: an ISO-looking but invalid value would pass the regex
+// alone and abort the whole statement at the cast, and pg_input_is_valid
+// alone accepts special literals such as 'infinity' (a forever-live claim).
 // A claim blocks a write only while it is LIVE. Without the TTL arm, a
 // process that died after stamping delivering_at — but before recording any
 // invalidation — left the keys forever and permanently blocked edits.
 const DELIVERY_CLAIM_NOT_LIVE_SQL = `(
   COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''
+  OR (estimate_data->'estimatorEngine'->>'delivering_at') !~ '^[0-9]{4}-'
   OR NOT pg_input_is_valid(estimate_data->'estimatorEngine'->>'delivering_at', 'timestamptz')
-  OR (CASE WHEN pg_input_is_valid(estimate_data->'estimatorEngine'->>'delivering_at', 'timestamptz')
+  OR (CASE WHEN (estimate_data->'estimatorEngine'->>'delivering_at') ~ '^[0-9]{4}-'
+             AND pg_input_is_valid(estimate_data->'estimatorEngine'->>'delivering_at', 'timestamptz')
         THEN (estimate_data->'estimatorEngine'->>'delivering_at')::timestamptz END)
        < NOW() - (INTERVAL '1 millisecond' * ${ESTIMATE_DELIVERY_CLAIM_TTL_MS})
 )`;
