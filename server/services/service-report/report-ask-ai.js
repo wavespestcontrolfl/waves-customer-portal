@@ -1879,10 +1879,10 @@ function contradictsHealth(text, facts) {
 const GRASS_NAMES = ['st\\.?\\s*augustine', 'floratam', 'bermuda', 'zoysia', 'bahia', 'centipede', 'paspalum', 'fescue', 'rye\\s*grass', 'ryegrass', 'kikuyu', 'buffalo\\s*grass', 'carpet\\s*grass', 'empire', 'palmetto', 'celebration', 'argentine'];
 // A direct grass identity must be the recorded one, named or not on the list:
 // "Your grass is CitraBlue" on a Floratam lawn (Codex P1 #5964 r63).
-const GRASS_IDENTITY_RE = /\b(?:[Yy]our|[Tt]he|[Tt]his)\s+(?:grass|lawn|turf)(?:\s+type)?\s+(?:is|was|looks\s+like|appears\s+to\s+be)\s+(?:a\s+|an\s+)?(?:variety\s+of\s+|type\s+of\s+)?([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})|\b(?:[Gg]rass\s+type|[Tt]urf\s+type|[Cc]ultivar|[Vv]ariety)\s+(?:is|was)\s+([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})/g;
+const GRASS_IDENTITY_RE = /\b(?:[Yy]ou\s+have|[Ii]t\s+is|[Ii]t['’]s|[Tt]his\s+is|[Tt]hat\s+is)\s+(?:an?\s+)?([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})\s+(?:turf|grass|sod|lawn)\b|\b(?:[Yy]our|[Tt]he|[Tt]his)\s+sod\s+(?:is|was)\s+(?:an?\s+)?([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})|\b(?:[Yy]our|[Tt]he|[Tt]his)\s+(?:grass|lawn|turf)(?:\s+type)?\s+(?:is|was|looks\s+like|appears\s+to\s+be)\s+(?:a\s+|an\s+)?(?:variety\s+of\s+|type\s+of\s+)?([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})|\b(?:[Gg]rass\s+type|[Tt]urf\s+type|[Cc]ultivar|[Vv]ariety)\s+(?:is|was)\s+([A-Z][\w.-]*(?:\s+[A-Z][\w.-]*){0,2})/g;
 function namesWrongGrassIdentity(text, recorded) {
   return [...matchForm(text).matchAll(GRASS_IDENTITY_RE)].some((m) => {
-    const said = normalizeKey((m[1] || m[2]).replace(/\bSt\.?\s*/i, 'st ')).split(' ').filter((word) => word && word !== 'grass');
+    const said = normalizeKey((m[1] || m[2] || m[3] || m[4]).replace(/\bSt\.?\s*/i, 'st ')).split(' ').filter((word) => word && word !== 'grass');
     return said.length > 0 && !NOT_CONFIRMED_RE.test(m[0]) && said.some((word) => !normalizeKey(recorded).split(' ').includes(word));
   });
 }
@@ -2509,10 +2509,11 @@ const CARE_PERMISSION_QUESTION = new RegExp(`\\b${CARE_VERB_Q}\\b[^?.!]*\\b(?:ok
 const REENTRY_PLACE = '(?:yard|patio|lawn|grass|lanai|pool|deck|porch|rooms?|kitchen|garage|house|home|areas?|spaces?|zones?|spots?|outside|inside|playset|play\\s*area|garden|beds?)';
 const REENTRY_QUESTION = new RegExp(`\\b(?:usable|re-?ent\\w*|ready\\s+(?:to|for)\\s+(?:use|go|enter|play)|dry\\s+(?:yet|time|enough))\\b|\\b(?:use|enter|go\\s+(?:back\\s+)?(?:in|into|on|onto|out|outside)|walk\\s+on|play\\s+(?:in|on)|step\\s+on|sit\\s+on|be\\s+(?:in|on))\\s+(?:the|our|my|treated|that|this)\\s+(?:\\w+\\s+)?${REENTRY_PLACE}\\b|\\b(?:ok(?:ay)?|safe|fine|alright)\\s+(?:to|for)\\s+(?:\\w+\\s+){0,3}?(?:enter|go|use|walk|play|be|come|return)\\b|\\bhow\\s+long\\b[^?.!]*\\b(?:dry|wait|stay\\s+off|keep\\s+off|before)\\b|\\bwhen\\s+(?:can|is|are|will|may)\\b[^?.!]*\\b(?:${REENTRY_PLACE}|pets?|dogs?|cats?|kids?|children|family)\\b[^?.!]*\\b(?:usable|ready|use|back|out|in|on|go|play|enter|ok(?:ay)?|safe|dry)\\b`, 'i');
 const LAWN_PROGRESS_QUESTION = /\b(?:chang\w*|progress\w*|improv\w*|since|trend\w*|compar\w*|better|worse|before|first\s+(?:visit|assessment)|over\s+time|history)\b/i;
+const GRASS_TYPE_QUESTION = /\b(?:grass|turf|sod|lawn)\s+(?:type|kind|variety|species|cultivar)\b|\b(?:what|which)\s+(?:kind|type|variety|sort|species)\s+of\s+(?:grass|turf|sod|lawn)\b|\bcultivar\b|\b(?:bermuda|zoysia|st\.?\s*augustine|bahia|centipede|floratam|paspalum|fescue|citrablue|palmetto)\b/i;
 const LAWN_SIZE_QUESTION = /\bhow\s+(?:big|large|much\s+(?:lawn|turf|grass|yard))\b|\b(?:lawn|turf|yard|property)\s+size\b|\bsize\s+of\s+(?:my|the|our)\b|\bsquare\s+f(?:ee|oo)t(?:age)?\b|\bsq\.?\s*ft\b|\bacres?\b|\bacreage\b/i;
-const PRODUCT_LOCATION_QUESTION = /\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
+const PRODUCT_LOCATION_QUESTION = /\b(?:used|applied|sprayed|spread|put|treated|placed)\b[^?.!]*\b(?:on|in|at|around|near|along|to|by)\s+(?:the\s+|my\s+|our\s+)?(?:\w+\s+){0,2}?(?:front|back|side|yard|lawn|beds?|palms?|trees?|shrubs?|hedges?|zones?|areas?|sections?|driveway|fence|patio|pool|garden|property|perimeter)\b|\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
 // Results, pest pressure and weather asked in any words (owner 2026-10-08).
-const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|precipitation|conditions?|shape|status|outlook|how\s+(?:is|are|was|were|did|does|do|has|have)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?)\b/i;
+const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|precipitation|conditions?|shape|status|outlook|how\s+(?:is|are|was|were|did|does|do|has|have)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?|effective\w*|efficacy|successful\w*|success|work(?:ed|ing|s)?\s*\?|(?:treatment|product|spray|application|visit|service|it)\s+(?:help(?:ed|ing)?|work(?:ed|ing)?|do\s+(?:any|its)\s+\w+)|help(?:ed|ing)?\s*\?|do(?:ing)?\s+any\s+good|make\s+a\s+difference)\b/i;
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
@@ -2568,29 +2569,37 @@ function asksAboutUnrecordedProduct(question, data = {}) {
 //   pressure and weather keep the fixed answer, so no AI wording can contradict
 //   a score, a trend, the gauge or a weather reading.
 const FIXED_TOPICS = new Set(['next_visit', 'reentry', 'watering', 'next_steps', 'results']);
+// Question intents that keep the fixed answer, checked in order:
+// [reason, (question, data) => matches].
+const FIXED_INTENTS = [
+  // Re-entry asked in other words: "When is the yard usable?", "Can we use
+  // the patio?" (Codex P1 #5964 r70).
+  ['reentry', (question) => REENTRY_QUESTION.test(question)],
+  // A legacy lawn page (no reportV2) draws its own trend and "since first
+  // assessment" delta, which the sheet does not carry (Codex P1 #5964 r70).
+  ['legacy_progress', (question, data) => data.serviceLine === 'lawn' && !data.reportV2 && LAWN_PROGRESS_QUESTION.test(question)],
+  ['results', (question) => RESULTS_QUESTION.test(question)],
+  ['photos', (question) => PHOTO_QUESTION.test(question)],
+  // The blog card's title is not on the fact sheet (Codex P1 #5964 r71).
+  ['blog', (question) => /\b(?:blog|article|post|reading|read\s+more)\b/i.test(question)],
+  // The page draws a product's zones from zone ids the sheet does not carry,
+  // so "where was it applied?" keeps the fixed answer (Codex P1 #5964 r68).
+  ['product_location', (question, data) => data.serviceLine !== 'pest' && PRODUCT_LOCATION_QUESTION.test(question)],
+  // Lawn size: footage never reaches an answer (owner writer rules), so the
+  // fixed answer gives it (Codex P1 #5964 r68).
+  ['lawn_size', (question) => LAWN_SIZE_QUESTION.test(question)],
+  // Grass identity: the fixed answer states the recorded type (Codex P1 #5964 r76).
+  ['grass_type', (question) => GRASS_TYPE_QUESTION.test(question)],
+  // A displayed mowing hold is a label interval: a mowing question keeps the
+  // fixed answer while one shows (Codex P1 #5964 r65).
+  ['mow_hold', (question, data) => Boolean(data.reportV2?.banner?.mowHold) && /\b(?:mow\w*|cut(?:ting)?\s+(?:the\s+)?(?:grass|lawn)|banner|hold)\b/i.test(question)],
+  ['next_steps', (question) => CARE_PERMISSION_QUESTION.test(question)],
+];
 function fixedAnswerTopic(topic, question, data = {}) {
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   if (FIXED_TOPICS.has(topic)) return topic;
-  // Re-entry asked in other words: "When is the yard usable?", "Can we use
-  // the patio?" (Codex P1 #5964 r70).
-  if (REENTRY_QUESTION.test(question)) return 'reentry';
-  // A legacy lawn page (no reportV2) draws its own trend and "since first
-  // assessment" delta, which the sheet does not carry (Codex P1 #5964 r70).
-  if (data.serviceLine === 'lawn' && !data.reportV2 && LAWN_PROGRESS_QUESTION.test(question)) return 'legacy_progress';
-  if (RESULTS_QUESTION.test(question)) return 'results';
-  if (PHOTO_QUESTION.test(question)) return 'photos';
-  // The blog card's title is not on the fact sheet (Codex P1 #5964 r71).
-  if (/\b(?:blog|article|post|reading|read\s+more)\b/i.test(question)) return 'blog';
-  // The page draws a product's zones from zone ids the sheet does not carry,
-  // so "where was it applied?" keeps the fixed answer (Codex P1 #5964 r68).
-  if (data.serviceLine !== 'pest' && PRODUCT_LOCATION_QUESTION.test(question)) return 'product_location';
-  // Lawn size: footage never reaches an answer (owner writer rules), so the
-  // fixed answer gives it (Codex P1 #5964 r68).
-  if (LAWN_SIZE_QUESTION.test(question)) return 'lawn_size';
-  // A displayed mowing hold is a label interval: a mowing question keeps the
-  // fixed answer while one shows (Codex P1 #5964 r65).
-  if (data.reportV2?.banner?.mowHold && /\b(?:mow\w*|cut(?:ting)?\s+(?:the\s+)?(?:grass|lawn)|banner|hold)\b/i.test(question)) return 'mow_hold';
-  return CARE_PERMISSION_QUESTION.test(question) ? 'next_steps' : null;
+  const intent = FIXED_INTENTS.find(([, matches]) => matches(question, data));
+  return intent ? intent[0] : null;
 }
 
 function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question = '') {

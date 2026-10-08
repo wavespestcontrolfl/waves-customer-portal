@@ -2621,3 +2621,27 @@ describe('answer screen, Codex round 75', () => {
     expect(ask('The report does not list a second product.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 76', () => {
+  const lawn = lawnData({ applications: [{ product: { name: 'Merit' } }], lawnAssessment: { scores: { overallScore: 82 }, turfProfile: { grassType: 'st_augustine' } }, reportV2: { aftercare: {} } });
+
+  test.each(['Did the treatment help?', 'Was the treatment effective?'])('an efficacy question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(lawn, [], 'applied', question)).toBe('results');
+  });
+
+  test('a yes/no product-location question keeps the fixed answer', () => {
+    expect(ruleAnswerReason(lawn, [], 'applied', 'Was Merit used on the front palms?')).toBe('product_location');
+  });
+
+  test('a grass-type question keeps the fixed answer', () => {
+    expect(ruleAnswerReason(lawn, [], 'unrouted', 'What is my grass type?')).toBe('grass_type');
+  });
+
+  test.each(['You have CitraBlue turf.', 'Your sod is CitraBlue.'])('a grass identity in other words must be the recorded type: %s', (answer) => {
+    expect(screenAskAnswer(answer, { question: 'q', data: lawn, facts: buildReportAskFacts({ data: lawn }) })).toBe('grass_type');
+  });
+
+  test('the model still answers a product question', () => {
+    expect(ruleAnswerReason(lawn, [], 'applied', 'Why was Merit used?')).toBeNull();
+  });
+});
