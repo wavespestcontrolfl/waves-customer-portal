@@ -83,7 +83,7 @@ describe('finding 5/6 — repeat callers and spoken-name variants', () => {
 describe('sound-alike first names (one spoken name, two spellings)', () => {
   test.each([
     ['erik', 'eric'], ['sara', 'sarah'], ['jon', 'john'], ['kathy', 'cathy'], ['chris', 'kris'],
-    ['nick', 'nik'], ['philip', 'phillip'], ['marc', 'mark'], ['hannah', 'hana'],
+    ['nick', 'nik'], ['philip', 'phillip'], ['marc', 'mark'], ['hannah', 'hana'], ['johnny', 'jonny'], ['leah', 'lea'],
   ])('%s and %s share one sound key', (a, b) => {
     expect(sameSoundingFirstName(a, b)).toBe(true);
     expect(sameSoundingFirstName(b, a)).toBe(true);
@@ -92,6 +92,7 @@ describe('sound-alike first names (one spoken name, two spellings)', () => {
     ['dario', 'daria'], ['aisha', 'alisha'], ['karen', 'karin'], ['julia', 'julian'], ['andre', 'andrea'],
     ['mary', 'gary'], ['dana', 'dane'], ['amy', 'ami'], ['sarah', 'sahar'], ['janet', 'jeanet'],
     ['cecil', 'kecil'], ['chad', 'kad'], ['thomas', 'tomas'], ['aaron', 'aron'],
+    ['johan', 'joan'], ['rohan', 'roan'], ['ahmed', 'amed'], ['mahala', 'mala'], ['jahn', 'jan'],
   ])('%s and %s keep different sound keys', (a, b) => {
     expect(sameSoundingFirstName(a, b)).toBe(false);
     expect(sameSoundingFirstName(b, a)).toBe(false);

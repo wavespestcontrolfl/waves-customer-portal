@@ -319,7 +319,8 @@ const SPOKEN_SOUND_KEY_STEPS = [
   ['chr', 'kr'],                       // Chris / Kris
   ['ck', 'k'],                         // Nick / Nik
   ['c(?![eiyh])', 'k'],                // hard c: Eric / Erik, Marc / Mark
-  ['([^cstpgw])h', '$1'],              // silent h: Sarah / Sara, John / Jon
+  ['ohn', 'on'],                       // John / Jon, Johnny / Jonny
+  ['([aeiou])h$', '$1'],               // final h only: Sarah / Sara. An inner h is a sound (Johan / Joan)
   ['([b-df-hj-np-tv-z])\\1+', '$1'],   // doubled consonant: Phillip / Philip
 ];
 function spokenFirstNameSoundKey(name) {

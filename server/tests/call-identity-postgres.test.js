@@ -55,15 +55,16 @@ jest.setTimeout(30000);
     }
     expect(extractedNameMatchesCustomer({ first_name: 'Eric', last_name: null }, lead('Erik', 1))).toBe(false);
   });
-  test('a different sound on one phone and one surname stays a separate lead', async () => {
-    const other = lead('Dario', 1);
+  test.each([['Dario', 'Daria'], ['Johan', 'Joan'], ['Rohan', 'Roan']])('a different sound on one phone and one surname stays a separate lead (%s / %s)', async (stored, spoken) => {
+    const other = lead(stored, 1);
     await trx('leads').insert(other);
-    expect(await lookup('Daria')).toMatchObject({ lead: null, phoneNameConflictLeadId: other.id });
+    expect(await lookup(spoken)).toMatchObject({ lead: null, phoneNameConflictLeadId: other.id });
+    expect(extractedNameMatchesCustomer({ first_name: spoken, last_name: 'Example' }, other)).toBe(false);
   });
   test('the SQL sound key is the twin of the JS sound key', async () => {
     const names = ['Erik', 'Eric', 'Sarah', 'Sara', 'Sahar', 'John', 'Jon', 'Phillip', 'Philip', 'Chris', 'Kris',
       'Rocco', 'Hannah', 'Cecil', 'Chad', 'Zach', 'Zack', 'Nick', 'Thomas', 'Rhonda', 'Ahhmed', 'Mc-Coy', "D'Arcy",
-      'Aaron', 'Lynnn', 'Cc', 'H', 'Ch', 'Ckck', 'Michhael', 'Schuyler', 'Whitney', 'Jacques'];
+      'Aaron', 'Lynnn', 'Johan', 'Joan', 'Rohan', 'Johnny', 'Leah', 'Shah', 'Hh', 'Ohnh', 'Cc', 'H', 'Ch', 'Ckck', 'Michhael', 'Schuyler', 'Whitney', 'Jacques'];
     const NORM = "LOWER(REGEXP_REPLACE(n, '[^a-zA-Z0-9]', '', 'g'))";
     const { rows } = await trx.raw(
       `SELECT n, ${spokenFirstNameSoundKeySql(NORM)} AS key FROM unnest(?::text[]) AS t(n)`,
