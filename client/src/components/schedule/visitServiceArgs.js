@@ -6,7 +6,10 @@ export function visitServiceArgs(service, lines = []) {
   const items = [
     { name: service?.serviceType || service?.service_type, key: service?.serviceKey || service?.service_key },
     ...(lines || []).map((line) => ({ name: line?.serviceType, key: line?.serviceKey })),
-    ...(Array.isArray(service?.visit?.serviceTypes) ? service.visit.serviceTypes : []).map((name) => ({ name })),
+    // The stop's list names the primary service too: drop that one entry.
+    ...(Array.isArray(service?.visit?.serviceTypes) ? service.visit.serviceTypes : [])
+      .filter((name, i, all) => i !== all.indexOf(service.serviceType || service.service_type))
+      .map((name) => ({ name })),
   ].filter((item) => typeof item.name === 'string' && item.name.trim());
   return { serviceTypes: items.map((item) => item.name), serviceKeys: items.map((item) => item.key || '') };
 }

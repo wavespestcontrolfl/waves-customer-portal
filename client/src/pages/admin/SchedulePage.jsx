@@ -2326,9 +2326,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
     // The same two best-times rows as New Appointment (owner 2026-10-08),
-    // ranked for everything the save will book: the form's primary service
-    // (it can be re-picked here) and the add-on lines.
-    ...visitServiceArgs({ serviceType: form.serviceType, serviceKey: form.serviceKey, visit: service.visit }, serviceLines),
+    // ranked for what the save will move: the form's primary service (it can
+    // be re-picked here), the add-on lines, and a shared stop's other
+    // services only when they move with it.
+    ...visitServiceArgs({
+      serviceType: form.serviceType,
+      serviceKey: form.serviceKey,
+      visit: {
+        serviceTypes: comboMove === "together"
+          // The stop's list names this service too: drop that one entry.
+          ? (service.visit?.serviceTypes || []).filter((name, i, all) => i !== all.indexOf(service.serviceType))
+          : [],
+      },
+    }, serviceLines),
     bestRows: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };

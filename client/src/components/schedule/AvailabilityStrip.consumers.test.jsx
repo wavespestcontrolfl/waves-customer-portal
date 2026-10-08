@@ -83,7 +83,7 @@ it('drag-drop confirm: asks for the best-times rows with the visit\'s services a
 
 it('visitServiceArgs: the primary service, add-on lines and a shared stop, keys in the same order', () => {
   expect(visitServiceArgs(
-    { service_type: 'Fixture Pest', service_key: 'fixture_pest', visit: { serviceTypes: ['Fixture Mosquito'] } },
+    { service_type: 'Fixture Pest', service_key: 'fixture_pest', visit: { serviceTypes: ['Fixture Pest', 'Fixture Mosquito'] } },
     [{ serviceType: 'Fixture Lawn Care', serviceKey: 'fixture_lawn' }, { serviceType: '' }],
   )).toEqual({ serviceTypes: ['Fixture Pest', 'Fixture Lawn Care', 'Fixture Mosquito'], serviceKeys: ['fixture_pest', 'fixture_lawn', ''] });
   expect(visitServiceArgs(null)).toEqual({ serviceTypes: [], serviceKeys: [] });
