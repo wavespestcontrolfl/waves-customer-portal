@@ -3077,7 +3077,7 @@ describe('suggested from this lawn', () => {
         guideAnswer = answerOf([], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
       }, { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
-      ['failed on the first read', async () => { guideAnswer = refusal(500, 'boom', 'Internal error'); await mxOpen(); await analyze(); await waitFor(() => expect(guideCalls()).toHaveLength(1)); },
+      ['guide request fails after a clean context (failed on the first read)', async () => { guideAnswer = refusal(500, 'boom', 'Internal error'); await mxOpen(); await analyze(); await waitFor(() => expect(guideCalls()).toHaveLength(1)); },
         { art: 'addable', artSearch: 'addable', leadSearch: 'hidden', arenaSearch: 'hidden', talak: 'hidden', vel: 'addable', weedEntry: 'addable', chinchEntry: 'addable', ...NO_CARDS }],
       // Unreadable is not blocked: nothing is offered (no card, no tap), but every product is released to
       // the search, a pick to the list, so a real application can still be recorded.
@@ -3102,6 +3102,20 @@ describe('suggested from this lawn', () => {
       // Let a first answer or failure settle before reading the paths.
       await waitFor(() => expect(document.querySelector('.tech-protocol-addons')).toBeTruthy());
       expect(await probe()).toEqual(expected);
+    });
+
+    test('a failed guide request keeps the context\'s rungs governed: Arena is not in the search, Talak is not a generic add-on, and the standing entry is the context\'s', async () => {
+      guideAnswer = refusal(500, 'boom', 'Internal error');
+      await mxOpen();
+      await analyze();
+      await waitFor(() => expect(guideCalls()).toHaveLength(1));
+      await waitFor(() => expect(listState('Chinch bugs found at the edge of damage')).toBe('addable'));
+      expect(await searchState('Arena', /^Arena 50 WDG/)).toBe('hidden');
+      expect(await searchState('Atticus', /^Atticus Talak 7\.9 F/)).toBe('hidden');
+      expect(listState('Atticus Talak 7.9 F')).toBe('hidden');
+      expect(lineOf('Chinch bugs found at the edge of damage').textContent).toContain('Arena 50 WDG, spot treatment');
+      fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
+      expect(present('Arena 50 WDG')).toBe(true);
     });
 
     test('pending also holds Complete until the guide has answered', async () => {

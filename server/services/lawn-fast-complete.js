@@ -675,7 +675,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       addOns: sheet.addOns,
       ...(await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures })),
       ...(await loadChinch({ loaded, sheet, svc, knex, readFailures })),
-      ...guidedProductIds(loaded, sheet),
+      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet)),
     };
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
@@ -800,7 +800,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // GATE_LAWN_TREATMENT_GUIDE: the sheet reads the "Suggested from this lawn" cards once the
     // assessment is confirmed (the treatment-guide route). Only a visit with a plan has any, and
     // the key exists only while the gate is live, so gate off is byte-identical.
-    ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' ? { treatmentGuide: true } : {}),
+    // A visit whose program rows could not be read has no guide at all (the read failure is named), rather
+    // than a guide that claims a clean "no chinch rows staged".
+    ...(featureGates.lawnTreatmentGuideLive() && plannedProducts.source === 'plan' && !readFailures.has('treatment_guide') ? { treatmentGuide: true } : {}),
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,
@@ -833,17 +835,6 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
 }
 
 // ── treatment guide ─────────────────────────────────────────────────────────
-
-// The assessment's run row, or null. Without it only the legacy per-photo reads speak: fewer cards,
-// never more.
-async function loadAssessmentRun(assessment, svc, knex) {
-  try {
-    return (await require('./lawn-visit-runs').loadRun(assessment.id, knex)) || null;
-  } catch (err) {
-    logger.warn(`[lawn-guide] assessment run unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return null;
-  }
-}
 
 /**
  * GET /:serviceId/lawn-fast/treatment-guide?assessmentId=: the "Suggested from this lawn" cards for
@@ -881,11 +872,15 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   const sheet = await sheetPlanned(loaded, knex);
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(structured);
   const weedMix = (await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures })).weedMix || null;
+  // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
+  if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const [offers, chinch] = await Promise.all([
     guide.addOnOffers({ candidates: loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows, svc, knex }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex }) : null,
   ]);
-  const run = await loadAssessmentRun(assessment, svc, knex);
+  // A read that throws fails the request (the sheet then follows the context's decisions); only a
+  // missing run row, which a legacy assessment legitimately has, reads as no run.
+  const run = (await require('./lawn-visit-runs').loadRun(assessment.id, knex)) || null;
   return result(guide.buildCards({
     signals: guide.signalsFromAssessment(assessment, run),
     month: visitMonthOf(svc),

@@ -244,7 +244,8 @@ function weedOffer(weedMix, items) {
  * mix uses decides: a product at its yearly count cap hands the tap to the next one; any other limit
  * on a product holds the offer with the limit's own words; a limit read that failed offers nothing.
  *
- *   null                                          no staged chinch rows (no v13 protocol)
+ *   null                                          the lookup succeeded and no chinch row is staged (no v13 protocol)
+ * A thrown staged-row lookup is not an answer: it rejects.
  *   { productId, name, stagedRow, note, rungIds, blockedIds }   the product to add; `note` says why it is not Arena
  *   { productId: null, note, rungIds, blockedIds }               nothing to offer, and why
  * `rungIds` are all the rungs' products (governed by the guide whether offered or not); `blockedIds` the ones
@@ -254,10 +255,11 @@ async function resolveChinch({ svc, structured, knex }) {
   const engine = require('./waveguard-plan-engine');
   const rows = engine.v13ProtocolRows(structured);
   if (!rows || !rows.size || !structured?.id) return null;
-  const none = (note) => ({ productId: null, name: null, stagedRow: null, note, rungIds: [], blockedIds: [], unreadableIds: [] });
-  const staged = await stagedChinchRows({ svc, structured, knex });
-  if (!staged) return none(UNREADABLE_NOTE);
-  const products = chinchProducts(staged);
+  // Three cases, kept apart: (1) the lookup succeeded and no chinch row is staged: a real "nothing to
+  // offer" (null); (2) the lookup THREW: the error propagates (the guide request fails, and the
+  // context drops the guide for the visit), because an empty answer here would claim a clean "no
+  // rungs" the sheet cannot tell from case 1; (3) rows found but the LIMIT read failed: unreadable.
+  const products = chinchProducts(await stagedChinchRows({ structured, knex }));
   if (!products.length) return null;
   const capped = await readCaps({ products: products.map((p) => ({ id: p.productId, name: p.name })), rows, svc, knex });
   return withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
@@ -276,22 +278,17 @@ function withRungs(result, products) {
 // Nothing is offered when the limit read failed: the line says so, and the rungs are released to the search.
 const unreadableChinch = () => ({ productId: null, name: null, stagedRow: null, note: UNREADABLE_NOTE, unreadable: true });
 
-// The staged chinch rows of the visit's protocol (any window) with their catalog row, or null when the
-// read failed.
-async function stagedChinchRows({ svc, structured, knex }) {
-  try {
-    const { activeProtocolProducts } = require('./lawn-protocol-retired');
-    return await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
-      .join('lawn_protocol_windows as w', 'lpp.lawn_protocol_window_id', 'w.id')
-      .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
-      .where('w.lawn_protocol_id', structured.id)
-      .whereNotNull('lpp.product_id')
-      .whereRaw(`lpp.gates->>'trigger' IN (${CHINCH_TRIGGERS.map(() => '?').join(', ')})`, CHINCH_TRIGGERS)
-      .select('lpp.product_id', 'lpp.product_name', 'lpp.gates', 'lpp.rate_per_1000', 'lpp.rate_unit', 'lpp.sort_order', 'w.month', 'pc.id as catalog_id', 'pc.name as catalog_name', 'pc.active as catalog_active');
-  } catch (err) {
-    logger.warn(`[lawn-guide] chinch rows unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return null;
-  }
+// The staged chinch rows of the visit's protocol (any window) with their catalog row. A failed read
+// THROWS: an empty list means the protocol really stages no chinch rung.
+async function stagedChinchRows({ structured, knex }) {
+  const { activeProtocolProducts } = require('./lawn-protocol-retired');
+  return activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
+    .join('lawn_protocol_windows as w', 'lpp.lawn_protocol_window_id', 'w.id')
+    .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
+    .where('w.lawn_protocol_id', structured.id)
+    .whereNotNull('lpp.product_id')
+    .whereRaw(`lpp.gates->>'trigger' IN (${CHINCH_TRIGGERS.map(() => '?').join(', ')})`, CHINCH_TRIGGERS)
+    .select('lpp.product_id', 'lpp.product_name', 'lpp.gates', 'lpp.rate_per_1000', 'lpp.rate_unit', 'lpp.sort_order', 'w.month', 'pc.id as catalog_id', 'pc.name as catalog_name', 'pc.active as catalog_active');
 }
 
 // One product per rung, in the program's order, the earliest window's row first; a product the

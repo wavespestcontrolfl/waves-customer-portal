@@ -432,8 +432,21 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
     expect(engine.v13VisitLimits).not.toHaveBeenCalled();
   });
 
-  test('a failed staged-row read offers nothing', async () => {
-    expect(await run(new Error('db down'))).toMatchObject({ productId: null, note: expect.stringMatching(/could not be checked/) });
+  // Three cases, kept apart: (1) the lookup succeeded and stages no chinch row = null; (2) the lookup
+  // threw = the error propagates (never a "successful" answer with no rungs); (3) rows found but the
+  // LIMIT read failed = unreadable (the rungs are known, released to the search, with the note).
+  describe('the three failure cases', () => {
+    test('(1) the lookup succeeded and no chinch row is staged: null, a real "nothing to offer"', async () => {
+      expect(await run([])).toBeNull();
+    });
+    test('(2) the lookup threw: it rejects, so no answer claims "no rungs"', async () => {
+      await expect(run(new Error('db down'))).rejects.toThrow('db down');
+      expect(engine.v13VisitLimits).not.toHaveBeenCalled();
+    });
+    test('(3) rows found but the limit read failed: unreadable, with the rungs known', async () => {
+      engine.v13VisitLimits.mockRejectedValue(new Error('limits down'));
+      expect(await run()).toMatchObject({ productId: null, rungIds: [P_ARENA, P_TALAK], blockedIds: [], unreadableIds: [P_ARENA, P_TALAK], note: expect.stringMatching(/could not be checked/) });
+    });
   });
 });
 

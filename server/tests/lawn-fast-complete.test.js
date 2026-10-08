@@ -661,14 +661,34 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect('chinch' in (await context(tablesFor())).plannedProducts).toBe(false);
     });
 
-    test('no staged chinch rows: no chinch key; a failed read is named and never blocks the sheet', async () => {
+    test('(1) no chinch row staged: no chinch key, and the guide is still on (a real "nothing to offer")', async () => {
       live();
-      expect('chinch' in (await context(tablesFor({ 'lawn_protocol_products as lpp': [] }))).plannedProducts).toBe(false);
-      v13GateNotes.mockImplementation(() => { throw new Error('notes down'); });
-      const ctx = await context(tablesFor());
-      expect(ctx.readFailures).toContain('treatment_guide');
+      const ctx = await context(tablesFor({ 'lawn_protocol_products as lpp': [] }));
       expect('chinch' in ctx.plannedProducts).toBe(false);
+      expect(ctx.treatmentGuide).toBe(true);
+      expect(ctx.readFailures).not.toContain('treatment_guide');
+    });
+
+    test.each([
+      ['(2) the staged lookup threw', () => tablesFor({ 'lawn_protocol_products as lpp': new Error('rows down') })],
+      ['the chinch item could not be built', () => { v13GateNotes.mockImplementation(() => { throw new Error('notes down'); }); return tablesFor(); }],
+    ])('%s: the read failure is named and the visit has no guide (never a clean "no chinch rows")', async (_name, make) => {
+      live();
+      const ctx = await context(make());
+      expect(ctx.readFailures).toContain('treatment_guide');
+      expect('treatmentGuide' in ctx).toBe(false);
+      expect('chinch' in ctx.plannedProducts).toBe(false);
+      expect('guidedProductIds' in ctx.plannedProducts).toBe(false);
+      // The sheet is not blocked: the plan's add-ons are listed as ever.
       expect(ctx.plannedProducts.addOns).toHaveLength(5);
+    });
+
+    test('(3) rows found but the limit read failed: the guide is on, the rungs are known and unreadable', async () => {
+      live();
+      v13VisitLimits.mockRejectedValue(new Error('limits down'));
+      const ctx = await context(tablesFor());
+      expect(ctx.treatmentGuide).toBe(true);
+      expect(ctx.plannedProducts.chinch).toMatchObject({ item: null, rungIds: [P_ARENA, P_TALAK], unreadableIds: [P_ARENA, P_TALAK], blockedIds: [] });
     });
 
     test('a visit with no plan has no guide', async () => {
@@ -935,10 +955,42 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(kinds(await guide(tables))).toEqual([]);
     });
 
-    test('a failed run read still answers, from the legacy reads', async () => {
+    // A read that THROWS must fail the request (the sheet then follows the context's decisions), never
+    // answer "nothing found". Each read in the guide path:
+    test('a missing run row (a legacy assessment) is no run, and the legacy reads speak', async () => {
       live();
-      const tables = tablesFor({ lawn_assessment_runs: new Error('runs down'), lawn_assessments: assessmentRow({ gemini_raw: [{ fungal_activity: 'severe' }] }) });
+      const tables = tablesFor({ lawn_assessment_runs: undefined, lawn_assessments: assessmentRow({ gemini_raw: [{ fungal_activity: 'severe' }] }) });
       expect(kinds(await guide(tables))).toEqual(['fungus']);
+    });
+
+    test.each([
+      ['the assessment run read', () => tablesFor({ lawn_assessment_runs: new Error('runs down') })],
+      ['the assessment read', () => tablesFor({ lawn_assessments: new Error('assessments down') })],
+      ['the staged chinch lookup', () => tablesFor({ 'lawn_protocol_products as lpp': new Error('rows down') })],
+      ['the catalog read', () => tablesFor({ products_catalog: new Error('catalog down') })],
+    ])('%s throwing fails the request', async (_name, make) => {
+      live();
+      await expect(guide(make())).rejects.toBeTruthy();
+    });
+
+    test('the plan build throwing fails the request', async () => {
+      live();
+      buildPlanForService.mockRejectedValue(new Error('plan down'));
+      await expect(guide(tablesFor())).rejects.toThrow('plan down');
+    });
+
+    test('a weed-mix defect fails the request instead of answering "no weed group"', async () => {
+      live();
+      jest.spyOn(require('../services/lawn-weed-mix'), 'buildWeedMix').mockRejectedValue(new Error('weed defect'));
+      await expect(guide(tablesFor())).rejects.toThrow('weed mix unavailable');
+    });
+
+    test('the three chinch cases at route level: (1) no row staged is null, (2) a thrown lookup fails, (3) a failed limit read is unreadable', async () => {
+      live();
+      expect((await guide(tablesFor({ 'lawn_protocol_products as lpp': [] }))).chinch).toBeNull();
+      await expect(guide(tablesFor({ 'lawn_protocol_products as lpp': new Error('rows down') }))).rejects.toThrow('rows down');
+      v13VisitLimits.mockRejectedValue(new Error('limits down'));
+      expect((await guide(tablesFor())).chinch).toMatchObject({ item: null, rungIds: [P_ARENA, P_TALAK], unreadableIds: [P_ARENA, P_TALAK], blockedIds: [] });
     });
   });
 });
