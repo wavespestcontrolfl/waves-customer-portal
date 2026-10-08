@@ -274,15 +274,17 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
-    // A person may have placed this visit since pass 1 (even back onto the
-    // same slot, which the field CAS cannot see): re-read its history on the
-    // move transaction (Codex #6055 r5).
-    const placed = await isPersonPlacedVisit(row, trx);
-    if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
-    if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
+    // A person may have placed this visit since pass 1 (even back onto the
+    // same slot, which the field CAS cannot see). The row handed in is the
+    // pre-transaction snapshot, so the check re-reads the row's own lock and
+    // date-exception columns and its history on the move transaction
+    // (Codex #6055 r5, r7).
+    const placed = await isPersonPlacedVisit(row, trx, { refresh: true });
+    if (placed.degraded) throw new Error(`service ${row.id}: ${placed.reason_description}`);
+    if (placed.placed) throw refuse(row.id, `was placed by a person (${placed.reason_description})`);
   };
 }
 

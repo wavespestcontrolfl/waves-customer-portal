@@ -459,3 +459,36 @@ it('together + a technician change on a recurring combo: the scope picker is hid
   expect(body(0)).toMatchObject({ comboMove: 'together', technicianId: 'tech-2', assignmentScope: 'this_only' });
 });
 
+// Auto-dispatch lock box: recurring occurrences only; its value rides the one save.
+const occurrence = { ...service, isRecurring: true, recurringParentId: 'fixture-parent', autoDispatchLocked: true };
+const savedBody = () => JSON.parse(fetch.mock.calls.find(([url]) => String(url).endsWith('/update-details'))[1].body);
+
+it('shows the auto-dispatch box checked for a locked recurring occurrence and hides it for a one-off visit', () => {
+  const view = render(<EditServiceModal service={occurrence} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByLabelText(/Keep auto-dispatch off this visit/)).toBeChecked();
+  view.unmount();
+  render(<EditServiceModal service={service} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.queryByText('Keep auto-dispatch off this visit')).not.toBeInTheDocument();
+});
+
+it('a cleared auto-dispatch box rides the save with the value the form opened with; an untouched box sends the same value twice', async () => {
+  fetch.mockImplementation(async (url) => ({ ok: true, json: async () => (String(url).endsWith('/admin/discounts') ? [] : {}) }));
+  const onSaved = vi.fn();
+  const view = render(<EditServiceModal service={occurrence} technicians={[]} onClose={vi.fn()} onSaved={onSaved} />);
+  const save = screen.getByRole('button', { name: 'Save', exact: true });
+  await waitFor(() => expect(save).toBeEnabled(), { timeout: 2000 });
+  fireEvent.click(screen.getByLabelText(/Keep auto-dispatch off this visit/));
+  fireEvent.click(save);
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+  expect(savedBody()).toMatchObject({ autoDispatchLocked: false, autoDispatchLockedWas: true });
+  expect(fetch.mock.calls.filter(([url]) => String(url).includes('/auto-dispatch/'))).toHaveLength(0);
+  view.unmount();
+  fetch.mockClear();
+  const onSaved2 = vi.fn();
+  render(<EditServiceModal service={occurrence} technicians={[]} onClose={vi.fn()} onSaved={onSaved2} />);
+  const save2 = screen.getByRole('button', { name: 'Save', exact: true });
+  await waitFor(() => expect(save2).toBeEnabled(), { timeout: 2000 });
+  fireEvent.click(save2);
+  await waitFor(() => expect(onSaved2).toHaveBeenCalledOnce());
+  expect(savedBody()).toMatchObject({ autoDispatchLocked: true, autoDispatchLockedWas: true });
+});
