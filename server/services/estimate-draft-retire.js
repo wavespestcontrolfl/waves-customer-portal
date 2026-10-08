@@ -162,8 +162,8 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
 // Archive one draft and mark its open "draft ready" bells done, in one
-// transaction. Lock order: the draft, then the sent estimate, each NOWAIT (a
-// busy row skips this draft for the tick), so the sweep never waits on one
+// transaction. Lock order: the draft, its leads, then the sent estimate, each
+// NOWAIT (a busy row skips this draft for the tick), so the sweep never waits on one
 // row while holding another. A Pipeline link takes the draft FOR SHARE NOWAIT
 // before its write: it either committed first (the open-lead predicate in
 // DRAFT_ELIGIBLE_SQL then keeps the draft) or is refused until this commits
@@ -172,6 +172,11 @@ async function retireOneDraft(trx, pair) {
   await trx.raw("SET LOCAL lock_timeout = '1500ms'");
   const held = await trx.raw('SELECT id FROM estimates WHERE id = ? FOR UPDATE NOWAIT', [pair.draft_id]);
   if (!held?.rows?.length) return null;
+  // Every lead pointing at the draft is locked too (NOWAIT, read only): a
+  // lead edit in flight — a closed lead being reopened — holds its row, so
+  // the sweep skips this tick; once it commits, the open-lead predicate in
+  // the UPDATE below sees it. The sweep still writes nothing to leads.
+  await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().noWait().select('id');
   // The send is judged again on the current row: still a real delivery at
   // the same door and time the read saw.
   const sent = await trx.raw(`

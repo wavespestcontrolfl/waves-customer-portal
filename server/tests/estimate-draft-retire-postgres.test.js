@@ -252,6 +252,32 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(sameDoor);
   });
 
+  test('a closed lead being reopened in another transaction makes the sweep skip its draft', async () => {
+    const c = randomUUID();
+    const draft = randomUUID();
+    const sent = randomUUID();
+    const leadId = randomUUID();
+    await database('customers').insert({ id: c, first_name: 'Fixture', last_name: 'RetireReopen', phone: '+12025550123', email: `${c}@example.invalid`, property_type: 'residential' });
+    const base = { customer_id: c, customer_name: 'Fixture RetireReopen', address: '100 Fixture Way, Testville, FL 34000', estimate_data: '{}' };
+    await database('estimates').insert([
+      { ...base, id: draft, status: 'draft', token: randomUUID().replace(/-/g, ''), created_at: minutesAgo(60), updated_at: minutesAgo(60) },
+      { ...base, id: sent, status: 'sent', token: randomUUID().replace(/-/g, ''), created_at: minutesAgo(20), updated_at: minutesAgo(10), sent_at: minutesAgo(10) },
+    ]);
+    await database('leads').insert({ id: leadId, estimate_id: draft, status: 'lost', first_name: 'Fixture', last_name: 'RetireReopen' });
+    const reopen = await database.transaction();
+    try {
+      await reopen('leads').where({ id: leadId }).update({ status: 'contacted' });
+      const result = await retireDraftsReplacedBySentEstimate();
+      expect(result.rows.find((r) => r.id === draft)).toBeUndefined();
+      expect((await database('estimates').where({ id: draft }).first()).archived_at).toBeNull();
+    } finally {
+      await reopen.rollback();
+      await database('leads').where({ id: leadId }).del();
+      await database('estimates').whereIn('id', [draft, sent]).del();
+      await database('customers').where({ id: c }).del();
+    }
+  });
+
   test('a replacement another transaction holds locked is skipped, not waited on', async () => {
     // Needs two real connections, so this case commits its own fixtures and cleans them up.
     const c = randomUUID();
