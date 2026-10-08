@@ -61,7 +61,7 @@ function recordedPartOfComposite(text) {
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts, sameDayWindowElapsed } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords, familiesIn } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -6974,7 +6974,14 @@ function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = nu
     // a suite, unit, bay or condo keeps the card (speaker labels and
     // negations are not reliable enough to suppress on).
     const text = [transcription, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
-    return isWholeStructureService({ serviceKey: row?.service_key || null })
+    // The view's own service words may name only the termite and WDO
+    // families (one catalog name carries both): another family heard only by
+    // V1 ("WDO and interior roach treatment") still needs the unit, even
+    // when the catalog row resolves to the whole-structure service.
+    const families = new Set(familiesIn([view.requested_service, view.matched_service, view.specific_service_name, view.call_summary]
+      .filter(Boolean).join('. ')).map((f) => f.key));
+    const onlyBuildingFamilies = [...families].every((k) => k === 'termite' || k === 'wdo');
+    return onlyBuildingFamilies && isWholeStructureService({ serviceKey: row?.service_key || null })
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
 }

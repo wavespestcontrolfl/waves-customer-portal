@@ -428,6 +428,15 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, commercial, 'Caller: new construction lot, slab pours Monday')).toBe(true);
   });
 
+  test('a second service family heard by V1 keeps the card, even when the catalog row is WDO', () => {
+    const commercial = { property: { property_type: 'commercial' } };
+    const v1Mixed = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection and interior roach treatment' };
+    const wdoOnly = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection for the closing' };
+    expect(callIsWholeStructureService({ extracted: wdoOnly, preAdoptionExtracted: v1Mixed, v2Extraction: commercial, services: CATALOG })).toBe(false);
+    expect(callIsWholeStructureService({ extracted: wdoOnly, preAdoptionExtracted: { ...wdoOnly }, v2Extraction: commercial, services: CATALOG })).toBe(true);
+    expect(run({ ...wdoOnly, call_summary: 'Wants a WDO letter and also has ants in the kitchen' }, commercial)).toBe(false);
+  });
+
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
     const wdo = { specific_service_name: 'WDO Inspection (Termite Letter)' };
     const commercial = { property: { property_type: 'commercial' } };
