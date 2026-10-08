@@ -24,7 +24,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
 const { getHourlyRainOutlook } = require('../services/weather-forecast');
 const { buildBookingAvailability } = require('../routes/booking')._internals;
-const { customerRainTierOf, startCustomerRainRank, stampRainTiers, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
+const { customerRainTierOf, startCustomerRainRank, stampRainTiers, rainTierDiff, _test: rankTest } = require('../services/scheduling/customer-rain-rank');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), n));
@@ -63,6 +63,7 @@ const bestFit = (availability) => availability.days[0].slots.find((s) => s.is_be
 describe('buildBookingAvailability rain rank', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    rankTest._forecastStarts.length = 0;
     wireDb();
     listOccupiedWindows.mockResolvedValue([]);
     getHourlyRainOutlook.mockResolvedValue(HOURLY);
@@ -156,13 +157,45 @@ describe('customer-rain-rank helpers', () => {
     expect(hourlyRain).not.toHaveBeenCalled();
   });
 
-  test('no candidate inside the 3 dates: stamp does not wait for the forecast', async () => {
+  const IN_AREA = { lat: 27.4, lng: -82.4 };
+  const near = () => [{ date: D1, start_time: '14:00', end_time: '15:00' }];
+  beforeEach(() => { rankTest._forecastStarts.length = 0; });
+
+  test('no candidate inside the 3 dates: nothing is read at all', async () => {
     process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
-    // A forecast that never answers: stamp must still resolve.
-    const rank = startCustomerRainRank({ serviceLabels: ['Pest Control'], lat: 1, lng: 2, today: new Date(), deps: { hourlyRain: () => new Promise(() => {}) } });
+    const hourlyRain = jest.fn(() => new Promise(() => {}));
+    const rank = startCustomerRainRank({ serviceLabels: ['Pest Control'], ...IN_AREA, today: new Date(), deps: { hourlyRain } });
     const far = [{ date: dayOffset(10), start_time: '10:00', end_time: '11:00' }];
     expect((await rank.stamp(far))[0].rain_tier).toBe(0);
     expect(await rank.stamp([])).toEqual([]);
+    expect(hourlyRain).not.toHaveBeenCalled();
+    expect(rankTest._forecastStarts).toHaveLength(0);
+  });
+
+  test('a candidate inside the 3 dates: one read, and the wet hour gets its tier', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const hourlyRain = jest.fn(async () => HOURLY);
+    const rank = startCustomerRainRank({ serviceLabels: ['Pest Control'], ...IN_AREA, today: new Date(), deps: { hourlyRain } });
+    expect((await rank.stamp(near()))[0].rain_tier).toBe(2);
+    expect(hourlyRain).toHaveBeenCalledTimes(1);
+  });
+
+  test('a point outside the service area reads no forecast', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const hourlyRain = jest.fn(async () => HOURLY);
+    const rank = startCustomerRainRank({ serviceLabels: ['Pest Control'], lat: 47.6, lng: -122.3, today: new Date(), deps: { hourlyRain } });
+    expect((await rank.stamp(near()))[0].rain_tier).toBe(0);
+    expect(hourlyRain).not.toHaveBeenCalled();
+  });
+
+  test('past the per-minute budget the build keeps today\'s order', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const hourlyRain = jest.fn(async () => HOURLY);
+    const make = () => startCustomerRainRank({ serviceLabels: ['Pest Control'], ...IN_AREA, today: new Date(), deps: { hourlyRain } });
+    for (let i = 0; i < rankTest.FORECAST_BUDGET; i += 1) await make().stamp(near());
+    expect(hourlyRain).toHaveBeenCalledTimes(rankTest.FORECAST_BUDGET);
+    expect((await make().stamp(near()))[0].rain_tier).toBe(0);
+    expect(hourlyRain).toHaveBeenCalledTimes(rankTest.FORECAST_BUDGET);
   });
 
   test('stampRainTiers: 0 without a tier function; rainTierDiff orders by tier', () => {

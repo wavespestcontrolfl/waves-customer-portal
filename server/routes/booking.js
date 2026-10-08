@@ -1658,13 +1658,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .catch(() => null)
     : null;
 
-  // Rain ranking (GATE_CUSTOMER_RAIN_RANK, dark): the forecast and the
-  // booking's rain fit resolve alongside the slot search; the result is a
-  // tier per candidate just before the sort. Null (today's order) with the
+  // Rain ranking (GATE_CUSTOMER_RAIN_RANK, dark): a tier per candidate just
+  // before the sort. The booking's rain fit and the forecast are read only
+  // once a candidate inside the next 3 dates exists. Today's order with the
   // gate off, under the re-service profile, or on any failure.
   const serviceLabels = normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
   const rainRank = startCustomerRainRank({
-    serviceIdentity, serviceLabels, lat, lng, today, rangeFrom, skip: reserviceRankIsActive(rankProfile), db,
+    serviceIdentity, serviceLabels, lat, lng, today, skip: reserviceRankIsActive(rankProfile), db,
   });
 
   const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);

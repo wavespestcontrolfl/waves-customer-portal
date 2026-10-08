@@ -1267,8 +1267,12 @@ which the picker sorts by first; it is absent otherwise, so with the gate
 off, a neutral booking, no forecast, or no candidate inside the 3 dates the
 payload is byte-identical to today's. The forecast (NWS hourly, Open-Meteo
 when NWS fails) is read at the request's own coordinates under a 2.5 s
-bound, only when the requested range reaches the 3 dates, and never logged
-with coordinates. Fail open on every error.
+bound, and never logged with coordinates. Outbound cost on these
+unauthenticated routes is bounded three ways: nothing is read until the
+slot search has produced a candidate inside the 3 dates; the coordinates
+must fall inside the service area's coarse box (`service-area.js`); and at
+most 60 reads start per minute per process, past which the build keeps
+today's order. Fail open on every error.
 **Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
 2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
 and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the

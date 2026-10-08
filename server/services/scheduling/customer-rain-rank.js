@@ -15,8 +15,8 @@
  * every candidate at tier 0, the order it has today.
  */
 const logger = require('../logger');
-const { rainFitFor, rainTierOf, withCatalogKeys, boundedHourlyRain, inRainHorizon, RAIN_DAYS } = require('./rain-fit');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { rainFitFor, rainTierOf, withCatalogKeys, boundedHourlyRain, inRainHorizon } = require('./rain-fit');
+const { etDateString } = require('../../utils/datetime-et');
 
 const GATE = 'GATE_CUSTOMER_RAIN_RANK';
 
@@ -50,22 +50,42 @@ async function customerRainTierOf({
   }
 }
 
+// Public availability routes are unauthenticated, and each cold coordinate
+// costs an outbound forecast read (a paid one when NWS fails). So a read is
+// made only for a point inside the service area's coarse box, and at most
+// FORECAST_BUDGET of them start per minute in this process; past that the
+// build keeps today's order (Codex #6126 r2). A repeat of the same point is
+// served from the forecast cache and still counts: the budget is a ceiling,
+// not an exact count of provider calls.
+const FORECAST_BUDGET = 60;
+const BUDGET_WINDOW_MS = 60 * 1000;
+const _forecastStarts = [];
+function takeForecastBudget(now = Date.now()) {
+  while (_forecastStarts.length && now - _forecastStarts[0] >= BUDGET_WINDOW_MS) _forecastStarts.shift();
+  if (_forecastStarts.length >= FORECAST_BUDGET) return false;
+  _forecastStarts.push(now);
+  return true;
+}
+
+function forecastAllowed(lat, lng) {
+  const { isInServiceAreaCoarseBox } = require('../service-area');
+  return isInServiceAreaCoarseBox(Number(lat), Number(lng)) && takeForecastBudget();
+}
+
 /**
- * One availability build's rain ranking. The fit and the forecast start
- * now, alongside the slot search, but only when the requested range reaches
- * the rain horizon; `stamp` awaits them only when a candidate is inside it.
- * A browse of later dates, or a build with no candidate, neither reads nor
- * waits for a forecast: every tier would be the same (Codex #6126 r1).
+ * One availability build's rain ranking. Nothing is read until `stamp` sees
+ * a candidate inside the rain horizon: a browse of later dates, or a build
+ * with no candidate, makes no identity lookup and no forecast request and
+ * waits for none (every tier would be the same; Codex #6126 r1 + r2). The
+ * read is then one bounded lookup; a point outside the service area or a
+ * spent budget keeps today's order.
  */
-function startCustomerRainRank({ rangeFrom, today, ...rest } = {}) {
+function startCustomerRainRank({ today, lat, lng, ...rest } = {}) {
   const todayYmd = etDateString(today || new Date());
-  const horizonEnd = etDateString(addETDays(today || new Date(), RAIN_DAYS - 1));
-  const reaches = !rangeFrom || String(rangeFrom) <= horizonEnd;
-  const pending = reaches ? customerRainTierOf({ today, ...rest }) : Promise.resolve(null);
   return {
     async stamp(candidates) {
-      const needed = candidates.some((c) => inRainHorizon(c.date, todayYmd));
-      return stampRainTiers(candidates, needed ? await pending : null);
+      const needed = candidates.some((c) => inRainHorizon(c.date, todayYmd)) && forecastAllowed(lat, lng);
+      return stampRainTiers(candidates, needed ? await customerRainTierOf({ today, lat, lng, ...rest }) : null);
     },
   };
 }
@@ -88,4 +108,4 @@ function stampRainTiers(candidates, tierOf) {
 // Tier difference for a comparator's first key; 0 for unstamped rows.
 const rainTierDiff = (a, b) => (a.rain_tier ?? 0) - (b.rain_tier ?? 0);
 
-module.exports = { startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
+module.exports = { _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
