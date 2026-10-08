@@ -1057,6 +1057,20 @@ const sentenceNames = (sentence, label) => stemmedTerms(sentence).includes(label
 // "We found ants" needs the visit's own record, not the concern alone (Codex
 // P1 #5964 r50), and its place must be there too: ants found in the kitchen
 // are no ants found in the attic (Codex P1 #5964 r51).
+const FOUND_LEAD = '(?:(?:some|a|an|the|any|more|no|signs?\\s+of|evidence\\s+of|traces?\\s+of|active|light|heavy|minor|early|visible|a\\s+few|several)\\s+)*';
+const FOUND_OBJECT_RE = new RegExp(`\\b(?:found|find|saw|spott\\w*|observ\\w*|noted|discover\\w*|confirm\\w*|identif\\w*|detect\\w*|located)\\s+${FOUND_LEAD}([a-z][\\w-]*)(?:\\s+([a-z][\\w-]*))?`, 'gi');
+const FOUND_SUBJECT_RE = /\b([a-z][\w-]*)\s+(?:was|were|has\s+been|have\s+been)\s+(?:\w+\s+)?(?:found|seen|spotted|observed|noted|discovered|confirmed|identified|detected|located)\b/gi;
+const FOUND_GENERIC = new Set(('nothing none it that this them those these what which where something anything everything activity issue issues problem problems sign signs evidence trace traces '
+  + 'pest pests insect insects bug bugs damage area areas spot spots and on in at near around along by during today here there you your we our the a an some any more few no not also only during').split(' '));
+function foundObjects(sentence) {
+  // After a generic first word ("nothing else"), the next word is not the object.
+  const words = [...sentence.matchAll(FOUND_OBJECT_RE)].flatMap((m) => (FOUND_GENERIC.has(stemWord(m[1].toLowerCase())) ? [] : [m[1], m[2]]))
+    .concat([...sentence.matchAll(FOUND_SUBJECT_RE)].map((m) => m[1]));
+  return words.filter(Boolean).map((word) => stemWord(word.toLowerCase()))
+    .filter((word) => word.length > 3 && !FOUND_GENERIC.has(word) && !FINDING_PLACE_WORD.test(word) && !/^(?:on|in|at|near|around|along|by|during|inside|outside|under|behind|from|with|that|when|while)$/.test(word));
+}
+const FINDING_PLACE_WORD = /^(?:attic|roof|garage|kitchen|bathroom|bedroom|closet|pantry|laundry|cabinet|sink|baseboard|wall|ceiling|eave|soffit|vent|window|door|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|lawn|bed|tree|shrub|palm|hedge|driveway|sidewalk|basement|front|back|side|home|house|property|exterior|interior)s?$/;
+
 function ungroundedFinding(text, terms, visitOnly, findings = []) {
   // Each recorded finding on its own, so one finding's place cannot ground
   // another's pest (Codex P1 #5964 r59).
@@ -1074,6 +1088,9 @@ function ungroundedFinding(text, terms, visitOnly, findings = []) {
       return wrongPair && NOMINAL_FINDING.test(sentence) && !APPLICATION_VERB.test(sentence) && !ATTRIBUTED_TO_CUSTOMER.test(sentence);
     }
     if (named.some((label) => !visitOnly.includes(label))) return true;
+    // The thing found must be on the visit's record whatever it is called:
+    // "We found ganoderma on the front palms" (Codex P1 #5964 r81).
+    if (foundObjects(sentence).some((word) => !visitOnly.includes(` ${word} `))) return true;
     if (!named.length || !places.length) return false;
     return places.some((place) => !visitOnly.includes(place)) || wrongPair;
   });

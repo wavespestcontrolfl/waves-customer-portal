@@ -2694,3 +2694,18 @@ describe('medical cues, Codex round 80 and the r73 review', () => {
     expect(medicalExposureAnswer(question)).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 81', () => {
+  const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 70 }, insights: [{ headline: 'Scale insects', whatWeSaw: 'Scale insects on the front palms.' }] } };
+  const question = 'What did you find?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['We found ganoderma on the front palms.', 'Ganoderma was found on the palms.'])('a found thing off the record is rejected whatever its name: %s', (answer) => {
+    expect(ask(answer)).toBe('target_list');
+  });
+
+  test.each(['We found scale insects on the front palms.', 'We found some activity near the palms.'])('a recorded or generic finding passes: %s', (answer) => {
+    expect(ask(answer)).toBeNull();
+  });
+});
