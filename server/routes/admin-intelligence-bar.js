@@ -3841,7 +3841,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // prompt/response (assignee email, Sentry titles/culprits, GitHub PR
     // titles, Pages branch names) would otherwise persist unredacted.
     // FULL_ACCESS_TWO_STEP_TOOL_NAMES already isolates exactly that set.
-    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name));
+    // offer_choices is scope 'none' too, and the question it rides on can
+    // name the customers being chosen between with no PII reader in this turn.
+    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name)
+      || c.name === OFFER_CHOICES_TOOL_NAME);
     const piiTainted = platformEnabled || usedPiiTool || piiTaintedHistory;
     const redactPii = platformEnabled || piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'

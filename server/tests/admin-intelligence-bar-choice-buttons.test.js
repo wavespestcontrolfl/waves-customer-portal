@@ -299,8 +299,14 @@ describe('offer_choices on /query', () => {
       // Nothing proposed, nothing executed through another tool.
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(mockExecuteTool).not.toHaveBeenCalled();
-      // The one db write is the query-analytics row every /query makes.
+      // The one db write is the query-analytics row every /query makes. An
+      // option can name a customer, so that row and the stored turns are
+      // redacted like any PII-tool turn.
       expect(mockDbInsert).toHaveBeenCalledTimes(1);
+      expect(mockDbInsert.mock.calls[0][0]).toEqual(expect.objectContaining({
+        prompt: '[redacted — PII-bearing tools used]', response: '[redacted — PII-bearing tools used]',
+      }));
+      expect(body.conversationHistory.at(-1).content).toMatch(/PII-bearing tool context/);
       // The option text is not in the returned tool-call log (it can name a customer).
       expect(body.toolCalls).toEqual([{ name: 'offer_choices', input: { fields: ['options'], confirmed: false } }]);
       // The choices are not part of the stored conversation the next request sends back.
