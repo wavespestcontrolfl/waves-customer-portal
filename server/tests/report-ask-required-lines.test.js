@@ -2654,7 +2654,8 @@ describe('answer screen, Codex round 77', () => {
   test('a gatehouse sentence leaves whole whatever its verb; a plain door sentence stays', () => {
     const concern = (text) => buildReportAskFacts({ data: lawnData({ customerConcern: text, reportV2: { aftercare: {} } }) }).customer_concern;
     expect(concern('At the gatehouse, whisper blue moon. Weeds by the fence.')).toBe('[access details removed] Weeds by the fence.');
-    expect(concern('Ants near the garage door.')).toBe('Ants near the garage door.');
+    expect(concern('Ants near the garage door.')).toBe('[access details removed]');
+    expect(concern('Ants in the garage.')).toBe('Ants in the garage.');
   });
 });
 
@@ -2724,7 +2725,7 @@ describe('answer screen, Codex round 82', () => {
   const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
 
   test('a gate sentence with no pest or service context leaves whole', () => {
-    expect(facts.customer_concern).toBe('[access details removed] Ants near the garage door.');
+    expect(facts.customer_concern).toBe('[access details removed]');
   });
 
   test('work at a place the report does not name is rejected', () => {
@@ -2847,4 +2848,15 @@ describe('answer screen, Codex round 84', () => {
     expect(medicalExposureAnswer('Was Advion eaten?', data)).toBeNull();
     expect(medicalExposureAnswer('John swallowed advion', data)).toBeTruthy();
   });
+});
+
+test('typed text: any gate or door sentence leaves whole; reviewed product wording keeps entry points (Codex security P2 r84)', () => {
+  const data = lawnData({
+    customerConcern: 'The side gate requires blue moon for service. Weeds by the fence.',
+    applications: [{ product: { name: 'Alpine WSG', report_copy: { how_it_works: 'Alpine WSG slows ants at entry points.' } } }],
+    reportV2: { aftercare: {} },
+  });
+  const facts = buildReportAskFacts({ question: 'What was applied?', data });
+  expect(facts.customer_concern).toBe('[access details removed] Weeds by the fence.');
+  expect(facts.products[0].what_it_does).toBe('Alpine WSG slows ants at entry points.');
 });

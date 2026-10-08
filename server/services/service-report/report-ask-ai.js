@@ -494,12 +494,34 @@ function scrubLeaves(value) {
   return value;
 }
 
+// Text a person typed (the customer's concern, the technician's paragraph) is
+// where an access credential turns up, in any wording: "The side gate
+// requires blue moon for service". No verb list or context word can prove
+// such a sentence clean, so there every sentence that names an entry device
+// leaves whole. Reviewed text (sections, findings, product wording) keeps the
+// narrower rule, so "slows ants at entry points" stays (Codex security P2
+// #5964 r84).
+// A garage or an entry point is also where pests are reported, so those words
+// alone do not remove a typed sentence; a gate, door, lock, keypad or guard does.
+const TYPED_ACCESS_DEVICE = /\b(?:gates?|gatehouse|doors?|locks?|padlocks?|keypads?|key\s*pads?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|guards?|guard\s*house|security|concierge|front\s+desk)\b/i;
+function dropAccessDeviceSentences(text) {
+  if (typeof text !== 'string' || !text) return text;
+  return splitSentences(text).map((sentence) => (TYPED_ACCESS_DEVICE.test(sentence) && sentence.trim().split(/\s+/).length >= 3
+    ? '[access details removed]' : sentence)).join(' ');
+}
+function scrubTypedText(facts) {
+  const out = { ...facts };
+  if (out.customer_concern) out.customer_concern = dropAccessDeviceSentences(out.customer_concern);
+  if (out.lawn_report?.from_your_technician) out.lawn_report = { ...out.lawn_report, from_your_technician: dropAccessDeviceSentences(out.lawn_report.from_your_technician) };
+  if (out.tree_shrub_report?.tech_paragraph) out.tree_shrub_report = { ...out.tree_shrub_report, tech_paragraph: dropAccessDeviceSentences(out.tree_shrub_report.tech_paragraph) };
+  return out;
+}
 function scrubFacts(facts) {
-  return Object.fromEntries(Object.entries(facts).map(([key, value]) => {
+  return scrubTypedText(Object.fromEntries(Object.entries(facts).map(([key, value]) => {
     if (VERBATIM_FACTS.has(key)) return [key, value];
     if (key === 'products') return [key, value.map((product) => ({ ...scrubLeaves(product), name: product.name }))];
     return [key, scrubLeaves(value)];
-  }));
+  })));
 }
 
 // ── The fact sheet ──────────────────────────────────────────────────────

@@ -156,7 +156,8 @@ describe('buildReportAskFacts', () => {
   test('scrubs contact details and digit runs from the customer concern', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Call Pat at 941-555-0100 or pat@example.com, gate 4821, roaches in kitchen' } });
     expect(facts.customer_concern).not.toMatch(/555|example\.com|4821/);
-    expect(facts.customer_concern).toMatch(/roaches in kitchen/);
+    // The gate sentence leaves whole, in typed text, whatever else it says (Codex security P2 #5964 r84).
+    expect(facts.customer_concern).toBe('[access details removed]');
   });
 
   test('technician recommendations never reach the model (they can hold a customer name)', () => {
