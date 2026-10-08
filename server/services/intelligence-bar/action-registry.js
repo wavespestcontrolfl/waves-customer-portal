@@ -12,6 +12,7 @@ const {
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
 const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
+const { repriceVisitsLive } = require('./reprice-visits-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -24,6 +25,7 @@ const MODULES = [
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
   ['closeout-repair-tools', 'CLOSEOUT_REPAIR_TOOLS', 'executeCloseoutRepairTool'],
   ['receipt-resend-tools', 'RECEIPT_RESEND_TOOLS', 'executeReceiptResendTool'],
+  ['reprice-visits-tools', 'REPRICE_VISITS_TOOLS', 'executeRepriceVisitsTool'],
   ['dashboard-tools', 'DASHBOARD_TOOLS', 'executeDashboardTool'],
   ['seo-tools', 'SEO_TOOLS', 'executeSeoTool'],
   ['procurement-tools', 'PROCUREMENT_TOOLS', 'executeProcurementTool'],
@@ -120,6 +122,7 @@ function allowed(action, { role, context, fullAccess } = {}) {
   if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
   if (context === 'tech') return action.role === 'technician_or_admin';
+  if (action.id === 'reprice_future_visits' && !repriceVisitsLive()) return false;
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
   if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
@@ -189,6 +192,8 @@ function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
+  // reprice_future_visits (domain schedule) also rides the Customers page and dashboard (owner 2026-10-07).
+  if (context === 'customers' || context === 'dashboard') common.add('reprice_future_visits');
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];

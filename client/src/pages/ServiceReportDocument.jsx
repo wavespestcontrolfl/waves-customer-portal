@@ -639,7 +639,11 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (reconciledResult
+  // The lawn Visit Summary (summarySource 'lawn_visit_summary') is fixed sentences written by
+  // code, vetted as a whole and never contradicting the watch items, so the PDF prints ALL of
+  // it. The reconciled todaysResult is only its first sentence and must not replace it.
+  const frozenVisitSummary = data.summarySource === 'lawn_visit_summary' && typeof data.summary === 'string' ? data.summary.trim() : '';
+  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (frozenVisitSummary || reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
   // The four-section report carries its own "What to expect": the separate

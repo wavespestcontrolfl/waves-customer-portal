@@ -77,7 +77,7 @@ const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-p
 const { FIRST_VISIT_DEFAULT_RATING, confirmFirstVisitUnderLock, firstVisitDefaultRating } = require('../services/pest-pressure/first-visit');
 const { activityScaleNames } = require('../services/pest-pressure/label');
 const { pestPressureConfigAllowsTechnicianRating } = require('../services/pest-pressure/technician-rating-gate');
-const { buildCompletionAdvisory, approvedReportProductFacts } = require('../services/service-report/report-data');
+const { buildCompletionAdvisory, approvedReportProductFacts, withApplicationHold } = require('../services/service-report/report-data');
 const { buildReportIdentitySnapshot, canonicalProductId } = require('../services/service-report/report-identity-snapshot');
 const { freezeTechTips } = require('../services/service-report/tip-library');
 const { gateEnvValue, isEnabled } = require('../config/feature-gates');
@@ -629,6 +629,22 @@ function blackoutLockoutBlocks(plan) {
   ]);
   return (plan?.propertyGate?.blocks || [])
     .filter((block) => lockoutCodes.has(block.code));
+}
+
+// A product the plan held back for the city's window (North Port Nutra-TECH, June to September: it
+// has no N or P analysis, so the ordinance check cannot see it) that the closeout records as applied.
+// Flagged like the nitrogen ban: same record, same advisory line in the closeout.
+function heldProductBlocks(plan, submittedProducts = []) {
+  // Held items are not selected, so they sit in the protocol lists, not in the mix items.
+  const held = new Map([...(plan?.protocol?.base || []), ...(plan?.protocol?.conditional || [])]
+    .filter((item) => item.selectionReason === 'north_port_product_window' && item.product?.id)
+    .map((item) => [String(item.product.id), item.product.name]));
+  const applied = new Set((submittedProducts || []).map((p) => String(p.productId)).filter((id) => held.has(id)));
+  return [...applied].map((id) => ({
+    code: 'actual_north_port_product_window',
+    severity: 'block',
+    message: `${held.get(id)} is recorded as applied, but North Port holds this product from June to September until the city confirms; the plan held it back.`,
+  }));
 }
 
 function annualNLockoutBlocks(plan) {
@@ -1280,6 +1296,23 @@ function packetPhotoUploadRequiredError(uploadResult) {
 // formatRescheduleTemplateVars was removed with the inline single-reschedule
 // send — that path now routes through admin-schedule's
 // sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
+
+// The report facts frozen per applied product at completion. A v13 protocol row that holds watering
+// and mowing after the use (Acelepryn on caterpillars, gate delayWateringOrMowingHours) freezes its
+// hold into the product's facts, so the customer's instruction carries it (grub use takes none).
+function freezeReportProductFacts({ productIds, submitted = [], catalogById, plan }) {
+  const protocolRows = plan?.protocol?.structured?.products || [];
+  const facts = {};
+  for (const productId of productIds) {
+    const use = (submitted || []).find((p) => canonicalProductId(p?.productId) === productId);
+    const row = protocolRows.find((r) => canonicalProductId(r?.productId) === productId && r?.gates?.delayWateringOrMowingHours);
+    facts[productId] = withApplicationHold(
+      approvedReportProductFacts(catalogById.get(productId) || null),
+      { hours: row?.gates?.delayWateringOrMowingHours, targets: use?.targets },
+    );
+  }
+  return facts;
+}
 
 async function actualProductBlackoutBlocks(svc, submittedProducts = [], database = db) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
@@ -5135,6 +5168,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       const blackoutBlocks = [
         ...blackoutLockoutBlocks(plan),
+        ...heldProductBlocks(plan, products),
         ...await actualProductBlackoutBlocks(svc, products, db),
       ];
       // Advisory, not a lockout (owner directive 2026-07-29: approval
@@ -5309,6 +5343,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               message: advisorySafeMessage(block.message),
               productId: block.productId || null,
               productName: block.productName || null,
+              ...(block.evidence ? { evidence: block.evidence } : {}),
             })),
           };
       }
@@ -6604,12 +6639,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );
-          const reportProductFactsSnapshot = {};
-          for (const productId of snapshotProductIds) {
-            reportProductFactsSnapshot[productId] = approvedReportProductFacts(
-              completionCatalogRowsById.get(productId) || null,
-            );
-          }
+          const reportProductFactsSnapshot = freezeReportProductFacts({
+            productIds: snapshotProductIds, submitted: products, catalogById: completionCatalogRowsById, plan: waveguardPlan,
+          });
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
             visit: snapshotVisitRow,
             customer: snapshotCustomerRow || null,
@@ -13575,6 +13607,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
         // And the "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH), keyed by assessment.
         if (gate.techParagraphFreeze) recordStructuredNotes.lawnTechParagraph = { ...(recordStructuredNotes.lawnTechParagraph || {}), ...gate.techParagraphFreeze };
+        // And the Visit Summary (GATE_LAWN_VISIT_SUMMARY_V2, PROTOTYPE ONLY), keyed by assessment.
+        if (gate.visitSummaryFreeze) recordStructuredNotes.lawnVisitSummary = { ...(recordStructuredNotes.lawnVisitSummary || {}), ...gate.visitSummaryFreeze };
         // A token the earlier mint could not create but the gate's own mint did.
         const recovered = adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl });
         if (recovered) {
@@ -15251,6 +15285,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
 module.exports = {
   completeScheduledService,
   actualProductBlackoutBlocks,
+  heldProductBlocks,
+  freezeReportProductFacts,
   deliveryUnverifiedProviderOutcome,
   throwIfDeliveryUnverified,
   completionSmsDefiniteRejectionError,
