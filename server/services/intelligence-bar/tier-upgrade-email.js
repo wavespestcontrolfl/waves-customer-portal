@@ -62,7 +62,9 @@ function eligibility(before = {}, after = {}) {
   if (fromRank < 0) return { eligible: false, reason: 'first_tier' };
   if (toRank <= fromRank) return { eligible: false, reason: 'not_an_upgrade' };
   if (cents(before.monthly_rate) === cents(after.monthly_rate)) return { eligible: false, reason: 'price_unchanged' };
-  if (require('../billing-lane').resolveBillingLane(after).mode !== 'monthly_membership') {
+  // Billed monthly AND at a rate above zero: the billing cron charges no
+  // dues on a zero rate, so the email would state a rate nobody is charged.
+  if (require('../billing-lane').resolveBillingLane(after).mode !== 'monthly_membership' || !(cents(after.monthly_rate) > 0)) {
     return { eligible: false, reason: 'rate_not_billed' };
   }
   if (!isRealMember(before)) return { eligible: false, reason: 'not_a_member_before' };

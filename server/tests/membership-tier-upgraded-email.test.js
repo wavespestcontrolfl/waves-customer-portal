@@ -34,7 +34,9 @@ const { WAVEGUARD, PALM } = require('../services/pricing-engine/constants');
 const seed = require('../models/migrations/20261008100000_membership_tier_upgraded_email_template');
 const { sendMembershipTierUpgraded } = require('../services/account-membership-email');
 
-const { TEMPLATE, templateRow } = seed._private;
+const { templateRow } = seed._private;
+// The copy the customer gets: the seed's blocks as 20261008110000 corrects them.
+const TEMPLATE = { ...seed._private.TEMPLATE, blocks: require('../models/migrations/20261008110000_membership_tier_upgraded_copy_fix')._private.BLOCKS };
 
 function stubCustomer(row) {
   mockDb.mockImplementation((table) => {
@@ -125,8 +127,8 @@ describe('membership.tier_upgraded template seed', () => {
       'Good news: your WaveGuard plan moved up from Bronze to Gold.',
       'WHAT GOLD INCLUDES',
       [
-        '- 15% off each recurring service in your plan (pest control, lawn care, tree & shrub, mosquito, termite bait and rodent bait)',
-        "- 15% off one-time services, like a roach clean-out or a special treatment, because you're a recurring customer",
+        '- 15% off each recurring service in your plan that qualifies for WaveGuard pricing',
+        "- 15% off most one-time services, because you're a recurring customer",
         '- A $10 per palm credit each year on palm injections',
       ].join('\n'),
       'Your monthly rate: $85.00 (was $100.00)',
@@ -136,12 +138,11 @@ describe('membership.tier_upgraded template seed', () => {
     expect(text).not.toMatch(/& Lawn Care/);
   });
 
-  // The template names the services that take the tier discount. If the
-  // pricing constants gain or lose one, this copy must be re-approved.
-  test('the recurring services named in the copy are exactly the WaveGuard qualifying services', () => {
-    expect([...WAVEGUARD.qualifyingServices].sort()).toEqual(
-      ['lawn_care', 'mosquito', 'pest_control', 'rodent_bait', 'termite_bait', 'tree_shrub'],
-    );
+  // The copy names no service and no one-time example: which services take
+  // each discount is pricing configuration (Codex #6122 r1).
+  test('the benefit lines name no service the pricing rules could exclude', () => {
+    const { text } = render(TEMPLATE.fixture.payload);
+    expect(text).not.toMatch(/roach|rodent|termite|mosquito|lawn care|pest control|tree & shrub/i);
   });
 });
 
@@ -158,7 +159,7 @@ describe('sendMembershipTierUpgraded: benefit lines come from the pricing consta
     expect(subject).toBe(`Your WaveGuard plan is now ${to}`);
     expect(text).toContain(`your WaveGuard plan moved up from ${from} to ${to}.`);
     expect(text).toContain(`- ${pct(WAVEGUARD.tiers[to.toLowerCase()].discount)}% off each recurring service in your plan`);
-    expect(text).toContain(`- ${pct(WAVEGUARD.recurringCustomerOneTimePerk)}% off one-time services`);
+    expect(text).toContain(`- ${pct(WAVEGUARD.recurringCustomerOneTimePerk)}% off most one-time services`);
   });
 
   test('the per-palm credit line shows from the tier that earns it, and not below it', async () => {
@@ -188,7 +189,7 @@ describe('sendMembershipTierUpgraded: benefit lines come from the pricing consta
         before: { waveguard_tier: 'Bronze', monthly_rate: 100 }, after: { waveguard_tier: 'Silver', monthly_rate: 90 },
       });
       expect(text).toContain('- 12.5% off each recurring service in your plan');
-      expect(text).toContain('- 20% off one-time services');
+      expect(text).toContain('- 20% off most one-time services');
     } finally {
       WAVEGUARD.tiers.silver.discount = saved.silver;
       WAVEGUARD.recurringCustomerOneTimePerk = saved.perk;
@@ -325,6 +326,29 @@ describe('migration 20261008100000 seeds membership.tier_upgraded once', () => {
     return knex;
   }
 
+  // 20261008110000 corrects the two benefit lines of the seeded version, once,
+  // and never touches a version an operator edited.
+  test('the copy fix rewrites the seeded version once and leaves an edited version alone', async () => {
+    const fix = require('../models/migrations/20261008110000_membership_tier_upgraded_copy_fix');
+    const knex = fakeKnex();
+    await seed.up(knex);
+    await fix.up(knex);
+    const [version] = knex.store.email_template_versions;
+    expect(JSON.parse(version.blocks)).toEqual(TEMPLATE.blocks);
+    expect(knex.store.email_template_versions).toHaveLength(1);
+    expect(knex.store.audit_log.map((row) => row.action)).toEqual(['email_template.seeded', 'email_template.copy_corrected']);
+    const snapshot = JSON.stringify(knex.store);
+    await fix.up(knex);
+    expect(JSON.stringify(knex.store)).toBe(snapshot);
+
+    const edited = fakeKnex();
+    await seed.up(edited);
+    edited.store.email_template_versions[0].blocks = JSON.stringify([{ type: 'paragraph', content: 'Operator wording' }]);
+    await fix.up(edited);
+    expect(JSON.parse(edited.store.email_template_versions[0].blocks)).toEqual([{ type: 'paragraph', content: 'Operator wording' }]);
+    expect(edited.store.audit_log).toHaveLength(1);
+  });
+
   test('writes one active template, one published version and one fixture; a second run changes nothing', async () => {
     const knex = fakeKnex();
     await seed.up(knex);
@@ -343,7 +367,7 @@ describe('migration 20261008100000 seeds membership.tier_upgraded once', () => {
       expect(typeof value).toBe('string');
       expect(() => JSON.parse(value)).not.toThrow();
     }
-    expect(JSON.parse(version.blocks)).toEqual(TEMPLATE.blocks);
+    expect(JSON.parse(version.blocks)).toEqual(seed._private.TEMPLATE.blocks);
     // One audit event for the seed, and none for the no-op re-run.
     expect(knex.store.audit_log).toHaveLength(1);
     expect(knex.store.audit_log[0]).toMatchObject({
