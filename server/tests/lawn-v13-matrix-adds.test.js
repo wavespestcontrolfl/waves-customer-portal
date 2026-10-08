@@ -304,11 +304,39 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
       blocks,
     });
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    const gate = source.indexOf("claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn' && Array.isArray(products)");
+    const gate = source.indexOf("claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn') {");
     expect(gate).toBeGreaterThan(source.indexOf('return ({ status: 422, body: internalOnlyProductsBlock });'));
-    expect(source.slice(gate, gate + 900)).toContain('treatedPropertyType(db, { propertyId: svc.property_id, customerId: svc.customer_id, fallback: svc.property_type })');
-    expect(source.slice(gate, gate + 900)).toContain('lawnProhibitedProductBlocks(db, products, { propertyType })');
-    expect(source.slice(gate, gate + 900)).toContain('status: 400, body: lawnProhibitedProductsBlockPayload(prohibited)');
+    expect(source.slice(gate, gate + 700)).toContain('lawnCloseoutProhibitedBlocks(db, svc, products)');
+    expect(source.slice(gate, gate + 700)).toContain('status: 400, body: lawnProhibitedProductsBlockPayload(prohibited)');
+  });
+
+  test('the closeout check runs only while GATE_LAWN_V13 is on, read at call time: gate off is the pre-v13 closeout', async () => {
+    const saved = process.env.GATE_LAWN_V13;
+    // A database that would answer "Ronstar" for any id, and fail the test if it is touched while the gate is off.
+    const reads = [];
+    const database = (table) => { reads.push(table); return { whereIn: () => ({ select: async () => [{ id: 'r1', name: 'Ronstar G', active_ingredient: 'Oxadiazon' }] }), where: () => ({ first: async () => ({ property_type: 'residential' }) }) }; };
+    const svc = { property_id: 'p', customer_id: 'c', property_type: 'residential' };
+    const products = [{ productId: 'r1' }, { productName: 'Ronstar G' }];
+    try {
+      delete process.env.GATE_LAWN_V13;
+      expect(await prohibited.lawnCloseoutProhibitedBlocks(database, svc, products)).toEqual([]);
+      expect(reads).toEqual([]);
+      process.env.GATE_LAWN_V13 = 'false';
+      expect(await prohibited.lawnCloseoutProhibitedBlocks(database, svc, products)).toEqual([]);
+      process.env.GATE_LAWN_V13 = 'true';
+      const on = await prohibited.lawnCloseoutProhibitedBlocks(database, svc, products);
+      // (One block per product name: the id and the free-text name are both Ronstar G.)
+      expect(on.map((block) => block.code)).toEqual(['lawn_product_not_for_home_lawns']);
+      // Gate on, nothing listed, or a commercial property: nothing to refuse.
+      expect(await prohibited.lawnCloseoutProhibitedBlocks(database, svc, [])).toEqual([]);
+      expect(await prohibited.lawnCloseoutProhibitedBlocks(database, svc, undefined)).toEqual([]);
+      expect(await prohibited.lawnCloseoutProhibitedBlocks(() => ({ where: () => ({ first: async () => ({ property_type: 'commercial' }) }) }), { ...svc, property_type: 'commercial' }, products)).toEqual([]);
+      // Read at call time: turning it back off stops the check at once.
+      delete process.env.GATE_LAWN_V13;
+      expect(await prohibited.lawnCloseoutProhibitedBlocks(database, svc, products)).toEqual([]);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved;
+    }
   });
 
   test('the plan caps it: no amount is planned and the sheet shows a block with the label reason', async () => {

@@ -71,7 +71,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
-const { lawnProhibitedProductBlocks, lawnProhibitedProductsBlockPayload, treatedPropertyType } = require('./lawn-prohibited-products');
+const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
@@ -4669,9 +4669,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
     // Oxadiazon (Ronstar) is not for home lawns (commercial turf is allowed; judged on the visit's linked property): a fresh lawn closeout that lists one is refused
     // before any write. A same-key replay or resume of a committed completion is left alone.
-    if (claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn' && Array.isArray(products) && products.length) {
-      const propertyType = await treatedPropertyType(db, { propertyId: svc.property_id, customerId: svc.customer_id, fallback: svc.property_type });
-      const prohibited = await lawnProhibitedProductBlocks(db, products, { propertyType });
+    // Only while GATE_LAWN_V13 is on (the check reads the gate at call time).
+    if (claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn') {
+      const prohibited = await lawnCloseoutProhibitedBlocks(db, svc, products);
       if (prohibited.length) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(prohibited[0].code), db);
         return ({ status: 400, body: lawnProhibitedProductsBlockPayload(prohibited) });

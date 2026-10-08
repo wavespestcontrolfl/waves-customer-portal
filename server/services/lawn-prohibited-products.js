@@ -94,4 +94,14 @@ function lawnProhibitedProductsBlockPayload(blocks) {
   };
 }
 
-module.exports = { treatedPropertyType, isCommercialProperty, lawnProhibitedProductsBlockPayload, CODE, isProhibitedOnHomeLawns, lawnProhibitedProductBlock, lawnProhibitedProductBlocks };
+// The lawn closeout's check, in one place: only while GATE_LAWN_V13 is live (read at call time, like the
+// plan-side check; gate off is the pre-v13 closeout, byte for byte), for a lawn visit that lists products.
+// Returns the blocks to refuse the closeout with, [] when the closeout may go on.
+async function lawnCloseoutProhibitedBlocks(database, svc, products) {
+  if (require('../config/feature-gates').lawnV13Live?.() !== true) return [];
+  if (!Array.isArray(products) || !products.length) return [];
+  const propertyType = await treatedPropertyType(database, { propertyId: svc.property_id, customerId: svc.customer_id, fallback: svc.property_type });
+  return lawnProhibitedProductBlocks(database, products, { propertyType });
+}
+
+module.exports = { lawnCloseoutProhibitedBlocks, treatedPropertyType, isCommercialProperty, lawnProhibitedProductsBlockPayload, CODE, isProhibitedOnHomeLawns, lawnProhibitedProductBlock, lawnProhibitedProductBlocks };
