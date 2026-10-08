@@ -4039,8 +4039,8 @@ async function fileNameSpellingCard(conn, { callLogId, customerId, extracted = {
     const customer = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
     const saved = Object.fromEntries(['first_name', 'last_name']
       .map((f) => [f, String(customer?.[f] || '').trim() || extracted?.[f] || null]));
-    const [top, ...others] = nameSpellingDifferences({ dictation, saved });
-    if (!top) return false;
+    const differences = nameSpellingDifferences({ dictation, saved });
+    if (!differences.length) return false;
     // The settled-card read and the insert / refresh run under the per-call triage lock (the
     // global lock order), so a Resolve / Dismiss that settles the card and this refresh
     // serialize: the card is never refreshed back open from a stale read.
@@ -4049,7 +4049,12 @@ async function fileNameSpellingCard(conn, { callLogId, customerId, extracted = {
       await lockTriageCall(trx, callLogId);
       const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs' })
         .whereIn('status', ['resolved', 'dismissed']).select('payload');
-      if (settled.some((r) => asObject(r.payload).spelled_value === top.spelled_value && asObject(r.payload).saved_value === top.saved_value)) return false;
+      // Each discrepancy (field, spelling, saved name) is judged on its own against every
+      // settled card's evidence (its main entry and its `also` list).
+      const key = (d) => `${d?.field}|${d?.spelled_value}|${d?.saved_value}`;
+      const seen = new Set(settled.flatMap((r) => { const o = asObject(r.payload); return [o, ...(Array.isArray(o.also) ? o.also : [])]; }).map(key));
+      const [top, ...others] = differences.filter((d) => !seen.has(key(d)));
+      if (!top) return false;
       await trx('triage_items')
         .insert(buildTriageItem({
           callLogId,

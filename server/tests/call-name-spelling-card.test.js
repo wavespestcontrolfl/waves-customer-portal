@@ -50,6 +50,7 @@ function makeConn({ customer = null, settled = [] } = {}) {
   conn.writes = writes;
   return conn;
 }
+const dictationFor = (entries, ...sources) => ({ emails: [], addresses: [], names: sanitizeNameEntries(entries, sources) });
 const file = (conn, over = {}) => fileNameSpellingCard(conn, {
   callLogId: 'call-1',
   customerId: null,
@@ -98,10 +99,26 @@ describe('fileNameSpellingCard', () => {
   });
 
   test('a spelling the office already resolved or dismissed on this call is not re-filed', async () => {
-    const conn = makeConn({ settled: [{ payload: { spelled_value: 'Serov', saved_value: 'Sirov' } }] });
+    const conn = makeConn({ settled: [{ payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' } }] });
     expect(await file(conn)).toBe(false);
-    const other = makeConn({ settled: [{ payload: JSON.stringify({ spelled_value: 'Serov', saved_value: 'Sirof' }) }] });
+    const other = makeConn({ settled: [{ payload: JSON.stringify({ field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirof' }) }] });
     expect(await file(other)).toBe(true);
+  });
+
+  test('each discrepancy is deduped on its own against a settled card\'s main entry AND its also list', async () => {
+    const both = dictationFor([
+      { raw_spoken: 'S-E-R-O-V', spelled_value: 'Serov', field: 'last_name', whose: 'caller', confidence: 0.92 },
+      { raw_spoken: 'K-W-E-N-T', spelled_value: 'Kwent', field: 'first_name', whose: 'caller', confidence: 0.9 },
+    ], 'Caller: last name S-E-R-O-V and first name K-W-E-N-T');
+    const settled = [{ payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', also: [] } }];
+    const conn = makeConn({ settled });
+    expect(await file(conn, { dictation: both })).toBe(true);
+    const payload = JSON.parse(conn.writes[0].row.payload);
+    // The settled last-name spelling is not re-filed; the first-name one is.
+    expect(payload).toMatchObject({ field: 'first_name', spelled_value: 'Kwent', saved_value: 'Quentrell', also: [] });
+    // A settled card that carried the first name in `also` settles it too.
+    const viaAlso = makeConn({ settled: [{ payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', also: [{ field: 'first_name', spelled_value: 'Kwent', saved_value: 'Quentrell' }] } }] });
+    expect(await file(viaAlso, { dictation: both })).toBe(false);
   });
 
   test('no card for a spelling the model gave to someone else, or one outside a caller turn', async () => {

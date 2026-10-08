@@ -147,10 +147,10 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);');
     const branch = client.slice(client.indexOf(') : isAdminResolveCard ? ('));
-    expect(branch.slice(0, 600)).toContain('isAdmin ? (');
+    expect(branch.slice(0, 600)).toContain('canResolveOwnCard(item.reason_code, isAdmin) ? (');
   });
   test('Resolve / Dismiss bind to the version the operator saw (expected_updated_at), via the version-bound reason set', () => {
-    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',\s*\];/);
+    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',(?:\s*'name_spelling_differs',)?\s*\];/);
     expect(triage).toContain('if (VERSION_BOUND_REASONS.includes(item.reason_code)');
     expect(triage).toContain('|| emailReviewCard');
     expect(triage).toContain("return { outcome: 'stale_version' };");
@@ -163,7 +163,7 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\([\s\S]*?"family_account_candidates"[\s\S]*?\]\);/);
     expect(client).toContain('!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard');
-    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence };');
+    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence };');
     expect(client).toContain('EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence');
   });
 });
