@@ -61,13 +61,16 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
 // the visit), a booking-page handoff (booking_intents, which the public
 // capture can re-open), a staged clarification text, or ANY lead that is not
 // soft-deleted (owner 2026-10-08: a lead's draft stays for staff, and the
-// sweep never writes to leads). Closed leads count too: one reopened later
+// sweep never writes to leads). Both link forms count: leads.estimate_id and
+// the draft's own estimate_data.lead_id mirror, which the estimator engine
+// keeps as the link when its FK write fails. Closed leads count too: one reopened later
 // must not point at an archived draft.
 const NO_LIVE_DEPENDENTS_SQL = `(
   NOT EXISTS (SELECT 1 FROM booking_intents b WHERE b.pricing_estimate_id = estimates.id)
   AND NOT EXISTS (
     SELECT 1 FROM leads l
-     WHERE l.estimate_id = estimates.id AND l.deleted_at IS NULL
+     WHERE (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data->>'lead_id')
+       AND l.deleted_at IS NULL
   )
   AND NOT EXISTS (
     SELECT 1 FROM message_drafts m
@@ -171,13 +174,18 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
 // and then sees the archive.
 async function retireOneDraft(trx, pair) {
   await trx.raw("SET LOCAL lock_timeout = '1500ms'");
-  const held = await trx.raw('SELECT id FROM estimates WHERE id = ? FOR UPDATE NOWAIT', [pair.draft_id]);
+  const held = await trx.raw("SELECT id, estimate_data->>'lead_id' AS mirror_lead_id FROM estimates WHERE id = ? FOR UPDATE NOWAIT", [pair.draft_id]);
   if (!held?.rows?.length) return null;
-  // Every lead pointing at the draft is locked too (NOWAIT, read only): a
+  // Every lead linked to the draft, by FK or by the draft's lead_id mirror,
+  // is locked too (NOWAIT, read only): a
   // lead edit in flight — a deleted lead being restored — holds its row, so
   // the sweep skips this tick; once it commits, the lead predicate in the
   // UPDATE below sees it. The sweep still writes nothing to leads.
-  await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().noWait().select('id');
+  await trx.raw(`
+    SELECT id FROM leads
+     WHERE estimate_id = ? OR id::text = ?
+       FOR UPDATE NOWAIT
+  `, [pair.draft_id, String(held.rows[0].mirror_lead_id || '')]);
   // The send is judged again on the current row: still a real delivery at
   // the same door and time the read saw.
   const sent = await trx.raw(`

@@ -213,9 +213,16 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const c2 = await customer();
     const other = await estimate(c2, { createdAt: minutesAgo(90) });
     await estimate(c2, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    // A lead named only by the draft's own lead_id mirror (no FK) keeps it too.
+    const c3 = await customer();
+    const mirrorLead = randomUUID();
+    await mockPg('leads').insert({ id: mirrorLead, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+    const mirrored = await estimate(c3, { createdAt: minutesAgo(90), data: { lead_id: mirrorLead } });
+    await estimate(c3, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     const before = await mockPg('leads').where({ id: leadId }).first();
     expect((await retireDraftsReplacedBySentEstimate({ limit: 1 })).retired).toBe(1);
     expect((await row(kept)).archived_at).toBeNull();
+    expect((await row(mirrored)).archived_at).toBeNull();
     expect((await row(other)).archived_at).not.toBeNull();
     expect((await row(sent)).archived_at).toBeNull();
     const after = await mockPg('leads').where({ id: leadId }).first();
