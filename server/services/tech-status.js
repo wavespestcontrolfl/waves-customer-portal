@@ -129,27 +129,14 @@ async function upsertTechStatus(payload) {
  * Set the semantic job focus for a tech without clobbering the latest
  * GPS coordinates. Used by service lifecycle transitions; Bouncie owns
  * lat/lng freshness, the lifecycle owns current_job_id.
- *
- * `ifCurrentJobId` makes the write conditional: ONE UPDATE ... WHERE tech_id
- * AND current_job_id = that job. It never inserts, and when the tech has
- * moved to another job (or none) in the meantime it changes nothing, returns
- * null and broadcasts nothing. A late GPS arrival uses it so it cannot put a
- * finished visit back on the board.
  */
-async function setTechJobStatus({ tech_id, status, current_job_id, ifCurrentJobId = null }) {
+async function setTechJobStatus({ tech_id, status, current_job_id }) {
   if (!tech_id || !status) {
     throw new Error('setTechJobStatus: tech_id and status are required');
   }
 
-  const conditional = ifCurrentJobId != null;
   const [row] = await db.raw(
-    conditional
-      ? `
-    UPDATE tech_status SET status = ?, current_job_id = ?, updated_at = NOW()
-    WHERE tech_id = ? AND current_job_id = ?
-    RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at
     `
-      : `
     INSERT INTO tech_status (tech_id, status, current_job_id, updated_at)
     VALUES (?, ?, ?, NOW())
     ON CONFLICT (tech_id) DO UPDATE SET
@@ -158,11 +145,8 @@ async function setTechJobStatus({ tech_id, status, current_job_id, ifCurrentJobI
       updated_at = NOW()
     RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at
     `,
-    conditional
-      ? [status, current_job_id ?? null, tech_id, ifCurrentJobId]
-      : [tech_id, status, current_job_id ?? null]
+    [tech_id, status, current_job_id ?? null]
   ).then((r) => r.rows);
-  if (!row) return null;
 
   const io = getIo();
   if (io) {

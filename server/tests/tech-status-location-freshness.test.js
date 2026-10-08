@@ -40,45 +40,6 @@ describe('tech_status GPS freshness writes', () => {
     expect(sql).not.toContain('INSERT INTO tech_status (tech_id, status, current_job_id, updated_at, location_updated_at)');
   });
 
-  test('conditional job status is ONE update bound to the current job and never inserts', async () => {
-    const io = { to: jest.fn(() => ({ emit: jest.fn() })) };
-    require('../sockets').getIo.mockReturnValue(io);
-    db.raw = jest.fn().mockResolvedValue({
-      rows: [{ tech_id: 'tech-1', status: 'on_site', current_job_id: 'job-1', location_updated_at: null }],
-    });
-
-    const row = await techStatus.setTechJobStatus({
-      tech_id: 'tech-1',
-      status: 'on_site',
-      current_job_id: 'job-1',
-      ifCurrentJobId: 'job-1',
-    });
-
-    const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/UPDATE tech_status SET/);
-    expect(sql).toMatch(/WHERE tech_id = \? AND current_job_id = \?/);
-    expect(sql).not.toMatch(/INSERT/);
-    expect(bindings).toEqual(['on_site', 'job-1', 'tech-1', 'job-1']);
-    expect(row).toMatchObject({ tech_id: 'tech-1', current_job_id: 'job-1' });
-    expect(io.to).toHaveBeenCalledWith(techStatus.ROOM);
-  });
-
-  test('conditional job status changes and broadcasts nothing when the tech moved to another job', async () => {
-    const io = { to: jest.fn(() => ({ emit: jest.fn() })) };
-    require('../sockets').getIo.mockReturnValue(io);
-    db.raw = jest.fn().mockResolvedValue({ rows: [] });
-
-    const row = await techStatus.setTechJobStatus({
-      tech_id: 'tech-1',
-      status: 'on_site',
-      current_job_id: 'job-old',
-      ifCurrentJobId: 'job-old',
-    });
-
-    expect(row).toBeNull();
-    expect(io.to).not.toHaveBeenCalled();
-  });
-
   test('upsertTechStatus refreshes location_updated_at only when coordinates are supplied', async () => {
     const insert = jest.fn().mockReturnThis();
     const onConflict = jest.fn().mockReturnThis();
