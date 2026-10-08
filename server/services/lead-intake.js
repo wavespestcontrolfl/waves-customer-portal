@@ -346,6 +346,7 @@ async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
       // lane is for shell-less SMS-origin leads only.
       const existingShell = await db('estimates')
         .where({ customer_id: customer.id, status: 'draft' })
+        .whereNull('archived_at')
         // Only true SHELLS bypass the engine: unpriced intake/webhook rows.
         // An unrelated priced draft (existing customer) must not disable
         // the lane — the engine's address-aware duplicate guard owns that.
@@ -456,6 +457,7 @@ async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
     // engine only runs when no open shell would block its priced draft.
     const existingShell = await db('estimates')
       .where({ customer_id: customer.id, status: 'draft' })
+      .whereNull('archived_at')
       .whereIn('source', ['sms_intake', 'lead_webhook'])
       .where(function unpriced() {
         this.whereNull('monthly_total').orWhere('monthly_total', 0);

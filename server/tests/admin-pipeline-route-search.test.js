@@ -215,6 +215,7 @@ function createFakeDb(seed = {}) {
       // estimate FOR SHARE.
       forUpdate() { return this; },
       forShare() { return this; },
+      noWait() { return this; },
       whereNull(column) {
         nullColumns.push(column);
         return this;

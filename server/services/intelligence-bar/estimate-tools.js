@@ -3064,6 +3064,11 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
       return { error: 'Only an unsent estimator_engine draft can be revised from Agent Estimate' };
     }
+    // An archived draft is hidden and unsendable: a revision would save
+    // into it unseen.
+    if (estimate.archived_at) {
+      return { error: 'This draft was archived and cannot be revised. Start a new Agent Estimate.' };
+    }
     const currentData = parseStoredJson(estimate.estimate_data);
     if (currentData?.estimatorEngine?.origin !== 'manual_agent') {
       return { error: 'This draft was created by another estimator flow and will not be overwritten' };
