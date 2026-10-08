@@ -93,7 +93,7 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   disclaimed the number. `text_number_differs` has its own Resolve; a call verdict on a
   sibling card does not sweep it. Resolve OR Dismiss lifts the number-keyed SMS hold this call armed
   (same release path and same tech-or-admin access as the `callback_number_needed` card, no new
-  endpoint; skipped while a `callback_number_needed` card on the call is still open), so a line
+  endpoint; skipped when the call also has a `callback_number_needed` card, which owns the hold), so a line
   wrongly marked no-text is never held forever: "Resolve when the phones are right; texts to the
   calling line resume". The appointment-contact backfill never saves a no-text
   line into a blank `customers.phone`. The office updates the phones by hand.

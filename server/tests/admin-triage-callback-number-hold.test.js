@@ -504,9 +504,9 @@ describe('text_number_differs card releases the no-text hold', () => {
     expect(tables.scheduled_services.find((s) => s.id === OTHER_CALL_VISIT_ID).call_sms_cleared_at).toBeNull();
   });
 
-  test('a still-open callback_number_needed card on the same call keeps its own hold', async () => {
+  test.each(['open', 'dismissed', 'resolved'])('a %s callback_number_needed card on the same call owns the hold: this card leaves it alone', async (status) => {
     const { conn, tables } = fixture({
-      triage_items: [textCard(), { ...textCard({ id: 'card-cb', reason_code: 'callback_number_needed' }) }],
+      triage_items: [textCard(), { ...textCard({ id: 'card-cb', reason_code: 'callback_number_needed', status }) }],
     });
     wireDb(db, { conn });
     await withServer(async (baseUrl) => {

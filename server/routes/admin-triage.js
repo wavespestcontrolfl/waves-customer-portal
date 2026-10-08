@@ -635,13 +635,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // Owner ruling 2026-10-08: the no-text hold this call armed must never outlive its card
       // (a line wrongly marked no-text would stay blocked forever). Resolve AND Dismiss lift it,
       // through the same release path the callback_number_needed card uses, in this
-      // transaction, under the call lock. An open callback_number_needed card on the same call
-      // (the caller also disclaimed the number) keeps its own hold until its own Resolve.
-      const callbackCardOpen = await trx('triage_items')
+      // transaction, under the call lock. A callback_number_needed card on the same call, in ANY
+      // state (the caller also disclaimed the number), owns the hold: a dismissed or replacement-only
+      // closure deliberately keeps it, and this card must not undo that.
+      const callbackCard = await trx('triage_items')
         .where({ call_log_id: item.call_log_id, reason_code: 'callback_number_needed' })
-        .whereIn('status', OPEN_STATES)
         .first('id');
-      if (!callbackCardOpen) {
+      if (!callbackCard) {
         const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
           clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER,
         });
