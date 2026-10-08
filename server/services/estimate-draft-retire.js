@@ -135,11 +135,13 @@ function sameProperty(pair) {
 const SENT_CHANNELS_SQL = (alias) => `(jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
   AND jsonb_array_length(${alias}.estimate_data #> '{deliveryState,sentChannels}') > 0
   AND ${alias}.viewed_at IS NOT NULL)`;
-const DELIVERED_AT_SQL = (alias) => `((${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}') ~ '^[0-9]{4}-')`;
+// pg_input_is_valid, not a shape regex: an ISO-looking but invalid value on
+// one row must not abort the whole candidate query at the cast.
+const DELIVERED_AT_SQL = (alias) => `pg_input_is_valid(${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}', 'timestamptz')`;
 const SENT_TIME_SQL = (alias) => `(CASE
   WHEN ${DELIVERED_AT_SQL(alias)}
     THEN (${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz
-  WHEN ${SENT_CHANNELS_SQL(alias)} AND (${alias}.estimate_data #>> '{deliveryState,attemptedAt}') ~ '^[0-9]{4}-'
+  WHEN ${SENT_CHANNELS_SQL(alias)} AND pg_input_is_valid(${alias}.estimate_data #>> '{deliveryState,attemptedAt}', 'timestamptz')
     THEN LEAST((${alias}.estimate_data #>> '{deliveryState,attemptedAt}')::timestamptz, ${alias}.viewed_at)
   WHEN ${SENT_CHANNELS_SQL(alias)} THEN ${alias}.viewed_at
   ELSE ${alias}.sent_at END)`;

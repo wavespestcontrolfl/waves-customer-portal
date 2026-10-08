@@ -362,6 +362,17 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBe(draft);
   });
 
+  test('an invalid delivery timestamp on one estimate does not break the sweep', async () => {
+    const bad = await customer();
+    const replaced = await estimate(bad, { createdAt: minutesAgo(200) });
+    await estimate(bad, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { lastDeliveredAt: '2026-not-a-date', attemptedAt: '2026-also-bad', sentChannels: ['sms'] } }, viewed_at: minutesAgo(80) });
+    const { autoDraft } = await sentAfterTwoDrafts();
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBeGreaterThanOrEqual(2);
+    expect((await row(autoDraft)).archived_at).not.toBeNull();
+    // The unreadable row falls back to its first view time, which is after the draft: still a real send.
+    expect((await row(replaced)).archived_at).not.toBeNull();
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
