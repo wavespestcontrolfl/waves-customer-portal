@@ -2133,6 +2133,17 @@ describe('weed spots and the spot area', () => {
     expect(within(addons()).getByRole('button', { name: 'Weed spots are on the sheet' })).toBeTruthy();
   });
 
+  test('a product that joins the group is figured from the program rate, not the catalog default', async () => {
+    await open(weedContext(MIX(), {
+      plannedProducts: { source: 'plan', items: [PLANNED[0]], month: 10, weedMix: MIX(), addOns: ADD_ONS.map((a) => (a.productId === P_LEAD ? { ...a, ratePer1000: 0.5, rateUnit: 'oz' } : a)) },
+    }));
+    await addProductByName('Lead WG');
+    addWeedSpots();
+    fireEvent.click(within(weedArea()).getByRole('button', { name: '500 sq ft' }));
+    // The catalog says 2 oz per 1,000; the program approved 0.5.
+    expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('0.25');
+  });
+
   test('an unknown temperature adds the surfactant with the reminder on its row', async () => {
     const note = 'Leave the surfactant out if it is 90°F or hotter.';
     await open(weedContext(MIX({ note, surfactant: { productId: P_SURF, included: true, note }, tempF: null })));

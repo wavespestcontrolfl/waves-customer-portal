@@ -620,7 +620,14 @@ function useProductRows(ctx, catalog) {
       if (!prev.some((row) => row.productId === product.id)) return [...prev, productRow(product, { added: true, planned, weedGroup })];
       // A weed-mix product the tech already added on its own joins the group, so it shares
       // the group's one area instead of keeping a control (and an area) of its own.
-      return weedGroup ? prev.map((row) => (row.productId === product.id && !row.weedGroup ? { ...row, weedGroup: true } : row)) : prev;
+      // It is rebuilt from its plan item (the program's rate and method), keeping an amount the tech typed.
+      if (!weedGroup) return prev;
+      return prev.map((row) => {
+        if (row.productId !== product.id || row.weedGroup) return row;
+        const joined = productRow(product, { added: true, planned, weedGroup: true });
+        return row.totalAmount === '' || row.totalAmount == null ? joined
+          : { ...joined, totalAmount: row.totalAmount, amountUnit: row.amountUnit, dimension: row.dimension, fromPlan: row.fromPlan, rateChanged: true, unitPicked: row.unitPicked };
+      });
     });
   }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
