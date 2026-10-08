@@ -443,7 +443,7 @@ export default function MobileServiceEditModal({
                 Keep auto-dispatch off this visit
               </div>
               <div className="text-ink-tertiary" style={{ fontSize: 14, marginTop: 2 }}>
-                Auto-dispatch will not move this visit. Changing the date or time here turns this on.
+                Auto-dispatch will not move this visit. Changing the date or time here turns this on. A visit that a customer or staff moved to its date stays protected when this is off.
               </div>
             </div>
           </label>
