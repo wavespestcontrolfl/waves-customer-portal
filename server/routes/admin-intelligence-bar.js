@@ -1409,7 +1409,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (_booking_price etc.) are unchanged. No catalog price: no guard.
       const priceConfirmedClaim = params.price_confirmed === true;
       delete params.price_confirmed;
-      if (booking.source === 'stated' && booking.catalogPrice != null && !priceAcceptedOnCard(reproposal?.acceptedPrice, booking)) {
+      if (booking.source === 'stated' && booking.catalogPrice != null) {
         const readBackKey = {
           actorId: getAdminActorId(req), customerId: String(params.customer_id), statedPrice: booking.price,
         };
@@ -1446,9 +1446,6 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
-      // The catalog price the read-back compared against: Show again reuses an
-      // accepted stated price only while this is unchanged.
-      params._booking_catalog_price = booking.catalogPrice;
       // Whether another visit already overlaps this time when the card is
       // built (owner 2026-10-05). The executor books through an overlap that
       // already existed (warning only) but refuses one that is NEW since
@@ -2072,11 +2069,10 @@ function cardRoleRefusal(req, toolName) {
   return null;
 }
 
-// The tool input a stored card was built from: the server's execution pins
-// (every `_` key, and the historical non-underscore ones) are recomputed by
-// the fresh proposal, so none is carried over.
-function publicCardInput(toolName, params) {
-  return splitApprovedParams(toolName, params).input;
+// The tool input a stored adjust_stock card was built from: every
+// `_`-prefixed key is a server pin the fresh proposal recomputes.
+function publicCardInput(params) {
+  return Object.fromEntries(Object.entries(params || {}).filter(([key]) => !key.startsWith('_')));
 }
 
 const claimErrorStatus = (error) => (error === 'not_found' ? 404 : error === 'actor_mismatch' ? 403 : 409);
@@ -2114,7 +2110,7 @@ async function chooseProductOnCard(req, id, productId, contractHash) {
   let source = null;
   try {
     await db.transaction(async (trx) => {
-      const claim = await PendingActions.claimForConfirm(id, actor, { contractHash, trx });
+      const claim = await PendingActions.claimForConfirm(id, actor, { contractHash, trx, forProductChoice: true });
       if (claim.error) {
         answer = claim.error === 'already_used' ? null : { status: claimErrorStatus(claim.error), body: { error: claimErrorMessage(claim.error) } };
         throw rollback;
@@ -2147,7 +2143,7 @@ async function proposeChosenProduct(req, action, productId, trx) {
   if (!(await require('../services/intelligence-bar/procurement-tools').productIsActive(productId, trx))) {
     return { status: 409, body: { error: 'That product is no longer active — pick another.', code: 'product_inactive' } };
   }
-  const input = publicCardInput('adjust_stock', action.params);
+  const input = publicCardInput(action.params);
   delete input.product_name;
   // A task's picker hands its step to the new card: the task keeps waiting
   // for that card's outcome instead of reading the picker as the result.
@@ -2206,18 +2202,17 @@ async function replayProductChoice(id, actor, productId) {
 }
 
 // Why /show-again refuses before retiring the card, or null.
-async function showAgainRefusal(req, row) {
+function showAgainRefusal(req, row) {
   if (!row) return { status: 404, body: { error: 'Pending action not found' } };
-  if (!UI_GATED_WRITE_TOOL_NAMES.has(row.tool_name)) return { status: 409, body: { error: 'This card cannot be shown again. Ask again instead.' } };
+  // Only stock cards (an adjust_stock card or its product picker) are shown
+  // again: their input is rebuilt exactly from the stored row. Every other
+  // card keeps the earlier rule: ask again.
+  if (row.tool_name !== 'adjust_stock') return { status: 409, body: { error: 'Ask again to get a fresh card.', code: 'ask_again' } };
   // A task owns its cards and its outcome: a standalone copy would run outside
   // it and leave the task reporting the step as cancelled.
   if (row.task_id) return { status: 409, body: { error: 'This card belongs to a task — continue it from the task.', code: 'task_owned' } };
   const role = cardRoleRefusal(req, row.tool_name);
-  if (role) return { status: role.status, body: { error: role.error } };
-  if (row.tool_name === AGENT_ESTIMATE_WRITE_TOOL && !(await agentEstimateEnabled(req))) {
-    return { status: 404, body: { error: 'Agent Estimate is not enabled' } };
-  }
-  return null;
+  return role ? { status: role.status, body: { error: role.error } } : null;
 }
 
 // Under GATE_IB_PLATFORM a proposal's input must pass the action registry for
@@ -2239,7 +2234,7 @@ async function showCardAgain(req, id) {
     await db.transaction(async (trx) => {
       retired = await PendingActions.retireExpiredAction(id, actor, { trx });
       if (!retired) throw rollback;
-      const proposed = await proposeShownAgain(req, retired, showAgainInput(retired), trx);
+      const proposed = await proposeShownAgain(req, retired, publicCardInput(retired.params), trx);
       if (proposed.failed || !proposed.clientPayload) {
         answer = { status: 409, body: { error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code } };
         throw rollback;
@@ -2256,18 +2251,6 @@ async function showCardAgain(req, id) {
   return answer || showAgainReplay(id, actor);
 }
 
-// The tool input Show again re-proposes: the stored card's input, plus what
-// the first proposal moved into a server pin. A rate change keeps only its
-// pinned _rate_family; the service the operator chose comes back as
-// rate_service, and the fresh proposal re-pins the ledger.
-function showAgainInput(row) {
-  const input = publicCardInput(row.tool_name, row.params);
-  const rateService = row.tool_name === 'update_customer'
-    ? require('../services/intelligence-bar/rate-change').rateServiceForFamily(row.params?._rate_family) : null;
-  if (rateService) input.rate_service = rateService;
-  return input;
-}
-
 // Not retired now: a retry after a lost response gets the card Show again
 // already made; otherwise the card was live or decided.
 async function showAgainReplay(id, actor) {
@@ -2276,17 +2259,9 @@ async function showAgainReplay(id, actor) {
   return { status: 409, body: { error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' } };
 }
 
-// Show again of a booking card: the stated price that card carried already
-// passed the price read-back (no card is made otherwise). It still counts
-// only while the stated price and the catalog price the read-back compared
-// against (pinned on that card) are both unchanged.
-function priceAcceptedOnCard(accepted, booking) {
-  return !!accepted && Number(accepted.price) === Number(booking.price) && Number(accepted.catalogPrice) === Number(booking.catalogPrice);
-}
-
-// Show again's fresh proposal for a retired card. A picker card re-lists its
-// own products with fresh numbers; a stock card keeps the product (and
-// request) its row stored; every other card is proposed from its input.
+// Show again's fresh proposal for a retired stock card. A picker card
+// re-lists its own products with fresh numbers; an adjust_stock card keeps
+// the product its row stored.
 async function proposeShownAgain(req, row, input, trx) {
   const stored = row.params || {};
   const base = { req, context: row.context || null, requestStartedAt: new Date() };
@@ -2297,11 +2272,8 @@ async function proposeShownAgain(req, row, input, trx) {
     if (card.failed) return card;
     return storeProposalCard({ ...base, toolName: row.tool_name, params: card.params, preview: card.preview, task: null, cardText: card, reproposal: { sourcePin, trx } });
   }
-  const grounded = STOCK_WRITE_TOOL_NAMES.has(row.tool_name)
-    ? { groundedTarget: { productId: stored.product_id || null, requestId: stored.request_id || null } } : {};
-  const acceptedPrice = stored._booking_price != null && stored._booking_catalog_price != null
-    ? { price: stored._booking_price, catalogPrice: stored._booking_catalog_price } : null;
-  return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input }, reproposal: { ...grounded, acceptedPrice, sourcePin, trx } });
+  return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input },
+    reproposal: { groundedTarget: { productId: stored.product_id || null }, sourcePin, trx } });
 }
 
 function getAdminActorId(req) {
@@ -3097,15 +3069,8 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
 // Only claimed, hash-verified approval parameters enter here. Model arguments
 // go directly to executeToolByName and must pass the registry schema unchanged.
 function executeApprovedTool(toolName, params, techContext, actionContext) {
-  const { input, executionPins } = splitApprovedParams(toolName, params);
-  return executeToolByName(toolName, input, techContext, { ...actionContext, executionPins });
-}
-
-// A stored card's params, split into the tool's schema input and the server's
-// execution pins. Show again re-proposes from the input part alone.
-function splitApprovedParams(toolName, params) {
   const input = {}, executionPins = {};
-  for (const [key, value] of Object.entries(params || {})) {
+  for (const [key, value] of Object.entries(params)) {
     if (key.startsWith('_')) executionPins[key] = value;
     // Existing pending cancellation rows store this historical field name.
     else if (key === 'preview_fingerprint') executionPins._approved_cancel_plan_fingerprint = value;
@@ -3114,7 +3079,7 @@ function splitApprovedParams(toolName, params) {
     else if (toolName === 'bulk_update_leads' && key === 'lead_ids') executionPins._approved_lead_ids = value;
     else if (key !== 'confirmed' && key !== 'confirm') input[key] = value;
   }
-  return { input, executionPins };
+  return executeToolByName(toolName, input, techContext, { ...actionContext, executionPins });
 }
 
 // Field technicians who can take an assignment right now (active AND
@@ -4171,6 +4136,14 @@ router.post('/execute', async (req, res, next) => {
 // both run exactly this — the same claim, role guards, proposal-time pin
 // re-checks and receipt. Returns { status, body, claimed } and never touches
 // the response; `claimed` says whether the approval was consumed.
+// Claim refusals with their own wording. A "choose the product" card is not
+// consumed by a Confirm (claimForConfirm): its way forward is /choose-product.
+const CLAIM_REFUSALS = {
+  contract_mismatch: 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.',
+  product_choice_required: 'Pick the product on the card first. Nothing was written.',
+};
+const CLAIM_REFUSAL_FACTS = { product_choice_required: { code: 'product_choice_required', written: false } };
+
 async function commitPendingAction(req, { id, contractHash }) {
   let claimedAction = null;
   const reply = (status, body) => ({ status, body, claimed: claimedAction !== null });
@@ -4191,21 +4164,11 @@ async function commitPendingAction(req, { id, contractHash }) {
       const status = claim.error === 'not_found' ? 404
         : claim.error === 'actor_mismatch' ? 403
           : 409; // already_used | cancelled | expired | hash_mismatch | contract_mismatch
-      const message = claim.error === 'contract_mismatch'
-        ? 'The confirmation card no longer matches the proposed action. Ask again to get a fresh card.'
-        : `Pending action ${claim.error.replace(/_/g, ' ')}`;
-      return reply(status, { error: message });
+      const message = CLAIM_REFUSALS[claim.error] || `Pending action ${claim.error.replace(/_/g, ' ')}`;
+      return reply(status, { error: message, ...CLAIM_REFUSAL_FACTS[claim.error] });
     }
     const action = claim.action;
     claimedAction = action;
-    // A "choose the product" card names no product, so it can never run:
-    // its only way forward is /choose-product. Nothing is written here.
-    if (Array.isArray(action.params?._ib_product_choices)) {
-      const result = { success: false, blocked: true, written: false, code: 'product_choice_required',
-        error: 'Pick the product on the card first. Nothing was written. Ask again for a fresh card.' };
-      await PendingActions.recordResult(action.id, result);
-      return reply(409, result);
-    }
     // cancel_appointment dispatches only when the gate is live AND the
     // stored action carries the proposal-time frozen impact pin (PR B of
     // ib-cancel-pinned-effects). This covers: the gate off (today's
@@ -4585,10 +4548,10 @@ router.post('/choose-product', async (req, res, next) => {
   }
 });
 
-// Show again (owner 2026-10-07). A card that expired before the operator
-// confirmed or cancelled it is proposed again: the SAME tool and the same
-// input, through the full proposal (fresh preview, fresh pins, fresh contract
-// hash, the supersede rules). It never commits: the result is a new card, or
+// Show again (owner 2026-10-07), stock cards only. An adjust_stock card or
+// its product picker that expired before the operator confirmed or cancelled
+// it is proposed again: the same input, through the full proposal (fresh
+// preview, fresh pins, fresh contract hash). It never commits: the result is a new card, or
 // the same refusal a fresh proposal would get. Only the card's own actor can
 // do this, and only once per expired card (it is retired atomically first).
 router.post('/show-again', async (req, res, next) => {
@@ -4597,9 +4560,9 @@ router.post('/show-again', async (req, res, next) => {
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'pending_action_id is required' });
     if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
     const row = await PendingActions.getPendingRow(id, getAdminActorId(req));
-    const refusal = await showAgainRefusal(req, row);
+    const refusal = showAgainRefusal(req, row);
     if (refusal) return res.status(refusal.status).json(refusal.body);
-    const invalid = platformInputRefusal(req, row, showAgainInput(row));
+    const invalid = platformInputRefusal(req, row, publicCardInput(row.params));
     if (invalid) return res.status(409).json({ error: invalid.error || 'This action cannot be shown again.', code: invalid.code });
     const shown = await showCardAgain(req, id);
     return res.status(shown.status).json(shown.body);

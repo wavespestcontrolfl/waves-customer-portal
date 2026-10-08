@@ -73,10 +73,14 @@ async function claimResume(id, actorId, sessionId, { selectedTarget } = {}) {
     : { error: 'This task is already running', code: 'already_running' };
 }
 
-// An expired step never ran and is not an unresolved outcome: continuing
-// proposes it again inside the task (Codex #6111 r3), and nothing commits.
+// Outcomes a task can continue past. An expired step never ran and is not an
+// unresolved outcome: continuing proposes it again inside the task (Codex
+// #6111 r3), and nothing commits. One list for the continue check, the
+// exposed state and the saved-task list, so they cannot disagree.
+const CONTINUABLE_OUTCOMES = ['completed', 'provider_accepted', 'expired'];
+
 function continuationError(task, receipts, { selectedTarget } = {}) {
-  if (receipts.some(r => !['completed', 'provider_accepted', 'expired'].includes(r.outcome))) {
+  if (receipts.some(r => !CONTINUABLE_OUTCOMES.includes(r.outcome))) {
     return { error: 'Resolve the saved action outcomes before continuing', code: 'steps_unresolved' };
   }
   // Images are never persisted and a checkpoint holds only their text
@@ -125,7 +129,7 @@ function exposedTaskState(task, receipts) {
   const outcomes = new Set(receipts.map(receipt => receipt.outcome));
   if (outcomes.has('awaiting_approval')) return 'awaiting_approval';
   if (outcomes.has('outcome_unknown')) return 'outcome_unknown';
-  if ([...outcomes].every(outcome => ['completed', 'provider_accepted'].includes(outcome))) return 'ready_to_continue';
+  if ([...outcomes].every(outcome => CONTINUABLE_OUTCOMES.includes(outcome))) return 'ready_to_continue';
   if (outcomes.has('completed') || outcomes.has('provider_accepted') || outcomes.has('partially_completed')) return 'partially_completed';
   return outcomes.size === 1 && outcomes.has('canceled') ? 'canceled' : 'failed';
 }

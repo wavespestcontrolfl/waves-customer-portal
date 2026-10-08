@@ -145,11 +145,4 @@ async function rateChangeProposal(customerId, newRate, rateService) {
   };
 }
 
-// The rate_service a stored card was proposed with, from its pinned family
-// (the proposal keeps only _rate_family). null when the card named no line:
-// an unchanged rate, or the earlier unsplit rate.
-function rateServiceForFamily(family) {
-  return family && family !== UNCHANGED && family !== UNATTRIBUTED ? String(family) : null;
-}
-
-module.exports = { rateChangeProposal, ledgerPin, lineLabel, money, UNCHANGED, customersWithBill, rateServiceForFamily };
+module.exports = { rateChangeProposal, ledgerPin, lineLabel, money, UNCHANGED, customersWithBill };

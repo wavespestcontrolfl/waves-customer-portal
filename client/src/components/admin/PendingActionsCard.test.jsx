@@ -181,7 +181,8 @@ it('Codex #5514 r5: a card stored as preview-only (minted before the commit path
   expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
 });
 
-// Product picker + Show again (owner 2026-10-07).
+// Product picker + Show again on stock cards (owner 2026-10-07).
+const stockAction = { ...action, tool: 'adjust_stock', summary: 'Synthetic stock change' };
 const PICKER = {
   id: '33333333-3333-4333-8333-333333333333', tool: 'adjust_stock', expiresInMs: 600000, contract_hash: 'hash-choice',
   contract: {
@@ -238,7 +239,7 @@ test('a refused pick keeps the card and shows why', async () => {
 test.each(['light', 'dark'])('an expired card offers Show again and puts the fresh card below it (%s)', async (variant) => {
   const fetch = vi.fn().mockResolvedValue(response({ success: true, pendingAction: NEXT_CARD }));
   vi.stubGlobal('fetch', fetch);
-  render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant={variant} />);
+  render(<PendingActionsCard actions={[{ ...stockAction, receipt: { outcome: 'expired', result: null } }]} variant={variant} />);
   expect(screen.getByText(/Expired — this proposal is no longer confirmable/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Show again' }));
   expect(await screen.findByText('Shown again below.')).toBeInTheDocument();
@@ -254,7 +255,7 @@ test('a card that runs out of time while open offers Show again; a refusal stays
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.setSystemTime(2000000);
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({ error: 'Product not found' }) }));
-  render(<PendingActionsCard actions={[{ ...action, receivedAt: 2000000 }]} variant="light" />);
+  render(<PendingActionsCard actions={[{ ...stockAction, receivedAt: 2000000 }]} variant="light" />);
   expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
   vi.setSystemTime(2600001);
   act(() => { vi.advanceTimersByTime(1500); });
@@ -304,7 +305,7 @@ test('Show again cannot be sent twice while its request is in flight', async () 
   let release;
   const fetch = vi.fn(() => new Promise((resolve) => { release = () => resolve(response({ success: true, pendingAction: NEXT_CARD })); }));
   vi.stubGlobal('fetch', fetch);
-  render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
+  render(<PendingActionsCard actions={[{ ...stockAction, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
   fireEvent.click(screen.getByRole('button', { name: 'Show again' }));
   const busy = await screen.findByRole('button', { name: 'Showing again…' });
   expect(busy).toBeDisabled();
@@ -315,7 +316,13 @@ test('Show again cannot be sent twice while its request is in flight', async () 
 });
 
 test('an expired task card points to the task Continue action instead of Show again', () => {
-  render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant="light" inTask />);
+  render(<PendingActionsCard actions={[{ ...stockAction, receipt: { outcome: 'expired', result: null } }]} variant="light" inTask />);
   expect(screen.getByText(/Continue the request to get a fresh card/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
+});
+
+test('an expired card of any other tool keeps the ask-again line and offers no Show again', () => {
+  render(<PendingActionsCard actions={[{ ...action, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
+  expect(screen.getByText('Expired — this proposal is no longer confirmable. Ask again to re-propose it.')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Show again' })).toBeNull();
 });

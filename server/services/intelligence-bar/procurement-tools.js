@@ -906,10 +906,10 @@ function stockFields(p) {
 async function resolveProduct(input) {
   if (input.product_id) {
     const product = await db('products_catalog').where('id', input.product_id).first();
-    return product ? { product } : { error: 'Product not found' };
+    return product ? { product } : { error: 'Product not found', code: 'product_not_found' };
   }
   const name = String(input.product_name || '').trim();
-  if (!name) return { error: 'product_name or product_id is required' };
+  if (!name) return { error: 'product_name or product_id is required', code: 'product_unspecified' };
   const exact = await db('products_catalog').whereRaw('lower(btrim(name)) = ?', [name.toLowerCase()]).limit(2);
   if (exact.length === 1) return { product: exact[0] };
   const literal = name.replace(/[\\%_]/g, '\\$&');
@@ -1774,7 +1774,7 @@ async function productChoicesFor({ input = {}, prompt = null, previewProductName
 
 const NOT_WRITTEN = ' Nothing was written and no confirmation card was created.';
 // Refusals that mean "which product?" — the only ones the picker replaces.
-const PRODUCT_IDENTITY_REFUSALS = new Set(['product_ambiguous', 'product_not_found',
+const PRODUCT_IDENTITY_REFUSALS = new Set(['product_ambiguous', 'product_not_found', 'product_unspecified',
   'target_clarification_required', 'target_relationship_mismatch']);
 const PICKER_NOTE = 'Nothing was written. The card lists the products that could match and the operator picks one, then confirms a second card that shows the exact before and after. Do NOT retry this tool, do NOT pick a product yourself, and do NOT claim stock changed; tell the operator to pick the product on the card.';
 
@@ -1818,15 +1818,13 @@ async function offerProductChoice(toolName, refusal, params, prompt, previewProd
   return card.failed ? card : { productChoice: card };
 }
 
-// A re-proposal's target is the one the server stored or listed (a picked
-// product, a Show again card): the fresh preview must resolve to it exactly.
-function groundedStockTarget(toolName, preview, grounded) {
-  const same = (a, b) => a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase();
-  const mismatch = { failed: true, modelResult: { error: `This product no longer matches the earlier card.${NOT_WRITTEN}`, code: 'target_relationship_mismatch' } };
-  if (toolName === 'update_restock_request') {
-    return same(preview?.request?.id, grounded.requestId) ? { productId: preview?.product?.id, requestId: preview.request.id } : mismatch;
-  }
-  return same(preview?.product?.id, grounded.productId) ? { productId: preview.product.id } : mismatch;
+// A re-proposed adjust_stock card's product is the one the server stored or
+// listed (a picked product, a Show again card): the fresh preview must
+// resolve to exactly that product.
+function groundedStockTarget(preview, grounded) {
+  const previewId = preview?.product?.id;
+  if (previewId && grounded.productId && String(previewId).toLowerCase() === String(grounded.productId).toLowerCase()) return { productId: previewId };
+  return { failed: true, modelResult: { error: `This product no longer matches the earlier card.${NOT_WRITTEN}`, code: 'target_relationship_mismatch' } };
 }
 
 // What a stock write proposal acts on, from its (possibly failed) preview:
@@ -1835,7 +1833,7 @@ function groundedStockTarget(toolName, preview, grounded) {
 //   { failed, modelResult }    a refusal: no card, nothing written.
 // `grounded` (a re-proposal) skips every reading of operator text.
 async function stockProposalTarget({ toolName, params, preview, prompt, pageData, actorId, threadId, threadSeq, grounded = null }) {
-  if (grounded) return isToolFailure(preview) ? { failed: true, modelResult: preview } : groundedStockTarget(toolName, preview, grounded);
+  if (grounded) return isToolFailure(preview) ? { failed: true, modelResult: preview } : groundedStockTarget(preview, grounded);
   if (isToolFailure(preview)) return (await offerProductChoice(toolName, preview, params, prompt)) || { failed: true, modelResult: preview };
   const target = await resolveInventoryWriteTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq });
   if (!target.error) return target;

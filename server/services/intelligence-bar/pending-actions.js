@@ -396,13 +396,19 @@ async function forTask(taskId, requestedBy) {
  */
 // `trx`: claim inside the caller's transaction (a product choice), so a later
 // failure in that transaction puts the card back.
-async function claimForConfirm(id, requestedBy, { contractHash = null, trx = null } = {}) {
+// A "choose the product" card (params._ib_product_choices) names no product,
+// so Confirm can never claim it: only a product choice (`forProductChoice`)
+// can. Any other caller gets product_choice_required and the card stays
+// pending and usable (a stale client's Confirm must not use it up).
+async function claimForConfirm(id, requestedBy, { contractHash = null, trx = null, forProductChoice = false } = {}) {
   const echoed = contractHash ? String(contractHash) : null;
   const q = trx || db;
   // A card for an intent with a supersede rule claims under the intent lock and
   // is refused when a NEWER card for the same intent exists (any status). Every
   // other card takes the single-statement claim below, unchanged.
   const peek = await q('ib_pending_actions').where({ id }).first('tool_name', 'params', 'requested_by', 'status', 'expires_at');
+  if (peek && !forProductChoice && Array.isArray(paramsOf(peek)._ib_product_choices)
+    && String(peek.requested_by) === String(requestedBy)) return { error: 'product_choice_required' };
   const key = peek && peek.status === 'pending' && String(peek.requested_by) === String(requestedBy)
     && new Date(peek.expires_at).getTime() > Date.now() ? intentKey(peek.tool_name, paramsOf(peek)) : null;
   if (!key) return claimRow(q, id, requestedBy, echoed);

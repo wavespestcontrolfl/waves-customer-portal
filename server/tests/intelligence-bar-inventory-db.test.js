@@ -298,6 +298,10 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(proposed.body.pendingActions).toHaveLength(1);
     const picker = proposed.body.pendingActions[0];
     expect(picker.contract.product_choices.map((c) => c.product_id).sort()).toEqual([ten.id, twenty.id].sort());
+    // A stale client's Confirm on the picker is refused and does not use it up.
+    const staleConfirm = await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: picker.id, contract_hash: picker.contract_hash });
+    expect(staleConfirm).toMatchObject({ status: 409, body: { code: 'product_choice_required', written: false } });
+    expect(await db('ib_pending_actions').where({ id: picker.id }).first()).toMatchObject({ status: 'pending', result: null });
     // A listed product made inactive since: refused, the picker stays usable.
     await db('products_catalog').where({ id: ten.id }).update({ active: false });
     const inactive = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: ten.id });
@@ -407,7 +411,19 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(taskId).toBeTruthy();
     await db('ib_pending_actions').where({ id: old.id }).update({ expires_at: new Date(Date.now() - 1000) });
     const before = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
-    expect(before.body).toMatchObject({ canContinue: true });
+    expect(before.body).toMatchObject({ canContinue: true, taskState: 'ready_to_continue' });
+    // The saved-task list keeps an expired-only task as continuable, behind more than twenty newer tasks.
+    const newer = Array.from({ length: 21 }, (_, i) => ({ actor_id: actor, session_id: sessionId, request_key: `newer-${crypto.randomUUID()}`,
+      request_hash: 'a'.repeat(64), state: 'responded', runner_token: crypto.randomUUID(), lease_expires_at: new Date(),
+      request: JSON.stringify({ prompt: 'Synthetic newer request' }), expires_at: new Date(Date.now() + 86400000),
+      created_at: new Date(Date.now() + 60000 + i) }));
+    await db('ib_tasks').insert(newer);
+    try {
+      const saved = (await api(`/api/admin/intelligence-bar/tasks?session_id=${sessionId}`)).body.tasks.find((t) => t.id === taskId);
+      expect(saved).toMatchObject({ state: 'ready_to_continue' });
+    } finally {
+      await db('ib_tasks').whereIn('request_key', newer.map((t) => t.request_key)).del();
+    }
     mockModel.mockReset();
     mockModel.mockResolvedValueOnce(toolCall('discover_capabilities', { query: 'adjust stock' }, 'discover-2'))
       .mockResolvedValueOnce(toolCall('adjust_stock', input, 'inventory-2'))

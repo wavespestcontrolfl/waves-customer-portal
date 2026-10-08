@@ -10,8 +10,8 @@
  *
  * A "choose the product" card (contract.product_choices, owner 2026-10-07)
  * lists the server's shortlist; the operator picks one and the server makes a
- * normal card for it. An expired card offers "Show again", which asks the
- * server to propose the same action afresh. Both render the new card right
+ * normal card for it. An expired stock card offers "Show again", which asks
+ * the server to propose the same action afresh. Both render the new card right
  * below the old one; neither ever writes anything by itself.
  *
  * variant="dark"  — D-palette inline styles (legacy IB surfaces)
@@ -168,15 +168,21 @@ function ContractView({ contract, dark, showApproval = true }) {
   );
 }
 
-// An expired card that was never decided: the server can propose it afresh.
-// A task's card is proposed afresh by continuing its task instead, so it
-// points at the task's Continue action.
-function ExpiredControls({ dark, reshowing, onShowAgain, inTask }) {
-  if (inTask) {
+// Stock cards (an adjust_stock card or its product picker) can be shown again.
+const SHOW_AGAIN_TOOLS = new Set(["adjust_stock"]);
+
+// An expired card that was never decided. A stock card can be proposed afresh
+// by the server (Show again). A task's card is proposed afresh by continuing
+// its task, so it points at the task's Continue action. Every other card
+// keeps the earlier rule: ask again.
+function ExpiredControls({ dark, tool, reshowing, onShowAgain, inTask }) {
+  if (inTask || !SHOW_AGAIN_TOOLS.has(tool)) {
     return (
       <div style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
         className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}>
-        Expired — this proposal is no longer confirmable. Continue the request to get a fresh card.
+        {inTask
+          ? "Expired — this proposal is no longer confirmable. Continue the request to get a fresh card."
+          : "Expired — this proposal is no longer confirmable. Ask again to re-propose it."}
       </div>
     );
   }
@@ -619,7 +625,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             )}
 
             {expired ? (
-              <ExpiredControls dark={dark} inTask={inTask} reshowing={reshowingById[action.id] === true} onShowAgain={() => showAgain(action)} />
+              <ExpiredControls dark={dark} tool={action.tool} inTask={inTask} reshowing={reshowingById[action.id] === true} onShowAgain={() => showAgain(action)} />
             ) : !settled && choices ? (
               <ProductPickerControls dark={dark} actionId={action.id} choices={choices} picked={picked} busy={busy} status={status}
                 touchFriendly={touchFriendly} remaining={remaining}

@@ -25,8 +25,6 @@ const mockGetPendingRow = jest.fn();
 const mockRetireExpiredAction = jest.fn();
 const mockAttachThread = jest.fn(async () => 1);
 const mockFindDerivedCard = jest.fn(async () => null);
-const mockIbBookingProposal = jest.fn();
-const mockPreviewBulkLeadUpdate = jest.fn();
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -54,9 +52,6 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: jest.fn(),
   resolveActiveTechnicianById: jest.fn(),
-  ibBookingProposal: (...args) => mockIbBookingProposal(...args),
-  ibBookingOverlapProposal: jest.fn(async () => null),
-  ibBookingOverlapWho: jest.fn(async () => []),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -85,7 +80,7 @@ jest.mock('../services/intelligence-bar/comms-tools', () => ({
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
 }));
 jest.mock('../services/intelligence-bar/tax-tools', () => ({ TAX_TOOLS: [], executeTaxTool: jest.fn() }));
-jest.mock('../services/intelligence-bar/leads-tools', () => ({ LEADS_TOOLS: [], executeLeadsTool: jest.fn(), resolveLeadForUpdate: jest.fn(), previewBulkLeadUpdate: (...args) => mockPreviewBulkLeadUpdate(...args), BULK_LEAD_UPDATE_CAP: 500 }));
+jest.mock('../services/intelligence-bar/leads-tools', () => ({ LEADS_TOOLS: [], executeLeadsTool: jest.fn(), resolveLeadForUpdate: jest.fn(), previewBulkLeadUpdate: jest.fn(), BULK_LEAD_UPDATE_CAP: 500 }));
 jest.mock('../services/intelligence-bar/email-tools', () => ({ EMAIL_TOOLS: [], executeEmailTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/estimate-tools', () => ({ ESTIMATE_TOOLS: [], executeEstimateTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/banking-tools', () => ({ BANKING_TOOLS: [], BANKING_QUERY_TOOLS: [], executeBankingTool: jest.fn() }));
@@ -243,13 +238,16 @@ describe('the picker card', () => {
     expect(mockCreatePendingAction.mock.calls[0][0].params.product_id).toBe(PRODUCT_A);
   });
 
-  test('a picker card cannot run through /confirm-action', async () => {
-    mockClaimForConfirm.mockResolvedValue({ action: { ...pickerRow(), status: 'confirmed' } });
+  test('a Confirm on a picker card is refused without using the card up', async () => {
+    // The claim itself refuses a picker (pending-actions claimForConfirm).
+    mockClaimForConfirm.mockResolvedValue({ error: 'product_choice_required' });
     await withServer(async (baseUrl) => {
       const { status, body } = await post(baseUrl, 'confirm-action', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice' });
       expect(status).toBe(409);
-      expect(body).toMatchObject({ code: 'product_choice_required', written: false });
+      expect(body).toEqual({ error: 'Pick the product on the card first. Nothing was written.', code: 'product_choice_required', written: false });
     });
+    expect(mockClaimForConfirm.mock.calls[0][2].forProductChoice).toBeUndefined();
+    expect(mockRecordResult).not.toHaveBeenCalled();
     expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
   });
 });
@@ -265,7 +263,7 @@ describe('/choose-product', () => {
       expect(body.pendingAction.contract.effects.map((e) => e.label)).toContain('Zentrovex 20% SC: restock 78 fl_oz; on hand 0 → 78 fl_oz');
       expect(body.pendingAction.contract.product_choices).toBeUndefined();
     });
-    expect(mockClaimForConfirm).toHaveBeenCalledWith(CHOICE_ID, 'admin-1', expect.objectContaining({ contractHash: 'hash-choice' }));
+    expect(mockClaimForConfirm).toHaveBeenCalledWith(CHOICE_ID, 'admin-1', expect.objectContaining({ contractHash: 'hash-choice', forProductChoice: true }));
     const proposed = mockCreatePendingAction.mock.calls[0][0];
     expect(proposed.params).toMatchObject({ product_id: PRODUCT_B, ...MOVEMENT });
     expect(proposed.params.product_name).toBeUndefined();
@@ -422,7 +420,7 @@ describe('/show-again', () => {
     const stored = mockCreatePendingAction.mock.calls[0][0].params;
     expect(stored._two_step_preview_fingerprint).not.toBe('old-print');
     expect(stored._ib_shown_from).toBe(CHOICE_ID);
-    expect(mockStockTarget).toHaveBeenCalledWith(expect.objectContaining({ grounded: { productId: PRODUCT_A, requestId: null } }));
+    expect(mockStockTarget).toHaveBeenCalledWith(expect.objectContaining({ grounded: { productId: PRODUCT_A } }));
     expect(confirmedCalls()).toHaveLength(0);
   });
 
@@ -502,99 +500,17 @@ describe('/show-again', () => {
     expect(mockAttachThread).toHaveBeenCalledWith([NEW_ID], 'thread-2', 7, 'admin-1');
   });
 
-  test('an expired rate change comes back with the service the operator chose (its pinned family)', async () => {
-    const CUSTOMER = '9a0c8f1e-0000-4000-8000-0000000000c1';
-    require('../services/intelligence-bar/tools').UPDATABLE_FIELDS.monthly_rate = 'monthly_rate';
-    const rateChange = require('../services/intelligence-bar/rate-change');
-    const proposal = jest.spyOn(rateChange, 'rateChangeProposal').mockResolvedValue({ family: 'lawn', pin: 'fresh-pin', display: null });
-    mockResolveCommsCustomer.mockResolvedValue({ id: CUSTOMER, first_name: 'Synthetic', last_name: 'Owner' });
+  test('a card of any other tool is not shown again: ask again', async () => {
     const row = { id: CHOICE_ID, tool_name: 'update_customer', status: 'pending', context: 'customers',
-      params: { customer_id: CUSTOMER, updates: { monthly_rate: 120 }, _rate_family: 'lawn', _rate_ledger_pin: 'old-pin' } };
+      params: { customer_id: '9a0c8f1e-0000-4000-8000-0000000000c1', updates: { city: 'Synthetic City' } } };
     mockGetPendingRow.mockResolvedValue(row);
-    mockRetireExpiredAction.mockResolvedValue({ ...row, status: 'cancelled' });
-    try {
-      await withServer(async (baseUrl) => {
-        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
-        expect([status, body.error]).toEqual([200, undefined]);
-      });
-      expect(proposal).toHaveBeenCalledWith(CUSTOMER, 120, 'lawn');
-      expect(mockCreatePendingAction.mock.calls[0][0].params).toMatchObject({ _rate_family: 'lawn', _rate_ledger_pin: 'fresh-pin' });
-      expect(mockCreatePendingAction.mock.calls[0][0].params.rate_service).toBeUndefined();
-    } finally {
-      proposal.mockRestore();
-      delete require('../services/intelligence-bar/tools').UPDATABLE_FIELDS.monthly_rate;
-    }
-  });
-
-  describe('a booking card with a stated price', () => {
-    const CUSTOMER = '9a0c8f1e-0000-4000-8000-0000000000c2';
-    const bookingRow = () => ({ id: CHOICE_ID, tool_name: 'create_appointment', status: 'pending', context: 'schedule',
-      params: { customer_id: CUSTOMER, service_type: 'Monthly Lawn Care Service', scheduled_date: '2099-01-05', price: 60.33,
-        _booking_price: 60.33, _booking_list_price: 61.33, _booking_catalog_price: 61.33, _booking_service_id: 'svc-lawn' } });
-    // No discount: the list price and the catalog price are the same number.
-    const booking = (catalogPrice) => ({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service',
-      catalogPrice, listPrice: catalogPrice });
-    beforeEach(() => {
-      mockResolveCommsCustomer.mockResolvedValue({ id: CUSTOMER, first_name: 'Synthetic', last_name: 'Booker' });
-      mockGetPendingRow.mockResolvedValue(bookingRow());
-      mockRetireExpiredAction.mockResolvedValue({ ...bookingRow(), status: 'cancelled' });
+    await withServer(async (baseUrl) => {
+      const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
+      expect(status).toBe(409);
+      expect(body).toEqual({ error: 'Ask again to get a fresh card.', code: 'ask_again' });
     });
-
-    test('comes back without asking the price again: that card already passed the read-back', async () => {
-      mockIbBookingProposal.mockResolvedValue(booking(61.33));
-      await withServer(async (baseUrl) => {
-        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
-        expect([status, body.error]).toEqual([200, undefined]);
-      });
-      expect(mockCreatePendingAction.mock.calls[0][0].params).toMatchObject({ _booking_price: 60.33, _booking_catalog_price: 61.33 });
-    });
-
-    test('asks the price again for an older card with no pinned catalog price', async () => {
-      const older = bookingRow();
-      delete older.params._booking_catalog_price;
-      mockGetPendingRow.mockResolvedValue(older);
-      mockRetireExpiredAction.mockResolvedValue({ ...older, status: 'cancelled' });
-      mockIbBookingProposal.mockResolvedValue(booking(61.33));
-      await withServer(async (baseUrl) => {
-        const { body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
-        expect(body.code).toBe('price_read_back');
-      });
-    });
-
-    test('asks the price again when the catalog price changed since that card (no discount)', async () => {
-      mockIbBookingProposal.mockResolvedValue(booking(65));
-      await withServer(async (baseUrl) => {
-        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
-        expect(status).toBe(409);
-        expect(body.code).toBe('price_read_back');
-      });
-      expect(mockCreatePendingAction).not.toHaveBeenCalled();
-    });
-  });
-
-  test('server pins outside the tool schema stay out of the re-proposed input (bulk lead ids)', async () => {
-    const LEAD = '9a0c8f1e-0000-4000-8000-00000000000e';
-    const row = { id: CHOICE_ID, tool_name: 'bulk_update_leads', status: 'pending', context: 'leads',
-      params: { current_status: 'new', new_status: 'contacted', dry_run: false, lead_ids: [LEAD], _expect_full_set: true } };
-    mockGetPendingRow.mockResolvedValue(row);
-    mockRetireExpiredAction.mockResolvedValue({ ...row, status: 'cancelled' });
-    mockPreviewBulkLeadUpdate.mockResolvedValue({ matched_ids: [LEAD], all_names: ['Synthetic Lead'], matches: 1, preview: [], action: 'update' });
-    // The registry's own schema check (strict, no extra properties) is
-    // covered by its suite; here it records what Show again asks it about.
-    const validate = jest.spyOn(require('../services/intelligence-bar/action-registry'), 'validateInput').mockReturnValue(null);
-    const previous = process.env.GATE_IB_PLATFORM;
-    process.env.GATE_IB_PLATFORM = 'true';
-    try {
-      await withServer(async (baseUrl) => {
-        const { status, body } = await post(baseUrl, 'show-again', { pending_action_id: CHOICE_ID });
-        expect([status, body.error]).toEqual([200, undefined]);
-      });
-      expect(validate).toHaveBeenCalledWith('bulk_update_leads', { current_status: 'new', new_status: 'contacted', dry_run: false }, expect.objectContaining({ role: 'admin' }));
-    } finally {
-      validate.mockRestore();
-      if (previous === undefined) delete process.env.GATE_IB_PLATFORM; else process.env.GATE_IB_PLATFORM = previous;
-    }
-    expect(mockCreatePendingAction.mock.calls[0][0].params.lead_ids).toEqual([LEAD]);
+    expect(mockRetireExpiredAction).not.toHaveBeenCalled();
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
   });
 
   test('another operator card is not found', async () => {

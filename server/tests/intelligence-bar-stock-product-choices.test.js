@@ -12,7 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const dbMock = require('../models/db');
 const inventory = require('../services/inventory-operations');
-const { productChoicesFor, PRODUCT_CHOICE_LIMIT, stockProposalTarget } = require('../services/intelligence-bar/procurement-tools');
+const { productChoicesFor, PRODUCT_CHOICE_LIMIT, stockProposalTarget, executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
 
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const ZEN_10 = { id: uuid(1), name: 'Zentrovex 10% SC', active: true, container_size: '78 fl oz', inventory_unit: 'fl_oz', inventory_on_hand: 20 };
@@ -26,10 +26,12 @@ function useCatalog(rows) {
   dbMock.mockImplementation((table) => {
     let result = table.startsWith('product_aliases') ? [] : rows.map((row) => ({ ...row }));
     const builder = {
-      where(arg) {
+      where(arg, value) {
         if (arg && typeof arg === 'object') result = result.filter((row) => Object.entries(arg).every(([k, v]) => row[k] === v));
+        else if (arg === 'id') result = result.filter((row) => row.id === value);
         return builder;
       },
+      first() { result = result[0]; return builder; },
       whereIn(column, values) { result = result.filter((row) => values.includes(row[column])); return builder; },
       whereRaw() { return builder; },
       whereILike() { return builder; },
@@ -167,6 +169,22 @@ describe('stockProposalTarget', () => {
     useCatalog([ZEN_10, ZEN_20]);
     const { productChoice } = await target({ params: restock({ product_name: undefined, product_id: ZEN_10.id }), preview: zenPreview, prompt: 'We got 78 oz of Zentrovex' });
     expect(productChoice.params._ib_product_choices).toEqual([ZEN_10.id, ZEN_20.id]);
+  });
+
+  test('a call that names no product, or a product id that does not exist, still gets a picker on receipt words', async () => {
+    useCatalog([ZEN_10, ZEN_20]);
+    // The codes the preview gives these two refusals (resolveProduct).
+    const unspecified = await executeProcurementTool('adjust_stock', { movement_type: 'restock', quantity: 78, unit: 'fl_oz' });
+    expect(unspecified.code).toBe('product_unspecified');
+    useCatalog([]);
+    const missing = await executeProcurementTool('adjust_stock', { product_id: uuid(999), movement_type: 'restock', quantity: 78, unit: 'fl_oz' });
+    expect(missing.code).toBe('product_not_found');
+    useCatalog([ZEN_10, ZEN_20]);
+    for (const preview of [unspecified, missing]) {
+      const { productChoice } = await target({ params: restock({ product_name: undefined }), preview, prompt: 'We received 78 oz of Zentrovex' });
+      expect(productChoice.params._ib_product_choices).toEqual([ZEN_10.id, ZEN_20.id]);
+      expect(productChoice.params.product_name).toBe('zentrovex');
+    }
   });
 
   test.each([
