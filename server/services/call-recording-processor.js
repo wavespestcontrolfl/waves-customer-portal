@@ -11005,9 +11005,16 @@ const CallRecordingProcessor = {
             note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Dismiss if the line can get texts.`,
           },
         });
-        const insert = db('triage_items').insert(item)
-          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'));
-        await (refresh ? insert.merge({ payload: item.payload, updated_at: new Date() }) : insert.ignore());
+        if (refresh) {
+          // Refresh the OPEN card only: a card staff already resolved or dismissed stays settled.
+          await db('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'text_number_differs' })
+            .whereIn('status', ['open', 'in_progress'])
+            .update({ payload: item.payload, updated_at: new Date() });
+        } else {
+          await db('triage_items').insert(item)
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+        }
       } catch (triageErr) {
         const code = triageErr.code || triageErr.name || 'db_error';
         if (failClosed) {

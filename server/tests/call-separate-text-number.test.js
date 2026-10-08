@@ -161,6 +161,13 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(section).not.toMatch(/db\('customers'\)[^;]*\.update\(/);
   });
 
+  test('the later refresh updates the OPEN card only; it never inserts, so a settled card stays settled', () => {
+    const at = src.indexOf('const fileTextNumberCard = async');
+    const section = src.slice(at, at + 3200);
+    expect(section).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: item\.payload/);
+    expect(section).not.toContain('.merge(');
+  });
+
   test('a hard-vetoed no-text call gets neither the hold nor the card (the veto the pipeline applies)', () => {
     expect(src).toContain('const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);');
     expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');
