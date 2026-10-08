@@ -106,6 +106,54 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     }
   });
 
+  // Arena carries three v13 limits (the count of 2, the 56-day gap, the yearly amount): the summaries report all of them.
+  describe('Arena\'s v13 limits are all reported (count, minimum interval, yearly amount)', () => {
+    const shape = (rows) => rows.map((l) => [l.limit_type, l.match_type, Number(l.limit_value), l.severity]);
+    const arenaRows = async (hardOnly = false) => (await ComplianceService.limitRowsWithV13Caps({ hardOnly })).filter((l) => l.product_name === 'Arena 50 WDG' || l.product_name === 'Arena S.E. 50 WDG Insecticide 2.5 lb. (Florida Only)');
+    const ALL = [['annual_max_apps', 'product', 2, 'hard_block'], ['min_interval_days', 'product', 56, 'hard_block'], ['annual_max_rate', 'v13_amount', 0.294, 'hard_block']];
+    const sorted = (rows) => rows.sort((a, b) => String(a[0]).localeCompare(b[0]));
+    const withGate = async (value, fn) => {
+      const saved = process.env.GATE_LAWN_V13;
+      if (value === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = value;
+      try { return await fn(); } finally { if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved; }
+    };
+
+    test('no stored row: the synthetic count, interval and amount rows are all there with the gate on, none with it off', async () => {
+      const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      expect(await db('product_limits').where({ product_id: arena.id })).toEqual([]);
+      expect(sorted(shape(await withGate('true', () => arenaRows())))).toEqual(sorted([...ALL]));
+      expect(sorted(shape(await withGate('true', () => arenaRows(true))))).toEqual(sorted([...ALL]));
+      expect(await withGate(undefined, () => arenaRows())).toEqual([]);
+    });
+
+    test('stored count and interval rows: each is reported once (lowered / raised / hard), the amount joins, nothing is duplicated', async () => {
+      const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      const stored = await db('product_limits').insert([
+        { product_id: arena.id, match_type: 'product', limit_type: 'annual_max_apps', limit_value: 5, limit_unit: 'applications', severity: 'warning', description: 'fixture count' },
+        { product_id: arena.id, match_type: 'product', limit_type: 'min_interval_days', limit_value: 30, limit_unit: 'days', severity: 'warning', description: 'fixture interval' },
+      ]).returning('*');
+      made.limits.push(...stored.map((r) => r.id));
+      try {
+        const rows = await withGate('true', () => arenaRows());
+        expect(sorted(shape(rows))).toEqual(sorted([...ALL]));
+        expect(rows.filter((l) => l.limit_type !== 'annual_max_rate').map((l) => l.id).sort()).toEqual(stored.map((r) => r.id).sort());
+        // Gate off: exactly the stored rows as stored.
+        expect(sorted(shape(await withGate(undefined, () => arenaRows())))).toEqual(sorted([['annual_max_apps', 'product', 5, 'warning'], ['min_interval_days', 'product', 30, 'warning']]));
+      } finally {
+        await db('product_limits').whereIn('id', stored.map((r) => r.id)).del();
+      }
+    });
+
+    test('getProductLimits lists the three rows for a customer, and only Arena is given an interval or an amount row', async () => {
+      const arena = await db('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      const customerId = await customerWithTwoProperties([0], arena);
+      const limits = (await withGate('true', () => ComplianceService.getProductLimits(customerId))).limits.filter((l) => l.productId === arena.id);
+      expect(limits.map((l) => l.limitType).sort()).toEqual(['annual_max_apps', 'annual_max_rate', 'min_interval_days']);
+      const others = (await withGate('true', () => ComplianceService.limitRowsWithV13Caps())).filter((l) => l.match_type === 'v13_amount' || (l.synthetic && l.limit_type === 'min_interval_days'));
+      expect(new Set(others.map((l) => l.product_id))).toEqual(new Set([arena.id]));
+    });
+  });
+
   test('getPropertyComplianceStatus (the compliance page, the context aggregator) is per lawn: one application at each of two properties is no block; two at one property is', async () => {
     const applicationLimits = require('../services/application-limits');
     const spread = await customerWithTwoProperties([0, 1]);

@@ -1825,6 +1825,9 @@ function v13ItemFields(line, gateContext, product) {
         // rate, never the catalog default (Arena: 0.147 oz here, the main label's 0.29 oz in the catalog).
         ratePer1000: Number(row?.ratePer1000) > 0 ? Number(row.ratePer1000) : null,
         rateUnit: Number(row?.ratePer1000) > 0 ? row.rateUnit || null : null,
+        // ... and the row's own carrier (Arena: 4 gal per 1,000 sq ft into the thatch), which the rate is stated over:
+        // the window's carrier (1 gal in May and June) would show a 4-gallon fill covering 4,000 sq ft.
+        carrierGalPer1000: Number(row?.carrierGalPer1000) > 0 ? Number(row.carrierGalPer1000) : null,
       }
       : null,
     // A line the plan cannot size at all: say why; the tech enters the actual work.

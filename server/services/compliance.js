@@ -3,7 +3,7 @@ const logger = require('./logger');
 const { etDateString, etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('../config/county-zips');
 const applicationLimits = require('./application-limits');
-const { capIdMap, withEntryCaps, syntheticCountLimit } = require('../config/lawn-v13-count-caps');
+const { capIdMap, withEntryCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
 
 // service_records.conditions is jsonb (object via pg) but tolerate a raw
 // JSON string — the writer must never throw on a malformed capture.
@@ -72,7 +72,6 @@ const { worstPropertyCount } = require('../utils/property-counts');
 // without one falls back to its visit's property (null = unplaced, counted at every property).
 const placeOnTheLedgerProperty = (rows) => rows.map((row) => ({ ...row, treated_property_id: row.property_id || row.visit_property_id || null }));
 
-const isProductCountRow = (limit) => limit.limit_type === 'annual_max_apps' && limit.match_type === 'product';
 
 // Every product_limits row (hard ones only when asked) with the product name, as the summaries read
 // it. While GATE_LAWN_V13 is on the v13 yearly caps are applied by product id, the way application-limits
@@ -90,13 +89,14 @@ async function limitRowsWithV13Caps({ hardOnly = false } = {}) {
 async function applyV13ToRows(rows) {
   if (require('../config/feature-gates').lawnV13Live?.() !== true) return rows;
   const capIds = await capIdMap(db);
-  const capped = rows.map((limit) => (isProductCountRow(limit) && capIds.has(String(limit.product_id))
-    ? withEntryCaps(capIds.get(String(limit.product_id)), [limit], limit.product_id)[0]
-    : limit));
-  const stored = new Set(capped.filter(isProductCountRow).map((limit) => String(limit.product_id)));
-  const synthetic = [...capIds].filter(([id]) => !stored.has(id))
-    .map(([id, entry]) => ({ ...syntheticCountLimit(entry, id), product_name: entry.name }));
-  return [...capped, ...synthetic];
+  // A capped product's stored rows go through withEntryCaps TOGETHER, so every limit it returns is reported once:
+  // the count (a stored row lowered, else a synthetic one), the minimum interval and the yearly amount.
+  const result = rows.filter((limit) => !capIds.has(String(limit.product_id)));
+  for (const [id, entry] of capIds) {
+    const stored = rows.filter((limit) => String(limit.product_id) === id);
+    result.push(...withEntryCaps(entry, stored, id).map((limit) => ({ product_name: entry.name, ...limit })));
+  }
+  return result;
 }
 
 // For each product, the largest per-lawn count any one customer has this year, computed in SQL:
@@ -128,7 +128,7 @@ async function busiestLawnByProduct(productIds, yearStart) {
 
 // The applications a limit counts: its product's, its MOA group's, or every nitrogen one.
 function matchingApplications(limit, apps) {
-  if (limit.match_type === 'product' && limit.product_id) return apps.filter((a) => a.product_id === limit.product_id);
+  if ((limit.match_type === 'product' || limit.match_type === V13_AMOUNT) && limit.product_id) return apps.filter((a) => a.product_id === limit.product_id);
   if (limit.match_type === 'moa_group') return apps.filter((a) => a.moa_group === limit.match_value);
   if (limit.match_type === 'nitrogen') return apps.filter(isNitrogenApplication);
   return [];

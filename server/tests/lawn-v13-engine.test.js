@@ -903,12 +903,12 @@ describe('Arena at the label\'s low turf rate (owner 2026-10-08)', () => {
   });
 
   test('a v13 spot row carries its own stated rate for the readers that size a dose (the job card\'s product search), not the catalog default', () => {
-    const arenaRow = { ratePer1000: 0.147, rateUnit: 'oz', gates: { trigger: 'chinch_20_to_25_per_sqft' } };
+    const arenaRow = { ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: 4, gates: { trigger: 'chinch_20_to_25_per_sqft' } };
     const product = { id: 'a', name: 'Arena 50 WDG', default_rate_per_1000: 0.29, rate_unit: 'oz' };
     const fields = engine.v13ItemFields({ row: arenaRow, state: 'spot' }, {}, product);
-    expect(fields.spot).toMatchObject({ reference: 'Label rate 0.147 oz per 1,000 sq ft', ratePer1000: 0.147, rateUnit: 'oz' });
+    expect(fields.spot).toMatchObject({ reference: 'Label rate 0.147 oz per 1,000 sq ft', ratePer1000: 0.147, rateUnit: 'oz', carrierGalPer1000: 4 });
     // A spot row with no stated rate falls back to the catalog reference text and carries no number.
     const bare = engine.v13ItemFields({ row: { ratePer1000: null, rateUnit: 'label_rate', gates: {} }, state: 'spot' }, {}, product);
-    expect(bare.spot).toMatchObject({ reference: 'Label rate 0.29 oz per 1,000 sq ft', ratePer1000: null, rateUnit: null });
+    expect(bare.spot).toMatchObject({ reference: 'Label rate 0.29 oz per 1,000 sq ft', ratePer1000: null, rateUnit: null, carrierGalPer1000: null });
   });
 });

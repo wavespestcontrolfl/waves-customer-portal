@@ -95,6 +95,19 @@ describe('December 10-0-22: the recipe and the catalog spec (no database)', () =
     expect(summary).not.toMatch(/pre-?emergent|prodiamine|dithiopyr/i);
   });
 
+  test('the bundled pricing import has the 10-0-22 row under the catalog name: SiteOne, 50 lb, $31.81 ($0.64 per lb), and nothing else spells it', () => {
+    const { parse } = require('csv-parse/sync');
+    const rows = parse(require('fs').readFileSync(require('path').join(__dirname, '../data/pricing.csv'), 'utf8'), { columns: true, skip_empty_lines: true, relax_column_count: true });
+    const hits = rows.filter((row) => /10-0-22/.test(row.Product));
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      Product: F10, Vendor: 'SiteOne', Size: '50 lb', Price: '$31.81', 'Unit Price': '$0.64/lb', Category: 'Fertilizer', 'Active Ingredient / Descriptor': CATALOG.active_ingredient,
+    });
+    // $31.81 / 50 lb, and 4.5 lb per 1,000 sq ft is $2.86.
+    expect(31.81 / 50).toBeCloseTo(0.6362, 4);
+    expect(Math.round(31.81 / 50 * 4.5 * 100) / 100).toBe(2.86);
+  });
+
   test('the recipe Dec line names the catalog row exactly and derives from the N target', () => {
     const dec = v13Recipe.st_augustine.visits.find((v) => v.month === 'Dec');
     expect(dec.primary).toBe(`${F10} — 4.5 lb per 1,000 sq ft (0.45 lb N, 0.99 lb K2O), spreader`);
