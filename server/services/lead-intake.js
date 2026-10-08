@@ -104,6 +104,8 @@ async function createOrUpdateDraftEstimate(customer, interest) {
   // shell, the create path's phone duplicate guard decides.
   const existingDraft = await db('estimates')
     .where({ customer_id: customer.id, status: 'draft' })
+    // An archived shell is retired work, never the intake's live draft.
+    .whereNull('archived_at')
     .whereIn('source', ['sms_intake', 'lead_webhook'])
     .where(function unpriced() {
       this.whereNull('monthly_total').orWhere('monthly_total', 0);
@@ -130,8 +132,10 @@ async function createOrUpdateDraftEstimate(customer, interest) {
     if (!existingDraft.address && customer.address_line1) updates.address = customer.address_line1;
     if (!existingDraft.customer_phone && customer.phone) updates.customer_phone = customer.phone;
     if (!existingDraft.customer_email && customer.email) updates.customer_email = customer.email;
-    await db('estimates').where({ id: existingDraft.id }).update(updates);
-    return existingDraft;
+    // Conditional on still being live: if an archive won the race, fall
+    // through to the create path and its duplicate guard.
+    const updated = await db('estimates').where({ id: existingDraft.id }).whereNull('archived_at').update(updates);
+    if (updated) return existingDraft;
   }
 
   // 128-bit bearer token, matching every other estimate creation path
