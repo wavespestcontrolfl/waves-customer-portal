@@ -31,7 +31,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { bookingServices } = require('../services/scheduling/rain-fit');
+const { bookingRainPlan } = require('../services/scheduling/rain-fit');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -430,6 +430,9 @@ router.post('/', async (req, res) => {
     // A summary also answers the best-times rows (find-time-hints.js
     // buildBestRows), with the picked verdict's drive numbers priced the
     // same way as the chips.
+    const rainPlan = await bookingRainPlan({
+      bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
+    }, db);
     const built = await buildHintSummary(plan, every, {
       rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,
       // Only a strip that shows the rows asks for them; any other skips the
@@ -438,10 +441,10 @@ router.post('/', async (req, res) => {
       // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
       // Each name carries its catalog key when the catalog holds it, so the
       // ranking reads the service's identity, not the words in its name.
-      // An existing visit's own rows say what moves (rain-fit.js bookingServices).
-      serviceTypes: await bookingServices({
-        bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys, serviceId, moveAlone,
-      }, db),
+      // An existing visit's own rows say what moves, and how far a shared
+      // stop reaches around this service (rain-fit.js bookingRainPlan).
+      serviceTypes: rainPlan.services,
+      rainSpan: rainPlan.rainSpan,
     });
     const pickedOut = built.picked;
 

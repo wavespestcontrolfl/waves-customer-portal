@@ -144,16 +144,23 @@ async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = 
 // What an existing visit books, from its rows: { own, siblings }, each a
 // list of { name, key }. `siblings` are the other live services on a shared
 // stop (empty when the move takes this service alone), add-ons included.
+// `span` is where those other services sit against this one's start, in
+// minutes ({ startOffset <= 0, endOffset }): the stop moves as one, each
+// service keeping its own window, so rain counts across all of them. null
+// without siblings or without a readable window.
 // null when the visit cannot be read: the caller keeps what the screen sent.
 async function storedVisitServices(serviceId, { moveAlone = false } = {}, db) {
   try {
     const row = await db('scheduled_services').where({ id: serviceId })
-      .first('id', 'service_type', 'service_key_snapshot', 'visit_id');
+      .first('id', 'service_type', 'service_key_snapshot', 'visit_id', 'window_start');
     if (!row) return null;
     const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
     const others = row.visit_id && !moveAlone
       ? await db('scheduled_services').where({ visit_id: row.visit_id }).whereNot('id', row.id)
-        .whereNotIn('status', TERMINAL_ROW_STATUSES).select('id', 'service_type', 'service_key_snapshot')
+        // A NULL status is a live row (rebooker.js, visit-groups.js); a bare
+        // NOT IN would drop it.
+        .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_ROW_STATUSES))
+        .select('id', 'service_type', 'service_key_snapshot', 'window_start', 'window_end')
       : [];
     const addOns = await db('scheduled_service_addons')
       .whereIn('scheduled_service_id', [row.id, ...others.map((o) => o.id)])
@@ -163,11 +170,37 @@ async function storedVisitServices(serviceId, { moveAlone = false } = {}, db) {
       item(r.service_type, r.service_key_snapshot),
       ...addOns.filter((a) => String(a.scheduled_service_id) === String(r.id)).map((a) => item(a.service_name, a.service_key_snapshot)),
     ];
-    return { own: withAddOns(row), siblings: others.flatMap(withAddOns) };
+    return { own: withAddOns(row), siblings: others.flatMap(withAddOns), span: siblingSpan(row, others) };
   } catch (err) {
     logger.warn(`[rain-fit] visit services lookup failed (the screen's list used): ${err.message}`);
     return null;
   }
+}
+
+function siblingSpan(row, others) {
+  const ownStart = toMin(row.window_start);
+  if (ownStart == null) return null;
+  let startOffset = 0;
+  let endOffset = 0;
+  for (const other of others) {
+    const start = toMin(other.window_start);
+    if (start == null) continue;
+    const end = Math.max(start + 60, toMin(other.window_end) ?? start + 60);
+    startOffset = Math.min(startOffset, start - ownStart);
+    endOffset = Math.max(endOffset, end - ownStart);
+  }
+  return startOffset || endOffset ? { startOffset, endOffset } : null;
+}
+
+// A chip widened to everything that moves with it: `span` from
+// storedVisitServices. The chip's own window is never shortened.
+function widenToSpan(chip, span) {
+  const start = toMin(chip.start_time);
+  if (!span || start == null) return chip;
+  const end = Math.max(start + 60, toMin(chip.end_time) ?? start + 60);
+  const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const clamp = (m) => Math.min(24 * 60 - 1, Math.max(0, m));
+  return { ...chip, start_time: hhmm(clamp(start + span.startOffset)), end_time: hhmm(clamp(Math.max(end, start + span.endOffset))) };
 }
 
 // The find-time request's services for the ranking: the primary service and
@@ -179,8 +212,14 @@ async function storedVisitServices(serviceId, { moveAlone = false } = {}, db) {
 // service out: the stored primary service and add-ons, unless the screen
 // sent its own list (the edit form's unsaved services), plus every live
 // service that shares the stop, unless the move takes this one alone.
-async function bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys, serviceId, moveAlone = false }, db) {
-  if (bestRows !== true) return [];
+async function bookingServices(args, db) {
+  return (await bookingRainPlan(args, db)).services;
+}
+
+// bookingServices plus `rainSpan`: the shared stop's reach around the
+// tapped service (storedVisitServices `span`), or null.
+async function bookingRainPlan({ bestRows, serviceType, serviceTypes, serviceKeys, serviceId, moveAlone = false }, db) {
+  if (bestRows !== true) return { services: [], rainSpan: null };
   let names = Array.isArray(serviceTypes) ? serviceTypes : [];
   let keys = Array.isArray(serviceKeys) && serviceKeys.length === names.length ? serviceKeys : [];
   const stored = serviceId ? await storedVisitServices(serviceId, { moveAlone }, db) : null;
@@ -207,7 +246,8 @@ async function bookingServices({ bestRows, serviceType, serviceTypes, serviceKey
   // Services past the cap are not looked up, so they cannot be called
   // rain-OK: one unclassified entry makes the whole booking outdoor rather
   // than letting the classified ones speak for it (Codex #6120 r4).
-  return withCatalogKeys([...seen.values()], db).then((services) => (overflow ? [...services, OVERFLOW_SERVICE] : services));
+  const services = await withCatalogKeys([...seen.values()], db);
+  return { services: overflow ? [...services, OVERFLOW_SERVICE] : services, rainSpan: stored?.span || null };
 }
 
 // The ranking's forecast: NWS hourly, Open-Meteo when NWS fails; fail open
@@ -295,10 +335,11 @@ function rankingNeedsForecast(fit, days, today, pickedDate) {
 }
 
 // The ranking's tier function for one forecast, or null (drive-only order)
-// when there is no forecast or the booking is neutral.
-function rainTierOf(fit, hourly, today) {
+// when there is no forecast or the booking is neutral. `span` widens each
+// chip to the whole shared stop that moves with it.
+function rainTierOf(fit, hourly, today, span = null) {
   if (fit === 'neutral' || !hourly) return null;
-  return (chip) => rainTier(fit, isWetWindow(hourly, chip, today), inRainHorizon(chip.date, today));
+  return (chip) => rainTier(fit, isWetWindow(hourly, widenToSpan(chip, span), today), inRainHorizon(chip.date, today));
 }
 
-module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, storedVisitServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, bookingRainPlan, storedVisitServices, widenToSpan, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
