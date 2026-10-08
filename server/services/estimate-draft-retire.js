@@ -188,13 +188,8 @@ async function detachLeads(trx, { pair, draftId, leads, sentRow }) {
 // this commits, so nothing changes its owner between the owner check and the
 // send replay.
 async function retireOneDraft(trx, pair) {
-  // Lead first, then estimates — the order createOrReuseAdminEstimate takes
-  // (lead, then its estimate), so a staff save of the same lead cannot
-  // deadlock with this sweep.
-  // The sweep never waits behind another writer: customer acceptance locks
-  // the replacement estimate and THEN its lead, the reverse of this order, so
-  // a wait here could deadlock a customer's request. A busy row means "not
-  // this tick" (lock_not_available is skipped by the caller).
+  // The sweep never waits behind another writer. A busy row means "not this
+  // tick" (lock_not_available is skipped by the caller).
   await trx.raw("SET LOCAL lock_timeout = '1500ms'");
   // Draft, then its leads, then the sent estimate — every lock NOWAIT, so
   // the sweep never waits on one row while holding another, whatever order
