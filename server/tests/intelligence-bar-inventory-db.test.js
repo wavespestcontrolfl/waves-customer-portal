@@ -449,6 +449,26 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(listed.state).toBe(detail.body.taskState);
   }, 40000);
 
+  // The database clock decides which task cards are expired, as it does for a
+  // Confirm's claim: a server clock that runs ahead must not replace a card
+  // the database can still claim (Codex #6111 r7).
+  test('a task card the database still holds live is not replaced when the server clock runs ahead', async () => {
+    const row = await product();
+    const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' }, `Add 2 lb of ${row.name} that arrived`);
+    const card = await db('ib_pending_actions').where({ id: proposed.body.pendingActions[0].id }).first();
+    const [task] = await db('ib_tasks').where({ id: card.task_id })
+      .update({ state: 'running', lease_expires_at: db.raw("now() + interval '5 minutes'") }).returning('*');
+    const ahead = jest.spyOn(Date, 'now').mockReturnValue(new Date(card.expires_at).getTime() + 3600000);
+    try {
+      const again = await require('../services/intelligence-bar/pending-actions').createPendingAction({ toolName: card.tool_name,
+        params: card.params, requestedBy: actor, taskId: task.id, runnerToken: task.runner_token, stepKey: card.step_key });
+      expect(again.id).toBe(card.id);
+    } finally {
+      ahead.mockRestore();
+    }
+    expect(await db('ib_pending_actions').where({ task_id: task.id }).select('id', 'step_key')).toEqual([{ id: card.id, step_key: card.step_key }]);
+  }, 40000);
+
   test('a chosen card that expired continues as a fresh picker in the same task', async () => {
     const prefix = `ResumeQA${crypto.randomUUID().slice(0, 8)}`;
     const ten = await product({ name: `${prefix} 10% SC` });

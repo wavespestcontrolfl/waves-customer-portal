@@ -25,6 +25,7 @@ const mockGetPendingRow = jest.fn();
 const mockRetireExpiredAction = jest.fn();
 const mockAttachThread = jest.fn(async () => 1);
 const mockFindDerivedCard = jest.fn(async () => null);
+const mockApprovedCardParams = jest.fn(async ({ params }) => ({ ...params, _approved_for_store: true }));
 
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockMessagesCreate(...args) },
@@ -87,6 +88,7 @@ jest.mock('../services/intelligence-bar/banking-tools', () => ({ BANKING_TOOLS: 
 jest.mock('../services/intelligence-bar/pending-actions', () => ({
   TTL_MINUTES: 10,
   createPendingAction: (...args) => mockCreatePendingAction(...args),
+  approvedCardParams: (...args) => mockApprovedCardParams(...args),
   claimForConfirm: (...args) => mockClaimForConfirm(...args),
   cancelPendingAction: jest.fn(),
   recordResult: (...args) => mockRecordResult(...args),
@@ -273,6 +275,13 @@ describe('/choose-product', () => {
     // The claim and the new card share one transaction.
     expect(mockClaimForConfirm.mock.calls[0][2]).toMatchObject({ trx: { isTrx: true } });
     expect(proposed.trx).toEqual({ isTrx: true });
+    // Every pool read (the preview, the target, the approved params) ran before
+    // the transaction took the picker, so the transaction needs one connection.
+    const claimedAt = mockClaimForConfirm.mock.invocationCallOrder[0];
+    for (const read of [mockExecuteProcurementTool, mockStockTarget, mockApprovedCardParams]) {
+      expect(read.mock.invocationCallOrder[0]).toBeLessThan(claimedAt);
+    }
+    expect(proposed.approvedParams).toMatchObject({ product_id: PRODUCT_B, _approved_for_store: true });
     expect(confirmedCalls()).toHaveLength(0);
     expect(mockRecordResult).toHaveBeenCalledWith(CHOICE_ID, expect.objectContaining({ success: true, written: false, chosen_product_id: PRODUCT_B }),
       { database: { isTrx: true } });
@@ -323,7 +332,7 @@ describe('/choose-product', () => {
     expect(mockProductIsActive).toHaveBeenCalledWith(PRODUCT_A, { isTrx: true });
     expect(mockRecordResult).not.toHaveBeenCalled();
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
-    expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
+    // The read-only preview ran before the transaction; nothing was stored.
   });
 
   test('an unlisted id names the reason', async () => {
@@ -415,6 +424,9 @@ describe('/show-again', () => {
     // Retired inside the same transaction that stores the new card.
     expect(mockRetireExpiredAction).toHaveBeenCalledWith(CHOICE_ID, 'admin-1', { trx: { isTrx: true } });
     expect(mockCreatePendingAction.mock.calls[0][0].trx).toEqual({ isTrx: true });
+    // The fresh preview was read before the transaction retired the card.
+    expect(mockExecuteProcurementTool.mock.invocationCallOrder[0]).toBeLessThan(mockRetireExpiredAction.mock.invocationCallOrder[0]);
+    expect(mockCreatePendingAction.mock.calls[0][0].approvedParams).toMatchObject({ _approved_for_store: true, _ib_shown_from: CHOICE_ID });
     const previewInput = mockExecuteProcurementTool.mock.calls[0][1];
     expect(Object.keys(previewInput).some((k) => k.startsWith('_'))).toBe(false);
     const stored = mockCreatePendingAction.mock.calls[0][0].params;
@@ -447,7 +459,7 @@ describe('/show-again', () => {
       expect(status).toBe(409);
       expect(body.code).toBe('not_expired');
     });
-    expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
+    // The database clock decides expiry inside the transaction; nothing is stored.
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
   });
 

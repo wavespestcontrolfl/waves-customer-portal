@@ -1973,17 +1973,30 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // marker predates it and is counted conservatively (Codex r4).
   if (ownerDirectVerdict) params._ib_owner_direct = directVerdict?.direct === true;
 
-  return storeProposalCard({ req, toolName: toolUse.name, params, preview, context, task, requestStartedAt, cardText, reproposal });
+  const card = { req, toolName: toolUse.name, params, preview, context, task, requestStartedAt, cardText, sourcePin: reproposal?.sourcePin };
+  return reproposal ? prepareProposalCard(card) : storeProposalCard(card);
+}
+
+// A card made from another card (a product choice, Show again) is stored
+// inside the transaction that uses up its source card. Everything that reads
+// through the shared pool (the preview above, the task scope here) is done
+// BEFORE that transaction opens, so the transaction never waits for a second
+// connection (Codex #6111 r7). Returns { prepared } for storeProposalCard.
+async function prepareProposalCard(card) {
+  Object.assign(card.params, card.sourcePin);
+  const approvedParams = await PendingActions.approvedCardParams({ toolName: card.toolName, params: card.params,
+    taskId: card.task?.id, requestStartedAt: card.requestStartedAt });
+  return { prepared: { ...card, approvedParams } };
 }
 
 // Stores a proposal as a pending card and builds what the model and the
 // client get. Every card path ends here: the /query proposal, a picked
 // product and Show again. `cardText` is a card's own display line and model
-// note (a picker card); `reproposal.sourcePin` names the card a derived card
-// came from (a server pin, so a retried request finds it); `reproposal.trx`
-// stores the card inside the caller's transaction.
-async function storeProposalCard({ req, toolName, params, preview, context, task, requestStartedAt, cardText, reproposal }) {
-  Object.assign(params, reproposal?.sourcePin);
+// note (a picker card); `sourcePin` names the card a derived card came from (a
+// server pin, so a retried request finds it); `trx` and `approvedParams`
+// store a prepared card inside the caller's transaction.
+async function storeProposalCard({ req, toolName, params, preview, context, task, requestStartedAt, cardText, sourcePin = null, trx = null, approvedParams = null }) {
+  Object.assign(params, sourcePin);
   // W0B authorization contract: the structured, server-built effect set the
   // operator approves. Derived from the same curated display params the card
   // lists plus the proposal-time pins — never model text — then hashed; the
@@ -2006,7 +2019,8 @@ async function storeProposalCard({ req, toolName, params, preview, context, task
     // When this request started, on the platform-on and platform-off paths alike:
     // a request that finishes late must not out-rank one that started later.
     requestStartedAt,
-    trx: reproposal?.trx,
+    trx,
+    approvedParams,
     ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolName, params, preview),
       ...(task.inherited ? { inheritedTask: true } : {}) } : {}),
   });
@@ -2020,7 +2034,7 @@ async function storeProposalCard({ req, toolName, params, preview, context, task
     return { failed: true, modelResult: { error: 'A newer request in this conversation already replaced this proposal. Nothing was prepared and nothing was changed. Do not propose it again; tell the operator to use the newer card.' } };
   }
   if (task && row.status !== 'pending') {
-    const receipt = await PendingActions.getActionReceipt(row.id, getAdminActorId(req));
+    const receipt = await PendingActions.getActionReceipt(row.id, getAdminActorId(req), trx ? { database: trx } : undefined);
     return { failed: !receipt.success, modelResult: { outcome: receipt.outcome, result: receipt.result,
       note: 'This step already has a durable outcome. Do not repeat it.' } };
   }
@@ -2099,41 +2113,65 @@ function pickerChoiceRefusal(req, row, productId) {
   return role ? { status: role.status, body: { error: role.error } } : null;
 }
 
+// The card a re-proposal could not make: the refusal the operator sees.
+const cardRefusal = (proposed, fallback) => ({ status: 409, body: { error: proposed.modelResult?.error || fallback.error, code: proposed.modelResult?.code || fallback.code } });
+
 // Claims the picker card and stores the normal card for the chosen product in
 // ONE transaction (Codex #6111 r2): any refusal or failure on the way rolls
-// the claim back, so the picker stays usable and a retry can succeed. Writes
-// no stock. Returns { status, body }.
-async function chooseProductOnCard(req, id, productId, contractHash) {
+// the claim back, so the picker stays usable and a retry can succeed. The
+// card is prepared from `row` (the picker as just read) before the
+// transaction opens. Writes no stock. Returns { status, body }.
+async function chooseProductOnCard(req, row, productId, contractHash) {
   const actor = getAdminActorId(req);
   const rollback = new Error('product choice rolled back');
+  const proposed = row.status === 'pending' ? await prepareChosenProduct(req, row, productId) : null;
   let answer = null;
   let source = null;
   try {
     await db.transaction(async (trx) => {
-      const claim = await PendingActions.claimForConfirm(id, actor, { contractHash, trx, forProductChoice: true });
+      const claim = await PendingActions.claimForConfirm(row.id, actor, { contractHash, trx, forProductChoice: true });
       if (claim.error) {
         answer = claim.error === 'already_used' ? null : { status: claimErrorStatus(claim.error), body: { error: claimErrorMessage(claim.error) } };
         throw rollback;
       }
       source = claim.action;
-      answer = await proposeChosenProduct(req, source, productId, trx);
+      answer = await storeChosenProduct(source, productId, sameCard(source, row) ? proposed : null, trx);
       if (answer.status !== 200) throw rollback;
     });
   } catch (err) {
     if (err !== rollback) throw err;
   }
   // Already used: a retry after a lost response gets the card that choice made.
-  if (!answer) return replayProductChoice(id, actor, productId);
+  if (!answer) return replayProductChoice(row.id, actor, productId);
   if (answer.status === 200) {
     await attachDerivedCard(source, answer.body.pendingAction.id, actor);
-    logger.info(`[intelligence-bar:pending] Product chosen on ${id}; proposed ${answer.body.pendingAction.id}`);
+    logger.info(`[intelligence-bar:pending] Product chosen on ${row.id}; proposed ${answer.body.pendingAction.id}`);
   }
   return answer;
 }
 
-// Inside chooseProductOnCard's transaction: propose the normal card for the
-// chosen product and record on the picker card what happened.
-async function proposeChosenProduct(req, action, productId, trx) {
+// The row a transaction took is the row its card was prepared from.
+const sameCard = (taken, read) => String(taken.params_hash) === String(read.params_hash);
+
+// Before chooseProductOnCard's transaction: the normal adjust_stock proposal
+// for the chosen product, prepared and not stored.
+async function prepareChosenProduct(req, row, productId) {
+  const input = publicCardInput(row.params);
+  delete input.product_name;
+  // A task's picker hands its step to the new card: the task keeps waiting
+  // for that card's outcome instead of reading the picker as the result.
+  const task = row.task_id ? { id: row.task_id, runner_token: null, inherited: true } : null;
+  return proposePendingWrite({
+    toolUse: { name: 'adjust_stock', input: { ...input, product_id: productId } },
+    req, context: row.context || null, requestStartedAt: new Date(),
+    task, taskContext: task ? taskScopeFromProof(row.params?._ib_task_context) : null,
+    reproposal: { groundedTarget: { productId }, sourcePin: { _ib_chosen_from: String(row.id) } },
+  });
+}
+
+// Inside chooseProductOnCard's transaction: store the prepared card and
+// record on the picker card what happened.
+async function storeChosenProduct(action, productId, proposed, trx) {
   // The claimed row is the authority (its params hash was just verified).
   if (!(offeredProductIds(action.params) || []).includes(productId)) {
     return { status: 409, body: { error: 'That product was not on this card. Nothing was written.', code: 'product_not_offered' } };
@@ -2143,26 +2181,15 @@ async function proposeChosenProduct(req, action, productId, trx) {
   if (!(await require('../services/intelligence-bar/procurement-tools').productIsActive(productId, trx))) {
     return { status: 409, body: { error: 'That product is no longer active — pick another.', code: 'product_inactive' } };
   }
-  const input = publicCardInput(action.params);
-  delete input.product_name;
-  // A task's picker hands its step to the new card: the task keeps waiting
-  // for that card's outcome instead of reading the picker as the result.
-  const task = action.task_id ? { id: action.task_id, runner_token: null, inherited: true } : null;
-  const proposed = await proposePendingWrite({
-    toolUse: { name: 'adjust_stock', input: { ...input, product_id: productId } },
-    req, context: action.context || null, requestStartedAt: new Date(),
-    task, taskContext: task ? taskScopeFromProof(action.params?._ib_task_context) : null,
-    reproposal: { groundedTarget: { productId }, sourcePin: { _ib_chosen_from: String(action.id) }, trx },
-  });
-  if (proposed.failed || !proposed.clientPayload) {
-    const refused = proposed.modelResult || {};
-    return { status: 409, body: { error: refused.error || 'The card for this product could not be made.', code: refused.code || 'product_choice_refused' } };
-  }
-  const name = proposed.modelResult?.product?.name || 'The product';
+  const refusal = { error: 'The card for this product could not be made.', code: 'product_choice_refused' };
+  if (!proposed?.prepared) return cardRefusal(proposed || {}, refusal);
+  const stored = await storeProposalCard({ ...proposed.prepared, trx });
+  if (stored.failed || !stored.clientPayload) return cardRefusal(stored, refusal);
+  const name = stored.modelResult?.product?.name || 'The product';
   await PendingActions.recordResult(action.id, { success: true, state: 'completed', written: false, chosen_product_id: productId,
     note: 'No stock was changed by this card. A new card for the chosen product waits for the operator to confirm.',
     receipt: { label: 'Product chosen', summary: `${name}. Confirm the new card to change the stock.` } }, { database: trx });
-  return { status: 200, body: { success: true, outcome: 'completed', chosen_product_id: productId, pendingAction: proposed.clientPayload } };
+  return { status: 200, body: { success: true, outcome: 'completed', chosen_product_id: productId, pendingAction: stored.clientPayload } };
 }
 
 // A stored card keeps only its approval proof, not the task's raw context.
@@ -2224,31 +2251,34 @@ function platformInputRefusal(req, row, input) {
 
 // Retires the expired card and stores its fresh proposal in ONE transaction:
 // a refusal or an error on the way rolls the retirement back, so the card
-// stays expired and a retry can succeed. Returns { status, body }.
-async function showCardAgain(req, id) {
+// stays expired and a retry can succeed. The proposal is prepared from `row`
+// (the card as just read) before the transaction opens. Returns { status, body }.
+async function showCardAgain(req, row) {
   const actor = getAdminActorId(req);
   const rollback = new Error('show again rolled back');
+  // A decided card cannot be retired below: nothing to prepare.
+  const proposed = row.status === 'pending' ? await prepareShownAgain(req, row, publicCardInput(row.params)) : {};
   let answer = null;
   let retired = null;
   try {
     await db.transaction(async (trx) => {
-      retired = await PendingActions.retireExpiredAction(id, actor, { trx });
+      retired = await PendingActions.retireExpiredAction(row.id, actor, { trx });
       if (!retired) throw rollback;
-      const proposed = await proposeShownAgain(req, retired, publicCardInput(retired.params), trx);
-      if (proposed.failed || !proposed.clientPayload) {
-        answer = { status: 409, body: { error: proposed.modelResult?.error || 'This action could not be shown again.', code: proposed.modelResult?.code } };
+      const stored = proposed.prepared && sameCard(retired, row) ? await storeProposalCard({ ...proposed.prepared, trx }) : proposed;
+      if (stored.failed || !stored.clientPayload) {
+        answer = cardRefusal(stored, { error: 'This action could not be shown again.' });
         throw rollback;
       }
-      answer = { status: 200, body: { success: true, pendingAction: proposed.clientPayload } };
+      answer = { status: 200, body: { success: true, pendingAction: stored.clientPayload } };
     });
   } catch (err) {
     if (err !== rollback) throw err;
   }
   if (answer?.status === 200) {
     await attachDerivedCard(retired, answer.body.pendingAction.id, actor);
-    logger.info(`[intelligence-bar:pending] Expired action ${id} shown again as ${answer.body.pendingAction.id}`);
+    logger.info(`[intelligence-bar:pending] Expired action ${row.id} shown again as ${answer.body.pendingAction.id}`);
   }
-  return answer || showAgainReplay(id, actor);
+  return answer || showAgainReplay(row.id, actor);
 }
 
 // Not retired now: a retry after a lost response gets the card Show again
@@ -2259,10 +2289,10 @@ async function showAgainReplay(id, actor) {
   return { status: 409, body: { error: 'Only an expired card that was never confirmed or cancelled can be shown again.', code: 'not_expired' } };
 }
 
-// Show again's fresh proposal for a retired stock card. A picker card
-// re-lists its own products with fresh numbers; an adjust_stock card keeps
-// the product its row stored.
-async function proposeShownAgain(req, row, input, trx) {
+// Before showCardAgain's transaction: the fresh proposal for an expired stock
+// card, prepared and not stored. A picker card re-lists its own products with
+// fresh numbers; an adjust_stock card keeps the product its row stored.
+async function prepareShownAgain(req, row, input) {
   const stored = row.params || {};
   const base = { req, context: row.context || null, requestStartedAt: new Date() };
   const sourcePin = { _ib_shown_from: String(row.id) };
@@ -2270,10 +2300,10 @@ async function proposeShownAgain(req, row, input, trx) {
     const card = await require('../services/intelligence-bar/procurement-tools').productChoiceCard({ params: input, seedIds: stored._ib_product_choices });
     if (!card) return { failed: true, modelResult: { error: 'None of the products on the earlier card can take this amount now. Nothing was written and no confirmation card was created.', code: 'target_clarification_required' } };
     if (card.failed) return card;
-    return storeProposalCard({ ...base, toolName: row.tool_name, params: card.params, preview: card.preview, task: null, cardText: card, reproposal: { sourcePin, trx } });
+    return prepareProposalCard({ ...base, toolName: row.tool_name, params: card.params, preview: card.preview, task: null, cardText: card, sourcePin });
   }
   return proposePendingWrite({ ...base, toolUse: { name: row.tool_name, input },
-    reproposal: { groundedTarget: { productId: stored.product_id || null }, sourcePin, trx } });
+    reproposal: { groundedTarget: { productId: stored.product_id || null }, sourcePin } });
 }
 
 function getAdminActorId(req) {
@@ -4538,9 +4568,10 @@ router.post('/choose-product', async (req, res, next) => {
     if (ibWritesDisabled()) return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
     const actor = getAdminActorId(req);
     // Checked before the claim, so a wrong id leaves the card usable.
-    const refusal = pickerChoiceRefusal(req, await PendingActions.getPendingRow(id, actor), productId);
+    const row = await PendingActions.getPendingRow(id, actor);
+    const refusal = pickerChoiceRefusal(req, row, productId);
     if (refusal) return res.status(refusal.status).json(refusal.body);
-    const chosen = await chooseProductOnCard(req, id, productId, req.body.contract_hash ? String(req.body.contract_hash).trim() : null);
+    const chosen = await chooseProductOnCard(req, row, productId, req.body.contract_hash ? String(req.body.contract_hash).trim() : null);
     return res.status(chosen.status).json(chosen.body);
   } catch (err) {
     logger.error(`[intelligence-bar] choose-product failed (code=${err.code || 'unknown'})`);
@@ -4564,7 +4595,7 @@ router.post('/show-again', async (req, res, next) => {
     if (refusal) return res.status(refusal.status).json(refusal.body);
     const invalid = platformInputRefusal(req, row, publicCardInput(row.params));
     if (invalid) return res.status(409).json({ error: invalid.error || 'This action cannot be shown again.', code: invalid.code });
-    const shown = await showCardAgain(req, id);
+    const shown = await showCardAgain(req, row);
     return res.status(shown.status).json(shown.body);
   } catch (err) {
     logger.error(`[intelligence-bar] show-again failed (code=${err.code || 'unknown'})`);
