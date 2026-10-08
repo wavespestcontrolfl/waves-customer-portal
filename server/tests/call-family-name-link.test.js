@@ -17,7 +17,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 const {
   pickNamedAccountHolder, normName, fullNameKey, statedAddressCorroborates,
-  findLiveCustomersByFullName, suggestFamilyAccounts, fileFamilyAccountCard, CARD_REASON,
+  findLiveCustomersByFullName, suggestFamilyAccounts, fileFamilyAccountCard, CARD_REASON, RETIRE_RULE,
 } = require('../services/call-family-name-link');
 const { buildTriageItem } = require('../services/call-routing-gates');
 
@@ -105,10 +105,11 @@ describe('the card is advisory in the customer-field lane', () => {
 });
 
 describe('suggest-only: nothing is written but the card', () => {
-  test('the module has no writer for links, contacts, opt-ins, texts or enrollment, and no gate', () => {
+  test('the module writes only triage cards: no link, contact, opt-in, text or enrollment, and no gate', () => {
     const code = moduleSource.split('\n').filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('//') && !line.trim().startsWith('/*')).join('\n');
-    expect(code).not.toMatch(/\.update\(|\.delete\(|\('call_log'\)|persistCallSecondaryContact|recipient_optin|sendCustomerMessage|forShare|transaction\(|GATE_CALL_FAMILY_NAME_LINK/);
-    expect((code.match(/\.insert\(/g) || [])).toHaveLength(1);
+    expect(code).not.toMatch(/persistCallSecondaryContact|recipient_optin|sendCustomerMessage|forShare|GATE_CALL_FAMILY_NAME_LINK|created_customer_id/);
+    // every write targets triage_items (plus the call-review aggregate helper); never customers or call_log
+    expect(code).not.toMatch(/trx\('customers'\)\.(update|insert)|conn\('customers'\)\.(update|insert)|trx\('call_log'\)\.update|conn\('call_log'\)\.update/);
     expect(code).toContain("'triage_items'");
   });
   test('the processor makes one short call before the customer is created, and has no family-link state', () => {
@@ -128,9 +129,10 @@ describe('suggest-only: nothing is written but the card', () => {
 describe('the suggestion has its own resolution (a verdict must not close it or the call\'s other cards)', () => {
   const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
   test('/verdict refuses family_account_candidates with a 400', () => {
-    const at = triage.indexOf("if (item.reason_code === 'family_account_candidates') {");
+    expect(triage).toMatch(/family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict/);
+    const at = triage.indexOf('if (NOT_A_VERDICT_MESSAGES[item.reason_code]) {');
     expect(at).toBeGreaterThan(0);
-    expect(triage.slice(at, at + 400)).toContain('res.status(400)');
+    expect(triage.slice(at, at + 200)).toContain('res.status(400)');
   });
   test('the call-wide verdict sweep leaves it alone', () => {
     const at = triage.indexOf(".whereNotIn('reason_code', [\n          'email_bounce_reverify'");
@@ -143,17 +145,20 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(triage).toContain("q.whereNotIn('reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain('if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {');
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
-    const branch = client.slice(client.indexOf(') : isFamilyCard ? ('));
-    expect(branch.slice(0, 200)).toContain('isAdmin ? (');
+    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);');
+    const branch = client.slice(client.indexOf(') : isAdminResolveCard ? ('));
+    expect(branch.slice(0, 600)).toContain('isAdmin ? (');
   });
   test('a merged candidate opens its survivor: the list resolves customer_ids for this card too', () => {
-    expect(triage).toContain("i.reason_code === 'missing_first_name' || i.reason_code === 'family_account_candidates'");
+    expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];");
+    expect(triage).toContain('items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code))');
   });
-  test('the inbox shows Resolve, not Accept / Deny, on the card', () => {
+  test('the inbox: no verdict badge or Accept / Deny, own evidence component, looked up by reason', () => {
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
-    expect(client).toContain('const isFamilyCard = isTriage && item.reason_code === "family_account_candidates";');
-    expect(client).toContain('!isFirstNameCard && !isFamilyCard &&');
-    expect(client).toContain(') : isFamilyCard ? (');
+    expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\([\s\S]*?"family_account_candidates"[\s\S]*?\]\);/);
+    expect(client).toContain('!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard');
+    expect(client).toContain('const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence };');
+    expect(client).toContain('EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence');
   });
 });
 
@@ -248,6 +253,95 @@ const SKIP = !process.env.DATABASE_URL;
     expect(card.payload.customer_ids).toHaveLength(5);
     await trx('customers').where({ city: 'City5' }).update({ deleted_at: new Date() });
     expect((await suggestFamilyAccounts(input(await call()))).more_accounts).toBe(false);
+  });
+
+  describe('reprocess: refresh the open card, retire it when the suggestion is gone', () => {
+    const TOKEN = 'proc-token-a';
+    const withToken = (callLogId, over = {}) => ({ ...input(callLogId), procToken: TOKEN, ...over });
+    const callWithToken = (over = {}) => call({ processing_token: TOKEN, ...over });
+
+    test('a still-true suggestion updates the open card payload in place (one card)', async () => {
+      const mom = await customer();
+      const callLogId = await callWithToken();
+      await fileFamilyAccountCard(withToken(callLogId));
+      const [first] = await trx('triage_items').where({ call_log_id: callLogId });
+      await trx('customers').where({ id: mom }).update({ city: 'Venice' });
+      await fileFamilyAccountCard(withToken(callLogId));
+      const cards = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(cards).toHaveLength(1);
+      expect(cards[0].id).toBe(first.id);
+      expect(cards[0].payload.holder_candidates[0].city).toBe('Venice');
+    });
+
+    test('the refresh also works after this pass created a customer for the caller (call linked, number now known)', async () => {
+      const mom = await customer();
+      const callLogId = await callWithToken();
+      await fileFamilyAccountCard(withToken(callLogId));
+      const daughter = await customer({ first_name: 'Dana', last_name: 'Lee', phone: '+19415550101', address_line1: '9 Elsewhere Ct' });
+      await trx('call_log').where({ id: callLogId }).update({ customer_id: daughter });
+      await trx('customers').where({ id: mom }).update({ city: 'Venice' });
+      await fileFamilyAccountCard(withToken(callLogId, { call: { id: callLogId, from_phone: '+19415550101', customer_id: daughter } }));
+      const cards = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ status: 'open' });
+      expect(cards[0].payload.holder_candidates[0].city).toBe('Venice');
+    });
+
+    test('the suggestion disappearing (no longer a family call, or no match) retires the open card as an auto-dismiss', async () => {
+      const mom = await customer();
+      for (const gone of [
+        { v2CanonicalExtraction: { caller: { relationship_to_property: 'other' }, meta: {} } },
+        { extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: true } },
+      ]) {
+        const callLogId = await callWithToken();
+        await fileFamilyAccountCard(withToken(callLogId));
+        await fileFamilyAccountCard(withToken(callLogId, gone));
+        const [card] = await trx('triage_items').where({ call_log_id: callLogId });
+        expect(card).toMatchObject({ status: 'dismissed', resolution_source: 'auto', resolution_rule: RETIRE_RULE });
+        expect((await trx('call_log').where({ id: callLogId }).first()).review_status).toBe('dismissed');
+      }
+      const noMatchCall = await callWithToken();
+      await fileFamilyAccountCard(withToken(noMatchCall));
+      await trx('customers').where({ id: mom }).update({ deleted_at: new Date() });
+      await fileFamilyAccountCard(withToken(noMatchCall));
+      expect((await trx('triage_items').where({ call_log_id: noMatchCall }))[0]).toMatchObject({ status: 'dismissed', resolution_rule: RETIRE_RULE });
+    });
+
+    test('an in_progress card is never touched, refreshed or retired', async () => {
+      await customer();
+      const callLogId = await callWithToken();
+      await fileFamilyAccountCard(withToken(callLogId));
+      await trx('triage_items').where({ call_log_id: callLogId }).update({ status: 'in_progress' });
+      const [before] = await trx('triage_items').where({ call_log_id: callLogId });
+      await fileFamilyAccountCard(withToken(callLogId, { extracted: { first_name: 'Dana', last_name: 'Lee', is_voicemail: true } }));
+      await fileFamilyAccountCard(withToken(callLogId, { statedAddress: { street_line_1: '9 Nowhere Ct' } }));
+      const cards = await trx('triage_items').where({ call_log_id: callLogId });
+      expect(cards).toHaveLength(1);
+      expect(cards[0]).toMatchObject({ status: 'in_progress' });
+      expect(cards[0].payload).toEqual(before.payload);
+    });
+
+    test('a card an operator closed is not reopened; a card the sweep retired is re-filed when the suggestion returns', async () => {
+      await customer();
+      const handled = await callWithToken();
+      await fileFamilyAccountCard(withToken(handled));
+      await trx('triage_items').where({ call_log_id: handled }).update({ status: 'dismissed', resolution_source: 'operator' });
+      await fileFamilyAccountCard(withToken(handled));
+      expect(await trx('triage_items').where({ call_log_id: handled, status: 'open' })).toHaveLength(0);
+      const swept = await callWithToken();
+      await fileFamilyAccountCard(withToken(swept));
+      await fileFamilyAccountCard(withToken(swept, { v2CanonicalExtraction: { caller: { relationship_to_property: 'other' }, meta: {} } }));
+      expect(await trx('triage_items').where({ call_log_id: swept, status: 'open' })).toHaveLength(0);
+      await fileFamilyAccountCard(withToken(swept));
+      expect(await trx('triage_items').where({ call_log_id: swept, status: 'open' })).toHaveLength(1);
+    });
+
+    test('a pass that lost the processing claim writes nothing', async () => {
+      await customer();
+      const callLogId = await call({ processing_token: 'someone-else' });
+      await fileFamilyAccountCard(withToken(callLogId));
+      expect(await trx('triage_items').where({ call_log_id: callLogId })).toHaveLength(0);
+    });
   });
 
   test('a second filing for the same call adds no second card', async () => {

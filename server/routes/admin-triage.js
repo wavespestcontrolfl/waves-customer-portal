@@ -18,10 +18,25 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Cards whose payload.customer_ids lists the customers to open: the list resolves each to its live merge
+// survivor (owed_customer_open_ids).
+const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];
 // Cards only an admin sees and settles: property-role proposals embed the customer's other property
 // addresses, and a family-account suggestion lists customers and the caller's number for the office to
 // link. Hidden from the tech list and counts, and refused on every shared transition.
 const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];
+// Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
+// the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
+// what the card asks).
+const NOT_A_VERDICT_MESSAGES = {
+  email_bounce_reverify: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.',
+  property_role_confirm: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.',
+  reschedule_link_promise: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.',
+  attached_booking_followup_unbooked: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.',
+  missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
+  family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.',
+};
+
 
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
@@ -349,7 +364,7 @@ router.get('/', async (req, res) => {
 
     // A first-name card's "Open customer" links must reach an editable record: a listed customer
     // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
-    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name' || i.reason_code === 'family_account_candidates');
+    const nameCards = items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code));
     if (nameCards.length) {
       const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
       for (const item of nameCards) {
@@ -1852,36 +1867,11 @@ router.post('/:id/verdict', async (req, res) => {
     // arrive DAYS after the call and say nothing about whether the AI routed
     // it correctly. They resolve individually via /resolve; recording an
     // accept/deny on one would pollute route_feedback calibration.
-    if (item.reason_code === 'email_bounce_reverify') {
-      return res.status(400).json({ error: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.' });
-    }
-    // Property-role cards are pending DATA changes, not call-routing
-    // judgments — they apply via /apply-property-roles or dismiss.
-    if (item.reason_code === 'property_role_confirm') {
-      return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
-    }
-    // A parked reschedule-link promise is exception handling on an
-    // OBLIGATION, not a call-routing judgment — and settling it (see
-    // transitionCore) needs the single-card Resolve/Dismiss transition, not
-    // a call-level cascade that never touches the underlying commitment.
-    if (item.reason_code === 'reschedule_link_promise') {
-      return res.status(400).json({ error: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.' });
-    }
-    // An owed follow-up visit is booked by hand and settled by its own
-    // Resolve — a call verdict says nothing about visit 2 and the bulk
-    // resolve below leaves this card out on purpose (codex r10 P1).
-    if (item.reason_code === 'attached_booking_followup_unbooked') {
-      return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
-    }
-    // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
-    // customer record, not a routing judgment — a verdict would close it without a name.
-    if (item.reason_code === 'missing_first_name') {
-      return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
-    }
-    // A family-account suggestion is settled by linking the call (the existing relink action), not
-    // by a verdict — a verdict would close it, and the call's other cards, without a link.
-    if (item.reason_code === 'family_account_candidates') {
-      return res.status(400).json({ error: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.' });
+    // Cards that are not a call verdict (bounced-email follow-up, property roles, a parked reschedule-link
+    // promise, an owed follow-up visit, an owed first name, a family-account suggestion): see
+    // NOT_A_VERDICT_MESSAGES. Their bulk-resolve exclusions are listed below.
+    if (NOT_A_VERDICT_MESSAGES[item.reason_code]) {
+      return res.status(400).json({ error: NOT_A_VERDICT_MESSAGES[item.reason_code] });
     }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {

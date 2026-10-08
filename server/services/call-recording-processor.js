@@ -12461,7 +12461,7 @@ const CallRecordingProcessor = {
     // pass creates a customer for the caller, writes nothing else.
     if (!customerLinkOverride) {
       await require('./call-family-name-link').fileFamilyAccountCard({
-        call, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
+        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
       });
     }
     const sharedPhoneAmbiguity = {};

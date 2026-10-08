@@ -15,7 +15,8 @@
  * card listing each candidate with an "address matches" mark when the stated address
  * is that account's. Staff confirm, then link the call with the existing call relink
  * action. Nothing is linked, saved, texted or enrolled here, so the call behaves
- * exactly as it did before, plus the card.
+ * exactly as it did before, plus the card. A reprocess refreshes the open card from the new extraction
+ * and retires it (auto-dismissed) when the suggestion is gone.
  *
  * No card: the caller is not a family member, no full name was named, a voicemail
  * (a one-sided transcription never names an account), an outbound call, a call that
@@ -29,6 +30,7 @@ const { whereLiveCustomer } = require('./customer-stages');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 
 // Roles the model may give the person the family caller names. A named person the model
@@ -109,32 +111,32 @@ function statedAddressCorroborates(stated, customer) {
 
 const CARD_REASON = 'Confirm, then link the call to this account. A customer record and visit may exist under the caller: move the visit to the account holder when you link.';
 
+const CARD_REASON_CODE = 'family_account_candidates';
+const RETIRE_RULE = 'family_suggestion_gone';
+const RETIRE_NOTE = 'Superseded: a reprocess no longer finds a family caller naming a live account.';
+
 /**
- * The suggestion for one processed call: { holder, candidates } or null when no card is due.
- * `phones` = every number the caller used (dictated callback and inbound caller ID); none may be
- * known to a live account (the canonical known-caller lookup).
+ * The accounts a family caller's words point at, from the extraction alone: { holder, more_accounts,
+ * candidates } or null. Pure of call state, so a reprocess can tell "the suggestion is gone" from
+ * "this pass created a customer for the caller".
  */
-async function suggestFamilyAccounts({
-  call, extracted, v2CanonicalExtraction, statedAddress, phones = [], isOutbound = false, conn = db,
+async function matchFamilyAccounts({
+  call, extracted, v2CanonicalExtraction, statedAddress, isOutbound = false, conn = db,
 }) {
-  if (isOutbound || extracted.is_voicemail || call.customer_id) return null;
+  if (isOutbound || extracted.is_voicemail) return null;
   const holder = pickNamedAccountHolder({
     callerRelationship: v2CanonicalExtraction?.caller?.relationship_to_property,
     caller: { first_name: extracted.first_name, last_name: extracted.last_name },
     secondaryContacts: [canonicalV2Secondary(v2CanonicalExtraction), ...mapSecondaryContactsToLegacy(v2CanonicalExtraction?.secondary_contacts)].filter(Boolean),
   });
   if (!holder) return null;
-  for (const phone of phones) {
-    if (await knownCallerPhoneExists(conn, phone)) return null;
-  }
   // One more than the card lists, so a truncated list can say so.
   const found = await findLiveCustomersByFullName(conn, holder, { limit: MAX_CANDIDATES + 1 });
   if (!found.length) return null;
-  const matches = found.slice(0, MAX_CANDIDATES);
   return {
     holder,
     more_accounts: found.length > MAX_CANDIDATES,
-    candidates: matches.map((m) => ({
+    candidates: found.slice(0, MAX_CANDIDATES).map((m) => ({
       id: String(m.id),
       name: displayName(m),
       city: m.city || null,
@@ -143,35 +145,92 @@ async function suggestFamilyAccounts({
   };
 }
 
-// File the card for a processed call. Fail-open: an error leaves the call exactly as it was.
+/**
+ * The suggestion that earns a NEW card: the match, plus the call state. No card for a call already linked
+ * (an operator's link, or this pass's own customer for the caller) or for a number some live account
+ * already knows (the canonical known-caller lookup, for every number the caller used).
+ */
+async function suggestFamilyAccounts({ phones = [], ...args }) {
+  const match = await matchFamilyAccounts(args);
+  if (!match || args.call.customer_id) return null;
+  for (const phone of phones) {
+    if (await knownCallerPhoneExists(args.conn || db, phone)) return null;
+  }
+  return match;
+}
+
+function cardPayload({ suggestion, extracted, call, phone }) {
+  return {
+    account_holder_name: displayName(suggestion.holder),
+    caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+    caller_phone: call.from_phone || null,
+    caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
+    holder_candidates: suggestion.candidates,
+    more_accounts: suggestion.more_accounts,
+    customer_ids: suggestion.candidates.map((c) => c.id),
+    reason: CARD_REASON,
+  };
+}
+
+// An operator already closed this call's card (resolved or dismissed by hand): a reprocess must not reopen
+// it. A card the sweep below retired is not an operator's decision.
+async function operatorClosedCard(trx, callLogId) {
+  const row = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: CARD_REASON_CODE })
+    .whereIn('status', ['resolved', 'dismissed'])
+    .whereRaw("COALESCE(resolution_source, '') <> 'auto'")
+    .first('id');
+  return Boolean(row);
+}
+
+async function retireOpenCard(trx, callLogId) {
+  const now = new Date();
+  const retired = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: CARD_REASON_CODE, status: 'open' })
+    .update({
+      status: 'dismissed', resolution_source: 'auto', resolution_rule: RETIRE_RULE, resolution_note: RETIRE_NOTE, resolved_at: now, updated_at: now,
+    });
+  if (retired) await syncCallReviewStatus(trx, callLogId, 'dismissed');
+}
+
+/**
+ * File, refresh or retire the card for one processed call (derived purely from the extraction, so a
+ * reprocess keeps it true). Runs under the per-call triage lock and the processing-token fence; an
+ * in_progress card (an operator is on it) is never touched. Fail-open: an error leaves the call exactly as
+ * it was.
+ */
 async function fileFamilyAccountCard({
-  call, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, conn = db,
+  call, procToken = null, extracted, v2CanonicalExtraction, statedAddress, phone, isOutbound, conn = db,
 }) {
   try {
-    const suggestion = await suggestFamilyAccounts({
-      call, extracted, v2CanonicalExtraction, statedAddress, phones: [phone, call.from_phone], isOutbound, conn,
-    });
-    if (!suggestion) return null;
-    const { buildTriageItem } = require('./call-routing-gates');
-    await conn('triage_items')
-      .insert(buildTriageItem({
+    let suggestion = null;
+    await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, call.id);
+      if (procToken && !(await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id'))) return;
+      const args = { call, extracted, v2CanonicalExtraction, statedAddress, isOutbound, conn: trx };
+      const match = await matchFamilyAccounts(args);
+      const open = await trx('triage_items').where({ call_log_id: call.id, reason_code: CARD_REASON_CODE, status: 'open' }).first('id');
+      if (!match) {
+        if (open) await retireOpenCard(trx, call.id);
+        return;
+      }
+      if (!open && !(await suggestFamilyAccounts({ ...args, phones: [phone, call.from_phone] }))) return;
+      if (!open && await operatorClosedCard(trx, call.id)) return;
+      suggestion = match;
+      const { buildTriageItem } = require('./call-routing-gates');
+      const item = buildTriageItem({
         callLogId: call.id,
-        flag: 'family_account_candidates',
+        flag: CARD_REASON_CODE,
         extraction: v2CanonicalExtraction || undefined,
         severity: 'advisory',
-        extraPayload: {
-          account_holder_name: displayName(suggestion.holder),
-          caller_name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
-          caller_phone: call.from_phone || null,
-          caller_callback_phone: phone && phone !== call.from_phone ? phone : null,
-          holder_candidates: suggestion.candidates,
-          more_accounts: suggestion.more_accounts,
-          customer_ids: suggestion.candidates.map((c) => c.id),
-          reason: CARD_REASON,
-        },
-      }))
-      .onConflict(conn.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
-      .ignore();
+        extraPayload: cardPayload({ suggestion: match, extracted, call, phone }),
+      });
+      await trx('triage_items')
+        .insert(item)
+        .onConflict(trx.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+        .merge({ payload: item.payload, updated_at: new Date() })
+        .where('triage_items.status', 'open');
+    });
     return suggestion;
   } catch (e) {
     logger.warn(`[call-family-link] card skipped for call ${call.id}: ${e.code || e.name || 'error'}`);
@@ -189,6 +248,8 @@ module.exports = {
   pickNamedAccountHolder,
   findLiveCustomersByFullName,
   statedAddressCorroborates,
+  RETIRE_RULE,
+  matchFamilyAccounts,
   suggestFamilyAccounts,
   fileFamilyAccountCard,
 };

@@ -109,7 +109,7 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
   // not send the office to edit some other account.
   // The server resolves each listed customer to the record to open (a merged-away one opens
   // its survivor); older responses fall back to the ids on the card.
-  const firstNameCustomerIds = reasonCode === "missing_first_name" || reasonCode === "family_account_candidates"
+  const firstNameCustomerIds = reasonCode === "missing_first_name"
     ? [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds
       : Array.isArray(p.customer_ids) ? p.customer_ids : [p.customer_id])
       .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))]
@@ -135,18 +135,7 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
     : [];
   const rows = [
-    // family_account_candidates (suggest-only): who called, who they named, and each live account with
-    // that name. The "Open customer" links below use the same customer_ids shape; staff confirm, then
-    // link the call with the existing relink action.
-    reasonCode === "family_account_candidates" && p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`].filter(Boolean).join(" · ") },
-    reasonCode === "family_account_candidates" && p.account_holder_name && { label: "Named", value: p.account_holder_name },
-    ...(reasonCode === "family_account_candidates" && Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
-      label: i === 0 ? "Account" : `Account (${i + 1})`,
-      value: [c.name, c.city, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
-    })),
-    reasonCode === "family_account_candidates" && p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
-    reasonCode === "family_account_candidates" && p.reason && { label: "Next", value: p.reason },
-    reasonCode !== "family_account_candidates" && firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
+    firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
     // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
@@ -329,6 +318,54 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     </div>
   );
 }
+
+// family_account_candidates (suggest-only): who called, who they named, and each live account with that
+// name. The "Open customer" links reuse the customer_ids shape (the server resolves a merged-away
+// candidate to its survivor in openCustomerIds). Staff confirm, then link the call with the relink action.
+export function FamilyEvidence({ payload, openCustomerIds = null }) {
+  const p = parsePayload(payload);
+  if (!p) return null;
+  const ids = [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds : Array.isArray(p.customer_ids) ? p.customer_ids : [])
+    .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))];
+  const rows = [
+    p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`].filter(Boolean).join(" · ") },
+    p.account_holder_name && { label: "Named", value: p.account_holder_name },
+    ...(Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
+      label: i === 0 ? "Account" : `Account (${i + 1})`,
+      value: [c.name, c.city, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
+    })),
+    p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
+    p.reason && { label: "Next", value: p.reason },
+  ].filter(Boolean);
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before linking</div>
+      {rows.map((r) => (
+        <div key={`${r.label}-${r.value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{r.label}:</span> {r.value}
+        </div>
+      ))}
+      {ids.map((id, i) => (
+        <a key={id} href={`/admin/customers?customerId=${id}`} className="inline-block mt-1 mr-3 text-14 font-medium text-zinc-900 underline">
+          {ids.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+// Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence };
+
+// Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
+// /verdict on each). The verdict badge is not shown on them.
+const NO_VERDICT_REASONS = new Set([
+  "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
+  "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
+  "auto_booking_skipped_after_approval",
+]);
+// …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
+const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);
 
 function reasonLabel(code) {
   if (!code) return "Needs review";
@@ -994,12 +1031,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // A missing first name is an owed capture, not a call verdict (the server
                 // 400s /verdict on it): enter the name on the customer record, then Resolve
                 // (or Dismiss). The sweep also closes it once the record carries a name.
-                const isFirstNameCard = isTriage && item.reason_code === "missing_first_name";
-                // A family-account suggestion (suggest-only) is settled by linking the call with the
-                // relink action, not by a verdict (the server 400s /verdict on it): Resolve or Dismiss.
-                const isFamilyCard = isTriage && item.reason_code === "family_account_candidates";
-                const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
-                const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
+                const isAdminResolveCard = isTriage && ADMIN_RESOLVE_REASONS.has(item.reason_code);
+                // The cards above (and the conflict / recovery tasks) are not call verdicts: no verdict badge.
+                const isNoVerdictCard = isTriage && NO_VERDICT_REASONS.has(item.reason_code);
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // A street-level address hold settles with its visit (confirm,
                 // correct or cancel it) — the server 409s Accept / Deny / Dismiss
@@ -1043,7 +1077,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isFamilyCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
+                          {!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -1116,22 +1150,10 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
                             </Button>
-                          ) : isFirstNameCard ? (
-                            // Admin-only (the server 403s a non-admin Resolve): the first name is
-                            // entered on the customer record, which only an admin edits.
-                            isAdmin ? (
-                              <Button
-                                size="sm"
-                                variant="primary"
-                                disabled={actioning === busyKey}
-                                onClick={() => resolveItem(item)}
-                              >
-                                <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                                {actioning === busyKey ? "Saving…" : "Resolve"}
-                              </Button>
-                            ) : null
-                          ) : isFamilyCard ? (
-                            // Admin-only (the server hides the card from techs and 403s their Resolve).
+                          ) : isAdminResolveCard ? (
+                            // Admin-only (the server hides the family card from techs and 403s a non-admin
+                            // Resolve): the first name is entered on the customer record, which only an
+                            // admin edits, and the family card is the office's link.
                             isAdmin ? (
                               <Button
                                 size="sm"
@@ -1179,7 +1201,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} />}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids })}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">
