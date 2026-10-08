@@ -1928,7 +1928,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // A visit whose step depends on the plan's cadence (v13 April: the 9x plan takes
   // Dimension 18-0-10 where every other plan takes 24-0-11) reads the cadence
   // from the booked service; unknown keeps the 12x step and warns.
-  const { visit, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
+  const { visit, unknownCadence, branch: cadenceBranch } = await visitForPlan(knex, recipeVisit, service);
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
@@ -2253,6 +2253,10 @@ async function buildPlanForService(serviceId, options = {}) {
     protocol: {
       structured: structuredProtocol,
       objective: visit?.notes || null,
+      // A cadence step that states its own goal (July on the 9-visit plan: scout, no tool) carries it; the job card
+      // shows it instead of the staged window's goal, which describes the 12x step.
+      cadenceBranch: cadenceBranch || null,
+      cadenceGoal: cadenceBranch && visit?.goal ? visit.goal : null,
       base: planItems.filter((item) => item.role === 'base'),
       conditional: planItems.filter((item) => item.role === 'conditional'),
       blocked: blocks,

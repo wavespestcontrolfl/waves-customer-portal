@@ -129,13 +129,45 @@ describeDb('the v13 plan through PostgreSQL', () => {
         label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'lb', active: true,
       }).returning('*');
       const staged = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
-      const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 7, window_key: 'jul_v13_inspect_spot', title: 'July', visit_type: 'granular_production_plus_spots' }).returning('*');
+      const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 7, window_key: 'jul_v13_inspect_spot', title: 'July', visit_type: 'granular_production_plus_spots', goal: 'Potassium feeding (0-0-50, no N or P) on the spreader; inspect the whole lawn and treat spots only.', required_tasks: JSON.stringify(['required_10_minute_inspection', 'blackout_zero_np']) }).returning('*');
       [julyRow] = await knex('lawn_protocol_products').insert({
         lawn_protocol_window_id: window.id, product_id: product.id, product_name: SOP, role: 'potassium_nutrition', application_mode: 'broadcast',
-        default_in_plan: true, rate_per_1000: 1, rate_unit: 'lb', gates: JSON.stringify({ targetK2O: '0.5 lb K2O/1000', requiresZeroNP: true }),
+        default_in_plan: true, rate_per_1000: 1, rate_unit: 'lb', gates: JSON.stringify({ targetK2O: '0.5 lb K2O/1000', requiresZeroNP: true, fertilizerSafety: true }),
       }).returning('*');
     });
     const sopItem = (result) => result.mixCalculator.items.find((item) => item.product?.name === SOP);
+
+    // The job card's procedure for a July visit on a plan of `pattern` (every_6_weeks = 9 a year, monthly = 12).
+    const julyCard = async (recurring_pattern) => {
+      const jobCard = require('../services/job-card');
+      const visit = await plannedVisit({ scheduled_date: '2026-07-14', recurring_pattern });
+      const built = await plan(visit);
+      const out = await jobCard.resolveVisitProducts({ facts: { serviceId: visit.id, isLawn: true }, protocols: {}, catalog: [], dbh: knex, deps: { buildPlan: async () => built } });
+      return { built, procedure: out.procedure };
+    };
+
+    test('9 visits a year: the July job card is the scout step: no K rate, no spreader or safety wording, the scout goal', async () => {
+      setGates();
+      const { built, procedure } = await julyCard('every_6_weeks');
+      expect(built.protocol.cadenceBranch).toBe('9');
+      expect(sopItem(built)).toBeUndefined();
+      expect(procedure.objective).toBe('No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only.');
+      const text = JSON.stringify([procedure.objective, procedure.visitNotes, procedure.steps]);
+      expect(text).not.toMatch(/K rate|K2O|0\.5 lb K|[Ss]preader|0-0-50|[Pp]otassium|deflector|fertilizer-free band/);
+      expect(procedure.visitNotes.join(' ')).toMatch(/No whole-lawn tool this month: inspect the whole lawn and treat spots only/);
+      expect(built.mixCalculator.nutrientProjection).toBeDefined();
+    });
+
+    test('12 visits a year: the July job card is unchanged (the potash goal, K rate, spreader visit and the safety block)', async () => {
+      setGates();
+      const { built, procedure } = await julyCard('monthly');
+      expect(built.protocol.cadenceBranch).toBeNull();
+      expect(built.protocol.cadenceGoal).toBeNull();
+      expect(sopItem(built)).toBeTruthy();
+      expect(procedure.objective).toBe('Potassium feeding (0-0-50, no N or P) on the spreader; inspect the whole lawn and treat spots only.');
+      expect(procedure.visitNotes.join(' ')).toMatch(/K rate: 0\.5 lb K\. Spreader visit/);
+      expect(procedure.visitNotes.join(' ')).toMatch(/deflector shield/i);
+    });
 
     test('a normal July window: the 0-0-50 is planned, 1 lb per 1,000 sq ft on 10,000 sq ft', async () => {
       setGates();

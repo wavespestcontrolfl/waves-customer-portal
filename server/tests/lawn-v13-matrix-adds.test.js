@@ -186,7 +186,14 @@ describe('6b. July potash is a 12-visit-plan step: a 9-visit lawn with a July ap
   test('the July visit carries a scout-only 9x variant on every track', () => {
     for (const track of TRACKS) {
       const july = v13[track].visits.find((v) => v.month === 'Jul');
-      expect(july.cadenceVariants).toEqual({ 9: { primary: 'Scout visit: inspect the whole lawn and treat spots only' } });
+      expect(july.cadenceVariants).toEqual({ 9: {
+        primary: 'Scout visit: inspect the whole lawn and treat spots only',
+        notes: 'N rate: 0 lb N. No whole-lawn tool this month: inspect the whole lawn and treat spots only. No N or P from June 1 through September 30.',
+        goal: 'No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only.',
+      } });
+      // The 9x notes carry no K rate and no spreader wording; the engine reads no nutrient target from them.
+      expect(july.cadenceVariants[9].notes).not.toMatch(/K rate|[Ss]preader/);
+      expect(engine.parseVisitNutrientTargets(july.cadenceVariants[9].notes)).toEqual({ targetNPer1000: 0, targetKPer1000: null });
     }
     expect(visitFor(7).notes).toMatch(/if a 9-visit lawn has one, it keeps the scout step with no potash/);
   });
@@ -196,6 +203,15 @@ describe('6b. July potash is a 12-visit-plan step: a 9-visit lawn with a July ap
     expect(wholeLawn(visitForCadence(july, 12).visit)).toEqual([matrix.SOP]);
     const nine = visitForCadence(july, 9);
     expect(nine.branch).toBe('9');
+    // The variant overrides the notes and states the goal; the 12x visit and an unknown plan keep the 12x notes.
+    expect(nine.visit.notes).toBe(july.cadenceVariants[9].notes);
+    expect(nine.visit.goal).toBe(july.cadenceVariants[9].goal);
+    expect(visitForCadence(july, 12).visit.notes).toBe(july.notes);
+    expect(visitForCadence(july, 12).visit.notes).toMatch(/K rate: 0\.5 lb K\. Spreader visit/);
+    expect(visitForCadence(july, 12).visit.goal).toBeUndefined();
+    expect(visitForCadence(july, null).visit.notes).toBe(july.notes);
+    // April's variant states neither: the 9x April keeps its notes.
+    expect(visitForCadence(visitFor(4), 9).visit.notes).toBe(visitFor(4).notes);
     expect(wholeLawn(nine.visit)).toEqual([]);
     expect(nine.visit.primary).not.toMatch(/0-0-50/);
     const parsed = engine.parseProtocolLines(nine.visit.primary, 'base', { exactName: true });

@@ -128,7 +128,9 @@ function visitForCadence(visit, visitsPerYear) {
   if (!variants || typeof variants !== 'object') return { visit, branch: null, unknownCadence: null };
   const variant = variants[String(Number(visitsPerYear))];
   if (visitsPerYear != null && variant) {
-    return { visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}) }, branch: String(Number(visitsPerYear)), unknownCadence: null };
+    // The variant replaces the whole step: its lines, and (when it states them) the notes and the visit goal the
+    // job card shows, so a step with no whole-lawn tool does not keep the 12x step's rates or tool wording.
+    return { visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}), ...(variant.notes ? { notes: variant.notes } : {}), ...(variant.goal ? { goal: variant.goal } : {}) }, branch: String(Number(visitsPerYear)), unknownCadence: null };
   }
   if (visitsPerYear != null) return { visit, branch: null, unknownCadence: null };
   // Only a line that names a product ("Name \u2014 rate"): a scout-only step has none.
