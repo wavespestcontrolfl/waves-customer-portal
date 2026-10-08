@@ -128,7 +128,8 @@ describeDb('staff onboarding documents on PostgreSQL', () => {
     const item = (await onboarding.onboardingFor(second)).documents.find(entry => entry.kind === 'form');
     const hired = new Date((await db('technicians').where({ id: second.id }).first('created_at')).created_at).getTime();
     const effective = new Date(formV1.effective_at).getTime();
-    expect(new Date(item.due_at).getTime()).toBe(Math.max(hired, effective) + 7 * 86400000);
+    const { addETDaysAtWallClock } = require('../utils/datetime-et');
+    expect(new Date(item.due_at).getTime()).toBe(addETDaysAtWallClock(new Date(Math.max(hired, effective)), 7).getTime());
   });
 
   test('a recorded hire date decides the due date, not the account creation date', async () => {
@@ -138,6 +139,11 @@ describeDb('staff onboarding documents on PostgreSQL', () => {
       const item = (await onboarding.onboardingFor(second)).documents.find(entry => entry.kind === 'form');
       // 2031-03-10 00:00 ET (EDT, UTC-4) + 7 days
       expect(new Date(item.due_at).toISOString()).toBe('2031-03-17T04:00:00.000Z');
+      // Across the fall DST change the deadline stays midnight ET seven
+      // calendar days later (Nov 1 EDT -> Nov 8 EST), not 11 p.m. on Nov 7.
+      await db('technicians').where({ id: second.id }).update({ hire_date: '2031-11-01' });
+      const fall = (await onboarding.onboardingFor(second)).documents.find(entry => entry.kind === 'form');
+      expect(new Date(fall.due_at).toISOString()).toBe('2031-11-08T05:00:00.000Z');
     } finally {
       await db('technicians').where({ id: second.id }).update({ hire_date: before });
     }

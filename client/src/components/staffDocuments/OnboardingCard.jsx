@@ -32,7 +32,7 @@ export default function OnboardingCard({ available, base, visitSearch = '' }) {
   }, [available]);
   if (!available || !outstanding.length) return null;
   return <section className="tf-card" data-testid="onboarding-card" aria-label="Finish setup" style={{ marginBottom: 12 }}>
-    <div className="tf-card-top"><ClipboardCheck aria-hidden="true" />Finish setup</div>
+    <div className="tf-card-top" style={{ fontSize: 14 }}><ClipboardCheck aria-hidden="true" />Finish setup</div>
     <div className="tf-card-main">
       <h2>{outstandingLabel(outstanding.length)}</h2>
       <p className="tf-muted">Next: {outstanding[0].title}</p>

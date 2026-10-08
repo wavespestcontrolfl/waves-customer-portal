@@ -19,7 +19,7 @@
 const db = require('../models/db');
 const featureGates = require('../config/feature-gates');
 const { dateOnlyString } = require('../utils/date-only');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, addETDaysAtWallClock } = require('../utils/datetime-et');
 
 const VEHICLE_AGREEMENT_KEY = 'staff.vehicle-use-commuting-agreement';
 // Display only: the due date shown for a form or procedure is this many days after the
@@ -71,7 +71,11 @@ function hiredAt(person) {
   const parsed = day ? parseETDateTime(`${day}T00:00`) : null;
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date(person.created_at);
 }
-const displayDue = (person, doc) => new Date(Math.max(hiredAt(person).getTime(), new Date(doc.effective_at).getTime()) + DUE_DAYS * 86400000);
+// Seven Eastern CALENDAR days, same wall-clock time (a DST change inside the
+// window must not pull the deadline a day early).
+const displayDue = (person, doc) => addETDaysAtWallClock(
+  new Date(Math.max(hiredAt(person).getTime(), new Date(doc.effective_at).getTime())), DUE_DAYS,
+);
 
 // Three reads for any number of people: Map(person id -> their required documents, each with
 // when it was signed). A non-admin sees only staff_access 'staff' documents.
