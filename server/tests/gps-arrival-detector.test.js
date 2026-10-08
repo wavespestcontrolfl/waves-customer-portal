@@ -628,6 +628,17 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(notMarkedWrites()[0].metadata.sample_age_s).toBeGreaterThanOrEqual(2399);
   });
 
+  test('a superseded in-radius sample for a row that already has arrived_at writes nothing', async () => {
+    // legacy / partly repaired row: lifecycle still reads en_route, arrival is stamped
+    const result = await run(baseService({ arrived_at: minutesAgo(30), en_route_at: minutesAgo(60) }), {
+      techStatus: baseTechStatus({ lat: 27.5, lng: -82.5, location_updated_at: new Date().toISOString() }),
+      point: basePoint({ lat: NEAR_LAT, reported_at: minutesAgo(40), speed_mph: 2 }),
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'stale_location_sample' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
   test.each([
     ['track_state on_property, arrived_at not stamped', { track_state: 'on_property', status: 'confirmed' }],
     ['status on_site, arrived_at not stamped', { track_state: 'en_route', status: 'on_site' }],

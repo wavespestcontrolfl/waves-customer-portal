@@ -422,6 +422,9 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
 // customer row write); with none stored, nothing is recorded. Never throws.
 async function recordNotMarked({ service, techStatus, point, config, reason, detail = null, destination = null, distance = null }) {
   try {
+    // The one guard every path shares: a visit that already arrived (by
+    // timestamp or by lifecycle state) or is closed is never a miss.
+    if (!isOpenWithoutArrival(service)) return;
     const dest = destination || extractDestination(service);
     const dist = distance ?? (dest ? distanceMeters(point?.lat, point?.lng, dest.lat, dest.lng) : null);
     if (dist == null || dist > config.radiusMeters) return;
