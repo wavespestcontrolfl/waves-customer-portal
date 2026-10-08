@@ -28,6 +28,9 @@ const RETIRE_BATCH_LIMIT = 200;
 const RETIRE_CLOSER = 'estimate-draft-retire';
 // Thrown inside the per-draft transaction to roll an archive back.
 class KeepDraft extends Error {}
+// lock_not_available (NOWAIT / lock_timeout) and deadlock_detected: another
+// writer holds a row this draft needs. Skipped; the next tick retries.
+const BUSY_ROW_CODES = new Set(['55P03', '40P01']);
 // Sends checked per draft (same-door first): bounds the read per draft.
 const SENDS_PER_DRAFT = 5;
 
@@ -126,6 +129,11 @@ async function retireOneDraft(trx, pair) {
   // Lead first, then estimates — the order createOrReuseAdminEstimate takes
   // (lead, then its estimate), so a staff save of the same lead cannot
   // deadlock with this sweep.
+  // The sweep never waits behind another writer: customer acceptance locks
+  // the replacement estimate and THEN its lead, the reverse of this order, so
+  // a wait here could deadlock a customer's request. A busy row means "not
+  // this tick" (lock_not_available is skipped by the caller).
+  await trx.raw("SET LOCAL lock_timeout = '1500ms'");
   const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().select('id');
   const sent = await trx.raw(`
     SELECT id, status, archived_at FROM estimates s
@@ -133,7 +141,7 @@ async function retireOneDraft(trx, pair) {
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
        AND ${SENT_EVIDENCE_SQL('s')}
-     FOR SHARE
+     FOR SHARE NOWAIT
   `, [pair.sent_id, pair.sent_property_id, pair.sent_address]);
   if (!sent?.rows?.length) return null;
   // An ACCEPTED replacement would need the lead converted; that is the
@@ -251,7 +259,7 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   for (const pair of chosen) {
     if (rows.length >= batch) break;
     const row = await conn.transaction((trx) => retireOneDraft(trx, pair))
-      .catch((err) => { if (err instanceof KeepDraft) return null; throw err; });
+      .catch((err) => { if (err instanceof KeepDraft || BUSY_ROW_CODES.has(err?.code)) return null; throw err; });
     if (!row) continue;
     rows.push({ ...row, sent_id: pair.sent_id });
     logger.info(`[estimate-draft-retire] archived draft ${row.id} (customer ${row.customer_id}): replaced by sent estimate ${pair.sent_id}`);

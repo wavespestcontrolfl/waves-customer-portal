@@ -308,6 +308,34 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(sameDoor);
   });
 
+  test('a replacement another transaction holds locked is skipped, not waited on', async () => {
+    // Needs two real connections, so this case commits its own fixtures and cleans them up.
+    const c = randomUUID();
+    const draft = randomUUID();
+    const sent = randomUUID();
+    await database('customers').insert({ id: c, first_name: 'Fixture', last_name: 'RetireLock', phone: '+12025550123', email: `${c}@example.invalid`, property_type: 'residential' });
+    const base = { customer_id: c, customer_name: 'Fixture RetireLock', address: '100 Fixture Way, Testville, FL 34000', estimate_data: '{}' };
+    await database('estimates').insert([
+      { ...base, id: draft, status: 'draft', token: randomUUID().replace(/-/g, ''), created_at: minutesAgo(60), updated_at: minutesAgo(60) },
+      { ...base, id: sent, status: 'sent', token: randomUUID().replace(/-/g, ''), created_at: minutesAgo(20), updated_at: minutesAgo(10), sent_at: minutesAgo(10) },
+    ]);
+    const holder = await database.transaction();
+    try {
+      await holder('estimates').where({ id: sent }).forUpdate().first('id');
+      const started = Date.now();
+      // Runs in this test's own transaction (rolled back in afterEach), so the
+      // sweep can never persist a change to another suite's rows.
+      const result = await retireDraftsReplacedBySentEstimate();
+      expect(result.rows.find((r) => r.id === draft)).toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(10000);
+      expect((await database('estimates').where({ id: draft }).first()).archived_at).toBeNull();
+    } finally {
+      await holder.rollback();
+      await database('estimates').whereIn('id', [draft, sent]).del();
+      await database('customers').where({ id: c }).del();
+    }
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
