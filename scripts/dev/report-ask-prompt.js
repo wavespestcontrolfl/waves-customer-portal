@@ -58,9 +58,12 @@ function main(argv) {
   process.env.LOG_LEVEL = 'error';
   // dotenv 17 prints a banner on stdout unless told to stay quiet (Codex P1 r13).
   process.env.DOTENV_CONFIG_QUIET = 'true';
-  const { buildReportAskPrompt, ruleAnswerReason } = require('../../server/services/service-report/report-ask-ai');
+  const { buildReportAskPrompt, ruleAnswerReason, reroutedTopic } = require('../../server/services/service-report/report-ask-ai');
   const { routeServiceReportQuestion } = require('../../server/services/service-report/report-assistant');
-  const routed = routeServiceReportQuestion({ question, data, nextAppointment });
+  // The same call the route makes (reports-public.js), re-route included.
+  const routed = routeServiceReportQuestion({
+    question, data, nextAppointment, rerouteTopic: reroutedTopic(question),
+  });
   const prompt = buildReportAskPrompt({
     question, data, nextAppointment, requiredLines: routed.requiredLines.map((line) => line.text),
   });

@@ -2822,3 +2822,29 @@ test('a recorded negative grounds no positive finding (pre-push audit)', () => {
   expect(screenAskAnswer('We found scale insects on the front palms.', { question, data, facts })).toBe('target_list');
   expect(screenAskAnswer('No scale insects were found on the front palms.', { question, data, facts })).toBeNull();
 });
+
+describe('answer screen, Codex round 84', () => {
+  const tree = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 70 }, insights: [{ headline: 'Scale insects', whatWeSaw: 'Scale insects on the front palms.' }] } };
+  const question = 'What did you find?';
+  const facts = buildReportAskFacts({ question, data: tree });
+  const ask = (answer) => screenAskAnswer(answer, { question, data: tree, facts });
+
+  test.each(['The palms have ganoderma.', 'There is ganoderma on the front palms.'])('a nominal diagnosis off the record is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('target_list');
+  });
+
+  test('a recorded nominal diagnosis passes', () => {
+    expect(ask('The palms have scale insects.')).toBeNull();
+  });
+
+  test('every rendered finding reaches the facts, past thirty', () => {
+    const data = pestData({ applications: [], findings: Array.from({ length: 31 }, (_, i) => ({ title: i === 30 ? 'Moisture damage' : `Ant trail ${i}`, detail: '' })) });
+    expect(buildReportAskFacts({ data }).findings).toHaveLength(31);
+  });
+
+  test('recorded-product ingestion needs a person or pet as the eater', () => {
+    const data = pestData({ applications: [{ product: { name: 'Advion Ant Bait' } }] });
+    expect(medicalExposureAnswer('Was Advion eaten?', data)).toBeNull();
+    expect(medicalExposureAnswer('John swallowed advion', data)).toBeTruthy();
+  });
+});

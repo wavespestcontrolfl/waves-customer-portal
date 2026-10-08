@@ -830,7 +830,7 @@ function buildReportAskFacts({
   // Every finding the report shows, so the answer cannot deny one (Codex P1
   // #5964 r58).
   const findings = asArray(data.findings)
-    .slice(0, 30)
+    .slice(0, 200)
     .filter(Boolean)
     .map((finding) => ({
       title: clip(finding.title, 120),
@@ -1074,6 +1074,13 @@ const FOUND_OBJECT_RE = new RegExp(`\\b(?:found|find|saw|spott\\w*|observ\\w*|no
 const FOUND_SUBJECT_RE = /\b([a-z][\w-]*)\s+(?:was|were|has\s+been|have\s+been)\s+(?:\w+\s+)?(?:found|seen|spotted|observed|noted|discovered|confirmed|identified|detected|located)\b/gi;
 const FOUND_GENERIC = new Set(('nothing none it that this them those these what which where something anything everything activity issue issues problem problems sign signs evidence trace traces '
   + 'pest pests insect insects bug bugs damage area areas spot spots and on in at near around along by during today here there you your we our the a an some any more few no not also only during').split(' '));
+const NOMINAL_CONDITION_RE = new RegExp(`\\b(?:palms?|trees?|shrubs?|hedges?|plants?|beds?|lawn|grass|turf|landscape|yard|they|it)\\s+(?:has|have|had|shows?|showed|is\\s+showing|are\\s+showing|is\\s+suffering\\s+from|are\\s+suffering\\s+from|is\\s+infected\\s+with|are\\s+infected\\s+with)\\s+${FOUND_LEAD}([a-z][\\w-]*)|\\bthere\\s+(?:is|are|was|were)\\s+${FOUND_LEAD}([a-z][\\w-]*)\\s+(?:on|in|at|along|around|near)\\b`, 'gi');
+const NOMINAL_GENERIC = new Set(('score scores rating health color colour density growth coverage foliage leaf leave leaves root roots stress damage area areas spot spots thin thinning weed weeds '
+  + 'good great healthy strong full dense green been improved room work treatment product products visit service plan time water rain sun shade mulch soil').split(' '));
+function nominalConditions(sentence) {
+  return [...sentence.matchAll(NOMINAL_CONDITION_RE)].map((m) => stemWord((m[1] || m[2] || '').toLowerCase()))
+    .filter((word) => word.length > 3 && !FOUND_GENERIC.has(word) && !NOMINAL_GENERIC.has(word) && !FINDING_PLACE_WORD.test(word) && !/^\d/.test(word));
+}
 function foundObjects(sentence) {
   // After a generic first word ("nothing else"), the next word is not the object.
   const words = [...sentence.matchAll(FOUND_OBJECT_RE)].flatMap((m) => (FOUND_GENERIC.has(stemWord(m[1].toLowerCase())) ? [] : [m[1], m[2]]))
@@ -1107,6 +1114,10 @@ function ungroundedFinding(text, terms, visitOnly, findings = [], positiveVisit 
     // Intensity must match the recorded finding: "heavy ant activity" on a
     // "Light ant activity" finding (Codex P1 #5964 r82).
     if (own.length > 0 && wrongIntensity(sentence, own)) return true;
+    // A nominal diagnosis must be on the record too, whatever it is called:
+    // "The palms have ganoderma", "There is ganoderma on the front palms"
+    // (Codex P1 #5964 r84).
+    if (!NEGATION_RE.test(sentence) && nominalConditions(sentence).some((word) => !positiveVisit.includes(` ${word} `))) return true;
     if (!FINDING_CLAIM.test(sentence)) {
       // A nominal claim keeps the place too: "The report lists ants in the
       // bedroom", "There was ant activity in the bedroom" (Codex P1 #5964
@@ -2570,7 +2581,10 @@ function ingestsRecordedProduct(text, data) {
   const firsts = asArray(data?.applications).map((app) => normalizeKey(app?.product?.name || app?.productName || app?.product_name || '').split(' ')[0])
     .filter((word) => word && word.length >= 4);
   if (!firsts.length) return false;
-  return text.split(/(?<=[.!?])\s+/).some((sentence) => EAT_VERB_RE.test(sentence) && !PEST_EATING.test(sentence)
+  // A person or pet must be the eater: "Was Advion eaten?" is a product
+  // question (Codex P2 #5964 r84).
+  const eaten = (sentence) => PERSON_EATS.test(sentence) || EATER_ACTS.test(sentence) || (EATER_IN_SENTENCE.test(sentence) && !PASSIVE_NO_EATER.test(sentence));
+  return text.split(/(?<=[.!?])\s+/).some((sentence) => EAT_VERB_RE.test(sentence) && !PEST_EATING.test(sentence) && eaten(sentence)
     && firsts.some((word) => new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(sentence)));
 }
 
