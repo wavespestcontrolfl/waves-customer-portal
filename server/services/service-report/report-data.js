@@ -1237,6 +1237,9 @@ function aggregateApplicationArea(applications, preferredUnits = []) {
 // backpack work on a few square feet, not part of the lawn the visit treated. The "Sq ft" metric
 // counts the whole-lawn rows only, so a 250 sq ft weed spot never reads as 6,250 beside a 6,000 sq ft lawn.
 function isSpotApplication(app) {
+  // Only a RECORDED spot method: a legacy row with no stored method has one inferred from its
+  // category (every herbicide reads as a spot), and its area is a whole-lawn area.
+  if (app?.methodInferred === true) return false;
   const { normalizeServiceReportApplicationMethod } = require('../complete-scheduled-service');
   return normalizeServiceReportApplicationMethod(app?.method ?? app?.applicationMethod) === 'spot_treatment';
 }

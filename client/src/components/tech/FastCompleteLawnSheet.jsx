@@ -616,10 +616,12 @@ function useProductRows(ctx, catalog) {
     }));
   }, []);
   const addProduct = useCallback((product, { planned = null, weedGroup = false } = {}) => {
-    setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
-      ...prev,
-      productRow(product, { added: true, planned, weedGroup }),
-    ]));
+    setRows((prev) => {
+      if (!prev.some((row) => row.productId === product.id)) return [...prev, productRow(product, { added: true, planned, weedGroup })];
+      // A weed-mix product the tech already added on its own joins the group, so it shares
+      // the group's one area instead of keeping a control (and an area) of its own.
+      return weedGroup ? prev.map((row) => (row.productId === product.id && !row.weedGroup ? { ...row, weedGroup: true } : row)) : prev;
+    });
   }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
@@ -1241,7 +1243,7 @@ function ProtocolAddOns({ addOns, month, weedMix = null, rows, catalog, locked, 
         <p className="tech-visit-muted">Tap what you applied.</p>
       </div>
       {showWeed && (
-        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} onAdd={onAdd} />
+        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={new Set(rows.filter((row) => row.weedGroup).map((row) => String(row.productId).toLowerCase()))} locked={locked} onAdd={onAdd} />
       )}
       {items.map((item) => {
         const onSheet = on.has(String(item.productId).toLowerCase());
@@ -1279,6 +1281,8 @@ function ProtocolAddOns({ addOns, month, weedMix = null, rows, catalog, locked, 
 // "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
 // opens the rows it names (each seeded from its own plan item, as a single add-on is) and
 // they share one area. With nothing to add (the yearly limit is reached) it is a line only.
+// `on` holds the products on the sheet AS GROUP ROWS: one added singly first (the search
+// box) still leaves the tap open, and the tap takes that row into the group.
 function WeedSpotsEntry({ weedMix, items, on, locked, onAdd }) {
   const allOn = items.length > 0 && items.every((item) => on.has(String(item.productId).toLowerCase()));
   const names = items.map((item) => item.product.name).join(', ');
@@ -1286,7 +1290,7 @@ function WeedSpotsEntry({ weedMix, items, on, locked, onAdd }) {
     <div className="tech-protocol-addon">
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">Weed spots</span>
-        <span className="tech-visit-muted">{allOn ? 'On the sheet' : [names, weedMix.note].filter(Boolean).join(' · ')}</span>
+        <span className="tech-visit-muted">{[allOn ? 'On the sheet' : names, weedMix.note].filter(Boolean).join(' · ')}</span>
       </span>
       {items.length > 0 && (
         <Button
