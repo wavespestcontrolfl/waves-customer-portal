@@ -5,7 +5,6 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({ isInternalNumber: () => false, isOwnedNumber: () => false }));
 const { _test: { findReusableCallLead, extractedNameMatchesCustomer } } = require('../services/call-recording-processor');
-const { spokenFirstNameSoundKey, spokenFirstNameSoundKeySql } = require('../utils/name-match');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('caller identity lookup on PostgreSQL', () => {
@@ -35,7 +34,7 @@ jest.setTimeout(30000);
     expect(await lookup('Aisha')).toMatchObject({ lead: null, phoneNameConflictLeadId: other.id });
     expect(extractedNameMatchesCustomer({ first_name: 'Aisha', last_name: 'Example' }, other)).toBe(false);
   });
-  test('a sound-alike spelling with the same surname reuses the lead', async () => {
+  test('a voicemail lead is reused when the callback transcript spells the first name with the other letter', async () => {
     const voicemail = lead('Erik', 10);
     await trx('leads').insert([voicemail, lead('Aisha', 1)]);
     const result = await lookup('Eric');
@@ -43,35 +42,10 @@ jest.setTimeout(30000);
     expect(result.lead?.id).toBe(voicemail.id);
     expect(extractedNameMatchesCustomer({ first_name: 'Eric', last_name: 'Example' }, result.lead)).toBe(true);
   });
-  test('a sound-alike spelling needs the surname on both sides', async () => {
-    const otherSurname = lead('Erik', 5, { last_name: 'Different' });
-    const noSurname = lead('Erik', 1, { last_name: null });
-    await trx('leads').insert([otherSurname, noSurname]);
-    expect(await lookup('Eric')).toMatchObject({ lead: null, phoneNameConflictLeadId: noSurname.id });
-    expect(await findReusableCallLead(trx, { phone, firstName: 'Eric', lastName: null, workableUnnamedLead: true }))
-      .toMatchObject({ lead: null, phoneNameConflictLeadId: noSurname.id });
-    for (const row of [otherSurname, noSurname]) {
-      expect(extractedNameMatchesCustomer({ first_name: 'Eric', last_name: 'Example' }, row)).toBe(false);
-    }
-    expect(extractedNameMatchesCustomer({ first_name: 'Eric', last_name: null }, lead('Erik', 1))).toBe(false);
-  });
-  test.each([['Dario', 'Daria'], ['Johan', 'Joan'], ['Rohan', 'Roan']])('a different sound on one phone and one surname stays a separate lead (%s / %s)', async (stored, spoken) => {
-    const other = lead(stored, 1);
+  test('a listed pair leaves a different name on the same phone and surname separate', async () => {
+    const other = lead('Erica', 1);
     await trx('leads').insert(other);
-    expect(await lookup(spoken)).toMatchObject({ lead: null, phoneNameConflictLeadId: other.id });
-    expect(extractedNameMatchesCustomer({ first_name: spoken, last_name: 'Example' }, other)).toBe(false);
-  });
-  test('the SQL sound key is the twin of the JS sound key', async () => {
-    const names = ['Erik', 'Eric', 'Sarah', 'Sara', 'Sahar', 'John', 'Jon', 'Phillip', 'Philip', 'Chris', 'Kris',
-      'Rocco', 'Hannah', 'Cecil', 'Chad', 'Zach', 'Zack', 'Nick', 'Thomas', 'Rhonda', 'Ahhmed', 'Mc-Coy', "D'Arcy",
-      'Aaron', 'Lynnn', 'Johan', 'Joan', 'Rohan', 'Johnny', 'Leah', 'Shah', 'Hh', 'Ohnh', 'Cc', 'H', 'Ch', 'Ckck', 'Michhael', 'Schuyler', 'Whitney', 'Jacques'];
-    const NORM = "LOWER(REGEXP_REPLACE(n, '[^a-zA-Z0-9]', '', 'g'))";
-    const { rows } = await trx.raw(
-      `SELECT n, ${spokenFirstNameSoundKeySql(NORM)} AS key FROM unnest(?::text[]) AS t(n)`,
-      [names],
-    );
-    expect(rows).toHaveLength(names.length);
-    for (const row of rows) expect({ n: row.n, key: row.key }).toEqual({ n: row.n, key: spokenFirstNameSoundKey(row.n) });
+    expect(await lookup('Erik')).toMatchObject({ lead: null, phoneNameConflictLeadId: other.id });
   });
   test('spelling support cannot override surname or ownership conflicts', async () => {
     await trx('leads').insert([lead('Jason', 1, { last_name: 'Different' }), lead('Jason', 5, { customer_id: randomUUID() })]);

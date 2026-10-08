@@ -1,7 +1,7 @@
 const { canAutoRoute, computeDeterministicTriageFlags, isExplicitlyNonOwner, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, deriveCallReviewBridge, callbackNumberNeededBlocksSms } = require('../services/call-triage-flags');
 const { decideDisposition } = require('../services/call-disposition');
 const { adoptV2PrimaryFields } = require('../utils/extraction-compat');
-const { sameSpokenFirstName, sameSoundingFirstName, spokenFirstNameSoundKey } = require('../utils/name-match');
+const { sameSpokenFirstName } = require('../utils/name-match');
 const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
 
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
@@ -74,34 +74,17 @@ describe('finding 5/6 — repeat callers and spoken-name variants', () => {
     expect(sameSpokenFirstName('karen', 'kevin')).toBe(false);
     expect(sameSpokenFirstName('', 'jason')).toBe(false);
   });
-  test.each([['aisha', 'alisha'], ['sarah', 'sahar'], ['janet', 'jeanet']])('an unlisted spelling difference cannot merge %s and %s', (a, b) => {
+  test.each([['carl', 'karl'], ['eric', 'erik'], ['marc', 'mark'], ['nick', 'nik'], ['sara', 'sarah'], ['philip', 'phillip'], ['nik', 'nicholas'], ['phil', 'phillip']])('a listed spelling pair is one spoken name: %s and %s', (a, b) => {
+    expect(sameSpokenFirstName(a, b)).toBe(true);
+    expect(sameSpokenFirstName(b, a)).toBe(true);
+  });
+  test.each([['carl', 'carla'], ['karl', 'carla'], ['eric', 'erica'], ['mark', 'marcus'], ['sara', 'sahar'], ['nik', 'nikki'], ['kris', 'chris']])('a listed pair does not pull in a different name: %s and %s', (a, b) => {
     expect(sameSpokenFirstName(a, b)).toBe(false);
     expect(sameSpokenFirstName(b, a)).toBe(false);
   });
-});
-
-describe('sound-alike first names (one spoken name, two spellings)', () => {
-  test.each([
-    ['erik', 'eric'], ['sara', 'sarah'], ['jon', 'john'], ['kathy', 'cathy'], ['chris', 'kris'],
-    ['nick', 'nik'], ['philip', 'phillip'], ['marc', 'mark'], ['hannah', 'hana'], ['johnny', 'jonny'], ['leah', 'lea'],
-  ])('%s and %s share one sound key', (a, b) => {
-    expect(sameSoundingFirstName(a, b)).toBe(true);
-    expect(sameSoundingFirstName(b, a)).toBe(true);
-  });
-  test.each([
-    ['dario', 'daria'], ['aisha', 'alisha'], ['karen', 'karin'], ['julia', 'julian'], ['andre', 'andrea'],
-    ['mary', 'gary'], ['dana', 'dane'], ['amy', 'ami'], ['sarah', 'sahar'], ['janet', 'jeanet'],
-    ['cecil', 'kecil'], ['chad', 'kad'], ['thomas', 'tomas'], ['aaron', 'aron'],
-    ['johan', 'joan'], ['rohan', 'roan'], ['ahmed', 'amed'], ['mahala', 'mala'], ['jahn', 'jan'],
-  ])('%s and %s keep different sound keys', (a, b) => {
-    expect(sameSoundingFirstName(a, b)).toBe(false);
-    expect(sameSoundingFirstName(b, a)).toBe(false);
-  });
-  test('a blank name never has a sound match, and the strict list is unchanged', () => {
-    expect(sameSoundingFirstName('', '')).toBe(false);
-    expect(sameSoundingFirstName('erik', '')).toBe(false);
-    expect(spokenFirstNameSoundKey(' E-rik ')).toBe('erik');
-    expect(sameSpokenFirstName('erik', 'eric')).toBe(false);
+  test.each([['aisha', 'alisha'], ['sarah', 'sahar'], ['janet', 'jeanet']])('an unlisted spelling difference cannot merge %s and %s', (a, b) => {
+    expect(sameSpokenFirstName(a, b)).toBe(false);
+    expect(sameSpokenFirstName(b, a)).toBe(false);
   });
 });
 

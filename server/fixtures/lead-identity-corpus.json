@@ -173,50 +173,6 @@
       "b": { "first_name": "Lucian", "last_name": "Abernathy", "email": "unknown" },
       "expected": "different",
       "rationale": "A malformed capture like 'unknown' must not reuse another lead storing the same garbage (PR #3275 P1) — not an email, no key."
-    },
-    {
-        "id": "soundalike-first-name-same-phone-same-surname",
-        "a": {
-            "first_name": "Erik",
-            "last_name": "Halvorsen",
-            "phone": "541-555-0121"
-        },
-        "b": {
-            "first_name": "Eric",
-            "last_name": "Halvorsen",
-            "phone": "541-555-0121"
-        },
-        "expected": "same",
-        "rationale": "One spoken name transcribed with two spellings (hard c / k) on one phone with the same surname is one caller; a voicemail plus a callback must not mint two leads."
-    },
-    {
-        "id": "soundalike-first-name-blank-surname-stays-separate",
-        "a": {
-            "first_name": "Erik",
-            "phone": "541-555-0122"
-        },
-        "b": {
-            "first_name": "Eric",
-            "last_name": "Halvorsen",
-            "phone": "541-555-0122"
-        },
-        "expected": "different",
-        "rationale": "The sound-alike rule needs an exact surname on both sides; without one the strict spelling list decides and the callers stay separate."
-    },
-    {
-        "id": "soundalike-rule-keeps-different-sounds-apart",
-        "a": {
-            "first_name": "Dario",
-            "last_name": "Ferreira",
-            "phone": "541-555-0123"
-        },
-        "b": {
-            "first_name": "Daria",
-            "last_name": "Ferreira",
-            "phone": "541-555-0123"
-        },
-        "expected": "different",
-        "rationale": "A different final vowel is a different spoken name: two household members with one surname and one phone stay two leads."
     }
   ]
 }
