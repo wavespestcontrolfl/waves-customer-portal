@@ -345,9 +345,16 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     await estimate(c2, { status: 'sent', createdAt: minutesAgo(150), sentAt: minutesAgo(140) });
     await estimate(c2, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
     await mockPg('leads').insert({ id: randomUUID(), estimate_id: linked, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
+    // An accepted estimate for ANOTHER property does not keep a linked draft.
+    const c3 = await customer();
+    const linkedOtherDoor = await estimate(c3, { createdAt: minutesAgo(200) });
+    await estimate(c3, { status: 'sent', createdAt: minutesAgo(150), sentAt: minutesAgo(140) });
+    await estimate(c3, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90), address: '500 Elsewhere Blvd, Testville, FL 34000' });
+    await mockPg('leads').insert({ id: randomUUID(), estimate_id: linkedOtherDoor, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
     expect((await row(fresh)).archived_at).toBeNull();
     expect((await row(linked)).archived_at).toBeNull();
+    expect((await row(linkedOtherDoor)).archived_at).not.toBeNull();
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {

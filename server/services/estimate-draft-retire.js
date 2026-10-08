@@ -239,7 +239,13 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   // WRITES are capped at `batch`.
   const pairs = (await conn.raw(`
     SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
-           s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address
+           s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address,
+           CASE WHEN EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id) THEN (
+             SELECT json_agg(json_build_object('property_id', a.property_id, 'address', a.address))
+               FROM estimates a
+              WHERE a.customer_id = d.customer_id AND a.id <> d.id
+                AND a.status = 'accepted' AND a.created_at > d.created_at
+           ) END AS accepted_later
       FROM (SELECT * FROM estimates WHERE ${DRAFT_ELIGIBLE_SQL}) d
       CROSS JOIN LATERAL (
         SELECT s.id, s.sent_at, s.property_id, s.address
@@ -254,21 +260,24 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
                   s.sent_at DESC
          LIMIT ${SENDS_PER_DRAFT}
       ) s
-     -- A lead-linked draft with ANY later accepted estimate is kept whole:
-     -- that lead belongs to the acceptance flow, so an older sent estimate
-     -- must not retire the draft and take the lead instead.
-     WHERE NOT (
-       EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id)
-       AND EXISTS (SELECT 1 FROM estimates a
-                    WHERE a.customer_id = d.customer_id AND a.id <> d.id
-                      AND a.status = 'accepted' AND a.created_at > d.created_at)
-     )
   `))?.rows || [];
 
   // First matching send per draft (the lateral lists same-door sends first).
   // No cap here: a candidate retireOneDraft keeps (accepted replacement with
   // a lead, a row changed since the read) must not use up the batch.
-  const chosen = [...new Map(pairs.filter(sameProperty).reverse().map((p) => [p.draft_id, p])).values()];
+  // A lead-linked draft with a later ACCEPTED estimate at the same door is
+  // kept whole: that lead belongs to the acceptance flow, so an older sent
+  // estimate must not retire the draft and take the lead instead. An accepted
+  // estimate for another property does not count.
+  const acceptedAtDoor = (pair) => (pair.accepted_later || []).some((accepted) => sameProperty({
+    draft_property_id: pair.draft_property_id,
+    draft_address: pair.draft_address,
+    sent_property_id: accepted.property_id,
+    sent_address: accepted.address,
+  }));
+  const chosen = [...new Map(pairs
+    .filter((pair) => sameProperty(pair) && !acceptedAtDoor(pair))
+    .reverse().map((p) => [p.draft_id, p])).values()];
 
   const rows = [];
   // The kept-forever shape (a lead-linked draft whose replacement is accepted)
