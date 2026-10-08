@@ -1085,10 +1085,16 @@ function leaksTargetList(text, {
   // root rot?" -> "Yes, your lawn has root rot" (Codex P1s #5964 r37, r39).
   // Only "the report does not say" style uncertainty may repeat it; "is not
   // labeled for termites" is a claim too (Codex P1 #5964 r47).
-  const inFacts = factText([data?.customerConcern, facts?.customer_concern, ...visitParts]);
+  // A term only the customer's concern names may be repeated as what the
+  // customer said, never as fact: "I am worried this might be root rot" does
+  // not ground "Your lawn has root rot" (pre-push audit, #5964).
+  const inVisit = factText(visitParts);
+  const inConcern = factText([data?.customerConcern, facts?.customer_concern]);
   return splitSentences(text).some((sentence) => !UNCERTAIN_RE.test(sentence)
-    && terms.some((label) => sentenceNames(sentence, label) && !inFacts.includes(label)));
+    && terms.some((label) => sentenceNames(sentence, label) && !inVisit.includes(label)
+      && !(inConcern.includes(label) && ATTRIBUTED_TO_CUSTOMER.test(sentence))));
 }
+const ATTRIBUTED_TO_CUSTOMER = /\b(?:you|your)\b[^.?!]*\b(?:report\w*|mention\w*|told|said|saw|seen|notic\w*|spott\w*|ask\w*|flagg\w*|concern\w*|worr\w*|rais\w*|describ\w*|call\w*\s+about)\b|\b(?:concern|worry|question)\s+(?:about|was|is)\b|\b(?:treat\w*|appl\w*|spray\w*|address\w*|target\w*)\b[^.?!]*\bfor\s+(?:the|your|that|those)\b/i;
 const FINDING_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathroom|bedroom|closet|pantry|laundry|cabinet|sink|baseboard|wall|ceiling|eave|soffit|vent|window|door|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|lawn|bed|tree|shrub|palm|hedge|driveway|sidewalk|basement|living\s+room|dining\s+room|office|stairs?)s?\b/g;
 const FINDING_CLAIM = /\b(?:we|i|our\s+tech\w*|the\s+tech\w*|your\s+tech\w*|technician|crew|team)\s+(?:\w+\s+){0,2}?(?:found|find|saw|spott\w*|observ\w*|noted|discover\w*|confirm\w*|identif\w*|detect\w*|located|turned\s+up)\b|\b(?:was|were|been|got)\s+(?:\w+\s+)?(?:found|seen|spotted|observed|noted|discovered|confirmed|identified|detected|located)\b/i;
 const UNCERTAIN_RE = /\b(?:(?:does|do|did)\s*n['’]?o?t\s+(?:say|show|list|mention|record|note|include|name|confirm|cover)|(?:is|are|was|were)\s*n['’]?o?t\s+(?:listed|recorded|noted|mentioned|shown|named|on\s+(?:the|this|your)\s+report)|not\s+(?:on|in)\s+(?:the|this|your)\s+report|no\s+(?:record|mention|note)|can['’]?t\s+(?:confirm|tell|say)|cannot\s+(?:confirm|tell|say)|unable\s+to|unclear|unknown|don['’]?t\s+know|not\s+sure|whether|if)\b/i;

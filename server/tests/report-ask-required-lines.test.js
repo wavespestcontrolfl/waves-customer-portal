@@ -2520,3 +2520,11 @@ describe('answer screen, Codex round 72', () => {
     expect(buildReportAskFacts({ data }).tree_shrub_report.peace_of_mind).toBe('Your landscape is on a steady plan.');
   });
 });
+
+test('a concern-only condition is repeated as what the customer said, never as fact (pre-push audit)', () => {
+  const data = lawnData({ customerConcern: 'I am worried this might be root rot.', reportV2: { aftercare: {} } });
+  const question = 'How is my lawn?';
+  const facts = buildReportAskFacts({ question, data });
+  expect(screenAskAnswer('Your lawn has root rot.', { question, data, facts })).toBe('target_list');
+  expect(screenAskAnswer('You mentioned a concern about root rot.', { question, data, facts })).toBeNull();
+});
