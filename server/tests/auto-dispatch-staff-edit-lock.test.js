@@ -51,4 +51,17 @@ describe('staffEditLockPatch (merged by the edit route next to recurringDispatch
     expect(staffEditLockPatch(before(), { window_start: '09:00', window_end: '10:00' })).toEqual({});
     expect(staffEditLockPatch(null, { window_start: '13:00' })).toEqual({});
   });
+
+  test('a box the person flipped wins, in both directions, even with a slot change', () => {
+    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: true, was: false })).toEqual({ auto_dispatch_locked: true });
+    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: false, was: true })).toEqual({ auto_dispatch_locked: false });
+    expect(staffEditLockPatch(before(), { window_start: '13:00', window_end: '14:00' }, { now: false, was: true })).toEqual({ auto_dispatch_locked: false });
+  });
+
+  test('an untouched box says nothing, so a stale form cannot undo a lock', () => {
+    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: false, was: false })).toEqual({});
+    expect(staffEditLockPatch(before(), { window_start: '13:00', window_end: '14:00' }, { now: false, was: false })).toEqual({ auto_dispatch_locked: true });
+    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: 'false', was: true })).toEqual({});
+    expect(staffEditLockPatch(before(), { notes: 'x' }, {})).toEqual({});
+  });
 });

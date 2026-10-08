@@ -61,7 +61,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
-import { getAdminUser } from "../../lib/adminAuth";
+import AutoDispatchLockBox, { autoDispatchLockSeed } from "../../components/schedule/AutoDispatchLockBox";
 import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
@@ -2097,12 +2097,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return derived != null ? String(derived) : "";
     })(),
   });
-  // Auto-dispatch lock (recurring occurrences only). Saved through its own
-  // PATCH after update-details, only when the box was changed; the server
-  // may also set the lock itself when the date or time changes.
-  // Admins only: the lock endpoint is requireAdmin.
-  const showAutoDispatchLock = !!(service.isRecurring && service.recurringParentId) && getAdminUser()?.role === "admin";
-  const autoDispatchLockedSeed = service.autoDispatchLocked === true;
+  // Auto-dispatch lock (recurring occurrences only). Sent with the save as
+  // the box's value and the value it opened with; the server acts only on a
+  // flip, and may also set the lock itself when the date or time changes.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
   const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
@@ -3712,6 +3710,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          // The auto-dispatch box and the value it opened with; the server acts only on a flip.
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
           // A shared stop: the server runs the choice in this one request.
           comboMove: comboSlotChanged ? comboMove : undefined,
           // The stop this form showed; the server refuses if it changed.
@@ -4023,18 +4024,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         } catch (patchErr) {
           showScheduleSaveNotice(
             `Appointment saved, but the re-entry correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
-          );
-        }
-      }
-      if (showAutoDispatchLock && autoDispatchLocked !== autoDispatchLockedSeed) {
-        try {
-          await adminFetch(`/admin/auto-dispatch/services/${service.id}/lock`, {
-            method: "PATCH",
-            body: JSON.stringify({ locked: autoDispatchLocked }),
-          });
-        } catch (patchErr) {
-          showScheduleSaveNotice(
-            `Appointment saved, but the auto-dispatch setting was not changed: ${patchErr.message}. Reopen the appointment to retry it.`,
           );
         }
       }
@@ -6378,35 +6367,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
-              {showAutoDispatchLock && (
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 10,
-                    marginBottom: 14,
-                    cursor: "pointer",
-                  }}
-                >
-                  {" "}
-                  <input
-                    type="checkbox"
-                    checked={autoDispatchLocked}
-                    onChange={(e) => setAutoDispatchLocked(e.target.checked)}
-                    disabled={saving}
-                    style={{ width: 17, height: 17, marginTop: 2, accentColor: "#18181B" }}
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div style={{ fontSize: 14, fontWeight: 500 }}>
-                      Keep auto-dispatch off this visit
-                    </div>{" "}
-                    <div style={{ fontSize: 14, color: D.muted }}>
-                      Auto-dispatch will not move this visit. Changing the date or time here turns this on. A visit that a customer or staff moved to its date stays protected when this is off.
-                    </div>{" "}
-                  </div>{" "}
-                </label>
-              )}{" "}
+              <AutoDispatchLockBox
+                service={service}
+                checked={autoDispatchLocked}
+                onChange={setAutoDispatchLocked}
+                disabled={saving}
+                helperColor={D.muted}
+                rowProps={{ style: { marginBottom: 14 } }}
+              />
               <div
                 style={{
                   display: "flex",

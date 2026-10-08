@@ -111,16 +111,7 @@ describe('MobileServiceEditModal save payload', () => {
   describe('auto-dispatch lock box', () => {
     const OCCURRENCE = { ...SERVICE, isRecurring: true, recurringParentId: 'parent-1', autoDispatchLocked: true };
     const LABEL = 'Keep auto-dispatch off this visit';
-    const lockCalls = () => fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/auto-dispatch/services/svc-1/lock'));
-    const asRole = (role) => localStorage.setItem('waves_admin_user', JSON.stringify({ role }));
-    beforeEach(() => asRole('admin'));
-
-    it('hides the box from a technician: the lock endpoint is admin-only', () => {
-      asRole('technician');
-      render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={vi.fn()} />);
-      expect(screen.queryByText(LABEL)).not.toBeInTheDocument();
-    });
-
+    const saveBody = () => JSON.parse(fetch.mock.calls.find(([url]) => String(url).endsWith('/update-details'))[1].body);
 
     it('shows the box checked for a locked recurring occurrence and hides it otherwise', () => {
       const view = render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -130,37 +121,22 @@ describe('MobileServiceEditModal save payload', () => {
       expect(screen.queryByText(LABEL)).not.toBeInTheDocument();
     });
 
-    it('clearing the box calls the lock endpoint with locked false after update-details', async () => {
+    it('a cleared box rides the one save: the new value and the value the form opened with', async () => {
       const onSaved = vi.fn();
       render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={onSaved} />);
       fireEvent.click(screen.getByLabelText(new RegExp(LABEL)));
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(onSaved).toHaveBeenCalled());
-      const urls = fetch.mock.calls.map(([url]) => String(url));
-      expect(urls.findIndex((u) => u.endsWith('/update-details'))).toBeLessThan(urls.findIndex((u) => u.endsWith('/lock')));
-      expect(lockCalls()).toHaveLength(1);
-      expect(lockCalls()[0][1].method).toBe('PATCH');
-      expect(JSON.parse(lockCalls()[0][1].body)).toEqual({ locked: false });
+      expect(saveBody()).toMatchObject({ autoDispatchLocked: false, autoDispatchLockedWas: true });
+      expect(fetch.mock.calls.filter(([url]) => String(url).includes('/auto-dispatch/'))).toHaveLength(0);
     });
 
-    it('saving without touching the box makes no lock call', async () => {
+    it('an untouched box sends the same value twice, which the server reads as no decision', async () => {
       const onSaved = vi.fn();
       render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={onSaved} />);
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(onSaved).toHaveBeenCalled());
-      expect(lockCalls()).toHaveLength(0);
-    });
-
-    it('a failed lock call still counts as saved and shows a notice', async () => {
-      fetch.mockImplementation(async (url) => (String(url).endsWith('/lock')
-        ? new Response('nope', { status: 500 })
-        : new Response(JSON.stringify({ ok: true }), { status: 200 })));
-      const onSaved = vi.fn();
-      render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={onSaved} />);
-      fireEvent.click(screen.getByLabelText(new RegExp(LABEL)));
-      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-      await waitFor(() => expect(onSaved).toHaveBeenCalled());
-      expect(saveNotice.shown[0]).toMatch(/^Saved, but the auto-dispatch setting was not changed/);
+      expect(saveBody()).toMatchObject({ autoDispatchLocked: true, autoDispatchLockedWas: true });
     });
   });
 });

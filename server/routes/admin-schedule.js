@@ -13158,6 +13158,9 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       assignmentScope,
+      // The edit form's "Keep auto-dispatch off this visit" box and the value it
+      // opened with (auto-dispatch/staff-edit-lock.js).
+      autoDispatchLocked, autoDispatchLockedWas,
       // Apply this save's PRICE / primary-SERVICE change to the rest of the
       // series ('following') or keep it per-visit ('this_only', the default).
       // Only honored behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — see the
@@ -14535,7 +14538,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
         // A staff date/window choice locks the occurrence from auto-dispatch
         // (this path writes no reschedule_log row the person-placed guard reads).
-        Object.assign(updates, staffEditLockPatch(occRow, updates));
+        Object.assign(updates, staffEditLockPatch(occRow, updates, { now: autoDispatchLocked, was: autoDispatchLockedWas }));
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)

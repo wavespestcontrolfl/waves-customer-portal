@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
 import { apiErrorMessage } from './seriesMove';
-import { getAdminUser } from '../../lib/adminAuth';
+import AutoDispatchLockBox, { autoDispatchLockSeed } from './AutoDispatchLockBox';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -81,11 +81,9 @@ export default function MobileServiceEditModal({
   const [error, setError] = useState(null);
   const [sharedStopAsk, setSharedStopAsk] = useState(false);
   const [showStaffPicker, setShowStaffPicker] = useState(false);
-  // Auto-dispatch lock: recurring occurrences only. Saved through its own PATCH
-  // after update-details, and only when the tech changed the box.
-  // Admins only: the lock endpoint is requireAdmin, and technicians open this editor too.
-  const showAutoDispatchLock = !!(service?.isRecurring && service?.recurringParentId) && getAdminUser()?.role === 'admin';
-  const autoDispatchLockedSeed = service?.autoDispatchLocked === true;
+  // Auto-dispatch lock: recurring occurrences only. Sent with the save as the
+  // box's value and the value it opened with; the server acts only on a flip.
+  const autoDispatchLockedSeed = autoDispatchLockSeed(service);
   const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
 
   const baseName = useMemo(() => baseServiceName(service?.serviceType), [service?.serviceType]);
@@ -129,6 +127,8 @@ export default function MobileServiceEditModal({
             : undefined,
           windowStart: service.windowStart,
           windowEnd: service.windowEnd,
+          autoDispatchLocked,
+          autoDispatchLockedWas: autoDispatchLockedSeed,
           serviceType: nextServiceType,
           estimatedDuration: Number(duration) || 30,
           technicianId: technicianId || null,
@@ -159,16 +159,6 @@ export default function MobileServiceEditModal({
       ];
       if (savedWarnings.length) {
         showScheduleSaveNotice(`Saved.\n\n${savedWarnings.join('\n\n')}`);
-      }
-      if (showAutoDispatchLock && autoDispatchLocked !== autoDispatchLockedSeed) {
-        try {
-          await adminFetch(`/admin/auto-dispatch/services/${service.id}/lock`, {
-            method: 'PATCH',
-            body: JSON.stringify({ locked: autoDispatchLocked }),
-          });
-        } catch (lockErr) {
-          showScheduleSaveNotice(`Saved, but the auto-dispatch setting was not changed: ${apiErrorMessage(lockErr, 'Failed to save')}. Reopen this visit to retry it.`);
-        }
       }
       onSaved?.();
     } catch (e) {
@@ -425,29 +415,15 @@ export default function MobileServiceEditModal({
           </span>
         </div>
 
-        {showAutoDispatchLock && (
-          <label
-            className="bg-white border-b border-hairline border-zinc-200 flex items-start gap-3"
-            style={{ padding: '14px 16px', cursor: 'pointer' }}
-          >
-            <input
-              type="checkbox"
-              checked={autoDispatchLocked}
-              onChange={(e) => setAutoDispatchLocked(e.target.checked)}
-              disabled={saving}
-              className="u-focus-ring"
-              style={{ width: 22, height: 22, marginTop: 1, accentColor: '#18181B' }}
-            />
-            <div className="flex-1 min-w-0">
-              <div className="text-zinc-900 font-medium" style={{ fontSize: 15 }}>
-                Keep auto-dispatch off this visit
-              </div>
-              <div className="text-ink-tertiary" style={{ fontSize: 14, marginTop: 2 }}>
-                Auto-dispatch will not move this visit. Changing the date or time here turns this on. A visit that a customer or staff moved to its date stays protected when this is off.
-              </div>
-            </div>
-          </label>
-        )}
+        <AutoDispatchLockBox
+          service={service}
+          checked={autoDispatchLocked}
+          onChange={setAutoDispatchLocked}
+          disabled={saving}
+          boxSize={22}
+          helperColor="#71717A"
+          rowProps={{ className: 'bg-white border-b border-hairline border-zinc-200 text-zinc-900', style: { padding: '14px 16px' } }}
+        />
 
         {/* Notes */}
         <div

@@ -9,7 +9,7 @@
  * own auto_dispatch_locked flag instead — the existing staff lock every
  * auto-dispatch path already honors (eligibility MANUALLY_LOCKED, apply.js
  * re-read). Staff see and clear it with the "Keep auto-dispatch off this visit"
- * box on the edit form (PATCH /admin/auto-dispatch/services/:id/lock). No reschedule_log
+ * box on the edit form, sent with the same save. No reschedule_log
  * row is written, so the ~20 readers of that table see no change.
  *
  * Pure: decides from the locked row before the edit and the update about to be
@@ -43,7 +43,15 @@ function staffEditLocksVisit(before, updates) {
 
 // The update patch for the edit route, in the same shape as
 // recurringDispatchDuePatch: the columns to merge into this save.
-function staffEditLockPatch(row, updates) {
+// `box` is the edit form's "Keep auto-dispatch off this visit" checkbox: its
+// value now and the value the form opened with. Only a box the person
+// actually flipped is a decision, and it wins (that is how staff clear a
+// lock). An untouched box says nothing, even when the form's copy of the
+// row is stale, so it can never undo a lock another save set. Otherwise a
+// slot change locks.
+function staffEditLockPatch(row, updates, box = {}) {
+  const flipped = typeof box.now === 'boolean' && typeof box.was === 'boolean' && box.now !== box.was;
+  if (row && flipped) return { auto_dispatch_locked: box.now };
   return staffEditLocksVisit(row, updates) ? { auto_dispatch_locked: true } : {};
 }
 
