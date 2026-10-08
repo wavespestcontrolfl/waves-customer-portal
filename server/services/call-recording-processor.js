@@ -12003,13 +12003,15 @@ const CallRecordingProcessor = {
         // — arm them here, from the SAME merged bridgeTriageFlags the card
         // below is about to file from, so shadow mode behaves exactly like
         // enforce mode for this one signal.
-        if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {
+        if (callbackNumberNeededBlocksSms(bridgeTriageFlags) && !(aniCannotTextOnly(v2Ext) && hasCanonicalWriteBlock(bridgeTriageFlags))) {
           v2SmsBlocked = true;
           v2SmsClearedByImpliedConsent = false;
           callbackNumberNeededHoldActive = true;
           // Round 7 P1: persisted NOW — before the bridge files the card
           // below and before any further awaited work.
           // Round 8 P1: a lost claim abandons the pass (nothing written).
+          // Same hard-veto rule as enforce mode: a no-text-only call vetoed for spam / out of area /
+          // do-not-contact gets neither the hold nor the card.
           noTextHoldArming = aniCannotText(v2Ext?.caller);
           if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
           if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(v2Ext, call.customer_id || null, { failClosed: true });

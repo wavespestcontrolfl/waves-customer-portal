@@ -233,6 +233,15 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(triage).toContain('noTextHold: cardCarriesNoTextHold({ ...item, ...liveCard })');
   });
 
+  test('shadow mode applies the same no-text hard-veto rule as enforce mode', () => {
+    expect(src).toContain('if (callbackNumberNeededBlocksSms(bridgeTriageFlags) && !(aniCannotTextOnly(v2Ext) && hasCanonicalWriteBlock(bridgeTriageFlags))) {');
+  });
+
+  test('re-arming the hold bumps the version of the call\'s text_number_differs cards, so an older closed card goes stale', () => {
+    const holds = fs.readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
+    expect(holds).toMatch(/if \(noTextHold\) \{[^]*?reason_code: 'text_number_differs'[^]*?\.update\(\{ updated_at: new Date\(\) \}\)/);
+  });
+
   test('a hard-vetoed no-text call gets neither the hold nor the card (the veto the pipeline applies)', () => {
     expect(src).toContain('const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);');
     expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');

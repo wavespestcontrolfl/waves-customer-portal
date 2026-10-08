@@ -286,7 +286,7 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
 
   test('shadow: armed where the bridge raises the flag — before deriveCallReviewBridge and the card inserts', () => {
     const gate = src.indexOf('if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {');
-    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {', gate);
+    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(bridgeTriageFlags) && !(aniCannotTextOnly(v2Ext) && hasCanonicalWriteBlock(bridgeTriageFlags))) {', gate);
     const decideEnd = src.indexOf('\n        }\n', decide);
     const block = src.slice(decide, decideEnd);
     expect(block.indexOf(ARM)).toBeGreaterThan(block.indexOf('callbackNumberNeededHoldActive = true;'));

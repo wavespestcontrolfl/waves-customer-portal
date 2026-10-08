@@ -125,6 +125,11 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
         .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
         .whereIn('status', ['open', 'in_progress'])
         .update({ payload: trx.raw('COALESCE(payload, \'{}\'::jsonb) || \'{"no_text_hold": true}\'::jsonb') });
+      // Re-arming invalidates the version of every text_number_differs card this call already has: an
+      // older (closed) card on screen can no longer release what this pass just armed.
+      await trx('triage_items')
+        .where({ call_log_id: callLogId, reason_code: 'text_number_differs' })
+        .update({ updated_at: new Date() });
     }
     return recorded;
   });
