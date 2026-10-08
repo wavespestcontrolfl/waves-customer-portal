@@ -509,12 +509,20 @@ function dropAccessDeviceSentences(text) {
   return splitSentences(text).map((sentence) => (TYPED_ACCESS_DEVICE.test(sentence) && sentence.trim().split(/\s+/).length >= 3
     ? '[access details removed]' : sentence)).join(' ');
 }
+// Every free-text leaf of the sheet gets the strict pass, since the report
+// builders copy the customer's concern into other fields (an insight card's
+// "what we saw") (Codex security P2 #5964 r85). Left alone: the catalog's own
+// product wording, and the lines that must be repeated word for word (a
+// changed line would no longer match and the fixed answer covers it).
+const STRICT_ACCESS_EXEMPT = new Set(['products', 'required_lines', 'pet_precaution_today', 'reentry', 'company', 'contact', 'service_date', 'asked_about_product', 'service', 'technician_first_name', 'weather_during_visit', 'areas_serviced']);
+function strictLeaves(value) {
+  if (typeof value === 'string') return dropAccessDeviceSentences(value);
+  if (Array.isArray(value)) return value.map(strictLeaves);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, strictLeaves(item)]));
+  return value;
+}
 function scrubTypedText(facts) {
-  const out = { ...facts };
-  if (out.customer_concern) out.customer_concern = dropAccessDeviceSentences(out.customer_concern);
-  if (out.lawn_report?.from_your_technician) out.lawn_report = { ...out.lawn_report, from_your_technician: dropAccessDeviceSentences(out.lawn_report.from_your_technician) };
-  if (out.tree_shrub_report?.tech_paragraph) out.tree_shrub_report = { ...out.tree_shrub_report, tech_paragraph: dropAccessDeviceSentences(out.tree_shrub_report.tech_paragraph) };
-  return out;
+  return Object.fromEntries(Object.entries(facts).map(([key, value]) => [key, STRICT_ACCESS_EXEMPT.has(key) ? value : strictLeaves(value)]));
 }
 function scrubFacts(facts) {
   return scrubTypedText(Object.fromEntries(Object.entries(facts).map(([key, value]) => {

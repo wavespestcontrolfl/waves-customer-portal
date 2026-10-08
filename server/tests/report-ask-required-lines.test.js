@@ -2875,3 +2875,16 @@ describe('answer screen, Codex round 85', () => {
     expect(medicalExposureAnswer("I can't see after the spray")).toBeTruthy();
   });
 });
+
+test('a concern copied into an insight card is masked too (Codex security P2 r85)', () => {
+  const data = lawnData({
+    customerConcern: 'The side gate requires blue moon for service.',
+    applications: [{ product: { name: 'Alpine WSG', report_copy: { how_it_works: 'Slows ants at door frames and entry points.' } } }],
+    reportV2: { aftercare: {}, insights: [{ headline: 'We looked into what you flagged', whatWeSaw: 'You mentioned: The side gate requires blue moon for service. We checked it.' }] },
+  });
+  const facts = buildReportAskFacts({ question: 'What was applied?', data });
+  expect(JSON.stringify(facts)).not.toMatch(/blue moon/);
+  expect(facts.lawn_report.insights[0].what_we_saw).toBe('[access details removed] We checked it.');
+  // The catalog's own wording is not typed text.
+  expect(facts.products[0].what_it_does).toBe('Slows ants at door frames and entry points.');
+});
