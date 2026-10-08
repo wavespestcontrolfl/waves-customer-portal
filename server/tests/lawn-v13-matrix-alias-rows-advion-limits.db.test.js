@@ -1,6 +1,6 @@
 // Lawn protocol v13 matrix adds: alias-resolved catalog rows and the Advion limits (20261007189500), through PostgreSQL.
 // The real earlier migrations stage a v13 protocol in an owned schema (cloned table definitions, no rows), then
-// 180000 to 189000 run, then 189500. Synthetic data only. Self-skips without DATABASE_URL.
+// 180000 to 189000 run, then 189500 (and its rollback guard, 189600). Synthetic data only. Self-skips without DATABASE_URL.
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
@@ -18,6 +18,7 @@ const round7 = require('../models/migrations/20261007187000_lawn_v13_matrix_adds
 const round11 = require('../models/migrations/20261007188000_lawn_v13_matrix_adds_round11');
 const remove = require('../models/migrations/20261007189000_lawn_v13_matrix_remove_july_potash');
 const aliasRows = require('../models/migrations/20261007189500_lawn_v13_matrix_alias_rows_and_advion_limits');
+const aliasGuard = require('../models/migrations/20261007189600_lawn_v13_matrix_alias_rows_rollback_guard');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const CHAIN = [matrix, fixes, round2, round3, round4, round5, round6, round7, round11, remove];
@@ -141,6 +142,32 @@ describeDb('v13 matrix: alias-resolved catalog rows and Advion limits (202610071
       headway(after.catalog).frac_group = null;
       expect(after).toEqual(before);
       expect(await knex('lawn_protocol_audit_log').where({ action: aliasRows.ACTION })).toHaveLength(0);
+    });
+  });
+
+  describe('a rollback while a visit references v13', () => {
+    const LEGACY = [
+      { match_type: 'product', limit_type: 'min_interval_days', limit_value: 30, limit_unit: 'days', severity: 'warning', description: 'legacy' },
+      { match_type: 'product', limit_type: 'annual_max_apps', limit_value: 6, limit_unit: 'applications', severity: 'hard_block', description: 'legacy' },
+    ];
+    beforeAll(async () => {
+      await build({ aliasOnly: true, legacyLimits: LEGACY });
+      await aliasRows.up(knex);
+      await aliasGuard.up(knex);
+      await knex('scheduled_services').insert({ lawn_protocol_key: staged.TRACKS[0].key, lawn_protocol_version: staged.V13_VERSION, service_type: 'Lawn fixture', scheduled_date: '2026-10-07' });
+    }, 120000);
+    afterAll(drop);
+
+    test('the whole chain rolled back keeps the alias rows facts, their approval and the label limits', async () => {
+      const live = await everything();
+      for (const migration of [aliasGuard, aliasRows, ...[...CHAIN].reverse()]) await migration.down(knex);
+      const after = await everything();
+      expect(after.limits).toEqual(live.limits);
+      expect(await limits(ADVION_ROW)).toEqual(LABEL_LIMITS);
+      for (const name of [HEADWAY_ROW, ADVION_ROW]) {
+        expect(after.catalog.find((row) => row.name === name)).toEqual(live.catalog.find((row) => row.name === name));
+      }
+      expect((await catalog(HEADWAY_ROW)).approved_for_service_report).toBe(true);
     });
   });
 
