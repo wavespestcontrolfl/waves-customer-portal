@@ -4252,6 +4252,17 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
       expect([clean.status, clean.data]).toEqual([409, BERMUDA_409]);
     });
 
+    test('area add-on (GATE_AREA_ADDONS off) AND parked -> the park; gated, NOT parked -> its own coded 409 and nothing converts', async () => {
+      const AREA_409 = { error: BERMUDA_409.error, code: 'AREA_ADDONS_GATED' };
+      const addOnPatch = { result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] }, oneTime: { items: [{ service: 'area_addon', name: 'Web Sweep', price: 59 }], specItems: [] } } };
+      const parked = await parkedAttempt(withData('est-mx-area-1', addOnPatch));
+      expect(isPark(parked)).toBe(true);
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+      const clean = await unparkedAttempt(withData('est-mx-area-2', addOnPatch));
+      expect([clean.status, clean.data]).toEqual([409, AREA_409]);
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    });
+
     test('quote-required AND parked -> quote_required wins (not the park, no alert); trenching AND parked -> trenching wins', async () => {
       const quote = await parkedAttempt(withData('est-mx-quote-1', { proposal: { enabled: true } }));
       expect(quote.status).toBe(409);

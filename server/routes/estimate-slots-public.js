@@ -159,17 +159,29 @@ const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void'])
 // PaymentIntent minted gate-on must never finalize gate-off). Returns a
 // sent 409 (caller must `return` it) or null when unaffected. Callers'
 // row loads all carry estimate_data (`.first()` or an explicit column).
-function isSuppressionGatedEstimate(estimate = {}) {
+// A persisted area add-on treatment (GATE_AREA_ADDONS off) rides the same rail: same helpers, same 409, its own
+// code (AREA_ADDONS_GATED), and like the Bermuda shape it is never priced (its replay would throw).
+function isBermudaGatedEstimate(estimate = {}) {
   const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
   return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
     && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
 }
-function rejectGatedSuppressionEstimate(res, estimate = {}) {
-  if (isSuppressionGatedEstimate(estimate)) {
-    return res.status(409).json({
+function isSuppressionGatedEstimate(estimate = {}) {
+  return isBermudaGatedEstimate(estimate)
+    || require('../services/pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estimate.estimate_data);
+}
+function gatedEstimateRefusalBody(estimate = {}) {
+  const { AREA_ADDONS_GATED_CODE, AREA_ADDONS_GATED_CUSTOMER_MESSAGE } = require('../services/pricing-engine/v1-legacy-mapper');
+  return isBermudaGatedEstimate(estimate)
+    ? {
       error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
       code: 'BERMUDA_SUPPRESSION_GATED',
-    });
+    }
+    : { error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE };
+}
+function rejectGatedSuppressionEstimate(res, estimate = {}) {
+  if (isSuppressionGatedEstimate(estimate)) {
+    return res.status(409).json(gatedEstimateRefusalBody(estimate));
   }
   return null;
 }
@@ -1178,6 +1190,10 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
             code: 'BERMUDA_SUPPRESSION_GATED',
           },
         };
+      }
+      // A persisted area add-on (GATE_AREA_ADDONS off): same recheck, its own code.
+      if (require('../services/pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(row.estimate_data)) {
+        return { status: 409, body: gatedEstimateRefusalBody(row) };
       }
       if (isCommercialAutoEstimate(row)) {
         return {

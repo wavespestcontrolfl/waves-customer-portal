@@ -372,6 +372,50 @@ describe('bermuda-suppression money/slot gate', () => {
   });
 });
 
+// Same boundaries for a persisted area add-on treatment (GATE_AREA_ADDONS): own code, same 409, nothing touched.
+describe('area add-on money/slot gate (GATE_AREA_ADDONS)', () => {
+  const ADDON_ESTIMATE = {
+    id: 'est-addon',
+    status: 'sent',
+    expires_at: null,
+    archived_at: null,
+    estimate_data: JSON.stringify({
+      result: { oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Pool Cage, Lanai & Eave Web Sweep', price: 59 }], specItems: [] } },
+    }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('gate off: availability, card hold and recurring card intent 409 with AREA_ADDONS_GATED', async () => {
+    delete process.env.GATE_AREA_ADDONS;
+    currentEstimate = ADDON_ESTIMATE;
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).toBe(409);
+    expect((await slots.json()).code).toBe('AREA_ADDONS_GATED');
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    for (const leg of ['card-hold-intent', 'recurring-card-intent']) {
+      const res = await fetch(`${base}/${TOKEN}/${leg}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('AREA_ADDONS_GATED');
+    }
+  });
+
+  test('gate on: the add-on gate does not fire on the slot path', async () => {
+    process.env.GATE_AREA_ADDONS = 'true';
+    currentEstimate = ADDON_ESTIMATE;
+    getAvailableSlots.mockResolvedValue([]);
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).not.toBe(409);
+  });
+});
+
 describe('B18 park: a parked estimate (its phone belongs to another customer) cannot browse, reserve, extend or capture a card', () => {
   const { estimatePublicBlockingState } = require('../routes/estimate-public');
   const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');

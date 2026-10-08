@@ -58,7 +58,12 @@ const {
   completePendingInvalidation,
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
-const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+const {
+  estimateDataCarriesBermudaSuppression,
+  estimateAreaAddOnsGated,
+  areaAddOnsGatedStaffMessage,
+  AREA_ADDONS_GATED_CODE,
+} = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
@@ -619,6 +624,13 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
     const err = new Error('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before sending.');
     err.statusCode = 409;
     err.code = 'BERMUDA_SUPPRESSION_GATED';
+    throw err;
+  }
+  // Same rule for a persisted area add-on treatment (GATE_AREA_ADDONS).
+  if (estimateAreaAddOnsGated(estimate.estimate_data || estimate.estimateData)) {
+    const err = new Error(areaAddOnsGatedStaffMessage('sending'));
+    err.statusCode = 409;
+    err.code = AREA_ADDONS_GATED_CODE;
     throw err;
   }
   // Estimator-engine YELLOW drafts carry review reasons (fallback sqft

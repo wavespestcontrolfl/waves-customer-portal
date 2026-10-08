@@ -7948,6 +7948,14 @@ async function scheduleCreateHandler(req, res, next) {
             code: 'BERMUDA_SUPPRESSION_GATED',
           });
         }
+        // Same rule for a persisted area add-on treatment (GATE_AREA_ADDONS).
+        const areaAddOnMapper = require('../services/pricing-engine/v1-legacy-mapper');
+        if (areaAddOnMapper.estimateAreaAddOnsGated(linkedEstimate.estimate_data)) {
+          return res.status(409).json({
+            error: areaAddOnMapper.areaAddOnsGatedStaffMessage('booking from it'),
+            code: areaAddOnMapper.AREA_ADDONS_GATED_CODE,
+          });
+        }
       }
       // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
       // (retired 2026-09-24) must not be booked-and-accepted here: the

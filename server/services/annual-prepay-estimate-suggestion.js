@@ -138,6 +138,9 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
       && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
       return blocked('estimate carries a gated add-on');
     }
+    if (require('./pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estData)) {
+      return blocked('estimate carries a gated add-on');
+    }
   } catch {
     return blocked('estimate acceptance blockers could not be verified');
   }

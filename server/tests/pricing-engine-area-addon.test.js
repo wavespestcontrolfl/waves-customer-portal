@@ -1,5 +1,9 @@
 const { priceAreaAddOn, generateEstimate } = require('../services/pricing-engine');
-const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+const {
+  mapV1ToLegacyShape,
+  estimateDataCarriesAreaAddOns,
+  estimateAreaAddOnsGated,
+} = require('../services/pricing-engine/v1-legacy-mapper');
 const { AREA_ADDONS, GLOBAL } = require('../services/pricing-engine/constants');
 
 // Owner rulings 2026-10-08: one cost-plus add-on pricer, 60% target at the
@@ -238,13 +242,122 @@ describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
     const estimate = generateEstimate({
       ...HOME,
       propertyType: 'commercial',
-      services: { areaAddOns: [...TWO_ADDONS, { key: 'hardscape_weed', areaSqFt: 1000 }] },
+      services: { areaAddOns: [{ key: 'bed_pre_emergent', areaSqFt: 1500 }, { key: 'web_sweep' }, { key: 'hardscape_weed', areaSqFt: 1000 }] },
     });
     expect(addOnLines(estimate)).toEqual([]);
     expect(estimate.lineItems.map((l) => [l.service, l.quoteRequired])).toEqual([
       ['commercial_lawn', true],
       ['commercial_pest', true],
     ]);
+  });
+});
+
+// Codex round 2 on #6135: one chokepoint per rule, so a narrow patch at one call site cannot leave a sibling path open.
+describe('area add-on input rules in the estimate engine', () => {
+  const run = (areaAddOns, extra = {}) => generateEstimate({ ...HOME, ...extra, services: { ...(extra.services || {}), areaAddOns } });
+  const throwsFailClosed = (fn, message) => expect(fn).toThrow(expect.objectContaining({
+    name: 'PricingError', statusCode: 400, failClosed: true, ...(message ? { message: expect.stringMatching(message) } : {}),
+  }));
+
+  test('the same key twice is refused, so maxPerYear cannot be split across rows', () => {
+    // 2 + 2 = 4 applications of a 2-a-year weed kill would each pass maxPerYear on its own row.
+    throwsFailClosed(() => run([
+      { key: 'hardscape_weed', areaSqFt: 1000, applications: 2 },
+      { key: 'hardscape_weed', areaSqFt: 1000, applications: 2 },
+    ]), /more than once/);
+    throwsFailClosed(() => run([{ key: 'web_sweep' }, { key: 'web_sweep', visitContext: 'sameTripAddOn' }]), /more than once/);
+    // The count goes in applications; over the yearly limit that is one custom-quote row.
+    const [line] = addOnLines(run([{ key: 'hardscape_weed', areaSqFt: 1000, applications: 4 }]));
+    expect(line).toMatchObject({ price: null, customQuoteReason: 'area_addon_applications_above_yearly_limit' });
+  });
+
+  test('a commercial property validates the entry first: unknown key or bad value throws, never a manual-quote line', () => {
+    const commercial = { propertyType: 'commercial' };
+    throwsFailClosed(() => run([{ key: 'aeration', areaSqFt: 1000 }], commercial), /addOnKey must be one of/);
+    throwsFailClosed(() => run([{ key: 'fire_ant_yard' }], commercial), /areaSqFt is required/);
+    throwsFailClosed(() => run([{ key: 'web_sweep', applications: 0 }], commercial), /applications must be a whole number/);
+    throwsFailClosed(() => run([{ key: 'web_sweep', visitContext: 'builderBatch' }], commercial), /visitContext must be one of/);
+    throwsFailClosed(() => run([{ key: 'web_sweep' }, 'web_sweep'], commercial), /must be an object/);
+    // A valid entry is still the commercial manual-quote line.
+    expect(run([{ key: 'fire_ant_yard', areaSqFt: 3000 }], commercial).lineItems.map((l) => l.service)).toEqual(['commercial_lawn']);
+  });
+
+  test('key casing, non-plain entries and malformed fields never price', () => {
+    throwsFailClosed(() => run([{ key: 'Web_Sweep' }]), /addOnKey must be one of/);
+    throwsFailClosed(() => run([{ key: ' web_sweep' }]), /addOnKey must be one of/);
+    throwsFailClosed(() => run([{ key: ['web_sweep'] }]), /addOnKey must be one of/);
+    throwsFailClosed(() => run([{}]), /addOnKey must be one of/);
+    class Entry { constructor() { this.key = 'web_sweep'; } }
+    throwsFailClosed(() => run([new Entry()]), /must be an object/);
+    throwsFailClosed(() => run([new Date()]), /must be an object/);
+    throwsFailClosed(() => priceAreaAddOn('web_sweep', null), /must be an object/);
+    throwsFailClosed(() => priceAreaAddOn('web_sweep', 'sameTripAddOn'), /must be an object/);
+    // Extra unknown fields are ignored.
+    expect(addOnLines(run([{ key: 'web_sweep', note: 'ignored' }])).map((l) => l.price)).toEqual([89]);
+  });
+
+  test('web sweep takes applications up to its yearly limit and ignores an area', () => {
+    expect(addOnLines(run([{ key: 'web_sweep', applications: 12, areaSqFt: 'x' }]))[0].price).toBe(89 * 12);
+    expect(addOnLines(run([{ key: 'web_sweep', applications: 13 }]))[0]).toMatchObject({ price: null, requiresCustomQuote: true });
+    throwsFailClosed(() => run([{ key: 'web_sweep', applications: 1.5 }]), /applications must be a whole number/);
+  });
+});
+
+describe('same-visit area add-ons need a host visit on the same estimate', () => {
+  const run = (areaAddOns, services = {}, extra = {}) => generateEstimate({ ...HOME, ...extra, services: { ...services, areaAddOns } });
+  const HOST_ERROR = expect.objectContaining({
+    name: 'PricingError', statusCode: 400, failClosed: true, message: expect.stringMatching(/same-visit area add-on needs a priced service on the same estimate/),
+  });
+  const SAME_TRIP_SWEEP = { key: 'web_sweep', visitContext: 'sameTripAddOn' };
+
+  test('a same-trip web sweep alone throws; it is never silently repriced as standalone', () => {
+    expect(() => run([SAME_TRIP_SWEEP])).toThrow(HOST_ERROR);
+  });
+
+  test('with recurring pest on the estimate it prices $59', () => {
+    const estimate = run([SAME_TRIP_SWEEP], { pest: { frequency: 'quarterly' } });
+    expect(addOnLines(estimate).map((l) => [l.visitContext, l.price])).toEqual([['sameTripAddOn', 59]]);
+  });
+
+  test('another one-time service is a host', () => {
+    const estimate = run([SAME_TRIP_SWEEP], { oneTimePest: true });
+    expect(estimate.lineItems.some((l) => l.service === 'one_time_pest' && l.price > 0)).toBe(true);
+    expect(addOnLines(estimate)[0].price).toBe(59);
+  });
+
+  test('one standalone add-on hosts a same-trip add-on, in either list order', () => {
+    const standalone = { key: 'bed_pre_emergent', areaSqFt: 1500 };
+    for (const list of [[standalone, SAME_TRIP_SWEEP], [SAME_TRIP_SWEEP, standalone]]) {
+      const lines = addOnLines(run(list));
+      expect(lines.map((l) => [l.addOnKey, l.visitContext, l.price]).sort()).toEqual([
+        ['bed_pre_emergent', 'standalone', 139],
+        ['web_sweep', 'sameTripAddOn', 59],
+      ]);
+    }
+  });
+
+  test('two same-trip add-ons with no other line throw', () => {
+    expect(() => run([SAME_TRIP_SWEEP, { key: 'fire_ant_yard', areaSqFt: 3000, visitContext: 'sameTripAddOn' }])).toThrow(HOST_ERROR);
+  });
+
+  test('an unpriced line is never a host: a custom-quote add-on, a commercial manual quote, or a priced-nothing estimate', () => {
+    // standalone add-on over the top tier = custom quote, no price
+    expect(() => run([{ key: 'fire_ant_yard', areaSqFt: 9000 }, SAME_TRIP_SWEEP])).toThrow(HOST_ERROR);
+    expect(() => run([{ key: 'web_sweep', applications: 13 }, { key: 'bed_pre_emergent', areaSqFt: 1000, visitContext: 'sameTripAddOn' }])).toThrow(HOST_ERROR);
+    // commercial: the add-on lines are manual quotes, so even a standalone one hosts nothing
+    expect(() => run([{ key: 'bed_pre_emergent', areaSqFt: 1500 }, SAME_TRIP_SWEEP], {}, { propertyType: 'commercial' })).toThrow(HOST_ERROR);
+  });
+
+  test('prior services the customer already holds are not a host (an existing visit is not supported yet)', () => {
+    expect(() => run([SAME_TRIP_SWEEP], {}, { recurringCustomer: true, priorQualifyingServices: ['pest_control', 'lawn_care'] })).toThrow(HOST_ERROR);
+  });
+
+  test('a standalone add-on never needs a host', () => {
+    expect(addOnLines(run([{ key: 'web_sweep' }])).map((l) => l.price)).toEqual([89]);
+  });
+
+  test('a direct priceAreaAddOn call still prices same-trip (the engine owns the host check)', () => {
+    expect(priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn' }).price).toBe(59);
   });
 });
 
@@ -284,5 +397,90 @@ describe('area add-ons through the legacy mapper', () => {
     expect(mapped.oneTime.total).toBe(89);
     expect(mapped.quoteRequired).toBe(true);
     expect(mapped.quoteRequiredItems).toEqual([expect.objectContaining({ service: 'area_addon', name: 'Fire Ant Yard Treatment' })]);
+  });
+});
+
+describe('area add-on unit price through the mapper', () => {
+  test('a two-application row carries perApplication on the item, and its detail names the per-application price', () => {
+    const estimate = generateEstimate({
+      ...HOME,
+      services: { areaAddOns: [{ key: 'fire_ant_yard', areaSqFt: 5000, applications: 1 }, { key: 'bed_pre_emergent', areaSqFt: 1500, applications: 2 }] },
+    });
+    const mapped = mapV1ToLegacyShape(estimate);
+    const bed = mapped.oneTime.items.find((i) => i.addOnKey === 'bed_pre_emergent');
+    expect(bed).toMatchObject({ price: 278, applications: 2, perApplication: 139, maxPerYear: AREA_ADDONS.items.bed_pre_emergent.maxPerYear });
+    expect(bed.detail).toContain('2 applications at $139 per application');
+    expect(bed.detail).not.toMatch(/per visit/i);
+    expect(mapped.oneTime.items.find((i) => i.addOnKey === 'fire_ant_yard')).toMatchObject({ applications: 1, perApplication: 129 });
+  });
+
+  test('the final projection keeps perApplication, and an unpriced custom-quote row carries null', () => {
+    const estimate = generateEstimate({
+      ...HOME,
+      services: { areaAddOns: [{ key: 'fire_ant_yard', areaSqFt: 9000 }, { key: 'hardscape_weed', areaSqFt: 1000, applications: 2 }] },
+    });
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.oneTime.specItems).toEqual([expect.objectContaining({ addOnKey: 'fire_ant_yard', perApplication: null })]);
+    expect(mapped.specItems.find((i) => i.addOnKey === 'fire_ant_yard')).toMatchObject({ perApplication: null });
+    expect(mapped.oneTime.items[0]).toMatchObject({ addOnKey: 'hardscape_weed', perApplication: 119, applications: 2 });
+  });
+});
+
+describe('a persisted estimate carrying an area add-on (the gate is a kill switch for stored estimates)', () => {
+  // Fixtures are built with the gate on (describe bodies run before beforeEach).
+  const fromEngine = (areaAddOns) => {
+    const prior = process.env.GATE_AREA_ADDONS;
+    process.env.GATE_AREA_ADDONS = 'true';
+    try { return generateEstimate({ ...HOME, services: { areaAddOns } }); } finally {
+      if (prior === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prior;
+    }
+  };
+  const PRICED = fromEngine([{ key: 'web_sweep' }]);
+  const CUSTOM = fromEngine([{ key: 'fire_ant_yard', areaSqFt: 9000 }]);
+  const MAPPED_PRICED = mapV1ToLegacyShape(PRICED);
+  const MAPPED_CUSTOM = mapV1ToLegacyShape(CUSTOM);
+
+  test.each([
+    ['engineInputs.services.areaAddOns', { engineInputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } } }],
+    ['engineInput (public wizard) services.areaAddOns', { engineInput: { services: { areaAddOns: [{ key: 'web_sweep' }] } } }],
+    ['inputs.services.areaAddOns', { inputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } } }],
+    ['engineRequest.options.services.areaAddOns', { engineRequest: { options: { services: { areaAddOns: [{ key: 'web_sweep' }] } } } }],
+    ['engineRequest.options.areaAddOns', { engineRequest: { options: { areaAddOns: [{ key: 'web_sweep' }] } } }],
+    ['a malformed non-empty areaAddOns value', { engineInputs: { services: { areaAddOns: 'web_sweep' } } }],
+    ['mapped result.oneTime.items (priced)', { result: MAPPED_PRICED }],
+    ['mapped result.oneTime.specItems (custom quote)', { result: MAPPED_CUSTOM }],
+    ['mapped result.specItems', { result: { specItems: [{ service: 'area_addon' }] } }],
+    ['mapped result.quoteRequiredItems', { result: { quoteRequiredItems: [{ service: 'area_addon', quoteRequired: true }] } }],
+    ['bare mapped shape (oneTime at the top)', { oneTime: { items: [{ service: 'area_addon' }] } }],
+    ['raw engineResult.lineItems', { engineInputs: {}, engineResult: PRICED }],
+    ['raw result.lineItems', { result: { lineItems: PRICED.lineItems } }],
+    ['a JSON string of a stored shape', JSON.stringify({ result: MAPPED_PRICED })],
+  ])('detects %s', (_label, estimateData) => {
+    expect(estimateDataCarriesAreaAddOns(estimateData)).toBe(true);
+  });
+
+  test.each([
+    ['null', null],
+    ['a string that is not JSON', 'not json'],
+    ['an empty object', {}],
+    ['an empty list', { engineInputs: { services: { areaAddOns: [] } } }],
+    ['no add-on rows', { result: { oneTime: { items: [{ service: 'one_time_pest' }], specItems: [] } } }],
+    ['a lawn-only mapped estimate', { result: mapV1ToLegacyShape(generateEstimate({ ...HOME, services: { pest: { frequency: 'quarterly' } } })) }],
+  ])('does not flag %s', (_label, estimateData) => {
+    expect(estimateDataCarriesAreaAddOns(estimateData)).toBe(false);
+  });
+
+  test('the guard is true only with an add-on and the gate off (read at call time)', () => {
+    const stored = { result: MAPPED_PRICED };
+    const clean = { result: { oneTime: { items: [], specItems: [] } } };
+    for (const value of [undefined, '', 'false', '0', 'off']) {
+      if (value === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = value;
+      expect(estimateAreaAddOnsGated(stored)).toBe(true);
+      expect(estimateAreaAddOnsGated(clean)).toBe(false);
+    }
+    for (const value of ['1', 'true', 'on']) {
+      process.env.GATE_AREA_ADDONS = value;
+      expect(estimateAreaAddOnsGated(stored)).toBe(false);
+    }
   });
 });

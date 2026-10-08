@@ -747,7 +747,9 @@ async function releaseHoldsIfStillParked(estimate) {
     // A Bermuda-suppression estimate (gate off) is never priced: its park was decided with suppressionGated, so
     // the recheck uses the same semantics, or the gate-disabled pricing path throws and the hold is never released.
     const suppressionGated = !!(require('../services/pricing-engine/v1-legacy-mapper').estimateDataCarriesBermudaSuppression(row.estimate_data)
-      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
+      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'))
+      // A gated area add-on estimate is never priced either (the replay would throw AREA_ADDONS_GATED).
+      || require('../services/pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(row.estimate_data);
     const state = await estimatePublicBlockingState(row, { database: trx, lock: true, fresh: true, suppressionGated });
     if (state?.state !== 'contact_review') return { released: 0 };
     return slotReservation.releaseEstimateHolds({ estimateId: estimate.id, database: trx });
@@ -10028,9 +10030,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return !!(estimateDataCarriesBermudaSuppression(estimate.estimate_data)
         && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION'));
     })();
+    // A persisted area add-on (GATE_AREA_ADDONS off) is refused the same way and, like the Bermuda shape, never priced
+    // for the park check (its replay would throw AREA_ADDONS_GATED).
+    const areaAddOnsGated = require('../services/pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estimate.estimate_data);
     if (!estimate.customer_id && estimate.customer_phone) {
       let blocking = null;
-      try { blocking = await estimatePublicBlockingState(estimate, { suppressionGated: bermudaSuppressionGated }); } catch { /* the authoritative in-transaction match decides */ }
+      try { blocking = await estimatePublicBlockingState(estimate, { suppressionGated: bermudaSuppressionGated || areaAddOnsGated }); } catch { /* the authoritative in-transaction match decides */ }
       if (blocking?.state === 'contact_review') {
         // A stale tab can have captured a recurring SetupIntent before the customer record turned
         // contradictory. Retire the one this request submits with main's own helper - the same one the
@@ -10061,6 +10066,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
         code: 'BERMUDA_SUPPRESSION_GATED',
       });
+    }
+    if (areaAddOnsGated) {
+      const { AREA_ADDONS_GATED_CODE, AREA_ADDONS_GATED_CUSTOMER_MESSAGE } = require('../services/pricing-engine/v1-legacy-mapper');
+      return res.status(409).json({ error: AREA_ADDONS_GATED_CUSTOMER_MESSAGE, code: AREA_ADDONS_GATED_CODE });
     }
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right

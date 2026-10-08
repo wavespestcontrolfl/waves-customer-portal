@@ -545,6 +545,11 @@ async function markEstimateManuallyAccepted({
         && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
         throw httpError('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before accepting.', 409);
       }
+      // Same rule for a persisted area add-on treatment (GATE_AREA_ADDONS).
+      const { estimateAreaAddOnsGated, areaAddOnsGatedStaffMessage } = require('./pricing-engine/v1-legacy-mapper');
+      if (estimateAreaAddOnsGated(estimate.estimate_data || estimate.estimateData)) {
+        throw httpError(areaAddOnsGatedStaffMessage('accepting'), 409);
+      }
     }
     if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);

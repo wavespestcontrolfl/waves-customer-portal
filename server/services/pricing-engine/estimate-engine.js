@@ -89,7 +89,7 @@ const {
   pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
-  priceTopDressing, priceDethatching, priceAreaAddOn, assertAreaAddOnsEnabled, buildPricingError,
+  priceTopDressing, priceDethatching, priceAreaAddOn, normalizeAreaAddOnInput, isPlainAreaAddOnObject, assertAreaAddOnsEnabled, buildPricingError,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
@@ -1669,26 +1669,40 @@ function generateEstimate(input) {
   // Area add-on treatments (GATE_AREA_ADDONS, enforced inside priceAreaAddOn):
   // one-time lines sold next to a base program. Malformed input fails closed
   // with a PricingError: a skipped entry would quote a customer less work than
-  // the operator selected. Add-ons are discountable:false and never reach
-  // activeServiceKeys, so they neither earn a discount nor count toward the
-  // WaveGuard tier. A commercial property gets the manual-quote line of the
-  // closest family (web sweep = pest control, the rest are lawn/bed/hardscape
-  // treatments = lawn care) because the tier tables are residential.
+  // the operator selected. Every entry is validated in full FIRST (one shared
+  // normaliser, the same one priceAreaAddOn runs), so a commercial property
+  // cannot turn an unknown key or a bad value into a manual-quote line. One
+  // row per add-on key: a repeat of a key would sidestep maxPerYear (the
+  // application count belongs in `applications`). Add-ons are
+  // discountable:false and never reach activeServiceKeys, so they neither earn
+  // a discount nor count toward the WaveGuard tier. A commercial property gets
+  // the manual-quote line of the closest family (web sweep = pest control, the
+  // rest are lawn/bed/hardscape treatments = lawn care) because the tier
+  // tables are residential. A 'sameTripAddOn' entry needs a host visit on this
+  // same estimate; that is checked below, once the final line list exists.
+  // Not supported yet: a same-visit add-on sold to an EXISTING customer
+  // against a visit that is already booked (it needs scheduling evidence).
+  const areaAddOnRequests = [];
   if (services.areaAddOns !== undefined) {
     if (!Array.isArray(services.areaAddOns)) {
       throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt, visitContext, applications }', { field: 'areaAddOns' });
     }
     if (services.areaAddOns.length > 0) assertAreaAddOnsEnabled();
+    const seenAreaAddOnKeys = new Set();
     services.areaAddOns.forEach((entry, index) => {
-      if (Object.prototype.toString.call(entry) !== '[object Object]') {
+      if (!isPlainAreaAddOnObject(entry)) {
         throw buildPricingError('Each services.areaAddOns entry must be an object', { field: 'areaAddOns', index });
       }
-      if (useCommercialManualQuote(entry, entry.key === 'web_sweep' ? 'pest_control' : 'lawn_care')) return;
-      const result = priceAreaAddOn(entry.key, {
-        areaSqFt: entry.areaSqFt,
-        visitContext: entry.visitContext,
-        applications: entry.applications,
-      });
+      const normalized = normalizeAreaAddOnInput(entry.key, entry);
+      if (seenAreaAddOnKeys.has(normalized.addOnKey)) {
+        throw buildPricingError(`services.areaAddOns lists ${normalized.addOnKey} more than once - send one entry per add-on and put the count in applications`, { field: 'areaAddOns', index, key: normalized.addOnKey });
+      }
+      seenAreaAddOnKeys.add(normalized.addOnKey);
+      areaAddOnRequests.push({ entry, normalized });
+    });
+    areaAddOnRequests.forEach(({ entry, normalized }) => {
+      if (useCommercialManualQuote(entry, normalized.addOnKey === 'web_sweep' ? 'pest_control' : 'lawn_care')) return;
+      const result = priceAreaAddOn(normalized.addOnKey, entry);
       (result.manualReviewReasons || []).forEach(addManualReviewReason);
       lineItems.push(result);
     });
@@ -2052,6 +2066,27 @@ function generateEstimate(input) {
       if (line && line.quoteRequired !== true && COMMERCIAL_SCOPED_ONETIME_SERVICES.has(line.service)) {
         lineItems[i] = markCommercialOneTimeLine(line, property, { commercialSubtype });
       }
+    }
+  }
+
+  // Same-visit area add-ons ride a host visit: the price drops the drive
+  // minutes, which is only true when a priced service shares the estimate. The
+  // host is another PRICED line that is not an area add-on (recurring, or any
+  // other one-time service), or a PRICED add-on in this list that is standalone
+  // (it has its own visit). An unpriced line (custom quote, commercial manual
+  // quote) is never a host. Checked on the final list, so list order is free.
+  // Prior services the customer already holds (priorQualifyingServices) are not
+  // a host: that case needs scheduling evidence and is not supported yet.
+  if (areaAddOnRequests.some(({ normalized }) => normalized.visitContext === 'sameTripAddOn')) {
+    const isPricedLine = (line) => !!line
+      && line.quoteRequired !== true
+      && line.requiresCustomQuote !== true
+      && [line.annual, line.price, line.total].some((amount) => Number(amount) > 0);
+    const hasHostVisit = lineItems.some((line) => (line?.service === 'area_addon'
+      ? line.visitContext === 'standalone'
+      : true) && isPricedLine(line));
+    if (!hasHostVisit) {
+      throw buildPricingError('A same-visit area add-on needs a priced service on the same estimate (a recurring service, another one-time service, or a standalone add-on); price it as standalone or add the service it rides with', { field: 'areaAddOns', visitContext: 'sameTripAddOn' });
     }
   }
 

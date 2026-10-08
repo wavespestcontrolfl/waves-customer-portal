@@ -786,6 +786,10 @@ async function depositStillRecordable(estimateId) {
       && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
       return { recordable: false, reason: 'bermuda_suppression_gated' };
     }
+    // Same kill-switch race for a persisted area add-on (GATE_AREA_ADDONS).
+    if (require('./pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estimate.estimate_data)) {
+      return { recordable: false, reason: 'area_addons_gated' };
+    }
   }
 
   let gates = null;

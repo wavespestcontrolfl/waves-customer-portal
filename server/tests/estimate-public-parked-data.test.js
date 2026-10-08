@@ -482,6 +482,21 @@ describe('the bulk hold release is judged on the estimate as it is now, under th
     }
   });
 
+  test('an area add-on estimate (GATE_AREA_ADDONS off) is rechecked with suppressionGated too, so its hold is released without any pricing work', async () => {
+    const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+    const gated = jest.spyOn(mapper, 'estimateAreaAddOnsGated').mockReturnValue(true);
+    try {
+      phoneCandidates = [BOB];
+      const est = makeEstimate();
+      estimateRow = est;
+      await refuseParkedWrite(est, 'cust-bob');
+      expect(gated).toHaveBeenCalled();
+      expect(mockReleaseEstimateHolds).toHaveBeenCalledTimes(1);
+    } finally {
+      gated.mockRestore();
+    }
+  });
+
   test('the estimate was corrected after the unlocked read said parked (phone fixed): NO hold is deleted', async () => {
     const stale = makeEstimate();
     estimateRow = { ...stale, customer_phone: '(941) 555-0999' }; // staff fixed the phone; the locked re-read sees it

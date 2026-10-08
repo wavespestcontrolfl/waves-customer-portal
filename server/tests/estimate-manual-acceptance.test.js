@@ -797,6 +797,38 @@ describe('estimate manual acceptance', () => {
     }
   });
 
+  test('blocks manual acceptance of a persisted area add-on estimate while GATE_AREA_ADDONS is off; gate on passes the add-on guard', async () => {
+    const prev = process.env.GATE_AREA_ADDONS;
+    try {
+      const estimate = {
+        id: 'estimate-area-addon-gated',
+        status: 'sent',
+        estimate_data: JSON.stringify({ engineInputs: { services: { areaAddOns: [{ key: 'web_sweep' }] } } }),
+      };
+      delete process.env.GATE_AREA_ADDONS;
+      const gated = makeDb(estimate);
+      await expect(markEstimateManuallyAccepted({
+        estimateId: estimate.id,
+        adminUserId: 1,
+        database: gated.database,
+      })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/GATE_AREA_ADDONS/) });
+      expect(gated.updates).toHaveLength(0);
+
+      process.env.GATE_AREA_ADDONS = 'true';
+      let thrown;
+      try {
+        await markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 1, database: makeDb(estimate).database });
+      } catch (err) {
+        thrown = err;
+      }
+      // Whatever this minimal fixture fails on, it is NOT the add-on gate.
+      if (thrown) expect(thrown.message).not.toMatch(/GATE_AREA_ADDONS/);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_AREA_ADDONS;
+      else process.env.GATE_AREA_ADDONS = prev;
+    }
+  });
+
   test('refuses manual acceptance of a not-yet-accepted 4x/quarterly tree & shrub estimate (retired 2026-09-24, codex P1 r9)', async () => {
     const estimate = {
       id: 'estimate-ts-quarterly',

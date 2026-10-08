@@ -206,6 +206,11 @@ function areaAddOnFields(li = {}) {
   return {
     addOnKey: li.addOnKey,
     applications: li.applications,
+    // Unit price: `price` is the total for all applications, so downstream
+    // copy needs this to say "$139 per application" (AGENTS.md per-application
+    // rule). Null on an unpriced custom-quote row.
+    perApplication: li.perApplication ?? null,
+    maxPerYear: li.maxPerYear ?? null,
     areaSqFt: li.areaSqFt ?? null,
     tierSqFt: li.tierSqFt ?? null,
     visitContext: li.visitContext,
@@ -1510,4 +1515,69 @@ function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
     || !!d.result?.lawnMeta?.bermudaSuppression;
 }
 
-module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression, treeShrubLegacyTierRows };
+// Does a persisted estimate carry an area add-on treatment (GATE_AREA_ADDONS)?
+// Same job as the Bermuda detector above and the same reason: a quote saved
+// gate-on serves its stored rows at send / accept / pay / schedule without
+// re-entering priceAreaAddOn, so the kill switch must be checked on the stored
+// shape. Every place an add-on can ride is read:
+//   - replayable inputs: engineInputs / engineInput / inputs `.services.areaAddOns`
+//     and engineRequest.options (`.services.areaAddOns` or `.areaAddOns`);
+//   - mapped rows (this module): result.oneTime.items, result.oneTime.specItems,
+//     result.specItems, result.quoteRequiredItems (the flat `oneTime` / `specItems`
+//     variant is read too, for a caller holding the bare mapped shape);
+//   - raw engine lines: engineResult.lineItems / result.lineItems.
+// Any non-empty areaAddOns value counts, even a malformed one: failing closed
+// beats reading a shape the engine would reject anyway.
+function estimateDataCarriesAreaAddOns(estimateDataRaw) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  const listed = (value) => value !== undefined && value !== null
+    && !(Array.isArray(value) && value.length === 0);
+  const isAddOnRow = (row) => !!row && typeof row === 'object' && row.service === 'area_addon';
+  const rowsHaveAddOn = (rows) => Array.isArray(rows) && rows.some(isAddOnRow);
+  const inputShapes = [d.engineInputs, d.engineInput, d.inputs, d.engineRequest?.options];
+  if (inputShapes.some((shape) => shape && typeof shape === 'object'
+    && (listed(shape.services?.areaAddOns) || (shape === d.engineRequest?.options && listed(shape.areaAddOns))))) {
+    return true;
+  }
+  const mappedRoots = [d, d.result].filter((root) => root && typeof root === 'object');
+  if (mappedRoots.some((root) => rowsHaveAddOn(root.oneTime?.items)
+    || rowsHaveAddOn(root.oneTime?.specItems)
+    || rowsHaveAddOn(root.specItems)
+    || rowsHaveAddOn(root.quoteRequiredItems)
+    || rowsHaveAddOn(root.lineItems))) {
+    return true;
+  }
+  return rowsHaveAddOn(d.engineResult?.lineItems);
+}
+
+// The persisted-boundary guard for area add-ons, shared by every route and
+// service that already guards the Bermuda add-on: true when the stored estimate
+// carries an add-on AND GATE_AREA_ADDONS is off (read at call time; unset =
+// kill). The caller fails closed with AREA_ADDONS_GATED in the status family
+// its Bermuda guard uses at that boundary.
+const AREA_ADDONS_GATED_CODE = 'AREA_ADDONS_GATED';
+function estimateAreaAddOnsGated(estimateDataRaw) {
+  return estimateDataCarriesAreaAddOns(estimateDataRaw)
+    && !require('../../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS');
+}
+// Staff-facing message ("sending", "accepting", "booking from it"...).
+function areaAddOnsGatedStaffMessage(action) {
+  return `This estimate includes an area add-on treatment, which is currently disabled (GATE_AREA_ADDONS). Re-enable the gate or rebuild the estimate without the add-on before ${action}.`;
+}
+// Customer-facing message (same wording the Bermuda refusal uses).
+const AREA_ADDONS_GATED_CUSTOMER_MESSAGE = 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.';
+
+module.exports = {
+  mapV1ToLegacyShape,
+  estimateDataCarriesBermudaSuppression,
+  estimateDataCarriesAreaAddOns,
+  estimateAreaAddOnsGated,
+  areaAddOnsGatedStaffMessage,
+  AREA_ADDONS_GATED_CODE,
+  AREA_ADDONS_GATED_CUSTOMER_MESSAGE,
+  treeShrubLegacyTierRows,
+};

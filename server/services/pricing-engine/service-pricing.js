@@ -8460,14 +8460,26 @@ function roundUpToNine(value) {
   return Math.ceil((value - 9) / 10) * 10 + 9;
 }
 
-// One-time add-on treatment priced from AREA_ADDONS (see constants.js for
-// the formula and the owner rulings). `areaSqFt` is the TREATED area; the
-// line prices at the top of the tier that holds it. An area above the
-// largest tier, or more applications than maxPerYear, returns an unpriced
-// custom-quote line instead of extrapolating.
-function priceAreaAddOn(addOnKey, options = {}) {
-  assertAreaAddOnsEnabled();
+// Plain data only: a class instance, array, Date or null is not an add-on
+// entry or options bag.
+function isPlainAreaAddOnObject(value) {
+  if (Object.prototype.toString.call(value) !== '[object Object]') return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+// The ONE validator for an add-on request. priceAreaAddOn (direct callers) and
+// the estimate engine's services.areaAddOns block both call it, so the rules
+// cannot drift between the two doors: known key (exact, case-sensitive),
+// visitContext, whole-number applications, and a positive area for tiered
+// keys. An area above the largest tier or applications above maxPerYear are
+// VALID input (they price as a custom quote), not errors. It does not check
+// the gate and prices nothing.
+function normalizeAreaAddOnInput(addOnKey, options = {}) {
   assertEnum(addOnKey, Object.keys(AREA_ADDONS.items), 'addOnKey');
+  if (!isPlainAreaAddOnObject(options)) {
+    throw buildPricingError('Area add-on options must be an object', { field: 'areaAddOns', addOnKey });
+  }
   const cfg = AREA_ADDONS.items[addOnKey];
   const visitContext = options.visitContext ?? 'standalone';
   assertEnum(visitContext, AREA_ADDON_VISIT_CONTEXTS, 'visitContext');
@@ -8480,6 +8492,40 @@ function priceAreaAddOn(addOnKey, options = {}) {
   if (!Number.isInteger(applications) || applications < 1) {
     throw buildPricingError('applications must be a whole number of 1 or more', { field: 'applications', value: options.applications });
   }
+  let areaSqFt = null;
+  let tierSqFt = null;
+  if (cfg.tiers) {
+    // Only a number or a numeric string is an area: Number(true) is 1 and
+    // Number([1200]) is 1200, which would quote malformed input.
+    const rawArea = options.areaSqFt;
+    const scalarArea = typeof rawArea === 'number'
+      || (typeof rawArea === 'string' && rawArea.trim() !== '');
+    areaSqFt = scalarArea ? Number(rawArea) : NaN;
+    if (!Number.isFinite(areaSqFt) || areaSqFt <= 0) {
+      throw buildPricingError(`areaSqFt is required for ${addOnKey} (the ${cfg.areaLabel} area in sq ft)`, { field: 'areaSqFt', value: options.areaSqFt });
+    }
+    tierSqFt = cfg.tiers.find((top) => areaSqFt <= top) ?? null;
+  }
+  return { addOnKey, cfg, visitContext, applications, areaSqFt, tierSqFt };
+}
+
+// One-time add-on treatment priced from AREA_ADDONS (see constants.js for
+// the formula and the owner rulings). `areaSqFt` is the TREATED area; the
+// line prices at the top of the tier that holds it. An area above the
+// largest tier, or more applications than maxPerYear, returns an unpriced
+// custom-quote line instead of extrapolating.
+//
+// visitContext 'sameTripAddOn' drops the drive minutes, so it is only true
+// when a host visit exists. This function cannot see the rest of the
+// estimate: generateEstimate checks that a priced host line is on the same
+// estimate (services.areaAddOns block), and a direct caller owns that check.
+// Selling a same-visit add-on to an EXISTING customer against an already
+// booked visit is not supported yet (it needs scheduling evidence).
+function priceAreaAddOn(addOnKey, options = {}) {
+  assertAreaAddOnsEnabled();
+  const {
+    cfg, visitContext, applications, areaSqFt, tierSqFt,
+  } = normalizeAreaAddOnInput(addOnKey, options);
 
   const base = {
     service: 'area_addon',
@@ -8502,22 +8548,8 @@ function priceAreaAddOn(addOnKey, options = {}) {
     customQuoteReason: reason,
   });
 
-  let areaSqFt = null;
-  let tierSqFt = null;
-  if (cfg.tiers) {
-    // Only a number or a numeric string is an area: Number(true) is 1 and
-    // Number([1200]) is 1200, which would quote malformed input.
-    const rawArea = options.areaSqFt;
-    const scalarArea = typeof rawArea === 'number'
-      || (typeof rawArea === 'string' && rawArea.trim() !== '');
-    areaSqFt = scalarArea ? Number(rawArea) : NaN;
-    if (!Number.isFinite(areaSqFt) || areaSqFt <= 0) {
-      throw buildPricingError(`areaSqFt is required for ${addOnKey} (the ${cfg.areaLabel} area in sq ft)`, { field: 'areaSqFt', value: options.areaSqFt });
-    }
-    tierSqFt = cfg.tiers.find((top) => areaSqFt <= top) ?? null;
-    if (tierSqFt === null) {
-      return customQuote('area_addon_area_above_largest_tier', { areaSqFt, tierSqFt: null });
-    }
+  if (cfg.tiers && tierSqFt === null) {
+    return customQuote('area_addon_area_above_largest_tier', { areaSqFt, tierSqFt: null });
   }
   if (applications > cfg.maxPerYear) {
     return customQuote('area_addon_applications_above_yearly_limit', { areaSqFt, tierSqFt });
@@ -8535,7 +8567,9 @@ function priceAreaAddOn(addOnKey, options = {}) {
   const detailParts = [];
   if (tierSqFt) detailParts.push(`Up to ${tierSqFt.toLocaleString()} sq ft ${cfg.areaLabel} area`);
   detailParts.push(visitContext === 'sameTripAddOn' ? 'Same visit as a booked service' : 'Own visit');
-  if (applications > 1) detailParts.push(`${applications} applications`);
+  // Unit price rides the detail so downstream copy can say "per application"
+  // (AGENTS.md: customer-facing units read per application, never per visit).
+  if (applications > 1) detailParts.push(`${applications} applications at $${perApplication} per application`);
 
   return {
     ...base,
@@ -9510,6 +9544,8 @@ module.exports = {
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
   priceAreaAddOn,
+  normalizeAreaAddOnInput,
+  isPlainAreaAddOnObject,
   assertAreaAddOnsEnabled,
   buildPricingError,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
