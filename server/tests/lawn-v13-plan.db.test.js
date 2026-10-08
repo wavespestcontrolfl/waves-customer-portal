@@ -119,25 +119,68 @@ describeDb('the v13 plan through PostgreSQL', () => {
     });
   });
 
-  // July potash (20261007180000): the recipe's July step names the 0-0-50; the staged window decides whether it applies.
-  describe('the July 0-0-50 follows its staged row (20261007186000)', () => {
-    const SOP = require('../models/migrations/20261007180000_lawn_v13_matrix_adds').SOP;
-    let julyRow;
+  // The inactive-row and alias notices (round 12) on a base line of the plan: the October Dimension bag stands in
+  // (the July potash step is gone: 20261007189000).
+  describe('a recipe base product whose catalog row is inactive or under another name', () => {
+    const BAG = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
     beforeAll(async () => {
-      const [product] = await knex('products_catalog').insert({
-        name: SOP, category: 'fertilizer', product_type: 'fertilizer', default_rate_per_1000: 1, rate_unit: 'lb', analysis_n: 0, analysis_p: 0, analysis_k: 50,
+      await knex('products_catalog').insert({
+        name: BAG, category: 'fertilizer', product_type: 'fertilizer', default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10,
         label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'lb', active: true,
-      }).returning('*');
+      });
       const staged = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
-      const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 7, window_key: 'jul_v13_inspect_spot', title: 'July', visit_type: 'granular_production_plus_spots', goal: 'Potassium feeding (0-0-50, no N or P) on the spreader; inspect the whole lawn and treat spots only.', required_tasks: JSON.stringify(['required_10_minute_inspection', 'blackout_zero_np']) }).returning('*');
-      [julyRow] = await knex('lawn_protocol_products').insert({
-        lawn_protocol_window_id: window.id, product_id: product.id, product_name: SOP, role: 'potassium_nutrition', application_mode: 'broadcast',
-        default_in_plan: true, rate_per_1000: 1, rate_unit: 'lb', gates: JSON.stringify({ targetK2O: '0.5 lb K2O/1000', requiresZeroNP: true, fertilizerSafety: true }),
-      }).returning('*');
+      const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 10, window_key: 'oct_v13_spreader_fall', title: 'October', visit_type: 'granular_production_plus_spots' }).returning('*');
+      const [product] = await knex('products_catalog').where({ name: BAG });
+      await knex('lawn_protocol_products').insert({
+        lawn_protocol_window_id: window.id, product_id: product.id, product_name: BAG, role: 'fall_pre_emergent_nutrition', application_mode: 'broadcast',
+        default_in_plan: true, rate_per_1000: 4.04, rate_unit: 'lb', gates: JSON.stringify({ targetN: '0.73 lb N/1000', targetK2O: '0.4 lb K2O/1000' }),
+      });
     });
-    const sopItem = (result) => result.mixCalculator.items.find((item) => item.product?.name === SOP);
+    const octoberPlan = async () => plan(await plannedVisit({ scheduled_date: '2026-10-14' }));
+    const bagItem = (result, id) => result.mixCalculator.items.find((item) => (id ? item.product?.id === id : item.product?.name === BAG));
+    const bagCatalog = () => knex('products_catalog').where({ name: BAG });
 
-    // The job card's procedure for a July visit on a plan of `pattern` (every_6_weeks = 9 a year, monthly = 12).
+    test('INACTIVE in the catalog: the plan blocks with a clear notice; the step does not just disappear', async () => {
+      setGates();
+      await bagCatalog().update({ active: false });
+      try {
+        const result = await octoberPlan();
+        expect(bagItem(result)).toBeUndefined();
+        const block = result.propertyGate.blocks.find((made) => made.code === 'lawn_v13_product_inactive');
+        expect(block).toMatchObject({ severity: 'block', productName: BAG });
+        expect(block.message).toMatch(/is inactive in the catalog; the office must activate it/);
+        expect(result.status).toBe('blocked');
+      } finally {
+        await bagCatalog().update({ active: true });
+      }
+      const again = await octoberPlan();
+      expect(again.propertyGate.blocks.map((made) => made.code)).not.toContain('lawn_v13_product_inactive');
+      expect(bagItem(again)).toBeTruthy();
+    });
+
+    test('the catalog row sits under another name with the recipe name as its alias: it is matched and planned', async () => {
+      setGates();
+      const [row] = await bagCatalog().update({ name: 'Renamed Bag Row' }).returning('*');
+      await knex('product_aliases').insert({ product_id: row.id, alias_name: BAG });
+      try {
+        const result = await octoberPlan();
+        const item = bagItem(result, row.id);
+        expect(item).toBeTruthy();
+        expect(item.mix.amount).toBeGreaterThan(0);
+        expect(result.propertyGate.blocks.map((made) => made.code)).not.toContain('lawn_v13_product_inactive');
+      } finally {
+        await knex('product_aliases').where({ product_id: row.id }).del();
+        await knex('products_catalog').where({ id: row.id }).update({ name: BAG });
+      }
+    });
+  });
+
+  describe('July is the scout visit: no 0-0-50 on the 12-visit or the 9-visit plan', () => {
+    // The staged July window as main has it: the scout window, no products.
+    beforeAll(async () => {
+      const staged = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
+      await knex('lawn_protocol_windows').insert({ lawn_protocol_id: staged.id, month: 7, window_key: 'jul_v13_inspect_spot', title: 'July Inspect and Spot', visit_type: 'scout_first', goal: 'No whole-lawn tool: inspect the lawn and treat spots only.', required_tasks: JSON.stringify(['required_10_minute_inspection']) });
+    });
     const julyCard = async (recurring_pattern) => {
       const jobCard = require('../services/job-card');
       const visit = await plannedVisit({ scheduled_date: '2026-07-14', recurring_pattern });
@@ -145,108 +188,15 @@ describeDb('the v13 plan through PostgreSQL', () => {
       const out = await jobCard.resolveVisitProducts({ facts: { serviceId: visit.id, isLawn: true }, protocols: {}, catalog: [], dbh: knex, deps: { buildPlan: async () => built } });
       return { built, procedure: out.procedure };
     };
-
-    test('9 visits a year: the July job card is the scout step: no K rate, no spreader or safety wording, the scout goal', async () => {
+    test.each([['monthly', '12 visits a year'], ['every_6_weeks', '9 visits a year']])('%s (%s): no whole-lawn product is planned and the card is the scout step', async (pattern) => {
       setGates();
-      const { built, procedure } = await julyCard('every_6_weeks');
-      expect(built.protocol.cadenceBranch).toBe('9');
-      expect(sopItem(built)).toBeUndefined();
-      expect(procedure.objective).toBe('No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only.');
-      const text = JSON.stringify([procedure.objective, procedure.visitNotes, procedure.steps]);
-      expect(text).not.toMatch(/K rate|K2O|0\.5 lb K|[Ss]preader|0-0-50|[Pp]otassium|deflector|fertilizer-free band/);
-      expect(procedure.visitNotes.join(' ')).toMatch(/No whole-lawn tool this month: inspect the whole lawn and treat spots only/);
-      expect(built.mixCalculator.nutrientProjection).toBeDefined();
-    });
-
-    test('12 visits a year: the July job card is unchanged (the potash goal, K rate, spreader visit and the safety block)', async () => {
-      setGates();
-      const { built, procedure } = await julyCard('monthly');
-      expect(built.protocol.cadenceBranch).toBeNull();
-      expect(built.protocol.cadenceGoal).toBeNull();
-      expect(sopItem(built)).toBeTruthy();
-      expect(procedure.objective).toBe('Potassium feeding (0-0-50, no N or P) on the spreader; inspect the whole lawn and treat spots only.');
-      expect(procedure.visitNotes.join(' ')).toMatch(/K rate: 0\.5 lb K\. Spreader visit/);
-      expect(procedure.visitNotes.join(' ')).toMatch(/deflector shield/i);
-    });
-
-    test('a normal July window: the 0-0-50 is planned, 1 lb per 1,000 sq ft on 10,000 sq ft', async () => {
-      setGates();
-      await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: true });
-      const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
-      expect(sopItem(result)).toBeTruthy();
-      expect(sopItem(result).mix.amount).toBeGreaterThan(0);
-    });
-
-    // The catalog row under test, restored after each case.
-    const sopCatalog = () => knex('products_catalog').where({ name: SOP });
-    test('the July 0-0-50 row is INACTIVE in the catalog: the plan blocks with a clear notice; the step does not just disappear', async () => {
-      setGates();
-      await sopCatalog().update({ active: false });
-      try {
-        const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
-        expect(sopItem(result)).toBeUndefined();
-        const block = result.propertyGate.blocks.find((made) => made.code === 'lawn_v13_product_inactive');
-        expect(block).toMatchObject({ severity: 'block', productName: SOP });
-        expect(block.message).toMatch(/is inactive in the catalog; the office must activate it/);
-        expect(result.status).toBe('blocked');
-      } finally {
-        await sopCatalog().update({ active: true });
-      }
-      // Active again: no notice, the potash is planned.
-      const again = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
-      expect(again.propertyGate.blocks.map((made) => made.code)).not.toContain('lawn_v13_product_inactive');
-      expect(sopItem(again)).toBeTruthy();
-    });
-
-    test('the July 0-0-50 catalog row sits under another name with the recipe name as its alias: it is matched and planned', async () => {
-      setGates();
-      const [row] = await sopCatalog().update({ name: 'Renamed Potash Row' }).returning('*');
-      await knex('product_aliases').insert({ product_id: row.id, alias_name: SOP });
-      try {
-        const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
-        expect(sopItem(result)).toBeUndefined();
-        const item = result.mixCalculator.items.find((made) => made.product?.id === row.id);
-        expect(item).toBeTruthy();
-        expect(item.mix.amount).toBeGreaterThan(0);
-        expect(result.propertyGate.blocks.map((made) => made.code)).not.toContain('lawn_v13_product_inactive');
-      } finally {
-        await knex('product_aliases').where({ product_id: row.id }).del();
-        await knex('products_catalog').where({ id: row.id }).update({ name: SOP });
-      }
-    });
-
-    test('a July window that kept its scout form (the row is not a default): the plan does not plan the 0-0-50, and says why', async () => {
-      setGates();
-      await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: false });
-      try {
-        const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
-        expect(sopItem(result)).toBeUndefined();
-        expect(JSON.stringify(result.mixCalculator.items)).not.toContain(SOP);
-        expect(result.propertyGate.warnings.map((warning) => warning.code)).toContain('lawn_v13_row_not_default');
-        expect(codes(result)).not.toContain('lawn_v13_protocol_missing');
-      } finally {
-        await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: true });
-      }
-    });
-
-    test('a suppressed July row (12 visits a year, window kept its scout form): the job card is the scout step: no potash notes, no safety block, the scout goal', async () => {
-      setGates();
-      await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: false });
-      try {
-        const { built, procedure } = await julyCard('monthly');
-        expect(sopItem(built)).toBeUndefined();
-        expect(built.protocol.nonDefaultBase).toBe(true);
-        expect(procedure.objective).toBe('No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only.');
-        const text = JSON.stringify([procedure.objective, procedure.visitNotes, procedure.steps]);
-        expect(text).not.toMatch(/K rate|K2O|0\.5 lb K|[Ss]preader|0-0-50|[Pp]otassium|deflector|fertilizer-free band|Manatee BMP/);
-        expect(procedure.visitNotes.join(' ')).toMatch(/No whole-lawn tool this month: inspect the whole lawn and treat spots only/);
-      } finally {
-        await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: true });
-      }
-      // Back to a default row: the 12x card is the potash card again.
-      const { procedure } = await julyCard('monthly');
-      expect(procedure.visitNotes.join(' ')).toMatch(/K rate: 0\.5 lb K\. Spreader visit/);
-      expect(procedure.visitNotes.join(' ')).toMatch(/deflector shield/i);
+      const { built, procedure } = await julyCard(pattern);
+      expect(built.protocol.objective).toBe('N rate: 0 lb N. No whole-lawn tool this month. No N or P from June 1 through September 30.');
+      expect(built.mixCalculator.items.filter((item) => item.role === 'base' && item.product)).toEqual([]);
+      expect(JSON.stringify(built.protocol.base)).not.toMatch(/0-0-50/);
+      expect(procedure.objective).toBe('No whole-lawn tool: inspect the lawn and treat spots only.');
+      expect(procedure.visitNotes.join(' ')).toMatch(/No whole-lawn tool this month/);
+      expect(JSON.stringify([procedure.objective, procedure.visitNotes, procedure.steps])).not.toMatch(/K rate|K2O|[Ss]preader|0-0-50|[Pp]otassium|deflector|fertilizer-free band|Manatee BMP/);
     });
   });
 

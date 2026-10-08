@@ -421,7 +421,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     4: [migration.NAMES.F24],
     5: [migration.NAMES.TET],
     6: [migration.NAMES.NT, migration.NAMES.DIM],
-    7: [matrixMigration.SOP],
+    7: [],
     8: [migration.NAMES.NT],
     9: [migration.NAMES.NT],
     10: [DIMENSION_18],
@@ -442,12 +442,12 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
       ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
       : spec);
-    // 20261007180000 adds its rows (the 0-0-50 in July is the one new default) and turns the April Artavia row into Headway (Arena keeps its name: 20261007181000).
+    // 20261007180000 adds its rows (its July 0-0-50 row is deleted by 20261007189000) and turns the April Artavia row into Headway (Arena keeps its name: 20261007181000).
     const matrixName = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
     const staged = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, s]) => swapped(s)).map((s) => ({
       productId: idOf(matrixName(s[0])), defaultInPlan: s[6], gates: s[7], applicationMode: s[2], ratePer1000: s[3], rateUnit: s[4],
     }));
-    const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey).map((spec) => ({
+    const added = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP).map((spec) => ({
       productId: idOf(spec.name), defaultInPlan: spec.defaultInPlan, gates: spec.gates, applicationMode: spec.mode, ratePer1000: spec.rate, rateUnit: spec.unit,
     }));
     const products = [...staged, ...added];
@@ -460,7 +460,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     };
   }
 
-  test.each(V13_GRASSES)('%s: each month prefills exactly the whole-lawn products (July the potash)', async (grass) => {
+  test.each(V13_GRASSES)('%s: each month prefills exactly the whole-lawn products (July none)', async (grass) => {
     await withGateAsync('true', async () => {
       for (const month of MONTHS) {
         const result = buildLawnCompletionDefaults(planFor(grass, month), { isLawn: true, propertyId: 'p', propertyMatchesProfile: true, history: { rows: [] } });
@@ -471,10 +471,10 @@ describe('completion defaults with the v13 protocol resolved', () => {
     });
   });
 
-  test('July prefills the potash (the one whole-lawn tool, the inspection stays) and carries no "unregistered" explanation', async () => {
+  test('July carries no default and no "unregistered" explanation (the scout visit)', async () => {
     await withGateAsync('true', async () => {
       const result = buildLawnCompletionDefaults(planFor('bermuda', 7), { isLawn: true, propertyId: 'p', propertyMatchesProfile: true, history: { rows: [] } });
-      expect(result.items.map((i) => i.product.name)).toEqual([matrixMigration.SOP]);
+      expect(result.items).toEqual([]);
       expect(result.message).toBeNull();
     });
   });

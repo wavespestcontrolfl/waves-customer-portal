@@ -25,7 +25,7 @@
       "No soil tests.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged.",
-      "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate); December LESCO 24-0-11 with PolyPlus OPTI at 3.1 lb per 1,000 sq ft (0.75 lb N). January Stonewall 4FL stays. The 9-visit plan keeps the October Dimension step."
+      "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
@@ -127,7 +127,7 @@
       {
         "visit": 7,
         "month": "Jul",
-        "primary": "Scout visit: inspect the whole lawn and treat spots only\nLESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer — 1.0 lb per 1,000 sq ft (0.5 lb K2O), spreader",
+        "primary": "Scout visit: inspect the whole lawn and treat spots only, no whole-lawn tool",
         "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours; mole cricket nymph spots: Talak 1.0 fl oz per 1,000 sq ft by backpack, treated late in the day, and the technician waters it in right after application with the hose (up to 0.5 inch) before leaving\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent\nArtavia 2 SC (Azoxy) — Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most",
         "tiers": {
           "bronze": true,
@@ -135,14 +135,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit; if a 9-visit lawn has one, it keeps the scout step with no potash.",
-        "cadenceVariants": {
-          "9": {
-            "primary": "Scout visit: inspect the whole lawn and treat spots only",
-            "notes": "N rate: 0 lb N. No whole-lawn tool this month: inspect the whole lawn and treat spots only. No N or P from June 1 through September 30.",
-            "goal": "No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only."
-          }
-        }
+        "notes": "N rate: 0 lb N. No whole-lawn tool this month. No N or P from June 1 through September 30."
       },
       {
         "visit": 8,
@@ -237,7 +230,7 @@
       "No soil tests.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged.",
-      "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate); December LESCO 24-0-11 with PolyPlus OPTI at 3.1 lb per 1,000 sq ft (0.75 lb N). January Stonewall 4FL stays. The 9-visit plan keeps the October Dimension step."
+      "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
@@ -339,7 +332,7 @@
       {
         "visit": 7,
         "month": "Jul",
-        "primary": "Scout visit: inspect the whole lawn and treat spots only\nLESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer — 1.0 lb per 1,000 sq ft (0.5 lb K2O), spreader",
+        "primary": "Scout visit: inspect the whole lawn and treat spots only, no whole-lawn tool",
         "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours; mole cricket nymph spots: Talak 1.0 fl oz per 1,000 sq ft by backpack, treated late in the day, and the technician waters it in right after application with the hose (up to 0.5 inch) before leaving\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent\nArtavia 2 SC (Azoxy) — Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most",
         "tiers": {
           "bronze": true,
@@ -347,14 +340,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit; if a 9-visit lawn has one, it keeps the scout step with no potash.",
-        "cadenceVariants": {
-          "9": {
-            "primary": "Scout visit: inspect the whole lawn and treat spots only",
-            "notes": "N rate: 0 lb N. No whole-lawn tool this month: inspect the whole lawn and treat spots only. No N or P from June 1 through September 30.",
-            "goal": "No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only."
-          }
-        }
+        "notes": "N rate: 0 lb N. No whole-lawn tool this month. No N or P from June 1 through September 30."
       },
       {
         "visit": 8,
@@ -449,7 +435,7 @@
       "No soil tests.",
       "Fertilizer safety: deflector shield on the spreader, a 10 ft fertilizer-free band from any water body, wetland, seawall or top of bank, no fertilizing when a severe thunderstorm, flood or tropical watch or warning is forecast, sweep fertilizer off driveways, sidewalks and streets back onto the lawn, Manatee BMP decal on the vehicle.",
       "North Port: no Nutra-TECH on the June, August and September visits until the city confirms. The April Nutra-TECH pass stays. The plan holds the summer product back and a completion that records it is flagged.",
-      "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate); December LESCO 24-0-11 with PolyPlus OPTI at 3.1 lb per 1,000 sq ft (0.75 lb N). January Stonewall 4FL stays. The 9-visit plan keeps the October Dimension step."
+      "Season 2027 (visits from 2027-10-01), 12-visit plan only. This is a note and changes no 2026 visit: October LESCO 24-0-11 with PolyPlus OPTI at 2.5 lb per 1,000 sq ft (0.60 lb N); November LESCO Dimension 0.21% 18-0-10 at 4.04 lb per 1,000 sq ft (0.73 lb N, 0.37 lb dithiopyr per acre, the commercial label Coastal South rate). January Stonewall 4FL stays. December is defined separately. The 9-visit plan keeps the October Dimension step."
     ],
     "safety_rules": [
       "Celsius WG: stay under the annual cap (Celsius, Certainty and Blindside: up to 2 applications per lawn per year each); use Blindside after the Celsius cap. Spray in the morning. Celsius + Certainty: no rain or irrigation for 2 hours after; Blindside: none for 24 hours after. No mowing 2 days before or after. In summer, only on watered turf.",
@@ -551,7 +537,7 @@
       {
         "visit": 7,
         "month": "Jul",
-        "primary": "Scout visit: inspect the whole lawn and treat spots only\nLESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer — 1.0 lb per 1,000 sq ft (0.5 lb K2O), spreader",
+        "primary": "Scout visit: inspect the whole lawn and treat spots only, no whole-lawn tool",
         "secondary": "Acelepryn Insecticide — caterpillars, 0.046 to 0.092 fl oz per 1,000 sq ft, recheck in 7 days, delay watering (irrigation) or mowing for 24 hours after application\nGravex 20 EW — gray leaf spot, second product after Artavia\nAtticus Talak 7.9 F — bifenthrin for chinch bugs, second product after Arena, or for caterpillars if Acelepryn does not hold at the 7-day recheck; delay watering 24 hours; mole cricket nymph spots: Talak 1.0 fl oz per 1,000 sq ft by backpack, treated late in the day, and the technician waters it in right after application with the hose (up to 0.5 inch) before leaving\nVelista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent\nArtavia 2 SC (Azoxy) — Pythium root rot on saturated areas, 0.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most",
         "tiers": {
           "bronze": true,
@@ -559,14 +545,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "N rate: 0 lb N. K rate: 0.5 lb K. Spreader visit: 0-0-50 potash is the one whole-lawn tool, with the whole-lawn inspection and spot treatment. It has no N or P, so it is legal from June 1 through September 30. Only the 12-visit plan has a July visit; if a 9-visit lawn has one, it keeps the scout step with no potash.",
-        "cadenceVariants": {
-          "9": {
-            "primary": "Scout visit: inspect the whole lawn and treat spots only",
-            "notes": "N rate: 0 lb N. No whole-lawn tool this month: inspect the whole lawn and treat spots only. No N or P from June 1 through September 30.",
-            "goal": "No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only."
-          }
-        }
+        "notes": "N rate: 0 lb N. No whole-lawn tool this month. No N or P from June 1 through September 30."
       },
       {
         "visit": 8,

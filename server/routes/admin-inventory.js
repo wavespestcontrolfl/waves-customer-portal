@@ -796,7 +796,6 @@ const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   ['v13_artavia', 'Artavia 2 SC (Azoxy)', 'pesticide', 'fungicide'],
   ['v13_velista', 'Velista', 'pesticide', 'fungicide'],
   ['v13_headway', 'Headway Fungicide', 'pesticide', 'fungicide'],
-  ['v13_lesco_0_0_50', 'LESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer', 'fertilizer', 'potassium fertilizer'],
   ['v13_advion_fire_ant', 'Advion Fire Ant Bait', 'pesticide', 'insecticide bait'],
   ['v13_gravex', 'Gravex 20 EW', 'pesticide', 'fungicide'],
   ['v13_celsius', 'Celsius WG', 'pesticide', 'post-emergent herbicide'],

@@ -63,9 +63,9 @@ describe('1. mole crickets: Talak 1.0 fl oz on nymph spots in July and August, w
     expect(track.safety_rules).toContain('Bifenthrin (Atticus Talak 7.9 F): delay watering 24 hours. On mole cricket nymph spots the technician first waters it in right after application with the hose (up to 0.5 inch).');
     expect(JSON.stringify(v13)).not.toMatch(/except mole cricket|water in at once/);
   });
-  test('August is a hose visit; July is a spreader visit (potash) with backpack spots: the water-in is the truck hose, never a second whole-lawn tool', () => {
+  test('August is a hose visit; July is the scout visit with backpack spots: the water-in is the truck hose, never a second whole-lawn tool', () => {
     expect(visitFor(8).notes).toMatch(/Hose visit/);
-    expect(visitFor(7).notes).toMatch(/Spreader visit/);
+    expect(visitFor(7).notes).toMatch(/No whole-lawn tool this month/);
     for (const month of [7, 8]) expect(lineFor(month, N.TAL).filter((l) => /mole cricket/.test(l))[0]).toMatch(/by backpack/);
   });
 });
@@ -180,175 +180,58 @@ describe('4. Arena keeps its name; SiteOne\'s Arena S.E. (Florida only) is the s
   });
 });
 
-describe('6. July potash on the 12x plan', () => {
-  test('the one whole-lawn tool is 1.0 lb of the 0-0-50 on a spreader, 0.5 lb K2O, no N or P', () => {
-    const tools = lines(visitFor(7).primary).filter((l) => l.includes(' — '));
-    expect(tools).toEqual([`${matrix.SOP} — 1.0 lb per 1,000 sq ft (0.5 lb K2O), spreader`]);
-    const targets = engine.parseVisitNutrientTargets(visitFor(7).notes);
-    expect([targets.targetNPer1000, targets.targetKPer1000]).toEqual([0, 0.5]);
-    const spec = matrix.INSERTS.find((s) => s.name === matrix.SOP);
-    expect([spec.rate, spec.unit, spec.mode, spec.defaultInPlan]).toEqual([1, 'lb', 'broadcast', true]);
-    const catalog = matrix.CATALOG.find((p) => p.name === matrix.SOP);
-    expect([catalog.analysis_n, catalog.analysis_p, catalog.analysis_k]).toEqual([0, 0, 50]);
-    // 1 lb of 0-0-50 is 0.5 lb K2O and no N or P, so it is legal in the June to September blackout.
-    expect(spec.rate * catalog.analysis_k / 100).toBe(0.5);
+describe('6. July is the scout visit again: no 0-0-50 potash step (owner: December only)', () => {
+  const wholeLawn = (visit) => lines(visit.primary).filter((l) => l.includes(' \u2014 ')).map(nameOf);
+  const MAIN_JULY = {
+    primary: 'Scout visit: inspect the whole lawn and treat spots only, no whole-lawn tool',
+    notes: 'N rate: 0 lb N. No whole-lawn tool this month. No N or P from June 1 through September 30.',
+  };
+
+  test('July is main\'s scout visit on every track: no whole-lawn tool, no K rate, not a spreader visit, no cadence variant', () => {
+    for (const track of TRACKS) {
+      const july = v13[track].visits.find((v) => v.month === 'Jul');
+      expect({ primary: july.primary, notes: july.notes }).toEqual(MAIN_JULY);
+      expect(july.cadenceVariants).toBeUndefined();
+      expect(wholeLawn(july)).toEqual([]);
+      const targets = engine.parseVisitNutrientTargets(july.notes);
+      expect([targets.targetNPer1000, targets.targetKPer1000]).toEqual([0, null]);
+    }
+    // Nothing in the recipe, top-level notes or safety rules mentions the potash.
+    expect(JSON.stringify(v13)).not.toMatch(/0-0-50|potash/i);
+    for (const track of TRACKS) expect(JSON.stringify(v13[track].visits.find((v) => v.month === 'Jul'))).not.toMatch(/K rate|K2O|[Ss]preader/);
   });
-  test('the inspection stays and classifies as an inspection; only the 12x plan has a July visit', () => {
+
+  test('the July inspection classifies as an inspection, and July keeps its spot lines (Talak mole crickets, Pythium, fairy ring)', () => {
     const [first] = engine.parseProtocolLines(visitFor(7).primary, 'base');
     expect(first.scope).toBe('INSPECTION_ONLY');
-    const [potash] = engine.parseProtocolLines(lines(visitFor(7).primary)[1], 'base', { exactName: true });
-    expect(potash.scope).not.toBe('INSPECTION_ONLY');
-    // The 9x plan visits Jan Feb Apr May Jun Aug Sep Oct Dec (docs: protocol-v13 9x): no July.
-    expect(['Jan', 'Feb', 'Apr', 'May', 'Jun', 'Aug', 'Sep', 'Oct', 'Dec']).not.toContain('Jul');
+    expect(lineFor(7, N.TAL).join(' ')).toMatch(/mole cricket nymph spots/);
+    expect(lineFor(7, N.ART).join(' ')).toMatch(/Pythium root rot/);
+    expect(lineFor(7, N.VEL).join(' ')).toMatch(/fairy ring/);
   });
-  test('one tool per visit: spreader visits carry granulars, hose visits carry liquids', () => {
-    const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME, matrix.SOP]);
+
+  test('the 12-visit and the 9-visit plan step are the same scout visit (visitForCadence and visitForPlan)', async () => {
+    const { visitForCadence } = require('../services/lawn-program');
+    const july = visitFor(7);
+    for (const perYear of [12, 9, 6, null]) {
+      const found = visitForCadence(july, perYear);
+      expect(found.visit).toBe(july);
+      expect(found.branch).toBeNull();
+      expect(found.unknownCadence).toBeNull();
+      expect(wholeLawn(found.visit)).toEqual([]);
+    }
+    for (const perYear of [12, 9]) expect(wholeLawn((await engine.visitForPlan(null, july, { id: 's', customer_id: 'c' }, perYear)).visit)).toEqual([]);
+  });
+
+  test('one tool per visit: spreader visits carry granulars, hose visits carry liquids, July none', () => {
+    const SPREADER_PRODUCTS = new Set([N.F24, october.NEW_NAME]);
     const HOSE_PRODUCTS = new Set([N.NT, N.STW, N.DIM, N.TET]);
-    for (const [month, mode] of [[1, 'hose'], [2, 'spreader'], [3, 'hose'], [4, 'spreader'], [5, 'hose'], [6, 'hose'], [7, 'spreader'], [8, 'hose'], [9, 'hose'], [10, 'spreader'], [11, 'spreader'], [12, 'spreader']]) {
-      const tools = lines(visitFor(month).primary).filter((l) => l.includes(' — ')).map(nameOf);
+    for (const [month, mode] of [[1, 'hose'], [2, 'spreader'], [3, 'hose'], [4, 'spreader'], [5, 'hose'], [6, 'hose'], [7, 'none'], [8, 'hose'], [9, 'hose'], [10, 'spreader'], [11, 'spreader'], [12, 'spreader']]) {
+      const tools = lines(visitFor(month).primary).filter((l) => l.includes(' \u2014 ')).map(nameOf);
+      if (mode === 'none') { expect(tools).toEqual([]); continue; }
       for (const tool of tools) expect({ month, tool, ok: (mode === 'spreader' ? SPREADER_PRODUCTS : HOSE_PRODUCTS).has(tool) }).toEqual({ month, tool, ok: true });
     }
     // The 9x April bag stays a spreader product too.
     expect(lines(visitFor(4).cadenceVariants['9'].primary).map(nameOf)).toEqual(['LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer']);
-  });
-});
-
-describe('6b. July potash is a 12-visit-plan step: a 9-visit lawn with a July appointment plans no potash', () => {
-  const { visitForCadence, unknownCadenceWarning } = require('../services/lawn-program');
-  const wholeLawn = (visit) => lines(visit.primary).filter((l) => l.includes(' \u2014 ')).map(nameOf);
-
-  test('the July visit carries a scout-only 9x variant on every track', () => {
-    for (const track of TRACKS) {
-      const july = v13[track].visits.find((v) => v.month === 'Jul');
-      expect(july.cadenceVariants).toEqual({ 9: {
-        primary: 'Scout visit: inspect the whole lawn and treat spots only',
-        notes: 'N rate: 0 lb N. No whole-lawn tool this month: inspect the whole lawn and treat spots only. No N or P from June 1 through September 30.',
-        goal: 'No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only.',
-      } });
-      // The 9x notes carry no K rate and no spreader wording; the engine reads no nutrient target from them.
-      expect(july.cadenceVariants[9].notes).not.toMatch(/K rate|[Ss]preader/);
-      expect(engine.parseVisitNutrientTargets(july.cadenceVariants[9].notes)).toEqual({ targetNPer1000: 0, targetKPer1000: null });
-    }
-    expect(visitFor(7).notes).toMatch(/if a 9-visit lawn has one, it keeps the scout step with no potash/);
-  });
-
-  test('12 visits a year: the 0-0-50; 9 visits: no whole-lawn product; the plan engine reads the step the same way', () => {
-    const july = visitFor(7);
-    expect(wholeLawn(visitForCadence(july, 12).visit)).toEqual([matrix.SOP]);
-    const nine = visitForCadence(july, 9);
-    expect(nine.branch).toBe('9');
-    // The variant overrides the notes and states the goal; the 12x visit and an unknown plan keep the 12x notes.
-    expect(nine.visit.notes).toBe(july.cadenceVariants[9].notes);
-    expect(nine.visit.goal).toBe(july.cadenceVariants[9].goal);
-    expect(visitForCadence(july, 12).visit.notes).toBe(july.notes);
-    expect(visitForCadence(july, 12).visit.notes).toMatch(/K rate: 0\.5 lb K\. Spreader visit/);
-    expect(visitForCadence(july, 12).visit.goal).toBeUndefined();
-    expect(visitForCadence(july, null).visit.notes).toBe(july.notes);
-    // April's variant states neither: the 9x April keeps its notes.
-    expect(visitForCadence(visitFor(4), 9).visit.notes).toBe(visitFor(4).notes);
-    expect(wholeLawn(nine.visit)).toEqual([]);
-    expect(nine.visit.primary).not.toMatch(/0-0-50/);
-    const parsed = engine.parseProtocolLines(nine.visit.primary, 'base', { exactName: true });
-    expect(parsed.map((line) => line.scope)).toEqual(['INSPECTION_ONLY']);
-    // The 9x secondary lines (spot products) are the visit's own.
-    expect(nine.visit.secondary).toBe(july.secondary);
-  });
-
-  test('the plan engine\'s own step picker (visitForPlan) gives a 9-visit lawn no potash and a 12-visit lawn the potash', async () => {
-    const july = visitFor(7);
-    const service = { id: 's', customer_id: 'c' };
-    const nine = await engine.visitForPlan(null, july, service, 9);
-    expect(wholeLawn(nine.visit)).toEqual([]);
-    expect(nine.warnings).toEqual([]);
-    const twelve = await engine.visitForPlan(null, july, service, 12);
-    expect(wholeLawn(twelve.visit)).toEqual([matrix.SOP]);
-  });
-
-  test('a base line whose staged row is not a default is not selected and has no amount; conditional lines and default rows are untouched', () => {
-    const catalog = [{ id: 'sop', name: matrix.SOP, aliases: [], default_rate_per_1000: 1, rate_unit: 'lb', analysis_n: 0, analysis_k: 50, cost_per_unit: 1, needs_pricing: false }];
-    const items = engine.resolveProtocolItems(engine.parseProtocolLines(visitFor(7).primary, 'base', { exactName: true }), catalog, {}, {});
-    const sop = items.find((item) => item.product?.id === 'sop');
-    expect(sop.selected).toBe(true);
-    const row = (defaultInPlan) => new Map([['sop', { productId: 'sop', defaultInPlan, applicationMode: 'broadcast', ratePer1000: 1, rateUnit: 'lb', gates: {} }]]);
-    // Default row (the normal 12x July): selected, calculated.
-    const normal = engine.suppressNonDefaultBaseProducts(items, row(true));
-    expect(normal.find((item) => item.product?.id === 'sop').selected).toBe(true);
-    expect(engine.v13LineState(sop.product, row(true), new Set(), {}, sop).state).toBe('calculate');
-    // Not a default (the July window kept its scout form): not selected, state not_default, no quantity.
-    const suppressed = engine.suppressNonDefaultBaseProducts(items, row(false));
-    expect(suppressed.find((item) => item.product?.id === 'sop')).toMatchObject({ selected: false, selectionReason: 'staged_row_not_default' });
-    expect(engine.v13LineState(sop.product, row(false), new Set(), {}, sop).state).toBe('not_default');
-    expect(engine.v13HoldWarnings(suppressed).map((warning) => warning.code)).toEqual(['lawn_v13_row_not_default']);
-    // An optional row is a conditional line, never base: a non-default row does not unselect it.
-    const conditional = { ...sop, role: 'conditional', selected: true };
-    expect(engine.suppressNonDefaultBaseProducts([conditional], row(false))[0].selected).toBe(true);
-    expect(engine.v13LineState(sop.product, row(false), new Set(), {}, conditional).state).toBe('calculate');
-    // A row with no stated default (older fixtures) is not suppressed.
-    expect(engine.suppressNonDefaultBaseProducts(items, new Map([['sop', { productId: 'sop' }]])).find((item) => item.product?.id === 'sop').selected).toBe(true);
-  });
-
-  test('a lawn whose plan is not on file keeps the 12x step and the warning says there is no product on the 9x step', () => {
-    const unknown = visitForCadence(visitFor(7), null);
-    expect(wholeLawn(unknown.visit)).toEqual([matrix.SOP]);
-    expect(unknown.unknownCadence).toEqual({ variantProducts: [], cadences: ['9'] });
-    expect(unknownCadenceWarning(unknown.unknownCadence).message).toMatch(/On a 9x plan, this visit has no whole-lawn product\.$/);
-    // April still names its product.
-    expect(unknownCadenceWarning(visitForCadence(visitFor(4), null).unknownCadence).message).toMatch(/use LESCO Dimension 0\.21%/);
-  });
-});
-
-describe('9. a recipe product is found by its catalog name, else by an alias; an inactive row is a clear notice', () => {
-  const RECIPE = {
-    sop: `${matrix.SOP} \u2014 1.0 lb per 1,000 sq ft (0.5 lb K2O), spreader`,
-    headway: `${matrix.HEAD} \u2014 mapped take-all areas, second spring application, 3 fl oz per 1,000 sq ft`,
-    advion: `${matrix.ADVION} \u2014 optional add-on, office prices it: fire ant bait broadcast at 1.5 lb per acre`,
-  };
-  const line = (key, role = 'base') => engine.parseProtocolLines(RECIPE[key], role, { exactName: true })[0];
-  const row = (id, name, aliases = []) => ({ id, name, aliases, active: true, default_rate_per_1000: 1, rate_unit: 'lb', cost_per_unit: 1, needs_pricing: false });
-
-  test.each([['sop', matrix.SOP], ['headway', matrix.HEAD], ['advion', matrix.ADVION]])('%s: a row held under another name whose alias is the recipe name is matched', (key, recipeName) => {
-    const catalog = [row('other', `Some Other Catalog Name For ${key}`, [recipeName]), row('decoy', 'Decoy Product')];
-    expect(engine.matchCatalogProduct(line(key), catalog)?.id).toBe('other');
-  });
-
-  test('exact name first: with a row of the exact name and an alias-only row, the exact-name row wins, and an unrelated alias or a partial alias never matches', () => {
-    const catalog = [row('alias-only', 'Renamed Potash', [matrix.SOP]), row('exact', matrix.SOP)];
-    expect(engine.matchCatalogProduct(line('sop'), catalog).id).toBe('exact');
-    expect(engine.matchCatalogProduct(line('sop'), [catalog[0]]).id).toBe('alias-only');
-    // An alias that is only part of the spelled name ("Headway") is not the spelled name ("Headway Fungicide").
-    expect(engine.matchCatalogProduct(line('headway'), [row('short', 'Headway G', ['Headway'])])).toBeNull();
-    // The decoy rule of the exact-name matcher stands: Acelepryn Xtra with the alias Acelepryn is not Acelepryn Insecticide.
-    expect(engine.matchCatalogProduct(engine.parseProtocolLines('Acelepryn Insecticide \u2014 caterpillars', 'conditional', { exactName: true })[0], [row('xtra', 'Acelepryn Xtra', ['Acelepryn'])])).toBeNull();
-    // Without the exact-name flag nothing changed.
-    expect(engine.matchCatalogProduct(engine.parseProtocolLines(RECIPE.sop, 'base')[0], [row('only', 'LESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer')]).id).toBe('only');
-  });
-
-  // A knex stub for the two reads the notice makes.
-  const knexWith = ({ inactive = [], aliases = [] }) => (table) => ({
-    where: () => ({ select: async () => inactive }),
-    whereIn: () => ({ select: async () => (table === 'product_aliases' ? aliases : []) }),
-  });
-  const unmatched = (key, role) => ({ ...line(key, role), role, product: null });
-
-  test.each([['sop', matrix.SOP, 'base'], ['headway', matrix.HEAD, 'base'], ['advion', matrix.ADVION, 'conditional']])('%s: an INACTIVE row with the recipe name (or its alias) gives a plan notice naming the product', async (key, recipeName, role) => {
-    const byName = await engine.lawnV13InactiveProductNotices(knexWith({ inactive: [{ id: 'i1', name: recipeName }] }), [unmatched(key, role)]);
-    const byAlias = await engine.lawnV13InactiveProductNotices(knexWith({ inactive: [{ id: 'i2', name: 'Retired name' }], aliases: [{ product_id: 'i2', alias_name: recipeName }] }), [unmatched(key, role)]);
-    for (const found of [byName, byAlias]) {
-      const [notice] = role === 'base' ? found.blocks : found.warnings;
-      expect(notice).toMatchObject({ code: 'lawn_v13_product_inactive', severity: role === 'base' ? 'block' : 'warning', productName: recipeName });
-      expect(notice.message).toBe(`${recipeName} is inactive in the catalog; the office must activate it. This visit's plan cannot include it until then${role === 'base' ? ', so no amount is planned for the step' : ''}.`);
-      expect(role === 'base' ? found.warnings : found.blocks).toEqual([]);
-    }
-  });
-
-  test('no inactive row, a matched line, a scout line, or a line without exact names: no notice', async () => {
-    expect(await engine.lawnV13InactiveProductNotices(knexWith({}), [unmatched('sop', 'base')])).toEqual({ blocks: [], warnings: [] });
-    const inactive = knexWith({ inactive: [{ id: 'i1', name: matrix.SOP }] });
-    expect(await engine.lawnV13InactiveProductNotices(inactive, [{ ...unmatched('sop', 'base'), product: { id: 'x' } }])).toEqual({ blocks: [], warnings: [] });
-    expect(await engine.lawnV13InactiveProductNotices(inactive, [{ raw: 'Scout visit: inspect the whole lawn and treat spots only', role: 'base', exactName: true, product: null }])).toEqual({ blocks: [], warnings: [] });
-    expect(await engine.lawnV13InactiveProductNotices(inactive, [{ ...unmatched('sop', 'base'), exactName: undefined }])).toEqual({ blocks: [], warnings: [] });
-    // An inactive row of a DIFFERENT name raises nothing.
-    expect(await engine.lawnV13InactiveProductNotices(knexWith({ inactive: [{ id: 'i3', name: 'Something Else' }] }), [unmatched('sop', 'base')])).toEqual({ blocks: [], warnings: [] });
   });
 });
 
@@ -595,14 +478,16 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
     expect(lines(visitFor(1).primary)[0]).toMatch(/^LESCO Stonewall 4FL/);
   });
 
-  test('N per application and per year: Oct 0.60, Nov 0.73, Dec 0.75, under 1 lb each and under the 4 lb ordinance cap', () => {
+  test('N per application and per year: Oct 0.60, Nov 0.73, and the 2026 December step 0.75, under 1 lb each and under the 4 lb ordinance cap', () => {
     const oct = 2.5 * 0.24;
     const nov = 4.04 * 0.18;
     const dec = 3.1 * 0.24;
     expect([oct, nov, dec].map((n) => Math.round(n * 100) / 100)).toEqual([0.6, 0.73, 0.74]);
     expect(note).toMatch(/October LESCO 24-0-11 with PolyPlus OPTI at 2\.5 lb per 1,000 sq ft \(0\.60 lb N\)/);
     expect(note).toMatch(/November LESCO Dimension 0\.21% 18-0-10 at 4\.04 lb per 1,000 sq ft \(0\.73 lb N, 0\.37 lb dithiopyr per acre/);
-    expect(note).toMatch(/December LESCO 24-0-11 with PolyPlus OPTI at 3\.1 lb per 1,000 sq ft \(0\.75 lb N\)/);
+    // December is defined separately (another lane owns it): the note carries no December line.
+    expect(note).toMatch(/December is defined separately/);
+    expect(note).not.toMatch(/December LESCO|3\.1 lb/);
     for (const n of [oct, nov, dec]) expect(n).toBeLessThanOrEqual(1);
     // Feb 0.75 + Apr 0.5 + Oct 0.6 + Nov 0.73 + Dec 0.75 = 3.33 lb N a year.
     expect(0.75 + 0.5 + 0.6 + 0.73 + 0.75).toBeCloseTo(3.33, 2);

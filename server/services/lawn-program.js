@@ -128,24 +128,19 @@ function visitForCadence(visit, visitsPerYear) {
   if (!variants || typeof variants !== 'object') return { visit, branch: null, unknownCadence: null };
   const variant = variants[String(Number(visitsPerYear))];
   if (visitsPerYear != null && variant) {
-    // The variant replaces the whole step: its lines, and (when it states them) the notes and the visit goal the
-    // job card shows, so a step with no whole-lawn tool does not keep the 12x step's rates or tool wording.
-    return { visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}), ...(variant.notes ? { notes: variant.notes } : {}), ...(variant.goal ? { goal: variant.goal } : {}) }, branch: String(Number(visitsPerYear)), unknownCadence: null };
+    return { visit: { ...visit, primary: variant.primary, ...(variant.secondary ? { secondary: variant.secondary } : {}) }, branch: String(Number(visitsPerYear)), unknownCadence: null };
   }
   if (visitsPerYear != null) return { visit, branch: null, unknownCadence: null };
-  // Only a line that names a product ("Name \u2014 rate"): a scout-only step has none.
-  const names = Object.values(variants).flatMap((entry) => String(entry.primary || '').split('\n').filter((line) => line.includes(' \u2014 ')).map((line) => line.split(' \u2014 ')[0].trim()).filter(Boolean));
+  const names = Object.values(variants).flatMap((entry) => String(entry.primary || '').split('\n').map((line) => line.split(' \u2014 ')[0].trim()).filter(Boolean));
   return { visit, branch: null, unknownCadence: { variantProducts: [...new Set(names)], cadences: Object.keys(variants) } };
 }
 
 // The warning for a visit whose plan cadence is unknown (visitForCadence's
 // unknownCadence): it kept the 12x step and says what a known plan would have used.
 function unknownCadenceWarning(unknownCadence) {
-  const cadences = unknownCadence.cadences.join('x or ');
-  const instead = unknownCadence.variantProducts.length ? `use ${unknownCadence.variantProducts.join(' or ')} instead` : 'this visit has no whole-lawn product';
   return {
     code: 'lawn_v13_plan_cadence_unknown', severity: 'warning',
-    message: `This visit's lawn plan (applications a year) is not on file, so the plan keeps the 12x step. On a ${cadences}x plan, ${instead}.`,
+    message: `This visit's lawn plan (applications a year) is not on file, so the plan keeps the 12x step. On a ${unknownCadence.cadences.join('x or ')}x plan, use ${unknownCadence.variantProducts.join(' or ')} instead.`,
   };
 }
 

@@ -18,10 +18,11 @@ const round5 = require('../models/migrations/20261007185000_lawn_v13_matrix_adds
 const round6 = require('../models/migrations/20261007186000_lawn_v13_matrix_adds_round6');
 const round7 = require('../models/migrations/20261007187000_lawn_v13_matrix_adds_round7');
 const round11 = require('../models/migrations/20261007188000_lawn_v13_matrix_adds_round11');
+const removePotash = require('../models/migrations/20261007189000_lawn_v13_matrix_remove_july_potash');
 const guard = require('../services/lawn-v13-rollback-guard');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
-const UPS = [matrix, fixes, round2, round3, round4, round5, round6, round7, round11];
+const UPS = [matrix, fixes, round2, round3, round4, round5, round6, round7, round11, removePotash];
 const DOWNS = [...UPS].reverse();
 const LIVE_KEY = 'swfl_zoysia_10_10';
 const TABLES = [
@@ -121,7 +122,7 @@ describeDb('v13 matrix rollback on a live and an idle protocol (20261007187000)'
       expect(await guard.anyV13ProtocolReferenced(knex)).toBe(true);
     });
 
-    test('rolling back 187000 to 180000 leaves the Headway facts and approval, the Advion rate and catalog default, the Talak rates and the July rows as they were', async () => {
+    test('rolling back 187000 to 180000 leaves the Headway facts and approval, the Advion rate and catalog default, the Talak rates and the July rows (no potash row: 189000 removed it) as they were', async () => {
       for (const migration of DOWNS) await migration.down(knex);
       const after = await facts();
       const headway = after.catalog.find((row) => row.name === matrix.HEAD);
@@ -134,14 +135,14 @@ describeDb('v13 matrix rollback on a live and an idle protocol (20261007187000)'
       expect(after.catalog).toEqual(upFacts.catalog);
       expect(after.aliases).toEqual(upFacts.aliases);
       expect(after.limits).toEqual(upFacts.limits);
-      // The referenced protocol's rows: Advion 0.0344, Talak 1.0 fl oz without the gate, the July 0-0-50 row with its conditions.
+      // The referenced protocol's rows: Advion 0.0344, Talak 1.0 fl oz without the gate, and no July 0-0-50 row (removed by 189000, which a rollback on a live protocol does not bring back).
       const rows = await protocolRows(LIVE_KEY);
       expect(rows).toEqual(upRows);
       // The idle tracks stay synchronized with the live one and the catalog: nothing of theirs is reverted either.
       for (const turf of staged.TRACKS) expect({ key: turf.key, rows: await protocolRows(turf.key) }).toEqual({ key: turf.key, rows: upAllRows[turf.key] });
       expect(Number(sub(rows, 'apr_v13_spreader_feeding', matrix.ADVION).rate_per_1000)).toBe(0.0344);
       expect([sub(rows, 'aug_v13_hose_blackout', 'Atticus Talak 7.9 F').rate_per_1000, sub(rows, 'aug_v13_hose_blackout', 'Atticus Talak 7.9 F').rate_unit]).toEqual([1, 'fl oz']);
-      expect(sub(rows, 'jul_v13_inspect_spot', matrix.SOP).gates).toMatchObject({ planVisitsPerYear: 12, fertilizerSafety: true });
+      expect(sub(rows, 'jul_v13_inspect_spot', matrix.SOP)).toBeUndefined();
     });
   });
 
@@ -162,7 +163,8 @@ describeDb('v13 matrix rollback on a live and an idle protocol (20261007187000)'
       expect(await facts()).toEqual(upFacts);
       // The idle tracks still have the rows 180000 inserted (it deleted them from an idle track before).
       const idle = await protocolRows('swfl_st_augustine_10_10');
-      expect(idle.map((row) => row.product_name)).toEqual(expect.arrayContaining([matrix.SOP, matrix.ADVION, matrix.HEAD]));
+      expect(idle.map((row) => row.product_name)).toEqual(expect.arrayContaining([matrix.ADVION, matrix.HEAD]));
+      expect(idle.map((row) => row.product_name)).not.toContain(matrix.SOP);
     });
   });
 

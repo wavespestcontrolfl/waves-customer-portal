@@ -42,19 +42,20 @@ describe('the v13 recipe', () => {
       expect(v13[grass].safety_rules.length).toBeGreaterThan(0);
       for (const visit of v13[grass].visits) {
         // April alone carries the 9x plan step (cadenceVariants); every other visit is the plain shape.
-        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(['Apr', 'Jul'].includes(visit.month) ? ['cadenceVariants'] : [])].sort());
+        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : [])].sort());
         expect(Object.values(visit.tiers)).toEqual([true, true, true, true]);
       }
     }
   });
 
-  test('what the program drops stays out (no Pennant, no March large patch spray, no SpeedZone); July potash and Headway are in on purpose (20261007180000)', () => {
+  test('what the program drops stays out (no Pennant, no July potash, no March large patch spray, no SpeedZone); Headway is in on purpose (20261007180000)', () => {
     const text = JSON.stringify(v13);
     expect(text).not.toMatch(/pennant|k-?flow|speedzone|medallion|t-storm|eagle|sedgehammer|cleary|harrell|atrazine|image for southern/i);
     const jul = visitFor(7);
     expect(jul.primary).toMatch(/scout visit/i);
     expect(jul.primary).not.toMatch(/Dimension|Stonewall|24-0-11/);
-    expect(lines(jul.primary).filter((l) => / — /.test(l)).map(nameOfLine)).toEqual([matrixMigration.SOP]);
+    expect(lines(jul.primary).filter((l) => / — /.test(l))).toEqual([]);
+    expect(JSON.stringify(v13)).not.toMatch(/0-0-50|potash/i);
     // March has no large patch spray (Velista there is for rust and leaf spot only).
     expect(visitFor(3).secondary).not.toMatch(/large patch/i);
     expect(visitFor(3).secondary).toMatch(/artavia/i);
@@ -89,7 +90,7 @@ describe('the v13 recipe', () => {
     const tools = MONTHS.map((m) => lines(visitFor(m).primary).filter((l) => / — /.test(l)).map(nameOfLine));
     const N = migration.NAMES;
     expect(tools).toEqual([
-      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [matrixMigration.SOP], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
+      [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [octoberMigration.NEW_NAME], [N.F24], [N.F24],
     ]);
   });
 });
@@ -99,10 +100,10 @@ describe('the 9x plan April step (recipe file and staged rows agree)', () => {
   const april = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
   const { visitForCadence } = require('../services/lawn-program');
 
-  test('April carries a 9x variant naming the Dimension 0.21% catalog row the fix migration inserts, July one scout-only 9x variant (20261007185000); no other visit has one', () => {
+  test('April carries one 9x variant naming the Dimension 0.21% catalog row the fix migration inserts; no other visit has one', () => {
     for (const grass of GRASSES) {
       const variants = v13[grass].visits.filter((v) => v.cadenceVariants);
-      expect(variants.map((v) => v.month)).toEqual(['Apr', 'Jul']);
+      expect(variants.map((v) => v.month)).toEqual(['Apr']);
       expect(Object.keys(variants[0].cadenceVariants)).toEqual(['9']);
       const [line, ...rest] = lines(variants[0].cadenceVariants['9'].primary);
       expect(rest).toEqual([]);
@@ -300,7 +301,8 @@ describe('staged migration 20261005120000', () => {
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
       // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
       // 20261007180000 turns the April Artavia row into Headway and adds its own rows (Arena keeps its name: 20261007181000 undoes the rename).
-      const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey);
+      // (The July 0-0-50 row 180000 inserts is deleted by 20261007189000: the recipe has no July potash.)
+      const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP);
       const after = (name) => (name === migration.NAMES.ART && windowKey === matrixMigration.WINDOWS.APR ? matrixMigration.HEAD : name);
       const whole = [...rowsForWindow.filter((s) => s[6]).map((s) => (s[0] === octoberMigration.OLD_NAME ? octoberMigration.NEW_NAME : s[0])), ...matrixAdds.filter((spec) => spec.defaultInPlan).map((spec) => spec.name)];
       const spots = [...rowsForWindow.filter((s) => !s[6]).map((s) => after(s[0])), ...matrixAdds.filter((spec) => !spec.defaultInPlan).map((spec) => spec.name)];

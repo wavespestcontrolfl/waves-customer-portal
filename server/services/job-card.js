@@ -38,7 +38,6 @@ const { isMistingDesignConsultation, isMistingSystemServiceUnconfigured } = requ
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
   itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
-  NOT_DEFAULT_REASON,
 } = require('./waveguard-plan-engine');
 const { stampedDivergesSql } = require('./stamped-address');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -1104,8 +1103,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       name: structured.name,
       source: `Published protocol · version ${structured.version}`,
       title: structured.window.title,
-      objective: plan.protocol?.cadenceGoal || structured.window.goal || null,
-      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(rowsAppliedThisVisit(plan, structured.products))],
+      objective: structured.window.goal || null,
+      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(structured.products)],
       steps: (structured.window.requiredTasks || []).map(task => String(task).replace(/_/g, ' ')),
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
@@ -1153,16 +1152,6 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
 // Hide template costs without dropping restrictions elsewhere in the same
 // line (for example, an add-on-only scope beside a minimum office price).
 // The full fertilizer safety block for an N visit (a window with a gated spreader row), as one note.
-// The staged rows this visit applies. A cadence step (the 9-visit plan) plans fewer lines than the window has
-// rows (July's 0-0-50 is a 12-visit row), and a row nothing plans must not print its safety block.
-function rowsAppliedThisVisit(plan, rows) {
-  if (!plan?.protocol?.cadenceBranch && !plan?.protocol?.nonDefaultBase) return rows;
-  // A line the plan suppressed (its staged row is not a default) is not applied either.
-  const planned = new Set([...(plan.protocol.base || []), ...(plan.protocol.conditional || [])]
-    .filter((item) => item?.selectionReason !== NOT_DEFAULT_REASON).map((item) => String(item?.product?.id)).filter(Boolean));
-  return (rows || []).filter((row) => planned.has(String(row.productId)));
-}
-
 function fertilizerSafetyNotes(rows) {
   const rules = fertilizerSafetyRules(rows);
   return rules.length ? [`Fertilizer safety: ${rules.join(' ')}`] : [];

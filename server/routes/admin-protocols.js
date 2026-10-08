@@ -23,7 +23,6 @@ const {
   loadVisitForPlan,
   loadVisitCity,
   holdNorthPortProducts,
-  suppressNonDefaultBaseProducts,
   v13HoldWarnings,
   v13NorthPortReferenceWarnings,
   v13VisitLimits,
@@ -1090,7 +1089,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // A product the city bans for this window (North Port Nutra-TECH, June to September) is held
     // back as in the plan: not selected, no amount, the plan's warning.
     const municipality = await loadVisitCity(db, scheduled);
-    const resolvedLines = suppressNonDefaultBaseProducts(holdNorthPortProducts(matchedLines, v13Rows, municipality), v13Rows);
+    const resolvedLines = holdNorthPortProducts(matchedLines, v13Rows, municipality);
     const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
     const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, municipality };
     const areaContext = {
@@ -1114,7 +1113,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
       // no quantity at all; a capped line none either).
-      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext, line) : null;
+      const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext) : null;
       const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),

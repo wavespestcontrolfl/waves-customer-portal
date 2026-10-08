@@ -109,7 +109,6 @@ const PRODUCT_CLASS_ENTRIES = [
   ['LESCO 0-0-18 Bio KMAG 1% Fe 1% Mg 1% Mn 2.17% S Organic Turf Granular Fertilizer', FAMILY.POTASSIUM],
   ['LESCO Elite 0-0-28', FAMILY.POTASSIUM],
   ['LESCO Elite 0-0-28 AM 7.5% Fe 6.5% Mn 9% S Turfgrass Granular Fertilizer', FAMILY.POTASSIUM],
-  ['LESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer', FAMILY.POTASSIUM],
 
   // Iron / micronutrient foliar (transient, never "behind")
   ['Chelated AM + Micros', FAMILY.IRON_MICROS],
