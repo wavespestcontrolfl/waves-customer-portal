@@ -20,6 +20,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
+import { visitServiceArgs } from './visitServiceArgs';
 import BestTimeHint from './BestTimeHint';
 import AvailabilityStrip from './AvailabilityStrip';
 
@@ -558,7 +559,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // The same two best-times rows as New Appointment (owner 2026-10-08):
     // road-priced chips with the chance of rain for each hour, ranked by
     // rain fit for this visit's service (GATE_BOOKING_RAIN_RANK).
-    serviceTypes: [service.serviceType || service.service_type].filter(Boolean),
+    ...visitServiceArgs(service),
     bestRows: true,
   });
 

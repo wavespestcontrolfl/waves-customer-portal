@@ -20,6 +20,7 @@ import {
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { visitServiceArgs } from './visitServiceArgs';
 import DispatchReadinessStrip from './DispatchReadinessStrip';
 import {
   SERIES_ACK_REQUIRED,
@@ -1727,6 +1728,7 @@ export default function TimeGridDay({
         isRecurring={!!pending?.svc?.isRecurring && !pending?.technicianChange}
         technicianChange={pending?.technicianChange}
         serviceId={pending?.svc?.id}
+        {...visitServiceArgs(pending?.svc)}
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
         durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}

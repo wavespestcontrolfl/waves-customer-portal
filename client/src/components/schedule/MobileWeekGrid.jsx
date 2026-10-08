@@ -16,6 +16,7 @@ import {
 } from '@dnd-kit/core';
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { visitServiceArgs } from './visitServiceArgs';
 import { SERIES_ACK_REQUIRED, apiErrorMessage, parseSeriesAckError } from './seriesMove';
 import { serviceColor } from '../../lib/service-colors';
 import { etDateString } from '../../lib/timezone';
@@ -730,6 +731,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
         isRecurring={!!pending?.svc?.isRecurring}
         technicianChange={pending?.technicianChange}
         serviceId={pending?.svc?.id}
+        {...visitServiceArgs(pending?.svc)}
         toWindow={pending?.newWindow}
         customerId={pending?.svc?.customerId || pending?.svc?.customer_id}
         durationMinutes={pending?.svc ? effectiveDuration(pending.svc) : undefined}

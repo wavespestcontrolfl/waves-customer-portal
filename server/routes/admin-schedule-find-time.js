@@ -432,8 +432,8 @@ router.post('/', async (req, res) => {
     // same way as the chips.
     const built = await buildHintSummary(plan, every, {
       rejectionsByDate, startedAt, ...dayFacts, today, target, picked, spanMin, pickedDate, pickedEnd,
-      // Only New Appointment shows the rows; other strips skip the rain and
-      // road-time work (Codex #6045 r2).
+      // Only a strip that shows the rows asks for them; any other skips the
+      // rain and road-time work (Codex #6045 r2).
       bestRows: bestRows === true,
       // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
       // Each name carries its catalog key when the catalog holds it, so the

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 import RainOutSheet from './RainOutSheet';
 import CreateAppointmentModal from './CreateAppointmentModal';
+import { visitServiceArgs } from './visitServiceArgs';
 
 const hooks = vi.hoisted(() => ({ availability: null, conflicts: [] }));
 vi.mock('./useBestTimes', () => ({
@@ -59,6 +60,35 @@ it('drag-drop confirm: a display-only strip, and the route warning it covers is 
   expect(screen.getByText(/Fixture Neighbor is already booked/)).toBeInTheDocument();
 });
 
+it('drag-drop confirm: asks for the best-times rows with the visit\'s services and shows them display-only', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => json({ enabled: false })));
+  hooks.availability = {
+    ...missAt('09:00'),
+    best: { day: [hour('11:00', { rainChance: 15 })], week: [hour('10:00', { date: '2035-01-03', rainChance: 65 })], weekCovered: true },
+  };
+  render(
+    <RescheduleConfirmModal
+      open customerName="Fixture Customer" fromDate="2035-01-01" fromMinutes={480} toDate={DATE} toMinutes={540}
+      serviceId="svc-1" technicianId="tech-1" toWindow="09:00-10:00" onConfirm={vi.fn()} onCancel={vi.fn()}
+      {...visitServiceArgs({ serviceType: 'Fixture Lawn Care', serviceKey: 'fixture_lawn' })}
+    />,
+  );
+  const rows = await screen.findAllByTestId('best-row');
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveTextContent('15% rain');
+  expect(rows[1]).toHaveTextContent('65% rain');
+  for (const chip of screen.getAllByTestId('availability-hour')) expect(chip).toBeDisabled();
+  expect(hooks.bestTimesArgs).toMatchObject({ bestRows: true, serviceTypes: ['Fixture Lawn Care'], serviceKeys: ['fixture_lawn'] });
+});
+
+it('visitServiceArgs: the primary service, add-on lines and a shared stop, keys in the same order', () => {
+  expect(visitServiceArgs(
+    { service_type: 'Fixture Pest', service_key: 'fixture_pest', visit: { serviceTypes: ['Fixture Mosquito'] } },
+    [{ serviceType: 'Fixture Lawn Care', serviceKey: 'fixture_lawn' }, { serviceType: '' }],
+  )).toEqual({ serviceTypes: ['Fixture Pest', 'Fixture Lawn Care', 'Fixture Mosquito'], serviceKeys: ['fixture_pest', 'fixture_lawn', ''] });
+  expect(visitServiceArgs(null)).toEqual({ serviceTypes: [], serviceKeys: [] });
+});
+
 it('drag-drop confirm with the gate off: no strip, the route warning stays', () => {
   vi.stubGlobal('fetch', vi.fn(async () => json({ enabled: false })));
   hooks.conflicts = [ROUTE_WARNING];
@@ -104,7 +134,7 @@ it('rain-out: asks for the best-times rows and shows each chip with its hourly r
   expect(rows).toHaveLength(2);
   expect(rows[0]).toHaveTextContent('15% rain');
   expect(rows[1]).toHaveTextContent('65% rain');
-  expect(hooks.bestTimesArgs).toMatchObject({ bestRows: true, serviceTypes: ['Fixture Lawn Care'] });
+  expect(hooks.bestTimesArgs).toMatchObject({ bestRows: true, serviceTypes: ['Fixture Lawn Care'], serviceKeys: [''] });
   // A "later today" preset carries its own hour's chance; a day-level fallback says so.
   expect(screen.getByText('80% rain')).toBeInTheDocument();
   expect(screen.getByText('74% rain that day')).toBeInTheDocument();

@@ -144,6 +144,7 @@ import BestTimeHint from "../../components/schedule/BestTimeHint";
 import AvailabilityStrip, { availabilityVerdict, stripCoversRouteWarning } from "../../components/schedule/AvailabilityStrip";
 import IntelligenceBarShell from "../../components/admin/IntelligenceBarShell";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
+import { visitServiceArgs } from "../../components/schedule/visitServiceArgs";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
 import {
   SERIES_ACK_REQUIRED,
@@ -2324,6 +2325,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // A re-picked Service address is where the save sends the visit —
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
+    // The same two best-times rows as New Appointment (owner 2026-10-08),
+    // ranked for everything the save will book: the form's primary service
+    // (it can be re-picked here) and the add-on lines.
+    ...visitServiceArgs({ serviceType: form.serviceType, serviceKey: form.serviceKey, visit: service.visit }, serviceLines),
+    bestRows: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
   // The form as it opened: a save that leaves the visit's slot alone (a
@@ -6205,6 +6211,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
+                bestRows
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
@@ -9507,6 +9514,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
     pickedStart: manualTime,
     rangeFrom: etDateString(),
+    // The same two best-times rows as New Appointment (owner 2026-10-08).
+    ...visitServiceArgs(service),
+    bestRows: true,
   });
 
   // One POST path for the suggested and custom pickers. A 409
