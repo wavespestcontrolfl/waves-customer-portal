@@ -2126,13 +2126,22 @@ describe('weed spots and the spot area', () => {
     expect(within(addons()).getByText('On the sheet · Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
   });
 
-  test('a product the Weed spots entry offers is not listed in the search: it is added through the entry only', async () => {
-    await open();
+  test('no product of the weed group is listed in the search: offered or held back, it comes through the entry only', async () => {
+    await open(weedContext(MIX({
+      productIds: [P_LEAD, P_CERT], note: 'Surfactant left out: it is 90°F or hotter.',
+      surfactant: { productId: P_SURF, included: false, note: 'Surfactant left out: it is 90°F or hotter.' }, tempF: 93,
+    })));
+    const search = await screen.findByLabelText('Search products');
+    for (const name of ['Lead WG', 'Tank Surfactant', 'Blind Herbicide']) {
+      fireEvent.change(search, { target: { value: name } });
+      expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+    }
+  });
+
+  test('when the limits could not be read the search lists the weed products again', async () => {
+    await open(weedContext(MIX({ mode: 'unavailable', productIds: [], surfactant: null, note: 'The weed-spray limits could not be checked. Use Other product for what you sprayed.' })));
     fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Lead WG' } });
-    expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
-    // A group product the entry does NOT offer (the replacement, in lead mode) is still searchable.
-    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Blind Herbicide' } });
-    expect(await screen.findByRole('button', { name: /Blind Herbicide/ })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /Lead WG/ })).toBeTruthy();
   });
 
   test('an unknown temperature adds the surfactant with the reminder on its row', async () => {
@@ -2699,15 +2708,15 @@ describe('suggested from this lawn', () => {
       expect(within(cardGroup('Weed spots')).getByRole('button', { name: 'Weed spots: on the sheet' }).disabled).toBe(true);
     });
 
-    test('the search follows the fresh offer: a product no longer in the mix is searchable again', async () => {
+    test('the search follows the fresh decision: no product of its weed group is listed, offered or held back', async () => {
       answer([freshCard()], FRESH);
       await open();
       await analyze();
       await suggested();
-      fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Cert Herbicide' } });
-      expect(await screen.findByRole('button', { name: /Cert Herbicide/ })).toBeTruthy();
-      fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Lead WG' } });
-      expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
+      for (const name of ['Cert Herbicide', 'Lead WG']) {
+        fireEvent.change(screen.getByLabelText('Search products'), { target: { value: name } });
+        expect(screen.queryByRole('button', { name: new RegExp(`^${name}`) })).toBeNull();
+      }
     });
 
     test('the area exemption and the surfactant note follow the fresh facts', async () => {
