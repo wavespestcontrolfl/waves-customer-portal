@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, isWholeStructureService, UNIT_LEVEL_WORDING_RE } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, UNIT_LEVEL_WORDING_RE } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -6936,20 +6936,23 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
 // unit card stays (same safeguard the business whole-building waiver keeps).
 const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|center|centre)|plaza|shopping (?:center|centre)|multi-tenant|tenant space|space\s*#?\s*\d+)\b|#\s*\d+/i;
 
+const PRE_CONSTRUCTION_SERVICE_KEYS = new Set(['termite_slab_pretreat', 'termite_pretreatment']);
+const LOCALIZED_TERMITE_WORK_RE = /\b(?:spot|foam\w*|bait\w*|drill\w*|stations?|sentricon|localized|fumigat\w*|tent(?:ing|ed)?)\b/i;
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
 
-// Card-only companion to the waiver above (owner 2026-10-07): true when EVERY
-// view of the call's service resolves to a whole-structure catalog row (slab
-// pre-treat, trenching, WDO inspection), the property is not typed as a condo
-// or apartment, and nothing on the call says condo/apartment. Commercial jobs
-// count — a new-construction slab has no unit. Used only to skip the advisory
-// missing_unit_number card; it never changes an address hold.
+// Card-only companion to the waiver above (owner 2026-10-07), narrowed to
+// what the audit showed: true when EVERY view of the call's service resolves
+// to a PRE-CONSTRUCTION pre-treat row (slab pre-treat, pretreatment), the
+// property type is a known building-level one, and nothing on the call names a
+// unit, a suite or other work. Commercial jobs count — a new slab has no unit.
+// WDO, trenching and liquid treatments keep today's card. Used only to skip
+// the advisory missing_unit_number card; it never changes an address hold.
 // The PROPERTY half, positive evidence only (fails closed): a KNOWN
 // building-level property type (an unknown type cannot prove the work is not
 // unit-level), no partial occupancy on either occupancy field, and no second
 // requested service (a coarse category cannot prove that work is
 // building-level).
-function propertyIsWholeStructure(v2Extraction) {
+function propertyHasNoUnitToAsk(v2Extraction) {
   const property = v2Extraction?.property || {};
   const secondary = v2Extraction?.service_request?.secondary_categories;
   return CARD_WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(property.property_type || '').toLowerCase())
@@ -6958,12 +6961,12 @@ function propertyIsWholeStructure(v2Extraction) {
     && !(Array.isArray(secondary) && secondary.length);
 }
 
-function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
+function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
   // Same conservative views as wholeStructureUnitWaiverForCall: a call the
   // unclear-service rule may book as a Waves Assessment is not whole-structure,
   // and the V1 service as heard BEFORE V2-primary adoption must agree too.
   if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return false;
-  if (!propertyIsWholeStructure(v2Extraction)) return false;
+  if (!propertyHasNoUnitToAsk(v2Extraction)) return false;
   const views = [preAdoptionExtracted, extracted, v2BookingServiceView(extracted, v2Extraction)].filter(Boolean);
   return views.every((view) => {
     const coarse = resolveSchedulableCallService(view, { transcription });
@@ -6974,14 +6977,13 @@ function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = nu
     // a suite, unit, bay or condo keeps the card (speaker labels and
     // negations are not reliable enough to suppress on).
     const text = [transcription, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
-    // The view's own service words may name only the termite and WDO
-    // families (one catalog name carries both): another family heard only by
-    // V1 ("WDO and interior roach treatment") still needs the unit, even
-    // when the catalog row resolves to the whole-structure service.
-    const families = new Set(familiesIn([view.requested_service, view.matched_service, view.specific_service_name, view.call_summary]
-      .filter(Boolean).join('. ')).map((f) => f.key));
-    const onlyBuildingFamilies = [...families].every((k) => k === 'termite' || k === 'wdo');
-    return onlyBuildingFamilies && isWholeStructureService({ serviceKey: row?.service_key || null })
+    // Pre-construction pre-treats only (PRE_CONSTRUCTION_SERVICE_KEYS): a new
+    // slab has no unit. The view's own service words may name only the
+    // termite family and no localized termite work (spot, foam, bait, drill,
+    // station) — anything else heard on the call may target one unit.
+    const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary].filter(Boolean).join('. ');
+    const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !LOCALIZED_TERMITE_WORK_RE.test(serviceWords);
+    return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
 }
@@ -11608,8 +11610,8 @@ const CallRecordingProcessor = {
           // verdict keep every flag.
           const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, {
             canonicalStreet: extracted?.address_line1,
-            wholeStructureService: finalFlags.includes('missing_unit_number')
-              && callIsWholeStructureService({
+            preConstructionPretreat: finalFlags.includes('missing_unit_number')
+              && callIsPreConstructionPretreat({
                 extracted, preAdoptionExtracted, v2Extraction, transcription,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
               }),
@@ -12028,7 +12030,7 @@ const CallRecordingProcessor = {
         // Shadow posture gets the same whole-structure rule as the enforce
         // card filter: no "which unit?" card or unit ask on a slab, trench or
         // WDO job (owner 2026-10-07).
-        if (needsConfirmation.includes('missing_unit_number') && callIsWholeStructureService({
+        if (needsConfirmation.includes('missing_unit_number') && callIsPreConstructionPretreat({
           extracted, preAdoptionExtracted, v2Extraction: v2Result?.status === 'valid' ? v2Ext : null, transcription,
           services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
         })) {
@@ -23466,7 +23468,7 @@ CallRecordingProcessor._test = {
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
-  callIsWholeStructureService,
+  callIsPreConstructionPretreat,
   businessWholeBuildingUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,

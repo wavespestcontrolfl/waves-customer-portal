@@ -390,10 +390,10 @@ describe('persisted marker + stale unit ask', () => {
 // Card-only companion (owner 2026-10-07): the advisory "which unit?" card is
 // skipped for a whole-building service, commercial jobs included; the address
 // hold itself is the waiver's business above and is unchanged.
-describe('callIsWholeStructureService (unit card skip)', () => {
-  const { callIsWholeStructureService } = require('../services/call-recording-processor')._test;
+describe('callIsPreConstructionPretreat (unit card skip)', () => {
+  const { callIsPreConstructionPretreat } = require('../services/call-recording-processor')._test;
   const { dropUnneededCallCards } = require('../services/call-triage-flags');
-  const run = (extracted, v2Extraction = null, transcription = '') => callIsWholeStructureService({ extracted, v2Extraction, transcription, services: CATALOG });
+  const run = (extracted, v2Extraction = null, transcription = '') => callIsPreConstructionPretreat({ extracted, v2Extraction, transcription, services: CATALOG });
 
   test('a commercial slab pre-treat counts as whole-structure', () => {
     const extracted = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
@@ -428,32 +428,37 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, commercial, 'Caller: new construction lot, slab pours Monday')).toBe(true);
   });
 
-  test('a second service family heard by V1 keeps the card, even when the catalog row is WDO', () => {
+  test('only pre-construction pre-treats skip the card; WDO, other families and localized termite work keep it', () => {
     const commercial = { property: { property_type: 'commercial' } };
-    const v1Mixed = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection and interior roach treatment' };
-    const wdoOnly = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection for the closing' };
-    expect(callIsWholeStructureService({ extracted: wdoOnly, preAdoptionExtracted: v1Mixed, v2Extraction: commercial, services: CATALOG })).toBe(false);
-    expect(callIsWholeStructureService({ extracted: wdoOnly, preAdoptionExtracted: { ...wdoOnly }, v2Extraction: commercial, services: CATALOG })).toBe(true);
-    expect(run({ ...wdoOnly, call_summary: 'Wants a WDO letter and also has ants in the kitchen' }, commercial)).toBe(false);
+    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service', requested_service: 'pre-slab termite treatment for new construction' };
+    expect(run(slab, commercial)).toBe(true);
+    expect(run({ specific_service_name: 'Termite Pretreatment Service' }, commercial)).toBe(true);
+    expect(run({ specific_service_name: 'WDO Inspection (Termite Letter)' }, commercial)).toBe(false);
+    // Another family heard only by V1, or anywhere in the summary.
+    const v1Mixed = { ...slab, requested_service: 'slab pre-treat and interior roach treatment' };
+    expect(callIsPreConstructionPretreat({ extracted: slab, preAdoptionExtracted: v1Mixed, v2Extraction: commercial, services: CATALOG })).toBe(false);
+    expect(run({ ...slab, call_summary: 'Wants the slab pre-treat and also has ants in the model home' }, commercial)).toBe(false);
+    // Localized termite work may target one unit.
+    expect(run({ ...slab, requested_service: 'slab pre-treat plus a termite foam spot treatment next door' }, commercial)).toBe(false);
   });
 
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {
-    const wdo = { specific_service_name: 'WDO Inspection (Termite Letter)' };
+    const pre = { specific_service_name: 'Slab Pre-Treat Termite Service' };
     const commercial = { property: { property_type: 'commercial' } };
-    expect(run(wdo, commercial, 'we need a WDO inspection for our suite')).toBe(false);
-    expect(run({ ...wdo, address_line2: 'Suite 4' }, commercial)).toBe(false);
-    expect(run(wdo, commercial, 'it is bay 3 in the plaza')).toBe(false);
-    expect(run({ ...wdo, address_line1: '100 Example Rd #12' }, commercial)).toBe(false);
+    expect(run(pre, commercial, 'we need the pre-treat for our suite')).toBe(false);
+    expect(run({ ...pre, address_line2: 'Suite 4' }, commercial)).toBe(false);
+    expect(run(pre, commercial, 'it is bay 3 in the plaza')).toBe(false);
+    expect(run({ ...pre, address_line1: '100 Example Rd #12' }, commercial)).toBe(false);
     expect(run({ specific_service_name: 'Slab Pre-Treat Termite Service' }, commercial, 'new construction lot, slab pours Monday')).toBe(true);
   });
 
   test('the V1 service heard before V2 adoption must agree, and an unclear-service call never counts', () => {
     const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
     const interior = { matched_service: 'General Pest Control', requested_service: 'roaches inside' };
-    expect(callIsWholeStructureService({ extracted: slab, preAdoptionExtracted: interior, services: CATALOG })).toBe(false);
-    expect(callIsWholeStructureService({ extracted: slab, preAdoptionExtracted: { ...slab }, v2Extraction: { property: { property_type: 'commercial' } }, services: CATALOG })).toBe(true);
+    expect(callIsPreConstructionPretreat({ extracted: slab, preAdoptionExtracted: interior, services: CATALOG })).toBe(false);
+    expect(callIsPreConstructionPretreat({ extracted: slab, preAdoptionExtracted: { ...slab }, v2Extraction: { property: { property_type: 'commercial' } }, services: CATALOG })).toBe(true);
     const unclear = { triage_flags: ['ambiguous_pest_or_service'], property: { property_type: 'commercial' } };
-    expect(callIsWholeStructureService({ extracted: slab, v2Extraction: unclear, services: CATALOG, unclearServiceAssessment: true })).toBe(false);
+    expect(callIsPreConstructionPretreat({ extracted: slab, v2Extraction: unclear, services: CATALOG, unclearServiceAssessment: true })).toBe(false);
   });
 
   test('the shadow bridge applies the same rule before filing its reasons', () => {
@@ -467,7 +472,7 @@ describe('callIsWholeStructureService (unit card skip)', () => {
 
   test('the card filter drops only missing_unit_number when told the service is whole-structure', () => {
     const ext = { scheduling: { status: 'requested' }, caller: {}, service_request: { service_intent: 'preventative_one_time' } };
-    expect(dropUnneededCallCards(['missing_unit_number', 'commercial_requires_quote'], ext, { wholeStructureService: true }).flags)
+    expect(dropUnneededCallCards(['missing_unit_number', 'commercial_requires_quote'], ext, { preConstructionPretreat: true }).flags)
       .toEqual(['commercial_requires_quote']);
     expect(dropUnneededCallCards(['missing_unit_number'], ext).flags).toEqual(['missing_unit_number']);
   });
