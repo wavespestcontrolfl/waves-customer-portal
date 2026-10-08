@@ -265,14 +265,14 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
 
   test('a month without the add-ons offers nothing, and nothing is read', async () => {
     const offers = await run([candidate(P_CEL, 'Weed')]);
-    expect(offers).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [] });
+    expect(offers).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [] });
     expect(engine.v13VisitLimits).not.toHaveBeenCalled();
   });
 
   test('a product at a limit, or one the city holds, is never suggested; the next fungicide is not substituted', async () => {
     limited([[P_ART, [{ type: 'annual_max_apps', message: 'limit' }]], [P_DISP, [{ message: 'read failed' }]]]);
     const offers = await run();
-    expect(offers).toEqual({ fungus: null, caterpillars: { item: { productId: P_ACE, name: 'Acelepryn' } }, dry_spots: null, blocked: [P_ART, P_DISP] });
+    expect(offers).toEqual({ fungus: null, caterpillars: { item: { productId: P_ACE, name: 'Acelepryn' } }, dry_spots: null, blocked: [P_ART], unreadable: [P_DISP] });
     noLimits();
     const held = [candidate(P_ART, 'Artavia', { unavailable: { kind: 'city_hold' } }), candidate(P_VEL, 'Velista')];
     const heldOffers = await run(held);
@@ -282,8 +282,8 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
 
   test('a limit read that fails offers nothing', async () => {
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
-    // The read failed: every pick is blocked, not merely without a finding.
-    expect(await run()).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [P_ART, P_ACE, P_DISP] });
+    // The read failed: every pick is unreadable (not forbidden, not merely without a finding).
+    expect(await run()).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [P_ART, P_ACE, P_DISP] });
   });
 
   test('take-all is told by the staged trigger, or by the protocol line; large patch and gray leaf spot are not', async () => {
@@ -329,11 +329,35 @@ describe('blockedProductIds: what the fresh read kept out, per governed kind', (
     expect(ids.sort()).toEqual([P_ART, P_ACE, P_ARENA, P_TALAK, P_CEL, P_CERT].sort());
     expect(blockedProductIds({ offers: { blocked: [P_ART] }, chinch: { blockedIds: [P_ART] } })).toEqual([P_ART]);
   });
-  test('the weed group: the replacement tap blocks the lead side, an unreadable limit blocks all, lead mode blocks none', () => {
+  test('the weed group: the replacement tap blocks the lead side, an unreadable limit blocks none, lead mode blocks none', () => {
     const group = [P_CEL, P_CERT, uuid(9)];
     expect(blockedProductIds({ weedMix: { mode: 'replacement', groupProductIds: group, productIds: [uuid(9)] } }).sort()).toEqual([P_CEL, P_CERT].sort());
-    expect(blockedProductIds({ weedMix: { mode: 'unavailable', groupProductIds: group, productIds: [] } })).toHaveLength(3);
+    expect(blockedProductIds({ weedMix: { mode: 'unavailable', groupProductIds: group, productIds: [] } })).toEqual([]);
+    expect(blockedProductIds({ weedMix: { mode: 'none', groupProductIds: group, productIds: [] } })).toHaveLength(3);
     expect(blockedProductIds({ weedMix: { mode: 'lead', groupProductIds: group, productIds: [P_CEL] } })).toEqual([]);
+  });
+});
+
+describe('unreadableProductIds: what the fresh read could not read (not forbidden)', () => {
+  const { unreadableProductIds, blockedProductIds, UNREADABLE_NOTE } = require('../services/lawn-treatment-guide');
+  test('a clean read has none', () => {
+    expect(unreadableProductIds({})).toEqual([]);
+    expect(unreadableProductIds({ offers: { unreadable: [] }, chinch: { unreadableIds: [] }, weedMix: { mode: 'lead', groupProductIds: [P_CEL] } })).toEqual([]);
+  });
+  test('the picks, the chinch rungs and an unavailable weed group are named once, and never also blocked', () => {
+    const input = {
+      offers: { blocked: [], unreadable: [P_ART, P_ACE] },
+      chinch: { blockedIds: [], unreadableIds: [P_ARENA, P_TALAK] },
+      weedMix: { mode: 'unavailable', groupProductIds: [P_CEL, P_CERT], productIds: [] },
+    };
+    expect(unreadableProductIds(input).sort()).toEqual([P_ART, P_ACE, P_ARENA, P_TALAK, P_CEL, P_CERT].sort());
+    expect(blockedProductIds(input)).toEqual([]);
+  });
+  test('a weed mix that is not unavailable adds none', () => {
+    for (const mode of ['lead', 'replacement', 'none']) expect(unreadableProductIds({ weedMix: { mode, groupProductIds: [P_CEL], productIds: [] } })).toEqual([]);
+  });
+  test('one wording', () => {
+    expect(UNREADABLE_NOTE).toBe('The limits could not be checked. Use Search products for what you applied; the office will review it.');
   });
 });
 
@@ -374,10 +398,11 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
 
   test('a failed limit read (a block with no type) offers nothing, as the weed mix does', async () => {
     limited([[P_ARENA, [{ message: 'application limits could not be read.' }]]]);
-    // Nothing is offered, and every rung is blocked (not merely unneeded).
-    expect(await run()).toMatchObject({ productId: null, note: expect.stringMatching(/could not be checked/), rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
+    // Nothing is offered; every rung is unreadable, none is blocked (nothing forbids them that was read).
+    const unread = { productId: null, note: 'The limits could not be checked. Use Search products for what you applied; the office will review it.', rungIds: [P_ARENA, P_TALAK], blockedIds: [], unreadableIds: [P_ARENA, P_TALAK] };
+    expect(await run()).toMatchObject(unread);
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
-    expect(await run()).toMatchObject({ productId: null, note: expect.stringMatching(/could not be checked/), rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
+    expect(await run()).toMatchObject(unread);
   });
 
   test('another limit on Arena (not the yearly count) holds the offer with the limit\'s words; it does not fall through', async () => {

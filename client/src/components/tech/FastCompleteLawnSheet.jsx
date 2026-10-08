@@ -234,7 +234,8 @@ const weedMixOf = (data) => {
 const chinchShape = (chinch) => {
   const item = chinch?.item?.productId ? chinch.item : null;
   const rungIds = Array.isArray(chinch?.rungIds) ? chinch.rungIds : [];
-  return item || chinch?.note ? { item, note: chinch.note || null, rungIds } : null;
+  const unreadableIds = Array.isArray(chinch?.unreadableIds) ? chinch.unreadableIds : [];
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
@@ -384,7 +385,7 @@ function useTreatmentGuide({ base, request, enabled, assessmentId }) {
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [] } });
+          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
         } else setState({ for: assessmentId, status: 'failed', guide: null });
       })
       .catch(() => { if (active) setState({ for: assessmentId, status: 'failed', guide: null }); });
@@ -428,8 +429,12 @@ function cardOwnedIds(guide, checks) {
 //             released to the generic list)   locked   no decision yet: the taps wait
 // A pick is RELEASED to the generic list when nothing blocked or holds it and no visible card owns
 // it: a clean answer with no finding for it ("the technician can still treat what he sees"), or a
-// card he dismissed. A blocked pick (a limit, a city hold, a failed limit read) never is.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), weedOffered: new Set(), chinchOffered: new Set() };
+// card he dismissed. A blocked pick (a limit or a city hold that was READ) never is.
+// A product whose limit read FAILED is UNREADABLE, not blocked: its entry or card offers nothing (we
+// cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
+// is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
+// leave no way to record a real application. Completion records the visit and flags it to the office.
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), unreadable: new Set(), unreadableNote: '', weedOffered: new Set(), chinchOffered: new Set() };
 
 function guideGovernance({ ctx, guide, status, checks }) {
   if (!ctx.treatmentGuide) return NO_GOVERNANCE;
@@ -445,15 +450,24 @@ function guideGovernance({ ctx, guide, status, checks }) {
   const held = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
   const cardIds = lowerIds(cards.flatMap((card) => [...card.productIds, ...card.items.map((item) => item.productId)]));
   const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => card.productIds));
+  const weedGroup = lowerIds(weedMix?.groupProductIds);
+  // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
+  const unreadable = settled ? [
+    ...lowerIds(answered ? guide.unreadableProductIds : []),
+    ...(weedMix?.mode === 'unavailable' ? weedGroup : []),
+    ...lowerIds(chinch?.unreadableIds),
+  ] : [];
   const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
   const owned = cardOwnedIds(answered ? guide : null, checks);
-  const governed = [...picks, ...(weedMix && weedMix.mode !== 'unavailable' ? lowerIds(weedMix.groupProductIds) : []), ...lowerIds(chinch?.rungIds), ...chinchItem];
+  const governed = [...picks, ...weedGroup, ...lowerIds(chinch?.rungIds), ...chinchItem];
   return {
     enabled: true,
     locked: !settled,
     governed: new Set(governed),
-    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free]),
-    hidden: new Set(governed.filter((id) => !free.includes(id) || owned.includes(id))),
+    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free, ...unreadable]),
+    hidden: new Set(governed.filter((id) => (!free.includes(id) && !unreadable.includes(id)) || owned.includes(id))),
+    unreadable: new Set(unreadable),
+    unreadableNote: answered ? guide.unreadableNote : '',
     weedOffered: new Set(weedOffered),
     chinchOffered: new Set([...chinchItem, ...chinchCardIds]),
   };
@@ -464,6 +478,8 @@ function guideGovernance({ ctx, guide, status, checks }) {
 function staleGuideRows(rows, gov) {
   return rows.filter((row) => {
     const id = String(row.productId).toLowerCase();
+    // An unreadable product cannot be called forbidden: its row stays.
+    if (gov.unreadable.has(id)) return false;
     return (gov.governed.has(id) && !gov.offered.has(id))
       || (row.guided === 'weeds' && !gov.weedOffered.has(id))
       || (row.guided === 'chinch' && !gov.chinchOffered.has(id));
@@ -1508,6 +1524,7 @@ function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCar
           onSheet={on.has(String(item.productId).toLowerCase())}
           // A product a guide card may own waits for the card (the fresh guide), then follows it.
           waiting={gov.locked && gov.governed.has(String(item.productId).toLowerCase())}
+          unreadableNote={gov.unreadable.has(String(item.productId).toLowerCase()) ? gov.unreadableNote : ''}
           locked={locked}
           onAdd={onAdd}
         />
@@ -1517,7 +1534,7 @@ function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCar
 }
 
 // One opt-in product of the month: its name, the protocol's own words for it, and its tap.
-function AddOnLine({ item, onSheet, waiting, locked, onAdd }) {
+function AddOnLine({ item, onSheet, waiting, unreadableNote = '', locked, onAdd }) {
   const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
   const why = [
     item.substituteFor ? `In place of ${item.substituteFor}` : '',
@@ -1525,6 +1542,8 @@ function AddOnLine({ item, onSheet, waiting, locked, onAdd }) {
     ...(item.gateNotes || []),
     item.applicationMethod ? methodLabel(item.applicationMethod) : '',
     rate,
+    // A product whose limit read failed is never silent: the one wording says what to do.
+    unreadableNote,
   ].filter(Boolean).join(' · ');
   return (
     <div className="tech-protocol-addon">

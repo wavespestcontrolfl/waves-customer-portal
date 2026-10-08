@@ -492,6 +492,11 @@ function programRateFor(item, programRows) {
   return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
 }
 
+// With the treatment guide live, a weed mix whose limit read failed carries the guide's one wording
+// (its products are released to the search, which the note names). The spot-rules note stands without it.
+const unreadableWeedNote = (weedMix) => (featureGates.lawnTreatmentGuideLive() && weedMix.mode === 'unavailable'
+  ? { ...weedMix, note: require('./lawn-treatment-guide').UNREADABLE_NOTE } : weedMix);
+
 // GATE_LAWN_SPOT_RULES: the weed add-ons as one cap-aware entry (see lawn-weed-mix.js), as
 // `{ weedMix }` to spread into plannedProducts, or `{}` (gate off, or no weed group). Its
 // limit read is caught inside (mode 'unavailable'); only a defect lands in the catch here.
@@ -499,7 +504,7 @@ async function loadWeedMix({ addOns, svc, plan, knex, readFailures }) {
   if (!featureGates.lawnSpotRulesLive()) return {};
   try {
     const weedMix = await require('./lawn-weed-mix').buildWeedMix({ addOns, svc, structured: plan?.protocol?.structured, knex });
-    return weedMix ? { weedMix } : {};
+    return weedMix ? { weedMix: unreadableWeedNote(weedMix) } : {};
   } catch (err) {
     logger.warn(`[lawn-fast] weed mix unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     readFailures.add('weed_mix');
@@ -543,10 +548,10 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex }) {
   const guide = require('./lawn-treatment-guide');
   const found = await guide.resolveChinch({ svc, structured, knex });
   if (!found) return null;
-  const { rungIds, blockedIds } = found;
-  if (!found.productId) return { item: null, note: found.note, rungIds, blockedIds };
+  const { rungIds, blockedIds, unreadableIds } = found;
+  if (!found.productId) return { item: null, note: found.note, rungIds, blockedIds, unreadableIds };
   const planned = sheetAddOns.find((addOn) => String(addOn.productId).toLowerCase() === found.productId.toLowerCase());
-  if (planned) return { item: planned, note: found.note, rungIds, blockedIds };
+  if (planned) return { item: planned, note: found.note, rungIds, blockedIds, unreadableIds };
   const catalog = (await loadCatalogRows([found.productId], knex)).get(found.productId) || null;
   const entry = productRuleEntry(found.productId, catalog);
   const staged = found.stagedRow;
@@ -575,6 +580,7 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex }) {
     note: found.note,
     rungIds,
     blockedIds,
+    unreadableIds,
   };
 }
 
@@ -863,12 +869,14 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   if (!assessment) return { ok: false, reason: 'not_found' };
   if (assessment.confirmed_by_tech !== true) return { ok: false, reason: 'not_confirmed' };
   if (!(await assessmentUsableForReport(svc, assessment, knex))) return { ok: false, reason: 'not_usable' };
-  const result = (cards, weedMix = null, chinch = null, blockedProductIds = []) => ({ ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds });
+  const guide = require('./lawn-treatment-guide');
+  const result = (cards, weedMix = null, chinch = null, ids = {}) => ({
+    ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds: ids.blocked || [], unreadableProductIds: ids.unreadable || [], unreadableNote: guide.UNREADABLE_NOTE,
+  });
   // Only a recurring program visit has a plan, and so any product to suggest.
   const loaded = visitType === 'recurring' ? await loadPlan(svc, knex) : null;
   if (!loaded) return result([]);
 
-  const guide = require('./lawn-treatment-guide');
   const structured = loaded.plan?.protocol?.structured;
   const sheet = await sheetPlanned(loaded, knex);
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(structured);
@@ -885,7 +893,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // No trouble-area store exists yet, so take-all stays the check only.
     troubleAreas: [],
-  }), weedMix, chinch, guide.blockedProductIds({ offers, chinch, weedMix }));
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }) });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

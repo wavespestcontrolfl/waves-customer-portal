@@ -59,7 +59,12 @@ const CHECKS = Object.freeze({
 const TAKE_ALL_TRIGGER = /^mapped_take_all/;
 const TAKE_ALL_LINE = /mapped take-all/i;
 const TAKE_ALL_NOTE = 'Take-all is treated on known trouble areas only. None is on file for this lawn.';
-const CHINCH_LIMITS_UNREAD = 'The chinch bug product limits could not be checked. Use Other product for what you sprayed.';
+// "Blocked" means the read found a limit or hold that forbids the product. When the limit read itself
+// failed the product is only UNREADABLE: its entry or card offers nothing (we cannot vouch for it),
+// but it is released to the search (and, for a pick, the generic list), because the sheet has no Full
+// form control: hiding it would leave no way to record a real application. Completion records the
+// visit and flags it to the office ("product limits could not be checked"). One wording, everywhere.
+const UNREADABLE_NOTE = 'The limits could not be checked. Use Search products for what you applied; the office will review it.';
 const CHINCH_LIMIT_REACHED = 'The yearly limit is reached for the chinch bug products on this lawn.';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -133,15 +138,18 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  */
 async function addOnOffers({ candidates, rows, svc, knex }) {
   const chosen = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
-  // `blocked`: the ids of the picks the read did not offer because of a limit, a city hold or a limit
-  // read that failed (a product that merely has no finding is not blocked).
-  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: [] };
+  // `blocked`: the picks a limit or a city hold that was READ forbids. `unreadable`: the picks whose
+  // limit read failed (nothing is offered for them, and they are not forbidden). A pick that merely
+  // has no finding is neither.
+  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: [], unreadable: [] };
   if (!chosen.length) return offers;
   const capped = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
-  if (!capped) return { ...offers, blocked: chosen.map(([, c]) => idOf(c.raw.product.id)) };
+  if (!capped) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
   for (const [kind, candidate] of chosen) {
+    const id = idOf(candidate.raw.product.id);
     offers[kind] = offerFor(kind, candidate, { capped, rows });
-    if (isBlocked(candidate, capped)) offers.blocked.push(idOf(candidate.raw.product.id));
+    if (isBlocked(candidate, capped)) offers.blocked.push(id);
+    else if (isUnreadable(candidate, capped)) offers.unreadable.push(id);
   }
   return offers;
 }
@@ -179,10 +187,15 @@ const isTakeAll = (candidate, rows) => TAKE_ALL_TRIGGER.test(stagedRowOf(rows, c
 // One kind's offer, or null. Any block (a reached cap, another limit, a read that failed and came
 // back as a block with no type, a city hold) keeps the product off the card. A take-all card names
 // no product, so it stands, with `blocked` so a later trouble-area card still holds back.
-const isBlocked = (candidate, capped) => heldByCity(candidate.raw) || (capped.get(idOf(candidate.raw.product.id)) || []).length > 0;
+// v13VisitLimits fails closed per product: a read that failed comes back as a block with no limit type
+// (a real limit always names one). A named limit or a city hold forbids the product; a typeless block
+// is an unreadable limit.
+const limitBlocks = (candidate, capped) => capped.get(idOf(candidate.raw.product.id)) || [];
+const isBlocked = (candidate, capped) => heldByCity(candidate.raw) || limitBlocks(candidate, capped).some((block) => block.type);
+const isUnreadable = (candidate, capped) => !isBlocked(candidate, capped) && limitBlocks(candidate, capped).length > 0;
 
 function offerFor(kind, candidate, { capped, rows }) {
-  const blocked = isBlocked(candidate, capped);
+  const blocked = isBlocked(candidate, capped) || isUnreadable(candidate, capped);
   if (kind === 'fungus' && isTakeAll(candidate, rows)) return { item: candidate.item, takeAll: true, blocked };
   return blocked ? null : { item: candidate.item };
 }
@@ -193,15 +206,26 @@ function offerFor(kind, candidate, { capped, rows }) {
  * sheet-shaped add-ons; the card carries them (and the names), and the tap adds exactly those rows.
  */
 /**
- * The ids of the guide-governed products the fresh read did NOT offer because of a limit, a city hold
- * or a failed limit read, across every governed kind: the fungicide, caterpillar and dry-spot picks,
- * the chinch rungs, and the weed group when the tap offers nothing (mode none or unavailable) or hands
- * the visit to the replacement. The sheet keeps these out of every list; a governed pick that is NOT
- * here and has no card (no finding) returns to the generic list. Pure.
+ * The ids of the guide-governed products the fresh read did NOT offer because a limit or a city hold it
+ * READ forbids them, across every governed kind: the fungicide, caterpillar and dry-spot picks, the
+ * chinch rungs, and the weed group when the tap offers nothing (mode none) or hands the visit to the
+ * replacement. The sheet keeps these out of every list; a governed pick that is NOT here and has no card
+ * (no finding) returns to the generic list. Pure.
  */
 function blockedProductIds({ offers, chinch, weedMix }) {
-  const weedOut = weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [];
+  const weedOut = weedMix && !['lead', 'unavailable'].includes(weedMix.mode) ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [];
   return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];
+}
+
+/**
+ * The ids of the guide-governed products whose limit read FAILED (so nothing could be offered or read as
+ * forbidden): the picks, the chinch rungs, and the weed group in mode 'unavailable'. They are not
+ * blocked: the sheet releases them to the search (and a pick to the generic list), see UNREADABLE_NOTE.
+ * Pure.
+ */
+function unreadableProductIds({ offers, chinch, weedMix }) {
+  const weedUnread = weedMix?.mode === 'unavailable' ? weedMix.groupProductIds || [] : [];
+  return [...new Set([...(offers?.unreadable || []), ...(chinch?.unreadableIds || []), ...weedUnread].map(idOf))];
 }
 
 function weedOffer(weedMix, items) {
@@ -224,28 +248,33 @@ function weedOffer(weedMix, items) {
  *   { productId, name, stagedRow, note, rungIds, blockedIds }   the product to add; `note` says why it is not Arena
  *   { productId: null, note, rungIds, blockedIds }               nothing to offer, and why
  * `rungIds` are all the rungs' products (governed by the guide whether offered or not); `blockedIds` the ones
- * a limit, or a limit read that failed, kept out.
+ * a limit that was read kept out; `unreadableIds` all of them when the limit read failed.
  */
 async function resolveChinch({ svc, structured, knex }) {
   const engine = require('./waveguard-plan-engine');
   const rows = engine.v13ProtocolRows(structured);
   if (!rows || !rows.size || !structured?.id) return null;
-  const none = (note) => ({ productId: null, name: null, stagedRow: null, note, rungIds: [], blockedIds: [] });
+  const none = (note) => ({ productId: null, name: null, stagedRow: null, note, rungIds: [], blockedIds: [], unreadableIds: [] });
   const staged = await stagedChinchRows({ svc, structured, knex });
-  if (!staged) return none(CHINCH_LIMITS_UNREAD);
+  if (!staged) return none(UNREADABLE_NOTE);
   const products = chinchProducts(staged);
   if (!products.length) return null;
   const capped = await readCaps({ products: products.map((p) => ({ id: p.productId, name: p.name })), rows, svc, knex });
-  return withRungs(capped ? chooseChinch(products, capped) : none(CHINCH_LIMITS_UNREAD), products);
+  return withRungs(capped ? chooseChinch(products, capped) : unreadableChinch(), products);
 }
 
-// Every rung's product id (all of them are governed by the guide, offered or not), and the rungs the
-// read blocked: all of them when nothing is offered, else the ones before the offered rung.
+// Every rung's product id (all of them are governed by the guide, offered or not); the rungs a READ
+// limit blocked (all of them when nothing is offered, else the ones before the offered rung); and, when
+// the limit read itself failed, the rungs that are unreadable instead (none blocked, none offered).
 function withRungs(result, products) {
   const rungIds = products.map((product) => product.productId);
+  if (result.unreadable) return { ...result, rungIds, blockedIds: [], unreadableIds: rungIds };
   const offered = rungIds.indexOf(result.productId);
-  return { ...result, rungIds, blockedIds: offered === -1 ? rungIds : rungIds.slice(0, offered) };
+  return { ...result, rungIds, blockedIds: offered === -1 ? rungIds : rungIds.slice(0, offered), unreadableIds: [] };
 }
+
+// Nothing is offered when the limit read failed: the line says so, and the rungs are released to the search.
+const unreadableChinch = () => ({ productId: null, name: null, stagedRow: null, note: UNREADABLE_NOTE, unreadable: true });
 
 // The staged chinch rows of the visit's protocol (any window) with their catalog row, or null when the
 // read failed.
@@ -288,7 +317,8 @@ function chinchProducts(staged) {
 function chooseChinch(products, capped) {
   const none = (note) => ({ productId: null, name: null, stagedRow: null, note });
   const blocksOf = (product) => capped.get(product.productId) || [];
-  if (products.some((product) => blocksOf(product).some((block) => !block.type))) return none(CHINCH_LIMITS_UNREAD);
+  // A rung whose read failed (a block with no limit type) is unreadable, not forbidden.
+  if (products.some((product) => blocksOf(product).some((block) => !block.type))) return unreadableChinch();
   let skipped = null;
   for (const product of products) {
     const blocks = blocksOf(product);
@@ -439,6 +469,8 @@ module.exports = {
   pickAddOns,
   weedOffer,
   blockedProductIds,
+  unreadableProductIds,
+  UNREADABLE_NOTE,
   resolveChinch,
   buildCards,
   treatmentGuideFreeze,
