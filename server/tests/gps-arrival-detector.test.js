@@ -703,17 +703,27 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
   test('a grouped stop records once for the stop, whichever member is the current job', async () => {
     const fast = { point: basePoint({ speed_mph: 32, ignition: true }) };
-    const pest = baseService({ id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-08', en_route_at: EN_ROUTE_TIME });
+    const pest = baseService({ id: 'svc-1', visit_id: 'visit-9', visit_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08', en_route_at: EN_ROUTE_TIME });
     // the sibling went en route a moment later and is now the tech's current job
-    const lawn = baseService({ id: 'svc-2', visit_id: 'visit-9', scheduled_date: '2026-10-08', en_route_at: new Date(new Date(EN_ROUTE_TIME).getTime() + 4000).toISOString() });
+    const lawn = baseService({ id: 'svc-2', visit_id: 'visit-9', visit_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08', en_route_at: new Date(new Date(EN_ROUTE_TIME).getTime() + 4000).toISOString() });
 
     const query = await runWithQuery(pest, fast);
     await run(lawn, { ...fast, techStatus: baseTechStatus({ current_job_id: 'svc-2' }) });
 
     const writes = notMarkedWrites();
     expect(writes).toHaveLength(1);
-    expect(writes[0].metadata).toMatchObject({ stop: 'visit:visit-9', attempt: '2026-10-08|visit' });
-    expect(query.trx.raw.mock.calls[0][1][1]).toBe('visit:visit-9:inside_radius_moving_too_fast:2026-10-08|visit');
+    const stopAttempt = `2026-10-08|visit:${new Date(EN_ROUTE_TIME).toISOString()}`;
+    expect(writes[0].metadata).toMatchObject({ stop: 'visit:visit-9', attempt: stopAttempt });
+    expect(query.trx.raw.mock.calls[0][1][1]).toBe(`visit:visit-9:inside_radius_moving_too_fast:${stopAttempt}`);
+
+    // The stop is reset and sent en route again the same day: a new attempt.
+    const restartedAt = new Date(new Date(EN_ROUTE_TIME).getTime() + 3600000).toISOString();
+    await run(baseService({ id: 'svc-1', visit_id: 'visit-9', visit_en_route_at: restartedAt, scheduled_date: '2026-10-08', en_route_at: restartedAt }), {
+      point: basePoint({ speed_mph: 32, ignition: true, reported_at: new Date(new Date(restartedAt).getTime() + 60000).toISOString() }),
+      techStatus: baseTechStatus({ location_updated_at: new Date(new Date(restartedAt).getTime() + 60000).toISOString() }),
+    });
+    expect(notMarkedWrites()).toHaveLength(2);
+    expect(notMarkedWrites()[1].metadata.attempt).toBe(`2026-10-08|visit:${restartedAt}`);
   });
 
   test('a returned failure with no state is judged by the persisted row (arrived and completed meanwhile)', async () => {

@@ -268,6 +268,7 @@ async function loadCurrentService(currentJobId) {
   if (!currentJobId) return null;
   return db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .leftJoin('service_visits as sv', 's.visit_id', 'sv.id')
     .where('s.id', currentJobId)
     .first(
       's.id',
@@ -281,6 +282,7 @@ async function loadCurrentService(currentJobId) {
       's.en_route_at',
       's.scheduled_date',
       's.visit_id',
+      'sv.en_route_at as visit_en_route_at',
       's.lat as service_lat',
       's.lng as service_lng',
       's.service_address_line1 as service_address_line1',
@@ -321,9 +323,10 @@ function attemptKey(service) {
   ).slice(0, 10);
   const dayPart = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none';
   // A grouped stop is ONE physical visit: its members carry slightly different
-  // en_route_at values, so the attempt is the stop's day, not a member's time.
-  if (service?.visit_id) return `${dayPart}|visit`;
-  const enRouteMs = timestampMs(service?.en_route_at);
+  // en_route_at values, so the attempt is the STOP's own en-route time
+  // (service_visits.en_route_at), which a same-day restart renews.
+  const enRouteMs = timestampMs(service?.visit_id ? service.visit_en_route_at : service?.en_route_at);
+  if (service?.visit_id) return `${dayPart}|visit:${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
   return `${dayPart}|${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
 }
 
