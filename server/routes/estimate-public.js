@@ -31375,3 +31375,11 @@ module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
 module.exports.buildOfferTiersBlock = buildOfferTiersBlock;
 module.exports.offerTierMemberBlock = offerTierMemberBlock;
 module.exports.resolveProspectiveOwnerId = resolveProspectiveOwnerId;
+// Area add-on classification seams (GATE_AREA_ADDONS), exported for server/tests/area-addon-flow.test.js.
+module.exports.collectServiceCategories = collectServiceCategories;
+module.exports.hasOnlyLawnCareServiceMix = hasOnlyLawnCareServiceMix;
+module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;
+module.exports.oneTimeItemsForRender = oneTimeItemsForRender;
+module.exports.oneTimeItemFamilyKeys = oneTimeItemFamilyKeys;
+module.exports.preservedOneTimeAddOnRowsFromBreakdown = preservedOneTimeAddOnRowsFromBreakdown;
+module.exports.oneTimeChoiceClassificationItems = oneTimeChoiceClassificationItems;

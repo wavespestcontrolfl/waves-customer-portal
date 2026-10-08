@@ -8976,3 +8976,6 @@ module.exports.frozenTermiteAnnualFinancialsFor = frozenTermiteAnnualFinancialsF
 module.exports.pickFirstServiceDate = pickFirstServiceDate;
 module.exports.funnelKeyForEstimate = funnelKeyForEstimate;
 module.exports.funnelKeyForEstimateId = funnelKeyForEstimateId;
+// One-time row classifiers (area add-on rows classify by key), exported for server/tests/area-addon-flow.test.js.
+module.exports.isGeneralPestOneTimeItem = isGeneralPestOneTimeItem;
+module.exports.isLawnCareOneTimeItem = isLawnCareOneTimeItem;

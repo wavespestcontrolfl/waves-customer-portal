@@ -416,6 +416,66 @@ describe('area add-on money/slot gate (GATE_AREA_ADDONS)', () => {
   });
 });
 
+// Area add-ons are booked and billed by the one-time accept only: a recurring-mode reserve of an estimate that
+// carries one is refused before any hold exists (the matching accept refusal is in the atomicity suite).
+describe('area add-ons reserve only in one-time mode (GATE_AREA_ADDONS on)', () => {
+  const ADDON_ROW = { service: 'area_addon', addOnKey: 'web_sweep', catalogServiceKey: 'area_addon_web_sweep', name: 'Web Sweep', price: 89 };
+  const ONE_TIME_ONLY = {
+    id: 'est-addon-ot', status: 'sent', expires_at: null, archived_at: null,
+    estimate_data: JSON.stringify({ result: { oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const WITH_RECURRING = {
+    id: 'est-addon-rec', status: 'sent', expires_at: null, archived_at: null, monthly_total: 88,
+    estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 }, oneTime: { items: [ADDON_ROW], specItems: [], total: 89 } } }),
+  };
+  const prevGate = process.env.GATE_AREA_ADDONS;
+  const reserve = (body) => fetch(`${base}/${TOKEN}/reserve`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slotId: '2030-01-01_09-00_unassigned', ...body }),
+  });
+  beforeEach(() => { process.env.GATE_AREA_ADDONS = 'true'; });
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = prevGate;
+  });
+
+  test('a recurring-mode reserve of an estimate with an add-on is refused with the office hand-off and holds nothing', async () => {
+    currentEstimate = WITH_RECURRING;
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+      code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+    });
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+  });
+
+  test('a structurally one-time estimate (add-ons only) reserves in one-time mode, whatever mode the body asks for', async () => {
+    currentEstimate = ONE_TIME_ONLY;
+    // The real predicate (estimate-public.js isStructuralOneTimeOnlyEstimate, pinned with real add-on rows in
+    // area-addon-flow.test.js) is mocked in this suite.
+    require('../routes/estimate-public').isStructuralOneTimeOnlyEstimate.mockReturnValueOnce(true);
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-1', expiresAt: null });
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(201);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ serviceMode: 'one_time' }));
+  });
+
+  test('a mixed estimate reserves when the customer asked for the one-time mode', async () => {
+    currentEstimate = WITH_RECURRING;
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-2', expiresAt: null });
+    const res = await reserve({ serviceMode: 'one_time' });
+    expect(res.status).toBe(201);
+    expect(slotReservation.reserveSlot).toHaveBeenCalledWith(expect.objectContaining({ serviceMode: 'one_time' }));
+  });
+
+  test('an estimate with no add-on is untouched by the rule', async () => {
+    currentEstimate = { id: 'est-plain', status: 'sent', expires_at: null, archived_at: null, monthly_total: 88, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }], monthlyTotal: 88 } } }) };
+    slotReservation.reserveSlot.mockResolvedValue({ scheduledServiceId: 'ss-3', expiresAt: null });
+    const res = await reserve({ serviceMode: 'recurring' });
+    expect(res.status).toBe(201);
+  });
+});
+
 describe('B18 park: a parked estimate (its phone belongs to another customer) cannot browse, reserve, extend or capture a card', () => {
   const { estimatePublicBlockingState } = require('../routes/estimate-public');
   const { createCardHoldSetupIntentForEstimate, resolveCardHoldPolicy } = require('../services/estimate-card-holds');

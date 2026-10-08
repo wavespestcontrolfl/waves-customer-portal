@@ -4263,6 +4263,23 @@ describe('B18 - an accept whose phone belongs to another customer is parked for 
       expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     });
 
+    test('area add-on (GATE_AREA_ADDONS on) accepted in recurring mode -> its own coded 409 before any write; the recurring conversion never runs', async () => {
+      const prior = process.env.GATE_AREA_ADDONS;
+      process.env.GATE_AREA_ADDONS = 'true';
+      try {
+        const addOnPatch = { result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] }, oneTime: { items: [{ service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', price: 89 }], specItems: [] } } };
+        const attempt = await unparkedAttempt(withData('est-mx-area-rec-1', addOnPatch));
+        expect([attempt.status, attempt.data]).toEqual([409, {
+          error: 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.',
+          code: 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY',
+        }]);
+        expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+        expect(storedEstimate().status).toBe('sent');
+      } finally {
+        if (prior === undefined) delete process.env.GATE_AREA_ADDONS; else process.env.GATE_AREA_ADDONS = prior;
+      }
+    });
+
     test('quote-required AND parked -> quote_required wins (not the park, no alert); trenching AND parked -> trenching wins', async () => {
       const quote = await parkedAttempt(withData('est-mx-quote-1', { proposal: { enabled: true } }));
       expect(quote.status).toBe(409);
