@@ -131,11 +131,13 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/feature-flags` | admin-feature-flags |
 | GET | `/api/admin/intelligence-bar/actions/:id` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/cancel-action` | admin-intelligence-bar |
+| POST | `/api/admin/intelligence-bar/choose-product` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/confirm-action` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/execute` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/knowledge-gap` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/query` | admin-intelligence-bar |
 | GET | `/api/admin/intelligence-bar/quick-actions` | admin-intelligence-bar |
+| POST | `/api/admin/intelligence-bar/show-again` | admin-intelligence-bar |
 | GET | `/api/admin/intelligence-bar/tasks` | admin-intelligence-bar |
 | GET | `/api/admin/intelligence-bar/tasks/:id` | admin-intelligence-bar |
 | POST | `/api/admin/intelligence-bar/tasks/:id/resume` | admin-intelligence-bar |

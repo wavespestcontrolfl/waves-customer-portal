@@ -260,6 +260,27 @@ describe('trial wording fixes (owner 2026-10-05)', () => {
   });
 });
 
+describe('catalog product names (owner 2026-10-08, "fix T&S names")', () => {
+  const PALM = 'LESCO 8-2-12 100% Poly Plus OPTI Kieserite 4% Mg 9.26% S 0.15% B 0.05% Cu 0.15% Fe 2% Mn 0.15% Zn Palm & Tropical Ornamental Granular Fertilizer';
+  const COMBO = 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer';
+
+  test('a long palm fertilizer name prints whole, never cut at 80 characters', () => {
+    expect(PALM.length).toBeGreaterThan(80);
+    const text = textFor({ technicianNote: '', products: [{ name: PALM }] }, []);
+    expect(text).toBe(`Today we applied ${PALM}.`);
+    const slots = { observed: [], maybe: [], confirmed: [], products: [PALM], allClear: null };
+    expect(tech.readFrozenTechParagraph({ treeShrubTechParagraph: { 77: { v: tech.FREEZE_VERSION, assessmentId: '77', text, slots } } }, 77)).toBe(text);
+  });
+
+  test('the one catalog name the screen reads as an access code still prints; any other banned name drops only the products sentence', () => {
+    expect(textFor({ technicianNote: '', products: [{ name: COMBO }] }, [])).toBe(`Today we applied ${COMBO}.`);
+    for (const name of ['Pet-safe Shrub Treatment', 'Security Combo 1234', 'Gate Code 4545 Blend']) {
+      expect(textFor({ technicianNote: '', products: [{ name }] }, [])).toBe('');
+    }
+    expect(textFor({ technicianNote: 'Found scale on the hedges.', products: [{ name: 'Pet-safe Shrub Treatment' }] }, [obs('scale', 'hedges')])).toBe('Our technician saw scale on the hedges.');
+  });
+});
+
 describe('Codex r10', () => {
   test('"spider mites" never prints twice, whichever id the model gave', () => {
     const note = 'Found spider mites on the hedges.';
@@ -276,7 +297,7 @@ describe('Codex r10', () => {
       observed: conditions.map((condition) => ({ condition, plant })),
       maybe: Object.keys(FINDING_LABELS).sort((a, b) => FINDING_LABELS[b].length - FINDING_LABELS[a].length).slice(0, 2),
       confirmed: Object.keys(FINDING_LABELS),
-      products: ['A', 'B', 'C', 'D', 'E'].map((c) => `${c}${'x'.repeat(79)}`),
+      products: ['A', 'B', 'C', 'D', 'E'].map((c) => `${c}${'x'.repeat(tech.MAX_PRODUCT_NAME_CHARS - 1)}`),
       allClear: 'excellent',
     };
     const text = tech.render(slots);

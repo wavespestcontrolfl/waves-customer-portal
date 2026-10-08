@@ -7,6 +7,7 @@ import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
 import {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 } from "./SchedulePage";
@@ -48,7 +49,13 @@ function adminFetch(path, options = {}) {
 const CONDITIONAL_LINE_RE =
   /^if\s|\bif\b|\bonly\b|\bwhere\b|\binstead\b|\brescue\b|\bcurative\b|\bthreshold\b|\bspot treat|\bpremium\b|\bfor (whitefly|scale|aphid|caterpillar|mite|borer|confirmed)/i;
 
-function parseProductLines(text) {
+// The v13 lawn payload carries its own safety_rules (GATE_LAWN_V13); with the gate off the
+// payload has none and the legacy descriptions (Celsius max 3x/year) apply.
+function productDescriptionsFor(trackData) {
+  return trackData?.safety_rules ? { ...PRODUCT_DESCRIPTIONS, ...PRODUCT_DESCRIPTIONS_V13 } : PRODUCT_DESCRIPTIONS;
+}
+
+function parseProductLines(text, descriptions = PRODUCT_DESCRIPTIONS) {
   if (!text) return [];
   return text
     .split("\n")
@@ -96,7 +103,7 @@ function parseProductLines(text) {
       const lookupName = name.toLowerCase();
       const lookupLine = clean.toLowerCase();
       let description = null;
-      for (const [key, val] of Object.entries(PRODUCT_DESCRIPTIONS)) {
+      for (const [key, val] of Object.entries(descriptions)) {
         // Word-boundary match — bare `includes` matched "pillar" inside
         // "caterpillar" and hung fungicide copy on an insecticide line.
         const keyRe = new RegExp(
@@ -264,10 +271,10 @@ function CalendarLine({ line, muted }) {
   );
 }
 
-function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted }) {
+function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted, descriptions }) {
   if (!visit) return null;
-  const primaryProducts = parseProductLines(visit.primary);
-  const secondaryProducts = parseProductLines(visit.secondary);
+  const primaryProducts = parseProductLines(visit.primary, descriptions);
+  const secondaryProducts = parseProductLines(visit.secondary, descriptions);
   const materialCost = parseFloat(visit.material_cost);
   // Lawn material_cost is the 10,000 sqft basis while conditional_cost
   // reserves derive from ~4,500 sqft inline line costs — normalize before
@@ -1355,6 +1362,7 @@ export default function ProtocolReferenceTabV2() {
               trackName={trackData.name}
               isLawnTrack={isLawnTrack}
               pricingRestricted={pricingRestricted}
+              descriptions={productDescriptionsFor(trackData)}
             />
           )}
           {!currentVisit && trackData.visits?.length > 0 && (
@@ -1478,12 +1486,12 @@ export default function ProtocolReferenceTabV2() {
                             )}
                           </td>
                           <td className="px-2.5 py-2 text-12 text-ink-primary align-top">
-                            {parseProductLines(v.primary).map((p, pi) => (
+                            {parseProductLines(v.primary, productDescriptionsFor(trackData)).map((p, pi) => (
                               <CalendarLine key={pi} line={p} />
                             ))}
                           </td>
                           <td className="px-2.5 py-2 text-12 text-ink-secondary align-top">
-                            {parseProductLines(v.secondary).map((p, pi) => (
+                            {parseProductLines(v.secondary, productDescriptionsFor(trackData)).map((p, pi) => (
                               <CalendarLine key={pi} line={p} muted />
                             ))}
                             {!v.secondary && "\u2014"}

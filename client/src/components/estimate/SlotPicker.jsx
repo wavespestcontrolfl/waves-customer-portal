@@ -361,7 +361,12 @@ export default function SlotPicker({
   const availability = toAvailability(shownSlots);
   // The API lists are engine-ordered (soonest / route-optimal first) — the
   // top three feed the picker's "Our best times" strip.
-  const rankedSlots = activePayload ? null : shownSlots.slice(0, 3).map((slot) => ({ slotId: slot.slotId, date: slot.date, start_time: slot.windowStart }));
+  // display_tier (GATE_CUSTOMER_RAIN_RANK): the server's rain tier for a slot
+  // it moved behind drier ones; the strip sorts by it first, so its
+  // nearby-first re-sort cannot lift a wet slot back up.
+  const rankedSlots = activePayload ? null : shownSlots.slice(0, 3).map((slot) => ({
+    slotId: slot.slotId, date: slot.date, start_time: slot.windowStart, display_tier: slot.display_tier,
+  }));
   const pickerSelected = selectedSlot ? { ...selectedSlot, start_time: selectedSlot.windowStart } : null;
 
   const callUs = (

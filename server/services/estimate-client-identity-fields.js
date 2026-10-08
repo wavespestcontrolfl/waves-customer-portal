@@ -23,6 +23,11 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'rodentBaitLegacyReplay',
   'rodentWaveguardPostureReplay',
   'catalogPricing',
+  // The GATE_LAWN_V13 bahia review exemption: a stored estimate replayed as sold
+  // (savedEstimateReplay), minus the service lines that same replay ADDS
+  // (addedServiceKeys). Only the server replay branches set them.
+  'savedEstimateReplay',
+  'addedServiceKeys',
 ]);
 
 // Deletes every server-owned field from `obj` IN PLACE (plain objects only;

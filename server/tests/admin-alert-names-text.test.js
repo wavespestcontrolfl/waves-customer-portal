@@ -189,6 +189,46 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(lastCall()[2]).toBe('We said “환불” (Sep 29) — nothing on record shows it done.');
   });
 
+  test('a Latin word with a Japanese or Korean ending attached is still matched (PDFを)', async () => {
+    const quote = '明日PDFを送ります。URLも送ります';
+    await ring({ row: { kind: 'other', description: 'PDF', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “PDF” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'URL', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “URL” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: '파일', evidence: [{ quote: 'PDF파일을 보내겠습니다' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “파일” (Sep 29) — nothing on record shows it done.');
+    // a Latin neighbour is still a word: change address inside exchange address does not match
+    await ring({ row: { kind: 'other', description: 'PDF', evidence: [{ quote: 'Send the PDFs today' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Send the PDFs today” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a period inside a word (email, decimal) keeps the slice; a sentence break still falls back', async () => {
+    await ring({ row: { kind: 'other', description: 'send 2.5 gallons', evidence: [{ quote: 'Sure. We will send 2.5 gallons Friday' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “send 2.5 gallons” (Sep 29) — nothing on record shows it done.');
+    const quote = 'I will email alice@example.test and email amy@example.test';
+    await ring({ row: { kind: 'other', description: 'email alice@example.test', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    const first = lastCall()[2];
+    expect(first).toMatch(/^We said “email /);
+    expect(first).not.toContain('alice@example.test');
+    await ring({ row: { kind: 'other', description: 'mail the receipt. then call', evidence: [{ quote: 'Okay. I will mail the receipt. then call' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // no space after the stop, next sentence capitalized: still a break
+    await ring({ row: { kind: 'other', description: 'mail the receipt.Then call', evidence: [{ quote: 'Okay. I will mail the receipt.Then call' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // a period before a closing quote is a break too
+    await ring({ row: { kind: 'other', description: 'Tell her “I mailed it.” Then call her', evidence: [{ quote: 'Okay. Tell her “I mailed it.” Then call her' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // an email followed by a sentence with no space: judged before redaction, still a break
+    await ring({ row: { kind: 'other', description: 'email alice@example.com.Then call', evidence: [{ quote: 'Okay. I will email alice@example.com.Then call' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+    // a bare domain is a URL too
+    await ring({ row: { kind: 'other', description: 'visit example.com', evidence: [{ quote: 'Sure. I will visit example.com later' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Sure” (Sep 29) — nothing on record shows it done.');
+    // a URL is a path the alert rules forbid: the headline keeps the first sentence
+    await ring({ row: { kind: 'other', description: 'visit https://example.com/help', evidence: [{ quote: 'Sure. I will visit https://example.com/help later' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Sure” (Sep 29) — nothing on record shows it done.');
+  });
+
   test('a description that is not in the quote keeps the first sentence', async () => {
     await ring({ row: { kind: 'other', description: 'reschedule the visit', evidence: [{ quote: 'Gonna knock out your quarterly spray tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — nothing on record shows it done.');

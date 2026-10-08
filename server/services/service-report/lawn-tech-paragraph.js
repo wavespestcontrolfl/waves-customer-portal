@@ -30,8 +30,7 @@
  * gate read: callers decide.
  */
 
-const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
-const { customerCopyViolations } = require('./technician-report-copy');
+const { createTechParagraphEngine, clean, copyScreenProblem } = require('./tech-paragraph-engine');
 const { FIELD_WORD_CAPS } = require('./lawn-report-lead');
 
 const PROMPT_VERSION = 'lawn_tech_paragraph_v2';
@@ -60,7 +59,8 @@ const MAX_WORDS = FIELD_WORD_CAPS.techParagraph;
  */
 const LAWN_SENTENCES = Object.freeze({
   observed: 'Our technician saw {items}.',
-  // {prep} is the place's own word: "in the front lawn".
+  // {prep} is the place's own word: "in the front lawn". {condition} is one problem,
+  // or every problem seen at that place ("clover and spurge").
   observedItemWithPlace: '{condition} {prep} the {place}',
   observedItem: '{condition}',
   maybe: 'There may be early signs of {labels}; we will keep an eye on it.',
@@ -219,9 +219,21 @@ function buildSlots(inputs, observed) {
 /** Slots -> sentences, in the fixed order. Unknown ids render nothing. Pure. */
 function renderSentences(s) {
   const out = [];
-  const items = s.observed.map((o) => (Object.hasOwn(PLACES, o.place)
-    ? fill(LAWN_SENTENCES.observedItemWithPlace, { condition: CONDITIONS[o.condition].display, prep: PLACES[o.place].prep, place: PLACES[o.place].display })
-    : fill(LAWN_SENTENCES.observedItem, { condition: CONDITIONS[o.condition].display })));
+  // Problems at one place share one phrase ("clover, spurge and goosegrass in the
+  // back lawn"); placed groups come first, in order, and problems with no place
+  // last, so "dollarweed and nutsedge in the side yard" never places the
+  // dollarweed (owner trial 2026-10-06).
+  const byPlace = new Map();
+  for (const o of s.observed) {
+    const place = Object.hasOwn(PLACES, o.place) ? o.place : NO_PLACE;
+    byPlace.set(place, [...(byPlace.get(place) || []), CONDITIONS[o.condition].display]);
+  }
+  const unplaced = byPlace.get(NO_PLACE) || [];
+  byPlace.delete(NO_PLACE);
+  const items = [
+    ...[...byPlace].map(([place, names]) => fill(LAWN_SENTENCES.observedItemWithPlace, { condition: joinList(names), prep: PLACES[place].prep, place: PLACES[place].display })),
+    ...unplaced.map((name) => fill(LAWN_SENTENCES.observedItem, { condition: name })),
+  ];
   if (items.length) out.push(fill(LAWN_SENTENCES.observed, { items: joinList(items) }));
   if (s.maybe.length) out.push(fill(LAWN_SENTENCES.maybe, { labels: joinList(s.maybe.map((k) => FINDING_LABELS[k])) }));
   if (s.products.length) out.push(fill(LAWN_SENTENCES.products, { products: joinList(s.products) }));
@@ -254,23 +266,9 @@ function fitted(slots) {
   return s;
 }
 
-// The copy screen, with one exact exception. A real catalog name reads to the
-// screen as an access code ("... Combo AM 1% ..."), so the known names in
-// CATALOG_NAMES_NOT_CODES are screened with "combo" neutralized; every other name,
-// "Security Combo 1234" included, is screened in full (Codex r2, r3, r5). The
-// sentence around a name is always screened in full with the names masked.
-// 2026-10-06 read-only check: of 238 prod catalog rows this is the only name the
-// screen flags. A new such name stays out of the paragraph until it is added here.
-const CATALOG_NAMES_NOT_CODES = new Set([
-  'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
-]);
-const screenedName = (name) => (CATALOG_NAMES_NOT_CODES.has(name) ? name.replace(/\bcombo\b/gi, 'blend') : name);
-const maskProducts = (text, products) => products.reduce((t, name) => t.split(name).join('the product'), text);
-function screenProblem(text, products) {
-  const named = products.filter((name) => text.includes(name));
-  return customerCopyViolations(maskProducts(text, named)).length > 0
-    || named.some((name) => customerCopyViolations(screenedName(name)).length > 0);
-}
+// The copy screen (copyScreenProblem, tech-paragraph-engine.js): the sentence in
+// full with the catalog names masked, each name in full, one exact exception.
+const screenProblem = copyScreenProblem;
 
 /** Slots -> the paragraph text, or '' when none. A sentence that fails the
  * customer-copy screen drops on its own. Pure. */

@@ -282,6 +282,217 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(await db('product_restock_requests').where({ product_id: automatic.id })).toHaveLength(1);
   }, 40000);
 
+  // Product picker (owner 2026-10-07): words that fit two products get a
+  // "choose the product" card; only a listed id is accepted, choosing writes
+  // nothing, and the stock changes only on the second card's Confirm.
+  test('an ambiguous product phrase becomes a picker; only a listed product can be chosen and only its card writes', async () => {
+    const prefix = `PickerQA${crypto.randomUUID().slice(0, 8)}`;
+    const ten = await product({ name: `${prefix} 10% SC` });
+    const twenty = await product({ name: `${prefix} 20% SC` });
+    const outsider = await product();
+    const order = await propose('adjust_stock', { product_name: prefix, movement_type: 'restock', quantity: 2, unit: 'lb' },
+      `Order 2 lb of ${prefix}`);
+    expect(order.body.pendingActions || []).toHaveLength(0);
+    const proposed = await propose('adjust_stock', { product_name: prefix, movement_type: 'restock', quantity: 2, unit: 'lb' },
+      `We got 2 lb of ${prefix}`);
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const picker = proposed.body.pendingActions[0];
+    expect(picker.contract.product_choices.map((c) => c.product_id).sort()).toEqual([ten.id, twenty.id].sort());
+    // A stale client's Confirm on the picker is refused and does not use it up.
+    const staleConfirm = await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: picker.id, contract_hash: picker.contract_hash });
+    expect(staleConfirm).toMatchObject({ status: 409, body: { code: 'product_choice_required', written: false } });
+    expect(await db('ib_pending_actions').where({ id: picker.id }).first()).toMatchObject({ status: 'pending', result: null });
+    // A listed product made inactive since: refused, the picker stays usable.
+    await db('products_catalog').where({ id: ten.id }).update({ active: false });
+    const inactive = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: ten.id });
+    expect(inactive).toMatchObject({ status: 409, body: { code: 'product_inactive' } });
+    expect((await db('ib_pending_actions').where({ id: picker.id }).first()).status).toBe('pending');
+    await db('products_catalog').where({ id: ten.id }).update({ active: true });
+    const forged = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: outsider.id });
+    expect(forged).toMatchObject({ status: 409, body: { code: 'product_not_offered' } });
+    // A failure while making the new card rolls the claim back (Codex #6111 r2):
+    // a refusal in the preview, then an insert error. The picker stays usable.
+    const inventory = require('../services/inventory-operations');
+    const previewSpy = jest.spyOn(inventory, 'previewStockAdjustment')
+      .mockRejectedValueOnce(Object.assign(new Error('Synthetic preview failure'), { isOperational: true, statusCode: 409, code: 'preview_changed' }));
+    let refused;
+    try {
+      refused = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
+    } finally { previewSpy.mockRestore(); }
+    expect(refused.status).toBe(409);
+    const insertSpy = jest.spyOn(require('../services/intelligence-bar/pending-actions'), 'createPendingAction')
+      .mockRejectedValueOnce(new Error('Synthetic insert failure'));
+    let broken;
+    try {
+      broken = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
+    } finally { insertSpy.mockRestore(); }
+    expect(broken.status).toBe(500);
+    expect(await db('ib_pending_actions').where({ id: picker.id }).first()).toMatchObject({ status: 'pending', result: null });
+    expect(await db('ib_pending_actions').whereRaw("params->>'_ib_chosen_from' = ?", [picker.id])).toHaveLength(0);
+    const chosen = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
+    expect([chosen.status, chosen.body.error]).toEqual([200, undefined]);
+    for (const row of [ten, twenty, outsider]) {
+      expect(await onHand(row.id)).toBe(10);
+      expect(await db('product_inventory_movements').where({ product_id: row.id })).toHaveLength(0);
+    }
+    const again = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: ten.id });
+    expect(again.status).toBe(409);
+    const replay = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: twenty.id });
+    expect(replay.body).toMatchObject({ replayed: true, pendingAction: { id: chosen.body.pendingAction.id, contract_hash: chosen.body.pendingAction.contract_hash } });
+    expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: picker.id, contract_hash: picker.contract_hash })).status).toBe(409);
+    const card = chosen.body.pendingAction;
+    // Under the platform the picker belonged to a task: the chosen card joins it.
+    const pickerTask = (await db('ib_pending_actions').where({ id: picker.id }).first()).task_id;
+    expect(pickerTask).toBeTruthy();
+    expect((await db('ib_pending_actions').where({ id: card.id }).first()).task_id).toBe(pickerTask);
+    const waiting = await api(`/api/admin/intelligence-bar/tasks/${pickerTask}?session_id=${sessionId}`);
+    expect(waiting.body.pendingActions.map((a) => a.id)).toEqual([card.id]);
+    expect(waiting.body.taskState).toBe('awaiting_approval');
+    expect(JSON.stringify(card.contract.effects)).toContain(`${twenty.name}: restock 2 lb; on hand 10 → 12 lb`);
+    const saved = await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    expect(saved.body).toMatchObject({ success: true, result: { product: { id: twenty.id } } });
+    expect(await onHand(twenty.id)).toBe(12);
+    expect(await onHand(ten.id)).toBe(10);
+  }, 40000);
+
+  // Show again (owner 2026-10-07): an expired card is proposed afresh once;
+  // it never writes, a live or decided card is not reshown, and a task-owned
+  // card is continued from its task instead (Codex #6111 r1).
+  test('Show again re-proposes an expired standalone card once, never writes, and leaves task cards to their task', async () => {
+    const row = await product();
+    const taskCard = (await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' },
+      `Add 2 lb of ${row.name} that arrived`)).body.pendingActions[0];
+    await db('ib_pending_actions').where({ id: taskCard.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    expect(await api('/api/admin/intelligence-bar/show-again', { pending_action_id: taskCard.id }))
+      .toMatchObject({ status: 409, body: { code: 'task_owned' } });
+    expect((await db('ib_pending_actions').where({ id: taskCard.id }).first()).status).toBe('pending');
+    // A standalone card (no task): the platform path off for one proposal.
+    const ten = await product();
+    process.env.GATE_IB_PLATFORM = 'false';
+    let card;
+    try {
+      card = (await propose('adjust_stock', { product_id: ten.id, movement_type: 'restock', quantity: 2, unit: 'lb' },
+        `Add 2 lb of ${ten.name} that arrived`)).body.pendingActions[0];
+    } finally { process.env.GATE_IB_PLATFORM = 'true'; }
+    expect((await db('ib_pending_actions').where({ id: card.id }).first()).task_id).toBeNull();
+    expect(await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id })).toMatchObject({ status: 409, body: { code: 'not_expired' } });
+    await db('ib_pending_actions').where({ id: card.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    // An insert failure rolls the retirement back (Codex #6111 pre-push): the
+    // card stays expired and pending, and a retry succeeds.
+    const insertSpy = jest.spyOn(require('../services/intelligence-bar/pending-actions'), 'createPendingAction')
+      .mockRejectedValueOnce(new Error('Synthetic insert failure'));
+    let broken;
+    try {
+      broken = await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id });
+    } finally { insertSpy.mockRestore(); }
+    expect(broken.status).toBe(500);
+    expect((await db('ib_pending_actions').where({ id: card.id }).first()).status).toBe('pending');
+    const shown = await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id });
+    expect(shown.status).toBe(200);
+    expect(shown.body.pendingAction.id).not.toBe(card.id);
+    expect((await db('ib_pending_actions').where({ id: card.id }).first()).status).toBe('cancelled');
+    expect(await onHand(ten.id)).toBe(10);
+    // A retry (a lost response) gets the same new card, not a second one.
+    const retry = await api('/api/admin/intelligence-bar/show-again', { pending_action_id: card.id });
+    expect(retry.body).toMatchObject({ replayed: true, pendingAction: { id: shown.body.pendingAction.id } });
+    const fresh = shown.body.pendingAction;
+    expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: fresh.id, contract_hash: fresh.contract_hash })).body.success).toBe(true);
+    expect(await onHand(ten.id)).toBe(12);
+  }, 40000);
+
+  // An expired task card never ran: continuing the task proposes it again in
+  // the same task with fresh pins; the old card stays expired (Codex #6111 r3).
+  test('a task whose card expired continues and proposes a fresh card in the same task', async () => {
+    const row = await product();
+    const input = { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' };
+    const proposed = await propose('adjust_stock', input, `Add 2 lb of ${row.name} that arrived`);
+    const old = proposed.body.pendingActions[0];
+    const taskId = proposed.body.taskId;
+    expect(taskId).toBeTruthy();
+    await db('ib_pending_actions').where({ id: old.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    const before = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    expect(before.body).toMatchObject({ canContinue: true, taskState: 'ready_to_continue' });
+    // The saved-task list keeps an expired-only task as continuable, behind more than twenty newer tasks.
+    const newer = Array.from({ length: 21 }, (_, i) => ({ actor_id: actor, session_id: sessionId, request_key: `newer-${crypto.randomUUID()}`,
+      request_hash: 'a'.repeat(64), state: 'responded', runner_token: crypto.randomUUID(), lease_expires_at: new Date(),
+      request: JSON.stringify({ prompt: 'Synthetic newer request' }), expires_at: new Date(Date.now() + 86400000),
+      created_at: new Date(Date.now() + 60000 + i) }));
+    await db('ib_tasks').insert(newer);
+    try {
+      const saved = (await api(`/api/admin/intelligence-bar/tasks?session_id=${sessionId}`)).body.tasks.find((t) => t.id === taskId);
+      expect(saved).toMatchObject({ state: 'ready_to_continue' });
+    } finally {
+      await db('ib_tasks').whereIn('request_key', newer.map((t) => t.request_key)).del();
+    }
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(toolCall('discover_capabilities', { query: 'adjust stock' }, 'discover-2'))
+      .mockResolvedValueOnce(toolCall('adjust_stock', input, 'inventory-2'))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Confirm the fresh card.' }], usage: {} });
+    const resumed = await api(`/api/admin/intelligence-bar/tasks/${taskId}/resume`, { session_id: sessionId });
+    expect(resumed.status).toBe(200);
+    const after = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    expect(after.body.pendingActions).toHaveLength(1);
+    const fresh = after.body.pendingActions[0];
+    expect(fresh.id).not.toBe(old.id);
+    expect((await db('ib_pending_actions').where({ id: fresh.id }).first()).task_id).toBe(taskId);
+    const stale = await db('ib_pending_actions').where({ id: old.id }).first();
+    expect(stale.status).toBe('pending');
+    expect(new Date(stale.expires_at).getTime()).toBeLessThan(Date.now());
+    expect(await onHand(row.id)).toBe(10);
+    expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: old.id, contract_hash: old.contract_hash })).status).toBe(409);
+    expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: fresh.id, contract_hash: fresh.contract_hash })).body.success).toBe(true);
+    expect(await onHand(row.id)).toBe(12);
+    // The task list and the task detail agree: the replaced expired step counts in neither.
+    const detail = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    const listed = (await api(`/api/admin/intelligence-bar/tasks?session_id=${sessionId}`)).body.tasks.find((t) => t.id === taskId);
+    expect(detail.body.taskState).toBe('ready_to_continue');
+    expect(listed.state).toBe(detail.body.taskState);
+  }, 40000);
+
+  // The database clock decides which task cards are expired, as it does for a
+  // Confirm's claim: a server clock that runs ahead must not replace a card
+  // the database can still claim (Codex #6111 r7).
+  test('a task card the database still holds live is not replaced when the server clock runs ahead', async () => {
+    const row = await product();
+    const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' }, `Add 2 lb of ${row.name} that arrived`);
+    const card = await db('ib_pending_actions').where({ id: proposed.body.pendingActions[0].id }).first();
+    const [task] = await db('ib_tasks').where({ id: card.task_id })
+      .update({ state: 'running', lease_expires_at: db.raw("now() + interval '5 minutes'") }).returning('*');
+    const ahead = jest.spyOn(Date, 'now').mockReturnValue(new Date(card.expires_at).getTime() + 3600000);
+    try {
+      const again = await require('../services/intelligence-bar/pending-actions').createPendingAction({ toolName: card.tool_name,
+        params: card.params, requestedBy: actor, taskId: task.id, runnerToken: task.runner_token, stepKey: card.step_key });
+      expect(again.id).toBe(card.id);
+    } finally {
+      ahead.mockRestore();
+    }
+    expect(await db('ib_pending_actions').where({ task_id: task.id }).select('id', 'step_key')).toEqual([{ id: card.id, step_key: card.step_key }]);
+  }, 40000);
+
+  test('a chosen card that expired continues as a fresh picker in the same task', async () => {
+    const prefix = `ResumeQA${crypto.randomUUID().slice(0, 8)}`;
+    const ten = await product({ name: `${prefix} 10% SC` });
+    await product({ name: `${prefix} 20% SC` });
+    const input = { product_name: prefix, movement_type: 'restock', quantity: 2, unit: 'lb' };
+    const proposed = await propose('adjust_stock', input, `We got 2 lb of ${prefix}`);
+    const picker = proposed.body.pendingActions[0];
+    const taskId = proposed.body.taskId;
+    const chosen = (await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: ten.id })).body.pendingAction;
+    await db('ib_pending_actions').where({ id: chosen.id }).update({ expires_at: new Date(Date.now() - 1000) });
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(toolCall('discover_capabilities', { query: 'adjust stock' }, 'discover-3'))
+      .mockResolvedValueOnce(toolCall('adjust_stock', input, 'inventory-3'))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Pick the product again.' }], usage: {} });
+    expect((await api(`/api/admin/intelligence-bar/tasks/${taskId}/resume`, { session_id: sessionId })).status).toBe(200);
+    const after = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    expect(after.body.pendingActions).toHaveLength(1);
+    const fresh = after.body.pendingActions[0];
+    expect([picker.id, chosen.id]).not.toContain(fresh.id);
+    expect(fresh.contract.product_choices.map((c) => c.product_id)).toContain(ten.id);
+    expect(after.body.receipts.map((r) => r.id)).not.toContain(picker.id);
+    expect(await onHand(ten.id)).toBe(10);
+  }, 40000);
+
   test('a stock change after confirm preflight is refused under the product lock', async () => {
     const row = await product();
     const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' }, `Add 2 lb of ${row.name} that arrived`);

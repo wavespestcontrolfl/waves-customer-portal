@@ -375,6 +375,7 @@ const NO_LAWN_GUIDANCE = Object.freeze({
   window: null,
   products: [],
   conditional_products: [],
+  held_products: [],
 });
 
 // Lawn visits: ONLY the products active for the visit's protocol window —
@@ -396,6 +397,9 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // strict — an outage here read as unknown_grass_track would hash
     // empty lawn guidance over a valid cached brief.
     const grass = await loadCustomerGrassContext(svc.customer_id, dbh, { strict: true });
+    // GATE_LAWN_V13: a bahia lawn has no program, so no window is shown for it, even when the
+    // visit was assigned a protocol (an assignment cannot give a bahia lawn another grass's guidance).
+    if (grass.noProgram) return { ...NO_LAWN_GUIDANCE, reason: 'lawn_v13_bahia_no_program' };
     const scheduledDay = calendarDay(svc.scheduled_date);
     const serviceDate = scheduledDay ? parseETDateTime(`${scheduledDay}T12:00`) : new Date();
 
@@ -462,7 +466,21 @@ async function loadLawnWindowGuidance(dbh, svc) {
       title: cleanText(g.title, 160),
       ruleText: cleanText(g.ruleText, 300),
     }));
+    // A product the city holds back for this window (North Port Nutra-TECH, June to September) is NOT
+    // to be applied: it leaves the fixed and conditional lists (no dose) and ships as a hold with the
+    // plan's own warning text. The city resolves as the plan resolves it (stamped address, turf
+    // profile municipality, customer city); strict, like every read here.
+    const { v13NorthPortHold, loadVisitCity, v13HoldWarnings } = require('./waveguard-plan-engine');
+    const municipality = await loadVisitCity(dbh, svc);
+    const heldRows = (summary.products || []).filter((p) => v13NorthPortHold(p, municipality));
+    const held = heldRows.map((p) => ({
+      name: cleanText(p.productName || p.protocolProductName, 120),
+      role: cleanText(p.role, 60),
+      hold: true,
+      message: cleanText(v13HoldWarnings([{ selectionReason: 'north_port_product_window', product: { id: p.productId, name: p.productName || p.protocolProductName } }])[0].message, 300),
+    }));
     const shaped = (summary.products || [])
+      .filter((p) => !heldRows.includes(p))
       .map((p) => ({
         shapedEntry: shapeWindowProduct(p),
         productId: p.productId || null,
@@ -520,6 +538,8 @@ async function loadLawnWindowGuidance(dbh, svc) {
       } : null,
       // Fixed guidance = default-in-plan, gate-free products only.
       products: shaped.filter((p) => p.fixed).map((p) => p.shapedEntry),
+      // Held back by the visit's city: no dose, the plan's hold text.
+      held_products: held,
       // Everything gated or optional, carrying the COMPLETE gate object
       // (never just gates.trigger — premiumTier / soilPIndexBelow / maxTempF
       // and the rest must survive) plus the trigger convenience field.
