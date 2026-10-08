@@ -264,9 +264,9 @@ async function resolveDestination(service) {
   }
 }
 
-async function loadCurrentService(currentJobId) {
+async function loadCurrentService(currentJobId, conn = db) {
   if (!currentJobId) return null;
-  return db('scheduled_services as s')
+  return conn('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('service_visits as sv', 's.visit_id', 'sv.id')
     .where('s.id', currentJobId)
@@ -283,6 +283,9 @@ async function loadCurrentService(currentJobId) {
       's.scheduled_date',
       's.visit_id',
       'sv.en_route_at as visit_en_route_at',
+      // A failed en-route fan-out can leave the stop unstamped while its
+      // members carry their own time: the earliest member is the fallback.
+      db.raw('(select min(m.en_route_at) from scheduled_services m where m.visit_id = s.visit_id) as group_en_route_at'),
       's.lat as service_lat',
       's.lng as service_lng',
       's.service_address_line1 as service_address_line1',
@@ -325,7 +328,9 @@ function attemptKey(service) {
   // A grouped stop is ONE physical visit: its members carry slightly different
   // en_route_at values, so the attempt is the STOP's own en-route time
   // (service_visits.en_route_at), which a same-day restart renews.
-  const enRouteMs = timestampMs(service?.visit_id ? service.visit_en_route_at : service?.en_route_at);
+  const enRouteMs = timestampMs(service?.visit_id
+    ? (service.visit_en_route_at || service.group_en_route_at)
+    : service?.en_route_at);
   if (service?.visit_id) return `${dayPart}|visit:${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
   return `${dayPart}|${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
 }
@@ -403,6 +408,11 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['gps_arrival_not_marked', key],
       );
+      // Serialized with the insert: another signal (manual, geofence, a
+      // concurrent sample) can have marked the arrival since the caller's
+      // snapshot. The persisted row decides, for every path.
+      const fresh = await loadCurrentService(serviceId, trx);
+      if (!fresh || !isOpenWithoutArrival(fresh)) return;
       const existing = await trx('audit_log')
         .where({ resource_type: 'scheduled_service', action: NOT_MARKED_ACTION })
         .whereRaw("metadata->>'stop' = ? AND metadata->>'reason' = ? AND metadata->>'attempt' = ?", [stop, reason, attempt])

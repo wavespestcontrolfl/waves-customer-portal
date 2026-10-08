@@ -51,6 +51,7 @@ function installServiceLookup(service, { existingAudit } = {}) {
     throw new Error(`Unexpected table ${table}`);
   });
   // The not_marked check + insert run in one transaction holding an advisory lock.
+  db.raw = jest.fn((sql) => sql);
   const trx = (table) => db(table);
   trx.raw = jest.fn().mockResolvedValue({ rows: [] });
   db.transaction = jest.fn(async (callback) => callback(trx));
@@ -626,6 +627,31 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
       metadata: expect.objectContaining({ reason: 'stale_location_sample', distance_m: expect.any(Number) }),
     })]);
     expect(notMarkedWrites()[0].metadata.sample_age_s).toBeGreaterThanOrEqual(2399);
+  });
+
+  test('an arrival that lands between the snapshot and the write is not logged (re-read under the lock)', async () => {
+    const service = baseService();
+    const query = installServiceLookup(service);
+    // first load = the detector's snapshot (open); second = the in-transaction re-read (arrived)
+    query.first
+      .mockResolvedValueOnce(service)
+      .mockResolvedValueOnce({ ...service, track_state: 'on_property', arrived_at: new Date().toISOString() });
+
+    const result = await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(), point: basePoint({ speed_mph: 32, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: 'inside_radius_moving_too_fast' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a grouped stop with no stop-level en-route stamp falls back to its earliest member time', async () => {
+    const memberAt = EN_ROUTE_TIME;
+    await run(baseService({ visit_id: 'visit-7', visit_en_route_at: null, group_en_route_at: memberAt, scheduled_date: '2026-10-08' }), {
+      point: basePoint({ speed_mph: 32, ignition: true }),
+    });
+
+    expect(notMarkedWrites()[0].metadata.attempt).toBe(`2026-10-08|visit:${new Date(memberAt).toISOString()}`);
   });
 
   test('a superseded in-radius sample for a row that already has arrived_at writes nothing', async () => {
