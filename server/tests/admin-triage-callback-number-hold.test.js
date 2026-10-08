@@ -21,11 +21,12 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}) }));
+let mockRole = 'admin';
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => {
-    req.technician = { id: 'tech-1', role: 'admin' };
+    req.technician = { id: 'tech-1', role: mockRole };
     req.technicianId = 'tech-1';
-    req.techRole = 'admin';
+    req.techRole = mockRole;
     next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -221,7 +222,7 @@ function fixture(extra = {}) {
 
 const numberHold = (tables, id = 'hold-1') => tables.disclaimed_number_holds.find((h) => h.id === id);
 
-beforeEach(() => { db.mockReset(); });
+beforeEach(() => { db.mockReset(); mockRole = 'admin'; });
 
 describe('PUT /admin/triage/:id/resolve on a callback_number_needed card', () => {
   test('lifts the hold on every LIVE visit this call created, and no other', async () => {
@@ -470,5 +471,77 @@ describe('POST /admin/triage/:id/verdict on a callback_number_needed card', () =
     expect(tables.triage_items[0].status).toBe('resolved');
     const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
     expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
+  });
+});
+
+/**
+ * text_number_differs (owner ruling 2026-10-08): the no-text hold this call armed must not
+ * outlive its card. Resolve AND Dismiss lift it through the same release path as the
+ * callback_number_needed card; the access rule is that card's rule (tech-or-admin, no extra
+ * role gate), and no new endpoint exists.
+ */
+describe('text_number_differs card releases the no-text hold', () => {
+  const textCard = (over = {}) => ({
+    id: CARD_ID, call_log_id: CALL_ID, reason_code: 'text_number_differs', status: 'open',
+    updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory', payload: {}, ...over,
+  });
+
+  test.each(['resolve', 'dismiss'])('%s lifts this call\'s number hold and its visit holds, and no other call\'s', async (action) => {
+    const { conn, tables } = fixture({ triage_items: [textCard()] });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/${action}`, { note: 'Phones updated.' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', number_holds_cleared: 1 });
+    });
+    expect(tables.triage_items[0].status).toBe(action === 'resolve' ? 'resolved' : 'dismissed');
+    expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+    expect(numberHold(tables).clear_reason).toBe('verified_same_number');
+    expect(numberHold(tables, 'hold-other').cleared_at).toBeNull();
+    const held = tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID);
+    expect(held.call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
+    expect(tables.scheduled_services.find((s) => s.id === OTHER_CALL_VISIT_ID).call_sms_cleared_at).toBeNull();
+  });
+
+  test('a still-open callback_number_needed card on the same call keeps its own hold', async () => {
+    const { conn, tables } = fixture({
+      triage_items: [textCard(), { ...textCard({ id: 'card-cb', reason_code: 'callback_number_needed' }) }],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`)).status).toBe(200);
+    });
+    expect(numberHold(tables).cleared_at).toBeNull();
+  });
+
+  test('a call verdict on a sibling card does not sweep it or touch the hold', async () => {
+    const { conn, tables } = fixture({
+      triage_items: [
+        textCard(),
+        { id: 'card-sib', call_log_id: CALL_ID, reason_code: 'missing_last_name', status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'name_review', severity: 'advisory', payload: {} },
+      ],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      await post(baseUrl, '/card-sib/verdict', { verdict: 'accept' });
+    });
+    expect(tables.triage_items.find((r) => r.id === CARD_ID).status).toBe('open');
+    expect(numberHold(tables).cleared_at).toBeNull();
+  });
+
+  test('technicians can resolve it exactly as they can the callback_number_needed card (no admin-only gate on either)', async () => {
+    mockRole = 'technician';
+    const cb = fixture();
+    wireDb(db, { conn: cb.conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`)).status).toBe(200);
+    });
+    const tx = fixture({ triage_items: [textCard()] });
+    wireDb(db, { conn: tx.conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`)).status).toBe(200);
+    });
+    expect(numberHold(tx.tables).cleared_at).toBeInstanceOf(Date);
   });
 });

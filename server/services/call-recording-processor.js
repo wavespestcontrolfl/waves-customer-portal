@@ -958,7 +958,7 @@ const CONFIRM_REASON_TEXT = {
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
-  text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones",
+  text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are right; texts to the calling line resume",
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -12867,7 +12867,7 @@ const CallRecordingProcessor = {
               ani_phone: aniPhone,
               text_phone: spokenText,
               customer_phone: onFile?.phone || null,
-              note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones`,
+              note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are right; texts to the calling line resume`,
             },
           }))
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
