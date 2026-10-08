@@ -2678,3 +2678,19 @@ describe('answer screen, Codex round 79', () => {
     expect(ruleAnswerReason(lawn, [], 'unrouted', q)).toBe(reason);
   });
 });
+
+describe('medical cues, Codex round 80 and the r73 review', () => {
+  test.each([
+    'My eyes hurt after the treatment',
+    'I am having trouble seeing after the treatment',
+    'My skin has pesticide on it',
+    'My dog has pesticide on its skin',
+    'My kids have spray on their hands',
+  ])('gets the fixed medical answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test.each(['The ants have bait in their nest', 'My lawn has brown spots after the treatment', 'Did the treatment hurt the bees?'])('is no exposure: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+});

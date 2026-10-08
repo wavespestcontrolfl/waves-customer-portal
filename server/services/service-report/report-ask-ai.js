@@ -2361,7 +2361,17 @@ const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${P
 // Feeling unwell takes only a listed person or pet: "my azalea is sick" is a
 // plant question, and no plant list is complete (Codex P1 #6016 r29).
 const LISTED_PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
+const BODY_PART = '(?:eyes?|skin|face|mouth|nose|lips?|tongue|throat|chest|lungs?|head|stomach|hands?|arms?|legs?|feet|foot|fingers?|paws?|fur|coat|ears?)';
+const EXPOSURE_STUFF = '(?:pesticides?|spray|product|chemicals?|insecticides?|herbicides?|fungicides?|treatment|bait|granules?|poison|powder|dust|residue)';
 const MEDICAL_CUES = [
+  // Pain or irritation in a body part, and trouble seeing, breathing or
+  // swallowing: "My eyes hurt after the treatment", "I am having trouble
+  // seeing" (Codex P1 #5964 r80).
+  new RegExp(`\\b${BODY_PART}\\s+(?:\\w+\\s+){0,2}?(?:hurts?|hurting|burn\\w*|sting\\w*|stung|ach(?:e|es|ing)|pain\\w*|irritat\\w*|water(?:s|ing|y)|sore|red|swollen|swell\\w*|blister\\w*|peel\\w*|tingl\\w*|numb)\\b`, 'i'),
+  /\b(?:trouble|difficulty|problems?|hard\s+time|struggling)\s+(?:with\s+)?(?:seeing|breathing|swallowing|my\s+(?:vision|breathing|eyes))\b|\b(?:blurr\w*|blurry|double)\s+vision\b|\bvision\s+(?:is|was|got|went)\s+\w+|\bcan['’]?t\s+see\b|\bcannot\s+see\b/i,
+  // Contact as a state: "My skin has pesticide on it", "My dog has pesticide
+  // on its skin" (Codex P1 #5964 r73 review).
+  new RegExp(`\\b${BODY_PART}\\s+(?:has|have|had|is|are|was|were|got)\\s+(?:\\w+\\s+){0,2}?${EXPOSURE_STUFF}\\b|\\b${EXPOSURE_STUFF}\\s+(?:is\\s+|was\\s+|still\\s+|got\\s+)?(?:on|in|all\\s+over)\\s+(?:my|his|her|their|our|its|the\\s+\\w+['’]s)\\s+(?:\\w+\\s+)?${BODY_PART}\\b|\\b(?:has|have|had|with|covered\\s+in)\\s+${EXPOSURE_STUFF}\\s+(?:on|all\\s+over)\\s+(?:my|his|her|our|its|him|me|us)\\b`, 'i'),
   // Symptoms, said with or without a subject.
   /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|cough\w*|shak(?:e|es|ing|y)|trembl\w*|shiver\w*|twitch\w*|sneez\w*|(?:in|has|have|got|getting)\s+hives|itch(?:y|ing)|sore\s+throat|watery\s+eyes|red\s+eyes|foaming|panting|limp|collapsed?|unresponsive|confused|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
   /\b(?:can['’]?t|cannot|can\s+not|couldn['’]?t|unable\s+to|trouble|difficulty|hard\s+to|struggling\s+to)\s+(?:to\s+)?breath\w*/i,
