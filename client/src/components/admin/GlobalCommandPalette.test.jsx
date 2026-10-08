@@ -564,3 +564,84 @@ describe('palette context casing (Codex #5573 r15)', () => {
     expect(fn.slice(0, 400)).toMatch(/const pathname = String\(rawPathname \|\| ""\)\.toLowerCase\(\);/);
   });
 });
+
+// Tap-to-answer buttons (server offer_choices → payload `choices`). The gap:
+// a "which value?" question could only be answered by voice or typing, and
+// dictation can mishear the number again. Credible regressions: a tap that
+// skips the normal submit (no thread, no request key), a double tap that asks
+// twice, and an old reply's buttons answering a newer question.
+describe('answer choice buttons', () => {
+  const question = (extra = {}) => ok({ response: 'Which is correct, $60.33 or $61.33?', conversationHistory: [
+    { role: 'user', content: 'Set the price' }, { role: 'assistant', content: 'Which is correct, $60.33 or $61.33?' }],
+  threadId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', threadSeq: 2, threadsEnabled: true,
+  choices: [{ label: '$60.33', reply: '$60.33 is correct' }, { label: '$61.33', reply: '$61.33 is correct' }], ...extra });
+  const queryBodies = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body));
+
+  it.each([false, true])('a tap sends the reply once through the typed-prompt path, then the set is gone (mobile=%s)', async mobile => {
+    useIsMobile.mockReturnValue(mobile);
+    await mount();
+    submit('Set the price');
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    await act(async () => queryResolvers[0](question()));
+    const group = await screen.findByRole('group', { name: 'Answer choices' });
+    expect(group.querySelectorAll('button')).toHaveLength(2);
+    const button = screen.getByRole('button', { name: '$61.33', exact: true });
+    expect(button).toBeEnabled();
+    expect(parseInt(button.style.minHeight, 10)).toBeGreaterThanOrEqual(44);
+    expect(parseInt(button.style.fontSize, 10)).toBeGreaterThanOrEqual(14);
+
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(queryResolvers).toHaveLength(2));
+    const [typed, tapped] = queryBodies();
+    expect(tapped.prompt).toBe('$61.33 is correct');
+    // The same continuation a typed follow-up carries: history, thread, session, and a fresh request key.
+    expect(tapped.conversationHistory).toHaveLength(2);
+    expect(tapped.thread_id).toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    expect(tapped.thread_seq).toBe(2);
+    expect(tapped.session_id).toBe(typed.session_id);
+    expect(tapped.context).toBe(typed.context);
+    expect(tapped.request_key).toBeTruthy();
+    expect(tapped.request_key).not.toBe(typed.request_key);
+    // Shown like typed text while it is in flight; the buttons are not.
+    expect(screen.getByPlaceholderText(/Ask anything/)).toHaveValue('$61.33 is correct');
+    expect(screen.queryByRole('group', { name: 'Answer choices' })).not.toBeInTheDocument();
+
+    await act(async () => queryResolvers[1](ok({ response: 'Using $61.33.', conversationHistory: [] })));
+    expect(await screen.findByText('Using $61.33.')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Answer choices' })).not.toBeInTheDocument();
+    expect(queryResolvers).toHaveLength(2);
+  });
+
+  it('a typed newer message drops the buttons, and a reply without choices shows none', async () => {
+    await mount();
+    submit('Set the price');
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+    await act(async () => queryResolvers[0](question()));
+    await screen.findByRole('group', { name: 'Answer choices' });
+    submit('Never mind, show the schedule');
+    await waitFor(() => expect(queryResolvers).toHaveLength(2));
+    expect(screen.queryByRole('group', { name: 'Answer choices' })).not.toBeInTheDocument();
+    await act(async () => queryResolvers[1](ok({ response: 'Here is the schedule.', conversationHistory: [] })));
+    await screen.findByText('Here is the schedule.');
+    expect(screen.queryByRole('group', { name: 'Answer choices' })).not.toBeInTheDocument();
+  });
+
+  it('a recalled task shows its saved answer with no buttons', async () => {
+    fetchMock.mockImplementation(async url => {
+      if (url.includes('/threads')) return { ok: false, status: 404, json: async () => ({ error: 'Not enabled' }) };
+      if (url.includes('/tasks/saved-task')) return (await question({ taskId: 'saved-task', taskState: 'responded', threadId: undefined, threadsEnabled: false }));
+      if (url.includes('/tasks?')) return ok({ tasks: [{ id: 'saved-task', target: { target: { label: 'Synthetic saved target' } }, state: 'responded' }] });
+      return ok({ actions: [] });
+    });
+    useIsMobile.mockReturnValue(true);
+    await mount();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/tasks?'))).toBe(true));
+    fireEvent.click(screen.getByLabelText('Conversation options'));
+    fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+    fireEvent.click(await screen.findByRole('button', { name: /Synthetic saved target/ }));
+    expect(await screen.findByText('Which is correct, $60.33 or $61.33?')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: 'Answer choices' })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/query'))).toBe(false);
+  });
+});

@@ -23,6 +23,7 @@ const CORE = [
   'update_lead_contact', 'update_lead_status',
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',
+  'offer_choices',
 ];
 // Property writes run only through the registry (executePropertyTool refuses
 // unless GATE_IB_PLATFORM), so the legacy list cannot offer them.

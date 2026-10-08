@@ -65,7 +65,9 @@ is appended for admin requests; technician tokens never see or execute them.
 Admin requests on every page (not tech, not `agent_estimate`) also get the
 core set `EVERY_PAGE_TOOL_NAMES` (`action-registry.js`): property add/edit/
 primary, lead contact/status, stock read/adjust, products, estimate detail,
-open slots. The platform list loads all of them; the legacy list loads the
+open slots, and `offer_choices` (`choice-tools.js`: tap-to-answer buttons for
+a "which value?" question, returned as `choices` on `/query`; display only, a
+tap sends ordinary operator text and never confirms a write). The platform list loads all of them; the legacy list loads the
 ones its modules execute (property writes are registry-only). Writes keep
 their UI-confirm card.
 Tech portal is isolated — no base tools, strictly read-only, lower

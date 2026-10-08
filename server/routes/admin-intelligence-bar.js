@@ -61,6 +61,7 @@ const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intellig
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
+const { CHOICE_TOOLS, executeChoiceTool, OFFER_CHOICES_TOOL_NAME } = require('../services/intelligence-bar/choice-tools');
 const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/intelligence-bar/billing-reader-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
@@ -2877,7 +2878,7 @@ const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
 function withEveryPageTools(tools, context, isAdmin) {
   if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
   const present = new Set(tools.map(t => t.name));
-  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS]
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS, ...CHOICE_TOOLS]
     .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
 }
 
@@ -3097,6 +3098,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (NEEDS_ME_TOOL_NAMES.has(toolName)) {
     return executeNeedsMeTool(toolName, input);
   }
+  if (toolName === OFFER_CHOICES_TOOL_NAME) {
+    return executeChoiceTool(toolName, input);
+  }
   if (BILLING_READER_TOOL_NAMES.has(toolName)) {
     return executeBillingReaderTool(toolName, input, actionContext);
   }
@@ -3192,6 +3196,7 @@ RULES:
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
 - Number read-back: when the operator gives a money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm in your previous turn, act on neither. Ask one short question naming both ("You said $60.33, but earlier it was $61.33. Which one?") and prepare no card until they answer. Voice dictation often mishears digits.
+- Answer buttons: when you must ask the operator to choose between two to four specific values (amounts, dates, times, quantities, products, or customers already named) and offer_choices is in your tools, call it with those exact values, then ask the question in your reply text as usual. A tap only sends that value back as the operator's next message. Never use it for a yes/no or to confirm a write: a write is confirmed only on its confirmation card, and a button never confirms, approves or commits anything.
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
@@ -3490,6 +3495,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // knowledge-gaps email (POST /knowledge-gap). Never logged here: the
     // search text can carry a customer's name, address or phone.
     const knowledgeMisses = new Set();
+    // Tap-to-answer buttons for this reply (offer_choices, choice-tools.js):
+    // the validated list from the latest successful call, client-only.
+    let offeredChoices = null;
 
     // Tool-use loop
     let lastToolResponse = null;
@@ -3549,7 +3557,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // Outside-service writes too (Codex r1 on #5275, P1): assign_sentry_issue
         // takes an account email, and their scope is 'none' so they are never
         // in PII_TOOL_NAMES.
-        const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name);
+        // offer_choices too: its scope is 'none' (it reads no rows), but an
+        // option can name a customer the operator is choosing between.
+        const toolTelemetrySensitive = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)
+          || toolUse.name === OFFER_CHOICES_TOOL_NAME;
         const loggableInput = toolTelemetrySensitive
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
@@ -3764,6 +3775,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
+        if (toolUse.name === OFFER_CHOICES_TOOL_NAME) offeredChoices = !failed && result?.status === 'choices_shown' ? result.choices : null;
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.
         if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
@@ -3939,6 +3951,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // Knowledge searches that came back empty, for the "add to knowledge
       // gaps" prompt. Absent when there were none.
       ...(knowledgeMisses.size ? { knowledgeMisses: [...knowledgeMisses] } : {}),
+      // Tap-to-answer buttons (offer_choices). A tap only sends that option's
+      // reply as the operator's next message. Absent when the model offered
+      // none, and dropped when this turn made a card or committed a direct
+      // edit: a button must never sit beside a Confirm control or a receipt.
+      ...(offeredChoices && !pendingProposals.length && !directActionIds.length ? { choices: offeredChoices } : {}),
       // Return the structured data from the last tool call for UI rendering
       structuredData: toolResults.length > 0 ? toolResults[toolResults.length - 1].result : null,
       // Pending write proposals for the client confirmation card. This is the

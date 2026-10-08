@@ -333,6 +333,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
   const [pendingActions, setPendingActions] = useState([]);
+  // Tap-to-answer buttons from the live reply (payload `choices`, server
+  // offer_choices). They belong to that one reply: any newer request, a
+  // recalled task or thread, New chat or a page change drops them, so an old
+  // question can never be answered by a tap.
+  const [choices, setChoices] = useState(null);
   const [activeTask, setActiveTask] = useState(null);
   const [savedTasks, setSavedTasks] = useState([]);
   const [tasksAvailable, setTasksAvailable] = useState(false);
@@ -486,6 +491,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     submittingRef.current = false;
     setLoading(false);
     setActiveTask(null);
+    setChoices(null);
     // With threads on, the visible reply stays with the thread it belongs to:
     // clearing it would look like a new conversation while the next prompt
     // silently carried the previous exchange. It is cleared below only when
@@ -533,6 +539,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setThreadId(thread.id);
     threadSeqRef.current = Number.isInteger(thread.lastSeq) ? thread.lastSeq : null;
     setPendingActions([]);
+    setChoices(null);
     setToolActivity([]);
     knowledgeGaps.reset();
     // A thread from History is not the open task: its card (and Confirm
@@ -620,6 +627,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       setShowThreads(false); // a query from the History view shows its answer
       setLoading(true);
       setResponse(null);
+      setChoices(null);
       setToolActivity([]);
       knowledgeGaps.reset();
       saveRecent(q);
@@ -658,6 +666,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           setResponse(data.response);
           setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
           setActiveTask(data.taskId ? data : null);
+          setChoices(Array.isArray(data.choices) && data.choices.length ? data.choices : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
           knowledgeGaps.load(data.knowledgeMisses, data.taskId || null);
           setConversationHistory(data.conversationHistory || []);
@@ -721,6 +730,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       if (threadEpochRef.current !== epoch) return;
       setActiveTask(data);
       setResponse(data.response);
+      // A recalled or continued task shows its saved answer without buttons.
+      setChoices(null);
       setConversationHistory(data.conversationHistory || []);
       setThreadId(data.threadId || null);
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
@@ -755,6 +766,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setActiveTask(task => retainTaskReceipt(task, action, decision, body));
     if (activeTask) void refreshTask();
   };
+  // A tap is the operator's next message: the same submit a typed prompt
+  // takes (same thread, task and request key). The text also goes into the
+  // composer, so a failed request keeps it for a retry like typed text.
+  const chooseAnswer = (reply) => { setPrompt(reply); submit(reply); };
+  const choicesDisabled = loading || attachmentsLoading || dictationPending;
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
     onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved}  variant="dark" />;
@@ -824,6 +840,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     setActiveTask(null);
     setConversationHistory([]);
     setResponse(null);
+    setChoices(null);
     setPendingActions([]);
     setToolActivity([]);
     knowledgeGaps.reset();
@@ -883,6 +900,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         loading={loading}
         response={response}
         pendingActions={pendingActions}
+        choices={choices}
+        chooseAnswer={chooseAnswer}
+        choicesDisabled={choicesDisabled}
         taskCard={taskCard}
         activeTask={activeTask}
         onActionResolved={onActionResolved}
@@ -1182,6 +1202,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             {taskCard}
             {" "}
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
+            <ChoiceButtons choices={choices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="dark" />
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="dark" />
           </div>
@@ -1322,6 +1343,9 @@ function MobileSheet({
   loading,
   response,
   pendingActions,
+  choices,
+  chooseAnswer,
+  choicesDisabled,
   taskCard,
   activeTask,
   onActionResolved,
@@ -1602,6 +1626,9 @@ function MobileSheet({
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" />
           )}
           {response && !loading && !showThreads && (
+            <ChoiceButtons choices={choices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="light" />
+          )}
+          {response && !loading && !showThreads && (
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="light" />
           )}
           {pendingActions.length > 0 && !loading && !showThreads && !activeTask && (
@@ -1694,6 +1721,42 @@ function IntelligenceResponse({ response, activity, task, variant }) {
       {hasActions && prose}
     </details>}
   </>;
+}
+
+// Tap-to-answer buttons under the reply that asked "which value?". A tap only
+// sends that option's reply as the operator's next message; it confirms
+// nothing (a write is confirmed on its card). One tap answers: submit takes
+// one request at a time, and starting it removes this set.
+function ChoiceButtons({ choices, onChoose, disabled: locked, variant }) {
+  if (!choices?.length) return null;
+  const light = variant === "light";
+  return (
+    <div role="group" aria-label="Answer choices" style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "12px 0" }}>
+      {choices.map((choice) => (
+        <button
+          key={choice.label}
+          type="button"
+          disabled={locked}
+          onClick={() => onChoose(choice.reply)}
+          style={{
+            minHeight: 44,
+            padding: "8px 16px",
+            borderRadius: light ? 6 : 8,
+            background: "#FFFFFF",
+            border: `1px solid ${light ? "#D4D4D8" : D.border}`,
+            color: light ? "#18181B" : "#000",
+            fontSize: 14,
+            fontWeight: 500,
+            fontFamily: "'Roboto', system-ui, sans-serif",
+            cursor: locked ? "default" : "pointer",
+            opacity: locked ? 0.6 : 1,
+          }}
+        >
+          {choice.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 function AttachButton({ onClick, color, size = 30, disabled = false }) {
