@@ -2114,6 +2114,9 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          // text_number_differs (owner ruling 2026-10-08): the phones are fixed on the customer
+          // and judged on this card's own Resolve, never swept by a sibling card's verdict.
+          ...(item.reason_code !== 'text_number_differs' ? ['text_number_differs'] : []),
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

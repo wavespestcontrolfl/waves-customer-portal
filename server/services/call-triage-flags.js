@@ -1,6 +1,5 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
-const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
@@ -86,30 +85,19 @@ function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
   return !(caller.phone_source === 'spoken' || caller.phone_source === 'both');
 }
 
-// ani_cannot_text (schema 1.25.0, owner ruling 2026-10-07, option A): the caller
-// said the line they called from cannot take texts and gave a separate number for
-// texts. This is NOT caller_id_disclaimed — the caller still owns that line for
-// calls — so none of the disclaimed-number consumers (crm_notes stamp, CSR
-// coaching, booking-link lane) read it. Returns the text number as E.164 when it
-// is usable: dialable, and not the ANI (a near-miss of the ANI counts as the ANI,
-// the same fail-closed rule as the disclaimed predicate above). null otherwise,
-// including when the flag is not set.
-function aniCannotTextNumber(caller, opts = {}) {
-  if (!caller || caller.ani_cannot_text !== true) return null;
-  const text = caller.text_phone_e164;
-  if (!isDialablePhone(text)) return null;
-  if (isDialablePhone(opts.ani) && sameCallbackAsAni(text, opts.ani)) return null;
-  // One of our own lines or a staff cell is never a customer's text number: the
-  // processor refuses it as a recipient, so the flag below must agree.
-  if (TWILIO_NUMBERS.isInternalNumber(text)) return null;
-  const e164 = toE164(text);
-  return typeof e164 === 'string' && isLikelyE164(e164) ? e164 : null;
+// True only for an explicit ani_cannot_text (schema 1.25.0). One reader for the hold, the
+// card dedupe and the booking-link skip.
+function aniCannotText(caller) {
+  return !!caller && caller.ani_cannot_text === true;
 }
 
-// The caller cannot take texts on the ANI and gave no usable number to text
-// instead: callback_number_needed holds the call's SMS leg and files the ask.
-function aniCannotTextNeedsNumber(caller, opts = {}) {
-  return !!caller && caller.ani_cannot_text === true && !aniCannotTextNumber(caller, opts);
+// The card for a no-text line is text_number_differs, which carries both numbers and the
+// ask. callback_number_needed also fires for the hold, but its card would say the same
+// thing twice (and its Resolve means "this number is fine to text"), so it is dropped
+// unless the caller ALSO disclaimed the number.
+function aniCannotTextOnly(extraction) {
+  const caller = extraction?.caller;
+  return aniCannotText(caller) && !callerIdDisclaimedNeedsCallback(caller);
 }
 
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
@@ -536,8 +524,12 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // callerIdDisclaimedNeedsCallback (single source of truth — pre-push
   // review P1: the crm_notes stamp and CSR-coaching addendum call it too,
   // rather than re-deriving the condition).
-  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone })
-      || aniCannotTextNeedsNumber(caller, { ani: opts.contactPhone })) {
+  // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-08, card-only): the caller said
+  // the line they called from cannot get texts. Automation never texts a number the caller
+  // dictated, so the call's texts to the ANI hold through this same flag; the
+  // text_number_differs card (not a callback_number_needed card) asks the office to fix the
+  // phones. Not caller_id_disclaimed: the caller still owns the line for calls.
+  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone }) || aniCannotText(caller)) {
     flags.push('callback_number_needed');
   }
 
@@ -791,6 +783,7 @@ function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {
   } else if (has('reschedule_or_cancel')) {
     dropped.add('existing_appointment_coordination');
   }
+  if (aniCannotTextOnly(extraction)) dropped.add('callback_number_needed');
   const status = String(extraction?.scheduling?.status || 'none');
   if (status === 'none') dropped.add('existing_appointment_coordination');
   // The merged canonical record counts too: adoptV2PrimaryFields keeps a
@@ -2744,7 +2737,7 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // so a disclaimed ANI kept getting texted while V2 is in shadow. Same
   // ADVISORY posture as every other flag here — this never holds the
   // booking, only the confirmation/reminder SMS leg (see SMS_ONLY_FLAGS).
-  if (flags.includes('callback_number_needed')) needsConfirmation.push('callback_number_needed');
+  if (flags.includes('callback_number_needed') && !aniCannotTextOnly(v2Extraction)) needsConfirmation.push('callback_number_needed');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.
@@ -3298,8 +3291,7 @@ module.exports = {
   SMS_ONLY_FLAGS,
   callbackNumberNeededBlocksSms,
   callerIdDisclaimedNeedsCallback,
-  aniCannotTextNumber,
-  aniCannotTextNeedsNumber,
+  aniCannotText,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

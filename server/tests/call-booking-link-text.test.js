@@ -407,11 +407,9 @@ describe('stagingIneligibleReason', () => {
     ['callback number needed (triage flag)', { triage_flags: ['callback_number_needed'] }, 'triage_flag_callback_number_needed'],
     ['the caller said the number is not theirs', { caller: { caller_id_disclaimed: true } }, 'caller_id_disclaimed'],
     ['the number is disclaimed even with a spoken callback', { caller: { caller_id_disclaimed: true, phone_e164: '+19415550199', phone_source: 'spoken' } }, 'caller_id_disclaimed'],
-    // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-07): the line they called from cannot
-    // take texts. Only a separate, usable text number keeps the lane open.
-    ['the line cannot take texts and no number for texts was given', { caller: { ani_cannot_text: true } }, 'ani_cannot_text_no_text_number'],
-    ['the number for texts is the ANI itself', { caller: { ani_cannot_text: true, text_phone_e164: '+19415550100' } }, 'ani_cannot_text_no_text_number'],
-    ['the number for texts is not dialable (impossible area code)', { caller: { ani_cannot_text: true, text_phone_e164: '+11735550142' } }, 'ani_cannot_text_no_text_number'],
+    // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-08): never texts a dictated number.
+    ['the line cannot get texts', { caller: { ani_cannot_text: true } }, 'ani_cannot_text'],
+    ['the line cannot get texts, a number for texts was given', { caller: { ani_cannot_text: true, text_phone_e164: '+19415559876' } }, 'ani_cannot_text'],
     ['a property manager calling', { caller: { relationship_to_property: 'property_manager' } }, 'third_party_caller'],
     ['a realtor calling', { caller: { relationship_to_property: 'real_estate_agent' } }, 'third_party_caller'],
     ['a lender calling', { caller: { relationship_to_property: 'lender' } }, 'third_party_caller'],
@@ -466,12 +464,6 @@ describe('stagingIneligibleReason', () => {
   // codex #5018 r11 P1: the canonical merge (model + deterministic flags)
   // must not introduce a false block on an otherwise perfectly normal call
   // — high confidence, a dialable ANI, nothing address-related to flag.
-  test('the line cannot take texts but a separate number for texts was given: staging proceeds (the destination check keeps it off the ANI)', () => {
-    const extraction = baseExtraction();
-    extraction.caller = { ...extraction.caller, ani_cannot_text: true, text_phone_e164: '+19415559876' };
-    expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
-  });
-
   test('a normal, high-confidence extraction proceeds despite the new canonical-flags merge', () => {
     const extraction = { ...baseExtraction(), confidence: { overall: 0.92 } };
     expect(stagingIneligibleReason(baseCall, extraction, leadId)).toBeNull();
@@ -1302,31 +1294,6 @@ describe('consentedDestination', () => {
     expect(consentedDestination(inboundCall, extraction, SPOKEN)).toBe(false);
     const explicitlyRefused = { caller: { phone_e164: SPOKEN }, consent: { sms_consent_given: false } };
     expect(consentedDestination(inboundCall, explicitlyRefused, SPOKEN)).toBe(false);
-  });
-
-  // ani_cannot_text (schema 1.25.0): the ANI is never a destination; the number given for
-  // texts is, with the same explicit-consent bar as any spoken alternate.
-  test('ani_cannot_text: the ANI is refused even though it is the call\'s own number', () => {
-    const extraction = { caller: { ani_cannot_text: true, text_phone_e164: SPOKEN }, consent: { sms_consent_given: true } };
-    expect(consentedDestination(inboundCall, extraction, ANI)).toBe(false);
-  });
-
-  test('ani_cannot_text: the number given for texts sends with explicit consent, not without it', () => {
-    const consented = { caller: { ani_cannot_text: true, text_phone_e164: SPOKEN }, consent: { sms_consent_given: true } };
-    expect(consentedDestination(inboundCall, consented, SPOKEN)).toBe(true);
-    const implied = { caller: { ani_cannot_text: true, text_phone_e164: SPOKEN }, consent: {} };
-    expect(consentedDestination(inboundCall, implied, SPOKEN)).toBe(false);
-  });
-
-  test('ani_cannot_text with no usable number for texts has no destination at all', () => {
-    const none = { caller: { ani_cannot_text: true }, consent: { sms_consent_given: true } };
-    expect(consentedDestination(inboundCall, none, ANI)).toBe(false);
-    expect(consentedDestination(inboundCall, none, SPOKEN)).toBe(false);
-  });
-
-  test('caller_id_disclaimed is untouched: a caller who only disclaimed the ANI keeps the old rule', () => {
-    const extraction = { caller: { caller_id_disclaimed: true }, consent: {} };
-    expect(consentedDestination(inboundCall, extraction, ANI)).toBe(true);
   });
 
   test('outbound: the dialed number (to_phone), not from_phone, is the call\'s own contact number', () => {

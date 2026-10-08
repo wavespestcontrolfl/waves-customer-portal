@@ -98,7 +98,7 @@ const { lockSmsPhone, lockCustomerComms } = require('../utils/customer-comms-loc
 const { OPEN_ESTIMATE_STATUSES } = require('./estimate-automation-duplicates');
 const {
   computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV,
-  suppressUnsupportedModelFlags, BLOCKING_TRIAGE_FLAGS, aniCannotTextNumber,
+  suppressUnsupportedModelFlags, BLOCKING_TRIAGE_FLAGS,
 } = require('./call-triage-flags');
 
 const GATE = 'callBookingLinkText';
@@ -738,12 +738,10 @@ const STAGING_CHECKS = [
   // does not enforce this call-specific hold. A disclaimer skips the text
   // even when a spoken number was given, because staff call those back.
   (call, extraction) => (extraction.caller?.caller_id_disclaimed === true ? 'caller_id_disclaimed' : null),
-  // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-07): the line they called from
-  // cannot take texts. This lane may text only the separate number they gave for texts
-  // (consentedDestination enforces the destination); with none usable it skips. It is a
-  // different statement from caller_id_disclaimed above: the caller owns the ANI.
-  (call, extraction) => (extraction.caller?.ani_cannot_text === true && !textNumberForCall(call, extraction)
-    ? 'ani_cannot_text_no_text_number' : null),
+  // ani_cannot_text (schema 1.25.0, owner ruling 2026-10-08): the line they called from cannot
+  // get texts, and automation never texts a number the caller dictated. A different statement
+  // from caller_id_disclaimed above: the caller owns the ANI.
+  (call, extraction) => (extraction.caller?.ani_cannot_text === true ? 'ani_cannot_text' : null),
   (call, extraction) => (extraction.caller?.preferred_contact_method === 'phone' ? 'prefers_phone_contact' : null),
   (call, extraction) => {
     const leadQuality = extraction.sentiment_and_lead?.lead_quality;
@@ -1355,29 +1353,11 @@ const DISPATCH_CHECKS = [
 // text that new number by hand. Compared by the repo's canonical phone
 // identity (NANP last-10 / +digits — server/utils/phone.js), never a raw
 // string match.
-// The separate number the caller gave for texts when the line they called from cannot
-// take them (ani_cannot_text, schema 1.25.0), usable only when aniCannotTextNumber says so
-// (dialable, not the ANI, not one of our own lines). null when the caller said nothing of the kind or
-// gave no usable number.
-function textNumberForCall(call, extraction) {
-  const { resolveCallContactPhone } = require('./call-recording-processor');
-  const ani = resolveCallContactPhone(call, null);
-  return aniCannotTextNumber(extraction?.caller, { ani });
-}
-
 function consentedDestination(call, extraction, phone) {
   const target = phoneIdentityKey(phone);
   if (!target) return false;
   const { resolveCallContactPhone } = require('./call-recording-processor');
   const contactPhone = resolveCallContactPhone(call, null);
-  // ani_cannot_text: the ANI is never a destination, and the only other candidate is the
-  // number given for texts. Explicit consent is still required for it, the same bar as
-  // any spoken alternate below.
-  if (extraction?.caller?.ani_cannot_text === true) {
-    const textNumber = textNumberForCall(call, extraction);
-    return !!textNumber && target === phoneIdentityKey(textNumber)
-      && extraction?.consent?.sms_consent_given === true;
-  }
   if (contactPhone && target === phoneIdentityKey(contactPhone)) return true;
   const spoken = extraction?.caller?.phone_e164;
   return !!spoken && target === phoneIdentityKey(spoken) && extraction?.consent?.sms_consent_given === true;
