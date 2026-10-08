@@ -668,9 +668,35 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(await guide({ scheduled_services: undefined })).toEqual({ ok: false, reason: 'not_found' });
     });
 
-    test('a clean lawn: no cards', async () => {
+    test('a clean lawn: no cards, and the Weed spots decision read fresh rides the answer', async () => {
       live();
-      expect(await guide(tablesFor())).toEqual({ ok: true, v: 1, assessmentId: CONFIRMED, cards: [] });
+      expect(await guide(tablesFor())).toEqual({
+        ok: true, v: 1, assessmentId: CONFIRMED, cards: [],
+        weedMix: expect.objectContaining({ mode: 'lead', productIds: [P_LEAD, P_CERT] }),
+      });
+    });
+
+    test('the fresh weed decision and the weed card agree: a cap reached after the sheet opened', async () => {
+      live();
+      capsFor({ [P_LEAD]: YEARLY });
+      const result = await guide(tablesFor({ lawn_assessments: assessmentRow({ weed_suppression: 50 }) }));
+      // In July the replacement is out of season and the lead is capped: no card, and the mix says why.
+      expect(result.cards).toEqual([]);
+      expect(result.weedMix).toMatchObject({ mode: 'none', productIds: [] });
+    });
+
+    test('the weed card carries the fresh offer\'s own add-ons, so the tap adds exactly those', async () => {
+      live();
+      const result = await guide(tablesFor({ lawn_assessments: assessmentRow({ weed_suppression: 50 }) }));
+      const weeds = result.cards.find((c) => c.kind === 'weeds');
+      expect(weeds.items.map((i) => i.productId)).toEqual(weeds.productIds);
+      expect(result.weedMix.productIds).toEqual(weeds.productIds);
+    });
+
+    test('a visit with no plan answers no weed decision', async () => {
+      live();
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+      expect(await guide(tablesFor())).toMatchObject({ cards: [], weedMix: null });
     });
 
     test('a one-time visit has no plan, so no cards', async () => {

@@ -180,13 +180,13 @@ function offerFor(kind, candidate, { capped, rows }) {
 /**
  * The Weed spots entry as an offer, or null: only while the spot rules' own decision says there is
  * something to add (the lead and its members, or the replacement at the lead's cap). `items` are the
- * sheet-shaped add-ons; the names ride the card, the tap itself is the sheet's Weed spots action.
+ * sheet-shaped add-ons; the card carries them (and the names), and the tap adds exactly those rows.
  */
 function weedOffer(weedMix, items) {
   if (!weedMix || !['lead', 'replacement'].includes(weedMix.mode) || !Array.isArray(weedMix.productIds) || !weedMix.productIds.length) return null;
   const found = weedMix.productIds.map((id) => (items || []).find((item) => idOf(item.productId).toLowerCase() === idOf(id).toLowerCase()));
   if (!found.every(Boolean)) return null;
-  return { productIds: weedMix.productIds.map(idOf), names: found.map((item) => item.name), note: weedMix.note || null };
+  return { productIds: weedMix.productIds.map(idOf), names: found.map((item) => item.name), items: found, note: weedMix.note || null };
 }
 
 // ── chinch bugs ─────────────────────────────────────────────────────────────
@@ -307,6 +307,8 @@ function weedsCard({ s, weeds }) {
     detail: weeds.names.join(', '),
     note: weeds.note,
     productIds: weeds.productIds,
+    // The fresh offer's own add-ons: the tap adds exactly these, not the context's older weed mix.
+    items: weeds.items,
     actionLabel: 'Add weed spots',
   });
 }
@@ -376,7 +378,7 @@ const MAX_RECORD_PRODUCTS = 4;
  * to spread into structured_notes, or `{}`. Built from the `treatmentGuide` block of the submit's
  * `lawnFast` echo, checked here: only while the gate is live, only version 1, unknown kinds and
  * repeats dropped, product ids uuids (at most four each), `checked` found | none | null,
- * `taken` a boolean. Every card kept was shown. Frozen on the record for tuning the rules and read
+ * `taken` a boolean (every product the card offers is on the sheet; the client decides). Every card kept was shown. Frozen on the record for tuning the rules and read
  * by no customer or public path.
  */
 function treatmentGuideFreeze(lawnFast) {

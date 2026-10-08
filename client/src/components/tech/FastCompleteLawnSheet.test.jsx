@@ -2346,7 +2346,7 @@ describe('suggested from this lawn', () => {
     kind, title: kind, finding: `Finding for ${kind}.`, check: null, detail: null, note: null, productIds: [], items: [], actionLabel: 'Add it', dismissLabel: null, ...extra,
   });
   const CARDS = {
-    weeds: () => card('weeds', { title: 'Weed spots', finding: 'Photos show weeds on about 18% of the lawn.', detail: 'Lead WG, Cert Herbicide', productIds: [P_LEAD, P_CERT], actionLabel: 'Add weed spots' }),
+    weeds: () => card('weeds', { title: 'Weed spots', finding: 'Photos show weeds on about 18% of the lawn.', detail: 'Lead WG, Cert Herbicide', productIds: [P_LEAD, P_CERT], items: [ADD_ONS[0], ADD_ONS[1]], actionLabel: 'Add weed spots' }),
     fungus: () => card('fungus', {
       title: 'Fungus', finding: 'Photos show minor fungus activity.', check: 'Check first: look at the blades and the edge of the patch.',
       detail: 'Art Fungicide — mapped large patch', productIds: [P_ART], items: [ADD_ONS[2]], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
@@ -2371,7 +2371,8 @@ describe('suggested from this lawn', () => {
     plannedProducts: { source: 'plan', items: [PLANNED[0]], addOns: ADD_ONS, month: 7, weedMix: WEED_MIX, ...(chinch ? { chinch } : {}) },
     ...extra,
   });
-  const answer = (cards) => { guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards }; };
+  // The guide answers the Weed spots decision it read fresh, with the cards.
+  const answer = (cards, weedMix = WEED_MIX) => { guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards, weedMix }; };
   const open = (ctx = guideContext()) => openSheet({ request: makeRequest({ ctx }), props: { catalog: GUIDE_CATALOG } });
   const guideCalls = () => requests.filter((r) => r.path.includes('/lawn-fast/treatment-guide'));
   const suggested = () => screen.findByRole('group', { name: 'Suggested from this lawn' });
@@ -2593,15 +2594,98 @@ describe('suggested from this lawn', () => {
     expect(sentGuide()).toEqual({ v: 1, cards: [] });
   });
 
-  test('a weed card whose products the catalog cannot build is not shown, and not recorded', async () => {
-    answer([CARDS.weeds(), CARDS.dry_spots()]);
+  test('a weed card adds the products it names even when the catalog does not list one of them', async () => {
+    answer([CARDS.weeds()]);
     await openSheet({ request: makeRequest({ ctx: guideContext() }), props: { catalog: GUIDE_CATALOG.filter((p) => p.id !== P_CERT) } });
     await analyze();
-    await suggested();
-    expect(screen.queryByRole('group', { name: 'Weed spots suggestion' })).toBeNull();
+    const group = await suggested();
+    fireEvent.click(within(group).getByRole('button', { name: 'Add weed spots' }));
+    expect(screen.getByRole('group', { name: 'Lead WG' })).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Cert Herbicide' })).toBeTruthy();
+  });
+
+  describe('the fresh guide is the one weed offer on screen', () => {
+    // The sheet opened with the full mix; after Confirm the guide re-read the plan: it is February
+    // now (the lead alone), and the surfactant would be the exempt member.
+    const FRESH = { ...WEED_MIX, productIds: [P_LEAD], note: 'February: Lead only while the lawn greens up.', surfactant: null, noAreaProductIds: [] };
+    const freshCard = () => ({ ...CARDS.weeds(), detail: 'Lead WG', note: FRESH.note, productIds: [P_LEAD], items: [ADD_ONS[0]] });
+
+    test('the tap adds what the fresh card names, not the context\'s older mix', async () => {
+      answer([freshCard()], FRESH);
+      await open();
+      await analyze();
+      const group = await suggested();
+      expect(within(group).getByText(FRESH.note)).toBeTruthy();
+      fireEvent.click(within(group).getByRole('button', { name: 'Add weed spots' }));
+      expect(screen.getByRole('group', { name: 'Lead WG' })).toBeTruthy();
+      expect(screen.queryByRole('group', { name: 'Cert Herbicide' })).toBeNull();
+      expect(within(cardGroup('Weed spots')).getByRole('button', { name: 'Weed spots: on the sheet' }).disabled).toBe(true);
+    });
+
+    test('the search follows the fresh offer: a product no longer in the mix is searchable again', async () => {
+      answer([freshCard()], FRESH);
+      await open();
+      await analyze();
+      await suggested();
+      fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Cert Herbicide' } });
+      expect(await screen.findByRole('button', { name: /Cert Herbicide/ })).toBeTruthy();
+      fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Lead WG' } });
+      expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
+    });
+
+    test('the area exemption and the surfactant note follow the fresh facts', async () => {
+      const note = 'Leave the surfactant out if it is 90°F or hotter.';
+      const fresh = { ...WEED_MIX, productIds: [P_LEAD, P_CERT], surfactant: { productId: P_CERT, included: true, note }, noAreaProductIds: [P_CERT] };
+      answer([CARDS.weeds()], fresh);
+      await open();
+      await analyze();
+      fireEvent.click(within(await suggested()).getByRole('button', { name: 'Add weed spots' }));
+      expect(within(editorFor('Cert Herbicide')).getByText(note)).toBeTruthy();
+      // Only the lead asks for the shared area: the exempt member holds nothing.
+      fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '250 sq ft' }));
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
+    });
+
+    test('with no weed card the add-ons entry follows the fresh decision too (a cap reached since the sheet opened)', async () => {
+      const capped = { ...WEED_MIX, mode: 'none', productIds: [], note: 'Lead yearly limit reached. Blind is used November through March only.' };
+      answer([], capped);
+      await open();
+      expect(within(addons()).getByRole('button', { name: 'Add weed spots' })).toBeTruthy();
+      await analyze();
+      await suggested();
+      expect(within(addons()).getByText(capped.note)).toBeTruthy();
+      expect(within(addons()).queryByRole('button', { name: 'Add weed spots' })).toBeNull();
+    });
+
+    test('an answer with no weed decision leaves the context\'s in force', async () => {
+      guideAnswer = { enabled: true, v: 1, cards: [] };
+      await open();
+      await analyze();
+      await suggested();
+      expect(within(addons()).getByRole('button', { name: 'Add weed spots' })).toBeTruthy();
+    });
+  });
+
+  test('a half-added weed mix is not "on the sheet": the tap finishes it, and the record says taken only when all are on', async () => {
+    answer([CARDS.weeds()]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    fireEvent.click(within(group).getByRole('button', { name: 'Add weed spots' }));
+    fireEvent.click(within(editorFor('Cert Herbicide')).getByRole('button', { name: 'Remove' }));
+    // Only the first product is left: the card is open again.
+    const again = within(cardGroup('Weed spots')).getByRole('button', { name: 'Add weed spots' });
+    expect(again.disabled).toBe(false);
+    fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '250 sq ft' }));
+    fireEvent.click(again);
+    // The missing member is back; the lead is not duplicated.
+    expect(screen.getAllByRole('group', { name: 'Lead WG' })).toHaveLength(1);
+    expect(screen.getByRole('group', { name: 'Cert Herbicide' })).toBeTruthy();
+    expect(within(cardGroup('Weed spots')).getByRole('button', { name: 'Weed spots: on the sheet' }).disabled).toBe(true);
+    fireEvent.click(within(editorFor('Cert Herbicide')).getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(sentGuide().cards.map((c) => c.kind)).toEqual(['dry_spots']);
+    expect(sentGuide().cards).toEqual([{ kind: 'weeds', shown: true, checked: null, taken: false, productIds: [P_LEAD, P_CERT] }]);
   });
 
   test('malformed cards in the answer are ignored', async () => {

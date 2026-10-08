@@ -808,7 +808,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
  * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
  * asks once the technician confirms; the plan is read again here so the cards name the same add-ons
  * the sheet lists, each one's limits read fresh. Read-only; nothing is added or recorded.
- * `{ ok: true, v: 1, assessmentId, cards }`, or `{ ok: false, reason }`: disabled, invalid_assessment,
+ * `{ ok: true, v: 1, assessmentId, cards, weedMix }` (`weedMix` is the Weed spots decision read fresh, the
+ * sheet's one source for the weed entry, the weed card and the search exclusion; null when the month has no
+ * weed group), or `{ ok: false, reason }`: disabled, invalid_assessment,
  * not_found, not_eligible, not_confirmed, not_usable. A plan or limit read that fails throws (a 500:
  * the sheet then shows no cards and works as before).
  */
@@ -823,7 +825,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   if (!assessment) return { ok: false, reason: 'not_found' };
   if (assessment.confirmed_by_tech !== true) return { ok: false, reason: 'not_confirmed' };
   if (!(await assessmentUsableForReport(svc, assessment, knex))) return { ok: false, reason: 'not_usable' };
-  const result = (cards) => ({ ok: true, v: 1, assessmentId: assessment.id, cards });
+  const result = (cards, weedMix = null) => ({ ok: true, v: 1, assessmentId: assessment.id, cards, weedMix });
   // Only a recurring program visit has a plan, and so any product to suggest.
   const loaded = visitType === 'recurring' ? await loadPlan(svc, knex) : null;
   if (!loaded) return result([]);
@@ -850,7 +852,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     offers: { ...offers, chinch },
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     troubleAreas: await guide.troubleAreasOnFile({ svc, knex }),
-  }));
+  }), weedMix);
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

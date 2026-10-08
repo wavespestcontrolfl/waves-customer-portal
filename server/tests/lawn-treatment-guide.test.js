@@ -76,7 +76,7 @@ describe('buildCards: the rule table', () => {
     dry_spots: { item: item(P_DISP, 'Dispatch Sprayable', null) },
     chinch: { item: item(P_ARENA, 'Arena 50 WDG'), note: null },
   };
-  const WEEDS = { productIds: [P_CEL, P_CERT], names: ['Celsius WG', 'Certainty'], note: null };
+  const WEEDS = { productIds: [P_CEL, P_CERT], names: ['Celsius WG', 'Certainty'], items: [item(P_CEL, 'Celsius WG'), item(P_CERT, 'Certainty')], note: null };
   const run = (signals, { month = 7, offers = OFFERS, weeds = WEEDS } = {}) => buildCards({
     signals: { weedCoverage: 0, fungus: 'none', insect: 'none', drought: 'none', ...signals }, month, offers, weeds,
   });
@@ -94,7 +94,7 @@ describe('buildCards: the rule table', () => {
     if (shown) {
       expect(cards[0]).toMatchObject({
         title: 'Weed spots', finding: `Photos show weeds on about ${weedCoverage}% of the lawn.`, check: null,
-        detail: 'Celsius WG, Certainty', productIds: [P_CEL, P_CERT], items: [], actionLabel: 'Add weed spots', dismissLabel: null,
+        detail: 'Celsius WG, Certainty', productIds: [P_CEL, P_CERT], items: WEEDS.items, actionLabel: 'Add weed spots', dismissLabel: null,
       });
     }
   });
@@ -203,7 +203,7 @@ describe('buildCards: the rule table', () => {
 describe('weedOffer: only what the Weed spots entry can add', () => {
   const items = [{ productId: P_CEL, name: 'Celsius WG' }, { productId: P_CERT, name: 'Certainty' }, { productId: P_TALAK, name: 'Other' }];
   test('lead mode offers the entry\'s products with their names', () => {
-    expect(weedOffer({ mode: 'lead', productIds: [P_CEL, P_CERT], note: 'n' }, items)).toEqual({ productIds: [P_CEL, P_CERT], names: ['Celsius WG', 'Certainty'], note: 'n' });
+    expect(weedOffer({ mode: 'lead', productIds: [P_CEL, P_CERT], note: 'n' }, items)).toEqual({ productIds: [P_CEL, P_CERT], names: ['Celsius WG', 'Certainty'], items: items.slice(0, 2), note: 'n' });
   });
   test('replacement mode offers the replacement alone', () => {
     expect(weedOffer({ mode: 'replacement', productIds: [P_CERT] }, items)).toMatchObject({ productIds: [P_CERT], names: ['Certainty'], note: null });
