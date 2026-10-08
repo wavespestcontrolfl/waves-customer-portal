@@ -1838,6 +1838,19 @@ sentence), so a failed refetch (best effort, caught at every call site, includin
   commit), the accept landed on another / no customer, the transaction's phone match differs from the preflight verdict, or
   the reused lone candidate (re-read FOR UPDATE at the end of the transaction) was deleted or moved off the phone. Nothing is suppressed, charged or enrolled on the stale decision.
 
+**Area add-on gate (`GATE_AREA_ADDONS`).** An estimate that carries a persisted area add-on treatment (a stored
+`services.areaAddOns` engine input, or a mapped `area_addon` one-time, spec or quote-required row) while the gate is off is
+refused on the same rail as the Bermuda gate, at the same position in every precedence order described above (after the
+viewability / terminal / inactive refusals and the blocking-state decision; a gated AND parked estimate still answers the park;
+contact review keeps its place ahead of the gate exactly as it does for Bermuda). Affected endpoints: `PUT /:token/accept`,
+`GET /:token/available-slots`, `POST /:token/find-slots`, `POST /:token/reserve`, `POST /:token/card-hold-intent`,
+`POST /:token/recurring-card-intent` and `POST /:token/reserve/:scheduledServiceId/extend` (pre-transaction check and the locked
+recheck). Refusal: HTTP 409 with `{ "error": "This estimate includes an option that is temporarily unavailable. Please contact
+our office and we will refresh your quote.", "code": "AREA_ADDONS_GATED" }`. The estimate is never priced for the park check while
+gated (its replay would throw). `GET /:token/data` is unchanged: it serves the stored rows and takes no money, as it does for a
+Bermuda-gated estimate. With the gate on, or with no add-on on the estimate, every body and status on these routes is unchanged.
+An estimate that carries both a gated Bermuda add-on and a gated area add-on answers the Bermuda body.
+
 On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
 tender, text }` (the exact authorization recorded as shown) beside the existing
 `acceptedRecurringCardConsentVariant` stamp. The inline enrollment and the `setup_intent.succeeded`
