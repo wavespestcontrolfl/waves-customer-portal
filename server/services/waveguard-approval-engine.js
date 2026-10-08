@@ -102,13 +102,16 @@ async function latestComparableGroupApplication(knex, customerId, product, group
 //   pre_emergent_group_3: pre-emergents are all HRAC Group 3 this season, so a repeat is no signal;
 //   take_all_artavia_pair: the planned take-all pair is Artavia, then Headway 28 days later (Headway adds
 //     propiconazole, group 3, to the same group 11 azoxystrobin, so group 11 repeats once: this is the
-//     named exception for it); Artavia twice, 28 days apart, stays allowed (label spacing:
+//     named exception for it, 30 to 45 days apart); Artavia twice, 28 days apart, stays allowed (label spacing:
 //     TAKE_ALL_PAIR_MIN_DAYS to TAKE_ALL_PAIR_MAX_DAYS between visits; an earlier repeat is a normal
 //     repeat), ONLY when both applications recorded a take-all target (no target evidence, no
 //     exemption), and ONLY for the SECOND application of the seasonal pair: exactly one take-all
 //     Artavia in the season window before this one, and it is the 28 to 45 day one. A third is a
 //     normal review.
 const TAKE_ALL_PAIR_MIN_DAYS = 28;
+// Artavia then HEADWAY: 30 days on every grass. The Headway label limits bermudagrass to 3 fl oz per 1,000 sq ft
+// every 30 days, so the pair is label-safe everywhere at 30 (Artavia twice keeps the 28 of its own label).
+const TAKE_ALL_HEADWAY_MIN_DAYS = 30;
 const TAKE_ALL_PAIR_MAX_DAYS = 45;
 // Two spacings of 45 days at most, so a third application still sees the first.
 const TAKE_ALL_SEASON_DAYS = 90;
@@ -209,7 +212,8 @@ async function isTakeAllPair(knex, { customerId, propertyId, product, plan, last
   const history = await takeAllArtaviaHistory(knex, customerId, [...new Set([product.name, last.product_name])], serviceDate, { strict, propertyId });
   if (history.length !== 1 || !TAKE_ALL_FIRST.test(normalizeText(history[0].product_name))) return false;
   const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
-  return apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
+  const minDays = /\bheadway\b/.test(normalizeText(product.name)) ? TAKE_ALL_HEADWAY_MIN_DAYS : TAKE_ALL_PAIR_MIN_DAYS;
+  return apart >= minDays && apart <= TAKE_ALL_PAIR_MAX_DAYS
     && dayNumber(history[0].service_date) === dayNumber(last.service_date);
 }
 

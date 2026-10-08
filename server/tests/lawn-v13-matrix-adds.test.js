@@ -100,6 +100,40 @@ describe('1b. no customer-report override for Talak on mole crickets (the code a
   });
 });
 
+describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
+  test('spring pair Mar (Artavia) then Apr (Headway); fall pair Sep (Artavia) then Oct (Headway)', () => {
+    expect(lineFor(3, N.ART)[0]).toMatch(/take-all areas, first spring application/);
+    expect(lineFor(4, matrix.HEAD)[0]).toMatch(/take-all areas, second spring application, 3 fl oz per 1,000 sq ft in 2 to 4 gal of water, 30 days after the first/);
+    expect(lineFor(4, N.ART)).toEqual([]);
+    expect(lineFor(9, N.ART)[0]).toMatch(/take-all areas, first fall application/);
+    expect(lineFor(10, matrix.HEAD)[0]).toMatch(/take-all areas, second fall application, 3 fl oz per 1,000 sq ft/);
+    // October's Artavia line is large patch only now.
+    expect(lineFor(10, N.ART)[0]).toBe(`${N.ART} — mapped large patch with Velista at 2 gal per 1,000 sq ft`);
+  });
+  test('Headway rate is the Headway liquid label (EPA 100-1216): 3 fl oz, 30 days after Artavia, so no "label rate to confirm" mark', () => {
+    const headway = matrix.CATALOG.find((p) => p.name === matrix.HEAD);
+    expect(headway).toMatchObject({ epa_reg_number: '100-1216', default_rate_per_1000: 3, max_label_rate_per_1000: 3, max_annual_per_1000: 23.75 });
+    // Two Headway passes a year (3 fl oz each) stay far under the label's 23.75 fl oz per 1,000 sq ft a year.
+    expect(2 * 3).toBeLessThan(headway.max_annual_per_1000);
+    expect(JSON.stringify(v13)).not.toMatch(/label rate to confirm/);
+  });
+  test('Artavia then Headway is 30 days on every track (the Headway label: bermudagrass 3 fl oz per 1,000 sq ft every 30 days); no recipe text says 28 for the Headway pass', () => {
+    for (const track of TRACKS) {
+      const text = JSON.stringify(v13[track]);
+      expect(text).not.toMatch(/Headway 28 days|Headway[^"]{0,120}28 days after the first/);
+      expect(text).toMatch(/Headway 30 days later/);
+      expect(text).toMatch(/limits bermudagrass to 3 fl oz per 1,000 sq ft every 30 days/);
+      for (const month of [4, 10]) expect(lineFor(month, matrix.HEAD)[0]).toMatch(/30 days after the first application/);
+    }
+  });
+  test('the notes keep the pair as the one named group 11 exception (Headway still carries the azoxystrobin)', () => {
+    const notes = v13.st_augustine.notes.join(' ');
+    expect(notes).toMatch(/Take-all: Artavia first, then Headway 30 days later/);
+    expect(notes).toMatch(/planned take-all pair: Headway adds propiconazole \(group 3\) to the same azoxystrobin \(group 11\), so group 11 repeats once and this is the named take-all exception/);
+    expect(notes).toMatch(/and the take-all pair \(Artavia, then Headway 30 days later, or Artavia twice; both recorded for take-all\)/);
+  });
+});
+
 describe('3. spot disease lines from the kit', () => {
   const month = (m, name) => lineFor(m, name).join('\n');
   test('Pythium root rot: Artavia, July to September plus June, 10 to 14 days, two in a row at most', () => {

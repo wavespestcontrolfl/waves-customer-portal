@@ -124,6 +124,10 @@ describeDb('rotation reads on composite groups and take-all evidence from the pr
     test('the rest of the exemption is unchanged: 28 to 45 days only, the second application only, the same property', async () => {
       await reset();
       await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH });
+      // Artavia then Headway is 30 to 45 days (the Headway label limits bermudagrass to one pass every 30 days):
+      // 28 and 29 days are a normal review, 30 and 45 are exempt.
+      for (const date of ['2026-04-11', '2026-04-12']) expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date }))).toEqual(['fungicide_frac_rotation_approval']);
+      for (const date of ['2026-04-13', '2026-04-28']) expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date }))).toEqual([]);
       // 27 and 46 days: normal review.
       expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-10' }))).toEqual(['fungicide_frac_rotation_approval']);
       expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-29' }))).toEqual(['fungicide_frac_rotation_approval']);

@@ -190,6 +190,26 @@ describeDb('the v13 plan through PostgreSQL', () => {
         await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: true });
       }
     });
+
+    test('a suppressed July row (12 visits a year, window kept its scout form): the job card is the scout step: no potash notes, no safety block, the scout goal', async () => {
+      setGates();
+      await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: false });
+      try {
+        const { built, procedure } = await julyCard('monthly');
+        expect(sopItem(built)).toBeUndefined();
+        expect(built.protocol.nonDefaultBase).toBe(true);
+        expect(procedure.objective).toBe('No whole-lawn tool on the 9-visit plan: inspect the lawn and treat spots only.');
+        const text = JSON.stringify([procedure.objective, procedure.visitNotes, procedure.steps]);
+        expect(text).not.toMatch(/K rate|K2O|0\.5 lb K|[Ss]preader|0-0-50|[Pp]otassium|deflector|fertilizer-free band|Manatee BMP/);
+        expect(procedure.visitNotes.join(' ')).toMatch(/No whole-lawn tool this month: inspect the whole lawn and treat spots only/);
+      } finally {
+        await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: true });
+      }
+      // Back to a default row: the 12x card is the potash card again.
+      const { procedure } = await julyCard('monthly');
+      expect(procedure.visitNotes.join(' ')).toMatch(/K rate: 0\.5 lb K\. Spreader visit/);
+      expect(procedure.visitNotes.join(' ')).toMatch(/deflector shield/i);
+    });
   });
 
   test('no staged v13 row: no products, no amounts anywhere in the plan, a block', async () => {

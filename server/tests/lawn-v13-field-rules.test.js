@@ -28,7 +28,7 @@ describe('recipe text', () => {
     const rule = track.notes.find((line) => line.startsWith('Never use the same chemical group'));
     expect(rule).toMatch(/twice in a row\. Two exceptions/);
     expect(rule).toMatch(/Group 3 pre-emergents \(all of them are Group 3 this season/);
-    expect(rule).toMatch(/take-all pair \(Artavia, then Headway 28 days later, or Artavia twice; both recorded for take-all\)/);
+    expect(rule).toMatch(/take-all pair \(Artavia, then Headway 30 days later, or Artavia twice; both recorded for take-all\)/);
     expect(JSON.stringify(track)).not.toMatch(/same target|on one lawn/);
     expect(track.safety_rules.some((line) => /Never repeat a chemical group on the next application/.test(line))).toBe(false);
     expect(track.safety_rules.find((line) => /chemical group/.test(line))).toMatch(/Exceptions: Group 3 pre-emergents .* take-all pair \(Artavia, then Headway or Artavia\), both recorded for take-all/);

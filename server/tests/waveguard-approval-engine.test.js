@@ -330,11 +330,15 @@ describe('waveguard approval engine', () => {
       const codes = async (history, input = now, product = HEADWAY) => repeats(await run([product], history, input)).map((b) => b.code);
       // Not a pair (no take-all evidence on the Headway pass): the group 11 repeat is found, once.
       expect(await codes([first('2026-05-13')], { ...now, targets: ['Gray leaf spot'] })).toEqual(['fungicide_frac_rotation_approval']);
-      // Artavia 28 days before, both for take-all: the second pass of the pair, exempt.
-      expect(await codes([first('2026-05-13')])).toEqual([]);
-      // Spacing 28 to 45 days: 27 and 46 days are a normal review.
-      expect(await codes([first('2026-05-14')])).toEqual(['fungicide_frac_rotation_approval']);
+      // Artavia 30 days before, both for take-all: the second pass of the pair, exempt.
+      expect(await codes([first('2026-05-11')])).toEqual([]);
+      // Artavia then HEADWAY is 30 to 45 days on every grass (the Headway label limits bermudagrass to one 3 fl oz
+      // pass every 30 days): 28 and 29 days (and 27) are a normal review, 30 and 45 are exempt, 46 is a review.
+      for (const date of ['2026-05-13', '2026-05-12', '2026-05-14']) expect(await codes([first(date)])).toEqual(['fungicide_frac_rotation_approval']);
+      expect(await codes([first('2026-04-26')])).toEqual([]);
       expect(await codes([first('2026-04-25')])).toEqual(['fungicide_frac_rotation_approval']);
+      // Artavia twice keeps its own label spacing, 28 days.
+      expect(repeats(await run([ARTAVIA], [first('2026-05-13')], now))).toEqual([]);
       expect(await codes([first('2026-05-13', 'Artavia 2 SC (Azoxy)', ['Large patch'])])).toEqual(['fungicide_frac_rotation_approval']);
       // A third pass (Artavia, Headway, then Headway again) or Headway as the first pass: review.
       // (Headway after Headway repeats both of its groups, 3 and 11: two findings.)

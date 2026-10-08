@@ -1611,6 +1611,11 @@ function v13NonDefaultBase(item, row) {
 }
 
 // The base lines whose staged row is not a default: not selected, so no default, no amount.
+// The visit's step with no product line (a cadence variant such as July's scout step), when it states notes.
+function scoutStepOf(visit) {
+  return Object.values(visit?.cadenceVariants || {}).find((variant) => variant?.notes && !String(variant.primary || '').includes(' \u2014 ')) || null;
+}
+
 function suppressNonDefaultBaseProducts(items, v13Rows) {
   return items.map((item) => (item.product && v13NonDefaultBase(item, v13Rows.get(String(item.product.id)))
     ? { ...item, selected: false, selectionReason: NOT_DEFAULT_REASON } : item));
@@ -1945,6 +1950,10 @@ async function buildPlanForService(serviceId, options = {}) {
   // A product the city bans for this visit's window is held back before anything is sized.
   const candidateItems = suppressNonDefaultBaseProducts(holdNorthPortProducts(resolvedItems, v13Rows, resolvedOrdinanceCity), v13Rows);
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
+  // With a base line suppressed, the visit's own notes and goal describe a step the plan does not run: the visit's
+  // scout step (a cadence variant with no product line) speaks instead, so the notes carry no rate or tool wording.
+  const suppressedBase = candidateItems.some((item) => item.role === 'base' && item.selectionReason === NOT_DEFAULT_REASON);
+  const scoutStep = suppressedBase ? scoutStepOf(recipeVisit) : null;
 
   // A rig the visit names (assignment or explicit request) is the visit's;
   // anything else the summary picks is inferred.
@@ -2252,11 +2261,13 @@ async function buildPlanForService(serviceId, options = {}) {
     },
     protocol: {
       structured: structuredProtocol,
-      objective: visit?.notes || null,
+      objective: scoutStep?.notes || visit?.notes || null,
       // A cadence step that states its own goal (July on the 9-visit plan: scout, no tool) carries it; the job card
       // shows it instead of the staged window's goal, which describes the 12x step.
       cadenceBranch: cadenceBranch || null,
-      cadenceGoal: cadenceBranch && visit?.goal ? visit.goal : null,
+      cadenceGoal: scoutStep?.goal || (cadenceBranch && visit?.goal ? visit.goal : null),
+      // A base line whose staged row is not a default (the window kept its earlier form) is not planned.
+      nonDefaultBase: suppressedBase,
       base: planItems.filter((item) => item.role === 'base'),
       conditional: planItems.filter((item) => item.role === 'conditional'),
       blocked: blocks,
@@ -2327,6 +2338,7 @@ module.exports = {
   v13LineState,
   holdNorthPortProducts,
   suppressNonDefaultBaseProducts,
+  NOT_DEFAULT_REASON,
   v13NorthPortHold,
   loadVisitCity,
   v13NorthPortReferenceWarnings,
