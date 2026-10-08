@@ -126,8 +126,9 @@ function sameProperty(pair) {
 // The older tracking shape (2026-07 to 2026-08) has no lastDeliveredAt. A
 // non-empty sentChannels list alone is NOT proof: a suppressed SMS or an
 // idempotent email "success" records a channel with nothing delivered. It
-// counts only when the customer opened the estimate (viewed_at), with
-// attemptedAt as its time.
+// counts only when the customer opened the estimate (viewed_at). Its time
+// is the EARLIER of attemptedAt and viewed_at: a later suppressed resend
+// overwrites attemptedAt, but the first view never moves.
 const SENT_CHANNELS_SQL = (alias) => `(jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
   AND jsonb_array_length(${alias}.estimate_data #> '{deliveryState,sentChannels}') > 0
   AND ${alias}.viewed_at IS NOT NULL)`;
@@ -136,7 +137,8 @@ const SENT_TIME_SQL = (alias) => `(CASE
   WHEN ${DELIVERED_AT_SQL(alias)}
     THEN (${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz
   WHEN ${SENT_CHANNELS_SQL(alias)} AND (${alias}.estimate_data #>> '{deliveryState,attemptedAt}') ~ '^[0-9]{4}-'
-    THEN (${alias}.estimate_data #>> '{deliveryState,attemptedAt}')::timestamptz
+    THEN LEAST((${alias}.estimate_data #>> '{deliveryState,attemptedAt}')::timestamptz, ${alias}.viewed_at)
+  WHEN ${SENT_CHANNELS_SQL(alias)} THEN ${alias}.viewed_at
   ELSE ${alias}.sent_at END)`;
 
 // A real send by staff or a verified flow. A row WITH delivery tracking

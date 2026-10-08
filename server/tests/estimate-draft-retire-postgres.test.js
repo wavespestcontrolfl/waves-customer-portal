@@ -327,6 +327,10 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const c3 = await customer();
     const draft3 = await estimate(c3, { createdAt: minutesAgo(200) });
     await estimate(c3, { status: 'viewed', createdAt: minutesAgo(100), sentAt: minutesAgo(90), viewed_at: minutesAgo(80), data: { deliveryState: { attemptedAt: minutesAgo(90).toISOString(), sentChannels: ['sms'], failedChannels: [] } } });
+    // Viewed 80 min ago, draft edited 40 min ago, then a suppressed resend moved attemptedAt to 5 min ago: kept.
+    const c5 = await customer();
+    const draft5 = await estimate(c5, { createdAt: minutesAgo(200), updatedAt: minutesAgo(40) });
+    await estimate(c5, { status: 'viewed', createdAt: minutesAgo(100), sentAt: minutesAgo(5), viewed_at: minutesAgo(80), data: { deliveryState: { attemptedAt: minutesAgo(5).toISOString(), sentChannels: ['sms'], failedChannels: [] } } });
     // The same shape never opened by the customer may be a suppressed send: not proof.
     const c4 = await customer();
     const draft4 = await estimate(c4, { createdAt: minutesAgo(200) });
@@ -334,6 +338,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
     expect((await row(draft3)).archived_at).not.toBeNull();
     expect((await row(draft4)).archived_at).toBeNull();
+    expect((await row(draft5)).archived_at).toBeNull();
     expect((await row(edited)).archived_at).toBeNull();
     expect((await row(draft2)).archived_at).toBeNull();
   });
