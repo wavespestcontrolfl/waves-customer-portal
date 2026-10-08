@@ -3,6 +3,7 @@
 // customers, is never reported as over a per-lawn cap on a total. Runs on the migrated test
 // database with synthetic rows, removed afterwards.
 const { randomUUID } = require('crypto');
+const { etDateString } = require('../utils/datetime-et');
 const db = require('../models/db');
 const ComplianceService = require('../services/compliance');
 const { fixture } = require('./helpers/lawn-history-db');
@@ -30,7 +31,7 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     made.customers.push(f.customerId);
     const [propertyB] = await db('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
     const properties = [f.property.id, propertyB.id];
-    const today = new Date().toISOString().slice(0, 10);
+    const today = etDateString();
     for (const index of applicationsAt) {
       const [visit] = await db('scheduled_services').insert({ customer_id: f.customerId, property_id: properties[index], scheduled_date: today, service_type: 'Lawn fixture' }).returning('*');
       const [record] = await db('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: today, service_type: 'Lawn fixture' }).returning('*');
@@ -148,7 +149,8 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
     // closeout run, per lawn.
     describe('usage and status of the interval and amount rows', () => {
       const dayStamp = (daysAgo) => {
-        const [y, m, d] = new Date().toISOString().slice(0, 10).split('-').map(Number);
+        // The Eastern calendar day, as getProductLimits reads "today" (not the UTC day).
+        const [y, m, d] = etDateString().split('-').map(Number);
         return new Date(Date.UTC(y, m - 1, d - daysAgo, 12)).toISOString().slice(0, 10);
       };
       // apps: [{ daysAgo, rate, property }] with property 0 or 1 (two properties).
@@ -177,8 +179,8 @@ describeDb('compliance summaries: annual_max_apps is per lawn', () => {
       });
 
       test('the interval looks past New Year: the latest application counts even when it is not this year\'s', async () => {
-        const [y] = new Date().toISOString().slice(0, 4).split('-').map(Number);
-        const daysIntoYear = Math.floor((Date.now() - Date.UTC(y, 0, 1)) / 86400000);
+        const [y, m, d] = etDateString().split('-').map(Number);
+        const daysIntoYear = Math.round((Date.UTC(y, m - 1, d) - Date.UTC(y, 0, 1)) / 86400000);
         const result = await arenaCustomer([{ daysAgo: daysIntoYear + 5, rate: 0.147 }]);
         expect(result.min_interval_days.usage).toBe(daysIntoYear + 5);
         expect(result.min_interval_days.status).toBe(daysIntoYear + 5 < 56 ? 'exceeded' : 'ok');
