@@ -563,6 +563,9 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
   const typed = positiveNumber(row.weedGroup ? weedArea : row.spotSqft);
   return {
     ...row,
+    // The plan's own quantity for a spot row is figured from its estimate of the spot area, so an
+    // untouched one is dropped with that estimate: the amount comes from the tech's area or entry.
+    ...(row.fromPlan ? { totalAmount: '', fromPlan: false } : {}),
     spotRule: true,
     spotArea: typed || null,
     spotExempt: !!weedMix?.noAreaProductIds?.some((id) => sameId(id, row.productId)),
