@@ -103,3 +103,55 @@ describe('enrichFromCall', () => {
     expect(res.applied).toEqual([]);
   });
 });
+
+describe('provider note on internal_notes', () => {
+  // Runs enrichFromCall against a customer with empty notes; returns the note written, or null.
+  async function noteFor({ extraction, legacy = null }) {
+    isEnabled.mockReturnValue(true);
+    const updates = [];
+    db.mockImplementation((table) => {
+      const builder = {
+        where: () => builder,
+        forUpdate: () => builder,
+        first: async () => ({ internal_notes: null }),
+        update: async (u) => { updates.push({ table, u }); return 1; },
+        insert: async () => {},
+      };
+      return builder;
+    });
+    await enrichFromCall({ customerId: 'c1', extraction, legacy, callCreatedAt: '2026-10-08T21:46:00Z' });
+    return updates.find((x) => x.table === 'customers')?.u.internal_notes ?? null;
+  }
+
+  test('a caller leaving a provider reads "Switching from"', async () => {
+    const note = await noteFor({ extraction: { customer_history: { status: 'switching_from_competitor', competitor_name: 'Acme Pest' } } });
+    expect(note).toBe('[call 2026-10-08] Switching from: Acme Pest');
+  });
+
+  test('a provider only used before or compared is named without a switch claim', async () => {
+    const note = await noteFor({ extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } } });
+    expect(note).toBe('[call 2026-10-08] Other provider named: Acme Pest');
+    expect(note).not.toMatch(/Switching from/);
+  });
+
+  test('a V2 null is not refilled from the legacy extraction (home inspector on a realtor call)', async () => {
+    const note = await noteFor({
+      extraction: { customer_history: { status: 'new_customer', competitor_name: null } },
+      legacy: { competitor_name: 'Sample Home Inspections' },
+    });
+    expect(note).toBeNull();
+  });
+
+  test('a V2 history block with the field omitted is not refilled either', async () => {
+    const note = await noteFor({
+      extraction: { customer_history: { status: 'unknown' } },
+      legacy: { competitor_name: 'Sample Home Inspections' },
+    });
+    expect(note).toBeNull();
+  });
+
+  test('no V2 history block: the legacy name is kept, with no switch claim', async () => {
+    const note = await noteFor({ extraction: { property: {} }, legacy: { competitor_name: 'Acme Pest' } });
+    expect(note).toBe('[call 2026-10-08] Other provider named: Acme Pest');
+  });
+});

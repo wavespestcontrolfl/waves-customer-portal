@@ -117,8 +117,18 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
     const colorBits = [];
     if (legacy?.referred_by) colorBits.push(`Referred by: ${legacy.referred_by}`);
     if (Array.isArray(legacy?.pain_points) && legacy.pain_points.length) colorBits.push(`Context: ${legacy.pain_points.slice(0, 3).join('; ')}`);
-    const compName = extraction.customer_history?.competitor_name || legacy?.competitor_name;
-    if (compName) colorBits.push(`Switching from: ${compName}`);
+    // A V2 customer_history block governs the provider: its null (a home
+    // inspector, a realtor — no pest or lawn provider named) must not be
+    // refilled from the legacy extraction, whose JSON has no such contract.
+    // "Switching from" only when the caller is leaving that provider; one they
+    // used years ago or only got a quote from is named without that claim.
+    const history = extraction.customer_history && typeof extraction.customer_history === 'object'
+      ? extraction.customer_history
+      : null;
+    const compName = history ? history.competitor_name : legacy?.competitor_name;
+    if (compName) {
+      colorBits.push(`${history?.status === 'switching_from_competitor' ? 'Switching from' : 'Other provider named'}: ${compName}`);
+    }
     if (colorBits.length) {
       const cust = await db('customers').where({ id: customerId }).first('internal_notes');
       if (cust) {
