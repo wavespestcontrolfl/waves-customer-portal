@@ -200,8 +200,22 @@ describe('withCatalogKeys', () => {
     load(resolver);
     const { bookingServices } = require('../services/scheduling/rain-fit');
     const out = await bookingServices({ bestRows: true, serviceTypes: Array.from({ length: 5000 }, (_, i) => `Service ${i}`) }, {});
-    expect(out).toHaveLength(12);
+    // 12 looked up, plus one entry standing for the rest.
     expect(resolver).toHaveBeenCalledTimes(12);
+    expect(out).toHaveLength(13);
+  });
+
+  test('bookingServices: services past the cap make the booking outdoor, never rain-OK', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    load(resolver);
+    const { bookingServices, rainFitFor: fit } = require('../services/scheduling/rain-fit');
+    // 12 rain-OK inspections, then a 13th line that is never looked up.
+    const names = Array.from({ length: 13 }, (_, i) => `Line ${i}`);
+    const keys = [...Array(12).fill('wdo_inspection'), 'pest_general_quarterly'];
+    expect(fit(await bookingServices({ bestRows: true, serviceTypes: names, serviceKeys: keys }, {}))).toBe('avoid');
+    // At the cap exactly, the classified services decide.
+    expect(fit(await bookingServices({ bestRows: true, serviceTypes: names.slice(0, 12), serviceKeys: keys.slice(0, 12) }, {}))).toBe('prefer');
   });
 
   test('gate on, lookup fails: that name stays bare (word rules)', async () => {
@@ -240,9 +254,12 @@ describe('isWetWindow', () => {
     gappy[2].rainChance = 70;
     expect(isWetWindow(gappy, chip('2026-10-08', '09:00', '10:00'), TODAY)).toBe(true);
   });
-  test('tiers', () => {
-    expect([rainTier('avoid', false), rainTier('avoid', null), rainTier('avoid', true)]).toEqual([0, 1, 2]);
-    expect([rainTier('prefer', true), rainTier('prefer', null), rainTier('prefer', false)]).toEqual([0, 1, 2]);
+  test('tiers: rain moves only what the forecast knows', () => {
+    // avoid: dry 0, unreadable inside the horizon 1, wet 2; past the horizon 0.
+    expect([rainTier('avoid', false), rainTier('avoid', null, true), rainTier('avoid', true)]).toEqual([0, 1, 2]);
+    expect(rainTier('avoid', null, false)).toBe(0);
+    // prefer: wet 0, everything else 1 (dry, unreadable, past the horizon).
+    expect([rainTier('prefer', true), rainTier('prefer', null, true), rainTier('prefer', false), rainTier('prefer', null, false)]).toEqual([0, 1, 1, 1]);
     expect(rainTier('neutral', true)).toBe(0);
   });
 });
@@ -325,6 +342,26 @@ describe('best rows rank by rain fit (GATE_BOOKING_RAIN_RANK)', () => {
     const hourlyRain = jest.fn(async () => hourly);
     await run(['General Pest Control'], hourlyRain);
     expect(hourlyRain).toHaveBeenCalledWith(1, 2, true);
+  });
+
+  // Owner 2026-10-08: a date past the horizon competes on drive alone.
+  test('gate on: a far date with the shorter drive still beats a dry near hour', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const far = '2026-10-12';
+    const mixed = [
+      { date: TODAY, status: 'open', hours: [h(TODAY, '08:00', 30), h(TODAY, '14:00', 2)] },
+      { date: far, status: 'open', hours: [h(far, '09:00', 5)] },
+    ];
+    const rows = (serviceTypes) => buildBestRows(mixed, {
+      pickedDate: '2026-10-20', today: TODAY, lat: 1, lng: 2, serviceTypes,
+      deps: { priceChipsOnRoads: async (chips) => chips, hourlyRain: async () => hourly },
+    });
+    // Outdoor: the far date (drive 5) leads, the dry near hour (30) follows, the wet hour is last.
+    const outdoor = await rows(['General Pest Control']);
+    expect(outdoor.rows.week.map((c) => `${c.date} ${c.start_time}`)).toEqual([`${far} 09:00`, `${TODAY} 08:00`, `${TODAY} 14:00`]);
+    // Rain-OK: the wet hour leads; then drive decides, and the dry near hour is not behind the far date by rule.
+    const rainOk = await rows(['WaveGuard Assessment']);
+    expect(rainOk.rows.week.map((c) => `${c.date} ${c.start_time}`)).toEqual([`${TODAY} 14:00`, `${far} 09:00`, `${TODAY} 08:00`]);
   });
 
   test('gate on, no forecast: drive-only order (fail open)', async () => {

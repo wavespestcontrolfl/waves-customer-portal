@@ -108,6 +108,8 @@ function rainFitFor(serviceTypes) {
 // booking, and each entry costs catalog reads (Codex #6120 r1).
 const MAX_BOOKING_SERVICES = 12;
 const KEY_SHAPE = /^[a-z0-9_]{1,80}$/;
+// Stands for every service past the cap: an identity no list knows, so outdoor.
+const OVERFLOW_SERVICE = Object.freeze({ name: 'More services', serviceKey: 'booking_services_over_cap', findingsType: null });
 
 // The booking's services with their stable identity, for rainFitFor: the
 // catalog key and findings type the completion-profile resolver gives a
@@ -147,17 +149,23 @@ function bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys }, d
   const names = Array.isArray(serviceTypes) ? serviceTypes : [];
   const keys = Array.isArray(serviceKeys) && serviceKeys.length === names.length ? serviceKeys : [];
   const seen = new Map();
+  let overflow = false;
   const add = (name, key) => {
-    if (typeof name !== 'string' || !name.trim() || seen.size >= MAX_BOOKING_SERVICES) return;
+    if (typeof name !== 'string' || !name.trim()) return;
     const serviceKey = typeof key === 'string' && KEY_SHAPE.test(key) ? key : null;
     const id = `${serviceKey || ''}|${name.trim().toLowerCase()}`;
-    if (!seen.has(id)) seen.set(id, { name: name.trim(), serviceKey });
+    if (seen.has(id)) return;
+    if (seen.size >= MAX_BOOKING_SERVICES) { overflow = true; return; }
+    seen.set(id, { name: name.trim(), serviceKey });
   };
   names.forEach((name, i) => add(name, keys[i]));
   // The primary service, unless the list already names it (with its key).
   const primary = typeof serviceType === 'string' ? serviceType.trim().toLowerCase() : '';
   if (primary && ![...seen.values()].some((item) => item.name.toLowerCase() === primary)) add(serviceType, null);
-  return withCatalogKeys([...seen.values()], db);
+  // Services past the cap are not looked up, so they cannot be called
+  // rain-OK: one unclassified entry makes the whole booking outdoor rather
+  // than letting the classified ones speak for it (Codex #6120 r4).
+  return withCatalogKeys([...seen.values()], db).then((services) => (overflow ? [...services, OVERFLOW_SERVICE] : services));
 }
 
 // The booking's fit with the gate applied: 'neutral' (drive-only) while
@@ -201,14 +209,20 @@ function isWetWindow(hourly, { date, start_time: start, end_time: end }, today) 
   return missing ? null : false;
 }
 
-// Sort tier: 0 sorts first. Unknown rain sits between: an 'avoid' booking
-// prefers a known-dry hour over an unknown one, and a 'prefer' booking a
-// known-wet hour over an unknown one.
-function rainTier(fit, wet) {
+// Sort tier: 0 sorts first. Rain moves only what the forecast knows:
+//   avoid:  a wet hour 2; an hour inside the horizon the forecast cannot
+//           read 1 (not promoted to dry); a dry hour 0.
+//   prefer: a wet hour 0; every other hour 1.
+// A date past the horizon is tier 0 for 'avoid' and 1 for 'prefer', the
+// same as a dry hour: it competes on drive alone, as before rain ranking.
+// (Owner 2026-10-08: with "unknown" between dry and wet, every dry hour in
+// the next 3 days outranked all later dates for an outdoor booking, and a
+// rain-OK booking's dry near hours ranked behind dates a week out.)
+function rainTier(fit, wet, inHorizon = true) {
   if (fit === 'neutral') return 0;
-  if (wet == null) return 1;
-  if (fit === 'avoid') return wet ? 2 : 0;
-  return wet ? 0 : 2;
+  if (fit === 'prefer') return wet === true ? 0 : 1;
+  if (wet === true) return 2;
+  return wet == null && inHorizon ? 1 : 0;
 }
 
 // Whether ranking can use a forecast at all: a non-neutral booking with at
@@ -225,7 +239,7 @@ function rankingNeedsForecast(fit, days, today, pickedDate) {
 // when there is no forecast or the booking is neutral.
 function rainTierOf(fit, hourly, today) {
   if (fit === 'neutral' || !hourly) return null;
-  return (chip) => rainTier(fit, isWetWindow(hourly, chip, today));
+  return (chip) => rainTier(fit, isWetWindow(hourly, chip, today), inRainHorizon(chip.date, today));
 }
 
 module.exports = { RAIN_OK_KEYS, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
