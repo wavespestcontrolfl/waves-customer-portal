@@ -1,5 +1,5 @@
 const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
-const { staffEditLockPatch } = require('../services/auto-dispatch/staff-edit-lock');
+const { staffEditLockPatch, autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -13237,7 +13237,8 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         }
       }
     }
-    const updates = {};
+    // A flipped "Keep auto-dispatch off this visit" box is a change in itself.
+    const updates = { ...autoDispatchBoxPatch({ now: autoDispatchLocked, was: autoDispatchLockedWas }) };
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
     // filters, and the catalog's own type/amount as the authority. Without
@@ -14538,7 +14539,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
         // A staff date/window choice locks the occurrence from auto-dispatch
         // (this path writes no reschedule_log row the person-placed guard reads).
-        Object.assign(updates, staffEditLockPatch(occRow, updates, { now: autoDispatchLocked, was: autoDispatchLockedWas }));
+        Object.assign(updates, staffEditLockPatch(occRow, updates));
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)

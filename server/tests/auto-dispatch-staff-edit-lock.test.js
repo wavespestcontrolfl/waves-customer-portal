@@ -52,16 +52,24 @@ describe('staffEditLockPatch (merged by the edit route next to recurringDispatch
     expect(staffEditLockPatch(null, { window_start: '13:00' })).toEqual({});
   });
 
-  test('a box the person flipped wins, in both directions, even with a slot change', () => {
-    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: true, was: false })).toEqual({ auto_dispatch_locked: true });
-    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: false, was: true })).toEqual({ auto_dispatch_locked: false });
-    expect(staffEditLockPatch(before(), { window_start: '13:00', window_end: '14:00' }, { now: false, was: true })).toEqual({ auto_dispatch_locked: false });
+  test('an explicit box flip already in the update wins over the slot-change lock', () => {
+    expect(staffEditLockPatch(before(), { window_start: '13:00', window_end: '14:00', auto_dispatch_locked: false })).toEqual({});
+  });
+});
+
+describe('autoDispatchBoxPatch (merged where the edit route builds its update)', () => {
+  const { autoDispatchBoxPatch } = require('../services/auto-dispatch/staff-edit-lock');
+  test('a box the person flipped is a change, in both directions', () => {
+    expect(autoDispatchBoxPatch({ now: true, was: false })).toEqual({ auto_dispatch_locked: true });
+    expect(autoDispatchBoxPatch({ now: false, was: true })).toEqual({ auto_dispatch_locked: false });
   });
 
-  test('an untouched box says nothing, so a stale form cannot undo a lock', () => {
-    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: false, was: false })).toEqual({});
-    expect(staffEditLockPatch(before(), { window_start: '13:00', window_end: '14:00' }, { now: false, was: false })).toEqual({ auto_dispatch_locked: true });
-    expect(staffEditLockPatch(before(), { notes: 'x' }, { now: 'false', was: true })).toEqual({});
-    expect(staffEditLockPatch(before(), { notes: 'x' }, {})).toEqual({});
+  test('an untouched, missing or malformed box says nothing, so a stale form cannot undo a lock', () => {
+    expect(autoDispatchBoxPatch({ now: false, was: false })).toEqual({});
+    expect(autoDispatchBoxPatch({ now: true, was: true })).toEqual({});
+    expect(autoDispatchBoxPatch({ now: 'false', was: true })).toEqual({});
+    expect(autoDispatchBoxPatch({ now: false })).toEqual({});
+    expect(autoDispatchBoxPatch({})).toEqual({});
+    expect(autoDispatchBoxPatch()).toEqual({});
   });
 });

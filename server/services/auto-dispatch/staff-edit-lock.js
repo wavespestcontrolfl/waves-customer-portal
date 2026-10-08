@@ -41,18 +41,23 @@ function staffEditLocksVisit(before, updates) {
   return !landsWithoutWindow;
 }
 
-// The update patch for the edit route, in the same shape as
-// recurringDispatchDuePatch: the columns to merge into this save.
-// `box` is the edit form's "Keep auto-dispatch off this visit" checkbox: its
-// value now and the value the form opened with. Only a box the person
-// actually flipped is a decision, and it wins (that is how staff clear a
-// lock). An untouched box says nothing, even when the form's copy of the
-// row is stale, so it can never undo a lock another save set. Otherwise a
-// slot change locks.
-function staffEditLockPatch(row, updates, box = {}) {
+// The edit form's "Keep auto-dispatch off this visit" checkbox: its value now
+// and the value the form opened with. Only a box the person actually flipped
+// is a decision (that is how staff clear a lock). An untouched box says
+// nothing, even when the form's copy of the row is stale, so it can never
+// undo a lock another save set. Merged where the route builds `updates`, so
+// a save that only flips the box is a real change.
+function autoDispatchBoxPatch(box = {}) {
   const flipped = typeof box.now === 'boolean' && typeof box.was === 'boolean' && box.now !== box.was;
-  if (row && flipped) return { auto_dispatch_locked: box.now };
+  return flipped ? { auto_dispatch_locked: box.now } : {};
+}
+
+// The slot-change lock for the edit route, in the same shape as
+// recurringDispatchDuePatch: the columns to merge into this save. An explicit
+// box flip already in `updates` wins.
+function staffEditLockPatch(row, updates) {
+  if (updates && updates.auto_dispatch_locked !== undefined) return {};
   return staffEditLocksVisit(row, updates) ? { auto_dispatch_locked: true } : {};
 }
 
-module.exports = { staffEditLocksVisit, staffEditLockPatch };
+module.exports = { staffEditLocksVisit, staffEditLockPatch, autoDispatchBoxPatch };
