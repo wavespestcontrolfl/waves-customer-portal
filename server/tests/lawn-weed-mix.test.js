@@ -28,8 +28,8 @@ const addOns = () => [
 ];
 const svc = { id: 'visit-1', customer_id: 'cust-1', property_id: 'prop-1', scheduled_date: '2026-10-05' };
 const run = (items = addOns()) => buildWeedMix({ addOns: items, svc, structured: { products: [] }, knex: {} });
-const capped = (...ids) => engine.v13VisitLimits.mockResolvedValue({ capped: new Map(ids.map((id) => [id, [{ message: 'limit' }]])), warnings: [], blocks: [] });
-const weather = (temp, extra = {}) => getCurrent.mockResolvedValue({ temp_f: temp, station: 'Test Station', timestamp: new Date().toISOString(), ...extra });
+const capped = (...ids) => engine.v13VisitLimits.mockResolvedValue({ capped: new Map(ids.map((id) => [id, [{ type: 'annual_max_apps', message: 'limit' }]])), warnings: [], blocks: [] });
+const weather = (temp, extra = {}) => getCurrent.mockResolvedValue({ temp_f: temp, station: 'Test Station', timestamp: new Date().toISOString(), observation_time: new Date().toISOString(), ...extra });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -110,6 +110,22 @@ describe('buildWeedMix', () => {
     expect(await run()).toMatchObject({ mode: 'unavailable', productIds: [], groupProductIds: [LEAD, CERT, SURF, REPL] });
   });
 
+  // The real reader fails closed per product: a failed read is a block with no limit type.
+  test('a per-product limit read that failed is not a reached cap: nothing is offered, not the replacement', async () => {
+    engine.v13VisitLimits.mockResolvedValue({ capped: new Map([[LEAD, [{ message: 'Alpha Weed: application limits could not be read.' }]]]), warnings: [], blocks: [] });
+    expect(await run()).toMatchObject({ mode: 'unavailable', productIds: [], note: 'The weed-spray limits could not be checked. Use Other product for what you sprayed.' });
+  });
+
+  test('a failed read on the replacement alone also offers nothing', async () => {
+    engine.v13VisitLimits.mockResolvedValue({ capped: new Map([[REPL, [{ message: 'unread' }]]]), warnings: [], blocks: [] });
+    expect(await run()).toMatchObject({ mode: 'unavailable', productIds: [] });
+  });
+
+  test('a lead held by another limit (a minimum interval) is not handed to the replacement', async () => {
+    engine.v13VisitLimits.mockResolvedValue({ capped: new Map([[LEAD, [{ type: 'min_interval_days', message: 'Alpha Weed: only 5 days from another application (min 14).' }]]]), warnings: [], blocks: [] });
+    expect(await run()).toMatchObject({ mode: 'none', productIds: [], note: 'Alpha Weed: only 5 days from another application (min 14).' });
+  });
+
   describe('surfactant by air temperature', () => {
     test('the limit is 90', () => expect(SURFACTANT_MAX_TEMP_F).toBe(90));
     test.each([[90], [96.4]])('at %s F or hotter it is left out, with its note', async (temp) => {
@@ -141,7 +157,15 @@ describe('buildWeedMix', () => {
       expect(await run()).toMatchObject(unknown);
     });
     test('an unknown temperature: an old cached reading', async () => {
-      weather(70, { timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() });
+      weather(70, { observation_time: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() });
+      expect(await run()).toMatchObject(unknown);
+    });
+    test('an unknown temperature: a fresh fetch that carries an old observation', async () => {
+      weather(70, { timestamp: new Date().toISOString(), observation_time: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString() });
+      expect(await run()).toMatchObject(unknown);
+    });
+    test('an unknown temperature: no observation time on the reading', async () => {
+      weather(70, { observation_time: undefined });
       expect(await run()).toMatchObject(unknown);
     });
     test('an unknown temperature: no answer within the bound', async () => {

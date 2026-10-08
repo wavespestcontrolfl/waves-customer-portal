@@ -61,6 +61,10 @@ function weedMixGroup(items) {
   return { lead, members, replacement };
 }
 
+const LIMITS_UNREAD = 'The weed-spray limits could not be checked. Use Other product for what you sprayed.';
+// application-limits' type for the yearly application count (checkLimits).
+const YEARLY_CAP = 'annual_max_apps';
+
 // The air temperature (F) at the property right now, or null for anything but a fresh number.
 async function currentTempF(svc) {
   let timer;
@@ -72,7 +76,9 @@ async function currentTempF(svc) {
     const current = await Promise.race([require('./fawn-weather').getCurrent(coordinates), timeout]);
     if (!current || current.station === 'unavailable' || current.temp_f == null) return null;
     const temp = Number(current.temp_f);
-    const at = Date.parse(current.timestamp);
+    // The reading's own time: `timestamp` is when the response was normalized, so a stale station
+    // reading would pass on it. No observation time reads as unknown.
+    const at = Date.parse(current.observation_time);
     if (!Number.isFinite(temp) || !Number.isFinite(at) || Date.now() - at > TEMP_MAX_AGE_MS) return null;
     return temp;
   } catch (err) {
@@ -118,9 +124,17 @@ async function buildWeedMix({ addOns, svc, structured, knex }) {
     ({ capped } = await engine.v13VisitLimits(knex, svc, all.map((item) => ({ selected: true, product: item.product })), engine.v13ProtocolRows(structured), {}));
   } catch (err) {
     logger.warn(`[lawn-weed-mix] limits unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return { ...base, mode: 'unavailable', note: 'The weed-spray limits could not be checked. Use Other product for what you sprayed.' };
+    return { ...base, mode: 'unavailable', note: LIMITS_UNREAD };
   }
-  const isCapped = (item) => capped.has(idOf(item));
+  // v13VisitLimits fails closed per product: a read that failed comes back as a block with no
+  // limit type (a real limit always names one). That is not a reached cap, so nothing is offered.
+  const blocksOf = (item) => capped.get(idOf(item)) || [];
+  if (all.some((item) => blocksOf(item).some((block) => !block.type))) return { ...base, mode: 'unavailable', note: LIMITS_UNREAD };
+  const isCapped = (item) => blocksOf(item).length > 0;
+  // Only the yearly count hands the visit to the replacement; any other limit on the lead (a
+  // minimum interval, a blackout) just holds the weed mix, with the limit's own words.
+  const yearlyCapped = (item) => blocksOf(item).some((block) => block.type === YEARLY_CAP);
+  if (isCapped(lead) && !yearlyCapped(lead)) return { ...base, note: blocksOf(lead)[0].message || WEED_LIMIT_REACHED };
   if (isCapped(lead)) {
     if (replacement && !isCapped(replacement)) {
       return {

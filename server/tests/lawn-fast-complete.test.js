@@ -373,7 +373,7 @@ describe('buildLawnFastContext', () => {
       buildPlanForService.mockResolvedValue(PLAN());
       v13VisitLimits.mockReset().mockResolvedValue({ capped: new Map(), warnings: [], blocks: [] });
       resolvePropertyCoordinates.mockReset().mockResolvedValue({ latitude: 27.4, longitude: -82.5 });
-      getCurrent.mockReset().mockResolvedValue({ temp_f: 82, station: 'Test Station', timestamp: new Date().toISOString() });
+      getCurrent.mockReset().mockResolvedValue({ temp_f: 82, station: 'Test Station', timestamp: new Date().toISOString(), observation_time: new Date().toISOString() });
     });
     afterEach(() => { delete process.env.GATE_LAWN_SPOT_RULES; });
 
@@ -399,7 +399,7 @@ describe('buildLawnFastContext', () => {
 
     test('gate on, lead at its cap: the replacement mode, no weather read', async () => {
       process.env.GATE_LAWN_SPOT_RULES = 'true';
-      v13VisitLimits.mockResolvedValue({ capped: new Map([[P_LEAD, [{ message: 'limit' }]]]), warnings: [], blocks: [] });
+      v13VisitLimits.mockResolvedValue({ capped: new Map([[P_LEAD, [{ type: 'annual_max_apps', message: 'limit' }]]]), warnings: [], blocks: [] });
       const ctx = await read();
       expect(ctx.plannedProducts.weedMix).toMatchObject({ mode: 'replacement', productIds: [P_BLIND] });
       expect(getCurrent).not.toHaveBeenCalled();
