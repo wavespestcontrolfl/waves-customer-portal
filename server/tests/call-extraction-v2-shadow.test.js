@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v25');
-    expect(PROMPT_HASH).toMatch(/^v25-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v26');
+    expect(PROMPT_HASH).toMatch(/^v26-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {

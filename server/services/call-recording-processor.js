@@ -12020,18 +12020,21 @@ const CallRecordingProcessor = {
         // — arm them here, from the SAME merged bridgeTriageFlags the card
         // below is about to file from, so shadow mode behaves exactly like
         // enforce mode for this one signal.
-        if (callbackNumberNeededBlocksSms(bridgeTriageFlags) && !(aniCannotTextOnly(v2Ext) && hasCanonicalWriteBlock(bridgeTriageFlags))) {
+        if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {
           v2SmsBlocked = true;
           v2SmsClearedByImpliedConsent = false;
           callbackNumberNeededHoldActive = true;
           // Round 7 P1: persisted NOW — before the bridge files the card
           // below and before any further awaited work.
           // Round 8 P1: a lost claim abandons the pass (nothing written).
-          // Same hard-veto rule as enforce mode: a no-text-only call vetoed for spam / out of area /
-          // do-not-contact gets neither the hold nor the card.
+          // ASYMMETRY with enforce mode (owner-confirmed 2026-10-08): in shadow the legacy V1 pipeline
+          // still runs the customer, booking and SMS even when a V2-only hard veto (spam / out of area /
+          // do-not-contact) applies, so the SMS hold for a valid ani_cannot_text is armed regardless of
+          // the veto (a hold only blocks texts and is always safe). Only the CARD is skipped on a
+          // hard-vetoed call. Enforce mode blocks the canonical writes on a veto, so it arms neither.
           noTextHoldArming = aniCannotText(v2Ext?.caller);
           if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
-          if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(v2Ext, call.customer_id || null, { failClosed: true });
+          if (aniCannotText(v2Ext?.caller) && !hasCanonicalWriteBlock(bridgeTriageFlags)) await fileTextNumberCard(v2Ext, call.customer_id || null, { failClosed: true });
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the

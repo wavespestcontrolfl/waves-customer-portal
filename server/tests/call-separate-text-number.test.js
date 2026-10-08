@@ -174,10 +174,13 @@ describe('schema 1.25.0, normalizer, flat view, prompt, replay watch list', () =
     expect(normalizeExtractionV2(v2({ ani_cannot_text: true, text_phone_e164: 'call me' })).caller.text_phone_e164).toBeNull();
   });
 
-  test('prompt v25 carries the rule and keeps caller_id_disclaimed out of it', () => {
-    expect(PROMPT_VERSION).toBe('v25');
+  test('prompt v26 carries the rule and keeps caller_id_disclaimed out of it', () => {
+    expect(PROMPT_VERSION).toBe('v26');
     const prompt = buildExtractionPrompt('', '', '');
-    expect(prompt).toMatch(/- ani_cannot_text: set true ONLY when the caller says the line they are calling from cannot receive text messages/);
+    expect(prompt).toMatch(/- ani_cannot_text: set true whenever the caller says the line they are calling from cannot receive text messages/);
+    expect(prompt).toMatch(/WITH or WITHOUT naming another number to text/);
+    expect(prompt).not.toMatch(/ani_cannot_text: set true ONLY/);
+    expect(prompt).toMatch(/otherwise null \(ani_cannot_text stays true with no number\)/);
     expect(prompt).toMatch(/do NOT set caller_id_disclaimed for it/);
     expect(prompt).toMatch(/- text_phone_e164: /);
   });
@@ -236,8 +239,15 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(triage).toContain('noTextHold: cardCarriesNoTextHold({ ...item, ...liveCard })');
   });
 
-  test('shadow mode applies the same no-text hard-veto rule as enforce mode', () => {
-    expect(src).toContain('if (callbackNumberNeededBlocksSms(bridgeTriageFlags) && !(aniCannotTextOnly(v2Ext) && hasCanonicalWriteBlock(bridgeTriageFlags))) {');
+  test('shadow mode arms the hold regardless of the V2 hard veto; only the CARD is skipped on a vetoed call (enforce arms neither)', () => {
+    const at = src.indexOf('if (callbackNumberNeededBlocksSms(bridgeTriageFlags)) {');
+    expect(at).toBeGreaterThan(-1);
+    const shadow = src.slice(at, at + 2200);
+    expect(shadow).toContain('ASYMMETRY with enforce mode');
+    expect(shadow).toContain('noTextHoldArming = aniCannotText(v2Ext?.caller);');
+    expect(shadow).toContain('if (aniCannotText(v2Ext?.caller) && !hasCanonicalWriteBlock(bridgeTriageFlags)) await fileTextNumberCard(');
+    // enforce keeps its veto guard on both
+    expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');
   });
 
   test('re-arming the hold bumps the version of the call\'s text_number_differs cards, so an older closed card goes stale', () => {
