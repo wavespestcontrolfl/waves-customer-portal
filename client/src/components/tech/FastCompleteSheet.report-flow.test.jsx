@@ -354,6 +354,8 @@ describe('generate and read', () => {
     await generate();
     // The footer says why; the report card shows no heard line.
     expect(screen.getByText('Couldn’t read where you treated from your note. Write it again to retry.')).toBeTruthy();
+    // A read that failed is not the tech's to fix: the header offers the full form.
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
     expect(screen.queryByTestId('fast-complete-heard')).toBeNull();
     expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Write again' }));

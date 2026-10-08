@@ -1032,11 +1032,13 @@ function reportCompletionBody({
 // inspections), so it needs no product (null: no hold).
 // The send holds per record mode: a lane visit's, a typed visit's, else the
 // pest visit's.
-// A hold whose own words send the tech to the full form.
-const namesFullForm = (reason) => /\bfull form\b/i.test(String(reason || ''));
+// A hold the tech can't clear on the sheet: its own words send the tech to the
+// full form, or it reports a read that failed (every such hold starts
+// "Couldn’t": the note's read of where product went down, the saved trace).
+const needsFullFormHold = (reason) => /\bfull form\b|^couldn[’']t\b/i.test(String(reason || ''));
 
 function reportFlowNeedsFullForm({ generateMissing, completeMissing, report, visitPhotos, trace }) {
-  if (namesFullForm(generateMissing.reason) || namesFullForm(completeMissing.reason)) return true;
+  if (needsFullFormHold(generateMissing.reason) || needsFullFormHold(completeMissing.reason)) return true;
   return !!report.writeError || visitPhotos.failed === true || trace.failed === true;
 }
 
