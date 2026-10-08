@@ -132,13 +132,13 @@ describe('the card is wired like the other name_review cards', () => {
     expect(read('../services/call-routing-gates.js')).toMatch(/name_spelling_differs: 'name_review'/);
   });
 
-  test('version-bound Resolve / Dismiss, not swept by a sibling verdict, not itself a verdict', () => {
+  test('version-bound Resolve / Dismiss, not swept by a sibling verdict, not itself a verdict (main\'s tables)', () => {
     const src = read('../routes/admin-triage.js');
-    expect(src).toMatch(/const VERSION_BOUND_REASON_CODES = new Set\(\[[^\]]*'name_spelling_differs'/s);
-    expect(src).toMatch(/if \(VERSION_BOUND_REASON_CODES\.has\(item\.reason_code\)/);
+    expect(src).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'name_spelling_differs'/s);
     expect(src).toMatch(/\.whereNotIn\('reason_code', \[[^\]]*'name_spelling_differs'/s);
-    expect(src).toMatch(/NOT_A_VERDICT_MESSAGES = \{[^}]*name_spelling_differs/s);
-    expect(src).toMatch(/if \(NOT_A_VERDICT_MESSAGES\[item\.reason_code\]\)/);
+    expect(src).toMatch(/const NOT_A_VERDICT_MESSAGES = \{[^}]*name_spelling_differs/s);
+    // Open to the office: not in the admin-only set.
+    expect(src).not.toMatch(/const ADMIN_ONLY_REASONS = \[[^\]]*name_spelling_differs/s);
   });
 
   test('the card does not survive a recording swap (it is evidence about the transcript)', () => {
@@ -146,9 +146,11 @@ describe('the card is wired like the other name_review cards', () => {
     expect(SUPERSEDE_KEPT_CARD_SQL).not.toMatch(/name_spelling_differs/);
   });
 
-  test('the inbox labels it and shows the spelling, the saved name and the caller turn', () => {
+  test('the inbox labels it, renders it through the evidence lookup, and gives it its own Resolve (no verdict)', () => {
     const src = read('../../client/src/pages/admin/TriageInboxTabV2.jsx');
     expect(src).toMatch(/name_spelling_differs: "Caller spelled their name — check it"/);
-    expect(src).toMatch(/\.\.\.nameSpellingRows\(p\),/);
+    expect(src).toMatch(/const EVIDENCE_BY_REASON = \{[^}]*name_spelling_differs: NameSpellingEvidence/);
+    expect(src).toMatch(/const NO_VERDICT_REASONS = new Set\(\[[^\]]*"name_spelling_differs"/s);
+    expect(src).not.toMatch(/const ADMIN_RESOLVE_REASONS = new Set\(\[[^\]]*name_spelling_differs/s);
   });
 });

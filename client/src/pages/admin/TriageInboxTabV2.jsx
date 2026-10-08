@@ -69,6 +69,7 @@ const REASON_LABELS = {
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
   missing_first_name: "First name missing — get it",
+  family_account_candidates: "Family caller named an account — confirm, then link",
   name_spelling_differs: "Caller spelled their name — check it",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
@@ -100,28 +101,6 @@ function parsePayload(payload) {
 // A card's visit link must stay inside the admin app (navigation only — not an API call).
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Name cards that settle by their own Resolve (not a call verdict). The owed first name is
-// admin-only (it is entered on the customer record); the name-spelling check is open to the office.
-const OWN_RESOLVE_NAME_CARDS = {
-  missing_first_name: { adminOnly: true },
-  name_spelling_differs: { adminOnly: false },
-};
-function canResolveNameCard(reasonCode, isAdmin) {
-  return isAdmin || !OWN_RESOLVE_NAME_CARDS[reasonCode]?.adminOnly;
-}
-
-// Rows for the name-spelling card: what the caller spelled, what the record says, and the
-// caller turn the spelling came from (so the office hears the context, not just the letters).
-function nameSpellingRows(p) {
-  if (!p.spelled_value) return [];
-  return [
-    p.card_text && { label: "Check", value: p.card_text },
-    { label: "Caller spelled", value: p.spelled_value },
-    p.saved_value && { label: "Record says", value: p.saved_value },
-    p.quote && { label: "Caller said", value: `“${p.quote}”` },
-  ].filter(Boolean);
-}
 
 export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null }) {
   const p = parsePayload(payload);
@@ -157,7 +136,6 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
     : [];
   const rows = [
-    ...nameSpellingRows(p),
     firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
@@ -341,6 +319,79 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     </div>
   );
 }
+
+// family_account_candidates (suggest-only): who called, who they named, and each live account with that
+// name. The "Open customer" links reuse the customer_ids shape (the server resolves a merged-away
+// candidate to its survivor in openCustomerIds). Staff confirm, then link the call with the relink action.
+export function FamilyEvidence({ payload, openCustomerIds = null }) {
+  const p = parsePayload(payload);
+  if (!p) return null;
+  const ids = [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds : Array.isArray(p.customer_ids) ? p.customer_ids : [])
+    .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))];
+  const rows = [
+    p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone && `calling from ${p.caller_phone}`, p.caller_callback_phone && `callback ${p.caller_callback_phone}`].filter(Boolean).join(" · ") },
+    p.account_holder_name && { label: "Named", value: p.account_holder_name },
+    ...(Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
+      label: i === 0 ? "Account" : `Account (${i + 1})`,
+      value: [c.name, c.city, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
+    })),
+    p.more_accounts === true && { label: "More", value: "more accounts share this name — search by name" },
+    p.reason && { label: "Next", value: p.reason },
+  ].filter(Boolean);
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">Confirm before linking</div>
+      {rows.map((r) => (
+        <div key={`${r.label}-${r.value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{r.label}:</span> {r.value}
+        </div>
+      ))}
+      {ids.map((id, i) => (
+        <a key={id} href={`/admin/customers?customerId=${id}`} className="inline-block mt-1 mr-3 text-14 font-medium text-zinc-900 underline">
+          {ids.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+// name_spelling_differs (advisory): every spelling the caller gave that differs from the saved name, each
+// with the caller turn it came from. The card text names the first; `also` lists any other field.
+export function NameSpellingEvidence({ payload }) {
+  const p = parsePayload(payload);
+  if (!p?.spelled_value) return null;
+  const all = [p, ...(Array.isArray(p.also) ? p.also : [])].filter((d) => d && d.spelled_value);
+  return (
+    <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
+      <div className="text-11 text-ink-tertiary font-medium mb-1">Check the name</div>
+      {p.card_text && <div className="text-14 text-zinc-900 mb-1">{p.card_text}</div>}
+      {all.map((d) => (
+        <div key={`${d.field}-${d.spelled_value}`} className="text-14 text-ink-secondary">
+          <span className="text-ink-tertiary">{String(d.field || "name").replace(/_/g, " ")}:</span>{" "}
+          caller spelled {d.spelled_value}; record says {d.saved_value}
+          {d.quote ? ` — “${d.quote}”` : ""}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, name_spelling_differs: NameSpellingEvidence };
+
+// Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
+// /verdict on each). The verdict badge is not shown on them.
+const NO_VERDICT_REASONS = new Set([
+  "property_role_confirm", "reschedule_link_promise", "attached_booking_followup_unbooked",
+  "missing_first_name", "family_account_candidates", "on_file_house_number_conflict",
+  "auto_booking_skipped_after_approval", "name_spelling_differs",
+]);
+// …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
+const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);
+// Cards with their own Resolve button: the admin-only ones above, plus the name-spelling check, which the
+// office may Resolve (fix the name on the record if the spelling is theirs, then Resolve or Dismiss).
+const OWN_RESOLVE_REASONS = new Set([...ADMIN_RESOLVE_REASONS, "name_spelling_differs"]);
+const canResolveOwnCard = (reasonCode, isAdmin) => isAdmin || !ADMIN_RESOLVE_REASONS.has(reasonCode);
 
 function reasonLabel(code) {
   if (!code) return "Needs review";
@@ -1006,11 +1057,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // A missing first name is an owed capture, not a call verdict (the server
                 // 400s /verdict on it): enter the name on the customer record, then Resolve
                 // (or Dismiss). The sweep also closes it once the record carries a name.
-                // The name-spelling check (name_spelling_differs) settles the same way: fix the name on the
-                // record if the spelling is theirs, then Resolve (or Dismiss). Office roles may Resolve it.
-                const isFirstNameCard = isTriage && OWN_RESOLVE_NAME_CARDS[item.reason_code] !== undefined;
-                const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
-                const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
+                const isAdminResolveCard = isTriage && OWN_RESOLVE_REASONS.has(item.reason_code);
+                // The cards above (and the conflict / recovery tasks) are not call verdicts: no verdict badge.
+                const isNoVerdictCard = isTriage && NO_VERDICT_REASONS.has(item.reason_code);
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // A street-level address hold settles with its visit (confirm,
                 // correct or cancel it) — the server 409s Accept / Deny / Dismiss
@@ -1054,7 +1103,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
+                          {!isNoVerdictCard && !isRescheduleProposal && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -1127,10 +1176,11 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
                             </Button>
-                          ) : isFirstNameCard ? (
-                            // The owed first name is admin-only (the server 403s a non-admin Resolve): it
-                            // is entered on the customer record, which only an admin edits.
-                            canResolveNameCard(item.reason_code, isAdmin) ? (
+                          ) : isAdminResolveCard ? (
+                            // Admin-only (the server hides the family card from techs and 403s a non-admin
+                            // Resolve): the first name is entered on the customer record, which only an
+                            // admin edits, and the family card is the office's link.
+                            canResolveOwnCard(item.reason_code, isAdmin) ? (
                               <Button
                                 size="sm"
                                 variant="primary"
@@ -1177,7 +1227,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} />}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids })}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">

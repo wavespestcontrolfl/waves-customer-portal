@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
-import TriageInboxTabV2, { ConfirmEvidence } from './TriageInboxTabV2';
+import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence, NameSpellingEvidence } from './TriageInboxTabV2';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 
@@ -317,6 +317,29 @@ describe('missing first-name card', () => {
   });
 });
 
+describe('NameSpellingEvidence', () => {
+  it('shows the card text and EVERY differing spelling with its caller turn', () => {
+    render(<NameSpellingEvidence payload={JSON.stringify({
+      flag: 'name_spelling_differs',
+      field: 'last_name',
+      spelled_value: 'Serov',
+      saved_value: 'Sirov',
+      quote: 'Caller: my last name is Serov, S-E-R-O-V',
+      card_text: 'Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs.',
+      also: [{ field: 'first_name', spelled_value: 'Kwentrell', saved_value: 'Quentrell', quote: 'Caller: first name K-W-E-N-T-R-E-L-L' }],
+    })} />);
+    expect(screen.getByText(/the record says Sirov\. Fix the name/)).toBeInTheDocument();
+    expect(screen.getByText(/last name:/)).toBeInTheDocument();
+    expect(screen.getByText(/caller spelled Serov; record says Sirov/)).toHaveTextContent('my last name is Serov, S-E-R-O-V');
+    expect(screen.getByText(/caller spelled Kwentrell; record says Quentrell/)).toHaveTextContent('first name K-W-E-N-T-R-E-L-L');
+  });
+
+  it('renders nothing without a spelling', () => {
+    const { container } = render(<NameSpellingEvidence payload={{ flag: 'name_spelling_differs' }} />);
+    expect(container.firstChild).toBeNull();
+  });
+});
+
 describe('name-spelling card', () => {
   const card = { ...ordinary, id: 'ns', first_name: 'Quentrell', last_name: 'Sirov', feedback_verdict: null,
     reason_code: 'name_spelling_differs',
@@ -404,6 +427,47 @@ describe('ConfirmEvidence — missing first name', () => {
   });
 });
 
+describe('FamilyEvidence — family account suggestions', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const B = '66666666-7777-4888-8999-000000000000';
+  const payload = {
+    flag: 'family_account_candidates',
+    caller_name: 'Dana Lee',
+    caller_phone: '+19415550101',
+    account_holder_name: 'Angelina Testerson',
+    holder_candidates: [
+      { id: A, name: 'Angelina Testerson', city: 'Sarasota', address_matches: true },
+      { id: B, name: 'Angelina Testerson', city: 'Bradenton', address_matches: false },
+    ],
+    customer_ids: [A, B],
+    reason: 'Confirm, then link the call to this account.',
+  };
+  it('shows the caller, the named holder, each account with the address mark, and an Open customer link per account', () => {
+    render(<FamilyEvidence payload={payload} />);
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101/)).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Sarasota · address matches')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Bradenton')).toBeInTheDocument();
+    expect(screen.getByText(/Confirm, then link the call to this account/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByRole('link', { name: 'Open customer 2' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    expect(screen.queryByText(/Add first name on/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/more accounts share this name/)).not.toBeInTheDocument();
+  });
+  it('shows BOTH numbers when the calling number and the dictated callback differ', () => {
+    render(<FamilyEvidence payload={{ ...payload, caller_callback_phone: '+19415550102' }} />);
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101 · callback \+19415550102/)).toBeInTheDocument();
+  });
+  it('says so when more accounts share the name than the card lists', () => {
+    render(<FamilyEvidence payload={{ ...payload, more_accounts: true }} />);
+    expect(screen.getByText(/more accounts share this name — search by name/)).toBeInTheDocument();
+  });
+  it('opens the server-resolved survivor for a merged candidate', () => {
+    render(<FamilyEvidence payload={payload} openCustomerIds={[B, A]} />);
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{
@@ -475,21 +539,6 @@ describe('ConfirmEvidence — secondary contact', () => {
     expect(row).toHaveTextContent('Joseph Haught');
     expect(row).toHaveTextContent('+19542901693');
     expect(row).not.toHaveTextContent('caller asked they get notifications');
-  });
-
-  it('name_spelling_differs shows the spelling, the saved name and the caller turn', () => {
-    render(<ConfirmEvidence reasonCode="name_spelling_differs" payload={JSON.stringify({
-      flag: 'name_spelling_differs',
-      field: 'last_name',
-      spelled_value: 'Serov',
-      saved_value: 'Sirov',
-      quote: 'Caller: my last name is Serov, S-E-R-O-V',
-      card_text: 'Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs.',
-    })} />);
-    expect(screen.getByText('Check:').parentElement).toHaveTextContent('the record says Sirov');
-    expect(screen.getByText('Caller spelled:').parentElement).toHaveTextContent('Serov');
-    expect(screen.getByText('Record says:').parentElement).toHaveTextContent('Sirov');
-    expect(screen.getByText('Caller said:').parentElement).toHaveTextContent('my last name is Serov, S-E-R-O-V');
   });
 
   it('renders nothing for payloads with no evidence (unchanged behavior)', () => {
