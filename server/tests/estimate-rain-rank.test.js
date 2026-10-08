@@ -85,6 +85,22 @@ describe('slotRainTierOf', () => {
     expect(tierOf(slot(D1, '08:00'))).toBe(0);
   });
 
+  test('a row\'s verified catalog key decides, whatever its label says', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const profiles = require('../services/service-completion-profiles');
+    const spy = jest.spyOn(profiles, 'resolveCompletionProfileForScheduledService')
+      .mockImplementation(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    const opts = { ...IN_AREA, deps: { hourlyRain: async () => HOURLY } };
+    // An inspection sold under a label that reads like spray work: rain-OK, so the wet window is tier 0.
+    const inspection = await slotRainTierOf([slot(D1, '14:00')], { services: [{ label: 'Exterior Spray Package', catalogServiceKey: 'wdo_inspection' }], ...opts });
+    expect(inspection(slot(D1, '14:00'))).toBe(0);
+    expect(spy).toHaveBeenCalledWith({ service_type: 'Exterior Spray Package', service_key_snapshot: 'wdo_inspection' }, undefined);
+    // Spray work sold under a label that reads like an inspection: outdoor, tier 2.
+    const spray = await slotRainTierOf([slot(D1, '14:00')], { services: [{ label: 'Home Inspection Visit', catalogServiceKey: 'pest_general_quarterly' }], ...opts });
+    expect(spray(slot(D1, '14:00'))).toBe(2);
+    spy.mockRestore();
+  });
+
   test('gate on, no slot inside the 3 dates: null, nothing read', async () => {
     process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
     const hourlyRain = jest.fn(async () => HOURLY);

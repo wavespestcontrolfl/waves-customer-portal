@@ -26,7 +26,8 @@ const GATE = 'GATE_CUSTOMER_RAIN_RANK';
 function servicesToClassify({ serviceIdentity, serviceLabels }) {
   const name = serviceIdentity && (serviceIdentity.serviceType || serviceIdentity.catalogServiceKey);
   if (name) return [{ name, serviceKey: serviceIdentity.catalogServiceKey || null }];
-  return (Array.isArray(serviceLabels) ? serviceLabels : []).filter(Boolean);
+  // Labels, or { name, serviceKey } rows from a caller that has the key.
+  return (Array.isArray(serviceLabels) ? serviceLabels : []).filter((item) => (item && item.name) || typeof item === 'string');
 }
 
 /**
@@ -105,9 +106,12 @@ async function slotRainTierOf(slots, { services = [], point = null, today, db, d
   const todayYmd = etDateString(today || new Date());
   const list = Array.isArray(slots) ? slots : [];
   if (!list.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
-  // An estimate's services are profile rows ({ label, service }) or names.
-  const serviceLabels = (Array.isArray(services) ? services : [])
-    .map((service) => (typeof service === 'string' ? service : service?.label || service?.service));
+  // An estimate's services are profile rows or names. A row keeps its
+  // verified catalog key (catalogServiceKey): its display label can differ
+  // from the catalog name, and the key settles the identity ahead of it.
+  const serviceLabels = (Array.isArray(services) ? services : []).map((service) => (typeof service === 'string'
+    ? service
+    : { name: service?.label || service?.service, serviceKey: service?.catalogServiceKey || null }));
   const tierOf = await customerRainTierOf({ serviceLabels, lat: point?.lat, lng: point?.lng, today, db, deps });
   return tierOf ? (slot) => tierOf({ date: slot.date, start_time: slot.windowStart, end_time: slot.windowEnd }) : null;
 }
