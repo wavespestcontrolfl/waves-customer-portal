@@ -52,6 +52,8 @@ describeDb('staff onboarding documents on PostgreSQL', () => {
       for (const table of ['technicians', 'company_documents', 'customer_contracts', 'audit_log']) {
         await setup.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
       }
+      // hire_date (the onboarding due date's authority); idempotent on a full schema.
+      await require('../models/migrations/20260428000007_technicians_payroll_profile').up(db);
       await require('../models/migrations/20260601000009_document_template_library').up(db);
       await require('../models/migrations/20260907000010_controlled_staff_documents').up(db);
       await require('../models/migrations/20261008120000_staff_document_onboarding_required').up(db);
@@ -127,6 +129,18 @@ describeDb('staff onboarding documents on PostgreSQL', () => {
     const hired = new Date((await db('technicians').where({ id: second.id }).first('created_at')).created_at).getTime();
     const effective = new Date(formV1.effective_at).getTime();
     expect(new Date(item.due_at).getTime()).toBe(Math.max(hired, effective) + 7 * 86400000);
+  });
+
+  test('a recorded hire date decides the due date, not the account creation date', async () => {
+    const before = (await db('technicians').where({ id: second.id }).first('hire_date')).hire_date;
+    await db('technicians').where({ id: second.id }).update({ hire_date: '2031-03-10' });
+    try {
+      const item = (await onboarding.onboardingFor(second)).documents.find(entry => entry.kind === 'form');
+      // 2031-03-10 00:00 ET (EDT, UTC-4) + 7 days
+      expect(new Date(item.due_at).toISOString()).toBe('2031-03-17T04:00:00.000Z');
+    } finally {
+      await db('technicians').where({ id: second.id }).update({ hire_date: before });
+    }
   });
 
   test('an admin-only document reaches administrators only; staff are never offered it', async () => {

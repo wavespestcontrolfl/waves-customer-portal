@@ -18,6 +18,8 @@
  */
 const db = require('../models/db');
 const featureGates = require('../config/feature-gates');
+const { dateOnlyString } = require('../utils/date-only');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const VEHICLE_AGREEMENT_KEY = 'staff.vehicle-use-commuting-agreement';
 // Display only: the due date shown for a form or procedure is this many days after the
@@ -62,7 +64,14 @@ function requiredVersions(conn, now) {
     .select('t.id as document_id', 't.name', 't.staff_kind as kind', 't.staff_access', 'v.id as version_id', 'v.effective_at', 'v.content_snapshot');
 }
 
-const displayDue = (person, doc) => new Date(Math.max(new Date(person.created_at).getTime(), new Date(doc.effective_at).getTime()) + DUE_DAYS * 86400000);
+// The payroll hire date (start of that ET day) is the authority; the account's
+// created_at is only the fallback for a profile with no hire date recorded.
+function hiredAt(person) {
+  const day = dateOnlyString(person.hire_date);
+  const parsed = day ? parseETDateTime(`${day}T00:00`) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date(person.created_at);
+}
+const displayDue = (person, doc) => new Date(Math.max(hiredAt(person).getTime(), new Date(doc.effective_at).getTime()) + DUE_DAYS * 86400000);
 
 // Three reads for any number of people: Map(person id -> their required documents, each with
 // when it was signed). A non-admin sees only staff_access 'staff' documents.
@@ -96,7 +105,7 @@ const shown = (item) => ({ document_id: item.document_id, title: item.title, kin
 /** The caller's own outstanding required documents. tech = { id }. A pure read. */
 async function onboardingFor(tech) {
   if (!live()) return empty();
-  const person = await db('technicians').where({ id: tech.id, employment_status: 'active' }).first('id', 'role', 'created_at');
+  const person = await db('technicians').where({ id: tech.id, employment_status: 'active' }).first('id', 'role', 'created_at', 'hire_date');
   const items = person ? (await standingFor(db, [person])).get(person.id) : [];
   const documents = items.filter((item) => !item.done).map(shown);
   return { enabled: true, documents, counts: { outstanding: documents.length, total: items.length } };
@@ -105,7 +114,7 @@ async function onboardingFor(tech) {
 /** Admin: every active technician, signed vs outstanding. A pure read. */
 async function onboardingForTeam() {
   if (!live()) return { enabled: false, technicians: [] };
-  const people = await db('technicians').where({ employment_status: 'active' }).orderBy('name').select('id', 'name', 'role', 'created_at');
+  const people = await db('technicians').where({ employment_status: 'active' }).orderBy('name').select('id', 'name', 'role', 'created_at', 'hire_date');
   const standing = await standingFor(db, people);
   return {
     enabled: true,
