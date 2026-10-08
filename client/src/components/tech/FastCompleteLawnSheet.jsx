@@ -1047,11 +1047,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
-  // The products the Weed spots entry offers are added through that entry only (one tap, one
-  // shared area), so the search does not list them: a row is never in the group and outside it.
+  // The weed group's products come through the Weed spots entry only, so the search lists none of
+  // them: not the ones the tap adds (one shared area), and not the ones the server held back (the
+  // surfactant in the heat, a member or the lead at its yearly limit, the replacement before its
+  // turn). Only when the limits could not be read does the entry send the tech to the search.
   const searchCatalog = useMemo(() => {
-    const offered = ctx.weedMix?.productIds || [];
-    return offered.length ? catalog.filter((product) => !offered.some((id) => sameId(id, product.id))) : catalog;
+    const held = ctx.weedMix && ctx.weedMix.mode !== 'unavailable' ? ctx.weedMix.groupProductIds || [] : [];
+    return held.length ? catalog.filter((product) => !held.some((id) => sameId(id, product.id))) : catalog;
   }, [catalog, ctx.weedMix]);
   const picker = useProductPicker({
     line: 'lawn',
