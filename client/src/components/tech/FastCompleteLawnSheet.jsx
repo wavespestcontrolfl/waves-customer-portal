@@ -563,9 +563,10 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
   const typed = positiveNumber(row.weedGroup ? weedArea : row.spotSqft);
   return {
     ...row,
-    // The plan's own quantity for a spot row is figured from its estimate of the spot area, so an
-    // untouched one is dropped with that estimate: the amount comes from the tech's area or entry.
-    ...(row.fromPlan ? { totalAmount: '', fromPlan: false } : {}),
+    // The plan's own quantity for a spot row is figured from its estimate of the spot area. Only an
+    // amount the tech entered stands (amountEntered, kept in the stored row): anything else in the
+    // box is the plan's, under whatever unit, and is dropped; the tech's area figures the amount.
+    ...(row.amountEntered ? {} : { totalAmount: '', fromPlan: false }),
     spotRule: true,
     spotArea: typed || null,
     spotExempt: !!weedMix?.noAreaProductIds?.some((id) => sameId(id, row.productId)),
@@ -617,6 +618,8 @@ function useProductRows(ctx, catalog) {
         // An amount the tech changed is no longer the plan's, and the plan's
         // rate no longer describes the row.
         ...('totalAmount' in patch || 'amountUnit' in patch ? { fromPlan: false, rateChanged: true } : {}),
+        // The tech typed (or dictated) this row's amount: the one amount a spot-rule row keeps.
+        ...('totalAmount' in patch ? { amountEntered: patch.totalAmount !== '' && patch.totalAmount != null } : {}),
       };
     }));
   }, []);
