@@ -231,11 +231,11 @@ const weedMixOf = (data) => {
 };
 // The standing "Chinch bugs found at the edge of damage" offer (GATE_LAWN_TREATMENT_GUIDE): the add-on its tap opens
 // (null when the limits leave nothing to add) and the line that says why, or null.
-const chinchOf = (data) => {
-  const chinch = data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null;
+const chinchShape = (chinch) => {
   const item = chinch?.item?.productId ? chinch.item : null;
   return item || chinch?.note ? { item, note: chinch.note || null } : null;
 };
+const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
@@ -349,6 +349,17 @@ function freshWeedMix(data) {
   return mix && Array.isArray(mix.productIds) && Array.isArray(mix.groupProductIds) ? mix : undefined;
 }
 
+// The standing chinch tap's decision the guide read fresh (the limits are read again after Confirm):
+// the offer, null when there is nothing to offer or say, or undefined when the answer carries none.
+function freshChinch(data) {
+  return 'chinch' in data ? chinchShape(data.chinch) : undefined;
+}
+
+// The ONE chinch decision the standing entry follows (the card is the guide's own): the guide's
+// fresh one once it has read, so a cap reached since the sheet opened, or a failed fresh limit read,
+// is never overruled by the context's older offer of Arena.
+const effectiveChinch = (guide, ctx) => (guide && guide.chinch !== undefined ? guide.chinch : ctx.chinch);
+
 // The ONE Weed spots decision the sheet follows: the guide's fresh one once it has read, else the
 // context's from when the sheet opened. The weed entry, the weed card, the search exclusion, the
 // surfactant note and the area exemptions all read this, so two offers never show.
@@ -367,7 +378,7 @@ function useTreatmentGuide({ base, request, enabled, assessmentId }) {
     let active = true;
     request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}`)
       .then((data) => {
-        if (active && data?.v === 1 && Array.isArray(data.cards)) setGuide({ assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data) });
+        if (active && data?.v === 1 && Array.isArray(data.cards)) setGuide({ assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data) });
       })
       .catch(() => {});
     return () => { active = false; };
@@ -1208,7 +1219,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} weedMix={weedMix} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1278,7 +1289,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, weedMix, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, weedMix, chinch, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1306,7 +1317,7 @@ function ProductsSection({ ctx, weedMix, rows, products, catalog, lawnSqft, weed
         </React.Fragment>
       ))}
       <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
-      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={ctx.chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );

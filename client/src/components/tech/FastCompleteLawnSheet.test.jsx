@@ -2381,7 +2381,7 @@ describe('suggested from this lawn', () => {
     ...extra,
   });
   // The guide answers the Weed spots decision it read fresh, with the cards.
-  const answer = (cards, weedMix = WEED_MIX) => { guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards, weedMix }; };
+  const answer = (cards, weedMix = WEED_MIX, extra = {}) => { guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards, weedMix, ...extra }; };
   const open = (ctx = guideContext()) => openSheet({ request: makeRequest({ ctx }), props: { catalog: GUIDE_CATALOG } });
   const guideCalls = () => requests.filter((r) => r.path.includes('/lawn-fast/treatment-guide'));
   const suggested = () => screen.findByRole('group', { name: 'Suggested from this lawn' });
@@ -2531,6 +2531,74 @@ describe('suggested from this lawn', () => {
     fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
     expect(within(editorFor('Arena 50 WDG')).getByText(/from the protocol/)).toBeTruthy();
     expect(within(addons()).getByRole('button', { name: 'Chinch bug treatment is on the sheet' }).disabled).toBe(true);
+  });
+
+  describe('the fresh guide is the one chinch decision on screen', () => {
+    // The sheet opened offering Arena; after Confirm the guide re-read the limits.
+    const BIF_NOTE = 'Arena yearly limit reached; Atticus is used in its place.';
+    const BOTH_NOTE = 'The yearly limit is reached for the chinch bug products on this lawn.';
+    const UNREAD_NOTE = 'The chinch bug product limits could not be checked. Use Other product for what you sprayed.';
+    const standing = () => within(addons());
+
+    test('a cap reached after the sheet opened: the standing entry now adds the bifenthrin product, not Arena', async () => {
+      answer([], WEED_MIX, { chinch: { item: BIF_ITEM, note: BIF_NOTE } });
+      await open();
+      expect(standing().getByText('Arena 50 WDG, spot treatment')).toBeTruthy();
+      await analyze();
+      await suggested();
+      expect(standing().getByText(`Atticus Talak 7.9 F, spot treatment · ${BIF_NOTE}`)).toBeTruthy();
+      expect(standing().queryByText('Arena 50 WDG, spot treatment')).toBeNull();
+      fireEvent.click(standing().getByRole('button', { name: 'Add chinch bug treatment' }));
+      expect(screen.getByRole('group', { name: 'Atticus Talak 7.9 F' })).toBeTruthy();
+      expect(screen.queryByRole('group', { name: 'Arena 50 WDG' })).toBeNull();
+    });
+
+    test('both capped on the fresh read: a line only, and the stale context cannot re-offer Arena', async () => {
+      answer([], WEED_MIX, { chinch: { item: null, note: BOTH_NOTE } });
+      await open();
+      await analyze();
+      await suggested();
+      expect(standing().getByText(BOTH_NOTE)).toBeTruthy();
+      expect(standing().queryByRole('button', { name: /chinch bug treatment/i })).toBeNull();
+      expect(standing().queryByText(/Arena 50 WDG/)).toBeNull();
+    });
+
+    test('a fresh limit read that failed offers nothing, and says so', async () => {
+      answer([], WEED_MIX, { chinch: { item: null, note: UNREAD_NOTE } });
+      await open();
+      await analyze();
+      await suggested();
+      expect(standing().getByText(UNREAD_NOTE)).toBeTruthy();
+      expect(standing().queryByRole('button', { name: /chinch bug treatment/i })).toBeNull();
+    });
+
+    test('card dismissed, then the standing entry offers the fresh product (the card and the entry agree)', async () => {
+      answer([CARDS.chinch(BIF_ITEM, BIF_NOTE)], WEED_MIX, { chinch: { item: BIF_ITEM, note: BIF_NOTE } });
+      await open();
+      await analyze();
+      await suggested();
+      expect(standing().queryByText('Chinch bugs found at the edge of damage')).toBeNull();
+      fireEvent.click(within(cardGroup('Insects: check for chinch bugs')).getByRole('button', { name: 'Nothing found' }));
+      expect(standing().getByText(`Atticus Talak 7.9 F, spot treatment · ${BIF_NOTE}`)).toBeTruthy();
+      expect(standing().queryByText(/Arena 50 WDG/)).toBeNull();
+    });
+
+    test('a fresh answer with no chinch product at all (null) removes the standing entry', async () => {
+      answer([], WEED_MIX, { chinch: null });
+      await open();
+      expect(standing().getByText('Chinch bugs found at the edge of damage')).toBeTruthy();
+      await analyze();
+      await suggested();
+      expect(standing().queryByText('Chinch bugs found at the edge of damage')).toBeNull();
+    });
+
+    test('an answer that carries no chinch decision leaves the context\'s in force', async () => {
+      guideAnswer = { enabled: true, v: 1, cards: [] };
+      await open();
+      await analyze();
+      await suggested();
+      expect(standing().getByText('Arena 50 WDG, spot treatment')).toBeTruthy();
+    });
   });
 
   test('the standing entry with both chinch products at their limit is a line only', async () => {

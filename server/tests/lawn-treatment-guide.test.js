@@ -28,7 +28,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   noLimits();
 });
-afterEach(() => { delete process.env.GATE_LAWN_TREATMENT_GUIDE; delete process.env.GATE_LAWN_SPOT_RULES; });
+afterEach(() => { delete process.env.GATE_LAWN_TREATMENT_GUIDE; delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_V13; });
 
 describe('signalsFromAssessment: where the finding levels come from', () => {
   test('a run-backed assessment reads the run\'s severities; weeds from the confirmed score', () => {
@@ -211,6 +211,9 @@ describe('weedOffer: only what the Weed spots entry can add', () => {
   test.each([['none'], ['unavailable']])('mode %s offers nothing', (mode) => {
     expect(weedOffer({ mode, productIds: [P_CEL] }, items)).toBeNull();
   });
+  test('a lone weed herbicide add-on with no group is not a weed offer (no mix: no card)', () => {
+    expect(weedOffer(null, [{ productId: P_CEL, name: 'Celsius WG' }])).toBeNull();
+  });
   test('no mix, nothing to add, or a product the add-ons do not hold: nothing', () => {
     expect(weedOffer(null, items)).toBeNull();
     expect(weedOffer({ mode: 'lead', productIds: [] }, items)).toBeNull();
@@ -376,10 +379,37 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
   });
 });
 
+describe('lawnTreatmentGuideLive: strict, and only with the spot rules and the v13 program', () => {
+  const { lawnTreatmentGuideLive } = require('../config/feature-gates');
+  const set = (guide, spot, v13) => {
+    for (const [name, value] of [['GATE_LAWN_TREATMENT_GUIDE', guide], ['GATE_LAWN_SPOT_RULES', spot], ['GATE_LAWN_V13', v13]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  };
+  test.each([
+    ['true', 'true', 'true', true],
+    ['true', 'true', undefined, false],
+    ['true', undefined, 'true', false],
+    ['true', undefined, undefined, false],
+    [undefined, 'true', 'true', false],
+    ['1', 'true', 'true', false],
+    ['TRUE', 'true', 'true', false],
+    ['true', 'true', '1', false],
+  ])('guide=%s spot rules=%s v13=%s is live: %s', (guide, spot, v13, live) => {
+    set(guide, spot, v13);
+    expect(lawnTreatmentGuideLive()).toBe(live);
+  });
+});
+
 describe('treatmentGuideFreeze: the completion record', () => {
   const card = (extra = {}) => ({ kind: 'fungus', shown: true, checked: 'found', taken: true, productIds: [P_ART], ...extra });
   const freeze = (cards, extra = {}) => treatmentGuideFreeze({ visitType: 'recurring', treatmentGuide: { v: 1, cards, ...extra } });
-  beforeEach(() => { process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true'; });
+  beforeEach(() => { process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true'; });
+
+  test('the v13 program off: nothing is written (fail closed)', () => {
+    delete process.env.GATE_LAWN_V13;
+    expect(freeze([card()])).toEqual({});
+  });
 
   test('gate off, or the spot rules off: nothing is written', () => {
     delete process.env.GATE_LAWN_TREATMENT_GUIDE;

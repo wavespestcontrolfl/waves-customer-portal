@@ -401,15 +401,9 @@ describe('buildLawnFastContext', () => {
     test('gate on, lead at its cap: the replacement mode, no weather read', async () => {
       process.env.GATE_LAWN_SPOT_RULES = 'true';
       v13VisitLimits.mockResolvedValue({ capped: new Map([[P_LEAD, [{ type: 'annual_max_apps', message: 'limit' }]]]), warnings: [], blocks: [] });
-      const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex({ scheduled_services: visit({ scheduled_date: '2026-12-05' }), customers: { billing_mode: null }, products_catalog: [herbicide] }) });
+      const ctx = await read();
       expect(ctx.plannedProducts.weedMix).toMatchObject({ mode: 'replacement', productIds: [P_BLIND] });
       expect(getCurrent).not.toHaveBeenCalled();
-    });
-
-    test('gate on, lead at its cap in October: the replacement is out of season, so nothing is offered', async () => {
-      process.env.GATE_LAWN_SPOT_RULES = 'true';
-      v13VisitLimits.mockResolvedValue({ capped: new Map([[P_LEAD, [{ type: 'annual_max_apps', message: 'limit' }]]]), warnings: [], blocks: [] });
-      expect((await read()).plannedProducts.weedMix).toMatchObject({ mode: 'none', productIds: [], note: 'Test yearly limit reached. Test is used November through March only.' });
     });
 
     describe("a spot add-on carries the program's approved rate (the staged protocol row's)", () => {
@@ -504,7 +498,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
   const P_ARENA = uuid(46);
   const P_TALAK = uuid(47);
   const CONFIRMED = uuid(48);
-  const GATES = ['GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TREATMENT_GUIDE'];
+  const GATES = ['GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13', 'GATE_LAWN_TREATMENT_GUIDE'];
   const row = (id, name, gates, extra = {}) => ({ product: { id, name }, applicationMethod: 'spot_treatment', mix: {}, gates, ...extra });
   const addOns = () => [
     row(P_LEAD, 'Test Lead WG', { annualCounter: 'x' }, { raw: 'Test Lead WG — weed spots' }),
@@ -576,6 +570,15 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const ctx = await context(tablesFor());
       expect('treatmentGuide' in ctx).toBe(false);
       expect('chinch' in ctx.plannedProducts).toBe(false);
+    });
+
+    test('the v13 program off (fail closed): the guide is off even with the guide and spot-rules gates on', async () => {
+      live();
+      delete process.env.GATE_LAWN_V13;
+      const ctx = await context(tablesFor());
+      expect('treatmentGuide' in ctx).toBe(false);
+      expect('chinch' in ctx.plannedProducts).toBe(false);
+      expect(await guide(tablesFor())).toEqual({ ok: false, reason: 'disabled' });
     });
 
     test('gate on: treatmentGuide, and Arena built from the staged row when the month does not hold it', async () => {
@@ -673,14 +676,35 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(await guide(tablesFor())).toEqual({
         ok: true, v: 1, assessmentId: CONFIRMED, cards: [],
         weedMix: expect.objectContaining({ mode: 'lead', productIds: [P_LEAD, P_CERT] }),
+        chinch: expect.objectContaining({ item: expect.objectContaining({ productId: P_ARENA }) }),
       });
+    });
+
+    test('the fresh chinch decision rides the answer: the product, then the fallback, then nothing', async () => {
+      live();
+      const tables = tablesFor();
+      expect((await guide(tables)).chinch).toMatchObject({ item: { productId: P_ARENA }, note: null });
+      capsFor({ [P_ARENA]: YEARLY });
+      expect((await guide(tables)).chinch).toMatchObject({ item: { productId: P_TALAK }, note: expect.stringMatching(/yearly limit reached/) });
+      capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: YEARLY });
+      expect((await guide(tables)).chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.' });
+      // A fresh limit read that fails offers nothing, never Arena.
+      v13VisitLimits.mockRejectedValue(new Error('db down'));
+      expect((await guide(tables)).chinch).toMatchObject({ item: null, note: expect.stringMatching(/could not be checked/) });
+    });
+
+    test('no staged chinch rows, or no plan: the fresh chinch decision is null', async () => {
+      live();
+      expect((await guide(tablesFor({ 'lawn_protocol_products as lpp': [] }))).chinch).toBeNull();
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+      expect((await guide(tablesFor())).chinch).toBeNull();
     });
 
     test('the fresh weed decision and the weed card agree: a cap reached after the sheet opened', async () => {
       live();
       capsFor({ [P_LEAD]: YEARLY });
       const result = await guide(tablesFor({ lawn_assessments: assessmentRow({ weed_suppression: 50 }) }));
-      // In July the replacement is out of season and the lead is capped: no card, and the mix says why.
+      // The lead is capped and the month's data holds no replacement row: no card, and the mix says so.
       expect(result.cards).toEqual([]);
       expect(result.weedMix).toMatchObject({ mode: 'none', productIds: [] });
     });
@@ -691,6 +715,24 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       const weeds = result.cards.find((c) => c.kind === 'weeds');
       expect(weeds.items.map((i) => i.productId)).toEqual(weeds.productIds);
       expect(result.weedMix.productIds).toEqual(weeds.productIds);
+    });
+
+    // After the program data change (February = Celsius only; no Blindside row in May and October)
+    // the same outcomes fall out of the data. The weed card needs the Weed spots group.
+    test('(a) no weed group, only a lone weed herbicide add-on: no weeds card, no weed decision', async () => {
+      live();
+      buildPlanForService.mockResolvedValue(plan([row(P_LEAD, 'Test Lead WG', { annualCounter: 'x' }, { raw: 'Test Lead WG — weed spots' }), row(P_ART, 'Test Artavia', {})]));
+      const result = await guide(tablesFor({ lawn_assessments: assessmentRow({ weed_suppression: 50 }) }));
+      expect(kinds(result)).not.toContain('weeds');
+      expect(result.weedMix).toBeNull();
+    });
+
+    test('(b) the lead at its cap and no replacement row this month: no weeds card, the mix says the yearly limit is reached', async () => {
+      live();
+      capsFor({ [P_LEAD]: YEARLY });
+      const result = await guide(tablesFor({ lawn_assessments: assessmentRow({ weed_suppression: 50 }) }));
+      expect(kinds(result)).not.toContain('weeds');
+      expect(result.weedMix).toMatchObject({ mode: 'none', productIds: [], replacementProductId: null, note: 'The yearly weed-spray limit is reached for this lawn.' });
     });
 
     test('a visit with no plan answers no weed decision', async () => {

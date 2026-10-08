@@ -18,15 +18,9 @@
  * would be added, and any failure (no coordinates, no station, a slow answer, an old reading) is
  * "unknown": the surfactant is then added with a reminder, never silently dropped.
  *
- * Two season rules (owner 2026-10-08), from the visit's month: in February the tap adds the lead
- * ONLY (Certainty's label may delay green-up, and the program's February line is light weed spots
- * only), so the surfactant and its temperature read are skipped; and the replacement is offered
- * November through March only.
- *
  * Reads only. The result rides the tech context (plannedProducts.weedMix); no customer payload.
  */
 const logger = require('./logger');
-const { etCalendarDayOf } = require('../utils/datetime-et');
 
 // Celsius WG label: no adjuvant at 90 F air temperature or above (lawn-program-scope label checks,
 // 2026-10-01).
@@ -37,11 +31,6 @@ const TEMP_TIMEOUT_MS = 2500;
 const TEMP_MAX_AGE_MS = 90 * 60 * 1000;
 
 const REPLACEMENT_TRIGGER = 'celsius_annual_cap_reached';
-
-// owner 2026-10-08; restricted until the full Blindside label is read (heat injury on St. Augustine)
-const REPLACEMENT_MONTHS = new Set([11, 12, 1, 2, 3]);
-const LEAD_ONLY_MONTH = 2;
-const monthOf = (svc) => (svc.scheduled_date ? Number(String(etCalendarDayOf(svc.scheduled_date) || '').slice(5, 7)) || null : null);
 
 const SURFACTANT_LEFT_OUT = `Surfactant left out: it is ${SURFACTANT_MAX_TEMP_F}°F or hotter.`;
 const SURFACTANT_CHECK_NOTE = `Leave the surfactant out if it is ${SURFACTANT_MAX_TEMP_F}°F or hotter.`;
@@ -171,10 +160,6 @@ async function buildWeedMix({ addOns, svc, structured, knex }) {
   const yearlyCapped = (item) => blocksOf(item).some((block) => block.type === YEARLY_CAP);
   if (isCapped(lead) && !yearlyCapped(lead)) return { ...base, note: blocksOf(lead)[0].message || WEED_LIMIT_REACHED };
   if (isCapped(lead)) {
-    // A month the replacement is not used in (or one that cannot be told) offers nothing.
-    if (replacement && !REPLACEMENT_MONTHS.has(monthOf(svc))) {
-      return { ...base, note: `${shortName(lead.product.name)} yearly limit reached. ${shortName(replacement.product.name)} is used November through March only.` };
-    }
     if (replacement && !isCapped(replacement)) {
       return {
         ...base,
@@ -185,11 +170,7 @@ async function buildWeedMix({ addOns, svc, structured, knex }) {
     }
     return { ...base, note: WEED_LIMIT_REACHED };
   }
-  // February: the lead alone, no member and no surfactant (so no temperature read).
-  if (monthOf(svc) === LEAD_ONLY_MONTH) {
-    return { ...base, mode: 'lead', productIds: [idOf(lead)], note: `February: ${shortName(lead.product.name)} only while the lawn greens up.` };
-  }
   return leadMix({ base, lead, members, isCapped, svc });
 }
 
-module.exports = { SURFACTANT_MAX_TEMP_F, REPLACEMENT_MONTHS, weedMixGroup, buildWeedMix, currentTempF };
+module.exports = { SURFACTANT_MAX_TEMP_F, weedMixGroup, buildWeedMix, currentTempF };
