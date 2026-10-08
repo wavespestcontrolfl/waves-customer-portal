@@ -306,6 +306,45 @@ function sameSpokenFirstName(a, b) {
   return !!b && spokenFirstNameVariants(a).includes(b);
 }
 
+// Sound-alike spellings of ONE spoken name ("Erik" / "Eric", "Sara" /
+// "Sarah", "Jon" / "John", "Philip" / "Phillip"): a transcript picks either
+// spelling for the same caller, and the finite list above cannot hold every
+// pair. The key is a fixed set of rewrites, never edit distance — a
+// different sound keeps a different key (Dario / Daria, Aisha / Alisha,
+// Karen / Karin, Julia / Julian). Callers must ALSO require an exact,
+// non-blank surname match: the key alone is weaker than the list.
+// The steps take a normalizeNamePart value and run in this order in BOTH
+// twins below; change one and the other must change with it.
+const SPOKEN_SOUND_KEY_STEPS = [
+  ['chr', 'kr'],                       // Chris / Kris
+  ['ck', 'k'],                         // Nick / Nik
+  ['c(?![eiyh])', 'k'],                // hard c: Eric / Erik, Marc / Mark
+  ['([^cstpgw])h', '$1'],              // silent h: Sarah / Sara, John / Jon
+  ['([b-df-hj-np-tv-z])\\1+', '$1'],   // doubled consonant: Phillip / Philip
+];
+function spokenFirstNameSoundKey(name) {
+  return SPOKEN_SOUND_KEY_STEPS.reduce(
+    (value, [pattern, replacement]) => value.replace(new RegExp(pattern, 'g'), replacement),
+    normalizeNamePart(name),
+  );
+}
+// SQL twin: wraps an expression that is ALREADY the SQL normalizeNamePart
+// (LOWER(REGEXP_REPLACE(col, '[^a-zA-Z0-9]', '', 'g'))). PostgreSQL's
+// regex engine reads the same lookahead and back-reference syntax; only the
+// replacement's group marker differs ($1 → \1). The patterns hold no `?`
+// placeholder-shaped token except the lookahead, so the fragment is built
+// for knex.raw with that `?` escaped.
+function spokenFirstNameSoundKeySql(normalizedExpr) {
+  return SPOKEN_SOUND_KEY_STEPS.reduce(
+    (expr, [pattern, replacement]) => `REGEXP_REPLACE(${expr}, '${pattern.replace(/\?/g, '\\?')}', '${replacement.replace('$1', '\\1')}', 'g')`,
+    normalizedExpr,
+  );
+}
+function sameSoundingFirstName(a, b) {
+  const key = spokenFirstNameSoundKey(a);
+  return !!key && key === spokenFirstNameSoundKey(b);
+}
+
 module.exports = {
   normalizeNamePart,
   normalizeNameFolded,
@@ -313,5 +352,8 @@ module.exports = {
   sameFirstName,
   sameSpokenFirstName,
   spokenFirstNameVariants,
+  spokenFirstNameSoundKey,
+  spokenFirstNameSoundKeySql,
+  sameSoundingFirstName,
   payerNameCorroborates,
 };

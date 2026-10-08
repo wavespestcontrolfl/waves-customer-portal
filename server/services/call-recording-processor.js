@@ -1479,16 +1479,22 @@ function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadC
 
 // Name normalization + nickname-aware first-name matching live in
 // utils/name-match.js (shared with the Zelle notice reconciler, 2026-09-02).
-const { normalizeNamePart, firstNameVariants, sameFirstName, sameSpokenFirstName, spokenFirstNameVariants } = require('../utils/name-match');
+const { normalizeNamePart, firstNameVariants, sameFirstName, sameSpokenFirstName, spokenFirstNameVariants, spokenFirstNameSoundKey, spokenFirstNameSoundKeySql, sameSoundingFirstName } = require('../utils/name-match');
 
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!extractedFirst || !customerFirst) return true;
-  if (!sameSpokenFirstName(extractedFirst, customerFirst)) return false;
-
   const extractedLast = normalizeNamePart(extracted.last_name);
   const customerLast = normalizeNamePart(customer.last_name);
+  if (!sameSpokenFirstName(extractedFirst, customerFirst)) {
+    // Sound-alike spellings ("Erik" / "Eric") are one caller only when the
+    // surname is known on BOTH sides and equal — two leads minted for one
+    // voicemail + callback on 2026-10-07 because the transcripts spelled the
+    // first name two ways. A blank surname keeps the strict list above.
+    return !!extractedLast && extractedLast === customerLast
+      && sameSoundingFirstName(extractedFirst, customerFirst);
+  }
   if (extractedLast && customerLast && extractedLast !== customerLast) return false;
   return true;
 }
@@ -4588,11 +4594,18 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
     const variants = spokenFirstNameVariants(extractedFirst);
     const FIRST_NORM = "LOWER(REGEXP_REPLACE(first_name, '[^a-zA-Z0-9]', '', 'g'))";
     const LAST_NORM = "LOWER(REGEXP_REPLACE(last_name, '[^a-zA-Z0-9]', '', 'g'))";
-    const compatQuery = query.clone().whereRaw(
-      `(first_name IS NULL OR TRIM(first_name) = '' OR ${FIRST_NORM} IN (${variants.map(() => '?').join(', ')}))`,
-      variants,
-    );
     const extractedLast = normalizeNamePart(lastName);
+    // Sound-alike arm ("Erik" / "Eric"): only with an exact surname match on
+    // a non-blank surname, mirroring extractedNameMatchesCustomer. The SQL
+    // key is the twin of spokenFirstNameSoundKey (utils/name-match.js).
+    const soundKey = extractedLast ? spokenFirstNameSoundKey(extractedFirst) : '';
+    const soundArm = soundKey
+      ? ` OR (${LAST_NORM} = ? AND ${spokenFirstNameSoundKeySql(FIRST_NORM)} = ?)`
+      : '';
+    const compatQuery = query.clone().whereRaw(
+      `(first_name IS NULL OR TRIM(first_name) = '' OR ${FIRST_NORM} IN (${variants.map(() => '?').join(', ')})${soundArm})`,
+      soundKey ? [...variants, extractedLast, soundKey] : variants,
+    );
     if (extractedLast) {
       // AND-able formulation of "matched firsts require non-conflicting
       // lasts": a blank first already passed above, and a blank last (or a

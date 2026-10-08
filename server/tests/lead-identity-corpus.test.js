@@ -271,8 +271,8 @@ describe('lead identity corpus — shape and PII hygiene', () => {
   // Compared via namePart, so case/punctuation/hyphen variants of one name
   // ('Sofia'/'SOFIA', 'Okonkwo-Reyes'/'Okonkwo Reyes') are one entry.
   const SYNTHETIC_FIRST_NAMES = new Set([
-    'anneliese', 'beatrix', 'bill', 'bob', 'cornelius', 'dario', 'desmond',
-    'elizabeth', 'emeka', 'gunnar', 'harriet', 'ingrid', 'liz', 'lucian',
+    'anneliese', 'beatrix', 'bill', 'bob', 'cornelius', 'daria', 'dario',
+    'desmond', 'elizabeth', 'emeka', 'eric', 'erik', 'gunnar', 'harriet', 'ingrid', 'liz', 'lucian',
     'marisol', 'meredith', 'michael', 'mike', 'ngozi', 'oluwaseun', 'petra',
     'priyanka', 'ravindra', 'renata', 'robert', 'sofia', 'tobias', 'william',
     'yusuf',
@@ -388,7 +388,7 @@ describe('lead identity corpus — shape and PII hygiene', () => {
     const crypto = require('crypto');
     const canonical = JSON.stringify([corpus.$comment, ...CASES.map((c) => [c.id, c.rationale])]);
     expect(crypto.createHash('sha256').update(canonical).digest('hex'))
-      .toBe('de285bf0153d1e9e009b83ad03f814d32f29403d2e1cffd48cd97349c2911a5f');
+      .toBe('3d688a47e380b80104a3d03b4d776a48ddd08561e18ee174739f2f167ed7b307');
   });
 
   test('no case relies on exactly one usable phone (direction-dependent in production)', () => {
