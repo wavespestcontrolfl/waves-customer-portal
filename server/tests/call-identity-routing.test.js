@@ -74,6 +74,14 @@ describe('finding 5/6 — repeat callers and spoken-name variants', () => {
     expect(sameSpokenFirstName('karen', 'kevin')).toBe(false);
     expect(sameSpokenFirstName('', 'jason')).toBe(false);
   });
+  test.each([['carl', 'karl'], ['eric', 'erik'], ['marc', 'mark'], ['nick', 'nik'], ['sara', 'sarah'], ['philip', 'phillip'], ['nik', 'nicholas'], ['phil', 'phillip']])('a listed spelling pair is one spoken name: %s and %s', (a, b) => {
+    expect(sameSpokenFirstName(a, b)).toBe(true);
+    expect(sameSpokenFirstName(b, a)).toBe(true);
+  });
+  test.each([['carl', 'carla'], ['karl', 'carla'], ['eric', 'erica'], ['mark', 'marcus'], ['sara', 'sahar'], ['nik', 'nikki'], ['kris', 'chris']])('a listed pair does not pull in a different name: %s and %s', (a, b) => {
+    expect(sameSpokenFirstName(a, b)).toBe(false);
+    expect(sameSpokenFirstName(b, a)).toBe(false);
+  });
   test.each([['aisha', 'alisha'], ['sarah', 'sahar'], ['janet', 'jeanet']])('an unlisted spelling difference cannot merge %s and %s', (a, b) => {
     expect(sameSpokenFirstName(a, b)).toBe(false);
     expect(sameSpokenFirstName(b, a)).toBe(false);

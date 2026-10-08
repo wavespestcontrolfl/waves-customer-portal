@@ -293,6 +293,10 @@ function payerNameCorroborates(payerName, customer = {}) {
 const SPOKEN_FIRST_NAME_GROUPS = [
   ['jason', 'jayson'], ['jennifer', 'jenifer'],
   ['debbie', 'debbi'], ['hannah', 'hanna'],
+  // 2026-10-07: a voicemail and a callback minted two leads when the two
+  // transcripts spelled one first name with c and with k.
+  ['carl', 'karl'], ['eric', 'erik'], ['marc', 'mark'], ['nick', 'nik'],
+  ['sara', 'sarah'], ['philip', 'phillip'],
 ].map(group => new Set(group.flatMap(firstNameVariants)));
 function spokenFirstNameVariants(name) {
   if (!name) return [];
