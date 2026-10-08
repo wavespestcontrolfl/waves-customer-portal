@@ -1915,8 +1915,12 @@ router.post('/:token/ask', async (req, res, next) => {
       answer = urgent;
     } else if (require('../config/feature-gates').reportAskAiLive?.() === true) {
       const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
+      // Daily paid-call ceiling per report link and per IP (Codex P1 #5964
+      // r74): past it, the fixed-rule answer above stands.
+      const ipKey = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
       const ai = await answerReportQuestionWithAI({
         question, data, nextAppointment, requiredLines: routed.requiredLines, topic,
+        budgetKeys: [[`report:${String(req.params.token).slice(0, 64)}`, 40], [`ip:${ipKey}`, 120]],
       });
       if (ai) answer = ai.answer;
     }

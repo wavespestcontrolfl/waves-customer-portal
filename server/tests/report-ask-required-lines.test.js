@@ -2555,3 +2555,45 @@ test('a lowercase product variant is not the recorded product (Codex security P2
   expect(ruleAnswerReason(data, [], 'applied', 'was bifen xts applied?')).toBe('unrecorded_product');
   expect(ruleAnswerReason(data, [], 'applied', 'did you use bifen on the lawn?')).toBeNull();
 });
+
+describe('answer screen, Codex round 74', () => {
+  const { takeAskBudget } = require('../services/service-report/report-ask-ai');
+
+  test.each(['How were my plants?', 'What condition was my lawn in?', 'How much precipitation was there?'])('a results or weather synonym keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', question)).toBe('results');
+  });
+
+  test('the paid-call budget stops at each key\'s daily cap and resets after a day', () => {
+    const keys = [['report:budget-test', 3], ['ip:budget-test', 5]];
+    const start = Date.parse('2026-10-08T12:00:00Z');
+    expect([1, 2, 3, 4].map(() => takeAskBudget(keys, start))).toEqual([true, true, true, false]);
+    expect(takeAskBudget(keys, start + 25 * 60 * 60 * 1000)).toBe(true);
+  });
+
+  test('a spent budget keeps the fixed answer with no model call', async () => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    const callModel = jest.fn();
+    const keys = [['report:budget-spent', 0]];
+    expect(await answerReportQuestionWithAI({ question: 'What did you do on this visit?', data, requiredLines: [], budgetKeys: keys }, { callModel })).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
+  });
+
+  test('a verbal passphrase sentence leaves whole', () => {
+    const facts = buildReportAskFacts({ data: lawnData({ customerConcern: 'At the front gate, tell the guard blue moon. Weeds by the fence.', reportV2: { aftercare: {} } }) });
+    expect(facts.customer_concern).toBe('[access details removed] Weeds by the fence.');
+  });
+
+  const data = lawnData({ serviceDisplayName: 'Lawn Care', applications: [{ product: { name: 'Bifen I/T' }, applicationArea: 'Outside' }], reportV2: { aftercare: {} } });
+  const question = 'What was applied?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test('a variant of a recorded product in the answer is another product', () => {
+    expect(ask('We applied bifen xts outside.')).toBe('unrecorded_product');
+    expect(ask('We applied Bifen I/T outside.')).toBeNull();
+  });
+
+  test.each(['The service type is not listed on this report.', 'The report does not specify the service type.'])('a recorded service may not be called missing: %s', (answer) => {
+    expect(ask(answer)).toBe('service_kind');
+  });
+});

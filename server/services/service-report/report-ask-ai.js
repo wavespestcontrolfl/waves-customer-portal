@@ -406,8 +406,8 @@ const ACCESS_VERB_DEVICE = /\b((?:unlock|open|get\s+(?:into|through|past)|access
 // Any word order: a sentence that names an entry device and an access action
 // is access instructions and leaves whole, so no ordering can carry a
 // credential out (Codex P1 #5964 r69).
-const ACCESS_DEVICE = /\b(?:gates?|doors?|locks?|padlocks?|keypads?|key\s*pads?|garages?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|entry|entrances?)\b/i;
-const ACCESS_ACTION = /\b(?:enter|entering|type|typing|use|using|punch\w*|key\s+in|press|dial|input|codes?|combo|combination|password|passcode|pin|opens?\s+with|unlocks?\s+with|opened\s+with|word)\b/i;
+const ACCESS_DEVICE = /\b(?:guards?|gatehouse|guard\s*house|security|front\s+desk|concierge|gates?|doors?|locks?|padlocks?|keypads?|key\s*pads?|garages?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|entry|entrances?)\b/i;
+const ACCESS_ACTION = /\b(?:tell|say|saying|give|mention|ask\s+for|show|enter|entering|type|typing|use|using|punch\w*|key\s+in|press|dial|input|codes?|combo|combination|password|passcode|pin|opens?\s+with|unlocks?\s+with|opened\s+with|word)\b/i;
 function maskAccessSentences(text) {
   // Run last. A sentence about an entry device and an access action leaves
   // whole unless an earlier pass already masked its value: a credential can
@@ -1603,10 +1603,25 @@ function namesUnrecordedObject(text, known) {
 const PRODUCT_NOUN = '(?:product|treatment|chemical|pesticide|insecticide|herbicide|fungicide|fertilizer|bait|material|formula|brand)s?';
 const PRODUCT_IDENTITY_RE = new RegExp(`\\b${PRODUCT_NOUN}\\s+(?:used\\s+|applied\\s+|today\\s+)?(?:was|is|were|are|called|named)\\s+(?:called\\s+|named\\s+)?([A-Z][\\w-]*(?:\\s+[A-Z0-9][\\w-]*)*)|\\b([A-Z][\\w-]*(?:\\s+[A-Z0-9][\\w-]*)*)\\s+(?:was|is|were|are)\\s+(?:the|our|your)\\s+(?:\\w+\\s+)?${PRODUCT_NOUN}\\b`, 'g');
 
+function namesVariantOf(text, product) {
+  const tokens = normalizeKey(product.name).split(' ').filter(Boolean);
+  const first = tokens[0] || '';
+  if (first.length < 4) return false;
+  return [...text.matchAll(new RegExp(`\\b${first}\\s+([A-Za-z0-9/+-]+)`, 'gi'))].some((m) => {
+    const token = m[1];
+    const coded = /[\d/+]/.test(token) || (token.length <= 4 && !NOT_A_VARIANT.has(token.toLowerCase()))
+      || /^(?:pro|plus|max|gold|select|ultra|xtra|extra|granular|liquid|concentrate)$/i.test(token);
+    return coded && !normalizeKey(token).split(' ').every((part) => tokens.includes(part));
+  });
+}
+
 function namesUnrecordedProduct(text, { facts }) {
   const known = new Set(asArray(facts?.products).flatMap((product) => normalizeKey(product.name).split(' ')));
   for (const word of normalizeKey(facts?.technician_first_name || '').split(' ')) known.add(word);
   if (namesUnrecordedObject(matchForm(text), known)) return true;
+  // A variant after a recorded product's first word names another product,
+  // in any case: "We applied bifen xts outside" (Codex P1 #5964 r74).
+  if (asArray(facts?.products).some((product) => namesVariantOf(matchForm(text), product))) return true;
   // "The product was Roundup", "Roundup was the product" (Codex P1 #5964 r55).
   const identity = [...matchForm(text).matchAll(PRODUCT_IDENTITY_RE)].map((m) => m[1] || m[2]);
   if (identity.some((name) => normalizeKey(name).split(' ').some((word) => word && !known.has(word) && !SENTENCE_WORDS.has(word)))) return true;
@@ -1989,7 +2004,11 @@ function contradictsTrend(text, facts) {
 const SERVICE_KINDS = [['pest', /\bpest\b/], ['lawn', /\b(?:lawn|turf|grass)\b/], ['tree', /\b(?:tree|shrub|palm)s?\b/], ['termite', /\btermites?\b/], ['mosquito', /\bmosquito(?:es)?\b/], ['rodent', /\b(?:rodent|rat|mouse|mice)s?\b/]];
 const SERVICE_NOUN = /\b(?:service|visit|treatment|program|plan|appointment)\b/i;
 const THIS_VISIT = /\b(?:this|that|it|today['’]?s?|your|the)\b/i;
+// A recorded service may not be called missing: "The service type is not
+// listed on this report" (Codex P1 #5964 r74).
+const SERVICE_MISSING_RE = /\bservice(?:\s+(?:type|name|kind))?\s+(?:is|was|isn['’]t|wasn['’]t)\s+(?:not\s+)?(?:listed|named|recorded|shown|specified|stated|known|on\s+(?:the|this)\s+report)|\b(?:does|do|did)\s*n['’]?o?t\s+(?:name|list|show|specify|state|say|mention|record)\b[^.?!]*\b(?:service|what\s+(?:kind|type))\b|\bno\s+service\s+(?:type\s+)?(?:is\s+|was\s+)?(?:listed|named|recorded|shown)\b/i;
 function contradictsServiceKind(text, facts, data) {
+  if (facts?.service && SERVICE_MISSING_RE.test(matchForm(text)) && /\b(?:not|n['’]t|no)\b/i.test(text)) return true;
   const recorded = `${facts?.service || ''} ${data?.serviceLine || ''}`.toLowerCase().replace(/_/g, ' ');
   if (!recorded.trim()) return false;
   return clausesOf(text).some((clause) => {
@@ -2486,7 +2505,7 @@ const LAWN_PROGRESS_QUESTION = /\b(?:chang\w*|progress\w*|improv\w*|since|trend\
 const LAWN_SIZE_QUESTION = /\bhow\s+(?:big|large|much\s+(?:lawn|turf|grass|yard))\b|\b(?:lawn|turf|yard|property)\s+size\b|\bsize\s+of\s+(?:my|the|our)\b|\bsquare\s+f(?:ee|oo)t(?:age)?\b|\bsq\.?\s*ft\b|\bacres?\b|\bacreage\b/i;
 const PRODUCT_LOCATION_QUESTION = /\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
 // Results, pest pressure and weather asked in any words (owner 2026-10-08).
-const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|how\s+(?:is|are|was|did|does|do)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?)\b/i;
+const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|precipitation|conditions?|shape|status|outlook|how\s+(?:is|are|was|were|did|does|do|has|have)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?)\b/i;
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
@@ -2594,10 +2613,46 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
  * text is never logged. `requiredLines` is the rule router's list of
  * { text, source } entries (report-assistant.js requiredCollector).
  */
+// Paid-call budget (Codex P1 #5964 r74): every model answer is a paid call, and
+// the route's limiter alone allows 20 a minute for one report link. A caller
+// passes budget keys ([key, daily cap]); once any key is spent, the question
+// keeps the fixed-rule answer. Only calls that reach the model are counted.
+// In memory, per process: a restart or a second instance resets or splits the
+// count, so the caps are a spend ceiling, not an exact quota.
+const ASK_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
+const askBudgetUse = new Map();
+function takeAskBudget(keys, nowMs = Date.now()) {
+  const live = asArray(keys).filter((entry) => Array.isArray(entry) && entry[0]);
+  for (const [key] of live) {
+    const row = askBudgetUse.get(key);
+    if (row && nowMs - row.start >= ASK_BUDGET_WINDOW_MS) askBudgetUse.delete(key);
+  }
+  if (live.some(([key, cap]) => (askBudgetUse.get(key)?.count || 0) >= cap)) return false;
+  for (const [key] of live) {
+    const row = askBudgetUse.get(key) || { start: nowMs, count: 0 };
+    row.count += 1;
+    askBudgetUse.set(key, row);
+  }
+  // Bound the map: drop expired rows when it grows.
+  if (askBudgetUse.size > 5000) {
+    for (const [key, row] of askBudgetUse) if (nowMs - row.start >= ASK_BUDGET_WINDOW_MS) askBudgetUse.delete(key);
+  }
+  return true;
+}
+
+function withAskBudget(callModel, budgetKeys) {
+  return async (payload, options) => {
+    if (!budgetKeys || takeAskBudget(budgetKeys)) return callModel(payload, options);
+    logger.info('[report-ask] daily paid-call budget spent; using fixed-rule answer');
+    return { ok: false, reason: 'daily_budget' };
+  };
+}
+
 async function answerReportQuestionWithAI({
-  question, data, nextAppointment, requiredLines: rawRequiredLines, topic = null, now,
+  question, data, nextAppointment, requiredLines: rawRequiredLines, topic = null, now, budgetKeys,
 } = {}, deps = {}) {
-  const callModel = deps.callModel || defaultCallModel;
+  // The budget is taken only when a call is about to reach the model.
+  const callModel = withAskBudget(deps.callModel || defaultCallModel, budgetKeys);
   // Before any fact sheet or model call: a symptom or exposure gets the fixed
   // answer, never a generated one.
   const urgent = medicalExposureAnswer(question);
@@ -2673,6 +2728,7 @@ async function answerReportQuestionWithAI({
 }
 
 module.exports = {
+  takeAskBudget,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
   buildReportAskFacts,
