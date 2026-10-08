@@ -204,6 +204,8 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const lead = await mockPg('leads').where({ id: leadId }).first();
     expect(lead.estimate_id).toBe(sent);
     expect(lead.status).toBe('estimate_sent');
+    // A legacy sent row (no channel record) is still a real send: the lead qualifies.
+    expect(lead.is_qualified).toBe(true);
   });
 
   test('no replay when a lead already owns the sent estimate', async () => {

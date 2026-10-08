@@ -26,6 +26,7 @@ const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_E
 
 const RETIRE_BATCH_LIMIT = 200;
 const RETIRE_CLOSER = 'estimate-draft-retire';
+const DELIVERED_CHANNEL_UNKNOWN = 'delivered_channel_unknown';
 // A draft younger than this is still being finished by its creator: the
 // estimator engine posts its "draft ready" bell and parks clarifications
 // after the insert, and the lead webhook's background triage rewrites the
@@ -166,22 +167,26 @@ async function detachLeads(trx, { pair, draftId, leads, sentRow }) {
   if (await trx('leads').where({ estimate_id: pair.sent_id }).first('id')) return;
   const link = require('./lead-estimate-link');
   const replay = { estimateId: pair.sent_id, performedBy: RETIRE_CLOSER, database: trx, originatingNotAfter: pair.sent_at };
-  // Only the channels the delivery record proves count for the contact-wide
-  // answered stamp; with no record, none (an empty list stamps nothing)
-  // rather than assuming both.
-  const recorded = sentRow.sent_channels;
-  const sentChannels = Array.isArray(recorded) ? recorded.filter((ch) => ch === 'sms' || ch === 'email') : [];
+  // The send is real (SENT_EVIDENCE_SQL), so the rescued lead qualifies. Only
+  // the channels the delivery record proves count for the contact-wide
+  // answered stamp: with none recorded (a legacy row, or a later failed
+  // resend cleared them) the list names no sms/email channel, so no other
+  // lead is stamped, yet it is not the EMPTY list that means "nothing was
+  // delivered" and would skip qualification.
+  const recorded = (Array.isArray(sentRow.sent_channels) ? sentRow.sent_channels : []).filter((ch) => ch === 'sms' || ch === 'email');
+  const sentChannels = recorded.length ? recorded : [DELIVERED_CHANNEL_UNKNOWN];
   await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at, sentChannels });
   if (sentRow.status === 'viewed') await link.markLinkedLeadEstimateViewed(replay);
 }
 
 // Archive one draft, clear a lead link to it, and mark its open "draft
-// ready" bells done, in one transaction. The sent estimate is locked FOR
-// UPDATE NOWAIT first: a revise (address move), a linkage invalidation or a
-// Pipeline link of it (which takes FOR SHARE) either committed before this
-// check or cannot proceed until the archive commits, so nothing changes its
-// owner between the owner check and the send replay below. A busy row skips
-// this draft for the tick.
+// ready" bells done, in one transaction. Lock order: the draft, then its
+// leads, then the sent estimate, each NOWAIT (a busy row skips this draft for
+// the tick). Holding the sent estimate FOR UPDATE means a revise (address
+// move), a linkage invalidation or a Pipeline link of it (which takes FOR
+// SHARE) either committed before the checks below or cannot proceed until
+// this commits, so nothing changes its owner between the owner check and the
+// send replay.
 async function retireOneDraft(trx, pair) {
   // Lead first, then estimates — the order createOrReuseAdminEstimate takes
   // (lead, then its estimate), so a staff save of the same lead cannot
