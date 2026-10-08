@@ -271,7 +271,7 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
 
   test('enforce: armed right where the flag is raised — before the route decision insert and before any card insert', () => {
     const gate = src.indexOf('if (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED) {');
-    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(finalFlags)) {', gate);
+    const decide = src.indexOf('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {', gate);
     const decideEnd = src.indexOf('\n          }\n', decide);
     const block = src.slice(decide, decideEnd);
     const flip = block.indexOf('callbackNumberNeededHoldActive = true;');

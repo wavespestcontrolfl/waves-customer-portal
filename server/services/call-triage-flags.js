@@ -3294,6 +3294,7 @@ module.exports = {
   callbackNumberNeededBlocksSms,
   callerIdDisclaimedNeedsCallback,
   aniCannotText,
+  aniCannotTextOnly,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

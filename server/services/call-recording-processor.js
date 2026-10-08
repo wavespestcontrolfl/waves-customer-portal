@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, isDialablePhone } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, isDialablePhone } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -958,7 +958,7 @@ const CONFIRM_REASON_TEXT = {
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
-  text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are right; texts to the calling line resume",
+  text_number_differs: "caller said the line they called from can't get texts — texts go to the number they gave (or ask for one), calls stay on the line they called from; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Dismiss if the line can get texts.",
   callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
@@ -11000,8 +11000,9 @@ const CallRecordingProcessor = {
           extraPayload: {
             ani_phone: aniPhone,
             text_phone: spokenText,
-            customer_phone: onFile?.phone || null,
-            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are right; texts to the calling line resume`,
+            // A snapshot only: the inbox shows the customer's LIVE phone (list query); this is the account phone at the time of the call.
+            customer_phone_at_call: onFile?.phone || null,
+            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Dismiss if the line can get texts.`,
           },
         });
         const insert = db('triage_items').insert(item)
@@ -11639,7 +11640,12 @@ const CallRecordingProcessor = {
           // callback_number_needed card) — never automatic. Pure decision
           // in call-triage-flags.js so it's unit-testable independent of
           // this pass's DB/LLM calls.
-          if (callbackNumberNeededBlocksSms(finalFlags)) {
+          // A hard-vetoed call (spam / out of area / do-not-contact) writes nothing canonical and its
+          // customer is never texted, so a no-text line gets neither the hold nor the card there
+          // (a hold needs the card that releases it). A caller who also disclaimed the number
+          // keeps the original behavior.
+          const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);
+          if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {
             v2SmsBlocked = true;
             v2SmsClearedByImpliedConsent = false;
             // P1-C: this hold must outlive the confirmation send — the

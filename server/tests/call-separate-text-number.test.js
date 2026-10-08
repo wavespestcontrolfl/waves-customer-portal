@@ -74,6 +74,17 @@ describe('hold: texts to a no-text line ride the callback_number_needed hold', (
   });
 });
 
+describe('hard veto', () => {
+  test('a no-text-only call with a canonical-write veto flag is vetoed; one that also disclaimed the number is not', () => {
+    const { aniCannotTextOnly, hasCanonicalWriteBlock } = require('../services/call-triage-flags');
+    for (const veto of ['spam_or_wrong_number', 'out_of_service_area', 'do_not_contact_requested']) {
+      expect(aniCannotTextOnly(v2({ ani_cannot_text: true })) && hasCanonicalWriteBlock([veto, 'callback_number_needed'])).toBe(true);
+    }
+    expect(aniCannotTextOnly(v2({ ani_cannot_text: true })) && hasCanonicalWriteBlock(['callback_number_needed'])).toBe(false);
+    expect(aniCannotTextOnly(v2({ ani_cannot_text: true, caller_id_disclaimed: true }))).toBe(false);
+  });
+});
+
 describe('not "not my number": every caller_id_disclaimed consumer ignores the new field', () => {
   const relay = { ani_cannot_text: true, text_phone_e164: TEXT, caller_id_disclaimed: null };
   test('the disclaimed predicate, the crm_notes stamp and the CSR coaching note stay silent', () => {
@@ -145,9 +156,14 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(at).toBeGreaterThan(-1);
     const section = src.slice(at, at + 1800);
     expect(section).not.toContain('!createdCustomerFromCall');
-    for (const key of ['ani_phone:', 'text_phone:', 'customer_phone:', 'note: `caller said this line cannot get texts', 'Resolve when the phones are right; texts to the calling line resume']) expect(section).toContain(key);
+    for (const key of ['ani_phone:', 'text_phone:', 'customer_phone_at_call:', 'note: `caller said this line cannot get texts', 'Resolve when the phones are updated — the calling line stays blocked for texts. Dismiss if the line can get texts.']) expect(section).toContain(key);
     expect(section).toContain('isDialablePhone(callerForText?.text_phone_e164)');
     expect(section).not.toMatch(/db\('customers'\)[^;]*\.update\(/);
+  });
+
+  test('a hard-vetoed no-text call gets neither the hold nor the card (the veto the pipeline applies)', () => {
+    expect(src).toContain('const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);');
+    expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');
   });
 
   test('the card is filed at BOTH hold decision points (before any hard-veto exit) and refreshed after the customer is known', () => {
@@ -174,9 +190,12 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     const gates = fs.readFileSync(require.resolve('../services/call-routing-gates'), 'utf8');
     expect(gates).toMatch(/text_number_differs: 'customer_field_conflict'/);
     expect(src).toMatch(/text_number_differs: "caller said the line they called from can't get texts/);
+    expect(src).not.toContain('texts to the calling line resume');
     const client = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toContain('text_number_differs: "Caller\'s line can\'t get texts — fix the phones"');
+    expect(client).toContain('livePhone={item.customer_phone}');
     const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
-    expect(triage).toContain("...(item.reason_code !== 'text_number_differs' ? ['text_number_differs'] : [])");
+    expect(triage).toContain("          'text_number_differs',\n          ...(item.reason_code !== 'auto_booking_skipped_after_approval'");
+    expect(triage).toContain('text_number_differs: \'This card is a no-text line');
   });
 });

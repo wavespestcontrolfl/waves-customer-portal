@@ -101,7 +101,27 @@ function parsePayload(payload) {
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null }) {
+const RESOLVE_ONLY_LABELS = {
+  attached_booking_followup_unbooked: "Follow-up booked",
+  text_number_differs: "Phones are updated",
+};
+
+// text_number_differs (no-text line): the calling line, the number the caller gave (nothing is sent
+// to it), and the account phone. The account phone is the customer's LIVE phone from the list query,
+// never the snapshot taken at the call; the snapshot shows only when it differs.
+function textNumberRows(p, livePhone) {
+  if (p.ani_phone === undefined) return [];
+  const atCall = p.customer_phone_at_call && p.customer_phone_at_call !== livePhone ? p.customer_phone_at_call : null;
+  return [
+    { label: "What the caller said", value: p.note },
+    { label: "Called from (calls)", value: p.ani_phone || "unknown" },
+    { label: "Texts go to", value: p.text_phone || "no number given — ask for one" },
+    { label: "Account phone now", value: livePhone || "no primary phone" },
+    atCall && { label: "Account phone at the call", value: atCall },
+  ];
+}
+
+export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null, livePhone }) {
   const p = parsePayload(payload);
   if (!p) return null;
   // A missing-first-name task is owed on EVERY customer it lists (payload.customer_ids; a
@@ -149,12 +169,7 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
       value: p.candidates.map((c) => c.name || `Customer ${String(c.id).slice(0, 8)}`).join(" · ")
         + (Number(p.share_count) > p.candidates.length ? ` (+${Number(p.share_count) - p.candidates.length} more)` : ""),
     },
-    // text_number_differs: the caller's line cannot get texts. Nothing is sent to the number
-    // they gave; the office updates the phones from these rows.
-    p.note && p.ani_phone !== undefined && { label: "What the caller said", value: p.note },
-    p.ani_phone && { label: "Called from (calls)", value: p.ani_phone },
-    p.ani_phone !== undefined && { label: "Texts go to", value: p.text_phone || "no number given — ask for one" },
-    p.ani_phone !== undefined && { label: "Account phone now", value: p.customer_phone || "no primary phone" },
+    ...textNumberRows(p, livePhone),
     // caller_phone_not_on_file: the mismatching caller number IS the card —
     // the header prefers the linked customer's on-file phone, so without
     // these rows the office sees the on-file identity but never the number
@@ -982,7 +997,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // An owed follow-up visit (the primary booked; visit 2 is
                 // booked by hand) — settled by its own Resolve once booked,
                 // never by a call verdict (the server 400s /verdict on it).
-                const isFollowUpCard = isTriage && item.reason_code === "attached_booking_followup_unbooked";
+                // Both are settled by their own Resolve (never a call verdict; the server 400s /verdict).
+                // A no-text line's Resolve keeps the calling line blocked for texts; Dismiss releases it.
+                const isFollowUpCard = isTriage && Object.hasOwn(RESOLVE_ONLY_LABELS, item.reason_code);
                 // Accepting a house-number conflict stores a calibration
                 // `deny · address` on route_feedback; neither the settled
                 // conflict nor the recovery task it files is judged by it.
@@ -990,9 +1007,6 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // 400s /verdict on it): enter the name on the customer record, then Resolve
                 // (or Dismiss). The sweep also closes it once the record carries a name.
                 const isFirstNameCard = isTriage && item.reason_code === "missing_first_name";
-                // A no-text line is settled by its own Resolve (or Dismiss): both lift the SMS hold on
-                // the calling line, which a verdict (the server 400s it) would not.
-                const isTextNumberCard = isTriage && item.reason_code === "text_number_differs";
                 const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
                 const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
@@ -1038,7 +1052,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isTextNumberCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -1125,16 +1139,6 @@ export default function TriageInboxTabV2({ isAdmin }) {
                                 {actioning === busyKey ? "Saving…" : "Resolve"}
                               </Button>
                             ) : null
-                          ) : isTextNumberCard ? (
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              disabled={actioning === busyKey}
-                              onClick={() => resolveItem(item)}
-                            >
-                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Saving…" : "Phones are right"}
-                            </Button>
                           ) : isFollowUpCard ? (
                             <Button
                               size="sm"
@@ -1143,7 +1147,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               onClick={() => resolveItem(item)}
                             >
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Saving…" : "Follow-up booked"}
+                              {actioning === busyKey ? "Saving…" : RESOLVE_ONLY_LABELS[item.reason_code]}
                             </Button>
                           ) : (
                             <>
@@ -1171,7 +1175,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} />}
+                    {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} livePhone={item.customer_phone} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">

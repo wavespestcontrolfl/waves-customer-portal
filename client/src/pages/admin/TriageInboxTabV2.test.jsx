@@ -294,11 +294,22 @@ describe('no-text line card (text_number_differs)', () => {
     expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
     expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
     expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
-    fireEvent.click(within(el).getByRole('button', { name: /phones are right/i }));
+    fireEvent.click(within(el).getByRole('button', { name: /phones are updated/i }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
       method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
     }));
     expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/tn/verdict', expect.anything());
+  });
+
+  it('shows the customer\'s LIVE phone from the list query, not the snapshot taken at the call', async () => {
+    const live = { ...card, customer_phone: '+19415559876' };
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [{ ...live, payload: JSON.stringify({ flag: 'text_number_differs', ani_phone: '+19415550100', text_phone: '+19415559876', customer_phone_at_call: '+19415550100', note: 'n' }) }], counts: { open: 1, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    expect(within(el).getByText('Account phone now:').parentElement.textContent).toContain('+19415559876');
+    expect(within(el).getByText('Account phone at the call:').parentElement.textContent).toContain('+19415550100');
   });
 });
 

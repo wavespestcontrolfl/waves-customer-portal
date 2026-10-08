@@ -91,11 +91,14 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   get texts — texts go to X, calls to Y; update the customer's phones"). The
   `callback_number_needed` card is dropped for this case (same ask), kept if the caller also
   disclaimed the number. `text_number_differs` has its own Resolve; a call verdict on a
-  sibling card does not sweep it. Resolve OR Dismiss lifts the number-keyed SMS hold this call armed
-  (same release path and same tech-or-admin access as the `callback_number_needed` card, no new
-  endpoint; skipped when the call also has a `callback_number_needed` card, which owns the hold), so a line
-  wrongly marked no-text is never held forever: "Resolve when the phones are right; texts to the
-  calling line resume". The appointment-contact backfill never saves a no-text
+  sibling card does not sweep it. RESOLVE ("Resolve when the phones are updated — the calling line stays
+  blocked for texts") keeps the number-keyed SMS hold on the calling line and lifts only the visits'
+  clearance; DISMISS ("Dismiss if the line can get texts") releases the hold, so a line wrongly marked
+  no-text is never held forever. Same release path and tech-or-admin access as the
+  `callback_number_needed` card, no new endpoint; both are skipped while a `callback_number_needed`
+  card is OPEN on the call (it owns the hold; a closed one from an earlier pass is ignored). A call
+  vetoed for spam, out-of-area or do-not-contact gets neither the hold nor the card. The inbox shows
+  the customer's live phone, with the phone at the time of the call only when it differs. The appointment-contact backfill never saves a no-text
   line into a blank `customers.phone`. The office updates the phones by hand.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):

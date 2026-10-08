@@ -149,6 +149,32 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
   };
 }
 
+// text_number_differs card (owner ruling 2026-10-08): the caller's line cannot get texts.
+//   RESOLVE = "the phones are updated": nothing proved the line can get texts, so the number-keyed
+//     hold on it STAYS; only the visits' call-level clearance lifts (the replacement-number meaning).
+//   DISMISS = "this line can get texts after all": the hold is released like a verified number.
+// A callback_number_needed card still OPEN on the call owns the hold (its own Resolve decides); an
+// earlier pass's closed one does not. Returns the reply for the route, or `prior` when nothing ran.
+async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior) {
+  if (item.reason_code !== 'text_number_differs' || !item.call_log_id) return prior;
+  if (!['resolved', 'dismissed'].includes(nextStatus)) return prior;
+  const callbackCardOpen = await trx('triage_items')
+    .where({ call_log_id: item.call_log_id, reason_code: 'callback_number_needed' })
+    .whereIn('status', OPEN_STATES)
+    .first('id');
+  if (callbackCardOpen) return prior;
+  const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
+    clearedBy: assignedTo,
+    numberVerdict: nextStatus === 'dismissed' ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
+  });
+  return callbackNumberReply(cleared.numberVerdict, cleared.numbers);
+}
+
+const NOT_A_VERDICT_MESSAGES = {
+  missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
+  text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve or Dismiss.',
+};
+
 // Upsert the single current verdict for a call (re-review overwrites). Links to
 // the enforce-mode route_decision when one exists so calibration can attribute
 // the verdict to the flags that drove the gate.
@@ -631,23 +657,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       });
       callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }
-    if (item.reason_code === 'text_number_differs' && ['resolved', 'dismissed'].includes(nextStatus) && item.call_log_id) {
-      // Owner ruling 2026-10-08: the no-text hold this call armed must never outlive its card
-      // (a line wrongly marked no-text would stay blocked forever). Resolve AND Dismiss lift it,
-      // through the same release path the callback_number_needed card uses, in this
-      // transaction, under the call lock. A callback_number_needed card on the same call, in ANY
-      // state (the caller also disclaimed the number), owns the hold: a dismissed or replacement-only
-      // closure deliberately keeps it, and this card must not undo that.
-      const callbackCard = await trx('triage_items')
-        .where({ call_log_id: item.call_log_id, reason_code: 'callback_number_needed' })
-        .first('id');
-      if (!callbackCard) {
-        const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
-          clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER,
-        });
-        callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
-      }
-    }
+    callbackNumber = await releaseNoTextHold(trx, item, nextStatus, assignedTo, callbackNumber);
     if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
       // A promise exception is not closed by generic bookkeeping alone: the
       // underlying call_commitments row and its outbox_messages row must
@@ -1885,15 +1895,12 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
-    // A no-text line (text_number_differs) is settled by its own Resolve/Dismiss, which also lifts
-    // the SMS hold; a verdict would close the card and leave the line blocked.
-    if (item.reason_code === 'text_number_differs') {
-      return res.status(400).json({ error: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones and use Resolve instead.' });
-    }
     // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
     // customer record, not a routing judgment — a verdict would close it without a name.
-    if (item.reason_code === 'missing_first_name') {
-      return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
+    // …and a no-text line (text_number_differs) is settled by its own Resolve/Dismiss, which also
+    // decide the SMS hold; a verdict would close the card and leave the hold undecided.
+    if (Object.hasOwn(NOT_A_VERDICT_MESSAGES, item.reason_code)) {
+      return res.status(400).json({ error: NOT_A_VERDICT_MESSAGES[item.reason_code] });
     }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
@@ -2136,9 +2143,8 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
-          // text_number_differs (owner ruling 2026-10-08): the phones are fixed on the customer
-          // and judged on this card's own Resolve, never swept by a sibling card's verdict.
-          ...(item.reason_code !== 'text_number_differs' ? ['text_number_differs'] : []),
+          // …and a no-text line card (text_number_differs): settled by its own Resolve/Dismiss only.
+          'text_number_differs',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])
