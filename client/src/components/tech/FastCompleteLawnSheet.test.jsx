@@ -2261,6 +2261,15 @@ describe('weed spots and the spot area', () => {
     expect(sentProduct(P_SURF).totalAmount).toBeUndefined();
   });
 
+  test('a planned spot row never carries the plan\'s estimated quantity: no box value, and Complete waits for the area', async () => {
+    // The plan sized this spot from its own estimate of the area (9 fl oz on 1,500 sq ft).
+    const planned = { ...PLANNED[1], amount: 9, amountUnit: 'fl_oz', treatedSqft: 1500, areaUnit: 'sqft' };
+    await open(weedContext(MIX({ mode: 'none', productIds: [], note: null, surfactant: null }), { plannedProducts: { source: 'plan', items: [planned], addOns: [], month: 10 } }));
+    expect(within(editorFor('Iron Plus')).getByLabelText('Iron Plus').value).toBe('');
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('Enter the area treated for Iron Plus.'));
+  });
+
   test('a typed amount stands in for the area on a spot row', async () => {
     await open(weedContext(MIX({ mode: 'none', productIds: [], note: null, surfactant: null }), { plannedProducts: { source: 'plan', items: [{ ...PLANNED[1], amount: null }], addOns: [], month: 10 } }));
     await analyze();
