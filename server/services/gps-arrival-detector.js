@@ -280,6 +280,7 @@ async function loadCurrentService(currentJobId) {
       's.arrived_at',
       's.en_route_at',
       's.scheduled_date',
+      's.visit_id',
       's.lat as service_lat',
       's.lng as service_lng',
       's.service_address_line1 as service_address_line1',
@@ -318,14 +319,25 @@ function attemptKey(service) {
   const day = String(
     service?.scheduled_date instanceof Date ? service.scheduled_date.toISOString() : service?.scheduled_date || ''
   ).slice(0, 10);
+  const dayPart = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none';
+  // A grouped stop is ONE physical visit: its members carry slightly different
+  // en_route_at values, so the attempt is the stop's day, not a member's time.
+  if (service?.visit_id) return `${dayPart}|visit`;
   const enRouteMs = timestampMs(service?.en_route_at);
-  return `${/^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none'}|${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
+  return `${dayPart}|${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
+}
+
+// What a not_marked row is deduplicated on: the grouped stop when the row
+// belongs to one (any member can be the tech's current job), else the row.
+function stopKey(service) {
+  return service?.visit_id ? `visit:${service.visit_id}` : `service:${service?.id}`;
 }
 
 function auditMetadata({ service, techStatus, destination, distance, point, decision, result, error, notMarked }) {
   if (notMarked) {
     return {
       reason: notMarked.reason,
+      stop: stopKey(service),
       attempt: attemptKey(service),
       detail: notMarked.detail || null,
       tech_id: techStatus?.tech_id || null,
@@ -377,7 +389,8 @@ async function auditArrival({ trx = null, critical = false, ...args }) {
 // later sample can record the row.
 async function writeNotMarkedOnce(serviceId, reason, row) {
   const attempt = attemptKey(row.service);
-  const key = `${serviceId}:${reason}:${attempt}`;
+  const stop = stopKey(row.service);
+  const key = `${stop}:${reason}:${attempt}`;
   if (notMarkedRecorded.has(key)) return;
   if (notMarkedRecorded.size >= NOT_MARKED_MEMO_MAX) notMarkedRecorded.clear();
   notMarkedRecorded.add(key);
@@ -388,8 +401,8 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
         ['gps_arrival_not_marked', key],
       );
       const existing = await trx('audit_log')
-        .where({ resource_type: 'scheduled_service', resource_id: serviceId, action: NOT_MARKED_ACTION })
-        .whereRaw("metadata->>'reason' = ? AND metadata->>'attempt' = ?", [reason, attempt])
+        .where({ resource_type: 'scheduled_service', action: NOT_MARKED_ACTION })
+        .whereRaw("metadata->>'stop' = ? AND metadata->>'reason' = ? AND metadata->>'attempt' = ?", [stop, reason, attempt])
         .first('id');
       if (!existing) await auditArrival({ ...row, trx, critical: true });
     });
@@ -470,7 +483,9 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
     // A grouped stop can land the primary on property and still answer
     // visit_fanout_incomplete (ok false): the arrival happened, so it is not a
     // miss. Judge by the returned state, not result.ok alone.
-    if (!result?.ok && result?.state !== 'on_property') {
+    // Any other returned failure is judged by the persisted row too: a
+    // concurrent request can have arrived and completed the visit meanwhile.
+    if (!result?.ok && result?.state !== 'on_property' && await stillOpenWithoutArrival(service.id)) {
       await recordNotMarked({
         service, techStatus, point, config, destination, distance,
         reason: 'mark_on_property_failed', detail: result?.reason || null,

@@ -441,6 +441,12 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     trackTransitions.markOnProperty.mockResolvedValue({ ok: true, state: 'on_property' });
   });
 
+  async function runWithQuery(service, { techStatus = baseTechStatus(), point = basePoint(), lookup } = {}) {
+    const query = installServiceLookup(service, lookup);
+    await detector.maybeMarkArrivedFromGps({ techStatus, point, configOverride: detector._test.DEFAULT_CONFIG });
+    return query;
+  }
+
   async function run(service, { techStatus = baseTechStatus(), point = basePoint(), lookup } = {}) {
     installServiceLookup(service, lookup);
     return detector.maybeMarkArrivedFromGps({ techStatus, point, configOverride: detector._test.DEFAULT_CONFIG });
@@ -579,7 +585,7 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(lockSql).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
     expect(lockBindings).toEqual([
       'gps_arrival_not_marked',
-      `svc-1:inside_radius_moving_too_fast:none|${new Date(EN_ROUTE_TIME).toISOString()}`,
+      `service:svc-1:inside_radius_moving_too_fast:none|${new Date(EN_ROUTE_TIME).toISOString()}`,
     ]);
     // lookup and insert both ride the locked transaction; the insert reports failure
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -690,9 +696,39 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     // the lock key and the existence lookup both carry the attempt
     expect(query.trx.raw.mock.calls[0][1][1]).toContain(':2026-10-15|');
     expect(query.audit.whereRaw).toHaveBeenCalledWith(
-      "metadata->>'reason' = ? AND metadata->>'attempt' = ?",
-      ['inside_radius_moving_too_fast', writes[1].metadata.attempt],
+      "metadata->>'stop' = ? AND metadata->>'reason' = ? AND metadata->>'attempt' = ?",
+      ['service:svc-1', 'inside_radius_moving_too_fast', writes[1].metadata.attempt],
     );
+  });
+
+  test('a grouped stop records once for the stop, whichever member is the current job', async () => {
+    const fast = { point: basePoint({ speed_mph: 32, ignition: true }) };
+    const pest = baseService({ id: 'svc-1', visit_id: 'visit-9', scheduled_date: '2026-10-08', en_route_at: EN_ROUTE_TIME });
+    // the sibling went en route a moment later and is now the tech's current job
+    const lawn = baseService({ id: 'svc-2', visit_id: 'visit-9', scheduled_date: '2026-10-08', en_route_at: new Date(new Date(EN_ROUTE_TIME).getTime() + 4000).toISOString() });
+
+    const query = await runWithQuery(pest, fast);
+    await run(lawn, { ...fast, techStatus: baseTechStatus({ current_job_id: 'svc-2' }) });
+
+    const writes = notMarkedWrites();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].metadata).toMatchObject({ stop: 'visit:visit-9', attempt: '2026-10-08|visit' });
+    expect(query.trx.raw.mock.calls[0][1][1]).toBe('visit:visit-9:inside_radius_moving_too_fast:2026-10-08|visit');
+  });
+
+  test('a returned failure with no state is judged by the persisted row (arrived and completed meanwhile)', async () => {
+    const service = baseService();
+    trackTransitions.markOnProperty.mockImplementation(async () => {
+      service.status = 'completed';
+      service.track_state = 'complete';
+      service.arrived_at = new Date().toISOString();
+      return { ok: false, reason: 'terminal_status: completed' };
+    });
+
+    const result = await run(service);
+
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed' });
+    expect(notMarkedWrites()).toHaveLength(0);
   });
 
   test('a visit with no schedule day or en_route_at still gets a NULL-safe attempt', async () => {
