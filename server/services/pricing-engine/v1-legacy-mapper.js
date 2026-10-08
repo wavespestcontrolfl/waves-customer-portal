@@ -1571,6 +1571,16 @@ function areaAddOnsGatedStaffMessage(action) {
 // Customer-facing message (same wording the Bermuda refusal uses).
 const AREA_ADDONS_GATED_CUSTOMER_MESSAGE = 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.';
 
+// Accepted area add-ons are scheduled and invoiced by the one-time accept
+// (one appointment carrying the service mix, the one-time total as its price).
+// A recurring-mode accept converts the recurring plan only and has no step that
+// books a sold one-time add-on, so it is refused instead of taking the plan and
+// dropping the add-on (owner ruling 2026-10-08: one application per estimate;
+// recurring add-ons are a later PR). Staff-facing text lives in the log line of
+// the refusing route; the customer sees the office hand-off.
+const AREA_ADDONS_ONE_TIME_ONLY_CODE = 'AREA_ADDONS_ONE_TIME_ACCEPT_ONLY';
+const AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE = 'This estimate includes add-on treatments that our office schedules with you directly. Please contact our office to finish booking.';
+
 module.exports = {
   mapV1ToLegacyShape,
   estimateDataCarriesBermudaSuppression,
@@ -1579,5 +1589,7 @@ module.exports = {
   areaAddOnsGatedStaffMessage,
   AREA_ADDONS_GATED_CODE,
   AREA_ADDONS_GATED_CUSTOMER_MESSAGE,
+  AREA_ADDONS_ONE_TIME_ONLY_CODE,
+  AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE,
   treeShrubLegacyTierRows,
 };

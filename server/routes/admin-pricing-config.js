@@ -1293,6 +1293,19 @@ const CONFIG_KEY_SUB_FEATURE_GATES = {
 // and engine enforcement can never disagree on what counts as "on".
 const { gateEnvValue: gateEnvOn, termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 
+// Area add-on treatments (GATE_AREA_ADDONS, read at request time like the
+// sub-feature gates above): the estimator learns from the SAME lawn_pricing_v2
+// read that carries bermudaSuppression whether the add-ons are offered and
+// which ones, so the screen never hardcodes the table. `items` is the pricer's
+// own table (areaAddOnCatalog); `enabled` false means hide the whole section.
+function areaAddOnsAvailability() {
+  return {
+    enabled: gateEnvOn('GATE_AREA_ADDONS'),
+    visitContexts: ['standalone', 'sameTripAddOn'],
+    items: require('../services/pricing-engine/service-pricing').areaAddOnCatalog(),
+  };
+}
+
 function configKeyFeatureAvailable(key) {
   if (key === 'termite_annual_plan') return termiteAnnualPlanSelectionEnabled();
   const gate = CONFIG_KEY_FEATURE_GATES[key];
@@ -1371,6 +1384,7 @@ router.get('/:key', async (req, res, next) => {
       // Read at request time so a gate flip needs no redeploy of the client.
       featureAvailable: configKeyFeatureAvailable(req.params.key),
       ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
+      ...(req.params.key === 'lawn_pricing_v2' ? { areaAddOns: areaAddOnsAvailability() } : {}),
       ...(req.params.key === 'termite_install' ? { effective: await effectiveTermiteInstallBasis() } : {}),
     });
   } catch (err) { next(err); }

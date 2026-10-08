@@ -14,7 +14,7 @@ const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
 const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
-const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
+const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, areaAddOnConfig } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
 // serviceCountsTowardWaveGuardTier is the svc-shaped, line-flag-aware form).
 const { serviceCountsTowardWaveGuardTier: serviceKeyCountsTowardTier } = require('./pricing-engine/discount-engine');
@@ -2429,6 +2429,9 @@ function isIgnorableSetupOneTimeItem(item = {}) {
 
 function isGeneralPestOneTimeItem(item = {}) {
   const service = String(item.service || '').toLowerCase();
+  // An area add-on is never the general one-time pest job ("Fire Ant Yard
+  // Treatment" would match the name test below on the word "ant").
+  if (service === 'area_addon') return false;
   if (service === 'one_time_pest' || service === 'pest_control') return true;
   if (service === 'german_roach') return false;
   const raw = oneTimeRawText(item);
@@ -2438,6 +2441,8 @@ function isGeneralPestOneTimeItem(item = {}) {
 
 function isLawnCareOneTimeItem(item = {}) {
   if (isIgnorableSetupOneTimeItem(item)) return true;
+  // Area add-ons take their family from the add-on key, not the display name.
+  if (String(item.service || '').toLowerCase() === 'area_addon') return areaAddOnConfig(item)?.category === 'lawn_care';
   return /\blawn|turf|weed|fertili[sz]|chinch|fung/.test(oneTimeRawText(item));
 }
 

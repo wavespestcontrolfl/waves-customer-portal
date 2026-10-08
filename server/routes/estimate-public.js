@@ -91,7 +91,7 @@ const slotReservation = require('../services/slot-reservation');
 const { acquireOccupancyLock } = require('../services/scheduling/occupancy');
 const rateLimit = require('express-rate-limit');
 const { generateEstimate } = require('../services/pricing-engine');
-const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS } = require('../services/pricing-engine/constants');
+const { PEST, ONE_TIME, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2, LAWN_TIERS, areaAddOnConfig } = require('../services/pricing-engine/constants');
 const { isRetiredTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const addonDefaults = require('../config/addon-defaults-by-frequency');
 const BillingCadence = require('../services/billing-cadence');
@@ -1300,7 +1300,9 @@ function oneTimeItemFamilyKeys(item = {}) {
     || String(item?.service || '').toLowerCase() === 'one_time_pest'
     || isPestServiceName(item?.name || item?.label || '');
   const specialtyText = fields.filter(Boolean).join(' ').toLowerCase();
-  const lawnSpecialty = /top[ -_]?dress|dethatch|\bplugging\b/.test(specialtyText);
+  // An area add-on is specialty work too: its own visit must never adopt the
+  // customer's ordinary lawn visit and drop the sold treatment from dispatch.
+  const lawnSpecialty = isAreaAddOnItem(item) || /top[ -_]?dress|dethatch|\bplugging\b/.test(specialtyText);
   if ((category === 'pest_control' && !genericPest) || lawnSpecialty) {
     // Specific identities ONLY — no BROAD families, whose pest/roach and
     // lawn tokens would re-add them through the field union (codex r17).
@@ -2735,12 +2737,37 @@ function detectPestRecurring(recurring) {
   return { count: pest.length, visitsPerYear: vpy, monthlyBase, pricingVersion: pestPricingVersionOf(...pest) };
 }
 
+// Area add-on rows (GATE_AREA_ADDONS) are identified by service key, never by
+// display name: the name tests below read "Fire Ant Yard Treatment" as a pest
+// job and "Web Sweep" as nothing. Their family comes from the add-on key
+// (web sweep = pest control, the rest = lawn care); a row with the add-on
+// service key but an unknown add-on key has no family (null), never a guess.
+function isAreaAddOnItem(item = {}) {
+  return String(item?.service || '').toLowerCase() === 'area_addon';
+}
+function areaAddOnCategoryForItem(item = {}) {
+  return isAreaAddOnItem(item) ? (areaAddOnConfig(item)?.category || null) : null;
+}
+// The add-on identity fields every re-shaping of a one-time row must keep, so
+// the key and tier survive normalize, render, choice and acceptance copies
+// (a copy that drops addOnKey loses the family and the catalog service).
+const AREA_ADDON_ROW_FIELDS = ['addOnKey', 'catalogServiceKey', 'addOnCategory', 'areaSqFt', 'tierSqFt', 'visitContext', 'onSiteMinutes'];
+function areaAddOnRowFields(item = {}) {
+  if (!isAreaAddOnItem(item)) return {};
+  return Object.fromEntries(AREA_ADDON_ROW_FIELDS
+    .filter((field) => item[field] !== undefined && item[field] !== null)
+    .map((field) => [field, item[field]]));
+}
+
 // The interior-spray / exterior-eave-sweep preference toggles describe the
 // GENERAL pest-control visit. They do not apply to specialty one-time services
 // (German Roach Cleanout, standalone cockroach, wasp/stinging, exclusion, etc.),
 // so only a general one-time pest line should surface them.
 function isGeneralPestOneTimeItem(it = {}) {
   const service = String(it.service || '').toLowerCase();
+  // An area add-on is never the general pest visit, whatever its name says
+  // ("Fire Ant Yard Treatment" reads as a pest job to the name test below).
+  if (isAreaAddOnItem(it)) return false;
   // Commercial pest is flat (no interior/exterior opt-out) — never a general
   // residential pest item, even though its name contains "Pest".
   if (service.startsWith('commercial_')) return false;
@@ -3854,6 +3881,7 @@ function recurringServiceDisplayName(key) {
 }
 
 function isLawnCareOneTimeItem(item = {}) {
+  if (isAreaAddOnItem(item)) return areaAddOnCategoryForItem(item) === 'lawn_care';
   const raw = [item.service, item.name, item.label]
     .filter(Boolean)
     .join(' ')
@@ -10490,6 +10518,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // post-commit branches (no onboarding session, no tier upgrade,
     // no recurring schedule via EstimateConverter).
     const treatAsOneTime = isOneTimeOnly || serviceMode === 'one_time';
+    // Area add-ons are booked and billed only by the one-time accept; a recurring-mode accept would convert the
+    // plan and drop the sold add-on. Refused before any write (the staff books it by hand).
+    if (!treatAsOneTime) {
+      const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+      if (mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data)) {
+        logger.warn(`[estimate-accept] estimate ${estimate.id} carries area add-ons and was accepted in recurring mode - ${mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE}; office books the add-on by hand`);
+        return res.status(409).json({ error: mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE });
+      }
+    }
 
     // Acceptance terms scope (codex #5434 r1 P0): the record must carry the
     // Services line this tab rendered. Re-derived here from the SAME rule
@@ -19798,6 +19835,7 @@ function oneTimeItemsForRender(estResult, estData) {
     retainerBilling: row.retainerBilling || null,
     atticSqFt: row.atticSqFt ?? null,
     surfaceSqFt: row.surfaceSqFt ?? null,
+    ...areaAddOnRowFields(row),
   }));
 }
 
@@ -19854,6 +19892,9 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
   return !isWaveGuardSetupOneTimeItem(item) && String(item.service || '').toLowerCase() !== 'one_time_adjustment';
 }
 
+// Area add-ons (GATE_AREA_ADDONS) are excluded the same way: they ride alongside
+// the picked cadence, and their family would otherwise turn a pest estimate into
+// a mixed "bundle" with no one-time pest choice.
 // Bora-Care is a separately-billed add-on that rides alongside whichever cadence
 // the customer picks. It must not contribute to the one-time-choice classification,
 // or a recurring pest estimate with a Bora-Care add-on classifies as "bundle" and
@@ -19861,7 +19902,7 @@ function isOneTimeChoiceItemForCategory(item = {}, category = 'pest_control') {
 // to the add-on total instead of the selected pest visit).
 function oneTimeChoiceClassificationItems(items = []) {
   return (Array.isArray(items) ? items : []).filter(
-    (item) => serviceCategoryForOneTimeItem(item) !== 'bora_care',
+    (item) => serviceCategoryForOneTimeItem(item) !== 'bora_care' && !isAreaAddOnItem(item),
   );
 }
 
@@ -20024,7 +20065,9 @@ function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount =
     if (isOneTimePestChoiceItem(item)) return null;
     if (String(item.service || '').toLowerCase() === 'one_time_adjustment') return null;
     const isBoraCare = isBoraCareOneTimeItem(item);
-    if (!oneTimeItemLooksPestSpecialty(item) && !isBoraCare) return null;
+    // Area add-ons ride alongside whichever cadence the customer picks, like
+    // Bora-Care, whatever family they belong to.
+    if (!oneTimeItemLooksPestSpecialty(item) && !isBoraCare && !isAreaAddOnItem(item)) return null;
     const amount = oneTimeItemAmount(item);
     if (!Number.isFinite(amount) || amount <= 0) return null;
     let label = item.label || item.name || 'Pest treatment';
@@ -20041,6 +20084,7 @@ function preservedOneTimeAddOnRowsFromBreakdown(breakdown = {}, manualDiscount =
       label,
       price: Math.round(amount * 100) / 100,
       detail: item.detail || null,
+      ...areaAddOnRowFields(item),
     };
   }).filter(Boolean);
   return applyManualOneTimeDiscountToChoiceRows(rows, manualDiscount);
@@ -20107,6 +20151,7 @@ function oneTimeChoiceBreakdownForEstimate(estimate = {}, estData = {}, pricingB
     amount: Number(item.price || 0),
     detail: item.detail || 'Single treatment',
     kind: 'charge',
+    ...areaAddOnRowFields(item),
   }));
   const total = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   return {
@@ -20281,6 +20326,7 @@ function normalizeOneTimeBreakdown(estData) {
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,
         surfaceSqFt: Number(item.surfaceSqFt) > 0 ? Number(item.surfaceSqFt) : null,
+        ...areaAddOnRowFields(item),
       });
     }
   };
@@ -21100,6 +21146,7 @@ function acceptanceServiceLists(estData, { preserveDuplicates = false } = {}) {
         service: item.service,
         name: item.label,
         price: item.amount,
+        ...areaAddOnRowFields(item),
       }));
 
   const sourceResult = estData?.result || estData?.engineResult || estData || {};
@@ -22654,6 +22701,8 @@ function isNonServiceOneTimeItem(item = {}) {
 
 function serviceCategoryForOneTimeItem(item = {}) {
   if (isNonServiceOneTimeItem(item)) return null;
+  // Area add-ons take their family from the add-on key, before any name test.
+  if (isAreaAddOnItem(item)) return areaAddOnCategoryForItem(item);
   const name = item?.name || item?.label || item?.service || '';
   const service = String(item?.service || '').toLowerCase();
   // `termite_inspection` is the standalone FS 482.226 inspection (project-types.js:

@@ -8627,6 +8627,21 @@ function priceAreaAddOnList(entries, { grassSources = [], isCommercialManualQuot
   return { lines, requests };
 }
 
+// The estimator screen's add-on catalog, built from AREA_ADDONS so the screen
+// never hardcodes the table. maxPerYear is label-limit METADATA for the
+// screen (version 1 sells one application per estimate; nothing here reads it).
+function areaAddOnCatalog() {
+  return Object.entries(AREA_ADDONS.items).map(([key, cfg]) => ({
+    key,
+    name: cfg.name,
+    category: cfg.category,
+    areaLabel: cfg.areaLabel,
+    tiers: cfg.tiers ? [...cfg.tiers] : null,
+    maxPerYear: cfg.maxPerYear,
+    requiresGrassTrack: cfg.requiresGrassTrack || null,
+  }));
+}
+
 // Same-visit area add-ons ride a host visit: the price drops the drive
 // minutes, which is only true when a priced service shares the estimate. The
 // host is another PRICED line that is not an area add-on, or a PRICED add-on
@@ -9599,6 +9614,7 @@ module.exports = {
   priceTopDressing, priceDethatching,
   priceAreaAddOn,
   priceAreaAddOnList,
+  areaAddOnCatalog,
   assertAreaAddOnHostVisit,
   normalizeAreaAddOnInput,
   isPlainAreaAddOnObject,

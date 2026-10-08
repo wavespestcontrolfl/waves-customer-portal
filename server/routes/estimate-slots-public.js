@@ -733,6 +733,13 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       });
     }
     slotOpts.serviceMode = resolveSlotServiceMode(estimate, requestedServiceMode);
+    // Area add-ons are booked only by a one-time accept: do not hold a recurring slot the accept would refuse.
+    if (slotOpts.serviceMode !== 'one_time') {
+      const mapper = require('../services/pricing-engine/v1-legacy-mapper');
+      if (mapper.estimateDataCarriesAreaAddOns(estimate.estimate_data)) {
+        return res.status(409).json({ error: mapper.AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE, code: mapper.AREA_ADDONS_ONE_TIME_ONLY_CODE });
+      }
+    }
 
     try {
       const { scheduledServiceId, expiresAt } = await slotReservation.reserveSlot({

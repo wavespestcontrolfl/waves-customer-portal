@@ -1857,6 +1857,31 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     ]);
   });
 
+  test('area add-on rows take no recurring program lines, as primary or add-on (the catalog key, not the name, decides)', async () => {
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] },
+      lawn: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] },
+    };
+    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'c', name: 'Celsius WG' }];
+    const { AREA_ADDONS } = require('../services/pricing-engine/constants');
+    const buildPlan = jest.fn();
+    for (const cfg of Object.values(AREA_ADDONS.items)) {
+      const isPest = cfg.category === 'pest_control';
+      const facts = {
+        isLawn: !isPest, serviceId: 'svc1', serviceType: cfg.name, serviceCategory: cfg.category, serviceKey: cfg.serviceKey, scheduledDate: '2026-09-04', addons: [],
+      };
+      const primary = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
+      expect([cfg.serviceKey, primary.lines]).toEqual([cfg.serviceKey, []]);
+      expect(primary.note).toBe(`No treatment protocol for this service (${cfg.category})`);
+      const hosted = await jobCard.resolveVisitLines({
+        facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: cfg.name, category: cfg.category, serviceKey: cfg.serviceKey }] },
+        protocols, catalog, dbh: () => ({}),
+      });
+      expect(hosted.addons).toMatchObject([{ name: cfg.name, products: 0, visit: null, note: `No treatment protocol for this add-on (${cfg.category})` }]);
+    }
+    expect(buildPlan).not.toHaveBeenCalled();
+  });
+
   test('the misting-system NAME alone (no serviceKey) suppresses the barrier program, primary and add-on; barrier rows are unchanged (Codex round-2 P1)', async () => {
     // Real barrier program with a real treatment line, so a suppressed
     // misting-system result and a resolved barrier result are distinguishable.

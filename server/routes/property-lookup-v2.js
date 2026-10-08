@@ -5196,6 +5196,54 @@ function requireBermudaSuppressionGate() {
   throw err;
 }
 
+// Area add-on treatments (GATE_AREA_ADDONS, owner rulings 2026-10-08). The
+// estimator posts options.areaAddOns = [{ key, areaSqFt, visitContext }] and
+// this is the ONE place it becomes engine services.areaAddOns. Same posture as
+// the Bermuda gate: requested-while-dark fails CLOSED with a 400 the builder
+// surfaces verbatim, and the save-replay rethrows it (failClosed). Anything the
+// engine owns (known key, positive area, visit context, the host service for a
+// same-visit add-on) is validated by the engine's one validator, not here; this
+// boundary only refuses a malformed envelope, the legacy `applications` field
+// (one application per estimate in version 1) and an unverified grass.
+function areaAddOnInputError(message, code = 'AREA_ADDON_INPUT_INVALID') {
+  const err = new Error(message);
+  err.statusCode = 400;
+  err.code = code;
+  err.failClosed = true;
+  return err;
+}
+function requireAreaAddOnsGate() {
+  if (require('../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return;
+  throw areaAddOnInputError('Area add-on treatments are not enabled on this environment (GATE_AREA_ADDONS) - remove the add-ons or flip the gate.', 'AREA_ADDONS_GATED');
+}
+// `track` is the estimate's grass track; `grassChosen` says the operator
+// picked it (the translator defaults an unpicked grass to St. Augustine, which
+// must never price a label-bound add-on: that add-on then quotes as custom).
+function areaAddOnsFromOptions(options, { track, grassChosen }) {
+  const raw = options.areaAddOns;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw areaAddOnInputError('areaAddOns must be a list of { key, areaSqFt, visitContext }.');
+  if (raw.length === 0) return undefined;
+  requireAreaAddOnsGate();
+  const { AREA_ADDONS } = require('../services/pricing-engine/constants');
+  return raw.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw areaAddOnInputError(`areaAddOns entry ${index + 1} must be an object.`);
+    }
+    if (entry.applications !== undefined) {
+      throw areaAddOnInputError('applications is not supported: each area add-on is one application per estimate, and a second application is a new estimate.');
+    }
+    const cfg = typeof entry.key === 'string' && Object.prototype.hasOwnProperty.call(AREA_ADDONS.items, entry.key)
+      ? AREA_ADDONS.items[entry.key] : null;
+    return {
+      key: entry.key,
+      ...(entry.areaSqFt !== undefined ? { areaSqFt: entry.areaSqFt } : {}),
+      ...(entry.visitContext !== undefined ? { visitContext: entry.visitContext } : {}),
+      ...(cfg?.requiresGrassTrack ? { grassType: grassChosen ? track : 'unknown' } : {}),
+    };
+  });
+}
+
 // An association's common-area job (HOA / multifamily), by the operator's
 // business type or the property's subtype. One predicate for the lookup's
 // suite scope and the translate-time refusal; the estimate tool's
@@ -5895,6 +5943,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (sel.has('PLUGGING')) {
     services.plugging = { area: o.plugArea, spacing: o.plugSpacing || 12, urgency, afterHours };
   }
+  const areaAddOns = areaAddOnsFromOptions(o, { track, grassChosen: !!o.grassType });
+  if (areaAddOns) services.areaAddOns = areaAddOns;
   if (sel.has('RODENT_SANITATION')) {
     services.sanitation = {
       tier: o.sanitationTier || 'standard',

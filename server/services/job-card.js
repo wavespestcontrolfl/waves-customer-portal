@@ -423,6 +423,11 @@ async function loadAddons(dbh, serviceId) {
   return rows.map((r) => ({ name: clean(r.service_name, 80), category: r.category || null, serviceKey: r.service_key || null })).filter((a) => a.name);
 }
 
+// Area add-on catalog keys by family (constants.js AREA_ADDONS): single-purpose
+// one-time jobs that take no recurring program lines (see ADDON_PROGRAMS).
+const AREA_ADDON_SERVICE_KEYS_BY_CATEGORY = Object.values(require('./pricing-engine/constants').AREA_ADDONS.items)
+  .reduce((acc, cfg) => { acc[cfg.category].push(cfg.serviceKey); return acc; }, { pest_control: [], lawn_care: [] });
+
 // Catalog category → the treatment programs it may resolve to (the
 // matcher's pick is honoured only inside `any`, else the category's
 // `fallback`), so "Initial German Roach Knockdown" under pest_control
@@ -446,8 +451,12 @@ async function loadAddons(dbh, serviceId) {
 // Contrac Blox bait stations) and let the tank search dose any pesticide
 // on them. The bait-station services keep the program.
 const ADDON_PROGRAMS = Object.freeze({
-  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
-  lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
+  // Area add-ons (migration 20261008200000) are listed under nonChemical: the
+  // category's recurring program lines (the lawn visit's products, the pest
+  // visit's steps) are NOT their work, so they get no program; the tech enters
+  // the product used at completion (a web sweep applies none).
+  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest', nonChemical: AREA_ADDON_SERVICE_KEYS_BY_CATEGORY.pest_control },
+  lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing', ...AREA_ADDON_SERVICE_KEYS_BY_CATEGORY.lawn_care] },
   // mosquito_misting_system (the misting SYSTEM's design-visit identity) is
   // suppressed by the shared isMistingDesignConsultation predicate in
   // addonProgramKey below — key-first, name only for a keyless row — so it

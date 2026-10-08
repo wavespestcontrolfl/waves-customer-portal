@@ -559,7 +559,7 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   const seen = new Set();
   const seenEngineKeys = new Map();
   // `service` is the category (used for the row's service field + label dedup).
-  const add = (service, label, engineKey = null, catalogServiceKey = null) => {
+  const add = (service, label, engineKey = null, catalogServiceKey = null, durationMinutes = null) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
@@ -599,6 +599,9 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // for products whose engine key is deliberately unaliased
     // (cockroach_control / pest_initial_roach; codex #3842 r3 P1).
     const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null, catalogServiceKey: catalogServiceKey || null };
+    // An area add-on carries the engine's on-site minutes as a duration
+    // floor: the capacity pass books max(catalog default, these minutes).
+    if (durationMinutes) row.durationMinutes = durationMinutes;
     rows.push(row);
     if (engineKey && !seenEngineKeys.has(engineKey)) seenEngineKeys.set(engineKey, row);
   };
@@ -670,7 +673,8 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     }
     // Third arg is the RAW engine key off the breakdown item — the catalog's
     // identity, distinct from the display category passed first.
-    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null);
+    const onSiteMinutes = service === 'area_addon' ? Math.ceil(Number(item.onSiteMinutes)) : 0;
+    add(category || service || 'one_time_service', label, service || null, item.catalogServiceKey || null, onSiteMinutes > 0 ? onSiteMinutes : null);
   }
   return rows;
 }
