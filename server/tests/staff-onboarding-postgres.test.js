@@ -56,7 +56,7 @@ describeDb('staff onboarding documents on PostgreSQL', () => {
       await require('../models/migrations/20260428000007_technicians_payroll_profile').up(db);
       await require('../models/migrations/20260601000009_document_template_library').up(db);
       await require('../models/migrations/20260907000010_controlled_staff_documents').up(db);
-      await require('../models/migrations/20261008130000_staff_document_onboarding_required').up(db);
+      await require('../models/migrations/20261008120000_staff_document_onboarding_required').up(db);
     } finally { await setup.destroy(); }
     const people = [[admin, 'active'], [first, 'active'], [second, 'active'], [inactive, 'inactive'], [prospective, 'prospective']];
     await db('technicians').insert(people.map(([person, status], index) => ({ id: person.id, name: `QA Onboarding ${index}`,
@@ -78,7 +78,7 @@ describeDb('staff onboarding documents on PostgreSQL', () => {
     expect(form.onboarding_required).toBe(false);
     await expect(db('document_templates').insert({ id: randomUUID(), template_key: `qa.${run}`, name: 'QA customer', audience: 'customer', onboarding_required: true }))
       .rejects.toThrow(/document_templates_onboarding_staff_only/);
-    const migration = require('../models/migrations/20261008130000_staff_document_onboarding_required');
+    const migration = require('../models/migrations/20261008120000_staff_document_onboarding_required');
     await migration.down(db);
     expect(await db.schema.hasColumn('document_templates', 'onboarding_required')).toBe(false);
     await migration.up(db);
