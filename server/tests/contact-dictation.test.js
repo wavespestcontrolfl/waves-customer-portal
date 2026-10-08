@@ -493,7 +493,8 @@ describe('processor wiring — the spelled name goes to the flat record and the 
     expect(block).toMatch(/labeledInbound = !isOutboundCall\(call\) && \/\^\\s\*caller\\s\*:\/im\.test\(transcription\)/);
     expect(block).toMatch(/labeledInbound \? applyNameDictationPolicy/);
     // Shared phone (> 1 live customer): nothing changes and nothing is staged.
-    expect(block).toMatch(/countCustomersWithContactPhone\(phoneKeyForCall\)\.catch\(\(\) => 2\)/);
+    expect(block).toMatch(/resolveCallContactPhone\(call, extracted\.phone\)/);
+    expect(block).toMatch(/countCustomersWithContactPhone\(k\)\.catch\(\(\) => 2\)/);
     expect(block).toMatch(/if \(phoneMatches <= 1\) \{/);
     expect(block).toMatch(/linkedCustomerId = call\.customer_id \|\| phoneMatches === 1/);
     expect(block).toMatch(/if \(!linkedCustomerId\) extracted\[field\] = spelled\.value;/);

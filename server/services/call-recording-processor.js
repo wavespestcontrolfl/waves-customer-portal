@@ -11118,8 +11118,10 @@ const CallRecordingProcessor = {
           // account choice itself rests on the misheard name — change nothing and stage
           // nothing. One phone match is an existing customer (candidate only); none is
           // a new caller (the flat record takes the spelled name).
-          const phoneKeyForCall = phoneKey(contactPhone);
-          const phoneMatches = phoneKeyForCall ? await countCustomersWithContactPhone(phoneKeyForCall).catch(() => 2) : 0;
+          // The phone downstream customer matching uses (a spoken number can override the ANI),
+          // and the ANI itself: the stricter count wins.
+          const phoneKeys = [...new Set([contactPhone, resolveCallContactPhone(call, extracted.phone)].map(phoneKey).filter(Boolean))];
+          const phoneMatches = Math.max(0, ...await Promise.all(phoneKeys.map((k) => countCustomersWithContactPhone(k).catch(() => 2))));
           if (phoneMatches <= 1) {
             const linkedCustomerId = call.customer_id || phoneMatches === 1;
             for (const { field, spelled } of spelledNames) {
