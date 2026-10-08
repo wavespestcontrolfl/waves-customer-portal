@@ -10981,6 +10981,36 @@ const CallRecordingProcessor = {
         throw failClosed;
       }
     };
+    // text_number_differs (owner ruling 2026-10-08): the card that releases the no-text hold. It is
+    // filed at the hold decision point too (before any hard-veto exit, so a durable hold never
+    // exists without the card that can release it) and refreshed with the final customer later.
+    // Idempotent per open card; never blocks the pass.
+    const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false } = {}) => {
+      try {
+        const callerForText = ext?.caller;
+        const aniPhone = firstExternalPhone(contactPhone);
+        const spokenText = isDialablePhone(callerForText?.text_phone_e164) && !samePhone(callerForText.text_phone_e164, aniPhone)
+          ? callerForText.text_phone_e164 : null;
+        const onFile = linkedCustomerId ? await db('customers').where({ id: linkedCustomerId }).first('phone') : null;
+        const item = buildTriageItem({
+          callLogId: call.id,
+          flag: 'text_number_differs',
+          extraction: ext,
+          severity: 'advisory',
+          extraPayload: {
+            ani_phone: aniPhone,
+            text_phone: spokenText,
+            customer_phone: onFile?.phone || null,
+            note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are right; texts to the calling line resume`,
+          },
+        });
+        const insert = db('triage_items').insert(item)
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'));
+        await (refresh ? insert.merge({ payload: item.payload, updated_at: new Date() }) : insert.ignore());
+      } catch (triageErr) {
+        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+      }
+    };
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
     // inbound consent (no explicit sms_consent_given). The non-ANI recipient
     // hold at the send site keys off this — a send cleared by explicit consent
@@ -11612,6 +11642,7 @@ const CallRecordingProcessor = {
             // advisory card below, and anything else this pass awaits.
             // Round 8 P1: a lost claim abandons the pass (nothing written).
             if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
+            if (aniCannotText(v2Extraction?.caller)) await fileTextNumberCard(v2Extraction, call.customer_id || null);
           }
 
           const routeDecision = buildRouteDecision({
@@ -11947,6 +11978,7 @@ const CallRecordingProcessor = {
           // below and before any further awaited work.
           // Round 8 P1: a lost claim abandons the pass (nothing written).
           if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
+          if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(v2Ext, call.customer_id || null);
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the
@@ -12851,31 +12883,8 @@ const CallRecordingProcessor = {
     // existing customer alike. Advisory, with its own Resolve (a sibling card's verdict does
     // not sweep it). Writes nothing to the customer. A failed insert never blocks the pass.
     if (callAniCannotText) {
-      try {
-        const callerForText = v2CanonicalExtraction.caller;
-        const aniPhone = firstExternalPhone(contactPhone);
-        const spokenText = isDialablePhone(callerForText.text_phone_e164) && !samePhone(callerForText.text_phone_e164, aniPhone)
-          ? callerForText.text_phone_e164 : null;
-        const onFile = customerId ? await db('customers').where({ id: customerId }).first('phone') : null;
-        await db('triage_items')
-          .insert(buildTriageItem({
-            callLogId: call.id,
-            flag: 'text_number_differs',
-            extraction: v2CanonicalExtraction,
-            severity: 'advisory',
-            extraPayload: {
-              ani_phone: aniPhone,
-              text_phone: spokenText,
-              customer_phone: onFile?.phone || null,
-              note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are right; texts to the calling line resume`,
-            },
-          }))
-          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .ignore();
-        if (!bridgeNeedsConfirmation.includes('text_number_differs')) bridgeNeedsConfirmation.push('text_number_differs');
-      } catch (triageErr) {
-        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
-      }
+      await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });
+      if (!bridgeNeedsConfirmation.includes('text_number_differs')) bridgeNeedsConfirmation.push('text_number_differs');
     }
 
     // Phone-verification lane (owner directive 2026-07-27): when a call ends

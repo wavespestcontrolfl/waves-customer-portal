@@ -138,14 +138,23 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
   });
 
   test('the card is filed for new and existing customers, with both numbers and the ask', () => {
-    const at = src.indexOf("flag: 'text_number_differs'");
+    const at = src.indexOf('const fileTextNumberCard = async');
     expect(at).toBeGreaterThan(-1);
-    const section = src.slice(at - 900, at + 1200);
-    expect(section).toContain('if (callAniCannotText)');
+    const section = src.slice(at, at + 1800);
     expect(section).not.toContain('!createdCustomerFromCall');
-    for (const key of ['ani_phone:', 'text_phone:', 'customer_phone:', "note: `caller said this line cannot get texts"]) expect(section).toContain(key);
-    expect(section).toContain('isDialablePhone(callerForText.text_phone_e164)');
+    for (const key of ['ani_phone:', 'text_phone:', 'customer_phone:', 'note: `caller said this line cannot get texts', 'Resolve when the phones are right; texts to the calling line resume']) expect(section).toContain(key);
+    expect(section).toContain('isDialablePhone(callerForText?.text_phone_e164)');
     expect(section).not.toMatch(/db\('customers'\)[^;]*\.update\(/);
+  });
+
+  test('the card is filed at BOTH hold decision points (before any hard-veto exit) and refreshed after the customer is known', () => {
+    const calls = src.split('await fileTextNumberCard(').length - 1;
+    expect(calls).toBe(3);
+    const holdAt = src.indexOf("if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');\n            if (aniCannotText(v2Extraction?.caller))");
+    const vetoAt = src.indexOf('const routeDecision = buildRouteDecision({');
+    expect(holdAt).toBeGreaterThan(-1);
+    expect(holdAt).toBeLessThan(vetoAt);
+    expect(src).toContain('await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });');
   });
 
   test('the appointment-contact backfill never saves a no-text ANI into a blank customers.phone', () => {
