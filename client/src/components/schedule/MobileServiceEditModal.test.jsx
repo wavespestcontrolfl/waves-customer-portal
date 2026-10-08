@@ -107,4 +107,36 @@ describe('MobileServiceEditModal save payload', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Change the whole stop' }));
     expect(await screen.findByText('The save did not confirm, so it may or may not have gone through. Close this and check the schedule before you save again.')).toBeInTheDocument();
   });
+
+  describe('auto-dispatch lock box', () => {
+    const OCCURRENCE = { ...SERVICE, isRecurring: true, recurringParentId: 'parent-1', autoDispatchLocked: true };
+    const LABEL = 'Keep auto-dispatch off this visit';
+    const saveBody = () => JSON.parse(fetch.mock.calls.find(([url]) => String(url).endsWith('/update-details'))[1].body);
+
+    it('shows the box checked for a locked recurring occurrence and hides it otherwise', () => {
+      const view = render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={vi.fn()} />);
+      expect(screen.getByLabelText(new RegExp(LABEL))).toBeChecked();
+      view.unmount();
+      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, isRecurring: false, recurringParentId: null }} onClose={vi.fn()} onSaved={vi.fn()} />);
+      expect(screen.queryByText(LABEL)).not.toBeInTheDocument();
+    });
+
+    it('a cleared box rides the one save: the new value and the value the form opened with', async () => {
+      const onSaved = vi.fn();
+      render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={onSaved} />);
+      fireEvent.click(screen.getByLabelText(new RegExp(LABEL)));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(saveBody()).toMatchObject({ autoDispatchLocked: false, autoDispatchLockedWas: true });
+      expect(fetch.mock.calls.filter(([url]) => String(url).includes('/auto-dispatch/'))).toHaveLength(0);
+    });
+
+    it('an untouched box sends the same value twice, which the server reads as no decision', async () => {
+      const onSaved = vi.fn();
+      render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={onSaved} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(saveBody()).toMatchObject({ autoDispatchLocked: true, autoDispatchLockedWas: true });
+    });
+  });
 });

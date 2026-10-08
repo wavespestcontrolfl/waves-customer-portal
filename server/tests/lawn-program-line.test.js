@@ -371,3 +371,68 @@ describe('resolveProgramVisit: only recurring lawn plan visits get the line', ()
     });
   });
 });
+
+describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
+  const { lawnResultTimingViolation } = require('../services/service-report/report-writer-rules');
+
+  test('regional variants stay true: March names no micronutrient step, April feeding is qualified (codex #6091 r6)', () => {
+    expect(PROGRAM_DETAIL_V13[3].whyNow).not.toMatch(/micronutrient/i);
+    expect(PROGRAM_DETAIL_V13[4].whyNow).toMatch(/where local fertilizer rules allow/);
+  });
+
+  const { PROGRAM_DETAIL_V13, buildProgramDetail } = require('../services/service-report/lawn-program-line');
+  const withBoth = (detail, fn, lead = 'true') => withEnv({ [GATE]: 'true', GATE_LAWN_V13: 'true', GATE_LAWN_REPORT_LEAD: lead === null ? undefined : lead, GATE_LAWN_PROGRAM_DETAIL: detail }, fn);
+
+  test('every month has a why-now line and nothing else: no watering advice, no outcome timing (codex #6091 r5, r6)', () => {
+    for (let m = 1; m <= 12; m += 1) {
+      const d = PROGRAM_DETAIL_V13[m];
+      expect(d.whyNow).toEqual(expect.any(String));
+      expect(Object.keys(d)).toEqual(['whyNow']);
+      expect(lawnResultTimingViolation(d.whyNow)).toBe(false);
+    }
+  });
+
+  test('the copy names no product, brand, active ingredient or rate', () => {
+    const all = JSON.stringify(PROGRAM_DETAIL_V13);
+    expect(all).not.toMatch(/LESCO|Stonewall|Dimension|Celsius|Certainty|Artavia|Velista|Arena|Acelepryn|Tetrino|Dylox|Gravex|Dismiss|Nutra|prodiamine|dithiopyr|azoxystrobin|\bper 1,000\b|\blb\b|fl oz/i);
+  });
+
+  test('no detail without a program line; gate is strict and needs the lead layout', () => {
+    withBoth('true', () => {
+      expect(buildProgramDetail({ month: 10, programLine: null })).toBeUndefined();
+      expect(buildProgramDetail({ month: 10, programLine: 'x' })).toEqual({ whyNow: PROGRAM_DETAIL_V13[10].whyNow });
+    });
+    for (const loose of ['1', 'on', 'TRUE']) withBoth(loose, () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined());
+    withBoth('true', () => expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBeUndefined(), null);
+  });
+
+  test('barrier months and the May insect step keep the program line qualifier (codex #6091 r1, r2)', () => {
+    for (const m of [1, 3, 5, 6, 10]) expect(PROGRAM_DETAIL_V13[m].whyNow).toMatch(/where it fits the property/);
+  });
+
+  test('gate off: no seasonalDetail value and the serialized payload is unchanged', () => {
+    const off = withBoth(undefined, () => v13Report());
+    expect(off.snapshot.seasonalDetail).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(off.snapshot))).not.toHaveProperty('seasonalDetail');
+    expect(JSON.stringify(withBoth('false', () => v13Report()))).toBe(JSON.stringify(off));
+  });
+
+  test('gate on: the v13 month detail rides beside the program line', () => {
+    const on = withBoth('true', () => v13Report());
+    expect(on.snapshot.seasonalNoteSource).toBe('program');
+    const d = on.snapshot.seasonalDetail;
+    expect(d.whyNow).toBe(PROGRAM_DETAIL_V13[10].whyNow);
+    expect(d).toEqual({ whyNow: PROGRAM_DETAIL_V13[10].whyNow });
+  });
+
+  test('gate on without the program line (expectations off): no detail', () => {
+    const on = withEnv({ [GATE]: undefined, GATE_LAWN_V13: 'true', GATE_LAWN_REPORT_LEAD: 'true', GATE_LAWN_PROGRAM_DETAIL: 'true' }, () => v13Report());
+    expect(on.snapshot.seasonalDetail).toBeUndefined();
+  });
+
+  test('the copy is grass-neutral and assumes no earlier visit (codex #6091 r3)', () => {
+    const all = JSON.stringify(PROGRAM_DETAIL_V13);
+    expect(all).not.toMatch(/St\.? Augustine|Bermuda|Zoysia|Bahia/i);
+    expect(all).not.toMatch(/\b(?:renew\w*|first|second|again|already|another round|next round|re-?apply\w*)\b/i);
+  });
+});

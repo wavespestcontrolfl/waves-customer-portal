@@ -2366,8 +2366,12 @@ router.get('/:token/map.svg', async (req, res, next) => {
     // as the PDF: only lines whose reservice block composed (rs2-keyed).
     // GATE_PEST_TRACE_OR_NOTHING (owner 2026-08-31) widens the verdict to
     // the whole pest line ('-ton1'-keyed).
+    // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (codex #6089 r2): a lawn report
+    // whose coverage is hidden by the verdict frozen at completion must not
+    // keep serving that schematic A-D map here either.
     if ((reserviceReportCopyGateOn() && data.isCallback === true && data.reserviceReport)
-      || data.pestTraceOrNothing === true) {
+      || data.pestTraceOrNothing === true
+      || data.lawnCoverageHidden === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
     res.type('image/svg+xml');

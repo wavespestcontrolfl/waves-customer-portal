@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adminFetch } from '../../utils/admin-fetch';
-import TriageInboxTabV2, { ConfirmEvidence } from './TriageInboxTabV2';
+import TriageInboxTabV2, { ConfirmEvidence, FamilyEvidence } from './TriageInboxTabV2';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 
@@ -449,6 +449,47 @@ describe('ConfirmEvidence — missing first name', () => {
     unmount();
     render(<ConfirmEvidence reasonCode="email_unverified" payload={{ flag: 'email_unverified', customer_ids: [A], customer_id: A }} />);
     expect(screen.queryByRole('link')).toBeNull();
+  });
+});
+
+describe('FamilyEvidence — family account suggestions', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const B = '66666666-7777-4888-8999-000000000000';
+  const payload = {
+    flag: 'family_account_candidates',
+    caller_name: 'Dana Lee',
+    caller_phone: '+19415550101',
+    account_holder_name: 'Angelina Testerson',
+    holder_candidates: [
+      { id: A, name: 'Angelina Testerson', city: 'Sarasota', address_matches: true },
+      { id: B, name: 'Angelina Testerson', city: 'Bradenton', address_matches: false },
+    ],
+    customer_ids: [A, B],
+    reason: 'Confirm, then link the call to this account.',
+  };
+  it('shows the caller, the named holder, each account with the address mark, and an Open customer link per account', () => {
+    render(<FamilyEvidence payload={payload} />);
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101/)).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Sarasota · address matches')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Bradenton')).toBeInTheDocument();
+    expect(screen.getByText(/Confirm, then link the call to this account/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByRole('link', { name: 'Open customer 2' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    expect(screen.queryByText(/Add first name on/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/more accounts share this name/)).not.toBeInTheDocument();
+  });
+  it('shows BOTH numbers when the calling number and the dictated callback differ', () => {
+    render(<FamilyEvidence payload={{ ...payload, caller_callback_phone: '+19415550102' }} />);
+    expect(screen.getByText(/Dana Lee · calling from \+19415550101 · callback \+19415550102/)).toBeInTheDocument();
+  });
+  it('says so when more accounts share the name than the card lists', () => {
+    render(<FamilyEvidence payload={{ ...payload, more_accounts: true }} />);
+    expect(screen.getByText(/more accounts share this name — search by name/)).toBeInTheDocument();
+  });
+  it('opens the server-resolved survivor for a merged candidate', () => {
+    render(<FamilyEvidence payload={payload} openCustomerIds={[B, A]} />);
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
   });
 });
 

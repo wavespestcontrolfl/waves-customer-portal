@@ -12,7 +12,10 @@ import CreateAppointmentModal from './CreateAppointmentModal';
 
 const hooks = vi.hoisted(() => ({ availability: null, conflicts: [] }));
 vi.mock('./useBestTimes', () => ({
-  useBestTimes: () => ({ bestTimes: [], picked: null, bestInRange: null, availability: hooks.availability, checking: false }),
+  useBestTimes: (args) => {
+    hooks.bestTimesArgs = args;
+    return { bestTimes: [], picked: null, bestInRange: null, availability: hooks.availability, checking: false };
+  },
 }));
 vi.mock('./useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: hooks.conflicts }) }));
 
@@ -78,6 +81,33 @@ it('rain-out: on a preset the strip is display-only (the preset fixes the time)'
   const strip = await screen.findByTestId('availability-strip');
   expect(strip).toHaveTextContent("doesn't fit");
   for (const chip of screen.getAllByTestId('availability-hour')) expect(chip).toBeDisabled();
+});
+
+it('rain-out: asks for the best-times rows and shows each chip with its hourly rain, like New Appointment', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => (String(url).includes('/rain-out-options')
+    ? json({
+      sameDay: [{ kind: 'same_day', date: DATE, window: { start: '14:00', end: '15:00' }, display: 'Today, 2:00 PM-3:00 PM', rainChance: 80 }],
+      days: [{ kind: 'day', date: DATE, window: { start: '09:00', end: '10:00' }, display: 'Fixture day, 9:00 AM-10:00 AM', rainChance: 74, rainScope: 'day' }],
+      service: { window: { start: '08:00', end: '09:00' } },
+    })
+    : json({}))));
+  hooks.availability = {
+    ...missAt('14:00'),
+    best: {
+      day: [hour('11:00', { rainChance: 15, driveInMinutes: 8, driveSource: 'google' })],
+      week: [hour('10:00', { date: '2035-01-03', rainChance: 65 })],
+      weekCovered: true,
+    },
+  };
+  render(<RainOutSheet service={{ id: 'svc-1', technicianId: 'tech-1', customerId: 'cust-1', scheduledDate: '2035-01-01', serviceType: 'Fixture Lawn Care' }} onClose={vi.fn()} onDone={vi.fn()} />);
+  const rows = await screen.findAllByTestId('best-row');
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveTextContent('15% rain');
+  expect(rows[1]).toHaveTextContent('65% rain');
+  expect(hooks.bestTimesArgs).toMatchObject({ bestRows: true, serviceTypes: ['Fixture Lawn Care'] });
+  // A "later today" preset carries its own hour's chance; a day-level fallback says so.
+  expect(screen.getByText('80% rain')).toBeInTheDocument();
+  expect(screen.getByText('74% rain that day')).toBeInTheDocument();
 });
 
 it('new appointment: taking a chip sets the date, the hour and the technician it was scored for', async () => {

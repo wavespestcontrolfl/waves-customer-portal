@@ -23,6 +23,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
+const { UNISSUED_ESTIMATE, estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estimate-bahia-review');
 const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
 const {
   computeContactGaps,
@@ -17817,8 +17818,17 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       }
     }
     const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    // A line this mutation ADDS was never sold: the add rail, or the customer taking a staff-parked
+    // offer. The STAFF restore is the compensation of a send that delivered on no channel
+    // (revertLeadServiceForSend): it puts back a line the issued estimate already carried.
+    const lineIsAdded = mode === 'add' || (mode === 'restore' && staffOffered && actor !== 'staff');
     const reprice = await serverRecomputeFromEstimateData(parsedData, {
       replaySavedPricingKnobs: true,
+      // A line this mutation adds (the add rail, or the customer taking a staff-parked offer) was
+      // never sold, so the lawn pricer's v13 bahia review still applies to it. The STAFF restore is
+      // the compensation of a send that delivered on no channel (revertLeadServiceForSend): it puts
+      // back a line the issued estimate already carried, so it replays as sold.
+      addedServiceKeys: lineIsAdded ? [serviceKey] : [],
       termitePricingKnobsForRestore: mode === 'restore' && serviceKey === 'termite_bait'
         ? provenance?.termitePricingKnobs : null,
       priorQualifyingServices: priors,
@@ -17856,6 +17866,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       if (addedLineReviewOnly(reprice.rawEngineResult, serviceKey)) {
         return { status: 409, body: ({ error: 'add_unavailable' }) };
       }
+    } else if (lineIsAdded && addedLineReviewOnly(reprice.rawEngineResult, serviceKey)) {
+      // A customer taking a staff-parked offer joins the plan like an add: a line the engine could only
+      // price as review-only (a bahia lawn under GATE_LAWN_V13) is never confirmable, dry run included.
+      return { status: 409, body: ({ error: 'add_unavailable' }) };
     }
     const impact = optOutImpact({
       beforeResult, afterResult, beforeData, afterData: parsedData, label,
@@ -19423,7 +19437,10 @@ function extractEngineInputs(estData) {
   // Injected at the INPUT level only: explicit services.* signals stored in
   // the inputs still win inside the engine's own resolution, and a silent
   // estimate (no stamp, no evidence) injects nothing and replays live.
-  const out = { ...base, ...savedFloorReplayOverrides(estData) };
+  // savedEstimateReplay: a stored estimate re-priced as sold, so the lawn pricer's v13 bahia review
+  // (which parks NEW bahia quotes) leaves an estimate that was already sent alone. An estimate the
+  // caller knows was never issued (buildPricingBundleInner marks it) is not sold: it keeps the review.
+  const out = { ...base, ...savedFloorReplayOverrides(estData), savedEstimateReplay: estData[UNISSUED_ESTIMATE] !== true };
   // Existing-customer reprice: replay the prior qualifying services persisted at
   // save so any public recompute (bundle CTA, frequency slider) keeps the
   // COMBINED WaveGuard tier instead of reverting to this estimate's services
@@ -20723,7 +20740,13 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const setupWaiverUnverifiedRequote = (
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   )?.setupWaiverUnverifiedRequote === true;
+  // GATE_LAWN_V13 has no bahia program: a never-issued estimate (buildPricingBundleInner marks it)
+  // holding a recurring bahia lawn plan is review-only in every stored shape, including the V1
+  // blobs whose rows are served as stored and never re-priced.
+  const bahiaLawnReview = !!estData && estData[UNISSUED_ESTIMATE] === true
+    && require('../services/lawn-program').lawnV13NoBahiaProgram() && estimateHasBahiaLawn(estData);
   const quoteRequired = pricingBundle?.quoteRequired === true
+    || bahiaLawnReview
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
     || managerApprovalRequired
@@ -20743,6 +20766,7 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialProposal ? 'commercial_proposal' : null)
         || (commercialRiskTypeReview ? 'commercial_risk_type_review' : null)
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
+        || (bahiaLawnReview ? 'lawn_v13_bahia_no_program' : null)
         || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
         || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
         || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)
@@ -28073,6 +28097,11 @@ async function buildPricingBundleInner(estimate) {
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
+  // A row that was never issued (draft, scheduled, first send) is not sold: its replay keeps the
+  // GATE_LAWN_V13 bahia review, so the send snapshot cannot price a new bahia plan unreviewed.
+  // Set on EVERY call (true or false), so a mark left on a shared object by an earlier call for the same
+  // row never outlives that row's first send.
+  if (estData && typeof estData === 'object') estData[UNISSUED_ESTIMATE] = estimateNeverIssued(estimate);
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
   // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
   // accept paths bill this frozen figure UP FRONT beside the first

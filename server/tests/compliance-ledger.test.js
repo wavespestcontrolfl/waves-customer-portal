@@ -343,7 +343,9 @@ describe('application-limits annual caps count writer-shaped ledger rows', () =>
           limit_type: 'annual_max_apps', limit_value: 3, severity: 'hard_block',
           description: 'Celsius WG: max 3 applications per year per property.',
         }],
-      })); // product_limits (no moa_group → moa queries skipped)
+      })) // product_limits (no moa_group → moa queries skipped)
+      // The three visits' property (one lawn): a yearly count is per lawn, so the placed rows are read.
+      .mockReturnValueOnce(chain({ rows: [0, 1, 2].map((i) => ({ record_id: `rec-${i}`, property_id: 'prop-A' })) }));
 
     const result = await applicationLimits.checkLimits('cust-1', 'prod-celsius', new Date('2026-07-04T12:00:00Z'));
 

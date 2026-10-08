@@ -20,7 +20,8 @@ const migration = require('../models/migrations/20261005120000_lawn_protocol_v13
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
-const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// Three tracks: the bahia track is deleted (owner 2026-10-06; Celsius and Blindside are not labeled for bahiagrass).
+const GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
@@ -29,7 +30,7 @@ const visitFor = (month) => v13.st_augustine.visits.find((v) => v.month === MONT
 const lines = (text) => String(text || '').split('\n').filter(Boolean);
 
 describe('the v13 recipe', () => {
-  test('four tracks, one universal program, 12 months in the existing visit shape', () => {
+  test('three tracks (no bahia), one universal program, 12 months in the existing visit shape', () => {
     expect(Object.keys(v13)).toEqual(GRASSES);
     for (const grass of GRASSES) {
       expect(v13[grass].visits).toEqual(v13.st_augustine.visits);
@@ -300,7 +301,8 @@ describe('staged migration 20261005120000', () => {
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
-      expect(spots.sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
+      // Migration 20261007150000 retires the Dismiss rows and the recipe drops its lines (use up the jug, do not reorder).
+      expect(spots.filter((n) => n !== migration.NAMES.DIS).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');

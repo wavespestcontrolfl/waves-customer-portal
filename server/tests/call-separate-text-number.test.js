@@ -230,7 +230,7 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(src).toContain('noTextHold: noTextHoldArming');
     expect(src.split('noTextHoldArming = aniCannotText(').length - 1).toBe(2);
     const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
-    expect(triage).toContain('noTextHold: cardCarriesNoTextHold(liveCard ? { payload: liveCard.payload } : item)');
+    expect(triage).toContain('noTextHold: cardCarriesNoTextHold({ ...item, ...liveCard })');
   });
 
   test('a hard-vetoed no-text call gets neither the hold nor the card (the veto the pipeline applies)', () => {
@@ -265,9 +265,12 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(src).not.toContain('texts to the calling line resume');
     const client = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
     expect(client).toContain('text_number_differs: "Caller\'s line can\'t get texts — fix the phones"');
-    expect(client).toContain('livePhone={item.customer_phone}');
+    expect(client).toContain('livePhone: item.customer_phone');
+    // in the shared tables, not parallel branches
+    expect(client).toMatch(/const NO_VERDICT_REASONS = new Set\(\[[^\]]*"text_number_differs"/);
     const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
     expect(triage).toContain("          'text_number_differs',\n          ...(item.reason_code !== 'auto_booking_skipped_after_approval'");
     expect(triage).toContain('text_number_differs: \'This card is a no-text line');
+    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'text_number_differs'/);
   });
 });

@@ -724,7 +724,9 @@ router.post('/assess', async (req, res, next) => {
       // guess st_augustine, which would attribute the wrong protocol's products.
       // Gate on: perception never sees the planned products (they bias what
       // the model "sees"); reconciliation gets them at confirm instead.
-      const track = visitAssessmentEnabled ? null : grassCtx.trackKey;
+      // A bahia lawn under v13 keeps its track identity but has no program to show (noProgram), so no
+      // planned products are claimed for it either.
+      const track = visitAssessmentEnabled || grassCtx.noProgram ? null : grassCtx.trackKey;
       // Honor the window the office linked on the appointment (catch-up / rescheduled
       // / manually-assigned visits): a keyed window overrides the date-derived one so
       // the model sees the products the tech is actually expected to apply.

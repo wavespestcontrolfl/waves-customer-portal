@@ -78,7 +78,7 @@ Use for: "what's the protocol for quarterly pest?", "lawn care protocol for St. 
       type: 'object',
       properties: {
         service_type: { type: 'string', description: 'pest, lawn, mosquito, termite, tree_shrub, rodent, palm_injection, cockroach, or bed_bug' },
-        lawn_track: { type: 'string', description: 'For lawn: st_augustine, bermuda, zoysia, bahia (legacy A/B, C1, C2, D are accepted)' },
+        lawn_track: { type: 'string', description: 'For lawn: st_augustine, bermuda, zoysia, or bahia while the v13 lawn program is off (legacy A/B, C1, C2, D are accepted). Under v13 bahia has no program; the result says so.' },
       },
       required: ['service_type'],
     },

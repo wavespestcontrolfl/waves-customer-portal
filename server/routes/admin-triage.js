@@ -18,6 +18,33 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Cards whose payload.customer_ids lists the customers to open: the list resolves each to its live merge
+// survivor (owed_customer_open_ids).
+const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];
+// Cards only an admin sees and settles: property-role proposals embed the customer's other property
+// addresses, and a family-account suggestion lists customers and the caller's number for the office to
+// link. Hidden from the tech list and counts, and refused on every shared transition.
+// Cards whose transitions must carry the version (expected_updated_at) the operator saw: a reprocess
+// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion).
+const VERSION_BOUND_REASONS = [
+  'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
+  'auto_booking_skipped_after_approval', 'missing_first_name', 'text_number_differs', 'family_account_candidates',
+];
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];
+// Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
+// the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
+// what the card asks).
+const NOT_A_VERDICT_MESSAGES = {
+  email_bounce_reverify: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.',
+  property_role_confirm: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.',
+  reschedule_link_promise: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.',
+  attached_booking_followup_unbooked: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.',
+  missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
+  family_account_candidates: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.',
+  text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
+};
+
+
 const OPEN_STATES = ['open', 'in_progress'];
 const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
 // Match the booking/estimate address-confirmation notices before applying the
@@ -211,11 +238,6 @@ async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo }) {
   });
 }
 
-const NOT_A_VERDICT_MESSAGES = {
-  missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
-  text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
-};
-
 // Upsert the single current verdict for a call (re-review overwrites). Links to
 // the enforce-mode route_decision when one exists so calibration can attribute
 // the verdict to the flags that drove the gate.
@@ -321,7 +343,7 @@ router.get('/', async (req, res) => {
       // addresses — the same data admin-customers gates behind requireAdmin —
       // and only an admin can apply them; hide the cards from tech users.
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('triage_items.reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS);
       })
       .orderBy('triage_items.created_at', 'desc')
       .limit(limit)
@@ -362,7 +384,7 @@ router.get('/', async (req, res) => {
       .select('status')
       .count('* as n')
       .modify((q) => {
-        if (req.techRole !== 'admin') q.whereNot('reason_code', 'property_role_confirm');
+        if (req.techRole !== 'admin') q.whereNotIn('reason_code', ADMIN_ONLY_REASONS);
       })
       .groupBy('status');
     const counts = { open: 0, in_progress: 0, resolved: 0, dismissed: 0 };
@@ -411,7 +433,7 @@ router.get('/', async (req, res) => {
 
     // A first-name card's "Open customer" links must reach an editable record: a listed customer
     // merged away since filing opens the survivor of its merge chain (codex #5559 r18).
-    const nameCards = items.filter((i) => i.reason_code === 'missing_first_name');
+    const nameCards = items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code));
     if (nameCards.length) {
       const { owedCustomerOpenTargets } = require('../utils/missing-first-name-card');
       for (const item of nameCards) {
@@ -522,11 +544,6 @@ async function streetLevelHoldStillPending(conn, item) {
 }
 const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending visit: confirm the address with the customer, then confirm (or correct or cancel) the visit itself. It resolves when the visit does.';
 
-const VERSION_BOUND_REASONS = new Set([
-  'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
-  'auto_booking_skipped_after_approval', 'missing_first_name', 'text_number_differs',
-]);
-
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
@@ -605,15 +622,10 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // force-reprocess refreshes in place: "Follow-up booked" on the old
     // screen must not settle the newer obligation (pre-push audit P1 after
     // r27).
-    // (the VERSION_BOUND_REASONS set above lists them: property roles, promises, house-number conflict,
-    // owed follow-up, the recovery task a settlement refreshes in place (codex r30 P1), the owed-first-name
-    // card whose customer list a reprocess appends to, and the no-text line card whose payload a
-    // reprocess refreshes.)
-    if (VERSION_BOUND_REASONS.has(item.reason_code)
-      // …and email review cards (codex round-3 P1): the client already
-      // sends expected_updated_at on every resolve/dismiss, so a stale view
-      // of a card whose evidence has since changed refuses instead of
-      // settling evidence the operator never saw.
+    // VERSION_BOUND_REASONS: property-role, reschedule-promise, house-number-conflict, attached-follow-up,
+    // recovery-task, owed-first-name and family-account cards, each of which a reprocess refreshes in
+    // place — a stale Resolve / Dismiss must not settle evidence the operator never saw.
+    if (VERSION_BOUND_REASONS.includes(item.reason_code)
       || emailReviewCard
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt
@@ -695,7 +707,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // Round 7 P1: this is the VERIFIED_SAME_NUMBER meaning — the one
       // action that lifts the number-keyed row too (see the helper).
       const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
-        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, noTextHold: cardCarriesNoTextHold(liveCard ? { payload: liveCard.payload } : item),
+        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, noTextHold: cardCarriesNoTextHold({ ...item, ...liveCard }),
       });
       callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }
@@ -834,7 +846,7 @@ async function transition(req, res, nextStatus) {
   // property correction through these shared transitions either.
   if (req.techRole !== 'admin') {
     const guarded = await db('triage_items').where({ id }).first('reason_code');
-    if (guarded && guarded.reason_code === 'property_role_confirm') {
+    if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {
       return res.status(403).json({ error: 'Admin access required' });
     }
     // A missing first name is settled on the customer record, which only an admin edits:
@@ -1921,32 +1933,10 @@ router.post('/:id/verdict', async (req, res) => {
     // arrive DAYS after the call and say nothing about whether the AI routed
     // it correctly. They resolve individually via /resolve; recording an
     // accept/deny on one would pollute route_feedback calibration.
-    if (item.reason_code === 'email_bounce_reverify') {
-      return res.status(400).json({ error: 'This card is a bounced-email follow-up, not a call verdict — use Resolve instead.' });
-    }
-    // Property-role cards are pending DATA changes, not call-routing
-    // judgments — they apply via /apply-property-roles or dismiss.
-    if (item.reason_code === 'property_role_confirm') {
-      return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
-    }
-    // A parked reschedule-link promise is exception handling on an
-    // OBLIGATION, not a call-routing judgment — and settling it (see
-    // transitionCore) needs the single-card Resolve/Dismiss transition, not
-    // a call-level cascade that never touches the underlying commitment.
-    if (item.reason_code === 'reschedule_link_promise') {
-      return res.status(400).json({ error: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.' });
-    }
-    // An owed follow-up visit is booked by hand and settled by its own
-    // Resolve — a call verdict says nothing about visit 2 and the bulk
-    // resolve below leaves this card out on purpose (codex r10 P1).
-    if (item.reason_code === 'attached_booking_followup_unbooked') {
-      return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
-    }
-    // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
-    // customer record, not a routing judgment — a verdict would close it without a name.
-    // …and a no-text line (text_number_differs) is settled by its own Resolve/Dismiss, which also
-    // decide the SMS hold; a verdict would close the card and leave the hold undecided.
-    if (Object.hasOwn(NOT_A_VERDICT_MESSAGES, item.reason_code)) {
+    // Cards that are not a call verdict (bounced-email follow-up, property roles, a parked reschedule-link
+    // promise, an owed follow-up visit, an owed first name, a family-account suggestion): see
+    // NOT_A_VERDICT_MESSAGES. Their bulk-resolve exclusions are listed below.
+    if (NOT_A_VERDICT_MESSAGES[item.reason_code]) {
       return res.status(400).json({ error: NOT_A_VERDICT_MESSAGES[item.reason_code] });
     }
     // A street-level address hold is settled by its visit, not by a verdict.
@@ -2190,6 +2180,8 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          // …and a family-account suggestion, which only a link (or its own Resolve / Dismiss) settles.
+          'family_account_candidates',
           // …and a no-text line card (text_number_differs): settled by its own Resolve/Dismiss only.
           'text_number_differs',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
