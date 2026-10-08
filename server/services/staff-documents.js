@@ -124,6 +124,17 @@ async function publish(id, versionId, at, previewHash, actor) {
   });
 }
 
+async function setOnboardingRequired(id, required, actor) {
+  return db.transaction(async trx => {
+    await lockLibrary(trx);
+    const document = await loadDocument(trx, id, actor);
+    if (document.onboarding_required === required) return document;
+    const [updated] = await trx('document_templates').where({ id }).update({ onboarding_required: required, updated_at: trx.fn.now(), updated_by: actor.id }).returning('*');
+    await audit(trx, actor, required ? 'onboarding_required' : 'onboarding_not_required', id, {});
+    return updated;
+  });
+}
+
 async function updatePolicy(input, at, actor) {
   const values = validate(policySchema, input.values);
   if (values.paid_holidays.some(name => values.unpaid_holidays.includes(name))) reject('A holiday cannot be both paid and unpaid.');
@@ -264,4 +275,4 @@ async function saveRecord(versionId, input, actor) {
   });
 }
 
-module.exports = { saveDraft, preview, publish, updatePolicy, list, detail, acknowledge, saveRecord, recordAnswers, ACKNOWLEDGMENT };
+module.exports = { saveDraft, preview, publish, setOnboardingRequired, updatePolicy, list, detail, acknowledge, saveRecord, recordAnswers, ACKNOWLEDGMENT };

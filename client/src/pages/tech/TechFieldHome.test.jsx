@@ -41,3 +41,12 @@ it('keeps a failed route distinct from an empty route and offers retry', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Retry route' }));
   expect(onRetry).toHaveBeenCalledTimes(1);
 });
+
+it('puts the onboarding card at the top of Today, above the route, and not on Tools', () => {
+  const stops = groupServicesIntoStops([row('one', 'confirmed')]);
+  const { container, rerender } = render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={vi.fn()} onboarding={<div data-testid="onboarding-slot">Sign 1 document to finish setup</div>} />);
+  const slot = screen.getByTestId('onboarding-slot');
+  expect(slot.compareDocumentPosition(container.querySelector('.tf-today-grid')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  rerender(<TechFieldHome section="tools" stops={stops} tools={[]} onboarding={<div data-testid="onboarding-slot" />} />);
+  expect(screen.queryByTestId('onboarding-slot')).not.toBeInTheDocument();
+});
