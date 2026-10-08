@@ -53,6 +53,9 @@ const FULL_ACCESS_TWO_STEP_TOOL_NAMES = new Set([...OUTSIDE_WRITE_TOOL_NAMES]);
 // Their no-confirmed call produces the rich preview shown to the operator.
 const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'save_customer_estimate',
+  // reprice_future_visits (owner ruling 2026-10-07): one customer's future
+  // visits for one service, each saved through the Schedule visit edit.
+  'reprice_future_visits',
   'add_customer_property',
   'update_customer_property',
   'set_primary_property',

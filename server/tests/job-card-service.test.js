@@ -558,6 +558,21 @@ describe('current-visit procedure uses the same authority as product resolution'
     expect(buildPlan).toHaveBeenCalledTimes(1);
   });
 
+  test('an N visit (a gated spreader row) carries the full fertilizer safety block; a hose visit carries none', async () => {
+    const { FERTILIZER_SAFETY_RULES } = require('../services/lawn-fertilizer-safety');
+    const planFor = (products) => ({ propertyGate: { month: 'Feb', visit: 2, trackKey: 'st_augustine' }, protocol: { objective: 'N rate: 0.75 lb N. Spreader visit.', structured: {
+      status: 'active', grassTrack: 'st_augustine', name: 'Synthetic lawn protocol', version: 3, window: { title: 'February feeding', goal: 'One spreader feeding.', requiredTasks: [] }, products,
+    } } });
+    const card = async (products) => (await jobCard.resolveVisitProducts({ facts: { isLawn: true, serviceId: 'synthetic-visit' }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan: jest.fn().mockResolvedValue(planFor(products)) } })).procedure;
+    const spreader = await card([{ productId: 'f24', gates: { targetN: '0.75 lb N/1000', fertilizerSafety: true } }]);
+    expect(spreader.visitNotes).toEqual(['N rate: 0.75 lb N. Spreader visit.', `Fertilizer safety: ${FERTILIZER_SAFETY_RULES.join(' ')}`]);
+    for (const rule of ['deflector shield', '10 ft fertilizer-free band', 'severe thunderstorm, flood or tropical watch or warning', 'Sweep fertilizer off driveways, sidewalks and streets', 'Manatee BMP decal']) {
+      expect(spreader.visitNotes.join(' ')).toContain(rule);
+    }
+    expect((await card([{ productId: 'nt', gates: { requiresZeroNP: true } }])).visitNotes).toEqual(['N rate: 0.75 lb N. Spreader visit.']);
+    expect((await card([])).visitNotes).toEqual(['N rate: 0.75 lb N. Spreader visit.']);
+  });
+
   test('an assessment cannot inherit a treatment procedure from its display name', async () => {
     const out = await jobCard.resolveVisitProducts({ facts: { serviceType: 'Quarterly Pest Control', serviceCategory: 'inspection', scheduledDate: '2030-09-30' }, protocols: { pest: { visits: [{ visit: 1, primary: 'Treatment step' }] } }, catalog: [] });
     expect(out.procedure).toBeUndefined();

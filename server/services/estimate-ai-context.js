@@ -1044,9 +1044,16 @@ function externalReferencesFor(serviceKeys) {
 async function loadProtocolProductFamilies(db) {
   if (!db) return {};
   try {
-    const rows = await db('lawn_protocol_products')
-      .select('product_name')
-      .limit(1000);
+    const query = db('lawn_protocol_products').select('product_name');
+    // GATE_LAWN_V13 has no bahia program: the staged bahia rows are not a product linkage for it.
+    const { lawnV13NoBahiaProgram, BAHIA_TRACK, LAWN_V13_VERSION } = require('./lawn-program');
+    if (lawnV13NoBahiaProgram()) {
+      query.whereNotIn('lawn_protocol_window_id', db('lawn_protocol_windows as lpw')
+        .join('lawn_protocols as lp', 'lp.id', 'lpw.lawn_protocol_id')
+        .where({ 'lp.grass_track': BAHIA_TRACK, 'lp.version': LAWN_V13_VERSION })
+        .select('lpw.id'));
+    }
+    const rows = await query.limit(1000);
     const out = {};
     for (const row of rows) {
       for (const segment of cleanText(row.product_name || '').split(/\s*\+\s*/)) {
@@ -1147,4 +1154,6 @@ module.exports = {
   // never mutates this array. See its definition for why it is empty today.
   KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,
   KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES,
+  // Exported for direct testing of the GATE_LAWN_V13 bahia exclusion only.
+  loadProtocolProductFamilies,
 };

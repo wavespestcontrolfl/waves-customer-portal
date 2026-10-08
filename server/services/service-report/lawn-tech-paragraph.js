@@ -60,7 +60,8 @@ const MAX_WORDS = FIELD_WORD_CAPS.techParagraph;
  */
 const LAWN_SENTENCES = Object.freeze({
   observed: 'Our technician saw {items}.',
-  // {prep} is the place's own word: "in the front lawn".
+  // {prep} is the place's own word: "in the front lawn". {condition} is one problem,
+  // or every problem seen at that place ("clover and spurge").
   observedItemWithPlace: '{condition} {prep} the {place}',
   observedItem: '{condition}',
   maybe: 'There may be early signs of {labels}; we will keep an eye on it.',
@@ -219,9 +220,21 @@ function buildSlots(inputs, observed) {
 /** Slots -> sentences, in the fixed order. Unknown ids render nothing. Pure. */
 function renderSentences(s) {
   const out = [];
-  const items = s.observed.map((o) => (Object.hasOwn(PLACES, o.place)
-    ? fill(LAWN_SENTENCES.observedItemWithPlace, { condition: CONDITIONS[o.condition].display, prep: PLACES[o.place].prep, place: PLACES[o.place].display })
-    : fill(LAWN_SENTENCES.observedItem, { condition: CONDITIONS[o.condition].display })));
+  // Problems at one place share one phrase ("clover, spurge and goosegrass in the
+  // back lawn"); placed groups come first, in order, and problems with no place
+  // last, so "dollarweed and nutsedge in the side yard" never places the
+  // dollarweed (owner trial 2026-10-06).
+  const byPlace = new Map();
+  for (const o of s.observed) {
+    const place = Object.hasOwn(PLACES, o.place) ? o.place : NO_PLACE;
+    byPlace.set(place, [...(byPlace.get(place) || []), CONDITIONS[o.condition].display]);
+  }
+  const unplaced = byPlace.get(NO_PLACE) || [];
+  byPlace.delete(NO_PLACE);
+  const items = [
+    ...[...byPlace].map(([place, names]) => fill(LAWN_SENTENCES.observedItemWithPlace, { condition: joinList(names), prep: PLACES[place].prep, place: PLACES[place].display })),
+    ...unplaced.map((name) => fill(LAWN_SENTENCES.observedItem, { condition: name })),
+  ];
   if (items.length) out.push(fill(LAWN_SENTENCES.observed, { items: joinList(items) }));
   if (s.maybe.length) out.push(fill(LAWN_SENTENCES.maybe, { labels: joinList(s.maybe.map((k) => FINDING_LABELS[k])) }));
   if (s.products.length) out.push(fill(LAWN_SENTENCES.products, { products: joinList(s.products) }));

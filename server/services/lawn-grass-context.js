@@ -13,7 +13,7 @@
  * so we do NOT synthesize legacy A/B/C1/C2/D codes here.
  */
 const db = require('./../models/db');
-const { lawnProtocols } = require('./lawn-program');
+const { isBahiaGrass, lawnV13NoBahiaProgram } = require('./lawn-program');
 
 const GRASS_TYPE_LABELS = {
   st_augustine: 'St. Augustine',
@@ -62,7 +62,7 @@ function normalizeGrassType(raw) {
   if (/augustine|floratam|palmetto|seville|bitter\s*blue|citra\s*blue|provista|captiva/.test(key)) return 'st_augustine';
   if (/bermuda|celebration|tifway|tifgrand|latitude\s*36/.test(key)) return 'bermuda';
   if (/zoysia|empire|zeon|geo|jamur|palisades/.test(key)) return 'zoysia';
-  if (/bahia|argentine|pensacola/.test(key)) return 'bahia';
+  if (isBahiaGrass(key)) return 'bahia';
   if (/\bmix(ed)?\b/.test(key)) return 'mixed';
   return null;
 }
@@ -81,20 +81,34 @@ function irrigationTypeHasSystem(irrigationType) {
   return IRRIGATION_HAS_SYSTEM[irrigationType] ?? null;
 }
 
-// Resolve the protocol track id, mirroring waveguard-plan-engine.js: an
-// explicit track_key wins when it names a real protocols.lawn track;
-// otherwise the canonical grass type doubles as the track id
-// (st_augustine / bermuda / zoysia / bahia). 'mixed'/'unknown' — and any
-// value not present in protocols.lawn — have no track.
+// Resolve the lawn's track IDENTITY, mirroring waveguard-plan-engine.js: an
+// explicit track_key wins when it names a known track; otherwise the
+// canonical grass type doubles as the track id (st_augustine / bermuda /
+// zoysia / bahia). 'mixed'/'unknown' have no track.
+//
+// This is identity, not availability: a bahia lawn keeps trackKey 'bahia'
+// when GATE_LAWN_V13 is on, so the historical readers (the service report
+// context, analytics, the wiki) still know which grass the lawn is. Whether
+// the LIVE program has anything for that track is a separate, planning-only
+// question: loadCustomerGrassContext's `noProgram` (and `bahiaHasNoProgram`),
+// which every planning consumer asks instead of relying on a null track.
 function resolveTrackKey(trackKey, grassType) {
-  const lawn = lawnProtocols();
-  if (trackKey && lawn && lawn[trackKey]) return trackKey;
-  if (grassType && lawn && lawn[grassType]) return grassType;
+  if (trackKey && KNOWN_TRACK_GRASS.has(trackKey)) return trackKey;
+  if (grassType && KNOWN_TRACK_GRASS.has(grassType)) return grassType;
   return null;
+}
+
+// Whether a lawn record names bahia: the profile's grass type, its track key, or (only when no profile
+// grass or track is recorded) the legacy lawn text. The ONE rule the plan engine, the pre-visit brief
+// and every other planning reader share, so a conflicting record reads the same everywhere.
+function recordedGrassNamesBahia(profile, legacyGrass) {
+  const profileRecorded = [profile?.track_key, profile?.grass_type].some((value) => String(value || '').trim());
+  return [profile?.grass_type, profile?.track_key, profileRecorded ? null : legacyGrass].some(isBahiaGrass);
 }
 
 function emptyContext() {
   return {
+    noProgram: false,
     grassType: null,
     grassTypeLabel: null,
     trackKey: null,
@@ -127,6 +141,9 @@ async function loadCustomerGrassContext(customerId, knex = db, { strict = false 
   const grassType = profile?.grass_type || normalizeGrassType(customer?.lawn_type) || null;
 
   return {
+    // GATE_LAWN_V13 has no bahia program: planning readers show no window guidance for this lawn,
+    // even when the visit is assigned a protocol (historical readers do not read this).
+    noProgram: lawnV13NoBahiaProgram() && recordedGrassNamesBahia(profile, customer?.lawn_type),
     grassType,
     grassTypeLabel: grassTypeLabel(grassType),
     trackKey: resolveTrackKey(profile?.track_key, grassType),
@@ -146,5 +163,6 @@ module.exports = {
   normalizeGrassType,
   irrigationTypeHasSystem,
   resolveTrackKey,
+  recordedGrassNamesBahia,
   loadCustomerGrassContext,
 };

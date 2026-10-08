@@ -13109,7 +13109,8 @@ function retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate) {
   return vouched;
 }
 
-router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
+router.put('/:id/update-details', requireAdmin, scheduleUpdateDetailsHandler);
+async function scheduleUpdateDetailsHandler(req, res, next) {
   try {
     // First statement, before any read: see negativePricePosted.
     if (negativePricePosted(req.body || {})) {
@@ -13621,6 +13622,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       clearAddonDiscountsOnPriceEdit = financialPlan.clearAddonDiscountsOnPriceEdit;
       expectedAddonRowIds = financialPlan.expectedAddonRowIds;
       financialCasSnapshot = financialPlan.financialCasSnapshot;
+      // updateVisitDetails only (never an HTTP field): the visit version the
+      // caller approved replaces the planner's own read as the row-version CAS
+      // baseline, so a write after that approval is drift under the lock too.
+      if (req.approvedVisitVersion) {
+        if (!financialCasSnapshot?.versions) {
+          throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+            statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
+          });
+        }
+        financialCasSnapshot.versions.parent = String(req.approvedVisitVersion);
+      }
       // Codex pre-push audit P1 (round 4 on #4657, :13181): the re-service/
       // is_callback classification AND its reServiceConversionZeroPrice
       // decision (zeroing the visit + every add-on for an eligible free
@@ -14280,6 +14292,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           });
         }
       }
+      // updateVisitDetails only (never an HTTP field): the related state the
+      // caller approved, rechecked under the customer and visit locks above.
+      if (req.approvedRepriceState) await assertApprovedRepriceState(trx, req.params.id, req.approvedRepriceState);
 
       // The repricing refusal (owner ruling 2026-09-28): decided HERE, under
       // this visit's row lock — taken now if nothing above took it
@@ -16805,7 +16820,58 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     next(err);
   }
-});
+}
+
+// The Schedule-screen visit edit without an HTTP request — the Intelligence
+// Bar's reprice_future_visits tool (owner ruling 2026-10-07) saves each
+// visit's new price through this so the bar and the Edit appointment screen
+// share one writer (validation, the re-price block, CAS, post-commit
+// effects). It runs the router-level catalog prime (as router.use above
+// does, failures ignored), then the handler with the only request fields it
+// reads (params.id, body, technicianId, techRole), and resolves the reply it
+// would send: { status, json }. An error the handler passes to next() rejects.
+// approvedVisitVersion (the visit's xmin:ctid the caller checked) becomes the
+// handler's row-version CAS baseline: any write since then refuses 409
+// VISIT_CHANGED_RETRY under the visit's row lock. approvedRepriceState
+// ({ addonCount, billingLane, refreshablePrepayTerm }) covers the related records
+// that version does not: see assertApprovedRepriceState.
+async function updateVisitDetails({ id, body, actor, approvedVisitVersion = null, approvedRepriceState = null }) {
+  await primePercentDiscountExclusions().catch(() => {});
+  const req = { params: { id }, body, technicianId: actor.technicianId, techRole: 'admin', approvedVisitVersion, approvedRepriceState };
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 200,
+      status(code) { this.statusCode = code; return this; },
+      json(json) { resolve({ status: this.statusCode, json }); return this; },
+    };
+    scheduleUpdateDetailsHandler(req, res, reject).catch(reject);
+  });
+}
+
+// The related state an updateVisitDetails caller approved — the visit's add-on
+// line count, the customer's resolved billing lane, and whether the customer
+// has an annual prepay term this save's refresh would process
+// (refreshableTermsForCustomer) — read inside the save's
+// transaction after its customer, visit and add-on row locks. Any difference
+// refuses 409 VISIT_CHANGED_RETRY (REPRICE_APPROVAL_DRIFT) before any write.
+async function assertApprovedRepriceState(trx, id, approved) {
+  const visit = await trx('scheduled_services').where({ id }).first('customer_id');
+  const customer = visit?.customer_id
+    ? await trx('customers').where({ id: visit.customer_id }).first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate')
+    : null;
+  const [addons] = await trx('scheduled_service_addons').where({ scheduled_service_id: id }).count('* as count');
+  const { refreshableTermsForCustomer } = require('../services/annual-prepay-renewals');
+  const terms = customer ? await refreshableTermsForCustomer(customer.id, trx) : [];
+  const drifted = !customer
+    || Number(addons?.count || 0) !== Number(approved.addonCount)
+    || resolveBillingLane(customer).mode !== approved.billingLane
+    || terms.length > 0 !== (approved.refreshablePrepayTerm === true);
+  if (drifted) {
+    throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
+      statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'REPRICE_APPROVAL_DRIFT',
+    });
+  }
+}
 
 // POST /api/admin/schedule/:id/update-details/preview — structural round on
 // #4657 (replaces the recurring "mirror the server" P1s :3526/:2394):
@@ -28423,3 +28489,6 @@ module.exports.loadProjectCompletionContextByServiceId = loadProjectCompletionCo
 
 // Same handler as POST / — see createScheduleBooking above.
 module.exports.createScheduleBooking = createScheduleBooking;
+// Same handler as PUT /:id/update-details — see updateVisitDetails above.
+module.exports.updateVisitDetails = updateVisitDetails;
+module.exports.assertApprovedRepriceState = assertApprovedRepriceState;
