@@ -46,6 +46,7 @@ function makeConn({ customer = null, settled = [] } = {}) {
     };
   };
   conn.raw = (sql) => sql;
+  conn.transaction = async (fn) => { conn.locked = true; return fn(conn); };
   conn.writes = writes;
   return conn;
 }
@@ -78,6 +79,8 @@ describe('fileNameSpellingCard', () => {
     // One open card per call, refreshed in place on a reprocess.
     expect(target).toBe("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')");
     expect(cols).toEqual(['payload', 'summary', 'updated_at']);
+    // Read + upsert ran inside a transaction (the per-call triage lock is taken first).
+    expect(conn.locked).toBe(true);
   });
 
   test('equal letters (any case): no card', async () => {
@@ -109,6 +112,7 @@ describe('fileNameSpellingCard', () => {
   test('fails open', async () => {
     const boom = () => { throw new Error('db down'); };
     boom.raw = (s) => s;
+    boom.transaction = async () => { throw new Error('db down'); };
     expect(await file(boom)).toBe(false);
   });
 

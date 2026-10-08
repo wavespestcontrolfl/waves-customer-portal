@@ -317,6 +317,35 @@ describe('missing first-name card', () => {
   });
 });
 
+describe('name-spelling card', () => {
+  const card = { ...ordinary, id: 'ns', first_name: 'Quentrell', last_name: 'Sirov', feedback_verdict: null,
+    reason_code: 'name_spelling_differs',
+    payload: JSON.stringify({ flag: 'name_spelling_differs', spelled_value: 'Serov', saved_value: 'Sirov', quote: 'Caller: my last name is Serov, S-E-R-O-V' }) };
+  const load = () => adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+    ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+
+  it('has its own Resolve and Dismiss for the office (not admin-only), no Accept/Deny', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).getByRole('button', { name: /^resolve$/i })).toBeInTheDocument();
+  });
+
+  it('Resolve is PUT /resolve with its version, never a /verdict', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/ns/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch.mock.calls.some(([url]) => String(url).includes('/verdict'))).toBe(false);
+  });
+});
+
 describe('verdict 409 with its own instruction', () => {
   it('shows the server message for a relinked call instead of reloading and looping', async () => {
     const card = { ...ordinary, id: 'relinked', first_name: 'Relinked', last_name: 'Card', feedback_verdict: null };

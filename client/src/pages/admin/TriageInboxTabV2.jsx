@@ -101,6 +101,16 @@ function parsePayload(payload) {
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Name cards that settle by their own Resolve (not a call verdict). The owed first name is
+// admin-only (it is entered on the customer record); the name-spelling check is open to the office.
+const OWN_RESOLVE_NAME_CARDS = {
+  missing_first_name: { adminOnly: true },
+  name_spelling_differs: { adminOnly: false },
+};
+function canResolveNameCard(reasonCode, isAdmin) {
+  return isAdmin || !OWN_RESOLVE_NAME_CARDS[reasonCode]?.adminOnly;
+}
+
 // Rows for the name-spelling card: what the caller spelled, what the record says, and the
 // caller turn the spelling came from (so the office hears the context, not just the letters).
 function nameSpellingRows(p) {
@@ -996,7 +1006,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // A missing first name is an owed capture, not a call verdict (the server
                 // 400s /verdict on it): enter the name on the customer record, then Resolve
                 // (or Dismiss). The sweep also closes it once the record carries a name.
-                const isFirstNameCard = isTriage && item.reason_code === "missing_first_name";
+                // The name-spelling check (name_spelling_differs) settles the same way: fix the name on the
+                // record if the spelling is theirs, then Resolve (or Dismiss). Office roles may Resolve it.
+                const isFirstNameCard = isTriage && OWN_RESOLVE_NAME_CARDS[item.reason_code] !== undefined;
                 const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
                 const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
@@ -1116,9 +1128,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               {actioning === busyKey ? "Saving…" : "Mark handled"}
                             </Button>
                           ) : isFirstNameCard ? (
-                            // Admin-only (the server 403s a non-admin Resolve): the first name is
-                            // entered on the customer record, which only an admin edits.
-                            isAdmin ? (
+                            // The owed first name is admin-only (the server 403s a non-admin Resolve): it
+                            // is entered on the customer record, which only an admin edits.
+                            canResolveNameCard(item.reason_code, isAdmin) ? (
                               <Button
                                 size="sm"
                                 variant="primary"

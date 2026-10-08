@@ -4041,21 +4041,27 @@ async function fileNameSpellingCard(conn, { callLogId, customerId, extracted = {
       .map((f) => [f, String(customer?.[f] || '').trim() || extracted?.[f] || null]));
     const [top, ...others] = nameSpellingDifferences({ dictation, saved });
     if (!top) return false;
-    const settled = await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs' })
-      .whereIn('status', ['resolved', 'dismissed']).select('payload');
+    // The settled-card read and the insert / refresh run under the per-call triage lock (the
+    // global lock order), so a Resolve / Dismiss that settles the card and this refresh
+    // serialize: the card is never refreshed back open from a stale read.
     const asObject = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
-    if (settled.some((r) => asObject(r.payload).spelled_value === top.spelled_value && asObject(r.payload).saved_value === top.saved_value)) return false;
-    await conn('triage_items')
-      .insert(buildTriageItem({
-        callLogId,
-        flag: 'name_spelling_differs',
-        extraction,
-        severity: 'advisory',
-        extraPayload: { ...top, card_text: nameSpellingCardText(top), also: others },
-      }))
-      .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-      .merge(['payload', 'summary', 'updated_at']);
-    return true;
+    return await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, callLogId);
+      const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs' })
+        .whereIn('status', ['resolved', 'dismissed']).select('payload');
+      if (settled.some((r) => asObject(r.payload).spelled_value === top.spelled_value && asObject(r.payload).saved_value === top.saved_value)) return false;
+      await trx('triage_items')
+        .insert(buildTriageItem({
+          callLogId,
+          flag: 'name_spelling_differs',
+          extraction,
+          severity: 'advisory',
+          extraPayload: { ...top, card_text: nameSpellingCardText(top), also: others },
+        }))
+        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .merge(['payload', 'summary', 'updated_at']);
+      return true;
+    });
   } catch (err) {
     logger.warn(`[call-proc] name_spelling_differs card skipped: ${err.code || err.name || 'error'}`);
     return false;
