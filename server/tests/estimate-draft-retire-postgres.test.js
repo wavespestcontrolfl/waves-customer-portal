@@ -155,7 +155,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).archived_at).toBeNull();
   });
 
-  test('drafts with a booking handoff, a clarify text or a website quote are kept; a closed lead is no hold and keeps its link; bells close', async () => {
+  test('drafts with a booking handoff, a clarify text or a website quote are kept; a closed lead also keeps its draft; bells close', async () => {
     const { autoDraft, staffDraft } = await sentAfterTwoDrafts();
     const leadId = randomUUID();
     await mockPg('leads').insert({ id: leadId, estimate_id: autoDraft, status: 'lost', first_name: 'Fixture', last_name: 'Retire' });
@@ -172,10 +172,10 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'rejected', flags: JSON.stringify({ estimate_id: oldClarify }) });
     const bellId = randomUUID();
     await mockPg('notifications').insert({ id: bellId, recipient_type: 'admin', category: 'lead', title: 'Draft ready', metadata: JSON.stringify({ estimateId: staffDraft }) });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(3);
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
     expect((await row(oldClarify)).archived_at).not.toBeNull();
     expect((await row(staffDraft)).archived_at).not.toBeNull();
-    expect((await row(autoDraft)).archived_at).not.toBeNull();
+    expect((await row(autoDraft)).archived_at).toBeNull();
     expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBe(autoDraft);
     for (const id of [handoff, clarify, wizard, assessmentLinked]) expect((await row(id)).archived_at).toBeNull();
     const bell = await mockPg('notifications').where({ id: bellId }).first();
@@ -252,7 +252,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(sameDoor);
   });
 
-  test('a closed lead being reopened in another transaction makes the sweep skip its draft', async () => {
+  test('a deleted lead being restored in another transaction makes the sweep skip its draft', async () => {
     const c = randomUUID();
     const draft = randomUUID();
     const sent = randomUUID();
@@ -263,10 +263,10 @@ postgres('estimate draft retire (PostgreSQL)', () => {
       { ...base, id: draft, status: 'draft', token: randomUUID().replace(/-/g, ''), created_at: minutesAgo(60), updated_at: minutesAgo(60) },
       { ...base, id: sent, status: 'sent', token: randomUUID().replace(/-/g, ''), created_at: minutesAgo(20), updated_at: minutesAgo(10), sent_at: minutesAgo(10) },
     ]);
-    await database('leads').insert({ id: leadId, estimate_id: draft, status: 'lost', first_name: 'Fixture', last_name: 'RetireReopen' });
+    await database('leads').insert({ id: leadId, estimate_id: draft, status: 'lost', first_name: 'Fixture', last_name: 'RetireReopen', deleted_at: minutesAgo(5) });
     const reopen = await database.transaction();
     try {
-      await reopen('leads').where({ id: leadId }).update({ status: 'contacted' });
+      await reopen('leads').where({ id: leadId }).update({ deleted_at: null });
       const result = await retireDraftsReplacedBySentEstimate();
       expect(result.rows.find((r) => r.id === draft)).toBeUndefined();
       expect((await database('estimates').where({ id: draft }).first()).archived_at).toBeNull();

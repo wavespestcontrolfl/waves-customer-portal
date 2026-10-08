@@ -17,14 +17,14 @@
  *   - same property: same property_id when both rows have one, else the same
  *     address (no address = kept);
  *   - no live delivery claim, estimator-engine hold or address hold;
- *   - no OPEN lead links to it (owner 2026-10-08): such a draft is a live
- *     opportunity and stays for staff. The sweep writes nothing to leads;
+ *   - no lead links to it, open or closed, unless soft-deleted (owner
+ *     2026-10-08): a lead's draft stays for staff. The sweep writes nothing
+ *     to leads;
  *   - the sent estimate is a real send: delivered, not reset to draft and
  *     not carrying a call-linkage invalidation marker.
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_EXCEPTION_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const RETIRE_BATCH_LIMIT = 200;
@@ -59,16 +59,15 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
 // A draft with its own live lifecycle is never retired: an assessment-linked
 // pre-draft (ASSESSMENT_EXCEPTION_ABSENT_SQL, kept for staff to price after
 // the visit), a booking-page handoff (booking_intents, which the public
-// capture can re-open), a staged clarification text, or an OPEN lead (owner
-// 2026-10-08: a live opportunity stays for staff, and the sweep never writes
-// to leads). A closed or soft-deleted lead keeps its estimate_id and is not a
-// hold; its link is left as it is.
+// capture can re-open), a staged clarification text, or ANY lead that is not
+// soft-deleted (owner 2026-10-08: a lead's draft stays for staff, and the
+// sweep never writes to leads). Closed leads count too: one reopened later
+// must not point at an archived draft.
 const NO_LIVE_DEPENDENTS_SQL = `(
   NOT EXISTS (SELECT 1 FROM booking_intents b WHERE b.pricing_estimate_id = estimates.id)
   AND NOT EXISTS (
     SELECT 1 FROM leads l
      WHERE l.estimate_id = estimates.id AND l.deleted_at IS NULL
-       AND l.status IN (${OPEN_LEAD_STATUSES.map((st) => `'${st}'`).join(', ')})
   )
   AND NOT EXISTS (
     SELECT 1 FROM message_drafts m
@@ -165,7 +164,7 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
 // transaction. Lock order: the draft, its leads, then the sent estimate, each
 // NOWAIT (a busy row skips this draft for the tick), so the sweep never waits on one
 // row while holding another. A Pipeline link takes the draft FOR SHARE NOWAIT
-// before its write: it either committed first (the open-lead predicate in
+// before its write: it either committed first (the lead predicate in
 // DRAFT_ELIGIBLE_SQL then keeps the draft) or is refused until this commits
 // and then sees the archive.
 async function retireOneDraft(trx, pair) {
@@ -173,9 +172,9 @@ async function retireOneDraft(trx, pair) {
   const held = await trx.raw('SELECT id FROM estimates WHERE id = ? FOR UPDATE NOWAIT', [pair.draft_id]);
   if (!held?.rows?.length) return null;
   // Every lead pointing at the draft is locked too (NOWAIT, read only): a
-  // lead edit in flight — a closed lead being reopened — holds its row, so
-  // the sweep skips this tick; once it commits, the open-lead predicate in
-  // the UPDATE below sees it. The sweep still writes nothing to leads.
+  // lead edit in flight — a deleted lead being restored — holds its row, so
+  // the sweep skips this tick; once it commits, the lead predicate in the
+  // UPDATE below sees it. The sweep still writes nothing to leads.
   await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().noWait().select('id');
   // The send is judged again on the current row: still a real delivery at
   // the same door and time the read saw.
