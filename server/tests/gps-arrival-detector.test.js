@@ -644,6 +644,32 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(notMarkedWrites()).toHaveLength(0);
   });
 
+  test('a mark that committed the flip and then threw is not a miss (persisted row is re-read)', async () => {
+    const service = baseService();
+    trackTransitions.markOnProperty.mockImplementation(async () => {
+      // post-flip failure: the row is already on property when the throw happens
+      service.track_state = 'on_property';
+      service.arrived_at = new Date().toISOString();
+      throw new Error('arrival claim update failed');
+    });
+
+    const result = await run(service);
+
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a mark that threw before the flip is recorded as a miss', async () => {
+    trackTransitions.markOnProperty.mockRejectedValue(new Error('lock timeout'));
+
+    const result = await run(baseService());
+
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_threw' });
+    expect(notMarkedWrites()).toEqual([expect.objectContaining({
+      metadata: expect.objectContaining({ reason: 'mark_on_property_failed', detail: 'lock timeout' }),
+    })]);
+  });
+
   test('a rescheduled or restarted visit is a new attempt and records again', async () => {
     const fast = { point: basePoint({ speed_mph: 32, ignition: true }) };
     const attemptOne = baseService({ scheduled_date: '2026-10-08', en_route_at: EN_ROUTE_TIME });

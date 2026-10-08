@@ -448,6 +448,18 @@ function isOpenWithoutArrival(service) {
     && !['on_site', 'completed', 'cancelled', 'skipped', 'no_show'].includes(service.status);
 }
 
+// Re-read after a thrown mark. An unreadable row records nothing: a miss
+// that cannot be confirmed is not written as one.
+async function stillOpenWithoutArrival(serviceId) {
+  try {
+    const fresh = await loadCurrentService(serviceId);
+    return Boolean(fresh) && isOpenWithoutArrival(fresh);
+  } catch (err) {
+    logger.warn(`[gps-arrival] arrival re-read failed for ${serviceId}: ${err.message}`);
+    return false;
+  }
+}
+
 async function markAndAudit({ service, techStatus, destination, distance, point, decision, config }) {
   let result = null;
   try {
@@ -474,10 +486,14 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
   } catch (err) {
     logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
     await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err });
-    await recordNotMarked({
-      service, techStatus, point, config, destination, distance,
-      reason: 'mark_on_property_failed', detail: err.message,
-    });
+    // markOnProperty can commit the flip and then throw in its post-flip work,
+    // so the throw alone does not prove a miss: judge by the persisted row.
+    if (await stillOpenWithoutArrival(service.id)) {
+      await recordNotMarked({
+        service, techStatus, point, config, destination, distance,
+        reason: 'mark_on_property_failed', detail: err.message,
+      });
+    }
     return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance };
   }
 }
