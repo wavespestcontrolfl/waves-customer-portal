@@ -48,12 +48,12 @@ function petDetailsFrom(pets) {
   return raw ? String(raw).slice(0, 1000) : null;
 }
 
-function appendWithProvenance(existing, addition, callDate) {
+function appendWithProvenance(existing, addition, callDate, separator = '\n') {
   const tag = `[call ${String(callDate).slice(0, 10)}]`;
   const line = `${tag} ${addition}`.trim();
   if (!existing || !String(existing).trim()) return line;
   if (String(existing).includes(addition)) return existing; // idempotent reprocess
-  return `${existing}\n${line}`;
+  return `${existing}${separator}${line}`;
 }
 
 // The provider bit stays append-only, like every other line here. A reprocess
@@ -162,4 +162,4 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   return { applied };
 }
 
-module.exports = { enrichFromCall, _test: { extractCodes, appendWithProvenance, providerAlreadyNoted } };
+module.exports = { enrichFromCall, appendWithProvenance, _test: { extractCodes, appendWithProvenance, providerAlreadyNoted } };
