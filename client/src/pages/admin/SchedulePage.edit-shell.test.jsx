@@ -463,7 +463,17 @@ it('together + a technician change on a recurring combo: the scope picker is hid
 const occurrence = { ...service, isRecurring: true, recurringParentId: 'fixture-parent', autoDispatchLocked: true };
 const lockCalls = () => fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/auto-dispatch/services/fixture-visit/lock'));
 
+const asRole = (role) => localStorage.setItem('waves_admin_user', JSON.stringify({ role }));
+
+it('hides the auto-dispatch box from a technician: the lock endpoint is admin-only', () => {
+  asRole('technician');
+  render(<EditServiceModal service={occurrence} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.queryByText('Keep auto-dispatch off this visit')).not.toBeInTheDocument();
+  localStorage.removeItem('waves_admin_user');
+});
+
 it('shows the auto-dispatch box checked for a locked recurring occurrence and hides it for a one-off visit', () => {
+  asRole('admin');
   const view = render(<EditServiceModal service={occurrence} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
   expect(screen.getByLabelText(/Keep auto-dispatch off this visit/)).toBeChecked();
   view.unmount();
@@ -472,6 +482,7 @@ it('shows the auto-dispatch box checked for a locked recurring occurrence and hi
 });
 
 it('clearing the auto-dispatch box locks false after update-details, and an untouched box makes no lock call', async () => {
+  asRole('admin');
   fetch.mockImplementation(async (url) => ({ ok: true, json: async () => (String(url).endsWith('/admin/discounts') ? [] : {}) }));
   const onSaved = vi.fn();
   const view = render(<EditServiceModal service={occurrence} technicians={[]} onClose={vi.fn()} onSaved={onSaved} />);

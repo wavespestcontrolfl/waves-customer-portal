@@ -61,6 +61,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { getAdminUser } from "../../lib/adminAuth";
 import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
@@ -2099,7 +2100,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Auto-dispatch lock (recurring occurrences only). Saved through its own
   // PATCH after update-details, only when the box was changed; the server
   // may also set the lock itself when the date or time changes.
-  const showAutoDispatchLock = !!(service.isRecurring && service.recurringParentId);
+  // Admins only: the lock endpoint is requireAdmin.
+  const showAutoDispatchLock = !!(service.isRecurring && service.recurringParentId) && getAdminUser()?.role === "admin";
   const autoDispatchLockedSeed = service.autoDispatchLocked === true;
   const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
   const [saving, setSaving] = useState(false);

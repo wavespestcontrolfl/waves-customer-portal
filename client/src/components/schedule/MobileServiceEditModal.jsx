@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
 import { apiErrorMessage } from './seriesMove';
+import { getAdminUser } from '../../lib/adminAuth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -82,7 +83,8 @@ export default function MobileServiceEditModal({
   const [showStaffPicker, setShowStaffPicker] = useState(false);
   // Auto-dispatch lock: recurring occurrences only. Saved through its own PATCH
   // after update-details, and only when the tech changed the box.
-  const showAutoDispatchLock = !!(service?.isRecurring && service?.recurringParentId);
+  // Admins only: the lock endpoint is requireAdmin, and technicians open this editor too.
+  const showAutoDispatchLock = !!(service?.isRecurring && service?.recurringParentId) && getAdminUser()?.role === 'admin';
   const autoDispatchLockedSeed = service?.autoDispatchLocked === true;
   const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
 

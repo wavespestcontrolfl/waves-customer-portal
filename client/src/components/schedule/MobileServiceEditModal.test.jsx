@@ -112,6 +112,15 @@ describe('MobileServiceEditModal save payload', () => {
     const OCCURRENCE = { ...SERVICE, isRecurring: true, recurringParentId: 'parent-1', autoDispatchLocked: true };
     const LABEL = 'Keep auto-dispatch off this visit';
     const lockCalls = () => fetch.mock.calls.filter(([url]) => String(url).endsWith('/admin/auto-dispatch/services/svc-1/lock'));
+    const asRole = (role) => localStorage.setItem('waves_admin_user', JSON.stringify({ role }));
+    beforeEach(() => asRole('admin'));
+
+    it('hides the box from a technician: the lock endpoint is admin-only', () => {
+      asRole('technician');
+      render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={vi.fn()} />);
+      expect(screen.queryByText(LABEL)).not.toBeInTheDocument();
+    });
+
 
     it('shows the box checked for a locked recurring occurrence and hides it otherwise', () => {
       const view = render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={vi.fn()} />);
