@@ -63,6 +63,9 @@ describe('hold: texts to a no-text line ride the callback_number_needed hold', (
     const only = v2({ ani_cannot_text: true });
     expect(dropUnneededCallCards(['callback_number_needed'], only).dropped).toContain('callback_number_needed');
     const both = v2({ ani_cannot_text: true, caller_id_disclaimed: true });
+    // …even when a spoken number repeats the ANI (the disclaimer is then still unresolved)
+    const bothSame = v2({ ani_cannot_text: true, caller_id_disclaimed: true, phone_e164: ANI, phone_source: 'both' });
+    expect(dropUnneededCallCards(['callback_number_needed'], bothSame).dropped).not.toContain('callback_number_needed');
     expect(dropUnneededCallCards(['callback_number_needed'], both).dropped).not.toContain('callback_number_needed');
     // shadow-mode bridge agrees
     const bridge = (ext) => deriveCallReviewBridge({ v2TriageFlags: ['callback_number_needed'], v2Extraction: ext, extracted: {} }).needsConfirmation;
@@ -155,6 +158,9 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(holdAt).toBeGreaterThan(-1);
     expect(holdAt).toBeLessThan(vetoAt);
     expect(src).toContain('await fileTextNumberCard(v2CanonicalExtraction, customerId, { refresh: true });');
+    // decision-point failures abort the pass for retry, like the hold write
+    expect(src.split('{ failClosed: true })').length - 1).toBe(2);
+    expect(src).toMatch(/if \(failClosed\) \{[^]*?DISCLAIMED_NUMBER_HOLD_WRITE_FAILED/);
   });
 
   test('the appointment-contact backfill never saves a no-text ANI into a blank customers.phone', () => {

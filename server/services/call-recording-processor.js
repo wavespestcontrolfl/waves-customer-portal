@@ -10985,7 +10985,7 @@ const CallRecordingProcessor = {
     // filed at the hold decision point too (before any hard-veto exit, so a durable hold never
     // exists without the card that can release it) and refreshed with the final customer later.
     // Idempotent per open card; never blocks the pass.
-    const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false } = {}) => {
+    const fileTextNumberCard = async (ext, linkedCustomerId, { refresh = false, failClosed = false } = {}) => {
       try {
         const callerForText = ext?.caller;
         const aniPhone = firstExternalPhone(contactPhone);
@@ -11008,7 +11008,17 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'));
         await (refresh ? insert.merge({ payload: item.payload, updated_at: new Date() }) : insert.ignore());
       } catch (triageErr) {
-        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
+        const code = triageErr.code || triageErr.name || 'db_error';
+        if (failClosed) {
+          // The hold is already committed and callback_number_needed's card is suppressed for this
+          // case, so the release card must exist: abort the pass for the capped retry, like the
+          // hold write itself.
+          logger.error(`[call-proc] text-number card write failed at the decision point for ${maskSid(callSid)}: ${code} — aborting the pass for retry`);
+          const closed = new Error(`text-number card write failed (${code})`);
+          closed.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED';
+          throw closed;
+        }
+        logger.warn(`[call-proc-bridge] text-number card insert failed for ${maskSid(callSid)}: ${code}`);
       }
     };
     // True ONLY when the enforce-mode TCPA gate cleared the SMS via IMPLIED
@@ -11642,7 +11652,7 @@ const CallRecordingProcessor = {
             // advisory card below, and anything else this pass awaits.
             // Round 8 P1: a lost claim abandons the pass (nothing written).
             if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
-            if (aniCannotText(v2Extraction?.caller)) await fileTextNumberCard(v2Extraction, call.customer_id || null);
+            if (aniCannotText(v2Extraction?.caller)) await fileTextNumberCard(v2Extraction, call.customer_id || null, { failClosed: true });
           }
 
           const routeDecision = buildRouteDecision({
@@ -11978,7 +11988,7 @@ const CallRecordingProcessor = {
           // below and before any further awaited work.
           // Round 8 P1: a lost claim abandons the pass (nothing written).
           if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
-          if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(v2Ext, call.customer_id || null);
+          if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(v2Ext, call.customer_id || null, { failClosed: true });
         }
         // addressRecovery + rawStreetBeforeAdopt were computed above the
         // routing gate (shared with enforce mode); the bridge receives the

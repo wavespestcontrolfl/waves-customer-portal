@@ -97,7 +97,9 @@ function aniCannotText(caller) {
 // unless the caller ALSO disclaimed the number.
 function aniCannotTextOnly(extraction) {
   const caller = extraction?.caller;
-  return aniCannotText(caller) && !callerIdDisclaimedNeedsCallback(caller);
+  // Any caller_id_disclaimed keeps the callback card: its hold rests on the ANI comparison, and its
+  // Resolve is the only release for it.
+  return aniCannotText(caller) && caller.caller_id_disclaimed !== true;
 }
 
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
