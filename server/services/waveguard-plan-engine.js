@@ -140,6 +140,51 @@ function parseProtocolLines(text, role, { exactName = false } = {}) {
     }));
 }
 
+// How a product's name relates to the line a v13 program spells.
+// A line that spells whole catalog names (the v13 lawn program, `exact_catalog_names`) matches ONLY a product whose
+// full name it spells: a missing product leaves the line unmatched, never a partial-name stand-in (Acelepryn for
+// Tetrino because both say "Insecticide"). A product whose configured alias IS the spelled name also matches (a row
+// the catalog holds under another name), but only when no row has the exact name (matchCatalogProduct ranks it last).
+function nameRelation(product, name, normalizedLine, spelledName) {
+  const nameMatch = normalizedLine.includes(name);
+  const aliasMatch = !nameMatch && Boolean(spelledName) && (product.aliases || []).map(normalizeText).includes(spelledName);
+  return { nameMatch, aliasMatch };
+}
+
+// The legacy fuzzy match: any alias of the product inside the line (direct), the line inside an alias (reverse), or
+// the product's first two words inside the line.
+function fuzzyNameMatch(product, name, normalizedLine) {
+  const aliases = productAliases(product);
+  const direct = aliases.some((alias) => normalizedLine.includes(alias));
+  const reverse = aliases.some((alias) => alias.includes(normalizedLine));
+  const firstTwo = name.split(' ').slice(0, 2).join(' ');
+  const tokenMatch = firstTwo.length > 5 && normalizedLine.includes(firstTwo);
+  return { direct, tokenMatch, matched: direct || reverse || tokenMatch };
+}
+
+// Ranking: a longer name, a direct alias hit, a priced product and a matching NPK analysis rank higher; a product
+// still needing pricing, or a different NPK analysis, ranks lower.
+function candidateScore(product, name, { direct, tokenMatch }, lineNpk) {
+  const productNpk = parseNpkFromText(product.name);
+  const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
+  const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
+  const npkScore = lineNpk && productNpk
+    ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
+    : 0;
+  return name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore;
+}
+
+// One product against one line: { product, aliasOnly, score }, or null when it is not a candidate.
+function scoreCatalogCandidate(product, { line, normalizedLine, lineNpk, spelledName }) {
+  const name = normalizeText(product.name);
+  if (!name) return null;
+  const { nameMatch, aliasMatch } = nameRelation(product, name, normalizedLine, spelledName);
+  if (line.exactName && !nameMatch && !aliasMatch) return null;
+  const fuzzy = fuzzyNameMatch(product, name, normalizedLine);
+  if (!fuzzy.matched) return null;
+  return { product, aliasOnly: aliasMatch, score: candidateScore(product, name, fuzzy, lineNpk) };
+}
+
 function matchCatalogProduct(line, products) {
   // De-branded pest lines keep brand names out of the display text and supply
   // them via catalogProductHints (from the visit's lineMeta) so the catalog
@@ -155,36 +200,7 @@ function matchCatalogProduct(line, products) {
   const spelledName = normalizeProtocolProductText(String(matchText || '').split(' \u2014 ')[0]);
 
   const candidates = products
-    .map((product) => {
-      const name = normalizeText(product.name);
-      if (!name) return null;
-      // A line that spells whole catalog names (the v13 lawn program,
-      // `exact_catalog_names`) matches ONLY a product whose full name it spells:
-      // a missing product leaves the line unmatched, never a partial-name stand-in
-      // (Acelepryn for Tetrino because both say "Insecticide").
-      // A product whose configured alias IS the spelled name also matches (a row the catalog holds under another
-      // name), but only when no row has the exact name (see below).
-      const nameMatch = normalizedLine.includes(name);
-      const aliasMatch = !nameMatch && Boolean(spelledName) && (product.aliases || []).map(normalizeText).includes(spelledName);
-      if (line.exactName && !nameMatch && !aliasMatch) return null;
-      const productNpk = parseNpkFromText(product.name);
-      const aliases = productAliases(product);
-      const direct = aliases.some((alias) => normalizedLine.includes(alias));
-      const reverse = aliases.some((alias) => alias.includes(normalizedLine));
-      const firstTwo = name.split(' ').slice(0, 2).join(' ');
-      const tokenMatch = firstTwo.length > 5 && normalizedLine.includes(firstTwo);
-      if (!direct && !reverse && !tokenMatch) return null;
-      const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
-      const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
-      const npkScore = lineNpk && productNpk
-        ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
-        : 0;
-      return {
-        product,
-        aliasOnly: aliasMatch,
-        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore,
-      };
-    })
+    .map((product) => scoreCatalogCandidate(product, { line, normalizedLine, lineNpk, spelledName }))
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
 
