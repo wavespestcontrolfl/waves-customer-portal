@@ -3,23 +3,43 @@
 
 /**
  * Prints the exact prompt the service report's "Ask Waves" AI answer would
- * send to the model (GATE_REPORT_ASK_AI), as JSON { system, user }. No server,
- * no database, no model call: it reads a saved report payload and a question.
+ * send to the model (GATE_REPORT_ASK_AI), as JSON { system, user, topic,
+ * requiredLines, ruleAnswerOnlyBecause, ruleAnswer }: the prompt, the rule
+ * router's topic, the recorded instructions ({ text, source }) the AI answer
+ * must repeat word for word, why the question would skip the model (a service
+ * line the AI does not cover, a typed or companion report, a technician-typed
+ * required line; null when the model answers), and the fixed-rule answer the
+ * customer gets when the gate is off or the AI misses.
+ * No server, no database, no model call: it reads a saved report payload and
+ * a question.
  *
  *   node scripts/dev/report-ask-prompt.js <report-data.json> "<question>"
  *
  * <report-data.json> is the body of GET /api/reports/:token/data (what
- * buildServiceReportV1ResponseData returns), or { "data": {...} }. The
- * prompt carries no appointment: next-visit and schedule questions keep the
- * fixed-rule answer.
+ * buildServiceReportV1ResponseData returns), or { "data": {...},
+ * "nextAppointment": {...} }. A report payload's own camelCase
+ * `nextAppointment` is mapped the same way POST /:token/ask maps it.
  *
  * From Node:
  *   const { buildReportAskPrompt } = require('./server/services/service-report/report-ask-ai');
- *   buildReportAskPrompt({ question, data }) // -> { system, user }
+ *   buildReportAskPrompt({ question, data, nextAppointment, requiredLines }) // -> { system, user }
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
+
+// `source.nextAppointment` in the report payload's camelCase (as POST
+// /:token/ask maps it) or already in the route's snake_case.
+function nextAppointmentFor(source = {}) {
+  const next = source.nextAppointment;
+  return next
+    ? {
+      service_type: next.serviceType ?? next.service_type,
+      scheduled_date: next.scheduledDate ?? next.scheduled_date,
+      window_start: next.windowStart ?? next.window_start,
+    }
+    : null;
+}
 
 function main(argv) {
   const [file, ...rest] = argv;
@@ -32,12 +52,29 @@ function main(argv) {
   const wrapped = parsed && typeof parsed === 'object' && parsed.data && typeof parsed.data === 'object'
     && !parsed.reportVersion;
   const data = wrapped ? parsed.data : parsed;
+  // Bare or wrapped, the same mapping; the wrapper's own appointment wins.
+  const nextAppointment = nextAppointmentFor(wrapped ? parsed : data) || (wrapped ? nextAppointmentFor(data) : null);
   // Keep stdout pure JSON: the portal logger prints module-load warnings there.
   process.env.LOG_LEVEL = 'error';
-  // dotenv 17 prints a banner on stdout unless told to stay quiet (Codex P1 #6016 r20).
+  // dotenv 17 prints a banner on stdout unless told to stay quiet (Codex P1 r13).
   process.env.DOTENV_CONFIG_QUIET = 'true';
-  const { buildReportAskPrompt } = require('../../server/services/service-report/report-ask-ai');
-  process.stdout.write(`${JSON.stringify(buildReportAskPrompt({ question, data }), null, 2)}\n`);
+  const { buildReportAskPrompt, ruleAnswerReason, reroutedTopic } = require('../../server/services/service-report/report-ask-ai');
+  const { routeServiceReportQuestion } = require('../../server/services/service-report/report-assistant');
+  // The same call the route makes (reports-public.js), re-route included.
+  const routed = routeServiceReportQuestion({
+    question, data, nextAppointment, rerouteTopic: reroutedTopic(question),
+  });
+  const prompt = buildReportAskPrompt({
+    question, data, nextAppointment, requiredLines: routed.requiredLines.map((line) => line.text),
+  });
+  process.stdout.write(`${JSON.stringify({
+    ...prompt,
+    topic: routed.topic,
+    requiredLines: routed.requiredLines,
+    // Null: the model answers. A reason: the customer gets ruleAnswer, no model call.
+    ruleAnswerOnlyBecause: ruleAnswerReason(data, routed.requiredLines, routed.topic, question),
+    ruleAnswer: routed.answer,
+  }, null, 2)}\n`);
   return 0;
 }
 

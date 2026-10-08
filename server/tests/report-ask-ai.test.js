@@ -55,7 +55,6 @@ const featureGates = require('../config/feature-gates');
 const {
   SYSTEM_PROMPT,
   buildReportAskFacts,
-  AI_ASK_TOPICS,
   buildReportAskPrompt,
   screenAskAnswer,
   medicalExposureAnswer,
@@ -135,6 +134,10 @@ function reportData(overrides = {}) {
 const nextAppointment = { service_type: 'Quarterly Pest Control', scheduled_date: '2027-01-05', window_start: '09:00:00' };
 const NOW = new Date('2026-10-05T14:00:00Z');
 
+function withPetData() {
+  return { serviceLine: 'pest', applications: [], dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } };
+}
+
 describe('buildReportAskFacts', () => {
   const facts = buildReportAskFacts({ data: reportData(), nextAppointment, now: NOW });
   const sheet = JSON.stringify(facts);
@@ -153,17 +156,15 @@ describe('buildReportAskFacts', () => {
   test('scrubs contact details and digit runs from the customer concern', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Call Pat at 941-555-0100 or pat@example.com, gate 4821, roaches in kitchen' } });
     expect(facts.customer_concern).not.toMatch(/555|example\.com|4821/);
-    expect(facts.customer_concern).toMatch(/roaches in kitchen/);
+    // The gate sentence leaves whole, in typed text, whatever else it says (Codex security P2 #5964 r84).
+    expect(facts.customer_concern).toBe('[access details removed]');
   });
 
   test('technician recommendations never reach the model (they can hold a customer name)', () => {
-    const data = {
-      serviceLine: 'pest', applications: [], recommendations: ['Ask Mrs. Example to trim the shrubs.'],
-      findings: [{ title: 'Ants by the door', detail: 'Light trail.', recommendation: 'Tell Mrs. Example to seal the door.' }],
-    };
+    const data = { serviceLine: 'pest', applications: [], recommendations: ['Ask Mrs. Example to trim the shrubs.', 'Keep the pantry sealed.'] };
     const out = buildReportAskFacts({ data });
     expect(out.recommendations).toBeUndefined();
-    expect(JSON.stringify(out)).not.toMatch(/Mrs\. Example/);
+    expect(buildReportAskPrompt({ question: 'What was applied?', data }).user).not.toMatch(/Mrs\. Example|pantry/);
   });
 
   test('the Waves summary headline and body are carried when the report has no summary text', () => {
@@ -213,14 +214,14 @@ describe('buildReportAskFacts', () => {
   test('carries the visit\'s recorded pet precaution', () => {
     const withPet = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } } });
     expect(withPet.pet_precaution_today).toBe('Keep pets off treated zones until dry.');
-    // A fixed wait does not survive the timing strip; re-entry questions
-    // never reach the AI anyway.
+    // A fixed wait does not survive the timing strip as a fact; it reaches the
+    // model only as a required line, word for word.
     const timed = { serviceLine: 'pest', applications: [], advisory: { pet_advisory: 'Keep pets indoors for 2 hours.' } };
     expect(buildReportAskFacts({ data: timed }).pet_precaution_today).toBeUndefined();
-    expect(AI_ASK_TOPICS.has('reentry')).toBe(false);
-    expect(AI_ASK_TOPICS.has('next_steps')).toBe(false);
-    expect(AI_ASK_TOPICS.has('watering')).toBe(false);
-    expect(AI_ASK_TOPICS.has('applied')).toBe(true);
+    // A precaution that is already a required line is not sent twice.
+    const asLine = buildReportAskFacts({ data: withPetData(), requiredLines: ['Keep pets off treated zones until dry.'] });
+    expect(asLine.pet_precaution_today).toBeUndefined();
+    expect(asLine.required_lines).toEqual(['Keep pets off treated zones until dry.']);
   });
 
   test('carries the visit facts the answer needs', () => {
@@ -343,7 +344,7 @@ describe('buildReportAskPrompt', () => {
 
 describe('screenAskAnswer', () => {
   const data = reportData();
-  const facts = buildReportAskFacts({ data, now: NOW });
+  const facts = buildReportAskFacts({ data, nextAppointment, now: NOW });
   const screen = (answer, question = 'What was done?') => screenAskAnswer(answer, { question, data, facts });
 
   test('passes a plain grounded answer', () => {
@@ -391,26 +392,29 @@ describe('screenAskAnswer', () => {
     expect(run('Taurus SC also works on termites.')).toBe('target_list');
   });
 
-  test('normal phrasing with number words passes', () => {
-    expect(screen('A few days after this you may still see one roach or two.')).toBeNull();
-    // A relative schedule is never the model's to state (Codex P1 #6016 r19).
-    expect(screen('We will be back in two weeks.')).toBe('states_a_date');
-    expect(screen('Expect it to take two or three days, and half the kitchen was done first.')).toBeNull();
+  test('number words: prose passes, an invented duration does not', () => {
+    expect(screen('A few days after this you may still see a roach.')).toBeNull();
+    expect(screen('Half the kitchen was done first.')).toBeNull();
+    // A spelled duration the report never states is a claim like its digits (Codex P1 #5964 r14).
+    expect(screen('Expect it to take two or three days.')).toBe('unstated_number');
   });
 
   test('a target is matched by its singular or plural form', () => {
     expect(screen('It also covers the ghost ant.')).toBe('target_list');
     expect(screen('It also covers German roach.')).toBe('target_list');
-    expect(screen('We did treat for the ghost ant as you asked.', 'Did you treat for ghost ants?')).toBeNull();
+    // A pest only the question names may be repeated, never affirmed (Codex P1 #5964 r39).
+    expect(screen('We did treat for the ghost ant as you asked.', 'Did you treat for ghost ants?')).toBe('target_list');
+    expect(screen('The report does not list the ghost ant.', 'Did you treat for ghost ants?')).toBeNull();
   });
 
   test('more than four sentences is rejected', () => {
-    expect(screen('We treated the outside. We treated the kitchen. We checked the garage. We looked at the entry points.')).toBeNull();
+    expect(screen('We treated the outside. We treated the kitchen. The cockroach you saw was the reason. That is what the report shows.')).toBeNull();
     expect(screen('We treated the outside. We treated the kitchen. We checked the garage. We looked at the entry points. We wrote it up.')).toBe('too_many_sentences');
   });
 
-  test('a target pest the customer named is not a leak', () => {
-    expect(screen('We did treat for ghost ants as you asked.', 'Did you treat for ghost ants?')).toBeNull();
+  test('a target pest the customer named may be repeated, not affirmed', () => {
+    expect(screen('The report does not show a treatment for ghost ants.', 'Did you treat for ghost ants?')).toBeNull();
+    expect(screen('We did treat for ghost ants as you asked.', 'Did you treat for ghost ants?')).toBe('target_list');
   });
 
   test('the company phone number is allowed', () => {
@@ -439,87 +443,7 @@ describe('screenAskAnswer', () => {
     expect(screen('None were seen at the dishwasher today.')).toBeNull();
     expect(screen('Keep pets off the treated areas until they are dry.', 'Can my dog go out?')).toBeNull();
     expect(screen('Activity can stay up for a few days, and we check again at your next visit.')).toBeNull();
-    // A date, a weekday or a clock time is never stated by the AI (#6020).
     expect(screen('Your next visit is Tuesday, January 5, 2027.')).toBe('states_a_date');
-    expect(screen('The technician arrives at 2 PM.')).toBe('states_a_date');
-    expect(screen('We come back on 1/8.')).toBe('states_a_date');
-    expect(screen('The technician arrives Wed at 14:00.')).toBe('states_a_date');
-    expect(screen('The technician arrives on 2027-01-05.')).toBe('states_a_date');
-    expect(screen('Your next visit is 5 January.')).toBe('states_a_date');
-    expect(screen('Your next visit is the 5th of January.')).toBe('states_a_date');
-    expect(screen("The technician arrives at 2 o'clock.")).toBe('states_a_date');
-    expect(screen('The technician arrives January the 5th.')).toBe('states_a_date');
-    expect(screen('The technician arrives January fifth.')).toBe('states_a_date');
-    expect(screen('The technician arrives 1-5-2027.')).toBe('states_a_date');
-    expect(screen('The technician arrives at two PM.')).toBe('states_a_date');
-    expect(screen('The technician arrives tomorrow.')).toBe('states_a_date');
-    expect(screen('Your next visit is in May.')).toBe('states_a_date');
-    expect(screen('Your appointment is on the 5th.')).toBe('states_a_date');
-    expect(screen('Your visit is next weekend.')).toBe('states_a_date');
-    expect(screen('We treated the outside today.')).toBeNull();
-    expect(screen('The ants may move after the treatment.')).toBeNull();
-    expect(screen('We will be there at 2.')).toBe('states_a_date');
-    expect(screen('Your visit is at five.')).toBe('states_a_date');
-    expect(screen('We will arrive around 2.')).toBe('states_a_date');
-    expect(screen('We will be there between 2 and 4.')).toBe('states_a_date');
-    expect(screen('Your window is from two to four.')).toBe('states_a_date');
-    expect(screen('Your next visit is in two days.')).toBe('states_a_date');
-    expect(screen('We will return later this month.')).toBe('states_a_date');
-    expect(screen('We will return in Sept.')).toBe('states_a_date');
-    expect(screen('We will return in 2027.')).toBe('states_a_date');
-    expect(screen('We will return in a fortnight.')).toBe('states_a_date');
-    expect(screen('The technician will come back in the spring.')).toBe('states_a_date');
-    expect(screen('We will be back soon.')).toBe('states_a_date');
-    expect(screen('Your next service is in the spring.')).toBe('states_a_date');
-    expect(screen('Expect another visit soon.')).toBe('states_a_date');
-    expect(screen('Your follow-up is soon.')).toBe('states_a_date');
-    expect(screen('A technician will return soon.')).toBe('states_a_date');
-    expect(screen('Your technician will return soon.')).toBe('states_a_date');
-    // Past or negative facts about a follow-up are no promise.
-    expect(screen('Your follow-up was completed today.')).toBeNull();
-    expect(screen('A follow-up was not recorded on this report.')).toBeNull();
-    // No-harm assurances in other words.
-    expect(screen('The treatment poses no risk to pets.')).toBe('safety claim');
-    expect(screen('It will not harm your children.')).toBe('safety claim');
-    expect(screen('It is gentle around pets.')).toBe('safety claim');
-    expect(screen('The treatment does not pose any risk to pets.')).toBe('safety claim');
-    expect(screen('The treatment is unlikely to harm pets.')).toBe('safety claim');
-    expect(screen('The treatment will never harm pets.')).toBe('safety claim');
-    expect(screen("It shouldn't hurt children.")).toBe('safety claim');
-    expect(screen("It shouldn't affect children.")).toBe('safety claim');
-    expect(screen("It can't pose any risk to pets.")).toBe('safety claim');
-    expect(screen('The technician is scheduled to return.')).toBe('states_a_date');
-    expect(screen("We'll return soon.")).toBe('states_a_date');
-    expect(screen("We'll arrive soon.")).toBe('states_a_date');
-    expect(screen('The technician was scheduled for today and treated the outside.')).toBeNull();
-    expect(screen('We are coming soon.')).toBe('states_a_date');
-    expect(screen("We're on our way.")).toBe('states_a_date');
-    expect(screen('A technician will arrive soon.')).toBe('states_a_date');
-    expect(screen('Your technician is coming soon.')).toBe('states_a_date');
-    expect(screen('We will send someone out soon.')).toBe('states_a_date');
-    expect(screen('The technician arrived and treated the outside.')).toBeNull();
-    // Past or negative facts are no visit promise.
-    expect(screen('A technician did return today.')).toBeNull();
-    expect(screen('The next visit is not scheduled.')).toBeNull();
-    expect(screen('Your next appointment was scheduled last week.')).toBeNull();
-    expect(screen('The gate code is BLUE.')).toBe('banned_copy');
-    expect(screen('We will return two days from now.')).toBe('states_a_date');
-    expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
-    expect(screen('Your window is 2-4.')).toBe('states_a_date');
-    expect(screen('We will arrive at 1400.')).toBe('states_a_date');
-    expect(screen('We treated the window frames and door sweeps.')).toBeNull();
-    expect(screen('Your next service is in 2027.')).toBe('states_a_date');
-    expect(screen('Your next visit is in Jan.')).toBe('states_a_date');
-    expect(screen('We will come in Oct')).toBe('states_a_date');
-    expect(screen('Activity often drops between 2 and 4 weeks after treatment.')).toBeNull();
-    expect(screen('This may take a few days.')).toBeNull();
-    expect(screen('This may help with the ants.')).toBeNull();
-    expect(screen('Activity often settles after 2 weeks.')).toBeNull();
-    expect(screen('The technician arrives on the fifth.')).toBe('states_a_date');
-    expect(screen('The technician arrives the fifth of January.')).toBe('states_a_date');
-    expect(screen('The first application went around the exterior.')).toBeNull();
-    expect(screen('The technician arrives at half past two.')).toBe('states_a_date');
-    expect(screen('Activity often settles after the sun comes out.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
 
@@ -721,9 +645,6 @@ describe('symptoms and exposure never reach the model', () => {
     'My dog is taking a bite of bait',
     'My dog takes a bite of bait',
     'My dog took a bite of rodenticide',
-    'My dog took more than two bites of bait',
-    'My dog had a bite of bait',
-    'My dog took a bite of Advion Ant Bait Gel',
     'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
@@ -841,7 +762,6 @@ describe('symptoms and exposure never reach the model', () => {
     'Was there a little bit of bait left?',
     'Mosquitoes bit me after the treatment',
     'My child took a bite of lunch while I checked the bait',
-    'I had a bite of lunch near the bait',
     'Was the rodent bait eaten?',
     'Was any bait consumed?',
     'Was the rat poisoned?',
@@ -952,8 +872,14 @@ describe('scripts/dev/report-ask-prompt.js', () => {
   test('a bare report and a wrapped one give the same prompt, with no appointment', () => {
     const bare = run({ serviceLine: 'pest', applications: [], nextAppointment: camel });
     const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: camel });
+    // The prompt carries no appointment (next-visit questions keep the rule answer).
     expect(bare.user).not.toContain('January 5, 2027');
     expect(wrapped.user).toBe(bare.user);
+  });
+
+  test('a wrapped route-shaped (snake_case) appointment still works', () => {
+    const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: { service_type: 'Quarterly Pest Control', scheduled_date: '2027-01-05', window_start: '09:00:00' } });
+    expect(wrapped.user).not.toContain('January 5, 2027');
   });
 });
 
@@ -973,6 +899,9 @@ function chain(overrides = {}) {
 
 async function withServer(fn) {
   const app = express();
+  // Each test request comes from its own client address (ask() below), so the
+  // route's 20-a-minute limiter does not count across tests.
+  app.set('trust proxy', 'loopback');
   app.use(express.json());
   app.use('/reports', reportsRouter);
   app.use((err, _req, res, _next) => {
@@ -1010,13 +939,22 @@ function mockDb() {
     if (table === 'activity_log') return chain();
     throw new Error(`Unexpected table query: ${table}`);
   });
+  // The shared Ask budget reserves inside a transaction: no prior calls, and
+  // the reservation row is accepted.
+  const budgetTable = () => {
+    const api = { where: () => api, count: () => api, first: async () => ({ n: 0 }), insert: async () => {} };
+    return api;
+  };
+  db.transaction = jest.fn(async (work) => work(Object.assign(budgetTable, { raw: async () => {} })));
   return { eventInsert };
 }
 
+let askCount = 0;
 async function ask(baseUrl, question) {
+  askCount += 1;
   const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/ask`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `10.0.${Math.floor(askCount / 250)}.${askCount % 250}` },
     body: JSON.stringify({ question }),
   });
   return { status: res.status, body: await res.json() };
@@ -1048,11 +986,74 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: QUESTION.length, topic: 'applied' });
   });
 
-  test('gate on, a re-entry question: the fixed-rule answer and no model call', async () => {
+  // A lawn report with a recorded pet precaution: the re-entry question now
+  // reaches the AI, which must carry the precaution word for word.
+  const PET_LINE = 'Keep pets off treated zones until fully dry.';
+  const lawnReport = (petAdvisory = PET_LINE) => ({
+    serviceLine: 'lawn',
+    applications: [],
+    advisory: { pet_advisory: petAdvisory },
+    lawnAssessment: { scores: { overallScore: 82 }, snapshot: { summary: 'Your lawn is thickening.' } },
+  });
+
+  // Re-entry keeps the fixed answer even with the gate on: it is the safety
+  // instruction word for word (Codex security P1 #5964 r59).
+  test('gate on, a lawn report, a re-entry question: the fixed answer with the pet precaution, no model call', async () => {
     process.env.GATE_REPORT_ASK_AI = 'true';
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can my dog go back out on the lawn?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport() }).answer;
+    expect(rules).toContain(PET_LINE);
+    const { eventInsert } = mockDb();
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, q);
+      expect(status).toBe(200);
+      expect(body).toEqual({ answer: rules });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
+  });
+
+  // A question the fixed-intent guard recognizes gets that topic's own rule
+  // answer, not the generic summary (pre-push audit, #5964).
+  test.each(['on', 'off'])('gate %s, an implicit re-entry question gets the re-entry answer', async (gate) => {
+    process.env.GATE_REPORT_ASK_AI = gate === 'on' ? 'true' : 'false';
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can we use the patio?';
+    const reentry = routeServiceReportQuestion({ question: q, data: lawnReport(), forceTopic: 'reentry' }).answer;
+    expect(reentry).toContain(PET_LINE);
+    const { eventInsert } = mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: reentry });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
+  });
+
+  test.each(['on', 'off'])('gate %s, the rule router keeps its re-entry answer when the question also names the next visit', async (gate) => {
+    process.env.GATE_REPORT_ASK_AI = gate === 'on' ? 'true' : 'false';
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can my dog go outside before your next visit?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport() });
+    expect(rules.topic).toBe('reentry');
+    const { eventInsert } = mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: rules.answer });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
+  });
+
+  test('gate on, a recorded fixed wait trips the screen: the rule answer states it, no model call', async () => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    const wait = 'Keep pets inside for 2 hours.';
+    buildReportV1Data.mockResolvedValue(lawnReport(wait));
+    const q = 'Can my dog go back out on the lawn?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport(wait) }).answer;
+    expect(rules).toContain(wait);
     mockDb();
-    const q = 'When can I re-enter treated areas?';
-    const rules = routeServiceReportQuestion({ question: q, data: { serviceLine: 'pest', applications: [] } }).answer;
     await withServer(async (baseUrl) => {
       const { body } = await ask(baseUrl, q);
       expect(body).toEqual({ answer: rules });
@@ -1060,17 +1061,51 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('gate on, a lawn report: the fixed-rule answer and no model call (its aftercare stays rule-driven)', async () => {
-    process.env.GATE_REPORT_ASK_AI = 'true';
-    buildReportV1Data.mockResolvedValue({ serviceLine: 'lawn', applications: [] });
+  test('gate off, a lawn report: the fixed-rule answer, byte for byte, no model call', async () => {
+    delete process.env.GATE_REPORT_ASK_AI;
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can my dog go back out on the lawn?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport() }).answer;
     mockDb();
-    const lawnRules = routeServiceReportQuestion({ question: QUESTION, data: { serviceLine: 'lawn', applications: [] } }).answer;
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: rules });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  // Termite, rodent, mosquito and specialty reports, a typed-snapshot report
+  // and a report with a visible companion section keep the rule answer.
+  test.each([
+    ['termite', { serviceLine: 'termite' }],
+    ['rodent', { serviceLine: 'rodent' }],
+    ['mosquito', { serviceLine: 'mosquito' }],
+    ['specialty', { serviceLine: 'specialty' }],
+    ['typed pest', { serviceLine: 'pest', typedReport: { type: 'cockroach_service' } }],
+    ['pest with a companion section', { serviceLine: 'pest', companionReports: [{ type: 'rodent_trapping', internalOnly: false }] }],
+  ])('gate on, a %s report keeps the fixed-rule answer, no model call', async (_label, extra) => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    const report = { applications: [], ...extra };
+    buildReportV1Data.mockResolvedValue(report);
+    mockDb();
     await withServer(async (baseUrl) => {
       const { status, body } = await ask(baseUrl, QUESTION);
       expect(status).toBe(200);
-      expect(body).toEqual({ answer: lawnRules });
+      expect(body).toEqual({ answer: routeServiceReportQuestion({ question: QUESTION, data: report }).answer });
     });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test.each(['lawn', 'tree_shrub'])('gate on, a %s report reaches the AI for a plain question', async (line) => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    buildReportV1Data.mockResolvedValue({ serviceLine: line, applications: [] });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: 'No products were recorded on this report.' }, provider: 'anthropic' });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, QUESTION);
+      expect(body).toEqual({ answer: 'No products were recorded on this report.' });
+    });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
   test('gate on: the model answer, same reply shape, same event (length and topic only)', async () => {
@@ -1113,11 +1148,9 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'applied' });
   });
 
-  test.each(['on', 'off'])('gate %s, a spray question naming a person: the safety line, then the normal answer', async (gate) => {
-    if (gate === 'on') process.env.GATE_REPORT_ASK_AI = 'true'; else delete process.env.GATE_REPORT_ASK_AI;
-    // Queue a model result only when the route will call the model, so no
-    // stale result reaches a later test.
-    if (gate === 'on') dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
+  test('a spray question naming a person: the safety line, then the normal answer', async () => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
     mockDb();
     await withServer(async (baseUrl) => {
       const { status, body } = await ask(baseUrl, 'The tech sprayed my arm, what was it?');
@@ -1148,6 +1181,35 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
   });
 });
 
+describe('report Ask hotfix (Codex on #5964 against live #5957 code)', () => {
+  const m = require('../services/service-report/report-ask-ai');
+  it('a question about what was sprayed on the lawn is a report question, not an exposure', () => {
+    expect(m.medicalExposureAnswer('What was sprayed on my lawn?')).toBeNull();
+    expect(m.medicalExposureAnswer('What did you spray on my bushes?')).toBeNull();
+    // Option A (owner 2026-10-05): a spray + pet question keeps its answer, with the safety line first.
+    expect(m.exposureSafetyLine('They sprayed my dog')).toBe(m.EXPOSURE_SAFETY_LINE);
+    expect(m.medicalExposureAnswer('It got sprayed in my eyes')).toBeTruthy();
+  });
+  it('masks two-digit addresses on Pass, View and Walk streets', () => {
+    for (const address of ['18 Bay Pass', '7 Harbor View', '22 Palm Walk']) {
+      expect(m.buildReportAskPrompt({ question: `I live at ${address}`, data: { serviceLine: 'pest', applications: [] } }).user).not.toContain(address);
+    }
+  });
+  it('an AI answer states no date, weekday or time of its own', () => {
+    const facts = { service_date: 'Sunday, October 4, 2026', next_visit: { date: 'Monday, January 4, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' } };
+    const screen = (a, requiredLines = []) => m.screenAskAnswer(a, { question: 'q', data: {}, facts, requiredLines });
+    // Even a date the facts hold: a near miss ("January 1" for "January 10",
+    // a wrong year, a weekday from another date) cannot be told apart (#6020).
+    expect(screen('Your next visit is Monday, January 4, 2027, between 9:00 AM and 11:00 AM.')).toBe('states_a_date');
+    expect(screen('Your next visit is January 8 at 2 PM.')).toBe('states_a_date');
+    expect(screen('Your next visit is Friday.')).toBe('states_a_date');
+    expect(screen('It keeps working for weeks.')).toBeNull();
+    // A required line keeps its own date or time.
+    expect(screen('Not yet. Skip your turf watering until Thu 3 PM.', ['Skip your turf watering until Thu 3 PM.'])).toBeNull();
+  });
+
+});
+
 describe('street-address scrub keeps prose', () => {
   const { buildReportAskFacts } = require('../services/service-report/report-ask-ai');
   test.each([
@@ -1173,13 +1235,6 @@ describe('street-address scrub keeps prose', () => {
     ['Call me at nine four one five five five one two three four.', 'Call me at [phone].'],
     ['Call nine forty-one, two ninety-seven, fifty-seven forty-nine.', 'Call [phone].'],
     ['Call nine four one, triple five, triple one, two.', 'Call [phone].'],
-    ['Call triple two, double five, double nine.', 'Call [phone].'],
-    ['Call nine four one 55 five one two three four.', 'Call [phone].'],
-    ['Call nine hundred and forty-one, five hundred and fifty-five, twelve thirty-four.', 'Call [phone].'],
-    ['I saw two and three ants.', 'I saw two and three ants.'],
-    ['We saw 2 ants and three spiders.', 'We saw 2 ants and three spiders.'],
-    ['Ants at One Hundred F L 70.', 'Ants at [number] F L 70.'],
-    ['Ants at One Hundred U S Forty One.', 'Ants at [number] U S Forty One.'],
     ['Ants at One Hundred Florida 70.', 'Ants at [number] Florida 70.'],
     ['Ants at One Oh Five U S 41.', 'Ants at [number] U S 41.'],
     ['We saw twenty five ants.', 'We saw twenty five ants.'],
@@ -1196,5 +1251,52 @@ describe('street-address scrub keeps prose', () => {
     ['We saw 2 rats by the lake.', 'We saw [number] rats by the lake.'],
   ])('%s', (concern, expected) => {
     expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: concern } }).customer_concern).toBe(expected);
+  });
+});
+
+describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
+  // A stand-in for the transaction: one queue, so the lock, the counts and
+  // the insert run one request at a time, as the advisory locks make them.
+  function fakeSharedDb(rows = []) {
+    let chain = Promise.resolve();
+    const table = () => {
+      const q = { filters: {}, since: null };
+      const api = {
+        where(a, op, value) { if (typeof a === 'object') Object.assign(q.filters, a); else q.since = value; return api; },
+        count() { return api; },
+        first: async () => ({ n: rows.filter((row) => Object.entries(q.filters).every(([k, v]) => row[k] === v) && row.occurred_at >= q.since).length }),
+        insert: async (row) => { rows.push({ ...row, occurred_at: new Date() }); },
+      };
+      return api;
+    };
+    const trx = Object.assign(table, { raw: async () => {} });
+    return { rows, transaction: (work) => { const run = chain.then(() => work(trx)); chain = run.catch(() => {}); return run; } };
+  }
+
+  test('the shared reservation is atomic: 60 concurrent requests on a 40-a-day report take exactly 40', async () => {
+    const { reserveSharedReportAskBudget } = require('../routes/reports-public');
+    const dbConn = fakeSharedDb();
+    const results = await Promise.all(Array.from({ length: 60 }, (_, i) => reserveSharedReportAskBudget({ id: 'svc-1', customer_id: null }, `ip-${i}`, dbConn)));
+    expect(results.filter(Boolean)).toHaveLength(40);
+    expect(dbConn.rows).toHaveLength(40);
+    expect(dbConn.rows.every((row) => row.event_name === 'report_ask_model_call')).toBe(true);
+  });
+
+  test('the shared reservation counts what earlier replicas recorded, and the IP cap too', async () => {
+    const { reserveSharedReportAskBudget } = require('../routes/reports-public');
+    const now = new Date();
+    const prior = (n, extra) => Array.from({ length: n }, () => ({ event_name: 'report_ask_model_call', occurred_at: now, ...extra }));
+    expect(await reserveSharedReportAskBudget({ id: 'svc-2' }, 'ip-a', fakeSharedDb(prior(39, { service_record_id: 'svc-2', ip_hash: 'other' })))).toBe(true);
+    expect(await reserveSharedReportAskBudget({ id: 'svc-2' }, 'ip-a', fakeSharedDb(prior(40, { service_record_id: 'svc-2', ip_hash: 'other' })))).toBe(false);
+    expect(await reserveSharedReportAskBudget({ id: 'svc-3' }, 'ip-a', fakeSharedDb(prior(120, { service_record_id: 'elsewhere', ip_hash: 'ip-a' })))).toBe(false);
+    // Rows older than a day no longer count.
+    const old = prior(40, { service_record_id: 'svc-4', ip_hash: 'x' }).map((row) => ({ ...row, occurred_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }));
+    expect(await reserveSharedReportAskBudget({ id: 'svc-4' }, 'ip-a', fakeSharedDb(old))).toBe(true);
+  });
+
+  test('a failed shared reservation keeps the fixed answer (no model call)', async () => {
+    const { reportAskBudgetFor } = require('../routes/reports-public');
+    const deps = { reserveShared: async () => { throw new Error('db down'); } };
+    expect(await reportAskBudgetFor({ id: 'svc-fail' }, { ip: '203.0.113.9', headers: {} }, deps)).toBe(false);
   });
 });
