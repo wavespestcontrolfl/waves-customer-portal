@@ -2183,6 +2183,16 @@ describe('weed spots and the spot area', () => {
       // A member whose row has no rate still falls back to the catalog's.
       expect(sentProduct(P_CERT)).toMatchObject({ totalAmount: 0.25, rate: 0.5, rateUnit: 'fl_oz' });
     });
+    test('a small spot keeps a small dry dose: three decimals, never rounded to nothing', async () => {
+      // 0.028 oz per 1,000 sq ft on 100 sq ft is 0.0028 oz: two decimals would record 0.
+      await open(withLeadRate({ ratePer1000: 0.028, rateUnit: 'oz' }));
+      addWeedSpots();
+      fireEvent.click(within(weedArea()).getByRole('button', { name: '100 sq ft' }));
+      expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('0.003');
+      await analyze();
+      await submit();
+      expect(sentProduct(P_LEAD)).toMatchObject({ totalAmount: 0.003, amountUnit: 'oz', rate: 0.028, rateUnit: 'oz' });
+    });
     test('a weed row added on its own is figured the same way', async () => {
       await open(weedContext(MIX({ mode: 'none', productIds: [], groupProductIds: [] }), {
         plannedProducts: { source: 'plan', items: [PLANNED[0]], month: 10, weedMix: MIX({ mode: 'none', productIds: [], groupProductIds: [], surfactant: null }), addOns: [{ ...addOn(P_LEAD, 'Lead WG'), ratePer1000: 0.5, rateUnit: 'oz' }] },

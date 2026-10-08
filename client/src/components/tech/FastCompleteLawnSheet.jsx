@@ -523,16 +523,17 @@ function derivedAmount(row, lawnSqft) {
   if (!unit) return null;
   // In the unit the tech picked for the row (unitPicked), else the rate's own
   // (spoons for a small liquid dose). Rounded ONCE, after that conversion, to
-  // the precision the record keeps for the unit (three decimals for fl oz and
-  // gal, as submittedAmount sends them; two for spoons and dry weights): a
-  // two-decimal pre-round in fl oz would zero a tiny dose (0.004 fl oz) and
-  // the record would disagree with the box.
+  // the precision the record keeps (service_products.total_amount holds three
+  // decimals; spoons stay at two, submittedAmount converts them): a two-decimal
+  // round would zero a tiny dose (0.004 fl oz) or a small spot's dry dose
+  // (0.028 oz per 1,000 sq ft on 100 sq ft is 0.003 oz) and the record would
+  // disagree with the box.
   const inBase = rate * (area / 1000);
   const shown = row.unitPicked
     ? { amount: convertAmount(inBase, unit, row.amountUnit, row.dimension), unit: row.amountUnit }
     : seededAmount(inBase, unit);
   if (shown.amount == null) return null;
-  const places = shown.unit === 'fl_oz' || shown.unit === 'gal' ? 1000 : 100;
+  const places = shown.unit === 'tsp' || shown.unit === 'tbsp' ? 100 : 1000;
   const amount = Math.round(shown.amount * places) / places;
   if (!(amount > 0)) return null;
   return {
