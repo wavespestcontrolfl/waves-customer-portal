@@ -198,6 +198,20 @@ describe('customer-rain-rank helpers', () => {
     expect(hourlyRain).toHaveBeenCalledTimes(rankTest.FORECAST_BUDGET);
   });
 
+  test('builds that read nothing spend no budget: gate off, skip, neutral', async () => {
+    const hourlyRain = jest.fn(async () => HOURLY);
+    const args = { serviceLabels: ['Pest Control'], ...IN_AREA, today: new Date(), deps: { hourlyRain } };
+    await startCustomerRainRank(args).stamp(near()); // gate off
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    await startCustomerRainRank({ ...args, skip: true }).stamp(near()); // re-service profile
+    await startCustomerRainRank({ ...args, serviceLabels: [] }).stamp(near()); // neutral booking
+    expect(hourlyRain).not.toHaveBeenCalled();
+    expect(rankTest._forecastStarts).toHaveLength(0);
+    // The next eligible build still has the whole budget.
+    expect((await startCustomerRainRank(args).stamp(near()))[0].rain_tier).toBe(2);
+    expect(rankTest._forecastStarts).toHaveLength(1);
+  });
+
   test('stampRainTiers: 0 without a tier function; rainTierDiff orders by tier', () => {
     const rows = stampRainTiers([{ date: D1, start_time: '14:00', end_time: '15:00' }], null);
     expect(rows[0].rain_tier).toBe(0);

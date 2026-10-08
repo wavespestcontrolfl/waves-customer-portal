@@ -42,6 +42,9 @@ async function customerRainTierOf({
     const services = await withCatalogKeys(servicesToClassify({ serviceIdentity, serviceLabels }), db, { gate: GATE });
     const fit = rainFitFor(services);
     if (fit === 'neutral') return null;
+    // Checked last, just before the read: only a build that would really
+    // start a forecast lookup spends the budget (Codex #6126 r3).
+    if (!forecastAllowed(lat, lng)) return null;
     const hourly = await (deps.hourlyRain || boundedHourlyRain)(lat, lng, true);
     return rainTierOf(fit, hourly, etDateString(today || new Date()));
   } catch (err) {
@@ -84,7 +87,7 @@ function startCustomerRainRank({ today, lat, lng, ...rest } = {}) {
   const todayYmd = etDateString(today || new Date());
   return {
     async stamp(candidates) {
-      const needed = candidates.some((c) => inRainHorizon(c.date, todayYmd)) && forecastAllowed(lat, lng);
+      const needed = candidates.some((c) => inRainHorizon(c.date, todayYmd));
       return stampRainTiers(candidates, needed ? await customerRainTierOf({ today, lat, lng, ...rest }) : null);
     },
   };
