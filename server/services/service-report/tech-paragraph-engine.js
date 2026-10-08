@@ -24,8 +24,28 @@
 const crypto = require('crypto');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { customerCopyViolations } = require('./technician-report-copy');
 
 const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+
+// The copy screen for a rendered sentence, shared by both paragraphs, with one
+// exact exception. A real catalog name reads to the screen as an access code
+// ("... Combo AM 1% ..."), so the known names in CATALOG_NAMES_NOT_CODES are screened
+// with "combo" neutralized; every other name, "Security Combo 1234" included, is
+// screened in full (Codex r2, r3, r5 on #6067). The sentence around a name is
+// always screened in full with the names masked. Read-only checks of prod
+// (2026-10-06, 2026-10-08): of 238 catalog rows this is the only name the screen
+// flags. A new such name stays out of the paragraph until it is added here.
+const CATALOG_NAMES_NOT_CODES = new Set([
+  'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
+]);
+const screenedName = (name) => (CATALOG_NAMES_NOT_CODES.has(name) ? name.replace(/\bcombo\b/gi, 'blend') : name);
+const maskProducts = (text, products) => products.reduce((t, name) => t.split(name).join('the product'), text);
+function copyScreenProblem(text, products) {
+  const named = products.filter((name) => text.includes(name));
+  return customerCopyViolations(maskProducts(text, named)).length > 0
+    || named.some((name) => customerCopyViolations(screenedName(name)).length > 0);
+}
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -286,4 +306,4 @@ function createTechParagraphEngine(cfg) {
   };
 }
 
-module.exports = { createTechParagraphEngine, clean, parseJsonObject };
+module.exports = { createTechParagraphEngine, clean, parseJsonObject, copyScreenProblem, CATALOG_NAMES_NOT_CODES };

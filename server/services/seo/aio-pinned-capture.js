@@ -97,7 +97,10 @@ function parseSerp(items) {
   }));
   // Without a top-level markdown, the answer is every part's text, nested
   // components included.
-  const markdown = aio.markdown || parts.map((e) => e?.text || e?.markdown || '').filter(Boolean).join('\n');
+  // A video element has no text: its words are its title and snippet.
+  const partText = (e) => e?.text || e?.markdown
+    || (e?.type === 'ai_overview_video_element' ? [e.title, e.snippet].filter(Boolean).join(' ') : '');
+  const markdown = aio.markdown || parts.map(partText).filter(Boolean).join('\n');
   // Only URLs attached to an answer element prove a citation; top-level
   // references are pages Google MAY have used (same contract as
   // googleAnswerProbe in llm-mention-prober.js).

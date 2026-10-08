@@ -197,6 +197,11 @@ describe('mergeCandidates', () => {
     expect(out[0].city).toBeNull();
   });
 
+  test('a search over 700 characters is not a candidate', () => {
+    const out = sweep.mergeCandidates({ managedRows: [{ query: 'ant '.repeat(180) }, { query: 'ant control' }] });
+    expect(out.map((c) => c.query)).toEqual(['ant control']);
+  });
+
   test('the cap counts only rows that pass the screens', () => {
     const out = sweep.mergeCandidates({ max: 1, gscRows: [{ query: 'site:rival.example pests', impressions: 90 }, { query: 'ant control', impressions: 80 }] });
     expect(out.map((c) => c.query)).toEqual(['ant control']);

@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const localNewsStore = require('../services/local-news-store');
+const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { getForecast } = require('../services/pest-forecast/forecast');
 const { LOCATIONS, BY_SLUG, resolveZip } = require('../services/pest-forecast/locations');
 const { portalYardCalendarLive } = require('../config/feature-gates');
@@ -546,7 +547,7 @@ router.get('/weather', async (req, res, next) => {
     // the portal tile and the public widget can never disagree.
     const mosquitoPromise = loadMosquitoPressure(place);
 
-    const periods = await fetchNwsPeriods(place);
+    const periods = (await fetchNwsPeriods(place).catch(() => null)) || (await fetchOpenMeteoPeriods(place));
     if (!periods) return res.json(buildFallbackWeather(place, await mosquitoPromise));
 
     // Pick by isDaytime, not by index: after dark periods[0] is tonight and
@@ -559,7 +560,9 @@ router.get('/weather', async (req, res, next) => {
     const humidity = current.relativeHumidity?.value || 70;
     const wind = current.windSpeed || '5 mph';
     const shortForecast = current.shortForecast || 'Partly Cloudy';
-    const nightTemp = tonight.temperature || 72;
+    // nightLow: the Open-Meteo backup's overnight minimum, kept apart from its
+    // current reading (an NWS night period's temperature already is the low).
+    const nightTemp = tonight.nightLow || tonight.temperature || 72;
 
     const result = {
       location: place.label,
@@ -629,15 +632,67 @@ function resolveWeatherLocation(...sources) {
   return WEATHER_FALLBACK_LOCATION;
 }
 
+// One deadline for the whole NWS read (both requests and their bodies): a
+// connection that stalls must end, or the Open-Meteo backup never runs.
+const NWS_DEADLINE_MS = 5000;
 async function fetchNwsPeriods(place) {
+  const signal = AbortSignal.timeout(NWS_DEADLINE_MS);
   const headers = { 'User-Agent': 'WavesCustomerPortal/1.0 (waves@wavespestcontrol.com)' };
-  const pointRes = await fetch(`https://api.weather.gov/points/${place.lat},${place.lng}`, { headers });
+  const pointRes = await fetch(`https://api.weather.gov/points/${place.lat},${place.lng}`, { headers, signal });
   if (!pointRes.ok) return null;
   const forecastUrl = (await pointRes.json()).properties?.forecast;
   if (!forecastUrl) return null;
-  const forecastRes = await fetch(forecastUrl, { headers });
+  const forecastRes = await fetch(forecastUrl, { headers, signal });
   if (!forecastRes.ok) return null;
-  return (await forecastRes.json()).properties?.periods || [];
+  // An empty or missing list is no answer: null sends the route to the backup.
+  const periods = (await forecastRes.json()).properties?.periods;
+  return Array.isArray(periods) && periods.length ? periods : null;
+}
+
+// NWS backup (owner 2026-10-08): current conditions from the shared
+// property-forecast client, shaped as the two NWS periods the tile reads
+// (now, and tonight's low), so a customer sees real numbers through an NWS
+// outage, not the seasonal defaults. Null when Open-Meteo cannot answer.
+async function fetchOpenMeteoPeriods(place) {
+  const { fetchPropertyForecast, weatherCodeLabel } = require('../services/service-report/application-conditions');
+  const etHour = (at) => etParts(new Date(at)).hour;
+  const isNight = (at) => etHour(at) >= 18 || etHour(at) < 6;
+  // After dark the window starts at the 6 PM that began this night, so the
+  // low also counts the night hours already past (a 2 AM minimum read at
+  // 5 AM). By day it starts now and reaches tonight.
+  const nowDate = new Date(Date.now());
+  const nightStart = parseETDateTime(`${etDateString(etHour(nowDate) < 6 ? addETDays(nowDate, -1) : nowDate)}T18:00`);
+  const from = isNight(nowDate) ? nightStart : undefined;
+  const forecast = await fetchPropertyForecast({ latitude: place.lat, longitude: place.lng, from }).catch(() => null);
+  const now = forecast?.status === 'ok' ? forecast.current : null;
+  if (!now || !Number.isFinite(now.temperature_f)) return null;
+  // Tonight = the first unbroken run of night hours (6 PM-6 AM ET) from now.
+  // The window is 24 h, so after dark it also reaches tomorrow evening:
+  // those hours belong to the next night.
+  const nightTemps = [];
+  let inNight = false;
+  for (const h of forecast.hourly) {
+    if (isNight(h.at)) {
+      inNight = true;
+      if (Number.isFinite(h.temperature_f)) nightTemps.push(h.temperature_f);
+    } else if (inNight) break;
+  }
+  const round = (v) => (Number.isFinite(v) ? Math.round(v) : undefined);
+  const nightLow = nightTemps.length ? Math.round(Math.min(...nightTemps)) : undefined;
+  return [
+    {
+      isDaytime: !isNight(now.at),
+      // After dark this period is also "tonight": its low must not be the
+      // current reading.
+      nightLow,
+      temperature: round(now.temperature_f),
+      relativeHumidity: { value: round(now.humidity_pct) },
+      windSpeed: Number.isFinite(now.wind_mph) ? `${Math.round(now.wind_mph)} mph` : undefined,
+      shortForecast: weatherCodeLabel(now.weather_code) || undefined,
+      detailedForecast: '',
+    },
+    { isDaytime: false, temperature: nightLow },
+  ];
 }
 
 const PRESSURE_COLORS = { HIGH: '#E53935', MODERATE: '#FF9800', LOW: '#4CAF50' };

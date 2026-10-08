@@ -3991,6 +3991,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // so the operator can see who adds the least drive and pick them.
     compareTechsAt: techMode === 'choose' ? undefined : windowStart,
     serviceTypes: services.map((svc) => svc?.name).filter(Boolean),
+    // Same order as serviceTypes: the selected catalog row's key.
+    serviceKeys: services.filter((svc) => svc?.name).map((svc) => (svc?.service_key ?? svc?.serviceKey) || ''),
     rangeFrom: etDateString(),
     bestRows: true,
   });

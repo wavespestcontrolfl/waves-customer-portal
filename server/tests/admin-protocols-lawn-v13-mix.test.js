@@ -417,3 +417,10 @@ describe('the city hold on the tank sheet', () => {
     expect(codes(await lawnMix({ month: '6', track: 'st_augustine' }))).not.toContain('lawn_v13_north_port_product_window');
   });
 });
+
+test('July is the scout visit on the tank sheet: no whole-lawn product, the inspection line, and no 0-0-50 anywhere (20261007189000)', async () => {
+  const body = await lawnMix({ month: '7' });
+  expect(JSON.stringify(body)).not.toMatch(/0-0-50|[Pp]otash/);
+  expect(body.items.filter((item) => item.role === 'base' && item.product)).toEqual([]);
+  expect(body.items.some((item) => item.role === 'base' && /^Scout visit/.test(item.raw))).toBe(true);
+});

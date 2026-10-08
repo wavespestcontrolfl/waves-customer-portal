@@ -124,6 +124,8 @@ function namesAPerson(query, nameIndex) {
 // 5x, past the per-call budget reservation. Customers do not type colons, so
 // every colon query is left out rather than keeping a list of operators.
 const OPERATOR_RE = /:/;
+// DataForSEO refuses a keyword over 700 characters; such a row would only burn a task error.
+const MAX_KEYWORD_CHARS = 700;
 
 // Sums a Search Console row into a candidate; position is impression-weighted.
 function addGscNumbers(c, r, impressions) {
@@ -148,7 +150,7 @@ function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], people 
   const byQuery = new Map();
   const touch = (query, source) => {
     const key = normQuery(query);
-    if (!key || isWavesQuery(key) || OPERATOR_RE.test(key) || looksPersonal(key) || namesAPerson(key, nameIndex)) return null;
+    if (!key || key.length > MAX_KEYWORD_CHARS || isWavesQuery(key) || OPERATOR_RE.test(key) || looksPersonal(key) || namesAPerson(key, nameIndex)) return null;
     let c = byQuery.get(key);
     if (!c) {
       c = { query: key, sources: [], cityLabels: [], impressions_90d: null, clicks_90d: null, gsc_position: null, posWeight: 0 };

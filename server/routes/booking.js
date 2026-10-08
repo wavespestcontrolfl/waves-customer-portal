@@ -3,6 +3,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
+const { startCustomerRainRank, withDisplayTier, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
 const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
@@ -302,6 +303,10 @@ function dateLabels(date) {
 }
 
 function compareRankedSlots(a, b) {
+  // Rain fit first (GATE_CUSTOMER_RAIN_RANK; every candidate is tier 0 with
+  // the gate off, so this key is inert): customer-rain-rank.js.
+  const rain = rainTierDiff(a, b);
+  if (rain !== 0) return rain;
   const scoreA = a.score ?? a.rank ?? 999999;
   const scoreB = b.score ?? b.rank ?? 999999;
   if (scoreA !== scoreB) return scoreA - scoreB;
@@ -550,8 +555,13 @@ function applyReserviceProfile({ rankProfile, candidates, today, totalFeasible }
   const bestFitByDate = new Map();
   for (const candidate of candidates) {
     const scoreOf = active ? reserviceAdjustedScore(candidate) : (candidate.rank ?? Infinity);
+    // The day's best fit follows the rain tier too (0 for every candidate
+    // unless customer-rain-rank.js stamped it; never under this profile).
+    const tier = candidate.rain_tier ?? 0;
     const current = bestFitByDate.get(candidate.date);
-    if (!current || scoreOf < current.score) bestFitByDate.set(candidate.date, { score: scoreOf, slotSig: candidate.slot_sig });
+    if (!current || tier < current.tier || (tier === current.tier && scoreOf < current.score)) {
+      bestFitByDate.set(candidate.date, { tier, score: scoreOf, slotSig: candidate.slot_sig });
+    }
   }
   const bestFitSigByDate = new Map([...bestFitByDate].map(([date, best]) => [date, best.slotSig]));
 
@@ -1648,6 +1658,15 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       .catch(() => null)
     : null;
 
+  // Rain ranking (GATE_CUSTOMER_RAIN_RANK, dark): a tier per candidate just
+  // before the sort. The booking's rain fit and the forecast are read only
+  // once a candidate inside the next 3 dates exists. Today's order with the
+  // gate off, under the re-service profile, or on any failure.
+  const serviceLabels = normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
+  const rainRank = startCustomerRainRank({
+    serviceIdentity, serviceLabels, lat, lng, today, skip: reserviceRankIsActive(rankProfile), db,
+  });
+
   const candidateExpectedMinutes = await bookingExpectedMinutes(db, serviceKey, duration, serviceIdentity);
   // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): a
   // self-serve caller resolves the request's zone FROM COORDINATES (not city
@@ -1661,7 +1680,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     lng,
     zoneSlug,
     durationMinutes: duration,
-    serviceTypes: normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]),
+    serviceTypes: serviceLabels,
     // This booking's own expected-minutes credit — the same number the
     // mirror below and the commit probe use (offer/commit parity).
     expectedMinutes: candidateExpectedMinutes,
@@ -2053,7 +2072,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       }
     }
   }
-  const candidates = [...candidateMap.values()].sort(compareRankedSlots);
+  const candidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
   const totalFeasible = result.total_feasible || 0;
   const { slots: curatedSlots, bestFitByDate, rankProfileFields } = applyReserviceProfile({
     rankProfile, candidates, today, totalFeasible,
@@ -2128,7 +2147,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // stops_that_day is internal ranking state (reserviceAdjustedScore) —
     // strip it here so every caller's payload shape stays byte-for-byte
     // identical to before this field existed.
-    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, stops_that_day, ...slot }) => slot),
+    // rain_tier is internal ranking state too (customer-rain-rank.js); a
+    // tier above 0 rides out as display_tier, which the picker sorts by
+    // first (it re-sorts this list by nearby, then rank).
+    slots: curatedSlots.map(({ score, startTime24, endTime24, start, end, stops_that_day, rain_tier, ...slot }) => withDisplayTier(slot, rain_tier)),
     days,
     nearby: days.some(d => d.nearby),
     total_feasible: totalFeasible,

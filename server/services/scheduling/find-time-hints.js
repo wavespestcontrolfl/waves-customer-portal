@@ -11,7 +11,7 @@
  * enforcer).
  */
 
-const { bookingRainFit, rainTierOf, rankingNeedsForecast } = require('./rain-fit');
+const { bookingRainFit, rainTierOf, rankingNeedsForecast, boundedHourlyRain } = require('./rain-fit');
 const logger = require('../logger');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
@@ -541,24 +541,6 @@ function publicChip(chip) {
  * chance of rain for each chip's hour. Both lookups fail open: a chip keeps
  * the model's numbers, or shows no rain.
  */
-// The chips' forecast: NWS hourly, Open-Meteo when NWS fails; fail open to
-// no rain. Labels only: the 1.5 s wait the rows always had. Ranking
-// (GATE_BOOKING_RAIN_RANK, a date inside the horizon): NWS gets 1.2 s so a
-// slow failure still leaves the backup time inside a 2.5 s wait (Codex
-// #6102 r2); only then is the longer wait spent (Codex #6102 r5).
-const LABEL_WAIT_MS = 1500;
-const RANK_WAIT_MS = 2500;
-const RANK_NWS_MS = 1200;
-function boundedHourlyRain(la, ln, ranking = false) {
-  const { getHourlyRainOutlook } = require('../weather-forecast');
-  const opts = ranking ? { budgetMs: RANK_WAIT_MS, nwsBudgetMs: RANK_NWS_MS } : undefined;
-  let timer;
-  return Promise.race([
-    getHourlyRainOutlook(la, ln, opts).catch(() => null),
-    new Promise((resolve) => { timer = setTimeout(resolve, ranking ? RANK_WAIT_MS + 100 : LABEL_WAIT_MS, null); }),
-  ]).finally(() => clearTimeout(timer));
-}
-
 async function buildBestRows(days, {
   pickedDate, today, lat, lng, picked = null, spanMin = 60, pickedEnd, serviceTypes, deps = {},
 }) {
@@ -680,7 +662,7 @@ async function buildHintSummary(plan, everyStart, {
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
-  // Only New Appointment shows the best-times rows; other strips skip the
+  // New Appointment and Quick Move show the best-times rows; other strips skip the
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {
     pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd, serviceTypes,

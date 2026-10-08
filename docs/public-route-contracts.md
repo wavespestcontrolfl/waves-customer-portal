@@ -353,7 +353,10 @@ saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}",
 "There may be early signs of {labels}; we will keep an eye on it." (low-confidence
 kept photo findings the note does not cover, at most 2), "Our technician confirmed
 signs of {labels}." (findings the technician confirmed), "Today we applied
-{products}." (product display names only) and "Your landscape looked {excellent|good}
+{products}." (product display names only, printed whole up to 200 characters; the copy
+screen reads each sentence with the catalog names masked and each name in full, with
+the one exact exception in `CATALOG_NAMES_NOT_CODES`, `tech-paragraph-engine.js`,
+shared with the lawn paragraph) and "Your landscape looked {excellent|good}
 today." (only when nothing else applies, the visit has NO technician note, and the
 technician rated the landscape Excellent or Good). No model text is ever printed. It is written ONCE, at completion
 (`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), with at most
@@ -1248,6 +1251,44 @@ booking tools never opt in and are unaffected. Default 0 is byte-identical
 to before this lane. A slotId minted before this v3 bump fails verification
 once (the same accepted trade the v1→v2 canonical-string bump already made)
 — the client's existing "pick another time" 409 recovery re-signs fresh.
+**Customer rain rank (`GATE_CUSTOMER_RAIN_RANK`, owner 2026-10-08; ships
+dark).** Every caller of `buildBookingAvailability` except the active
+re-service rank profile — `/api/booking/availability`, `/find-slots`, the
+`/capture-intent` revalidation, public inspection booking and public
+reschedule — ranks its candidates by rain fit before route score
+(`services/scheduling/customer-rain-rank.js`, rules in `rain-fit.js`): for an
+outdoor booking an hour with a 60%+ hourly chance of rain from its start
+through 2 h after its end, on the next 3 dates, sorts last; for a rain-OK
+booking (assessments, inspections, interior-only work: the explicit
+`RAIN_OK_KEYS` list) it sorts first; a dry hour and any later date keep
+their route order. Auth, gates, rate limits, the hours offered, `days[]`,
+`is_best_fit`'s shape, signed offers (`slot_sig`) and every commit check are
+unchanged; only which candidates the curated `slots` hold, their order, and
+which slot a day flags `is_best_fit` can differ. Payload: a curated slot
+whose tier is above 0 carries one new field, `display_tier` (integer 1-2),
+which the picker sorts by first; it is absent otherwise, so with the gate
+off, a neutral booking, no forecast, or no candidate inside the 3 dates the
+payload is byte-identical to today's. The forecast (NWS hourly, Open-Meteo
+when NWS fails) is read at the request's own coordinates under a 2.5 s
+bound, and never logged with coordinates. Outbound cost on these
+unauthenticated routes is bounded three ways: nothing is read until the
+slot search has produced a candidate inside the 3 dates; the coordinates
+must fall inside the service area's coarse box (`service-area.js`); and at
+most 60 reads start per minute per process, past which the build keeps
+today's order. Fail open on every error.
+The estimate page's slot list (`estimate-slot-availability.js`
+`getAvailableSlots`, behind the estimate token routes that list and search
+slots) takes the same gate, rules, service-area check and budget: with a
+slot inside the 3 dates, everything BEHIND the lead cards is reordered by
+rain fit before the display slice. The first card stays the soonest opening
+and a scarce first day's pinned cards stay pinned, so
+`metadata.firstDayAvailability` and its badge keep matching the cards shown.
+A slot moved behind drier ones carries the same one field, `display_tier`
+(integer 1-2; never on a lead card), which the picker's best-times strip
+sorts by first; it is absent otherwise. The token gate, rate limits, signed
+`slotId`s, reserve and commit checks are unchanged. The result rides
+the existing 5-minute wrapper cache, so a gate flip reaches a cached
+estimate within that TTL.
 **Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
 2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
 and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the

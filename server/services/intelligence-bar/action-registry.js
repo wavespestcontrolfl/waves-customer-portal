@@ -65,6 +65,7 @@ const MODULES = [
   ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
   ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
+  ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });
@@ -186,6 +187,9 @@ const EVERY_PAGE_TOOL_NAMES = Object.freeze([
   'update_lead_contact', 'update_lead_status',
   'query_stock', 'adjust_stock', 'query_products',
   'get_estimate_detail', 'find_available_slots',
+  // Tap-to-answer buttons for a "which value?" question (choice-tools.js):
+  // display only, reads and writes nothing.
+  'offer_choices',
 ]);
 
 function initialTools(context, scope) {

@@ -30,8 +30,7 @@
  * gate read: callers decide.
  */
 
-const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
-const { customerCopyViolations } = require('./technician-report-copy');
+const { createTechParagraphEngine, clean, copyScreenProblem } = require('./tech-paragraph-engine');
 const { FIELD_WORD_CAPS } = require('./lawn-report-lead');
 
 const PROMPT_VERSION = 'lawn_tech_paragraph_v2';
@@ -267,23 +266,9 @@ function fitted(slots) {
   return s;
 }
 
-// The copy screen, with one exact exception. A real catalog name reads to the
-// screen as an access code ("... Combo AM 1% ..."), so the known names in
-// CATALOG_NAMES_NOT_CODES are screened with "combo" neutralized; every other name,
-// "Security Combo 1234" included, is screened in full (Codex r2, r3, r5). The
-// sentence around a name is always screened in full with the names masked.
-// 2026-10-06 read-only check: of 238 prod catalog rows this is the only name the
-// screen flags. A new such name stays out of the paragraph until it is added here.
-const CATALOG_NAMES_NOT_CODES = new Set([
-  'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
-]);
-const screenedName = (name) => (CATALOG_NAMES_NOT_CODES.has(name) ? name.replace(/\bcombo\b/gi, 'blend') : name);
-const maskProducts = (text, products) => products.reduce((t, name) => t.split(name).join('the product'), text);
-function screenProblem(text, products) {
-  const named = products.filter((name) => text.includes(name));
-  return customerCopyViolations(maskProducts(text, named)).length > 0
-    || named.some((name) => customerCopyViolations(screenedName(name)).length > 0);
-}
+// The copy screen (copyScreenProblem, tech-paragraph-engine.js): the sentence in
+// full with the catalog names masked, each name in full, one exact exception.
+const screenProblem = copyScreenProblem;
 
 /** Slots -> the paragraph text, or '' when none. A sentence that fails the
  * customer-copy screen drops on its own. Pure. */
