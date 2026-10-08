@@ -133,6 +133,42 @@ describe('slotRainTierOf', () => {
     spy.mockRestore();
   });
 
+  test('more than 12 service rows: the estimate is outdoor, never rain-OK', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const profiles = require('../services/service-completion-profiles');
+    const spy = jest.spyOn(profiles, 'resolveCompletionProfileForScheduledService')
+      .mockImplementation(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    const inspections = Array.from({ length: 13 }, (_, i) => ({ label: `Inspection ${i}`, catalogServiceKey: 'wdo_inspection' }));
+    const opts = { ...IN_AREA, deps: { hourlyRain: async () => HOURLY } };
+    const over = await slotRainTierOf([slot(D1, '14:00')], { services: inspections, ...opts });
+    expect(over(slot(D1, '14:00'))).toBe(2);
+    const atCap = await slotRainTierOf([slot(D1, '14:00')], { services: inspections.slice(0, 12), ...opts });
+    expect(atCap(slot(D1, '14:00'))).toBe(0);
+    spy.mockRestore();
+  });
+
+  test('a recurring estimate is judged by the service this appointment performs, not its companions', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const { appointmentServicesFor } = require('../services/estimate-slot-availability')._internals;
+    const profiles = require('../services/service-completion-profiles');
+    const spy = jest.spyOn(profiles, 'resolveCompletionProfileForScheduledService')
+      .mockImplementation(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    // Primary = a rain-OK rodent check; companion = outdoor lawn, booked separately.
+    const profile = { serviceMode: 'recurring', services: [
+      { label: 'Rodent Bait Stations', service: 'rodent_bait', catalogServiceKey: 'rodent_bait_quarterly' },
+      { label: 'Lawn Care', service: 'lawn_care', catalogServiceKey: 'lawn_care_monthly' },
+    ] };
+    expect(appointmentServicesFor(profile).map((s) => s.service)).toEqual(['rodent_bait']);
+    const tierOf = await slotRainTierOf([slot(D1, '14:00')], { profile, services: appointmentServicesFor(profile), ...IN_AREA, deps: { hourlyRain: async () => HOURLY } });
+    expect(tierOf(slot(D1, '14:00'))).toBe(0);
+    // One-time work and a combined allocation keep every service.
+    expect(appointmentServicesFor({ ...profile, serviceMode: 'one_time' })).toHaveLength(2);
+    expect(appointmentServicesFor({ ...profile, reservationServiceMix: {} })).toHaveLength(2);
+    // Pest is the primary when present.
+    expect(appointmentServicesFor({ serviceMode: 'recurring', services: [{ service: 'lawn_care' }, { service: 'pest_control' }] })[0].service).toBe('pest_control');
+    spy.mockRestore();
+  });
+
   test('gate off: no catalog lookup either', async () => {
     const catalogLinkForProfile = jest.fn();
     const profile = { services: [{ label: 'Rodent Bait Stations', service: 'rodent_bait' }] };

@@ -876,6 +876,18 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   };
 }
 
+// The services THIS appointment performs. Without a combined recurring
+// allocation the held appointment belongs to the converter's primary
+// service and companion programs book separately; one-time paid add-ons
+// remain work on this same appointment. Shared by the catalog resolution
+// below and the rain ranking, which must judge only the work done in the
+// slot (Codex #6127 r3). Idempotent on an already-narrowed profile.
+function appointmentServicesFor(profile = {}) {
+  const services = Array.isArray(profile.services) ? profile.services : [];
+  if (profile.reservationServiceMix || profile.serviceMode === 'one_time') return services;
+  return [services.find((service) => service.service === 'pest_control') || services[0]].filter(Boolean);
+}
+
 // { resolvedServiceKey } for a resolved catalog row; nothing when the lookup
 // found none, so a profile without one keeps today's exact shape.
 function resolvedKeyOf(catalog) {
@@ -889,11 +901,7 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
   if (!capacityEnabled() && !userOpts.preserveCapacity) return profile;
   const { catalogLinkForProfile } = require('./slot-reservation');
   const { serviceDurationMinutes } = require('./service-library');
-  // Without a combined recurring allocation, the held appointment belongs
-  // to the converter's primary service; companion programs book separately.
-  // One-time paid add-ons remain work on this same appointment.
-  const appointmentServices = profile.reservationServiceMix || profile.serviceMode === 'one_time' ? profile.services
-    : [profile.services.find(service => service.service === 'pest_control') || profile.services[0]].filter(Boolean);
+  const appointmentServices = appointmentServicesFor(profile);
   const services = [];
   for (const service of appointmentServices) {
     let catalog;
@@ -2204,7 +2212,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
   // the gate off, no slot inside the next 3 dates, or any failure.
-  const rainTierOf = await slotRainTierOf(funneledBookable, { profile: serviceProfile, point: coords, db });
+  const rainTierOf = await slotRainTierOf(funneledBookable, {
+    profile: serviceProfile, services: appointmentServicesFor(serviceProfile), point: coords, db,
+  });
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
     rainTierOf,
@@ -2491,6 +2501,7 @@ module.exports = {
     filterPastSlotsForToday,
     splitSlotResults,
     selectCustomerFacingSlots,
+    appointmentServicesFor,
     diversifyByDay,
     compareCustomerFacingSlots,
     resolveEstimateSlotProfile,

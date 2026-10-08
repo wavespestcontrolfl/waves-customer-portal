@@ -108,7 +108,9 @@ async function slotRainTierOf(slots, { services = [], profile = null, point = nu
   if (!list.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
   const { gateEnvValue } = require('../../config/feature-gates');
   if (!gateEnvValue(GATE)) return null;
-  const rows = profile && Array.isArray(profile.services) ? profile.services : services;
+  // `services` = the rows this appointment performs (the caller narrows a
+  // recurring estimate to its primary service); the whole profile otherwise.
+  const rows = Array.isArray(services) && services.length ? services : (profile && profile.services) || [];
   const serviceLabels = await estimateServiceIdentities(rows, { profile, db, deps });
   const tierOf = await customerRainTierOf({ serviceLabels, lat: point?.lat, lng: point?.lng, today, db, deps });
   return tierOf ? (slot) => tierOf({ date: slot.date, start_time: slot.windowStart, end_time: slot.windowEnd }) : null;
@@ -124,13 +126,18 @@ async function slotRainTierOf(slots, { services = [], profile = null, point = nu
 const MAX_ESTIMATE_SERVICES = 12;
 async function estimateServiceIdentities(rows, { profile, db, deps = {} }) {
   const out = [];
-  for (const service of (Array.isArray(rows) ? rows : []).slice(0, MAX_ESTIMATE_SERVICES)) {
+  const all = Array.isArray(rows) ? rows : [];
+  for (const service of all.slice(0, MAX_ESTIMATE_SERVICES)) {
     if (typeof service === 'string') { out.push(service); continue; }
     const name = service?.label || service?.service;
     let serviceKey = service?.catalogServiceKey || service?.resolvedServiceKey || null;
     if (!serviceKey && profile) serviceKey = await catalogKeyForRow(profile, service, { db, deps });
     out.push({ name, serviceKey });
   }
+  // Rows past the cap are not looked up, so they cannot be called rain-OK:
+  // one entry with an identity no list knows makes the estimate outdoor
+  // (Codex #6127 r3; the booking path's rule, rain-fit.js bookingServices).
+  if (all.length > MAX_ESTIMATE_SERVICES) out.push({ name: 'More services', serviceKey: 'estimate_services_over_cap' });
   return out;
 }
 
