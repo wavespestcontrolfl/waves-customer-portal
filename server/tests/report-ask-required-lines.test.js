@@ -2866,11 +2866,12 @@ describe('answer screen, Codex round 85', () => {
     expect(ruleAnswerReason(lawnData(), [], 'applied', question)).toBe('product_location');
   });
 
-  test.each(["I'm having trouble seeing the treatment map", 'I have difficulty seeing the photos'])('trouble seeing something on the report is no symptom: %s', (question) => {
+  test.each(["I'm having trouble seeing the treatment map", 'I have difficulty seeing the photos', "I can't see the treatment map", 'I cannot see my next appointment'])('trouble seeing something on the report is no symptom: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
   });
 
   test('trouble seeing after the treatment is still a symptom', () => {
     expect(medicalExposureAnswer('I am having trouble seeing after the treatment')).toBeTruthy();
+    expect(medicalExposureAnswer("I can't see after the spray")).toBeTruthy();
   });
 });
