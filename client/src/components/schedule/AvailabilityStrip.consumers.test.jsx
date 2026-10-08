@@ -86,6 +86,11 @@ it('visitServiceArgs: the primary service, add-on lines and a shared stop, keys 
     { service_type: 'Fixture Pest', service_key: 'fixture_pest', visit: { serviceTypes: ['Fixture Pest', 'Fixture Mosquito'] } },
     [{ serviceType: 'Fixture Lawn Care', serviceKey: 'fixture_lawn' }, { serviceType: '' }],
   )).toEqual({ serviceTypes: ['Fixture Pest', 'Fixture Lawn Care', 'Fixture Mosquito'], serviceKeys: ['fixture_pest', 'fixture_lawn', ''] });
+  // The move surfaces pass no lines: the visit's stored add-ons count.
+  const stored = { serviceType: 'Fixture Inspection', serviceAddons: [{ serviceName: 'Fixture Lawn Care', serviceKey: 'fixture_lawn' }] };
+  expect(visitServiceArgs(stored)).toEqual({ serviceTypes: ['Fixture Inspection', 'Fixture Lawn Care'], serviceKeys: ['', 'fixture_lawn'] });
+  // The edit form's own list wins, an empty one included.
+  expect(visitServiceArgs(stored, [])).toEqual({ serviceTypes: ['Fixture Inspection'], serviceKeys: [''] });
   expect(visitServiceArgs(null)).toEqual({ serviceTypes: [], serviceKeys: [] });
 });
 
