@@ -506,9 +506,10 @@ function figuringRate(row) {
 // planned spot row's own plan area while it is on the plan's method; else
 // none, so a planned row moved to spot treatment figures nothing from the old
 // plan area.
-// A spot row under the spot rules is figured on the area the tech set for it (spotArea).
+// A spot row under the spot rules is figured on the area the tech set for it (spotArea) and on
+// no other: the plan's own spot estimate figures nothing there.
 const figuringArea = (row, lawnSqft) => {
-  if (row.spotRule && row.spotArea > 0) return row.spotArea;
+  if (row.spotRule) return row.spotArea > 0 ? row.spotArea : null;
   return requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null);
 };
 
@@ -523,17 +524,18 @@ function derivedAmount(row, lawnSqft) {
   if (!unit) return null;
   // In the unit the tech picked for the row (unitPicked), else the rate's own
   // (spoons for a small liquid dose). Rounded ONCE, after that conversion, to
-  // the precision the record keeps (service_products.total_amount holds three
-  // decimals; spoons stay at two, submittedAmount converts them): a two-decimal
-  // round would zero a tiny dose (0.004 fl oz) or a small spot's dry dose
-  // (0.028 oz per 1,000 sq ft on 100 sq ft is 0.003 oz) and the record would
-  // disagree with the box.
+  // the precision the record keeps for the unit (three decimals for fl oz and
+  // gal, as submittedAmount sends them; two for spoons and dry weights): a
+  // two-decimal pre-round in fl oz would zero a tiny dose (0.004 fl oz) and
+  // the record would disagree with the box. A spot-rule row's dry dose also
+  // keeps three (0.028 oz per 1,000 sq ft on 100 sq ft is 0.003 oz, and
+  // service_products.total_amount holds three); every other row is as before.
   const inBase = rate * (area / 1000);
   const shown = row.unitPicked
     ? { amount: convertAmount(inBase, unit, row.amountUnit, row.dimension), unit: row.amountUnit }
     : seededAmount(inBase, unit);
   if (shown.amount == null) return null;
-  const places = shown.unit === 'tsp' || shown.unit === 'tbsp' ? 100 : 1000;
+  const places = shown.unit === 'fl_oz' || shown.unit === 'gal' || (row.spotRule && shown.unit !== 'tsp' && shown.unit !== 'tbsp') ? 1000 : 100;
   const amount = Math.round(shown.amount * places) / places;
   if (!(amount > 0)) return null;
   return {
@@ -553,8 +555,8 @@ const positiveNumber = (value) => (Number(value) > 0 ? Number(value) : null);
 
 // The spot rules for one row (the context's `spotRules`, owner 2026-10-08): a row whose
 // method is spot treatment carries the area the tech set for it (a weed-mix row, the one
-// shared `weedArea`; any other, its own `spotSqft`), else the plan's own area on the
-// plan's method. `spotExempt` marks a weed-mix member whose rate is not per area, which
+// shared `weedArea`; any other, its own `spotSqft`) and nothing else: a plan's estimate of
+// a spot area is not the area treated. `spotExempt` marks a weed-mix member whose rate is not per area, which
 // needs no area. Any other row, and every row without the rules, passes through untouched.
 function withSpotArea(row, { spotRules, weedMix, weedArea }) {
   if (!spotRules || normalizeApplicationMethod(row.method) !== 'spot_treatment') return row;
@@ -562,7 +564,7 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
   return {
     ...row,
     spotRule: true,
-    spotArea: typed || (onPlannedMethod(row) ? row.plannedSqft : null) || null,
+    spotArea: typed || null,
     spotExempt: !!weedMix?.noAreaProductIds?.some((id) => sameId(id, row.productId)),
   };
 }
@@ -616,19 +618,10 @@ function useProductRows(ctx, catalog) {
     }));
   }, []);
   const addProduct = useCallback((product, { planned = null, weedGroup = false } = {}) => {
-    setRows((prev) => {
-      if (!prev.some((row) => row.productId === product.id)) return [...prev, productRow(product, { added: true, planned, weedGroup })];
-      // A weed-mix product the tech already added on its own joins the group, so it shares
-      // the group's one area instead of keeping a control (and an area) of its own.
-      // The row keeps everything the tech set on it (amount, unit, method); it only gains the
-      // group mark and its plan item's own facts (the program's rate, method and area).
-      if (!weedGroup) return prev;
-      return prev.map((row) => {
-        if (row.productId !== product.id || row.weedGroup) return row;
-        const { planned: isPlanned, fromProtocol, plannedRatePer1000, plannedRateUnit, plannedMethod, plannedSqft } = productRow(product, { added: true, planned, weedGroup: true });
-        return { ...row, weedGroup: true, planned: isPlanned, fromProtocol, plannedRatePer1000, plannedRateUnit, plannedMethod, plannedSqft };
-      });
-    });
+    setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
+      ...prev,
+      productRow(product, { added: true, planned, weedGroup }),
+    ]));
   }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
@@ -1040,9 +1033,15 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
+  // The products the Weed spots entry offers are added through that entry only (one tap, one
+  // shared area), so the search does not list them: a row is never in the group and outside it.
+  const searchCatalog = useMemo(() => {
+    const offered = ctx.weedMix?.productIds || [];
+    return offered.length ? catalog.filter((product) => !offered.some((id) => sameId(id, product.id))) : catalog;
+  }, [catalog, ctx.weedMix]);
   const picker = useProductPicker({
     line: 'lawn',
-    products: catalog,
+    products: searchCatalog,
     commonProducts: [],
     rows,
     locked: locked || dictationPending,
@@ -1250,7 +1249,7 @@ function ProtocolAddOns({ addOns, month, weedMix = null, rows, catalog, locked, 
         <p className="tech-visit-muted">Tap what you applied.</p>
       </div>
       {showWeed && (
-        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={new Set(rows.filter((row) => row.weedGroup).map((row) => String(row.productId).toLowerCase()))} locked={locked} onAdd={onAdd} />
+        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} onAdd={onAdd} />
       )}
       {items.map((item) => {
         const onSheet = on.has(String(item.productId).toLowerCase());
@@ -1288,8 +1287,6 @@ function ProtocolAddOns({ addOns, month, weedMix = null, rows, catalog, locked, 
 // "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
 // opens the rows it names (each seeded from its own plan item, as a single add-on is) and
 // they share one area. With nothing to add (the yearly limit is reached) it is a line only.
-// `on` holds the products on the sheet AS GROUP ROWS: one added singly first (the search
-// box) still leaves the tap open, and the tap takes that row into the group.
 function WeedSpotsEntry({ weedMix, items, on, locked, onAdd }) {
   const allOn = items.length > 0 && items.every((item) => on.has(String(item.productId).toLowerCase()));
   const names = items.map((item) => item.product.name).join(', ');

@@ -2120,28 +2120,13 @@ describe('weed spots and the spot area', () => {
     expect(within(addons()).getByText('On the sheet · Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
   });
 
-  test('a weed product added on its own first joins the group at the tap: one shared area, no control of its own', async () => {
+  test('a product the Weed spots entry offers is not listed in the search: it is added through the entry only', async () => {
     await open();
-    await addProductByName('Lead WG');
-    // On its own it has its own area control, and the weed tap is still open.
-    expect(within(editorFor('Lead WG')).getByLabelText('Area treated (sq ft)')).toBeTruthy();
-    addWeedSpots();
-    expect(screen.getAllByLabelText('Area treated (sq ft)')).toHaveLength(1);
-    expect(within(editorFor('Lead WG')).queryByLabelText('Area treated (sq ft)')).toBeNull();
-    fireEvent.click(within(weedArea()).getByRole('button', { name: '500 sq ft' }));
-    expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('1');
-    expect(within(addons()).getByRole('button', { name: 'Weed spots are on the sheet' })).toBeTruthy();
-  });
-
-  test('a product that joins the group is figured from the program rate, not the catalog default', async () => {
-    await open(weedContext(MIX(), {
-      plannedProducts: { source: 'plan', items: [PLANNED[0]], month: 10, weedMix: MIX(), addOns: ADD_ONS.map((a) => (a.productId === P_LEAD ? { ...a, ratePer1000: 0.5, rateUnit: 'oz' } : a)) },
-    }));
-    await addProductByName('Lead WG');
-    addWeedSpots();
-    fireEvent.click(within(weedArea()).getByRole('button', { name: '500 sq ft' }));
-    // The catalog says 2 oz per 1,000; the program approved 0.5.
-    expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('0.25');
+    fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Lead WG' } });
+    expect(screen.queryByRole('button', { name: /^Lead WG/ })).toBeNull();
+    // A group product the entry does NOT offer (the replacement, in lead mode) is still searchable.
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'Blind Herbicide' } });
+    expect(await screen.findByRole('button', { name: /Blind Herbicide/ })).toBeTruthy();
   });
 
   test('an unknown temperature adds the surfactant with the reminder on its row', async () => {
