@@ -3429,6 +3429,16 @@ const gates = {
   // gateEnvValue() at call time. Kill switch: unset — drive-only order.
   bookingRainRank: gateEnvValue('GATE_BOOKING_RAIN_RANK'),
 
+  // Customer rain rank (owner 2026-10-08): the same rain-fit rule on the
+  // customer booking surfaces. buildBookingAvailability (routes/booking.js:
+  // /book, the inspection link, public reschedule) ranks its recommended
+  // slots and each day's best fit by rain fit before route score; the
+  // re-service profile keeps its own order. Order only: the hours offered,
+  // the day list, signed offers and commit checks do not change. OFF in every
+  // environment; scheduling/customer-rain-rank.js reads it through
+  // gateEnvValue() at call time. Kill switch: unset — today's order.
+  customerRainRank: gateEnvValue('GATE_CUSTOMER_RAIN_RANK'),
+
   // Combo route check (owner 2026-10-03): a visit shared by two or more
   // services answers `route_unverified` on every arrival check, because
   // certifying one half alone under-counts the work at the stop. On, a

@@ -115,15 +115,16 @@ const OVERFLOW_SERVICE = Object.freeze({ name: 'More services', serviceKey: 'boo
 // catalog key and findings type the completion-profile resolver gives a
 // visit. `items` are names or { name, serviceKey }; a key the screen sent
 // (the selected catalog row) settles the identity ahead of the name, which
-// is not unique in the catalog. Only while the gate is on; read one at a
+// is not unique in the catalog. Only while the caller's gate is on (the
+// picker's by default); read one at a
 // time; an entry that cannot be resolved (or a failed read) keeps its name
 // and takes the word rules.
-async function withCatalogKeys(items, db) {
+async function withCatalogKeys(items, db, { gate = 'GATE_BOOKING_RAIN_RANK' } = {}) {
   const list = (Array.isArray(items) ? items : [])
     .map((item) => ({ name: String((item && item.name) ?? item ?? '').trim(), serviceKey: (item && item.serviceKey) || null }))
     .filter((item) => item.name);
   const { gateEnvValue } = require('../../config/feature-gates');
-  if (!list.length || !gateEnvValue('GATE_BOOKING_RAIN_RANK')) return list.map((item) => item.name);
+  if (!list.length || !gateEnvValue(gate)) return list.map((item) => item.name);
   const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
   const out = [];
   for (const { name, serviceKey } of list) {
@@ -166,6 +167,23 @@ function bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys }, d
   // rain-OK: one unclassified entry makes the whole booking outdoor rather
   // than letting the classified ones speak for it (Codex #6120 r4).
   return withCatalogKeys([...seen.values()], db).then((services) => (overflow ? [...services, OVERFLOW_SERVICE] : services));
+}
+
+// The ranking's forecast: NWS hourly, Open-Meteo when NWS fails; fail open
+// to no rain. Labels only: a 1.5 s wait. Ranking: NWS gets 1.2 s so a slow
+// failure still leaves the backup time inside a 2.5 s wait (Codex #6102
+// r2); only a ranking read spends the longer wait (Codex #6102 r5).
+const LABEL_WAIT_MS = 1500;
+const RANK_WAIT_MS = 2500;
+const RANK_NWS_MS = 1200;
+function boundedHourlyRain(la, ln, ranking = false) {
+  const { getHourlyRainOutlook } = require('../weather-forecast');
+  const opts = ranking ? { budgetMs: RANK_WAIT_MS, nwsBudgetMs: RANK_NWS_MS } : undefined;
+  let timer;
+  return Promise.race([
+    getHourlyRainOutlook(la, ln, opts).catch(() => null),
+    new Promise((resolve) => { timer = setTimeout(resolve, ranking ? RANK_WAIT_MS + 100 : LABEL_WAIT_MS, null); }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 // The booking's fit with the gate applied: 'neutral' (drive-only) while
@@ -242,4 +260,4 @@ function rainTierOf(fit, hourly, today) {
   return (chip) => rainTier(fit, isWetWindow(hourly, chip, today), inRainHorizon(chip.date, today));
 }
 
-module.exports = { RAIN_OK_KEYS, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, boundedHourlyRain, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
