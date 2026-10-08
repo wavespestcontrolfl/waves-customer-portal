@@ -407,7 +407,7 @@ const ACCESS_VERB_DEVICE = /\b((?:unlock|open|get\s+(?:into|through|past)|access
 // is access instructions and leaves whole, so no ordering can carry a
 // credential out (Codex P1 #5964 r69).
 const ACCESS_DEVICE = /\b(?:guards?|gatehouse|guard\s*house|security|front\s+desk|concierge|gates?|doors?|locks?|padlocks?|keypads?|key\s*pads?|garages?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|entry|entrances?)\b/i;
-const ACCESS_ACTION = /\b(?:tell|say|saying|give|mention|ask\s+for|show|enter|entering|type|typing|use|using|punch\w*|key\s+in|press|dial|input|codes?|combo|combination|password|passcode|pin|opens?\s+with|unlocks?\s+with|opened\s+with|word)\b/i;
+const ACCESS_ACTION = /\b(?:whisper\w*|speak|state|quote|repeat|announce|shout|yell|call\s+out|buzz\w*|ring|knock\w*|tell|say|saying|give|mention|ask\s+for|show|enter|entering|type|typing|use|using|punch\w*|key\s+in|press|dial|input|codes?|combo|combination|password|passcode|pin|opens?\s+with|unlocks?\s+with|opened\s+with|word)\b/i;
 function maskAccessSentences(text) {
   // Run last. A sentence about an entry device and an access action leaves
   // whole unless an earlier pass already masked its value: a credential can
@@ -419,8 +419,13 @@ function isAccessSentence(sentence) {
   // One masked value does not show that every credential in the sentence is
   // gone ("Use lockbox [redacted] and tell the guard blue moon"), so the
   // sentence leaves whole either way (pre-push audit, #5964).
-  return ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence);
+  // A guard, gatehouse, keypad or lockbox sentence is about getting in
+  // whatever its verb ("At the gatehouse, whisper blue moon"); a plain gate,
+  // door or garage sentence needs an access action, so "ants near the garage
+  // door" stays (Codex security P2 #5964 r77).
+  return ACCESS_ONLY_PLACE.test(sentence) || (ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence));
 }
+const ACCESS_ONLY_PLACE = /\b(?:guards?|gatehouse|guard\s*house|security\s+(?:desk|guard|gate|booth|office)|front\s+desk|concierge|keypads?|key\s*pads?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|padlocks?|passcodes?|passwords?|pass\s*phrases?|gate\s+codes?|door\s+codes?|access\s+codes?|entry\s+codes?|combinations?)\b/i;
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
 
@@ -2531,11 +2536,13 @@ const GENERIC_PRODUCT_WORDS = new Set(('it this that anything something any some
 // "Was Roundup applied?", "Did you have roundup sprayed?" (Codex P1 #5964 r23).
 const PASSIVE_PRODUCT_QUESTION_RE = /\b(?:was|were|is|are|has|have|had)\s+(?:any\s+|some\s+|the\s+|both\s+)?([A-Za-z][\w-]*(?:\s+(?:and\s+|or\s+)?[A-Za-z][\w-]*){0,4}?)\s+(?:\w+\s+)?(?:applied|used|sprayed|put\s+down|spread|placed)\b/i;
 // "Was Roundup the product?", "Did you put Roundup down?" (Codex P1 #5964 r57).
-const IDENTITY_PRODUCT_QUESTION_RE = /\b(?:[Ww]as|[Ii]s|[Ww]ere|[Aa]re)\s+([A-Z][\w-]*(?:\s+[A-Z0-9][\w-]*)*)\s+(?:the|what|one\s+of\s+the)\s+(?:\w+\s+)?(?:product|treatment|chemical|pesticide|insecticide|herbicide|fertilizer|bait)s?\b|\b(?:[Pp]ut|[Ll]ay|[Ll]aid|[Ss]pread|[Tt]hrow|[Tt]hrew)\s+(?:some\s+|the\s+|any\s+)?([A-Z][\w-]*(?:\s+[A-Z0-9][\w-]*)*)\s+(?:down|out|on)\b/g;
+const IDENTITY_PRODUCT_QUESTION_RE = /\b(?:was|is|were|are)\s+([a-z][\w/-]*(?:\s+[a-z0-9][\w/-]*){0,2}?)\s+(?:the|what|one\s+of\s+the|among\s+the)\s+(?:\w+\s+)?(?:product|treatment|chemical|pesticide|insecticide|herbicide|fertilizer|bait)s?\b|\b(?:put|lay|laid|spread|throw|threw)\s+(?:some\s+|the\s+|any\s+)?([a-z][\w/-]*(?:\s+[a-z0-9][\w/-]*){0,2}?)\s+(?:down|out|on)\b/gi;
+const IDENTITY_FILLER = new Set('it this that these those there what which any some one anything something everything nothing he she they we you i'.split(' '));
 function asksAboutUnrecordedProduct(question, data = {}) {
   const text = String(question || '');
+  // Any case: "was roundup the product?" (Codex P1 #5964 r77).
   const identityNames = [...text.matchAll(IDENTITY_PRODUCT_QUESTION_RE)].map((m) => m[1] || m[2])
-    .filter((name) => !GENERIC_PRODUCT_WORDS.has(name.split(/\s+/)[0].toLowerCase()));
+    .filter((name) => !GENERIC_PRODUCT_WORDS.has(name.split(/\s+/)[0].toLowerCase()) && !IDENTITY_FILLER.has(name.split(/\s+/)[0].toLowerCase()));
   if (identityNames.some((name) => !productsNamedIn(name, asArray(data.applications).map(productFacts).filter(Boolean), text).length)) return true;
   // Every passive mention and every product it lists ("Were Alpine WSG and
   // Roundup applied?") (Codex P1 #5964 r31).
@@ -2629,46 +2636,23 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
  * text is never logged. `requiredLines` is the rule router's list of
  * { text, source } entries (report-assistant.js requiredCollector).
  */
-// Paid-call budget (Codex P1 #5964 r74): every model answer is a paid call, and
-// the route's limiter alone allows 20 a minute for one report link. A caller
-// passes budget keys ([key, daily cap]); once any key is spent, the question
-// keeps the fixed-rule answer. Only calls that reach the model are counted.
-// In memory, per process: a restart or a second instance resets or splits the
-// count, so the caps are a spend ceiling, not an exact quota.
-const ASK_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000;
-const askBudgetUse = new Map();
-function takeAskBudget(keys, nowMs = Date.now()) {
-  const live = asArray(keys).filter((entry) => Array.isArray(entry) && entry[0]);
-  for (const [key] of live) {
-    const row = askBudgetUse.get(key);
-    if (row && nowMs - row.start >= ASK_BUDGET_WINDOW_MS) askBudgetUse.delete(key);
-  }
-  if (live.some(([key, cap]) => (askBudgetUse.get(key)?.count || 0) >= cap)) return false;
-  for (const [key] of live) {
-    const row = askBudgetUse.get(key) || { start: nowMs, count: 0 };
-    row.count += 1;
-    askBudgetUse.set(key, row);
-  }
-  // Bound the map: drop expired rows when it grows.
-  if (askBudgetUse.size > 5000) {
-    for (const [key, row] of askBudgetUse) if (nowMs - row.start >= ASK_BUDGET_WINDOW_MS) askBudgetUse.delete(key);
-  }
-  return true;
-}
-
-function withAskBudget(callModel, budgetKeys) {
+// Paid-call budget (Codex P1s #5964 r74, r77): every model answer is a paid
+// call. The route owns the budget, on the same express-rate-limit store as its
+// other limiters, and passes `takeBudget`; it is asked only when a call is
+// about to reach the model, and a spent budget keeps the fixed-rule answer.
+function withAskBudget(callModel, takeBudget) {
   return async (payload, options) => {
-    if (!budgetKeys || takeAskBudget(budgetKeys)) return callModel(payload, options);
+    if (!takeBudget || await takeBudget()) return callModel(payload, options);
     logger.info('[report-ask] daily paid-call budget spent; using fixed-rule answer');
     return { ok: false, reason: 'daily_budget' };
   };
 }
 
 async function answerReportQuestionWithAI({
-  question, data, nextAppointment, requiredLines: rawRequiredLines, topic = null, now, budgetKeys,
+  question, data, nextAppointment, requiredLines: rawRequiredLines, topic = null, now,
 } = {}, deps = {}) {
   // The budget is taken only when a call is about to reach the model.
-  const callModel = withAskBudget(deps.callModel || defaultCallModel, budgetKeys);
+  const callModel = withAskBudget(deps.callModel || defaultCallModel, deps.takeBudget);
   // Before any fact sheet or model call: a symptom or exposure gets the fixed
   // answer, never a generated one.
   const urgent = medicalExposureAnswer(question);
@@ -2744,7 +2728,6 @@ async function answerReportQuestionWithAI({
 }
 
 module.exports = {
-  takeAskBudget,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
   buildReportAskFacts,

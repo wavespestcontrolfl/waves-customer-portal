@@ -1213,3 +1213,19 @@ describe('street-address scrub keeps prose', () => {
     expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: concern } }).customer_concern).toBe(expected);
   });
 });
+
+describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
+  test('stops at each key\'s cap on the express-rate-limit store', async () => {
+    const rateLimit = require('express-rate-limit');
+    const { takeReportAskBudget } = require('../routes/reports-public');
+    const store = new rateLimit.MemoryStore();
+    store.init({ windowMs: 60 * 1000 });
+    const keys = [['report:budget-test', 3], ['ip:budget-test', 5]];
+    const taken = [];
+    for (let i = 0; i < 4; i += 1) taken.push(await takeReportAskBudget(keys, store));
+    expect(taken).toEqual([true, true, true, false]);
+    // The refused call consumed nothing on the other key.
+    expect((await store.get('ip:budget-test')).totalHits).toBe(3);
+    store.shutdown?.();
+  });
+});

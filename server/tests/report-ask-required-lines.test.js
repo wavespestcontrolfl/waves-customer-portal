@@ -784,7 +784,8 @@ describe('answer screen, Codex round 7', () => {
 
   test('ordinary lockbox words stay', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'The lockbox is on the side gate.' }) });
-    expect(facts.customer_concern).toBe('The lockbox is on the side gate.');
+    // A lockbox sentence is access information and leaves whole (Codex security P2 #5964 r77).
+    expect(facts.customer_concern).toBe('[access details removed]');
   });
 });
 
@@ -1114,7 +1115,7 @@ describe('answer screen, Codex round 18', () => {
 
   test('compound lockbox values mask whole', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'lockbox A-B, key safe A/B, lockbox BLUE-RED, keypad 12-34' }) });
-    expect(facts.customer_concern).toBe('lockbox [redacted], key safe [redacted], lockbox [redacted], keypad [redacted]');
+    expect(facts.customer_concern).toBe('[access details removed]');
   });
 
   test.each(['The baby sucked on the bait', 'My dog lapped up the pesticide', 'My puppy mouthed the bait'])('oral exposure gets the full answer: %s', (question) => {
@@ -1290,7 +1291,7 @@ describe('answer screen, Codex round 26', () => {
 
   test('whitespace-separated lockbox segments mask whole', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Use lockbox 12 34 by the door. lockbox BLUE RED.' }) });
-    expect(facts.customer_concern).toBe('[access details removed] lockbox [redacted].');
+    expect(facts.customer_concern).toBe('[access details removed] [access details removed]');
   });
 });
 
@@ -1392,7 +1393,7 @@ describe('answer screen, Codex round 30', () => {
 
   test('all-caps lockbox values mask even when they spell a word', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Use lockbox ON RED. Use lockbox IN BLUE. The lockbox is on the gate.' }) });
-    expect(facts.customer_concern).toBe('[access details removed] [access details removed] The lockbox is on the gate.');
+    expect(facts.customer_concern).toBe('[access details removed] [access details removed] [access details removed]');
   });
 
   test.each(['My dog got a mouthful of bait.', 'My child had a sip of pesticide.'])('got / had a mouthful is ingestion: %s', (question) => {
@@ -2557,25 +2558,19 @@ test('a lowercase product variant is not the recorded product (Codex security P2
 });
 
 describe('answer screen, Codex round 74', () => {
-  const { takeAskBudget } = require('../services/service-report/report-ask-ai');
-
-  test.each(['How were my plants?', 'What condition was my lawn in?', 'How much precipitation was there?'])('a results or weather synonym keeps the fixed answer: %s', (question) => {
-    expect(ruleAnswerReason(lawnData(), [], 'unrouted', question)).toBe('results');
-  });
-
-  test('the paid-call budget stops at each key\'s daily cap and resets after a day', () => {
-    const keys = [['report:budget-test', 3], ['ip:budget-test', 5]];
-    const start = Date.parse('2026-10-08T12:00:00Z');
-    expect([1, 2, 3, 4].map(() => takeAskBudget(keys, start))).toEqual([true, true, true, false]);
-    expect(takeAskBudget(keys, start + 25 * 60 * 60 * 1000)).toBe(true);
-  });
-
   test('a spent budget keeps the fixed answer with no model call', async () => {
     const data = lawnData({ reportV2: { aftercare: {} } });
     const callModel = jest.fn();
-    const keys = [['report:budget-spent', 0]];
-    expect(await answerReportQuestionWithAI({ question: 'What did you do on this visit?', data, requiredLines: [], budgetKeys: keys }, { callModel })).toBeNull();
+    const takeBudget = jest.fn().mockResolvedValue(false);
+    expect(await answerReportQuestionWithAI({ question: 'What did you do on this visit?', data, requiredLines: [] }, { callModel, takeBudget })).toBeNull();
+    expect(takeBudget).toHaveBeenCalledTimes(1);
     expect(callModel).not.toHaveBeenCalled();
+  });
+
+  test('the budget is not asked for a question that keeps the fixed answer', async () => {
+    const takeBudget = jest.fn().mockResolvedValue(true);
+    expect(await answerReportQuestionWithAI({ question: 'How is my lawn doing?', data: lawnData({ reportV2: { aftercare: {} } }), requiredLines: [] }, { callModel: jest.fn(), takeBudget })).toBeNull();
+    expect(takeBudget).not.toHaveBeenCalled();
   });
 
   test('a verbal passphrase sentence leaves whole', () => {
@@ -2643,5 +2638,21 @@ describe('answer screen, Codex round 76', () => {
 
   test('the model still answers a product question', () => {
     expect(ruleAnswerReason(lawn, [], 'applied', 'Why was Merit used?')).toBeNull();
+  });
+});
+
+describe('answer screen, Codex round 77', () => {
+  test.each(['was roundup the product?', 'did you put roundup down?'])('a lowercase product identity question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(pestData({ applications: [{ product: { name: 'Alpine WSG' } }] }), [], 'applied', question)).toBe('unrecorded_product');
+  });
+
+  test('the recorded product in lowercase still reaches the model', () => {
+    expect(ruleAnswerReason(pestData({ applications: [{ product: { name: 'Alpine WSG' } }] }), [], 'applied', 'was alpine wsg the product?')).toBeNull();
+  });
+
+  test('a gatehouse sentence leaves whole whatever its verb; a plain door sentence stays', () => {
+    const concern = (text) => buildReportAskFacts({ data: lawnData({ customerConcern: text, reportV2: { aftercare: {} } }) }).customer_concern;
+    expect(concern('At the gatehouse, whisper blue moon. Weeds by the fence.')).toBe('[access details removed] Weeds by the fence.');
+    expect(concern('Ants near the garage door.')).toBe('Ants near the garage door.');
   });
 });

@@ -217,6 +217,22 @@ const reportLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
 
+// Daily ceiling on paid Ask Waves model answers (Codex P1s #5964 r74, r77):
+// reportLimiter alone allows 20 a minute for one report link. Same
+// express-rate-limit store as the limiters above, with a 24-hour window.
+// takeReportAskBudget is called only when a call is about to reach the model;
+// past any key's cap it returns false and the fixed-rule answer stands (no
+// 429). Like every limiter in this file the store is per process: a second
+// replica or a restart gets its own count.
+const reportAskBudgetStore = new rateLimit.MemoryStore();
+reportAskBudgetStore.init({ windowMs: 24 * 60 * 60 * 1000 });
+async function takeReportAskBudget(keys, store = reportAskBudgetStore) {
+  const used = await Promise.all(keys.map(([key]) => store.get(key)));
+  if (keys.some(([, cap], i) => (used[i]?.totalHits || 0) >= cap)) return false;
+  await Promise.all(keys.map(([key]) => store.increment(key)));
+  return true;
+}
+
 // Ask Waves privacy headers (audit "Additional gaps"): both report ask
 // endpoints answer with recorded-but-sensitive service/project facts and
 // must never be cached or indexed. Global Helmet already sets
@@ -1920,7 +1936,8 @@ router.post('/:token/ask', async (req, res, next) => {
       const ipKey = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
       const ai = await answerReportQuestionWithAI({
         question, data, nextAppointment, requiredLines: routed.requiredLines, topic,
-        budgetKeys: [[`report:${String(req.params.token).slice(0, 64)}`, 40], [`ip:${ipKey}`, 120]],
+      }, {
+        takeBudget: () => takeReportAskBudget([[`report:${String(req.params.token).slice(0, 64)}`, 40], [`ip:${ipKey}`, 120]]),
       });
       if (ai) answer = ai.answer;
     }
@@ -2726,3 +2743,4 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
+module.exports.takeReportAskBudget = takeReportAskBudget;
