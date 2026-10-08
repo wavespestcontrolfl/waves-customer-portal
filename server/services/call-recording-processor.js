@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, spelledNameDecision, callerNameForWrites, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingDifferences, nameSpellingCardText, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -4025,6 +4025,41 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
     }));
     return true;
   });
+}
+
+// The name_spelling_differs card (advisory, card-only): the caller spelled their own name
+// and the spelling differs (letters, any case) from the name being saved for the caller
+// (the linked customer's name when linked, else the extracted name). ONE open card per call;
+// a reprocess refreshes it in place (its updated_at moves, so a stale Resolve / Dismiss
+// refuses), and a spelling the office already resolved or dismissed on this call is not
+// re-filed. Never writes a name. Fail-open: a failure here never affects the call.
+async function fileNameSpellingCard(conn, { callLogId, customerId, extracted = {}, dictation, v2Result = null }) {
+  try {
+    const extraction = v2Result?.extraction || { meta: { call_summary: extracted?.call_summary || null } };
+    const customer = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
+    const saved = Object.fromEntries(['first_name', 'last_name']
+      .map((f) => [f, String(customer?.[f] || '').trim() || extracted?.[f] || null]));
+    const [top, ...others] = nameSpellingDifferences({ dictation, saved });
+    if (!top) return false;
+    const settled = await conn('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs' })
+      .whereIn('status', ['resolved', 'dismissed']).select('payload');
+    const asObject = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
+    if (settled.some((r) => asObject(r.payload).spelled_value === top.spelled_value && asObject(r.payload).saved_value === top.saved_value)) return false;
+    await conn('triage_items')
+      .insert(buildTriageItem({
+        callLogId,
+        flag: 'name_spelling_differs',
+        extraction,
+        severity: 'advisory',
+        extraPayload: { ...top, card_text: nameSpellingCardText(top), also: others },
+      }))
+      .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+      .merge(['payload', 'summary', 'updated_at']);
+    return true;
+  } catch (err) {
+    logger.warn(`[call-proc] name_spelling_differs card skipped: ${err.code || err.name || 'error'}`);
+    return false;
+  }
 }
 
 // Is the call's missing_first_name card still an open task (open or claimed)? Read under
@@ -10280,13 +10315,6 @@ const CallRecordingProcessor = {
     // did not render (or route on a block the prompt never carried).
     const assessmentLaneActive = commercialAssessmentBookingActive(call);
     const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });
-    // Caller-spelled names the decoder applied to the V1/flat record, by field, with the
-    // decoder's own confidence and quote: the candidate staging carries them (the V2
-    // extraction is never rewritten, so its caller_identity confidence does not apply).
-    const spelledNameOverrides = {};
-    // The name a NEW customer / lead is created with: the caller's spelling when the decoder
-    // decided one, else what was extracted.
-    const createNameFor = (field) => spelledNameOverrides[field]?.value ?? extracted[field];
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -11080,23 +11108,6 @@ const CallRecordingProcessor = {
         contactDictation = await decodeDictatedContacts({ transcript: transcription, contactPassTranscript });
       }
       if (contactDictation) {
-        // A last/first name the CALLER spelled out letter by letter beats the
-        // misheard word. One DECISION is computed here (grounded, Caller-labeled,
-        // inbound, name context, same name misheard or empty) and carried, not
-        // applied: `extracted` is never touched, and nothing here looks up who the
-        // customer is. The decision is used only where the canonical customer is
-        // known: the new-customer and new-lead inserts (createNameFor) and the
-        // candidate staging for a linked customer (nameOverrides, decoder
-        // confidence + quote). An existing customer's row is never written by this
-        // code; the GATE_CONTACT_CORRECTION lane and its gates decide. Narrowing:
-        // inbound calls with an explicitly labeled transcript only (outbound
-        // diarization can swap labels; unlabeled / Speaker-N text never attributes
-        // speech). V2 extraction and secondary contacts are never touched.
-        if (!isOutboundCall(call) && /^\s*caller\s*:/im.test(transcription)) {
-          Object.assign(spelledNameOverrides, spelledNameDecision({ current: extracted, dictation: contactDictation }));
-        }
-        // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
-        if (Object.keys(spelledNameOverrides).length) logger.info(`[call-proc-dictation] Caller-spelled name field(s) for ${maskSid(callSid)}: ${Object.keys(spelledNameOverrides).join(', ')}`);
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
         dictationEmailPayload = emailDecision.payload;
         if (emailDecision.adopt) {
@@ -12475,9 +12486,9 @@ const CallRecordingProcessor = {
     // on the line to book it). The missing first name rides an advisory card.
     // Every other creation guard (phone, voicemail, non-customer nature)
     // still applies at the branch below. Gate off: first_name is required.
-    const firstNameAdvisoryCreate = !createNameFor('first_name')
+    const firstNameAdvisoryCreate = !extracted.first_name
       && require('../config/feature-gates').callFirstNameAdvisoryLive()
-      && !!String(createNameFor('last_name') || '').trim()
+      && !!String(extracted.last_name || '').trim()
       && !addressRecovery?.recovered
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
     const sharedPhoneAmbiguity = {};
@@ -12532,7 +12543,7 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if ((createNameFor('first_name') || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+      } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
         // incident: first name + mangled address became a "real" customer).
@@ -12581,8 +12592,8 @@ const CallRecordingProcessor = {
           // Lazy require: route module from a service (load-cycle risk).
           const { ensureCustomerAccount } = require('../routes/admin-customers');
           const account = await ensureCustomerAccount(db, {
-            firstName: createNameFor('first_name') || '',
-            lastName: createNameFor('last_name') || null,
+            firstName: extracted.first_name || '',
+            lastName: extracted.last_name || null,
             phone,
             email: extracted.email || null,
           });
@@ -12613,8 +12624,8 @@ const CallRecordingProcessor = {
               // customers.first_name is NOT NULL: the advisory-create path
               // (last name only) stores '' — every greeting falls back to
               // "there" (see the audit in the PR notes).
-              first_name: createNameFor('first_name') || '',
-              last_name: createNameFor('last_name') || null,
+              first_name: extracted.first_name || '',
+              last_name: extracted.last_name || null,
               phone,
               email: extracted.email || null,
               address_line1: addrLine || null,
@@ -12664,7 +12675,7 @@ const CallRecordingProcessor = {
           // A customer created on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) gets
           // its owed-first-name card NOW, so every blank-name customer has one whether
           // or not a booking follows. Fail-soft: a card failure never undoes the create.
-          if (!String(createNameFor('first_name') || '').trim()) {
+          if (!String(extracted.first_name || '').trim()) {
             try {
               await fileMissingFirstNameCard(db, { callLogId: call.id, customerId, extraction: v2CanonicalExtraction || undefined, extracted });
               if (!bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
@@ -12688,7 +12699,7 @@ const CallRecordingProcessor = {
           await flagNonMobileCallCustomer({
             customerId,
             phone,
-            name: [createNameFor('first_name'), createNameFor('last_name')].filter(Boolean).join(' ') || null,
+            name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
           });
 
           // caller_id_disclaimed (schema 1.14.0, live miss 2026-09-25, call
@@ -12741,32 +12752,26 @@ const CallRecordingProcessor = {
           newsletterCandidate = {
             customerId,
             email: extracted.email,
-            firstName: capitalizeName(createNameFor('first_name')),
-            lastName: createNameFor('last_name') ? capitalizeName(createNameFor('last_name')) : null,
+            firstName: capitalizeName(extracted.first_name),
+            lastName: extracted.last_name ? capitalizeName(extracted.last_name) : null,
           };
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }
-      } else if (!createNameFor('first_name')) {
+      } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
       }
     }
 
-    // ONE resolved caller name for everything written or sent from here on (automation
-    // enrollment, greeting / confirmation SMS, lead alert text, newsletter, review-ask and
-    // booking-link text, lead updates): a customer THIS pass created (or a caller with no
-    // customer, i.e. a lead only) gets the spelled name; an existing customer is untouched.
-    {
-      const resolvedName = callerNameForWrites({
-        extracted,
-        overrides: spelledNameOverrides,
-        createdByThisPass: createdCustomerFromCall,
-        hasCustomer: Boolean(customerId),
-      });
-      if (resolvedName.first_name !== extracted.first_name || resolvedName.last_name !== extracted.last_name) {
-        extracted = { ...extracted, ...resolvedName };
-      }
-    }
+    // Card-only: a spelling the caller gave of their own name that differs from the name saved
+    // for them goes to the office as an advisory card. Nothing is written from it.
+    await fileNameSpellingCard(db, {
+      callLogId: call.id,
+      customerId,
+      extracted,
+      dictation: contactDictation,
+      v2Result,
+    });
 
     // Pre-linked calls (call.customer_id set at ring time by the inbound
     // webhook, an operator link, or the transcript-name reconciliation
@@ -14412,7 +14417,7 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!((createNameFor('first_name') || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
@@ -14477,9 +14482,6 @@ const CallRecordingProcessor = {
       customerId: customerId || call.customer_id || null,
       extraction: extracted,
       v2Extraction: v2ExtractionForAudit,
-      // Caller-spelled names the decoder applied: staged with the decoder's confidence and
-      // provenance in place of the V2 caller_identity confidence.
-      nameOverrides: spelledNameOverrides,
       // Token-fences the value-keyed dedupe's relink of pending rows: a
       // stale pass that lost its claim must not rewrite a candidate's
       // linkage after the owning pass relinked it (codex #3413 r18).
@@ -14906,8 +14908,8 @@ const CallRecordingProcessor = {
             // A name may be absent (caller never stated it) — store null, not an
             // empty string, so leadContactCompleteness reads it as missing and
             // the lead surfaces UNqualified for the office to complete.
-            first_name: capitalizeName(createNameFor('first_name')) || null,
-            last_name: capitalizeName(createNameFor('last_name')) || null,
+            first_name: capitalizeName(extracted.first_name) || null,
+            last_name: capitalizeName(extracted.last_name) || null,
             email: extracted.email || null,
             // 'voicemail' is an established lead_type (admin-agents
             // isMissedCallLead treats it as a missed call needing outreach).
@@ -15921,8 +15923,8 @@ const CallRecordingProcessor = {
                   lead_source_id: leadSourceId,
                   customer_id: customerId || null,
                   phone,
-                  first_name: capitalizeName(createNameFor('first_name')) || null,
-                  last_name: capitalizeName(createNameFor('last_name')) || null,
+                  first_name: capitalizeName(extracted.first_name) || null,
+                  last_name: capitalizeName(extracted.last_name) || null,
                   email: extracted.email || null,
                   address: composedLeadAddress || null,
                   city: extracted.city || null,
@@ -15991,8 +15993,8 @@ const CallRecordingProcessor = {
                   lead_source_id: leadSourceId,
                   customer_id: customerId || null,
                   phone: null,
-                  first_name: capitalizeName(createNameFor('first_name')) || null,
-                  last_name: capitalizeName(createNameFor('last_name')) || null,
+                  first_name: capitalizeName(extracted.first_name) || null,
+                  last_name: capitalizeName(extracted.last_name) || null,
                   email: extracted.email || null,
                   // Composed (street + unit) — this row loops back as
                   // `current`, and the fill-only pass above skips a
@@ -23389,6 +23391,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  fileNameSpellingCard,
   legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,

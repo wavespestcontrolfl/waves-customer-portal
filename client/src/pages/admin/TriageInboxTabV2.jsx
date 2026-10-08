@@ -69,6 +69,7 @@ const REASON_LABELS = {
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
   missing_first_name: "First name missing — get it",
+  name_spelling_differs: "Caller spelled their name — check it",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -99,6 +100,18 @@ function parsePayload(payload) {
 // A card's visit link must stay inside the admin app (navigation only — not an API call).
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Rows for the name-spelling card: what the caller spelled, what the record says, and the
+// caller turn the spelling came from (so the office hears the context, not just the letters).
+function nameSpellingRows(p) {
+  if (!p.spelled_value) return [];
+  return [
+    p.card_text && { label: "Check", value: p.card_text },
+    { label: "Caller spelled", value: p.spelled_value },
+    p.saved_value && { label: "Record says", value: p.saved_value },
+    p.quote && { label: "Caller said", value: `“${p.quote}”` },
+  ].filter(Boolean);
+}
 
 export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = null }) {
   const p = parsePayload(payload);
@@ -134,6 +147,7 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
     : [];
   const rows = [
+    ...nameSpellingRows(p),
     firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),

@@ -455,6 +455,19 @@ async function streetLevelHoldStillPending(conn, item) {
 }
 const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending visit: confirm the address with the customer, then confirm (or correct or cancel) the visit itself. It resolves when the visit does.';
 
+// Cards that are owed captures / checks, not call-routing judgments: a verdict would close them
+// without the work (the clicked card's own Resolve / Dismiss is the way).
+const NOT_A_VERDICT_MESSAGES = {
+  missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
+  name_spelling_differs: 'This card is a name-spelling check, not a call verdict — fix the name on the record if the spelling is theirs, then use Resolve or Dismiss.',
+};
+
+const VERSION_BOUND_REASON_CODES = new Set([
+  'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict',
+  'attached_booking_followup_unbooked', 'auto_booking_skipped_after_approval', 'missing_first_name',
+  'name_spelling_differs',
+]);
+
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
@@ -533,15 +546,10 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // force-reprocess refreshes in place: "Follow-up booked" on the old
     // screen must not settle the newer obligation (pre-push audit P1 after
     // r27).
-    if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
-      || item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'attached_booking_followup_unbooked'
-      // …and the recovery task a settlement refreshes in place (window,
-      // address, retained visit) — a stale click must not close the newer
-      // obligation (codex r30 P1).
-      || item.reason_code === 'auto_booking_skipped_after_approval'
-      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
-      // Resolve / Dismiss must not settle a customer the operator never saw.
-      || item.reason_code === 'missing_first_name'
+    // (The version-bound set: the recovery task a settlement refreshes in place — a stale click
+    // must not close the newer obligation (codex r30 P1); the owed-first-name card, whose customer
+    // list a reprocess appends to; and the name-spelling card a reprocess refreshes in place.)
+    if (VERSION_BOUND_REASON_CODES.has(item.reason_code)
       // …and email review cards (codex round-3 P1): the client already
       // sends expected_updated_at on every resolve/dismiss, so a stale view
       // of a card whose evidence has since changed refuses instead of
@@ -1870,8 +1878,8 @@ router.post('/:id/verdict', async (req, res) => {
     }
     // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
     // customer record, not a routing judgment — a verdict would close it without a name.
-    if (item.reason_code === 'missing_first_name') {
-      return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
+    if (NOT_A_VERDICT_MESSAGES[item.reason_code]) {
+      return res.status(400).json({ error: NOT_A_VERDICT_MESSAGES[item.reason_code] });
     }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
@@ -2114,6 +2122,8 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          // A name-spelling card is settled by its own Resolve / Dismiss, never swept by a sibling's verdict.
+          'name_spelling_differs',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

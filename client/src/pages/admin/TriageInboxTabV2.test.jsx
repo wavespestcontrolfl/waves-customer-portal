@@ -448,6 +448,21 @@ describe('ConfirmEvidence — secondary contact', () => {
     expect(row).not.toHaveTextContent('caller asked they get notifications');
   });
 
+  it('name_spelling_differs shows the spelling, the saved name and the caller turn', () => {
+    render(<ConfirmEvidence reasonCode="name_spelling_differs" payload={JSON.stringify({
+      flag: 'name_spelling_differs',
+      field: 'last_name',
+      spelled_value: 'Serov',
+      saved_value: 'Sirov',
+      quote: 'Caller: my last name is Serov, S-E-R-O-V',
+      card_text: 'Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs.',
+    })} />);
+    expect(screen.getByText('Check:').parentElement).toHaveTextContent('the record says Sirov');
+    expect(screen.getByText('Caller spelled:').parentElement).toHaveTextContent('Serov');
+    expect(screen.getByText('Record says:').parentElement).toHaveTextContent('Sirov');
+    expect(screen.getByText('Caller said:').parentElement).toHaveTextContent('my last name is Serov, S-E-R-O-V');
+  });
+
   it('renders nothing for payloads with no evidence (unchanged behavior)', () => {
     const { container } = render(<ConfirmEvidence payload={{ flag: 'missing_last_name' }} />);
     expect(container.firstChild).toBeNull();
