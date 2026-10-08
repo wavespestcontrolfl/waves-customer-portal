@@ -56,6 +56,27 @@ function appendWithProvenance(existing, addition, callDate) {
   return `${existing}\n${line}`;
 }
 
+// A reprocess can change what this call says about a provider: the label
+// ("Switching from" → "Other provider named"), or nothing at all (the name was a
+// home inspector). The earlier pass's generated bit sits on this call's own
+// dated line; relabel or drop it there, so the notes never hold two
+// statements about one provider from one call. Only a bit naming exactly
+// `name` on a line with this call's tag is touched; staff text is not.
+const PROVIDER_NOTE_LABELS = ['Switching from', 'Other provider named'];
+function reconcileProviderNote(existing, callDate, name, bit) {
+  if (!existing || !name) return existing;
+  const tag = `[call ${String(callDate).slice(0, 10)}]`;
+  const stale = PROVIDER_NOTE_LABELS.map((label) => `${label}: ${name}`).filter((text) => text !== bit);
+  const lines = String(existing).split('\n').map((line) => {
+    if (!line.startsWith(`${tag} `)) return line;
+    const parts = line.slice(tag.length + 1).split(' | ');
+    if (!parts.some((part) => stale.includes(part))) return line;
+    const kept = [...new Set(parts.map((part) => (stale.includes(part) ? bit : part)).filter(Boolean))];
+    return kept.length ? `${tag} ${kept.join(' | ')}` : null;
+  });
+  return lines.filter((line) => line !== null).join('\n');
+}
+
 /**
  * Enrich a customer's profile from a processed call's extraction.
  * @returns {{ applied: string[] }} which fields were written (for the audit log)
@@ -126,13 +147,20 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
       ? extraction.customer_history
       : null;
     const compName = history ? history.competitor_name : legacy?.competitor_name;
-    if (compName) {
-      colorBits.push(`${history?.status === 'switching_from_competitor' ? 'Switching from' : 'Other provider named'}: ${compName}`);
-    }
-    if (colorBits.length) {
+    const providerBit = compName
+      ? `${history?.status === 'switching_from_competitor' ? 'Switching from' : 'Other provider named'}: ${compName}`
+      : null;
+    if (providerBit) colorBits.push(providerBit);
+    // The name an earlier pass of this call may have written: this pass's
+    // provider, or the legacy value V2 has now ruled out.
+    const earlierName = compName || (history ? legacy?.competitor_name : null);
+    if (colorBits.length || earlierName) {
       const cust = await db('customers').where({ id: customerId }).first('internal_notes');
       if (cust) {
-        const appended = appendWithProvenance(cust.internal_notes, colorBits.join(' | ').slice(0, 500), callCreatedAt);
+        const reconciled = reconcileProviderNote(cust.internal_notes, callCreatedAt, earlierName, providerBit);
+        const appended = colorBits.length
+          ? appendWithProvenance(reconciled, colorBits.join(' | ').slice(0, 500), callCreatedAt)
+          : (reconciled || null);
         if (appended !== cust.internal_notes) {
           await db('customers').where({ id: customerId }).update({ internal_notes: appended, updated_at: new Date() });
           applied.push('internal_notes');
@@ -145,4 +173,4 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   return { applied };
 }
 
-module.exports = { enrichFromCall, _test: { extractCodes, appendWithProvenance } };
+module.exports = { enrichFromCall, _test: { extractCodes, appendWithProvenance, reconcileProviderNote } };

@@ -106,22 +106,57 @@ describe('enrichFromCall', () => {
 
 describe('provider note on internal_notes', () => {
   // Runs enrichFromCall against a customer with empty notes; returns the note written, or null.
-  async function noteFor({ extraction, legacy = null }) {
+  async function noteFor({ extraction, legacy = null, existing = null }) {
     isEnabled.mockReturnValue(true);
     const updates = [];
     db.mockImplementation((table) => {
       const builder = {
         where: () => builder,
         forUpdate: () => builder,
-        first: async () => ({ internal_notes: null }),
+        first: async () => ({ internal_notes: existing }),
         update: async (u) => { updates.push({ table, u }); return 1; },
         insert: async () => {},
       };
       return builder;
     });
     await enrichFromCall({ customerId: 'c1', extraction, legacy, callCreatedAt: '2026-10-08T21:46:00Z' });
-    return updates.find((x) => x.table === 'customers')?.u.internal_notes ?? null;
+    const write = updates.find((x) => x.table === 'customers');
+    return write ? write.u.internal_notes : existing;
   }
+
+  describe('a reprocess reconciles the bit an earlier pass of the same call wrote', () => {
+    test('relabels "Switching from" on this call\'s line; staff text and other calls stay', async () => {
+      const note = await noteFor({
+        existing: 'Staff: gate sticks\n[call 2026-09-01] Switching from: Acme Pest\n[call 2026-10-08] Referred by: a neighbor | Switching from: Acme Pest',
+        extraction: { customer_history: { status: 'former_lapsed', competitor_name: 'Acme Pest' } },
+        legacy: { referred_by: 'a neighbor' },
+      });
+      expect(note).toBe('Staff: gate sticks\n[call 2026-09-01] Switching from: Acme Pest\n[call 2026-10-08] Referred by: a neighbor | Other provider named: Acme Pest');
+    });
+
+    test('drops the bit when V2 now rules the name out; an emptied line goes', async () => {
+      const note = await noteFor({
+        existing: 'Staff: gate sticks\n[call 2026-10-08] Switching from: Sample Home Inspections',
+        extraction: { customer_history: { status: 'new_customer', competitor_name: null } },
+        legacy: { competitor_name: 'Sample Home Inspections' },
+      });
+      expect(note).toBe('Staff: gate sticks');
+    });
+
+    test('a different provider on the same day is not touched', async () => {
+      const note = await noteFor({
+        existing: '[call 2026-10-08] Switching from: Beta Lawn',
+        extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } },
+      });
+      expect(note).toBe('[call 2026-10-08] Switching from: Beta Lawn\n[call 2026-10-08] Other provider named: Acme Pest');
+    });
+
+    test('same label again changes nothing', async () => {
+      const existing = '[call 2026-10-08] Switching from: Acme Pest';
+      const note = await noteFor({ existing, extraction: { customer_history: { status: 'switching_from_competitor', competitor_name: 'Acme Pest' } } });
+      expect(note).toBe(existing);
+    });
+  });
 
   test('a caller leaving a provider reads "Switching from"', async () => {
     const note = await noteFor({ extraction: { customer_history: { status: 'switching_from_competitor', competitor_name: 'Acme Pest' } } });
