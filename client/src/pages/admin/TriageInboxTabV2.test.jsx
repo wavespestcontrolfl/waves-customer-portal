@@ -728,3 +728,58 @@ describe('street-level address hold: office confirm', () => {
     expect(screen.queryByText('1 23rd Ave, Parrish, FL, 34219')).not.toBeInTheDocument();
   });
 });
+
+describe('Save to notes on second-contact cards', () => {
+  const contact = { name_full: 'Pat Sample', phone_e164: '+19415550123', email: 'pat.sample@example.com', role: 'property_owner' };
+  const secondCard = { ...ordinary, id: 'second', first_name: 'Second', last_name: 'Contact', reason_code: 'secondary_contact_captured',
+    feedback_verdict: null, payload: { flag: 'secondary_contact_captured', secondary_contact: contact } };
+  const nameOnlyCard = { ...secondCard, id: 'name-only', first_name: 'Name', last_name: 'Only',
+    payload: { flag: 'secondary_contact_captured', secondary_contact: { name_full: 'Pat Sample' } } };
+  let listItems;
+
+  beforeEach(() => {
+    listItems = [secondCard, nameOnlyCard, ordinary];
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: listItems, counts: { open: listItems.length, resolved: 0, dismissed: 0 } }
+      : { ok: true }));
+  });
+
+  it('shows the button only on a second-contact card that names a reachable person', async () => {
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Second Contact')).closest('.py-4');
+    expect(within(card).getByRole('button', { name: 'Save to notes' })).toBeInTheDocument();
+    expect(within(screen.getByText('Name Only').closest('.py-4')).queryByRole('button', { name: 'Save to notes' })).not.toBeInTheDocument();
+    expect(within(screen.getByText('Ordinary Card').closest('.py-4')).queryByRole('button', { name: 'Save to notes' })).not.toBeInTheDocument();
+  });
+
+  it('hides the button from a non-admin', async () => {
+    render(<TriageInboxTabV2 isAdmin={false} />);
+    await screen.findByText('Second Contact');
+    expect(screen.queryByRole('button', { name: 'Save to notes' })).not.toBeInTheDocument();
+  });
+
+  it('posts to the save-contact-note route and reloads the list', async () => {
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Second Contact')).closest('.py-4');
+    listItems = [nameOnlyCard, ordinary];
+    fireEvent.click(within(card).getByRole('button', { name: 'Save to notes' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
+      '/admin/triage/second/save-contact-note',
+      { method: 'POST', body: JSON.stringify({}) },
+    ));
+    await waitFor(() => expect(screen.queryByText('Second Contact')).not.toBeInTheDocument());
+  });
+
+  it('shows the server message when the call has no linked customer', async () => {
+    render(<TriageInboxTabV2 isAdmin />);
+    const card = (await screen.findByText('Second Contact')).closest('.py-4');
+    const err = Object.assign(new Error('This call has no linked customer — link the call to a customer first'), { status: 409 });
+    adminFetch.mockImplementation(async (url) => {
+      if (url.includes('/save-contact-note')) throw err;
+      return { items: listItems, counts: { open: listItems.length, resolved: 0, dismissed: 0 } };
+    });
+    fireEvent.click(within(card).getByRole('button', { name: 'Save to notes' }));
+    expect(await screen.findByText(/no linked customer/)).toBeInTheDocument();
+    expect(screen.getByText('Second Contact')).toBeInTheDocument();
+  });
+});

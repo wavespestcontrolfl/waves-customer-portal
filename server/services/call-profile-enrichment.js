@@ -135,4 +135,4 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   return { applied };
 }
 
-module.exports = { enrichFromCall, _test: { extractCodes, appendWithProvenance } };
+module.exports = { enrichFromCall, appendWithProvenance, _test: { extractCodes, appendWithProvenance } };

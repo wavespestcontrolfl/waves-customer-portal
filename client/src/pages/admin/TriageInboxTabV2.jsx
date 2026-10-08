@@ -97,6 +97,14 @@ function parsePayload(payload) {
   try { return JSON.parse(payload); } catch { return null; }
 }
 
+// A second-contact card can be filed to the customer's notes when it names a
+// person with a phone or an email (the server re-checks).
+function hasNamedContact(payload) {
+  const p = parsePayload(payload);
+  return [p?.secondary_contact, ...(Array.isArray(p?.secondary_contacts) ? p.secondary_contacts : [])].some((c) => c && typeof c === "object"
+    && (c.name_full || c.first_name || c.last_name) && (c.phone || c.phone_e164 || c.email));
+}
+
 // A card's visit link must stay inside the admin app (navigation only — not an API call).
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -855,6 +863,21 @@ export default function TriageInboxTabV2({ isAdmin }) {
       });
   };
 
+  // Files the second person named on the call in the customer's notes (no
+  // slot, no message recipient) and resolves the card server-side.
+  const saveContactNote = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/save-contact-note`, { method: "POST", body: JSON.stringify({}) })
+      .then(() => { setActioning(null); load(mode, status); })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409) load(mode, status);
+        setError(err?.status === 409
+          ? (err?.message || "This card changed or has no linked customer — check it and try again.")
+          : isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Save failed — try again.");
+      });
+  };
+
   const openDeny = (item, kind) => { setDenyFields([]); setDenyFor({ item, kind }); };
   const toggleDenyField = (key) =>
     setDenyFields((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -1177,6 +1200,16 @@ export default function TriageInboxTabV2({ isAdmin }) {
                             </Button>
                           ) : (
                             <>
+                              {isOpenView && isAdmin && item.reason_code === "secondary_contact_captured" && hasNamedContact(item.payload) && (
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  disabled={actioning === busyKey}
+                                  onClick={() => saveContactNote(item)}
+                                >
+                                  {actioning === busyKey ? "Saving…" : "Save to notes"}
+                                </Button>
+                              )}
                               <Button
                                 size="sm"
                                 variant="secondary"
