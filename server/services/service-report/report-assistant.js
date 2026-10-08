@@ -813,7 +813,27 @@ const REPORT_QUESTION_TOPICS = Object.freeze([
   'reentry', 'watering', 'findings', 'next_steps', 'next_visit', 'applied', 'results', 'summary', 'unrouted',
 ]);
 
-function routeServiceReportQuestion({
+// The deterministic answer for a topic another classifier chose (the Ask AI
+// fixed-intent guard recognizes more wordings than the rules below: "Can we
+// use the patio?" is re-entry). Returns null for a topic with no dedicated
+// answer, so the ordinary routing stands.
+function answerForTopic(topic, { data, nextAppointment }) {
+  const required = [];
+  const builders = {
+    reentry: () => answerReentry({ data, required }),
+    next_visit: () => answerNextAppointment({ nextAppointment }),
+    next_steps: () => answerNextSteps({ data, nextAppointment, required }),
+    results: () => answerTrend({ data }),
+  };
+  if (!builders[topic]) return null;
+  return { topic, answer: builders[topic](), requiredLines: required };
+}
+
+function routeServiceReportQuestion({ forceTopic = null, ...input } = {}) {
+  return (forceTopic && answerForTopic(forceTopic, input)) || routeByRules(input);
+}
+
+function routeByRules({
   question,
   data,
   nextAppointment,

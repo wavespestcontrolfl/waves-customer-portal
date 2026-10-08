@@ -1908,11 +1908,21 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
-    const routed = routeServiceReportQuestion({
+    const firstRoute = routeServiceReportQuestion({
       question,
       data,
       nextAppointment,
     });
+    // The Ask AI fixed-intent guard recognizes more wordings than the rule
+    // router ("Can we use the patio?" is re-entry, "Are you due back?" is the
+    // next visit). When it names a topic the router has a dedicated answer
+    // for, that answer is the one given, gate on or off, so a question the
+    // model may not answer never falls to the generic summary (pre-push
+    // audit, #5964).
+    const fixedTopic = require('../services/service-report/report-ask-ai').fixedAnswerTopic(firstRoute.topic, question, data);
+    const routed = fixedTopic && fixedTopic !== firstRoute.topic
+      ? routeServiceReportQuestion({ question, data, nextAppointment, forceTopic: fixedTopic })
+      : firstRoute;
     const { topic } = routed;
     let { answer } = routed;
     // GATE_REPORT_ASK_AI (dark): Claude Sonnet 5.5 writes the answer from the

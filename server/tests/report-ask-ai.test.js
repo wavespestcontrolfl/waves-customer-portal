@@ -1006,6 +1006,23 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
   });
 
+  // A question the fixed-intent guard recognizes gets that topic's own rule
+  // answer, not the generic summary (pre-push audit, #5964).
+  test.each(['on', 'off'])('gate %s, an implicit re-entry question gets the re-entry answer', async (gate) => {
+    process.env.GATE_REPORT_ASK_AI = gate === 'on' ? 'true' : 'false';
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can we use the patio?';
+    const reentry = routeServiceReportQuestion({ question: q, data: lawnReport(), forceTopic: 'reentry' }).answer;
+    expect(reentry).toContain(PET_LINE);
+    const { eventInsert } = mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: reentry });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
+  });
+
   test('gate on, a recorded fixed wait trips the screen: the rule answer states it, no model call', async () => {
     process.env.GATE_REPORT_ASK_AI = 'true';
     const wait = 'Keep pets inside for 2 hours.';

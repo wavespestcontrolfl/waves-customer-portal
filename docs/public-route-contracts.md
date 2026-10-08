@@ -93,7 +93,11 @@ questions. Results, score, trend, pest-pressure and weather questions keep the
 fixed-rule answer (owner 2026-10-08), as do next-visit,
 next-steps (care-permission questions included), re-entry and watering,
 which keep the fixed-rule answer word for word, and photo, lawn-size and
-lawn/tree product-location questions. Termite, rodent,
+lawn/tree product-location questions. The same intent guard (`fixedAnswerTopic`)
+also picks the fixed answer itself, gate on or off: a question it reads as
+re-entry, next visit, next steps or results gets that topic's own rule answer
+(`routeServiceReportQuestion` with `forceTopic`) and that topic in the
+recorded event, even when the rule router alone would have left it unrouted. Termite, rodent,
 mosquito and specialty reports, any report a typed snapshot drives
 (`data.typedReport`) and any report with a customer-visible companion section
 (`data.companionReports`) keep the fixed-rule answer, with no model call. The

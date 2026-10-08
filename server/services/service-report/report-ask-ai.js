@@ -2769,6 +2769,7 @@ async function answerReportQuestionWithAI({
 }
 
 module.exports = {
+  fixedAnswerTopic,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
   buildReportAskFacts,
