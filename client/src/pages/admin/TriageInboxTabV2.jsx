@@ -354,8 +354,25 @@ export function FamilyEvidence({ payload, openCustomerIds = null }) {
   );
 }
 
+// The shared evidence panel plus the one-tap "Save to notes" (admin, open cards only). The SERVER decides
+// which cards qualify (can_save_contact_note on the list item: one person, not a message recipient or
+// payer, a usable phone or email), so this screen holds no second copy of that rule.
+function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, canSave, busy, onSave }) {
+  return (
+    <>
+      <ConfirmEvidence payload={payload} reasonCode={reasonCode} />
+      {isOpenView && isAdmin && canSave && (
+        <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={onSave}
+          title="Adds this person to the customer's notes. They do not get messages.">
+          {busy ? "Saving…" : "Save to notes"}
+        </Button>
+      )}
+    </>
+  );
+}
+
 // Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
-const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence };
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, secondary_contact_captured: SecondContactEvidence };
 
 // Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
 // /verdict on each). The verdict badge is not shown on them.
@@ -855,6 +872,27 @@ export default function TriageInboxTabV2({ isAdmin }) {
       });
   };
 
+  // Files the one person a second-contact card names in the customer's notes
+  // (not a message recipient) and resolves the card server-side. Version-bound
+  // like the other card actions: a card refreshed since it was displayed is a 409.
+  const saveContactNote = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/save-contact-note`, {
+      method: "POST",
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+    })
+      .then(() => { setActioning(null); load(mode, status); })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409) {
+          load(mode, status);
+          setError(err.message || "This card changed since it loaded — review it and try again.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : err?.status === 400 ? err.message : "Save failed — try again.");
+      });
+  };
+
   const openDeny = (item, kind) => { setDenyFields([]); setDenyFor({ item, kind }); };
   const toggleDenyField = (key) =>
     setDenyFields((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -1201,7 +1239,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">
