@@ -1,6 +1,9 @@
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { getHourlyRainOutlook } = require('./weather-forecast');
+
+const HQ = { lat: 27.4217, lng: -82.4065 };
 
 class ForecastAnalyzer {
   async analyzeTomorrow() {
@@ -17,32 +20,19 @@ class ForecastAnalyzer {
 
     if (!services.length) return { date: tomorrowStr, services: [], needsReschedule: [], canProceed: [], caution: [] };
 
-    // Fetch weather from NWS
+    // Hourly forecast at HQ from the shared reader: NWS, Open-Meteo when
+    // NWS fails (weather-forecast.js). Fail open: no forecast, no flags.
     let forecast = null;
     try {
-      const res = await fetch('https://api.weather.gov/points/27.4217,-82.4065', {
-        headers: { 'User-Agent': 'WavesPortal/1.0 (waves@wavespestcontrol.com)' },
-      });
-      if (res.ok) {
-        const pointData = await res.json();
-        const forecastUrl = pointData.properties?.forecastHourly;
-        if (forecastUrl) {
-          const fRes = await fetch(forecastUrl, {
-            headers: { 'User-Agent': 'WavesPortal/1.0 (waves@wavespestcontrol.com)' },
-          });
-          if (fRes.ok) {
-            const fData = await fRes.json();
-            forecast = (fData.properties?.periods || []).map(p => ({
-              datetime: new Date(p.startTime),
-              temp_f: p.temperature,
-              wind_speed_mph: parseInt(p.windSpeed) || 0,
-              rain_probability_pct: p.probabilityOfPrecipitation?.value || 0,
-              rain_mm: 0, // NWS doesn't give mm directly
-              short_forecast: p.shortForecast,
-            }));
-          }
-        }
-      }
+      const hours = await getHourlyRainOutlook(HQ.lat, HQ.lng);
+      forecast = (hours || []).map((h) => ({
+        datetime: new Date(h.startTime),
+        temp_f: h.temperatureF,
+        wind_speed_mph: h.windMph || 0,
+        rain_probability_pct: h.rainChance || 0,
+        rain_mm: 0, // the hourly forecast carries no amount
+        short_forecast: h.shortForecast,
+      }));
     } catch (e) { logger.error(`Forecast fetch failed: ${e.message}`); }
 
     const results = services.map(service => this.analyzeServiceWeather(service, forecast || []));

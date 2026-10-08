@@ -147,22 +147,47 @@ function fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs = TOTAL_BUDGET_
 // current hour and ends 7 days later, so its first and last dates can be
 // partial, and a max over part of a day understates a wetter missing part.
 const DAYTIME_HOURS = 12;
-function dailyFromHours(hours) {
-  const byDate = {};
+const maxOf = (a, b) => (b != null && (a == null || b > a) ? b : a);
+// Complete daytime dates, in date order: [{ date, rainChance, tempHighF }].
+function daytimeFromHours(hours) {
+  const byDate = new Map();
   for (const hour of hours) {
     const date = hour.startTime.slice(0, 10);
     const hh = Number(hour.startTime.slice(11, 13));
     if (hh < 6 || hh >= 18) continue;
-    const day = byDate[date] || (byDate[date] = { hours: new Set(), rainChance: null });
+    if (!byDate.has(date)) byDate.set(date, { date, hours: new Set(), rainChance: null, tempHighF: null });
+    const day = byDate.get(date);
     day.hours.add(hh);
-    const chance = hour.rainChance;
-    if (chance != null && (day.rainChance == null || chance > day.rainChance)) day.rainChance = chance;
+    day.rainChance = maxOf(day.rainChance, hour.rainChance);
+    day.tempHighF = maxOf(day.tempHighF, hour.temperatureF);
   }
+  return [...byDate.values()]
+    .filter((day) => day.hours.size === DAYTIME_HOURS)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(({ date, rainChance, tempHighF }) => ({ date, rainChance, tempHighF }));
+}
+
+function dailyFromHours(hours) {
   const out = {};
-  for (const [date, day] of Object.entries(byDate)) {
-    if (day.hours.size === DAYTIME_HOURS) out[date] = { rainChance: day.rainChance, shortForecast: null, source: 'open-meteo' };
+  for (const day of daytimeFromHours(hours)) {
+    out[day.date] = { rainChance: day.rainChance, shortForecast: null, source: 'open-meteo' };
   }
   return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Open-Meteo daytime (6 AM-6 PM ET) highs and rain chances for the complete
+ * dates in the next 7 days, for a reader with its own NWS path that needs a
+ * backup (pest forecast). Shares the backup read, its dedupe and the shared
+ * client's cache. Never throws; null when unavailable.
+ */
+async function getOpenMeteoDaytime(lat, lng) {
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (lat == null || lng == null || !Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+  const hours = await fetchOpenMeteoHours(latNum, lngNum, Date.now());
+  const days = hours ? daytimeFromHours(hours) : [];
+  return days.length ? days : null;
 }
 
 async function openMeteoDailyBackup(latNum, lngNum, startedAt) {
@@ -387,6 +412,7 @@ module.exports = {
   getDailyRainOutlook,
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
+  getOpenMeteoDaytime,
   forecastLinkForZip,
-  _test: { dailyFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };

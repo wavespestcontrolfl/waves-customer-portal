@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const localNewsStore = require('../services/local-news-store');
+const { etParts } = require('../utils/datetime-et');
 const { getForecast } = require('../services/pest-forecast/forecast');
 const { LOCATIONS, BY_SLUG, resolveZip } = require('../services/pest-forecast/locations');
 const { portalYardCalendarLive } = require('../config/feature-gates');
@@ -546,7 +547,7 @@ router.get('/weather', async (req, res, next) => {
     // the portal tile and the public widget can never disagree.
     const mosquitoPromise = loadMosquitoPressure(place);
 
-    const periods = await fetchNwsPeriods(place);
+    const periods = (await fetchNwsPeriods(place).catch(() => null)) || (await fetchOpenMeteoPeriods(place));
     if (!periods) return res.json(buildFallbackWeather(place, await mosquitoPromise));
 
     // Pick by isDaytime, not by index: after dark periods[0] is tonight and
@@ -638,6 +639,32 @@ async function fetchNwsPeriods(place) {
   const forecastRes = await fetch(forecastUrl, { headers });
   if (!forecastRes.ok) return null;
   return (await forecastRes.json()).properties?.periods || [];
+}
+
+// NWS backup (owner 2026-10-08): current conditions from the shared
+// property-forecast client, shaped as the two NWS periods the tile reads
+// (now, and tonight's low), so a customer sees real numbers through an NWS
+// outage, not the seasonal defaults. Null when Open-Meteo cannot answer.
+async function fetchOpenMeteoPeriods(place) {
+  const { fetchPropertyForecast, weatherCodeLabel } = require('../services/service-report/application-conditions');
+  const forecast = await fetchPropertyForecast({ latitude: place.lat, longitude: place.lng }).catch(() => null);
+  const now = forecast?.status === 'ok' ? forecast.current : null;
+  if (!now || !Number.isFinite(now.temperature_f)) return null;
+  const etHour = (at) => etParts(new Date(at)).hour;
+  const isNight = (at) => etHour(at) >= 18 || etHour(at) < 6;
+  const nightTemps = forecast.hourly.filter((h) => isNight(h.at) && Number.isFinite(h.temperature_f)).map((h) => h.temperature_f);
+  const round = (v) => (Number.isFinite(v) ? Math.round(v) : undefined);
+  return [
+    {
+      isDaytime: !isNight(now.at),
+      temperature: round(now.temperature_f),
+      relativeHumidity: { value: round(now.humidity_pct) },
+      windSpeed: Number.isFinite(now.wind_mph) ? `${Math.round(now.wind_mph)} mph` : undefined,
+      shortForecast: weatherCodeLabel(now.weather_code) || undefined,
+      detailedForecast: '',
+    },
+    { isDaytime: false, temperature: nightTemps.length ? Math.round(Math.min(...nightTemps)) : undefined },
+  ];
 }
 
 const PRESSURE_COLORS = { HIGH: '#E53935', MODERATE: '#FF9800', LOW: '#4CAF50' };
