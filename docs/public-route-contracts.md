@@ -1851,6 +1851,25 @@ gated (its replay would throw). `GET /:token/data` is unchanged: it serves the s
 Bermuda-gated estimate. With the gate on, or with no add-on on the estimate, every body and status on these routes is unchanged.
 An estimate that carries both a gated Bermuda add-on and a gated area add-on answers the Bermuda body.
 
+**Area add-ons are booked by the one-time accept only (`GATE_AREA_ADDONS` on).** The recurring conversion has no step
+that books or bills a sold one-time add-on, so an estimate that carries an area add-on row is refused when the
+effective service mode is not one-time (an estimate with no recurring amount is structurally one-time; a one-time
+toggle on a mixed estimate also counts): `PUT /:token/accept` (after the quote-required and review refusals, before any
+write) and `POST /:token/reserve` (so no recurring slot is held that accept would refuse) answer HTTP 409 with
+`{ "error": "This estimate includes add-on treatments that our office schedules with you directly. Please contact our
+office to finish booking.", "code": "AREA_ADDONS_ONE_TIME_ACCEPT_ONLY" }`. The one-time accept (and its reserve) is
+unchanged in shape: one held appointment carries the one-time service mix, its catalog id is stamped by the exact
+`catalogServiceKey` on the add-on row (never by name), and the one-time total is its price. Browse routes
+(`available-slots`, `find-slots`) answer as before. With no add-on on the estimate, every body and status is unchanged.
+`GET /:token/data` one-time rows (`pricing.oneTimeBreakdown.items[]`, and the render rows behind the page) for an
+add-on carry, beside the existing fields: `addOnKey`, `catalogServiceKey` (`area_addon_<addOnKey>`), `addOnCategory`
+(`pest_control` for the web sweep, `lawn_care` for the rest), `areaSqFt` and `tierSqFt` (null on the web sweep) and
+`visitContext` (`standalone` | `sameTripAddOn`), plus a `copy` object from the static pack
+(`server/services/estimate-one-time-copy.json`, `area_addon_*`); the row has no `applications`, `perApplication` or
+`maxPerYear` (one application per estimate). The engine's `onSiteMinutes` is internal and stripped from the public rows
+(`sanitizePublicOneTimeBreakdown`). An add-on row never unlocks a service-details packet
+(`GET/POST /:token/service-details/...`): the lawn guide still needs a recurring lawn line or a listed one-time lawn row.
+
 On success the accept persists `estimate_data.acceptedRecurringCardConsent` `{ variant, version,
 tender, text }` (the exact authorization recorded as shown) beside the existing
 `acceptedRecurringCardConsentVariant` stamp. The inline enrollment and the `setup_intent.succeeded`

@@ -155,6 +155,10 @@ Required: species, tier (1–4), removal option; optional aggressiveness/height/
 - Top dressing: area (blank → 65% of lawn when no recurring lawn; show the assumption), depth.
 - Dethatching: lawn sq ft, grass type (St. Augustine needs manager approval), cleanup level, access, thatch probes (raw strings pass through by design).
 
+## 15a. Area add-ons (`options.areaAddOns`, dark behind `GATE_AREA_ADDONS`)
+
+UI-A only (not the website form, the composer or the lead builder). `options.areaAddOns` = `[{ key, areaSqFt, visitContext }]`, one entry per add-on key (`bed_pre_emergent`, `lawn_insect_spot`, `fire_ant_yard`, `lawn_insect_preventive`, `hardscape_weed`, `web_sweep`). `areaSqFt` is the TREATED area and is required for every key except `web_sweep`; `visitContext` is `standalone` (default) or `sameTripAddOn` (needs a priced service on the same estimate). `lawn_insect_spot` needs the operator-chosen grass (`options.grassType`): St. Augustine prices, any other grass or none is a custom quote. One application per estimate; an `applications` field is refused. `translateV2CallToV1Input` refuses the option while the gate is off (400 `AREA_ADDONS_GATED`) and a malformed list (400 `AREA_ADDON_INPUT_INVALID`); the catalog the screen renders comes from `GET /api/admin/pricing-config/lawn_pricing_v2` (`areaAddOns`).
+
 ## 16. Commercial (`commercial_*`)
 
 Required: building sq ft (footprint; unknown → quote required for pest/termite/rodent), measured turf (lawn), bed area + tree count (T&S), lot (mosquito always prices), risk type (cadence bucket), interior on/off (pest), cadence overrides. All commercial lines are 45%-margin cost buildups on literals with $120 admin; none has a catalog row; per-application quotes render pre-tax while completion invoices tax pest/mosquito/termite/rodent at 7% (TAX-001).
