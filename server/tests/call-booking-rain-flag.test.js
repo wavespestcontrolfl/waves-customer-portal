@@ -95,6 +95,36 @@ describe('flagCallBookingRain', () => {
     expect((await none.result).reason).toBe('not_wet'); // 09:00-10:00 (+2 h) is dry
   });
 
+  test('the forecast is read at the booked property, not the customer\'s primary home', async () => {
+    process.env.GATE_CALL_BOOKING_RAIN_FLAG = 'true';
+    // The visit carries the property's stamped point: used, the customer row is not read.
+    const stamped = run({ visit: visit({ property_id: 'prop-2', lat: 27.05, lng: -82.25 }) });
+    await stamped.result;
+    expect(stamped.hourlyRain).toHaveBeenCalledWith(27.05, -82.25, true);
+    expect(stamped.customerPoint).not.toHaveBeenCalled();
+    // A specific property with no stamped point: no trustworthy point, no notice.
+    const unknown = run({ visit: visit({ property_id: 'prop-2' }) });
+    expect(await unknown.result).toEqual({ flagged: false, reason: 'no_point' });
+    expect(unknown.customerPoint).not.toHaveBeenCalled();
+    // No property at all (legacy row): the customer's point.
+    const legacy = run();
+    await legacy.result;
+    expect(legacy.customerPoint).toHaveBeenCalled();
+    // A stamped point outside the service area reads nothing.
+    const far = run({ visit: visit({ property_id: 'prop-3', lat: 47.6, lng: -122.3 }) });
+    expect((await far.result).reason).toBe('no_point');
+  });
+
+  test('a long visit is checked through its real length, not the one-hour window', async () => {
+    process.env.GATE_CALL_BOOKING_RAIN_FLAG = 'true';
+    // 10:00-11:00 window + 2 h tail ends at 13:00: dry. Rain starts at 14:00.
+    const oneHour = run({ windowStart: '10:00', windowEnd: '11:00' });
+    expect((await oneHour.result).reason).toBe('not_wet');
+    // The same window on a 3-hour treatment: work to 13:00, tail to 15:00: wet.
+    const long = run({ visit: visit({ estimated_duration_minutes: 180 }), windowStart: '10:00', windowEnd: '11:00' });
+    expect(await long.result).toMatchObject({ flagged: true, peak: 85 });
+  });
+
   test('never throws: a failing notify or lookup is "no flag"', async () => {
     process.env.GATE_CALL_BOOKING_RAIN_FLAG = 'true';
     const failed = run({}, { notifyAdmin: async () => { throw new Error('bell down'); } });

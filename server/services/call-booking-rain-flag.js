@@ -16,7 +16,8 @@
  * day itself storm-watch.js still nudges the technician.
  *
  * Noise limits: outdoor work only (rain-fit's classification, by catalog
- * identity), the next RAIN_DAYS dates only, a point inside the service area,
+ * identity), the next RAIN_DAYS dates only, the booked property's own point
+ * inside the service area,
  * one notification per visit (dedupeKey). Never throws: any failure is "no
  * flag", and the booking above it is already committed.
  */
@@ -45,13 +46,29 @@ function peakChance(hourly, { date, start, end }) {
   return peak;
 }
 
+// A { lat, lng } inside the service area, or null.
+function areaPoint(lat, lng) {
+  if (lat == null || lng == null) return null;
+  const { isInServiceAreaCoarseBox } = require('./service-area');
+  return isInServiceAreaCoarseBox(Number(lat), Number(lng)) ? { lat: Number(lat), lng: Number(lng) } : null;
+}
+
 async function customerPoint(db, customerId) {
   if (!customerId) return null;
   const row = await db('customers').where({ id: customerId }).first('latitude', 'longitude');
-  const lat = Number(row?.latitude);
-  const lng = Number(row?.longitude);
-  const { isInServiceAreaCoarseBox } = require('./service-area');
-  return row?.latitude != null && row?.longitude != null && isInServiceAreaCoarseBox(lat, lng) ? { lat, lng } : null;
+  return areaPoint(row?.latitude, row?.longitude);
+}
+
+// Where the work happens. The pipeline stamps the booked property's own
+// coordinates on the visit (lat / lng), which for a multi-property customer
+// differ from the customer row's primary home (Codex #6136 r1). A visit tied
+// to a specific property with no stamped point has no trustworthy point:
+// the customer row could be another address, so it gets no forecast. Only a
+// visit with no property at all falls back to the customer's point.
+async function visitPoint(visit, { db, deps }) {
+  const stamped = areaPoint(visit.lat, visit.lng);
+  if (stamped || visit.property_id) return stamped;
+  return (deps.customerPoint || customerPoint)(db, visit.customer_id);
 }
 
 // The visit's date and window: the pipeline's own values when it passes them
@@ -63,7 +80,19 @@ function visitWindow({ visit, scheduledDate, windowStart, windowEnd }) {
   const date = dateOnly(scheduledDate || visit.scheduled_date);
   const start = hhmm(windowStart || visit.window_start || '09:00');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(start)) return null;
-  const end = hhmm(windowEnd || visit.window_end) || `${String(Number(start.slice(0, 2)) + 1).padStart(2, '0')}:${start.slice(3, 5)}`;
+  // The end is the later of the stored window end and start + the visit's
+  // real length: the pipeline writes a one-hour window even for a two-hour
+  // treatment and stores the length in estimated_duration_minutes, and the
+  // rain check must cover all of the work plus its drying tail (Codex #6136 r1).
+  const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+  const storedEnd = hhmm(windowEnd || visit.window_end);
+  const length = Number(visit.estimated_duration_minutes);
+  const endMin = Math.min(24 * 60 - 1, Math.max(
+    toMin(start) + 60,
+    /^\d{2}:\d{2}$/.test(storedEnd) ? toMin(storedEnd) : 0,
+    Number.isFinite(length) && length > 0 ? toMin(start) + length : 0,
+  ));
+  const end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
   return { date, start, end };
 }
 
@@ -78,7 +107,7 @@ async function isOutdoorVisit(visit, catalogRow, db) {
 // The peak chance when the window is wet at the customer's point; undefined
 // when it is not (dry, unreadable, or no forecast). `reason` says which.
 async function wetPeak(visit, window, todayYmd, { db, deps }) {
-  const point = await (deps.customerPoint || customerPoint)(db, visit.customer_id);
+  const point = await visitPoint(visit, { db, deps });
   if (!point) return { reason: 'no_point' };
   const hourly = await (deps.hourlyRain || boundedHourlyRain)(point.lat, point.lng, true);
   const wet = isWetWindow(hourly, { date: window.date, start_time: window.start, end_time: window.end }, todayYmd) === true;
@@ -102,7 +131,8 @@ function sendNotice(visit, window, peak, { callSid, deps }) {
 
 /**
  * Flag one phone-booked visit. `visit` = the scheduled_services row the call
- * created ({ id, customer_id, service_type, ... }); `scheduledDate`,
+ * created ({ id, customer_id, property_id, lat, lng, service_type,
+ * estimated_duration_minutes, ... }); `scheduledDate`,
  * `windowStart`, `windowEnd` = what the pipeline wrote it with; `catalogRow`
  * = the catalog row the pipeline resolved (its service_key is the identity).
  * Resolves to { flagged, reason } (for tests and logs); never rejects.
