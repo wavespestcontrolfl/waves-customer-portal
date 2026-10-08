@@ -380,8 +380,18 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     // Delivered 60 min ago; the draft was edited 30 min ago; a resend that delivered nothing stamped sent_at 5 min ago.
     const edited = await estimate(c, { createdAt: minutesAgo(200), updatedAt: minutesAgo(30) });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(5), data: { deliveryState: { firstDeliveredAt: minutesAgo(60).toISOString(), lastDeliveredAt: minutesAgo(60).toISOString() } } });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
+    // A suppressed first send: delivery tracking exists, nothing was delivered.
+    const c2 = await customer();
+    const draft2 = await estimate(c2, { createdAt: minutesAgo(200) });
+    await estimate(c2, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { attemptedAt: minutesAgo(90).toISOString(), sentChannels: [], failedChannels: ['sms'] } } });
+    // The older tracking shape: sent channels listed, no lastDeliveredAt. It is a real send.
+    const c3 = await customer();
+    const draft3 = await estimate(c3, { createdAt: minutesAgo(200) });
+    await estimate(c3, { status: 'viewed', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { attemptedAt: minutesAgo(90).toISOString(), sentChannels: ['sms'], failedChannels: [] } } });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(draft3)).archived_at).not.toBeNull();
     expect((await row(edited)).archived_at).toBeNull();
+    expect((await row(draft2)).archived_at).toBeNull();
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {

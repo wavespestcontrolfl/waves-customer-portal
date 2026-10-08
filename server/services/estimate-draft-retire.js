@@ -113,15 +113,25 @@ function sameProperty(pair) {
 }
 
 // When the customer last actually received the estimate: the delivery
-// witness (deliveryState.lastDeliveredAt), with sent_at only for legacy rows
-// that have none. sent_at alone is not a fence: a resend attempt that
+// witness (deliveryState.lastDeliveredAt, or the older shape below), with
+// sent_at only for legacy rows that have no delivery tracking. sent_at alone is not a fence: a resend attempt that
 // delivers on no channel still overwrites it.
+// The older tracking shape (2026-07 to 2026-08) has no lastDeliveredAt: a
+// non-empty sentChannels list is its delivery witness and attemptedAt its time.
+const SENT_CHANNELS_SQL = (alias) => `(jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
+  AND jsonb_array_length(${alias}.estimate_data #> '{deliveryState,sentChannels}') > 0)`;
+const DELIVERED_AT_SQL = (alias) => `((${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}') ~ '^[0-9]{4}-')`;
 const SENT_TIME_SQL = (alias) => `(CASE
-  WHEN (${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}') ~ '^[0-9]{4}-'
+  WHEN ${DELIVERED_AT_SQL(alias)}
     THEN (${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz
+  WHEN ${SENT_CHANNELS_SQL(alias)} AND (${alias}.estimate_data #>> '{deliveryState,attemptedAt}') ~ '^[0-9]{4}-'
+    THEN (${alias}.estimate_data #>> '{deliveryState,attemptedAt}')::timestamptz
   ELSE ${alias}.sent_at END)`;
 
-// A real send by staff or a verified flow. Website quote rows (quote_wizard)
+// A real send by staff or a verified flow. A row WITH delivery tracking
+// (deliveryState) must carry a delivery witness: a suppressed send stamps
+// sent_at and status with nothing delivered. Only legacy rows with no
+// delivery tracking at all are taken on sent_at. Website quote rows (quote_wizard)
 // never count: /api/public/quote/calculate is unauthenticated, so a caller
 // who knows a prospect's email and address could otherwise mint a "sent" row
 // that archives that customer's staff drafts (codex security review).
@@ -133,6 +143,9 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND ${alias}.status <> 'draft'
   AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}
   AND COALESCE(${alias}.source, '') <> 'quote_wizard'
+  AND (jsonb_typeof(${alias}.estimate_data->'deliveryState') IS DISTINCT FROM 'object'
+       OR COALESCE(${DELIVERED_AT_SQL(alias)}, false)
+       OR COALESCE(${SENT_CHANNELS_SQL(alias)}, false))
   AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
