@@ -65,6 +65,7 @@ const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
+const { REPRICE_VISITS_TOOLS, executeRepriceVisitsTool, repriceVisitsLive } = require('../services/intelligence-bar/reprice-visits-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
@@ -154,6 +155,7 @@ const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
 const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name));
+const REPRICE_VISITS_TOOL_NAMES = new Set(REPRICE_VISITS_TOOLS.map(t => t.name));
 const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
@@ -232,6 +234,8 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Resending a receipt contacts the customer — admin only, like the
   // requireAdmin send-receipt route it mirrors.
   ...RECEIPT_RESEND_TOOL_NAMES,
+  // Repricing visits runs the requireAdmin visit edit — admin only.
+  ...REPRICE_VISITS_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -819,6 +823,11 @@ const PINNED_DISPLAY_BUILDERS = {
       message: preview.body_preview,
     }
     : null),
+  // reprice_future_visits: the card names the customer, the service and the
+  // new price; each visit's old -> new line is curated in authorization-contract.js.
+  reprice_future_visits: (_params, preview) => (preview?.preview === true
+    ? { customer: preview.customer_name, service: preview.service_label, new_price: `${preview.new_price} per visit` }
+    : null),
   // The card names the invoice, what the receipt states, whether this is a
   // re-send, and who it reaches — never just the raw invoice id the model sent.
   resend_receipt: (params, preview) => (preview?.preview === true
@@ -893,6 +902,9 @@ const VERIFIED_VERSION_PARAMS = {
   // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
   // state the card showed — a receipt sent in between is refused, never doubled.
   resend_receipt: '_verified_receipt_version',
+  // reprice_future_visits binds every listed visit's id, date, status, price
+  // and row version (reprice-visits-tools.js plan version).
+  reprice_future_visits: '_verified_reprice_version',
 };
 
 // The overlapping visits a booking card names, or [] when the lookup fails
@@ -1183,6 +1195,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // after the fingerprint check (pre-push P1). `_`-prefixed: never
       // shown, ignored by the unconfirmed fingerprint re-run.
       params._approved_changes = preview.changes;
+      // …and the customer link the card was built on (Codex #6099 r11).
+      params._approved_customer_link = preview._customer_id ? String(preview._customer_id) : 'none';
     }
     // A feature switch already in the requested state is a plain answer, not
     // a failure and not a card (Codex r3 on #5489): no is_error result, no
@@ -2042,6 +2056,13 @@ function getConfirmedActionIdempotencyKey(req, params) {
 }
 
 // Context-specific system prompt extensions
+// The lawn tracks the estimate prompt names: the v13 program (GATE_LAWN_V13) has no bahia track,
+// so a bahia lawn is parked for review rather than offered as a track. Read per request.
+function lawnTracksPromptText() {
+  if (!require('../services/lawn-program').lawnV13NoBahiaProgram()) return 'st_augustine, bermuda, zoysia, bahia';
+  return 'st_augustine, bermuda, zoysia (bahia has no v13 program: a bahia lawn is parked for review, never priced as a plan)';
+}
+
 const CONTEXT_PROMPTS = {
   agent_estimate: `
 AGENT ESTIMATE CONTEXT:
@@ -2408,7 +2429,7 @@ LEADS CAPABILITIES:
 - Response time distribution and its correlation with conversion
 - Update single lead status (with confirmation)
 - Bulk update: move matching leads to a new status (dry-run first, then execute)
-- Fix a lead's contact details — first/last name, phone, email (update_lead_contact; shows before → after, then the confirmation card)
+- Fix a lead's contact details — first/last name, phone, email, street address, city, zip (update_lead_contact; shows before → after, then the confirmation card)
 
 RESPONSE STYLE:
 - Stale leads are URGENT — leads that haven't been contacted in 48+ hours are likely lost
@@ -2474,7 +2495,7 @@ QUOTING WORKFLOW:
 ENGINE BASICS (so you can explain numbers):
 - Loaded labor rate: $35/hr
 - Pest frequencies: quarterly (~90d), bimonthly (~60d), monthly (~30d)
-- Lawn tracks: st_augustine, bermuda, zoysia, bahia. Tiers: basic, enhanced, premium
+- Lawn tracks: __LAWN_TRACKS__. Tiers: basic, enhanced, premium
 - WaveGuard tiers: Bronze (1 service), Silver (2), Gold (3), Platinum (4+). The tier is a label the office sets; changing it changes NO price. Prices change only through a new estimate or a monthly-rate edit, so never tell the operator a discount "will apply" after a tier change. monthly_rate is the customer's whole monthly bill (all services summed; get_customer_detail shows the lines as monthly_bill).
 - Default sqft if unknown: 2000. Default lot: 4× home sqft.
 
@@ -2585,8 +2606,17 @@ function withEveryPageTools(tools, context, isAdmin) {
     .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
 }
 
+// reprice_future_visits (owner ruling 2026-10-07): offered to admins on the
+// Customers, Schedule / Dispatch and dashboard pages while
+// GATE_IB_REPRICE_VISITS is on; off, it is in no list (and refuses every call).
+const REPRICE_VISITS_CONTEXTS = new Set(['customers', 'schedule', 'dispatch', 'dashboard']);
+function withRepriceVisitsTool(tools, context, isAdmin) {
+  if (!isAdmin || !REPRICE_VISITS_CONTEXTS.has(context) || !repriceVisitsLive()) return tools;
+  return [...tools, ...REPRICE_VISITS_TOOLS];
+}
+
 function getToolsForContext(context, isAdmin = false, fullAccess = false) {
-  const tools = withEveryPageTools(toolsForContextUngated(context, isAdmin, fullAccess), context, isAdmin)
+  const tools = withRepriceVisitsTool(withEveryPageTools(toolsForContextUngated(context, isAdmin, fullAccess), context, isAdmin), context, isAdmin)
     // Defense in depth: catches a future red tool reaching a context list
     // through a module that forgot its own write-free "query" export
     // (banking-tools.js / seo-tools.js already build one for the branches
@@ -2798,6 +2828,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   if (RECEIPT_RESEND_TOOL_NAMES.has(toolName)) {
     return executeReceiptResendTool(toolName, input, actionContext);
   }
+  if (REPRICE_VISITS_TOOL_NAMES.has(toolName)) {
+    return executeRepriceVisitsTool(toolName, input, actionContext);
+  }
   if (BILLING_WRITE_TOOL_NAMES.has(toolName)) {
     return executeBillingWriteTool(toolName, input, actionContext);
   }
@@ -2858,6 +2891,7 @@ BUSINESS CONTEXT:
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
 - Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (6x/yr bi-monthly default; 9x every-6-weeks upsell — quarterly is retired for new sales, existing quarterly plans only), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
+- A tier change never reprices any visit; never say it does. To apply a discount or a new price to a customer's upcoming visits, use reprice_future_visits when it is in your tools: one service, the new dollar price per visit (ask for the dollar price; it takes no percentage).
 - Resolve active technicians from live tool results; never assume a historic roster is current.
 - Scheduling zones by city: Parrish, Palmetto, Lakewood Ranch, Bradenton, Sarasota, Venice/North Port
 
@@ -3041,7 +3075,8 @@ async function runQuery(req, res, next) {
     // Build context-aware system prompt
     let systemPrompt = SYSTEM_PROMPT;
     if (context && CONTEXT_PROMPTS[context]) {
-      systemPrompt += '\n\n' + CONTEXT_PROMPTS[context];
+      // The lawn track list follows GATE_LAWN_V13 (bahia has no v13 program), read per request.
+      systemPrompt += '\n\n' + CONTEXT_PROMPTS[context].replace('__LAWN_TRACKS__', lawnTracksPromptText());
     }
     // Infra tools load on every admin context (getToolsForContext), so their
     // guidance rides along for every admin request. The tech and

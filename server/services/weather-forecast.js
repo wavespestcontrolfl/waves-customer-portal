@@ -40,9 +40,9 @@ function cacheKey(lat, lng) {
 // request URLs embed location (customer lat/lng on /points, the
 // resolved grid cell on /gridpoints), and address-level PII does not
 // belong in application logs.
-async function fetchJson(url, label) {
+async function fetchJson(url, label, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
@@ -121,8 +121,8 @@ function raceDeadline(promise, ms) {
   ]).finally(() => clearTimeout(timer));
 }
 
-function fetchOpenMeteoHours(latNum, lngNum, startedAt) {
-  const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+function fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs = TOTAL_BUDGET_MS) {
+  const remaining = budgetMs - (Date.now() - startedAt);
   const key = cacheKey(latNum, lngNum);
   const pending = _backupInFlight.get(key);
   // Joining a read another lookup started still keeps THIS lookup's budget:
@@ -130,11 +130,15 @@ function fetchOpenMeteoHours(latNum, lngNum, startedAt) {
   // the shared read finishes for the caller that started it.
   if (pending) return remaining > 0 ? raceDeadline(pending, remaining) : Promise.resolve(null);
   if (remaining < BACKUP_MIN_MS) return Promise.resolve(null);
-  const read = readOpenMeteoHours(latNum, lngNum, Math.min(remaining, FORECAST_BACKUP_MAX_MS))
-    .catch(() => null)
-    .finally(() => _backupInFlight.delete(key));
-  _backupInFlight.set(key, read);
-  return read;
+  const read = readOpenMeteoHours(latNum, lngNum, Math.min(remaining, FORECAST_BACKUP_MAX_MS)).catch(() => null);
+  // A read under a caller's own short budget is not published for others to
+  // join: an uncapped reader (storm watch, Rain Out) arriving meanwhile
+  // starts its own full-length read instead of inheriting this timeout
+  // (Codex #6102 r6).
+  if (budgetMs < TOTAL_BUDGET_MS) return read;
+  const shared = read.finally(() => _backupInFlight.delete(key));
+  _backupInFlight.set(key, shared);
+  return shared;
 }
 
 // Daily backup = the max hourly chance over the NWS daytime period
@@ -289,7 +293,11 @@ function parseWindMph(text) {
   return Math.max(...nums.map(Number));
 }
 
-async function getHourlyRainOutlook(lat, lng) {
+// Optional `budgetMs` / `nwsBudgetMs` (best-times ranking, Codex #6102 r2):
+// a caller with a short wait caps NWS at `nwsBudgetMs` so a slow NWS failure
+// still leaves the Open-Meteo backup time inside `budgetMs`. Defaults are
+// the plain behavior: NWS fetches at their own timeout, backup on the rest.
+async function getHourlyRainOutlook(lat, lng, { budgetMs = TOTAL_BUDGET_MS, nwsBudgetMs = budgetMs } = {}) {
   if (lat == null || lng == null || lat === '' || lng === '') return null;
   const latNum = Number(lat);
   const lngNum = Number(lng);
@@ -300,18 +308,50 @@ async function getHourlyRainOutlook(lat, lng) {
   if (cached && Date.now() - cached.at < HOURLY_CACHE_TTL_MS) return cached.value;
 
   const startedAt = Date.now();
-  const hours = (await nwsHourly(latNum, lngNum)) || (await fetchOpenMeteoHours(latNum, lngNum, startedAt));
+  const nws = await nwsHourlyShared(latNum, lngNum, key, startedAt + nwsBudgetMs, nwsBudgetMs < TOTAL_BUDGET_MS);
+  // Another reader may have cached an NWS answer while this one waited.
+  const fresh = _hourlyCache.get(key);
+  if (!nws && fresh && Date.now() - fresh.at < HOURLY_CACHE_TTL_MS) return fresh.value;
+  const hours = nws || (await fetchOpenMeteoHours(latNum, lngNum, startedAt, budgetMs));
   if (!hours) return null;
-  _hourlyCache.set(key, { at: Date.now(), value: hours });
+  // A backup answer reached only because THIS caller capped NWS is not
+  // cached: an uncapped reader (storm watch, Rain Out) must still try NWS,
+  // the primary source (Codex #6102 r3).
+  if (nws || nwsBudgetMs >= TOTAL_BUDGET_MS) _hourlyCache.set(key, { at: Date.now(), value: hours });
   return hours;
 }
 
-async function nwsHourly(latNum, lngNum) {
-  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup');
-  const hourlyUrl = points?.properties?.forecastHourly;
-  if (!hourlyUrl) return null;
+// One uncapped NWS hourly read per grid key at a time. A capped caller (the
+// picker) joins one already running for up to its own NWS deadline instead
+// of starting a second, shorter read that may lose to the backup while the
+// full read is about to answer (Codex #6102 r9). A capped read is never
+// published: an uncapped reader must not inherit its short deadline.
+const _nwsHourlyInFlight = new Map();
+function nwsHourlyShared(latNum, lngNum, key, deadlineAt, capped) {
+  const pending = _nwsHourlyInFlight.get(key);
+  if (pending) {
+    const left = deadlineAt - Date.now();
+    return left > 0 ? raceDeadline(pending, left) : Promise.resolve(null);
+  }
+  const read = nwsHourly(latNum, lngNum, deadlineAt).catch(() => null);
+  if (capped) return read;
+  const shared = read.finally(() => _nwsHourlyInFlight.delete(key));
+  _nwsHourlyInFlight.set(key, shared);
+  return shared;
+}
 
-  const forecast = await fetchJson(hourlyUrl, 'hourly forecast');
+// Each NWS fetch waits at most its own timeout and never past `deadlineAt`.
+function nwsTimeout(deadlineAt) {
+  return Math.min(FETCH_TIMEOUT_MS, deadlineAt - Date.now());
+}
+
+async function nwsHourly(latNum, lngNum, deadlineAt) {
+  if (nwsTimeout(deadlineAt) <= 0) return null;
+  const points = await fetchJson(`${NWS_BASE}/points/${latNum.toFixed(4)},${lngNum.toFixed(4)}`, 'points lookup', nwsTimeout(deadlineAt));
+  const hourlyUrl = points?.properties?.forecastHourly;
+  if (!hourlyUrl || nwsTimeout(deadlineAt) <= 0) return null;
+
+  const forecast = await fetchJson(hourlyUrl, 'hourly forecast', nwsTimeout(deadlineAt));
   const periods = forecast?.properties?.periods;
   if (!Array.isArray(periods)) return null;
 
@@ -348,5 +388,5 @@ module.exports = {
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
   forecastLinkForZip,
-  _test: { dailyFromHours, _backupInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
+  _test: { dailyFromHours, _backupInFlight, _nwsHourlyInFlight, cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };

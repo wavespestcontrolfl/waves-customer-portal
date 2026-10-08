@@ -105,7 +105,7 @@ const idPart = value => (value === undefined || value === null || value === '' ?
 //     'refuse' - a second card would repeat a one-off effect (a booking): the
 //                new card is refused, the operator moves the visit instead.
 //     'allow'  - a later edit is a legitimate new edit and stays confirmable.
-const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email'];
+const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'];
 function leadFieldsChanged(p) {
   const approved = p._approved_changes;
   const isSet = approved && typeof approved === 'object' && !Array.isArray(approved);

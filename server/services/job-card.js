@@ -48,6 +48,7 @@ const { parsePackSize } = require('./product-costing');
 const { isServingProtocol } = require('./lawn-program');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
+const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -1103,7 +1104,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       source: `Published protocol · version ${structured.version}`,
       title: structured.window.title,
       objective: structured.window.goal || null,
-      visitNotes: procedureLines(plan.protocol?.objective),
+      visitNotes: [...procedureLines(plan.protocol?.objective), ...fertilizerSafetyNotes(structured.products)],
       steps: (structured.window.requiredTasks || []).map(task => String(task).replace(/_/g, ' ')),
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
@@ -1150,6 +1151,12 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
 
 // Hide template costs without dropping restrictions elsewhere in the same
 // line (for example, an add-on-only scope beside a minimum office price).
+// The full fertilizer safety block for an N visit (a window with a gated spreader row), as one note.
+function fertilizerSafetyNotes(rows) {
+  const rules = fertilizerSafetyRules(rows);
+  return rules.length ? [`Fertilizer safety: ${rules.join(' ')}`] : [];
+}
+
 function procedureLines(text) {
   return String(text || '').replace(/\(\s*\$[\d,.]+\s*\)/g, '')
     .replace(/\$\d(?:[\d,.]*\d)?(?:\s*[-–]\s*\$?\d(?:[\d,.]*\d)?)?/g, '[price omitted]')
