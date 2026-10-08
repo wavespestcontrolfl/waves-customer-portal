@@ -1228,4 +1228,16 @@ describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
     expect((await store.get('ip:budget-test')).totalHits).toBe(3);
     store.shutdown?.();
   });
+
+  test('an expired counter no longer blocks', async () => {
+    const { takeReportAskBudget } = require('../routes/reports-public');
+    const ended = new Date(Date.now() - 1000);
+    const hits = { 'report:expired': { totalHits: 9, resetTime: ended } };
+    const store = {
+      get: async (key) => hits[key],
+      increment: async (key) => { hits[key] = { totalHits: 1, resetTime: new Date(Date.now() + 60000) }; return hits[key]; },
+    };
+    expect(await takeReportAskBudget([['report:expired', 3]], store)).toBe(true);
+    expect(hits['report:expired'].totalHits).toBe(1);
+  });
 });

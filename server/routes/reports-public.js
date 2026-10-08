@@ -228,7 +228,10 @@ const reportAskBudgetStore = new rateLimit.MemoryStore();
 reportAskBudgetStore.init({ windowMs: 24 * 60 * 60 * 1000 });
 async function takeReportAskBudget(keys, store = reportAskBudgetStore) {
   const used = await Promise.all(keys.map(([key]) => store.get(key)));
-  if (keys.some(([, cap], i) => (used[i]?.totalHits || 0) >= cap)) return false;
+  // get() can return a counter whose window has ended (only increment()
+  // resets it), so an expired entry counts as unused (pre-push audit, #5964).
+  const live = (entry) => (entry && !(entry.resetTime && entry.resetTime.getTime() <= Date.now()) ? entry.totalHits || 0 : 0);
+  if (keys.some(([, cap], i) => live(used[i]) >= cap)) return false;
   await Promise.all(keys.map(([key]) => store.increment(key)));
   return true;
 }
