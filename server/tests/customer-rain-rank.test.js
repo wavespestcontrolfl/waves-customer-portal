@@ -24,7 +24,7 @@ const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { listOccupiedWindows } = require('../services/scheduling/occupancy');
 const { getHourlyRainOutlook } = require('../services/weather-forecast');
 const { buildBookingAvailability } = require('../routes/booking')._internals;
-const { customerRainTierOf, stampRainTiers, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
+const { customerRainTierOf, startCustomerRainRank, stampRainTiers, rainTierDiff } = require('../services/scheduling/customer-rain-rank');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), n));
@@ -92,6 +92,31 @@ describe('buildBookingAvailability rain rank', () => {
     expect(JSON.stringify(out)).not.toContain('rain_tier');
   });
 
+  test('gate on: a wet recommendation carries display_tier for the picker; a dry one does not', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const D2 = dayOffset(2);
+    // D1 has only the wet 14:00; D2 (no reading above 60%) a dry 10:00.
+    getHourlyRainOutlook.mockResolvedValue([...HOURLY, ...HOURLY.map((h) => ({ startTime: h.startTime.replace(D1, D2), rainChance: 5 }))]);
+    findAvailableSlots.mockResolvedValue({
+      slots: [gapSlot('14:00', { rank: 1, score: 5, insertion: { after_stop_id: 'a' } }), gapSlot('10:00', { date: D2, rank: 2, score: 40, insertion: { after_stop_id: 'b' } })],
+      total_feasible: 2,
+    });
+    const out = await build({ rangeTo: D2 });
+    const byDate = Object.fromEntries(out.slots.map((s) => [s.date, s]));
+    expect(byDate[D1].display_tier).toBe(2);
+    expect(byDate[D2]).not.toHaveProperty('display_tier');
+    expect(JSON.stringify(out)).not.toContain('rain_tier');
+  });
+
+  test('gate on, a range wholly past the 3 dates: the forecast is not read', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const far = dayOffset(10);
+    findAvailableSlots.mockResolvedValue({ slots: [gapSlot('10:00', { date: far })], total_feasible: 1 });
+    const out = await build({ rangeFrom: far, rangeTo: far });
+    expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+    expect(JSON.stringify(out)).not.toContain('display_tier');
+  });
+
   test('gate on, rain-OK booking (assessment identity): the wet hour stays first', async () => {
     process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
     const out = await build({ serviceKey: '', serviceIdentity: { catalogServiceKey: 'waves_assessment', serviceType: 'Waves Assessment' } });
@@ -129,6 +154,15 @@ describe('customer-rain-rank helpers', () => {
     const hourlyRain = jest.fn(async () => HOURLY);
     expect(await customerRainTierOf({ serviceLabels: [], lat: 1, lng: 2, deps: { hourlyRain } })).toBeNull();
     expect(hourlyRain).not.toHaveBeenCalled();
+  });
+
+  test('no candidate inside the 3 dates: stamp does not wait for the forecast', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    // A forecast that never answers: stamp must still resolve.
+    const rank = startCustomerRainRank({ serviceLabels: ['Pest Control'], lat: 1, lng: 2, today: new Date(), deps: { hourlyRain: () => new Promise(() => {}) } });
+    const far = [{ date: dayOffset(10), start_time: '10:00', end_time: '11:00' }];
+    expect((await rank.stamp(far))[0].rain_tier).toBe(0);
+    expect(await rank.stamp([])).toEqual([]);
   });
 
   test('stampRainTiers: 0 without a tier function; rainTierDiff orders by tier', () => {

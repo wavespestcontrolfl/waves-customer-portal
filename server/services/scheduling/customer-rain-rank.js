@@ -6,15 +6,17 @@
  * public reschedule page.
  *
  * It only changes ORDER: which hours are offered, the full day list, the
- * signed offers and the commit checks are untouched. An outdoor booking's
+ * signed offers and the commit checks are untouched. A recommendation whose
+ * tier is above 0 carries `display_tier`, which the booking picker sorts by
+ * first (it re-sorts the recommendations itself by nearby, then rank). An outdoor booking's
  * wet hours (60%+ NWS chance from the start through 2 h after the end, next
  * 3 dates) rank after its dry ones; a rain-OK booking's wet hours rank
  * first. Fail open: no forecast, a neutral booking or the gate off leaves
  * every candidate at tier 0, the order it has today.
  */
 const logger = require('../logger');
-const { rainFitFor, rainTierOf, withCatalogKeys, boundedHourlyRain } = require('./rain-fit');
-const { etDateString } = require('../../utils/datetime-et');
+const { rainFitFor, rainTierOf, withCatalogKeys, boundedHourlyRain, inRainHorizon, RAIN_DAYS } = require('./rain-fit');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 const GATE = 'GATE_CUSTOMER_RAIN_RANK';
 
@@ -48,6 +50,34 @@ async function customerRainTierOf({
   }
 }
 
+/**
+ * One availability build's rain ranking. The fit and the forecast start
+ * now, alongside the slot search, but only when the requested range reaches
+ * the rain horizon; `stamp` awaits them only when a candidate is inside it.
+ * A browse of later dates, or a build with no candidate, neither reads nor
+ * waits for a forecast: every tier would be the same (Codex #6126 r1).
+ */
+function startCustomerRainRank({ rangeFrom, today, ...rest } = {}) {
+  const todayYmd = etDateString(today || new Date());
+  const horizonEnd = etDateString(addETDays(today || new Date(), RAIN_DAYS - 1));
+  const reaches = !rangeFrom || String(rangeFrom) <= horizonEnd;
+  const pending = reaches ? customerRainTierOf({ today, ...rest }) : Promise.resolve(null);
+  return {
+    async stamp(candidates) {
+      const needed = candidates.some((c) => inRainHorizon(c.date, todayYmd));
+      return stampRainTiers(candidates, needed ? await pending : null);
+    },
+  };
+}
+
+// What the client sorts a recommendation by before anything else: the rain
+// tier, sent only when it is above 0 (absent = 0), so a payload with no
+// rain ranking is byte-identical to today's. `rain_tier` itself stays
+// server-side.
+function withDisplayTier(slot, rainTier) {
+  return rainTier > 0 ? { ...slot, display_tier: rainTier } : slot;
+}
+
 // Stamp each candidate's tier (0 when there is no tier function). Returns
 // the same array, so the caller can chain its sort.
 function stampRainTiers(candidates, tierOf) {
@@ -58,4 +88,4 @@ function stampRainTiers(candidates, tierOf) {
 // Tier difference for a comparator's first key; 0 for unstamped rows.
 const rainTierDiff = (a, b) => (a.rain_tier ?? 0) - (b.rain_tier ?? 0);
 
-module.exports = { customerRainTierOf, stampRainTiers, rainTierDiff, GATE };
+module.exports = { startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
