@@ -50,6 +50,7 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
 
 const knex = require('knex');
+const { etDateString } = require('../utils/datetime-et');
 const { randomUUID } = require('crypto');
 
 // Verified private clone only — never a shared or production URL. Accepts this worktree's own
@@ -247,13 +248,21 @@ postgres('closeout: a hard product count limit flags, never refuses', () => {
       const f = await seedLawnVisit({ priorApplications: 0 });
       try {
         const arena = await mockPg('products_catalog').where({ name: 'Arena 50 WDG' }).first();
-        const year = new Date().getFullYear();
-        const [past] = await mockPg('scheduled_services').insert({ customer_id: f.customerId, property_id: f.propertyId, scheduled_date: `${year}-01-05`, service_type: 'Lawn fixture', status: 'completed' }).returning('*');
-        const [rec] = await mockPg('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: `${year}-01-05`, service_type: 'Lawn fixture' }).returning('*');
-        await mockPg('property_application_history').insert({ customer_id: f.customerId, product_id: arena.id, application_date: `${year}-01-05`, application_rate: prior, rate_unit: 'oz', service_record_id: rec.id });
+        // The earlier pass sits in the visit's own Eastern calendar year, 60 days back where the year
+        // allows (so the 56-day spacing is not what this test is about) and on January 1 otherwise.
+        const today = etDateString();
+        const year = Number(today.slice(0, 4));
+        const back = new Date(Date.UTC(year, Number(today.slice(5, 7)) - 1, Number(today.slice(8, 10)) - 60, 12)).toISOString().slice(0, 10);
+        const priorDate = back < `${year}-01-01` ? `${year}-01-01` : back;
+        const [past] = await mockPg('scheduled_services').insert({ customer_id: f.customerId, property_id: f.propertyId, scheduled_date: priorDate, service_type: 'Lawn fixture', status: 'completed' }).returning('*');
+        const [rec] = await mockPg('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: priorDate, service_type: 'Lawn fixture' }).returning('*');
+        await mockPg('property_application_history').insert({ customer_id: f.customerId, product_id: arena.id, application_date: priorDate, application_rate: prior, rate_unit: 'oz', service_record_id: rec.id });
         const out = await complete(f, { products: [product(f, { productId: arena.id, rate: 0.147 })] });
         expect(out.status).toBe(200);
-        expect(out.body.completionAdvisories || []).toEqual(flagged ? ['Recorded. The office will review: Arena 50 WDG is over its yearly amount limit.'] : []);
+        // Only the amount finding is asserted: early in the year the 56-day spacing can add its own line.
+        const amountLine = 'Recorded. The office will review: Arena 50 WDG is over its yearly amount limit.';
+        expect((out.body.completionAdvisories || []).includes(amountLine)).toBe(flagged);
+        expect((out.body.completionAdvisories || []).some((line) => /yearly application limit/.test(line))).toBe(false);
       } finally { await cleanup(f); }
     }
   });
