@@ -2888,3 +2888,28 @@ test('a concern copied into an insight card is masked too (Codex security P2 r85
   // The catalog's own wording is not typed text.
   expect(facts.products[0].what_it_does).toBe('Slows ants at door frames and entry points.');
 });
+
+describe('answer screen, Codex round 86', () => {
+  const concern = (text) => buildReportAskFacts({ data: lawnData({ customerConcern: text, reportV2: { aftercare: {} } }) }).customer_concern;
+
+  test.each(['Garage access is blue moon for service.', 'The side entrance requires blue moon for service.'])('a typed garage or entrance access sentence leaves whole: %s', (text) => {
+    expect(concern(text)).toBe('[access details removed]');
+  });
+
+  test.each(['Ants in a two-car garage.', 'Ants at the entry points.', 'Weeds by the front entrance.'])('a pest reported at a garage or entrance stays: %s', (text) => {
+    expect(concern(text)).toBe(text);
+  });
+
+  test('a service-team return question is the next visit; a pest returning is not', () => {
+    const { reroutedTopic } = require('../services/service-report/report-ask-ai');
+    expect(reroutedTopic('When is pest control coming back?')).toBe('next_visit');
+    expect(reroutedTopic('When are they coming back?')).toBe('next_visit');
+    expect(reroutedTopic('Will the ants return to the kitchen?')).toBeNull();
+  });
+
+  test('the missing-purpose check looks only at the product the question names', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG', report_copy: { how_it_works: 'Works on ants.' } } }, { product: { name: 'Advion' } }] });
+    expect(ruleAnswerReason(data, [], 'applied', 'Why was Alpine WSG used?')).toBeNull();
+    expect(ruleAnswerReason(data, [], 'applied', 'Why was Advion used?')).toBe('product_purpose');
+  });
+});

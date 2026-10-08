@@ -504,10 +504,20 @@ function scrubLeaves(value) {
 // A garage or an entry point is also where pests are reported, so those words
 // alone do not remove a typed sentence; a gate, door, lock, keypad or guard does.
 const TYPED_ACCESS_DEVICE = /\b(?:gates?|gatehouse|doors?|locks?|padlocks?|keypads?|key\s*pads?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|guards?|guard\s*house|security|concierge|front\s+desk)\b/i;
+// A garage or entrance sentence stays only when it names a pest and has no
+// access word: "Ants in a two-car garage" stays, "Garage access is blue moon
+// for service" leaves (Codex security P2 #5964 r86).
+const TYPED_ACCESS_PLACE = /\b(?:garages?|entrances?|entry(?!\s+points?)|entryways?)\b/i;
+const TYPED_ACCESS_WORD = /\b(?:access|requir\w*|needs?|opens?|unlock\w*|codes?|password|passcode|pass\s*phrase|keys?|enter(?:s|ed|ing)?|use[sd]?|using|say|tell|ask)\b/i;
+const TYPED_PEST_WORD = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|spiders?|wasps?|bees?|hornets?|termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?|fleas?|ticks?|weeds?|nests?|webs?|trails?|droppings|pests?|bugs?|insects?)\b/i;
+function isTypedAccessSentence(sentence) {
+  if (sentence.trim().split(/\s+/).length < 3) return false;
+  if (TYPED_ACCESS_DEVICE.test(sentence)) return true;
+  return TYPED_ACCESS_PLACE.test(sentence) && (TYPED_ACCESS_WORD.test(sentence) || !TYPED_PEST_WORD.test(sentence));
+}
 function dropAccessDeviceSentences(text) {
   if (typeof text !== 'string' || !text) return text;
-  return splitSentences(text).map((sentence) => (TYPED_ACCESS_DEVICE.test(sentence) && sentence.trim().split(/\s+/).length >= 3
-    ? '[access details removed]' : sentence)).join(' ');
+  return splitSentences(text).map((sentence) => (isTypedAccessSentence(sentence) ? '[access details removed]' : sentence)).join(' ');
 }
 // Every free-text leaf of the sheet gets the strict pass, since the report
 // builders copy the customer's concern into other fields (an insight card's
@@ -2650,7 +2660,7 @@ function defaultCallModel(payload, options) {
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
 const SCHEDULE_QUESTION = /\b(?:when\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)\s+(?:is|will\s+be)|(?:service|visit|appointment|treatment)\s+date|date\s+of\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|appointment|treatment)|(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?<!\bdid\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back|in|into|inside))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?<!\b(?:did|when)\s)(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit(?:ing)?\b|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
 // Next-visit intents in other words (Codex P1 #5964 r68).
-const NEXT_VISIT_QUESTION = /\b(?:due\s+back|return\s+(?:date|visit|trip|service|treatment|appointment)|future\s+(?:visit|service|treatment|appointment)|revisit|\b(?:you|y['’]?all|we|tech\w*|technician|someone|somebody|waves|team|crew)\s+(?:\w+\s+)?(?:come|coming|be)\s+back|next\s+(?:visit|service|treatment|appointment|time\s+you)|follow[\s-]?up\s+(?:visit|date|appointment)|another\s+(?:visit|treatment|service|appointment)|see\s+you\s+again|return\s+to)\b/i;
+const NEXT_VISIT_QUESTION = /\b(?:due\s+back|return\s+(?:date|visit|trip|service|treatment|appointment)|future\s+(?:visit|service|treatment|appointment)|revisit|\b(?:you|y['’]?all|we|they|tech\w*|technician|someone|somebody|waves|team|crew|pest\s+control|lawn\s+care|the\s+company|your\s+(?:guys|people))\s+(?:\w+\s+)?(?:come|coming|be)\s+back|next\s+(?:visit|service|treatment|appointment|time\s+you)|follow[\s-]?up\s+(?:visit|date|appointment)|another\s+(?:visit|treatment|service|appointment)|see\s+you\s+again|return\s+to)\b/i;
 // Passive booking questions: "Is another treatment booked?" (Codex P1 #5964 r47).
 const BOOKING_QUESTION = /\b(?:is|are|was|were|has|have|do|does|did)\s+(?:there\s+)?(?:another|a|any|my|our|the\s+next|(?:a|the)\s+follow[\s-]?up|more|a\s+second|a\s+return)\s+(?:\w+\s+)?(?:treatments?|visits?|services?|appointments?)\s+(?:\w+\s+)?(?:booked|scheduled|set\s+up|lined\s+up|planned|arranged|confirmed|reserved|coming)\b|\b(?:another|next|follow[\s-]?up|return|second)\s+(?:\w+\s+)?(?:treatment|visit|service|appointment)\s+(?:\w+\s+)?(?:booked|scheduled|planned|coming)\b|\bany\s+(?:more|other|upcoming|future)\s+(?:treatments?|visits?|services?|appointments?)\b/i;
 function asksAboutSchedule(question) {
@@ -2759,7 +2769,7 @@ const FIXED_INTENTS = [
 // service?" is not a next-visit question) (pre-push audit, #5964).
 // A pest as the one entering or returning is a findings question: "Did ants
 // enter the house?", "Will the ants return to the kitchen?" (Codex P1 #5964 r83).
-const PEST_SUBJECT_QUESTION = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|pests?|bugs?|insects?|spiders?|rodents?|rats?|mice|mouse|termites?|mosquito(?:es)?|fleas?|ticks?|wasps?|bees?|weeds?|fungus|they|them)\b/i;
+const PEST_SUBJECT_QUESTION = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|bugs?|insects?|spiders?|rodents?|rats?|mice|mouse|termites?|mosquito(?:es)?|fleas?|ticks?|wasps?|bees?|weeds?|fungus|pests?(?!\s+control))\s+(?:\w+\s+){0,2}?(?:enter\w*|return\w*|com(?:e|es|ing)|came|get(?:s|ting)?|got|go(?:es|ing)?|be|been|back)\b/i;
 function reroutedTopic(question) {
   const text = String(question || '');
   if (PEST_SUBJECT_QUESTION.test(text)) return null;
@@ -2778,6 +2788,13 @@ function fixedAnswerTopic(topic, question, data = {}) {
 }
 
 const PRODUCT_PURPOSE_QUESTION = /\b(?:why|purpose|reason)\b[^?.!]*\b(?:products?|treatments?|spray\w*|chemicals?|used?|using|appl\w*|put\s+down|chosen|chose|picked?)\b|\b(?:products?|treatments?|spray|chemicals?)\b[^?.!]*\b(?:why|purpose|reason)\b|\bwhat\s+(?:is|was|are|were)\s+(?!you\b|we\b)[^?.!]*\b(?:used\s+)?for\b|\bwhat\s+(?:does|did)\s+(?!you\b|we\b|they\b|the\s+tech)[^?.!]*\bdo\b/i;
+// Only the product or products the question names (all of them when it names
+// none) (Codex P2 #5964 r85).
+function purposeMissingFor(question, data) {
+  const products = asArray(data.applications).map(productFacts).filter(Boolean);
+  const named = productsNamedIn(String(question || ''), products);
+  return (named.length ? named : products).some((product) => !product.what_it_does);
+}
 function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question = '') {
   if (!AI_SERVICE_LINES.has(data.serviceLine)) return 'service_line';
   // A question about a product the report does not record ("Did you use
@@ -2794,8 +2811,7 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
   // a product has no recorded wording; the sheet does not carry it, so a
   // purpose question about such a product keeps the fixed answer (Codex P1
   // on b8360a829e).
-  if (PRODUCT_PURPOSE_QUESTION.test(String(question || ''))
-    && asArray(data.applications).map(productFacts).filter(Boolean).some((product) => !product.what_it_does)) return 'product_purpose';
+  if (PRODUCT_PURPOSE_QUESTION.test(String(question || '')) && purposeMissingFor(question, data)) return 'product_purpose';
   const fixedTopic = fixedAnswerTopic(topic, String(question || ''), data);
   if (fixedTopic) return fixedTopic;
   if (data.typedReport) return 'typed_report';
