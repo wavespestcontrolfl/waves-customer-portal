@@ -2549,3 +2549,9 @@ describe('results, pest pressure and weather keep the fixed answer', () => {
     expect(ruleAnswerReason(lawnData({ reportV2: { aftercare: {} } }), [], 'applied', question)).toBeNull();
   });
 });
+
+test('a lowercase product variant is not the recorded product (Codex security P2 r73)', () => {
+  const data = lawnData({ applications: [{ product: { name: 'Bifen I/T' } }] });
+  expect(ruleAnswerReason(data, [], 'applied', 'was bifen xts applied?')).toBe('unrecorded_product');
+  expect(ruleAnswerReason(data, [], 'applied', 'did you use bifen on the lawn?')).toBeNull();
+});

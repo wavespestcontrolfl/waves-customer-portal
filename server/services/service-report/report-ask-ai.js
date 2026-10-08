@@ -287,6 +287,8 @@ function productFacts(app = {}) {
 // product: the sheet then carries only its facts, so the answer cannot wander
 // into the other products. Matched on the whole normalized name, or on its
 // first word when that word is a real name (4+ letters) said as a whole word.
+const NOT_A_VARIANT = new Set('a an the and or but was is are were be been do did does on in at by for to of off out up it its so as if no not now too also used use work safe kill help when why how what who with from that this then than they them you your we our us i me my here ok okay yet gone left put down went stay last long take took good bad fine'.split(' '));
+
 function productsNamedIn(question, products, fullText = question) {
   const q = ` ${normalizeKey(question)} `;
   if (!q.trim()) return [];
@@ -305,7 +307,12 @@ function productsNamedIn(question, products, fullText = question) {
     // "Bifen XTS" is not "Bifen I/T": a variant token after the shared first
     // word names another product (Codex P1 #5964 r68).
     const after = new RegExp(`\\b${first}\\s+([A-Za-z0-9/+-]+)`, 'i').exec(String(fullText));
-    const variant = after && /^(?:[A-Z0-9][A-Z0-9/+-]*|\d[\w/+-]*|Pro|Plus|Max|Gold|Select|Ultra|Xtra|Extra)$/.test(after[1]) ? normalizeKey(after[1]) : '';
+    // Any case: a short or coded token that is no ordinary word is a variant
+    // ("xts", "sc", "2.0", "i/t") (Codex security P2 #5964 r73).
+    const token = after ? after[1] : '';
+    const coded = /[\d/+]/.test(token) || (token.length <= 4 && !NOT_A_VARIANT.has(token.toLowerCase()))
+      || /^(?:pro|plus|max|gold|select|ultra|xtra|extra|granular|liquid|concentrate)$/i.test(token);
+    const variant = token && coded ? normalizeKey(token) : '';
     return !variant || normalizeKey(product.name).split(' ').includes(variant);
   });
   return byFirst.length === 1 ? byFirst : [];
