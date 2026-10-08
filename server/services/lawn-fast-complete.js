@@ -481,6 +481,32 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
 
 // ── planned products ────────────────────────────────────────────────────────
 
+// GATE_LAWN_SPOT_RULES: the rate the program approved for a line the plan gave no rate (a
+// spot row: the plan sizes none), from its staged protocol row (`ratePer1000` / `rateUnit`,
+// the values v13SpotReference prints), so the sheet figures a spot amount from it rather
+// than the catalog default. `{}` when the gate is off, the plan already carries a rate, the
+// row has none, or the row states a concentration (a surfactant figures nothing).
+function programRateFor(item, programRows) {
+  const row = programRows?.get(String(item.product.id));
+  if (!row || item.mix?.ratePer1000 != null || row.gates?.concentration) return {};
+  return Number(row.ratePer1000) > 0 && row.rateUnit ? { ratePer1000: Number(row.ratePer1000), rateUnit: row.rateUnit } : {};
+}
+
+// GATE_LAWN_SPOT_RULES: the weed add-ons as one cap-aware entry (see lawn-weed-mix.js), as
+// `{ weedMix }` to spread into plannedProducts, or `{}` (gate off, or no weed group). Its
+// limit read is caught inside (mode 'unavailable'); only a defect lands in the catch here.
+async function loadWeedMix({ addOns, svc, plan, knex, readFailures }) {
+  if (!featureGates.lawnSpotRulesLive()) return {};
+  try {
+    const weedMix = await require('./lawn-weed-mix').buildWeedMix({ addOns, svc, structured: plan?.protocol?.structured, knex });
+    return weedMix ? { weedMix } : {};
+  } catch (err) {
+    logger.warn(`[lawn-fast] weed mix unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    readFailures.add('weed_mix');
+    return {};
+  }
+}
+
 /**
  * The visit's planned products with each one's watering rule: `{ source, items,
  * unavailable }`. Only a recurring program appointment has a plan: with the
@@ -506,6 +532,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
     const items = withProduct(plan?.completionDefaults?.items);
     const addOns = withProduct(plan?.completionDefaults?.addOns);
     const rows = await loadCatalogRows([...items, ...addOns].map((item) => String(item.product.id)), knex);
+    const programRows = featureGates.lawnSpotRulesLive() ? require('./waveguard-plan-engine').v13ProtocolRows(plan?.protocol?.structured) : null;
     const plannedItem = (item) => {
       const entry = productRuleEntry(String(item.product.id), rows.get(String(item.product.id)) || null);
       return {
@@ -522,6 +549,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
         areaUnit: item.mix?.treatedSqft != null ? 'sqft' : null,
         ratePer1000: item.mix?.ratePer1000 ?? null,
         rateUnit: item.mix?.rateUnit ?? null,
+        ...programRateFor(item, programRows),
         approvedForReport: entry.approvedForReport,
         wateringRule: entry.rule,
         wateringSummary: entry.ruleSummary,
@@ -543,6 +571,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
         substituteFor: item.substitution?.originalProductName || null,
         gateNotes: (Array.isArray(item.gateNotes) ? item.gateNotes : []).map((note) => note?.text).filter((text) => typeof text === 'string' && text),
       })),
+      ...(await loadWeedMix({ addOns, svc, plan, knex, readFailures })),
     };
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
@@ -661,6 +690,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture,
     plannedProducts,
+    // GATE_LAWN_SPOT_RULES: the sheet asks for a spot row's area (and holds Complete without
+    // one). The key exists only while the gate is live, so gate off is byte-identical.
+    ...(featureGates.lawnSpotRulesLive() ? { spotRules: true } : {}),
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,
