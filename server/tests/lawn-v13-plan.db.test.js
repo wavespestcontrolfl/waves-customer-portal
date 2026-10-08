@@ -177,6 +177,44 @@ describeDb('the v13 plan through PostgreSQL', () => {
       expect(sopItem(result).mix.amount).toBeGreaterThan(0);
     });
 
+    // The catalog row under test, restored after each case.
+    const sopCatalog = () => knex('products_catalog').where({ name: SOP });
+    test('the July 0-0-50 row is INACTIVE in the catalog: the plan blocks with a clear notice; the step does not just disappear', async () => {
+      setGates();
+      await sopCatalog().update({ active: false });
+      try {
+        const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
+        expect(sopItem(result)).toBeUndefined();
+        const block = result.propertyGate.blocks.find((made) => made.code === 'lawn_v13_product_inactive');
+        expect(block).toMatchObject({ severity: 'block', productName: SOP });
+        expect(block.message).toMatch(/is inactive in the catalog; the office must activate it/);
+        expect(result.status).toBe('blocked');
+      } finally {
+        await sopCatalog().update({ active: true });
+      }
+      // Active again: no notice, the potash is planned.
+      const again = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
+      expect(again.propertyGate.blocks.map((made) => made.code)).not.toContain('lawn_v13_product_inactive');
+      expect(sopItem(again)).toBeTruthy();
+    });
+
+    test('the July 0-0-50 catalog row sits under another name with the recipe name as its alias: it is matched and planned', async () => {
+      setGates();
+      const [row] = await sopCatalog().update({ name: 'Renamed Potash Row' }).returning('*');
+      await knex('product_aliases').insert({ product_id: row.id, alias_name: SOP });
+      try {
+        const result = await plan(await plannedVisit({ scheduled_date: '2026-07-14' }));
+        expect(sopItem(result)).toBeUndefined();
+        const item = result.mixCalculator.items.find((made) => made.product?.id === row.id);
+        expect(item).toBeTruthy();
+        expect(item.mix.amount).toBeGreaterThan(0);
+        expect(result.propertyGate.blocks.map((made) => made.code)).not.toContain('lawn_v13_product_inactive');
+      } finally {
+        await knex('product_aliases').where({ product_id: row.id }).del();
+        await knex('products_catalog').where({ id: row.id }).update({ name: SOP });
+      }
+    });
+
     test('a July window that kept its scout form (the row is not a default): the plan does not plan the 0-0-50, and says why', async () => {
       setGates();
       await knex('lawn_protocol_products').where({ id: julyRow.id }).update({ default_in_plan: false });

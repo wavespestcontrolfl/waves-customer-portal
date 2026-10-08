@@ -150,6 +150,9 @@ function matchCatalogProduct(line, products) {
   const normalizedLine = normalizeProtocolProductText(matchText);
   if (!normalizedLine) return null;
   const lineNpk = parseNpkFromText(matchText);
+  // The product name a v13 line spells: the text before " \u2014 " (the migrations resolve a recipe name the same
+  // way: the exact catalog name, else an exact alias).
+  const spelledName = normalizeProtocolProductText(String(matchText || '').split(' \u2014 ')[0]);
 
   const candidates = products
     .map((product) => {
@@ -159,7 +162,11 @@ function matchCatalogProduct(line, products) {
       // `exact_catalog_names`) matches ONLY a product whose full name it spells:
       // a missing product leaves the line unmatched, never a partial-name stand-in
       // (Acelepryn for Tetrino because both say "Insecticide").
-      if (line.exactName && !normalizedLine.includes(name)) return null;
+      // A product whose configured alias IS the spelled name also matches (a row the catalog holds under another
+      // name), but only when no row has the exact name (see below).
+      const nameMatch = normalizedLine.includes(name);
+      const aliasMatch = !nameMatch && Boolean(spelledName) && (product.aliases || []).map(normalizeText).includes(spelledName);
+      if (line.exactName && !nameMatch && !aliasMatch) return null;
       const productNpk = parseNpkFromText(product.name);
       const aliases = productAliases(product);
       const direct = aliases.some((alias) => normalizedLine.includes(alias));
@@ -174,13 +181,17 @@ function matchCatalogProduct(line, products) {
         : 0;
       return {
         product,
+        aliasOnly: aliasMatch,
         score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore,
       };
     })
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
 
-  return enrichProductAnalysis(candidates[0]?.product || null);
+  // Exact name first, else alias: an alias-only row stands in only when no row spells the name.
+  const ranked = line.exactName && candidates.some((candidate) => !candidate.aliasOnly)
+    ? candidates.filter((candidate) => !candidate.aliasOnly) : candidates;
+  return enrichProductAnalysis(ranked[0]?.product || null);
 }
 
 function enrichProductAnalysis(product) {
@@ -493,6 +504,37 @@ function v13ProtocolRows(structuredProtocol) {
 // windows. Either way the plan withholds its calculated products and blocks
 // instead; the pin is read from the appointment itself, so this does not depend on
 // the completion-default gates. Returns the block, or null.
+// A v13 recipe line (exact catalog names) that matched no active product, because the catalog row that carries its
+// name (or an alias of it) is INACTIVE: getProducts leaves inactive rows out, so without this the line would just
+// vanish (a July base application disappearing). A base line is a block, a conditional line a warning; both name
+// the product and say the office must activate it. A line with no inactive row is unmatched as before.
+async function lawnV13InactiveProductNotices(knex, items, { strict = false } = {}) {
+  const unmatched = (items || []).filter((item) => item.exactName === true && !item.product && String(item.raw || '').includes(' \u2014 '));
+  if (!unmatched.length) return { blocks: [], warnings: [] };
+  const inactive = await savepointRead(knex, (k) => k('products_catalog').where({ active: false }).select('id', 'name'))
+    .catch((err) => { if (strict) throw err; return []; });
+  if (!inactive.length) return { blocks: [], warnings: [] };
+  const aliasRows = await savepointRead(knex, (k) => k('product_aliases').whereIn('product_id', inactive.map((row) => row.id)).select('product_id', 'alias_name'))
+    .catch((err) => { if (strict) throw err; return []; });
+  const namesOf = (row) => [row.name, ...aliasRows.filter((alias) => String(alias.product_id) === String(row.id)).map((alias) => alias.alias_name)].map(normalizeText);
+  const blocks = [];
+  const warnings = [];
+  const seen = new Set();
+  for (const item of unmatched) {
+    const spelled = String(item.raw).split(' \u2014 ')[0].trim();
+    if (seen.has(`${item.role}:${spelled}`) || !inactive.some((row) => namesOf(row).includes(normalizeText(spelled)))) continue;
+    seen.add(`${item.role}:${spelled}`);
+    const notice = {
+      code: 'lawn_v13_product_inactive',
+      severity: item.role === 'base' ? 'block' : 'warning',
+      productName: spelled,
+      message: `${spelled} is inactive in the catalog; the office must activate it. This visit's plan cannot include it until then${item.role === 'base' ? ', so no amount is planned for the step' : ''}.`,
+    };
+    (item.role === 'base' ? blocks : warnings).push(notice);
+  }
+  return { blocks, warnings };
+}
+
 function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
   if (featureGates.lawnV13Live?.() === true) {
     if (!trackKey || structuredProtocol?.version === LAWN_V13_VERSION) return null;
@@ -2063,6 +2105,9 @@ async function buildPlanForService(serviceId, options = {}) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
     blocks.push(...notices.blocks);
     warnings.push(...notices.warnings, ...v13Limit.warnings);
+    const inactiveNotices = await lawnV13InactiveProductNotices(knex, candidateItems, { strict });
+    blocks.push(...inactiveNotices.blocks);
+    warnings.push(...inactiveNotices.warnings);
   }
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
@@ -2338,6 +2383,7 @@ module.exports = {
   v13LineState,
   holdNorthPortProducts,
   suppressNonDefaultBaseProducts,
+  lawnV13InactiveProductNotices,
   NOT_DEFAULT_REASON,
   v13NorthPortHold,
   loadVisitCity,

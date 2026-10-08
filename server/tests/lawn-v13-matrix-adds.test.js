@@ -297,6 +297,61 @@ describe('6b. July potash is a 12-visit-plan step: a 9-visit lawn with a July ap
   });
 });
 
+describe('9. a recipe product is found by its catalog name, else by an alias; an inactive row is a clear notice', () => {
+  const RECIPE = {
+    sop: `${matrix.SOP} \u2014 1.0 lb per 1,000 sq ft (0.5 lb K2O), spreader`,
+    headway: `${matrix.HEAD} \u2014 mapped take-all areas, second spring application, 3 fl oz per 1,000 sq ft`,
+    advion: `${matrix.ADVION} \u2014 optional add-on, office prices it: fire ant bait broadcast at 1.5 lb per acre`,
+  };
+  const line = (key, role = 'base') => engine.parseProtocolLines(RECIPE[key], role, { exactName: true })[0];
+  const row = (id, name, aliases = []) => ({ id, name, aliases, active: true, default_rate_per_1000: 1, rate_unit: 'lb', cost_per_unit: 1, needs_pricing: false });
+
+  test.each([['sop', matrix.SOP], ['headway', matrix.HEAD], ['advion', matrix.ADVION]])('%s: a row held under another name whose alias is the recipe name is matched', (key, recipeName) => {
+    const catalog = [row('other', `Some Other Catalog Name For ${key}`, [recipeName]), row('decoy', 'Decoy Product')];
+    expect(engine.matchCatalogProduct(line(key), catalog)?.id).toBe('other');
+  });
+
+  test('exact name first: with a row of the exact name and an alias-only row, the exact-name row wins, and an unrelated alias or a partial alias never matches', () => {
+    const catalog = [row('alias-only', 'Renamed Potash', [matrix.SOP]), row('exact', matrix.SOP)];
+    expect(engine.matchCatalogProduct(line('sop'), catalog).id).toBe('exact');
+    expect(engine.matchCatalogProduct(line('sop'), [catalog[0]]).id).toBe('alias-only');
+    // An alias that is only part of the spelled name ("Headway") is not the spelled name ("Headway Fungicide").
+    expect(engine.matchCatalogProduct(line('headway'), [row('short', 'Headway G', ['Headway'])])).toBeNull();
+    // The decoy rule of the exact-name matcher stands: Acelepryn Xtra with the alias Acelepryn is not Acelepryn Insecticide.
+    expect(engine.matchCatalogProduct(engine.parseProtocolLines('Acelepryn Insecticide \u2014 caterpillars', 'conditional', { exactName: true })[0], [row('xtra', 'Acelepryn Xtra', ['Acelepryn'])])).toBeNull();
+    // Without the exact-name flag nothing changed.
+    expect(engine.matchCatalogProduct(engine.parseProtocolLines(RECIPE.sop, 'base')[0], [row('only', 'LESCO Elite 0-0-50 AM 18% S SOP Turfgrass Granular Fertilizer')]).id).toBe('only');
+  });
+
+  // A knex stub for the two reads the notice makes.
+  const knexWith = ({ inactive = [], aliases = [] }) => (table) => ({
+    where: () => ({ select: async () => inactive }),
+    whereIn: () => ({ select: async () => (table === 'product_aliases' ? aliases : []) }),
+  });
+  const unmatched = (key, role) => ({ ...line(key, role), role, product: null });
+
+  test.each([['sop', matrix.SOP, 'base'], ['headway', matrix.HEAD, 'base'], ['advion', matrix.ADVION, 'conditional']])('%s: an INACTIVE row with the recipe name (or its alias) gives a plan notice naming the product', async (key, recipeName, role) => {
+    const byName = await engine.lawnV13InactiveProductNotices(knexWith({ inactive: [{ id: 'i1', name: recipeName }] }), [unmatched(key, role)]);
+    const byAlias = await engine.lawnV13InactiveProductNotices(knexWith({ inactive: [{ id: 'i2', name: 'Retired name' }], aliases: [{ product_id: 'i2', alias_name: recipeName }] }), [unmatched(key, role)]);
+    for (const found of [byName, byAlias]) {
+      const [notice] = role === 'base' ? found.blocks : found.warnings;
+      expect(notice).toMatchObject({ code: 'lawn_v13_product_inactive', severity: role === 'base' ? 'block' : 'warning', productName: recipeName });
+      expect(notice.message).toBe(`${recipeName} is inactive in the catalog; the office must activate it. This visit's plan cannot include it until then${role === 'base' ? ', so no amount is planned for the step' : ''}.`);
+      expect(role === 'base' ? found.warnings : found.blocks).toEqual([]);
+    }
+  });
+
+  test('no inactive row, a matched line, a scout line, or a line without exact names: no notice', async () => {
+    expect(await engine.lawnV13InactiveProductNotices(knexWith({}), [unmatched('sop', 'base')])).toEqual({ blocks: [], warnings: [] });
+    const inactive = knexWith({ inactive: [{ id: 'i1', name: matrix.SOP }] });
+    expect(await engine.lawnV13InactiveProductNotices(inactive, [{ ...unmatched('sop', 'base'), product: { id: 'x' } }])).toEqual({ blocks: [], warnings: [] });
+    expect(await engine.lawnV13InactiveProductNotices(inactive, [{ raw: 'Scout visit: inspect the whole lawn and treat spots only', role: 'base', exactName: true, product: null }])).toEqual({ blocks: [], warnings: [] });
+    expect(await engine.lawnV13InactiveProductNotices(inactive, [{ ...unmatched('sop', 'base'), exactName: undefined }])).toEqual({ blocks: [], warnings: [] });
+    // An inactive row of a DIFFERENT name raises nothing.
+    expect(await engine.lawnV13InactiveProductNotices(knexWith({ inactive: [{ id: 'i3', name: 'Something Else' }] }), [unmatched('sop', 'base')])).toEqual({ blocks: [], warnings: [] });
+  });
+});
+
 describe('7. Advion fire ant bait: an optional add-on in April and October (both spreader visits)', () => {
   test('a secondary line only, priced by the office, 1.5 lb per acre', () => {
     for (const m of [4, 10]) {
