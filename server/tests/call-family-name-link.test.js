@@ -125,6 +125,26 @@ describe('suggest-only: nothing is written but the card', () => {
   });
 });
 
+describe('the suggestion has its own resolution (a verdict must not close it or the call\'s other cards)', () => {
+  const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+  test('/verdict refuses family_account_candidates with a 400', () => {
+    const at = triage.indexOf("if (item.reason_code === 'family_account_candidates') {");
+    expect(at).toBeGreaterThan(0);
+    expect(triage.slice(at, at + 400)).toContain('res.status(400)');
+  });
+  test('the call-wide verdict sweep leaves it alone', () => {
+    const at = triage.indexOf(".whereNotIn('reason_code', [\n          'email_bounce_reverify'");
+    expect(at).toBeGreaterThan(0);
+    expect(triage.slice(at, at + 700)).toContain("'family_account_candidates'");
+  });
+  test('the inbox shows Resolve, not Accept / Deny, on the card', () => {
+    const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
+    expect(client).toContain('const isFamilyCard = isTriage && item.reason_code === "family_account_candidates";');
+    expect(client).toContain('!isFirstNameCard && !isFamilyCard &&');
+    expect(client).toContain(') : isFamilyCard ? (');
+  });
+});
+
 const SKIP = !process.env.DATABASE_URL;
 (SKIP ? describe.skip : describe)('family account suggestions on PostgreSQL', () => {
   jest.setTimeout(30000);

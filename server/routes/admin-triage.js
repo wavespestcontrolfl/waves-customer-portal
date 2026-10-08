@@ -1873,6 +1873,11 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'missing_first_name') {
       return res.status(400).json({ error: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.' });
     }
+    // A family-account suggestion is settled by linking the call (the existing relink action), not
+    // by a verdict — a verdict would close it, and the call's other cards, without a link.
+    if (item.reason_code === 'family_account_candidates') {
+      return res.status(400).json({ error: 'This card suggests accounts for a family caller, not a call verdict — confirm the account, link the call, then use Resolve or Dismiss.' });
+    }
     // A street-level address hold is settled by its visit, not by a verdict.
     if (await streetLevelHoldStillPending(db, item)) {
       return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
@@ -2114,6 +2119,8 @@ router.post('/:id/verdict', async (req, res) => {
         // operator never saw. It survives for its own click instead.
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked', 'missing_first_name',
+          // …and a family-account suggestion, which only a link (or its own Resolve / Dismiss) settles.
+          'family_account_candidates',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])

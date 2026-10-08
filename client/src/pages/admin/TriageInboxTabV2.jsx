@@ -69,6 +69,7 @@ const REASON_LABELS = {
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
   missing_first_name: "First name missing — get it",
+  family_account_candidates: "Family caller named an account — confirm, then link",
   property_role_confirm: "Property roles",
   reschedule_link_promise: "Promised reschedule link",
   attached_booking_followup_unbooked: "Follow-up visit not booked — book by hand",
@@ -993,6 +994,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // 400s /verdict on it): enter the name on the customer record, then Resolve
                 // (or Dismiss). The sweep also closes it once the record carries a name.
                 const isFirstNameCard = isTriage && item.reason_code === "missing_first_name";
+                // A family-account suggestion (suggest-only) is settled by linking the call with the
+                // relink action, not by a verdict (the server 400s /verdict on it): Resolve or Dismiss.
+                const isFamilyCard = isTriage && item.reason_code === "family_account_candidates";
                 const isConflictCard = isTriage && item.reason_code === "on_file_house_number_conflict";
                 const isRecoveryCard = isTriage && item.reason_code === "auto_booking_skipped_after_approval";
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
@@ -1038,7 +1042,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
+                          {!isPropertyRoleCard && !isPromiseCard && !isFollowUpCard && !isFirstNameCard && !isFamilyCard && !isRescheduleProposal && !isConflictCard && !isRecoveryCard && !isStreetLevelHoldCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -1125,6 +1129,16 @@ export default function TriageInboxTabV2({ isAdmin }) {
                                 {actioning === busyKey ? "Saving…" : "Resolve"}
                               </Button>
                             ) : null
+                          ) : isFamilyCard ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey}
+                              onClick={() => resolveItem(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {actioning === busyKey ? "Saving…" : "Resolve"}
+                            </Button>
                           ) : isFollowUpCard ? (
                             <Button
                               size="sm"
