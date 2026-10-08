@@ -507,7 +507,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
     row(P_ACE, 'Test Acelepryn', {}, { raw: 'Test Acelepryn — caterpillars' }),
     row(P_DISP, 'Test Dispatch', {}),
   ];
-  const plan = (list = addOns()) => ({ protocol: { structured: { id: 'protocol-1', products: [] } }, completionDefaults: { items: [], addOns: list } });
+  const plan = (list = addOns(), eligible = true) => ({ protocol: { structured: { id: 'protocol-1', products: [] } }, completionDefaults: { eligible, items: [], addOns: eligible ? list : [] } });
   const PROGRAM = new Map([
     [P_LEAD, { productId: P_LEAD, role: 'post_emergent_spot', gates: { annualCounter: 'x' } }],
     [P_ART, { productId: P_ART, role: 'fungicide_spot', gates: { trigger: 'mapped_large_patch' } }],
@@ -622,6 +622,22 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       expect(ctx.plannedProducts.chinch.item).toMatchObject({ productId: P_ARENA, line: 'Test Arena — chinch bugs at 20 to 25 per sq ft' });
     });
 
+    test('an ineligible plan offers no chinch product: nothing from the staged rows, nothing read', async () => {
+      live();
+      buildPlanForService.mockResolvedValue(plan(addOns(), false));
+      const ctx = await context(tablesFor());
+      // The plan is read and offers nothing (no program applies, the profile does not match, the
+      // protocol is not the visit's): no chinch key, and the staged rows are not looked at.
+      expect(ctx.plannedProducts).toMatchObject({ source: 'plan', items: [], addOns: [] });
+      expect('chinch' in ctx.plannedProducts).toBe(false);
+      expect(v13VisitLimits).not.toHaveBeenCalled();
+      // A plan that does not say it is eligible reads as not eligible (fail closed).
+      const bare = plan();
+      delete bare.completionDefaults.eligible;
+      buildPlanForService.mockResolvedValue(bare);
+      expect('chinch' in (await context(tablesFor())).plannedProducts).toBe(false);
+    });
+
     test('no staged chinch rows: no chinch key; a failed read is named and never blocks the sheet', async () => {
       live();
       expect('chinch' in (await context(tablesFor({ 'lawn_protocol_products as lpp': [] }))).plannedProducts).toBe(false);
@@ -691,6 +707,18 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       // A fresh limit read that fails offers nothing, never Arena.
       v13VisitLimits.mockRejectedValue(new Error('db down'));
       expect((await guide(tables)).chinch).toMatchObject({ item: null, note: expect.stringMatching(/could not be checked/) });
+    });
+
+    test('an ineligible plan: the route answers no chinch decision and no chinch card, whatever the photos say', async () => {
+      live();
+      buildPlanForService.mockResolvedValue(plan(addOns(), false));
+      const result = await guide(tablesFor({
+        scheduled_services: visit({ scheduled_date: '2026-07-14' }),
+        lawn_assessment_runs: run({ insect_damage: { level: 'severe' }, fungal_activity: { level: 'severe' } }),
+        lawn_assessments: assessmentRow({ weed_suppression: 50 }),
+      }));
+      expect(result).toMatchObject({ ok: true, cards: [], weedMix: null, chinch: null });
+      expect(v13VisitLimits).not.toHaveBeenCalled();
     });
 
     test('no staged chinch rows, or no plan: the fresh chinch decision is null', async () => {

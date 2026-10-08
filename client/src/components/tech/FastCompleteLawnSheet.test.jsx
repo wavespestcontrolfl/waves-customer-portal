@@ -2610,6 +2610,16 @@ describe('suggested from this lawn', () => {
     });
   });
 
+  test('a visit whose plan is not eligible (no add-ons, no chinch offer) shows no standing entry, before or after Confirm', async () => {
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [], weedMix: null, chinch: null };
+    await open(guideContext({}, null));
+    expect(screen.queryByText('Chinch bugs found at the edge of damage')).toBeNull();
+    await analyze();
+    await suggested();
+    expect(screen.queryByText('Chinch bugs found at the edge of damage')).toBeNull();
+    expect(screen.queryByRole('button', { name: /chinch bug treatment/i })).toBeNull();
+  });
+
   test('the standing entry with both chinch products at their limit is a line only', async () => {
     const note = 'The yearly limit is reached for the chinch bug products on this lawn.';
     await open(guideContext({}, { item: null, note }));

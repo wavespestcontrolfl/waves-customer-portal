@@ -511,9 +511,12 @@ async function loadWeedMix({ addOns, svc, plan, knex, readFailures }) {
 // plannedProducts (the standing "Chinch bugs found" entry, every month) or `{}` (gate off, no
 // staged chinch rows). `chinch.item` is the add-on the tap opens, shaped like a plan add-on: the
 // month's own add-on when the plan holds the product, else built from the program's staged row
-// (an off-plan product the sheet records like any catalog product the technician adds).
+// (an off-plan product the sheet records like any catalog product the technician adds), and only
+// while the plan is eligible for the visit (the same rule the add-ons are built behind).
 async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
-  if (!featureGates.lawnTreatmentGuideLive()) return {};
+  // Only where the plan offers anything for this visit: an ineligible plan (no program applies, the
+  // profile does not match the property, the protocol is not the visit's) offers no chinch product.
+  if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   try {
     const chinch = await chinchOffer({ svc, structured: loaded.plan?.protocol?.structured, sheetAddOns: sheet.addOns, knex });
     return chinch ? { chinch } : {};
@@ -570,7 +573,13 @@ async function loadPlan(svc, knex) {
   if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return null;
   const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
   const withProduct = (list) => (Array.isArray(list) ? list : []).filter((item) => item?.product?.id);
-  return { plan, items: withProduct(plan?.completionDefaults?.items), addOns: withProduct(plan?.completionDefaults?.addOns) };
+  return {
+    plan,
+    // The plan's own eligibility for this visit: the rule behind the items and the add-ons.
+    eligible: plan?.completionDefaults?.eligible === true,
+    items: withProduct(plan?.completionDefaults?.items),
+    addOns: withProduct(plan?.completionDefaults?.addOns),
+  };
 }
 
 // The plan's lists as the sheet reads them: `{ items, addOns }`, in the plan's order.
@@ -803,6 +812,17 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
 
 // ── treatment guide ─────────────────────────────────────────────────────────
 
+// The assessment's run row, or null. Without it only the legacy per-photo reads speak: fewer cards,
+// never more.
+async function loadAssessmentRun(assessment, svc, knex) {
+  try {
+    return (await require('./lawn-visit-runs').loadRun(assessment.id, knex)) || null;
+  } catch (err) {
+    logger.warn(`[lawn-guide] assessment run unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
+}
+
 /**
  * GET /:serviceId/lawn-fast/treatment-guide?assessmentId=: the "Suggested from this lawn" cards for
  * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
@@ -838,15 +858,9 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   const weedMix = (await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures })).weedMix || null;
   const [offers, chinch] = await Promise.all([
     guide.addOnOffers({ candidates: loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows, svc, knex }),
-    chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex }),
+    loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex }) : null,
   ]);
-  let run = null;
-  try {
-    run = (await require('./lawn-visit-runs').loadRun(assessment.id, knex)) || null;
-  } catch (err) {
-    // Without the run only the legacy per-photo reads speak: fewer cards, never more.
-    logger.warn(`[lawn-guide] assessment run unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-  }
+  const run = await loadAssessmentRun(assessment, svc, knex);
   return result(guide.buildCards({
     signals: guide.signalsFromAssessment(assessment, run),
     month: visitMonthOf(svc),
