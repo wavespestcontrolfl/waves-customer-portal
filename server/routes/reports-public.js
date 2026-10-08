@@ -226,29 +226,47 @@ const reportLimiter = rateLimit({
 // replica or a restart gets its own count.
 const reportAskBudgetStore = new rateLimit.MemoryStore();
 reportAskBudgetStore.init({ windowMs: 24 * 60 * 60 * 1000 });
-// The shared count (Codex P1 #5964 r83): every recorded Ask question is a
-// service_report_events row, so the last 24 hours of those rows for this
-// report and this IP is one count for every replica and it survives a
-// restart. It counts every recorded question, not only model answers, so it
-// is the stricter of the two. A failed read falls back to the in-process
-// reservation alone.
+// The shared, atomic reservation (Codex P1 #5964 r83 and the pre-push audit):
+// before a model call, one transaction takes an advisory lock for the report
+// and one for the IP, counts the last 24 hours of `report_ask_model_call`
+// rows in service_report_events for each, and inserts this call's row when
+// both are under their cap. Every replica shares the rows, a restart keeps
+// them, and two concurrent requests cannot both take the last slot. The row
+// is written only when a call is about to reach the model. No migration:
+// event_name is free text and every reader of the table filters by name.
+// A failed transaction (the test doubles, a database fault) falls back to
+// the in-process reservation below, so the model is never unbounded.
 const REPORT_ASK_DAILY = { report: 40, ip: 120 };
-async function reportAskUseLastDay(service, ipHash, dbConn = db) {
-  try {
+const REPORT_ASK_CALL_EVENT = 'report_ask_model_call';
+async function reserveSharedReportAskBudget(service, ipHash, dbConn = db) {
+  return dbConn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-ask:${service.id}`]);
+    if (ipHash) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`report-ask-ip:${ipHash}`]);
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const count = async (where) => Number((await dbConn('service_report_events')
-      .where({ event_name: 'report_question_asked', ...where }).where('created_at', '>=', since).count('* as n').first())?.n || 0);
-    return { report: await count({ service_record_id: service.id }), ip: ipHash ? await count({ ip_hash: ipHash }) : 0 };
-  } catch (err) {
-    logger.warn(`[reports-public] report ask budget read failed: ${err.message}`);
-    return { report: 0, ip: 0 };
-  }
+    const used = async (where) => Number((await trx('service_report_events')
+      .where({ event_name: REPORT_ASK_CALL_EVENT, ...where }).where('occurred_at', '>=', since).count('* as n').first())?.n || 0);
+    // occurred_at: the table indexes (service_record_id, occurred_at) and (event_name, occurred_at).
+    if (await used({ service_record_id: service.id }) >= REPORT_ASK_DAILY.report) return false;
+    if (ipHash && await used({ ip_hash: ipHash }) >= REPORT_ASK_DAILY.ip) return false;
+    await trx('service_report_events').insert({
+      service_record_id: service.id,
+      customer_id: service.customer_id || null,
+      event_name: REPORT_ASK_CALL_EVENT,
+      channel: 'public_report',
+      metadata: '{}',
+      ip_hash: ipHash,
+    });
+    return true;
+  });
 }
 async function reportAskBudgetFor(service, req, deps = {}) {
   const ipHash = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
-  const used = await (deps.useLastDay || reportAskUseLastDay)(service, ipHash);
-  if (used.report >= REPORT_ASK_DAILY.report || used.ip >= REPORT_ASK_DAILY.ip) return false;
-  return takeReportAskBudget([[`report:${service.id}`, REPORT_ASK_DAILY.report], [`ip:${ipHash}`, REPORT_ASK_DAILY.ip]], deps.store);
+  try {
+    return await (deps.reserveShared || reserveSharedReportAskBudget)(service, ipHash);
+  } catch (err) {
+    logger.warn(`[reports-public] shared report ask budget unavailable (${err.message}); using the in-process reservation`);
+    return takeReportAskBudget([[`report:${service.id}`, REPORT_ASK_DAILY.report], [`ip:${ipHash}`, REPORT_ASK_DAILY.ip]], deps.store);
+  }
 }
 async function takeReportAskBudget(keys, store = reportAskBudgetStore) {
   // Reserve first, then check: increment() is the store's atomic step (and it
@@ -2771,3 +2789,4 @@ module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
 module.exports.takeReportAskBudget = takeReportAskBudget;
 module.exports.reportAskBudgetFor = reportAskBudgetFor;
+module.exports.reserveSharedReportAskBudget = reserveSharedReportAskBudget;

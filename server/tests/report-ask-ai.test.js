@@ -1261,16 +1261,52 @@ describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
     store.shutdown?.();
   });
 
-  test('the shared count from recorded questions stops the model across replicas', async () => {
+  // A stand-in for the transaction: one queue, so the lock, the counts and
+  // the insert run one request at a time, as the advisory locks make them.
+  function fakeSharedDb(rows = []) {
+    let chain = Promise.resolve();
+    const table = () => {
+      const q = { filters: {}, since: null };
+      const api = {
+        where(a, op, value) { if (typeof a === 'object') Object.assign(q.filters, a); else q.since = value; return api; },
+        count() { return api; },
+        first: async () => ({ n: rows.filter((row) => Object.entries(q.filters).every(([k, v]) => row[k] === v) && row.occurred_at >= q.since).length }),
+        insert: async (row) => { rows.push({ ...row, occurred_at: new Date() }); },
+      };
+      return api;
+    };
+    const trx = Object.assign(table, { raw: async () => {} });
+    return { rows, transaction: (work) => { const run = chain.then(() => work(trx)); chain = run.catch(() => {}); return run; } };
+  }
+
+  test('the shared reservation is atomic: 60 concurrent requests on a 40-a-day report take exactly 40', async () => {
+    const { reserveSharedReportAskBudget } = require('../routes/reports-public');
+    const dbConn = fakeSharedDb();
+    const results = await Promise.all(Array.from({ length: 60 }, (_, i) => reserveSharedReportAskBudget({ id: 'svc-1', customer_id: null }, `ip-${i}`, dbConn)));
+    expect(results.filter(Boolean)).toHaveLength(40);
+    expect(dbConn.rows).toHaveLength(40);
+    expect(dbConn.rows.every((row) => row.event_name === 'report_ask_model_call')).toBe(true);
+  });
+
+  test('the shared reservation counts what earlier replicas recorded, and the IP cap too', async () => {
+    const { reserveSharedReportAskBudget } = require('../routes/reports-public');
+    const now = new Date();
+    const prior = (n, extra) => Array.from({ length: n }, () => ({ event_name: 'report_ask_model_call', occurred_at: now, ...extra }));
+    expect(await reserveSharedReportAskBudget({ id: 'svc-2' }, 'ip-a', fakeSharedDb(prior(39, { service_record_id: 'svc-2', ip_hash: 'other' })))).toBe(true);
+    expect(await reserveSharedReportAskBudget({ id: 'svc-2' }, 'ip-a', fakeSharedDb(prior(40, { service_record_id: 'svc-2', ip_hash: 'other' })))).toBe(false);
+    expect(await reserveSharedReportAskBudget({ id: 'svc-3' }, 'ip-a', fakeSharedDb(prior(120, { service_record_id: 'elsewhere', ip_hash: 'ip-a' })))).toBe(false);
+    // Rows older than a day no longer count.
+    const old = prior(40, { service_record_id: 'svc-4', ip_hash: 'x' }).map((row) => ({ ...row, occurred_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }));
+    expect(await reserveSharedReportAskBudget({ id: 'svc-4' }, 'ip-a', fakeSharedDb(old))).toBe(true);
+  });
+
+  test('a failed shared reservation falls back to the in-process one', async () => {
     const { reportAskBudgetFor } = require('../routes/reports-public');
     const rateLimit = require('express-rate-limit');
     const store = new rateLimit.MemoryStore();
     store.init({ windowMs: 60 * 1000 });
-    const req = { ip: '203.0.113.9', headers: {} };
-    const service = { id: 'svc-budget-shared' };
-    expect(await reportAskBudgetFor(service, req, { store, useLastDay: async () => ({ report: 40, ip: 3 }) })).toBe(false);
-    expect(await reportAskBudgetFor(service, req, { store, useLastDay: async () => ({ report: 2, ip: 120 }) })).toBe(false);
-    expect(await reportAskBudgetFor(service, req, { store, useLastDay: async () => ({ report: 2, ip: 3 }) })).toBe(true);
+    const deps = { store, reserveShared: async () => { throw new Error('db down'); } };
+    expect(await reportAskBudgetFor({ id: 'svc-fallback' }, { ip: '203.0.113.9', headers: {} }, deps)).toBe(true);
     store.shutdown?.();
   });
 
