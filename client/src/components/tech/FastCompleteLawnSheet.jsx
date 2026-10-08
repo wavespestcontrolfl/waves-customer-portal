@@ -348,11 +348,14 @@ function plannedRate(planned) {
 // A row for a catalog product. `planned` carries the plan's amount, unit and
 // method (a planned row's, or a tapped protocol add-on's plan item); an added
 // product has none and starts on its own default method.
-function productRow(product, { planned = null, added = false, weedGroup = false }) {
+function productRow(product, { planned = null, added = false, weedGroup = false, spotRules = false }) {
   const rawMethod = planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
-  const seeded = plannedSeed(planned, productUnits(product, { method }));
+  // Under the spot rules a spot row never holds the plan's quantity: it is figured from the plan's
+  // estimate of the spot area, and the tech's own area figures the amount instead.
+  const spotRow = spotRules && normalizeApplicationMethod(method) === 'spot_treatment';
+  const seeded = plannedSeed(spotRow ? { ...planned, amount: null } : planned, productUnits(product, { method }));
   return {
     product,
     productId: product.id,
@@ -598,11 +601,12 @@ function plannedRows(ctx, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
   return uniquePlanned(ctx.planned).map((item) => productRow(
     byId.get(String(item.productId).toLowerCase()) || { id: item.productId, name: item.name || 'Planned product' },
-    { planned: item },
+    { planned: item, spotRules: !!ctx.spotRules },
   ));
 }
 
 function useProductRows(ctx, catalog) {
+  const spotRules = !!ctx.spotRules;
   const [rows, setRows] = useState(() => plannedRows(ctx, catalog));
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => {
@@ -612,6 +616,10 @@ function useProductRows(ctx, catalog) {
       // derivedAmount figures in it. Only a typed number is the tech's amount.
       const unitOnly = 'amountUnit' in patch && !('totalAmount' in patch) && !row.amountPicked && !row.fromPlan;
       if (unitOnly) return { ...row, amountUnit: patch.amountUnit, unitPicked: true };
+      // A row moved ONTO spot treatment under the spot rules drops the plan's quantity it still
+      // holds, as a row created on it never had one (productRow).
+      const toSpot = spotRules && row.fromPlan && !('totalAmount' in patch) && 'method' in patch && normalizeApplicationMethod(patch.method) === 'spot_treatment';
+      if (toSpot) return { ...row, ...patch, totalAmount: '', fromPlan: false };
       return {
         ...row,
         ...patch,
@@ -622,13 +630,13 @@ function useProductRows(ctx, catalog) {
         ...('totalAmount' in patch ? { amountEntered: patch.totalAmount !== '' && patch.totalAmount != null } : {}),
       };
     }));
-  }, []);
+  }, [spotRules]);
   const addProduct = useCallback((product, { planned = null, weedGroup = false } = {}) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { added: true, planned, weedGroup }),
+      productRow(product, { added: true, planned, weedGroup, spotRules }),
     ]));
-  }, []);
+  }, [spotRules]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
