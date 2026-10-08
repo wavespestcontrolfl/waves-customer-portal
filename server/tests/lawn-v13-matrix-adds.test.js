@@ -385,9 +385,13 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
     // A residential customer with a commercial lot linked to the visit, and the reverse.
     expect(await type(tables({ property: { property_type: 'commercial' }, customer: { property_type: 'residential' } }), { propertyId: 'p', customerId: 'c', fallback: 'residential' })).toBe('commercial');
     expect(await type(tables({ property: { property_type: 'residential' }, customer: { property_type: 'commercial' } }), { propertyId: 'p', customerId: 'c', fallback: 'commercial' })).toBe('residential');
-    // The linked row says nothing (null type, or no row): the customer's type.
-    expect(await type(tables({ property: { property_type: null }, customer: { property_type: 'business' } }), { propertyId: 'p', customerId: 'c', fallback: 'business' })).toBe('business');
-    expect(await type(tables({ property: undefined, customer: { property_type: 'business' } }), { propertyId: 'p', customerId: 'c' })).toBe('business');
+    // A linked property is judged on its own row ONLY: a missing row, a null or empty type fail closed, however
+    // commercial the account is. The account type answers only a visit with no linked property.
+    for (const property of [undefined, null, { property_type: null }, { property_type: '' }, { property_type: '  ' }]) {
+      expect(await type(tables({ property, customer: { property_type: 'business' } }), { propertyId: 'p', customerId: 'c', fallback: 'business' })).toBe('residential');
+      expect(await type(tables({ property, customer: { property_type: 'commercial' } }), { propertyId: 'p', customerId: 'c' })).toBe('residential');
+    }
+    expect(await type(tables({ property: { property_type: 'business' }, customer: { property_type: 'residential' } }), { propertyId: 'p', customerId: 'c' })).toBe('business');
     // No property on the visit: the fallback, else the customer's row, else nothing; a failed read says nothing.
     expect(await type(tables({ customer: { property_type: 'residential' } }), { customerId: 'c', fallback: 'commercial' })).toBe('commercial');
     expect(await type(tables({ customer: { property_type: 'commercial' } }), { customerId: 'c' })).toBe('commercial');
@@ -403,15 +407,15 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
       expect(await prohibited.treatedPropertyType(broken, { propertyId: 'p', customerId: 'c', fallback: 'commercial' })).toBe('residential');
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('customer_properties property type read failed'));
       // The customer read fails: closed too.
-      const onlyCustomerFails = (table) => (table === 'customers' ? broken() : { where: () => ({ first: async () => undefined }) });
-      expect(await prohibited.treatedPropertyType(onlyCustomerFails, { propertyId: 'p', customerId: 'c' })).toBe('residential');
+      expect(await prohibited.treatedPropertyType(broken, { customerId: 'c' })).toBe('residential');
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('customers property type read failed'));
       // Ronstar stays blocked on both, and commercial is still allowed when the reads succeed.
       expect(prohibited.lawnProhibitedProductBlock({ name: 'Ronstar G' }, { propertyType: 'residential' })).toMatchObject({ code: 'lawn_product_not_for_home_lawns' });
-      // An absent row (no throw, no type) is absent: the fallback decides.
+      // A missing linked row is NOT absent information: it fails closed. With no linked property, nothing on
+      // file is just absent (the caller treats it as residential).
       const absent = () => ({ where: () => ({ first: async () => undefined }) });
-      expect(await prohibited.treatedPropertyType(absent, { propertyId: 'p', customerId: 'c', fallback: 'commercial' })).toBe('commercial');
-      expect(await prohibited.treatedPropertyType(absent, { propertyId: 'p', customerId: 'c' })).toBeUndefined();
+      expect(await prohibited.treatedPropertyType(absent, { propertyId: 'p', customerId: 'c', fallback: 'commercial' })).toBe('residential');
+      expect(await prohibited.treatedPropertyType(absent, { customerId: 'c' })).toBeUndefined();
     } finally {
       warn.mockRestore();
     }

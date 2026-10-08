@@ -2169,7 +2169,7 @@ async function buildPlanForService(serviceId, options = {}) {
     customerId: service.customer_id,
     service,
     plan: {
-      protocol: { base: planItems.filter((item) => item.role === 'base'), conditional: planItems.filter((item) => item.role === 'conditional') },
+      protocol: { base: planItems.filter((item) => item.role === 'base'), conditional: planItems.filter((item) => item.role === 'conditional'), structured: structuredProtocol },
       mixCalculator: { items: plannedItems },
       propertyGate: { latestAssessment: latestAssessment ? { stressFlags } : null, trackKey, trackName: track?.name || null },
     },

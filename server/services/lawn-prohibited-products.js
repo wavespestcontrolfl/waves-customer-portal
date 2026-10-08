@@ -58,12 +58,12 @@ async function lawnProhibitedProductBlocks(database, submittedProducts = [], { p
   return blocks;
 }
 
-// The property type of the TREATED property: the visit's linked customer_properties row when the
-// visit has one and the row says (a customer can own a home and a commercial lot), else the
-// customer's own property_type (`fallback`, already on the visit's row, or read by `customerId`).
-// undefined when nothing says (no row, no type): an ABSENT answer, the caller treats it as residential.
-// A FAILED read is not an absent one: the linked property may be the residential one while the customer's
-// own type is commercial, so a failed read fails closed ('residential': Ronstar stays blocked) and is logged.
+// The property type of the TREATED property. A visit with a linked customer_properties row is judged on THAT
+// row alone (a customer can own a home and a commercial lot): its type when it has one; a missing row, or a
+// row with no type, or a failed read, fails closed ('residential': Ronstar stays blocked; a failed read is
+// logged). The customer's own property_type (`fallback`, already on the visit's row, or read by `customerId`)
+// answers ONLY for a visit with no linked property. undefined when nothing says: the caller treats it as
+// residential too.
 const FAILED_READ_TYPE = 'residential';
 async function treatedPropertyType(database, { propertyId, customerId, fallback } = {}) {
   const { savepointRead } = require('../utils/savepoint-read');
@@ -74,7 +74,7 @@ async function treatedPropertyType(database, { propertyId, customerId, fallback 
   if (propertyId) {
     try {
       const property = await savepointRead(database, (k) => k('customer_properties').where({ id: propertyId }).first('property_type'));
-      if (property?.property_type) return property.property_type;
+      return String(property?.property_type || '').trim() ? property.property_type : FAILED_READ_TYPE;
     } catch (err) { return failed('customer_properties', err); }
   }
   if (fallback !== undefined) return fallback;

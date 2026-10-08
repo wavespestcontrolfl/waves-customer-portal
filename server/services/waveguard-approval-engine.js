@@ -66,6 +66,8 @@ function productGroups(product) {
 // closeout and plan engine keep their lenient default).
 async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false } = {}) {
   const groupColumn = `${groupType}_group`;
+  const tokens = groupSet(groupValue);
+  if (!tokens.length) return null;
   const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('products_catalog as pc', function () {
@@ -75,17 +77,21 @@ async function latestComparableGroupApplication(knex, customerId, product, group
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
     .where(function () {
-      this.where(`pc.${groupColumn}`, groupValue);
-      // A mixed product's field holds several groups ("3 + 11"): the group is one token of the value.
-      this.orWhereRaw('?? ~* ?', [`pc.${groupColumn}`, `(^|[^0-9a-z])${escapeRegex(groupValue)}($|[^0-9a-z])`]);
-      if (groupType === 'hrac') this.orWhere('pc.hrac_group_secondary', groupValue);
-      if (groupType === 'moa') this.orWhere('sp.moa_group', groupValue);
+      // The caller may hand a composite value ("3 + 11", the job card passes the product's whole field): every
+      // caller gets the tokens, and a prior application matches on any one of them.
+      for (const token of tokens) {
+        this.orWhere(`pc.${groupColumn}`, token);
+        // A mixed product's field holds several groups ("3 + 11"): the group is one token of the value.
+        this.orWhereRaw('?? ~* ?', [`pc.${groupColumn}`, `(^|[^0-9a-z])${escapeRegex(token)}($|[^0-9a-z])`]);
+        if (groupType === 'hrac') this.orWhere('pc.hrac_group_secondary', token);
+        if (groupType === 'moa') this.orWhere('sp.moa_group', token);
+      }
     })
     .modify((query) => {
       if (product?.category) query.where('sp.product_category', product.category);
     })
     .orderBy('sr.service_date', 'desc')
-    .select('sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group', 'sp.targets')
+    .select('sp.id as service_product_id', 'sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group', 'sp.targets')
     .limit(1))
     .catch((err) => { if (strict) throw err; return []; });
   return rows[0] || null;
@@ -122,6 +128,46 @@ function targetList(value) {
 
 const hasTakeAllTarget = (value) => targetList(value).some((target) => TAKE_ALL_TARGET.test(target));
 
+// Does an applied protocol row (its trigger or its role) name take-all? ("mapped_take_all_spring_2" reads as take all.)
+function rowNamesTakeAll(row) {
+  const gates = typeof row?.gates === 'string' ? (() => { try { return JSON.parse(row.gates) || {}; } catch { return {}; } })() : (row?.gates || {});
+  return [gates.trigger, row?.role].some((text) => TAKE_ALL_TARGET.test(normalizeText(text)));
+}
+
+// The staged protocol row a PRIOR application was applied under: the ledger actual of its service_products row
+// (protocol_product_id -> lawn_protocol_products). null when it has none or the ledger is not there. A failed
+// read throws when strict, else reads as no row.
+async function priorProtocolRow(knex, serviceProductId, { strict = false } = {}) {
+  if (!serviceProductId) return null;
+  try {
+    const rows = await savepointRead(knex, (k) => k('lawn_protocol_product_actuals as a')
+      .join('lawn_protocol_products as p', 'a.protocol_product_id', 'p.id')
+      .where('a.service_product_id', serviceProductId)
+      .select('p.gates', 'p.role'));
+    return (rows || []).length ? rows : null;
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+}
+
+// Target evidence for a PRIOR application. Recorded targets decide when there are any (a non-take-all target
+// is not take-all evidence). Fast Complete records none, so then the protocol row it was applied under decides;
+// with neither there is no evidence.
+async function takeAllEvidence(knex, { targets, serviceProductId, strict }) {
+  if (targetList(targets).length) return hasTakeAllTarget(targets);
+  const rows = await priorProtocolRow(knex, serviceProductId, { strict });
+  return Boolean(rows && rows.some(rowNamesTakeAll));
+}
+
+// The same for the application being judged: its recorded targets, else the plan's staged row for the product
+// (plan.protocol.structured.products, the rows the visit is applied under).
+function currentTakeAllEvidence({ input, product, plan }) {
+  if (targetList(input.targets).length) return hasTakeAllTarget(input.targets);
+  const rows = (plan?.protocol?.structured?.products || []).filter((row) => String(row?.productId) === String(product?.id));
+  return rows.some(rowNamesTakeAll);
+}
+
 function productIsPreEmergent(product, plan) {
   const rows = plan?.protocol?.structured?.products || [];
   return rows.some((row) => String(row?.productId) === String(product?.id) && /pre_emergent/.test(String(row?.role || '')))
@@ -143,17 +189,23 @@ async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate
     .where('sr.service_date', '<', serviceDate)
     .whereIn('sp.product_name', productNames)
     .orderBy('sr.service_date', 'desc')
-    .select('sr.service_date', 'sp.product_name', 'sp.targets'))
+    .select('sp.id as service_product_id', 'sr.service_date', 'sp.product_name', 'sp.targets'))
     .catch((err) => { if (strict) throw err; return []; });
   const today = dayNumber(serviceDate);
-  return rows.filter((row) => today - dayNumber(row.service_date) <= TAKE_ALL_SEASON_DAYS && hasTakeAllTarget(row.targets));
+  const inSeason = rows.filter((row) => today - dayNumber(row.service_date) <= TAKE_ALL_SEASON_DAYS);
+  const found = [];
+  for (const row of inSeason) {
+    if (await takeAllEvidence(knex, { targets: row.targets, serviceProductId: row.service_product_id, strict })) found.push(row);
+  }
+  return found;
 }
 
-async function isTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) {
+async function isTakeAllPair(knex, { customerId, propertyId, product, plan, last, input, serviceDate, strict }) {
   // Artavia after Artavia, or Headway after Artavia; the first of the pair is always Artavia.
   if (!TAKE_ALL_SECOND.test(normalizeText(product.name)) || !TAKE_ALL_FIRST.test(normalizeText(last.product_name))) return false;
   if (TAKE_ALL_FIRST.test(normalizeText(product.name)) && normalizeText(last.product_name) !== normalizeText(product.name)) return false;
-  if (!hasTakeAllTarget(input.targets) || !hasTakeAllTarget(last.targets)) return false;
+  if (!currentTakeAllEvidence({ input, product, plan })) return false;
+  if (!(await takeAllEvidence(knex, { targets: last.targets, serviceProductId: last.service_product_id, strict }))) return false;
   const history = await takeAllArtaviaHistory(knex, customerId, [...new Set([product.name, last.product_name])], serviceDate, { strict, propertyId });
   if (history.length !== 1 || !TAKE_ALL_FIRST.test(normalizeText(history[0].product_name))) return false;
   const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
@@ -163,7 +215,7 @@ async function isTakeAllPair(knex, { customerId, propertyId, product, last, inpu
 
 async function rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) {
   if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
-  return await isTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
+  return await isTakeAllPair(knex, { customerId, propertyId, product, plan, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
 }
 
 function latestAssessmentStressed(plan) {
@@ -367,4 +419,5 @@ module.exports = {
   managerApprovalSummary,
   latestComparableGroupApplication,
   productGroups,
+  priorProtocolRow,
 };
