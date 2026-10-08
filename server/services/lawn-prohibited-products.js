@@ -14,13 +14,18 @@
 // Turf use, not pricing: the pricing classifier (commercial-helpers.js) calls HOA and multifamily common
 // areas and apartments "commercial", but people live on that turf and the label bars residential
 // properties. So a type is commercial here only when the pricing classifier says so AND the stored type
-// names nothing residential. "office", "warehouse", "medical_office", "retail", "commercial", "business"
+// names no dwelling. An HOA or common-area type alone is treated as residential; one that says it is
+// commercial ("hoa_common_area_commercial": a business park or commercial association) is not.
+// "office", "warehouse", "medical_office", "retail", "commercial", "business", "hoa_common_area_commercial"
 // pass; "hoa_common_area_residential", "multifamily_common_area_residential", "residential_hoa",
-// "residential_common_area", "apartment", blank and unknown types do not (the safe side).
-const RESIDENTIAL_TURF = /resident|hoa|multi[\s_-]?family|apartment|condo|town\s?home|townhouse|duplex|common[\s_-]?area|single[\s_-]?family|\bhome\b/i;
+// "residential_common_area", "hoa", "common_area", "apartment", blank and unknown types do not (the safe side).
+const DWELLING = /resident|multi[\s_-]?family|apartment|condo|town\s?home|townhouse|duplex|single[\s_-]?family|\bhome\b/i;
+const SHARED_AREA = /hoa|common[\s_-]?area/i;
+const EXPLICIT_COMMERCIAL = /commercial|business/i;
 const isCommercialProperty = (propertyType) => {
   const type = String(propertyType || '');
-  if (!type.trim() || RESIDENTIAL_TURF.test(type)) return false;
+  if (!type.trim() || DWELLING.test(type)) return false;
+  if (SHARED_AREA.test(type) && !EXPLICIT_COMMERCIAL.test(type)) return false;
   return require('./pricing-engine/commercial-helpers').isCommercialProperty({ propertyType });
 };
 

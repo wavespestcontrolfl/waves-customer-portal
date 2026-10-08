@@ -19,6 +19,7 @@ const round11 = require('../models/migrations/20261007188000_lawn_v13_matrix_add
 const remove = require('../models/migrations/20261007189000_lawn_v13_matrix_remove_july_potash');
 const aliasRows = require('../models/migrations/20261007189500_lawn_v13_matrix_alias_rows_and_advion_limits');
 const aliasGuard = require('../models/migrations/20261007189600_lawn_v13_matrix_alias_rows_rollback_guard');
+const advionRate = require('../models/migrations/20261007189700_lawn_v13_matrix_advion_catalog_rate');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const CHAIN = [matrix, fixes, round2, round3, round4, round5, round6, round7, round11, remove];
@@ -126,6 +127,18 @@ describeDb('v13 matrix: alias-resolved catalog rows and Advion limits (202610071
       expect(await limits(ADVION_ROW)).toEqual(LABEL_LIMITS);
     });
 
+    test('189700: the alias-resolved Advion row gets the label default rate and unit; a second up changes nothing; down takes them back', async () => {
+      expect((await catalog(ADVION_ROW)).default_rate_per_1000).toBeNull();
+      await advionRate.up(knex);
+      const row = await catalog(ADVION_ROW);
+      expect([Number(row.default_rate_per_1000), row.rate_unit]).toEqual([0.0344, 'lb']);
+      await advionRate.up(knex);
+      expect(await knex('lawn_protocol_audit_log').where({ action: advionRate.ACTION })).toHaveLength(1);
+      await advionRate.down(knex);
+      const back = await catalog(ADVION_ROW);
+      expect([back.default_rate_per_1000, back.rate_unit]).toEqual([null, null]);
+    });
+
     test('a second up changes nothing', async () => {
       const once = await everything();
       await aliasRows.up(knex);
@@ -154,13 +167,14 @@ describeDb('v13 matrix: alias-resolved catalog rows and Advion limits (202610071
       await build({ aliasOnly: true, legacyLimits: LEGACY });
       await aliasRows.up(knex);
       await aliasGuard.up(knex);
+      await advionRate.up(knex);
       await knex('scheduled_services').insert({ lawn_protocol_key: staged.TRACKS[0].key, lawn_protocol_version: staged.V13_VERSION, service_type: 'Lawn fixture', scheduled_date: '2026-10-07' });
     }, 120000);
     afterAll(drop);
 
     test('the whole chain rolled back keeps the alias rows facts, their approval and the label limits', async () => {
       const live = await everything();
-      for (const migration of [aliasGuard, aliasRows, ...[...CHAIN].reverse()]) await migration.down(knex);
+      for (const migration of [advionRate, aliasGuard, aliasRows, ...[...CHAIN].reverse()]) await migration.down(knex);
       const after = await everything();
       expect(after.limits).toEqual(live.limits);
       expect(await limits(ADVION_ROW)).toEqual(LABEL_LIMITS);
@@ -168,6 +182,7 @@ describeDb('v13 matrix: alias-resolved catalog rows and Advion limits (202610071
         expect(after.catalog.find((row) => row.name === name)).toEqual(live.catalog.find((row) => row.name === name));
       }
       expect((await catalog(HEADWAY_ROW)).approved_for_service_report).toBe(true);
+      expect(Number((await catalog(ADVION_ROW)).default_rate_per_1000)).toBe(0.0344);
     });
   });
 
@@ -186,6 +201,17 @@ describeDb('v13 matrix: alias-resolved catalog rows and Advion limits (202610071
       await aliasRows.up(knex);
       expect(await limits(ADVION_ROW)).toEqual([LABEL_LIMITS[0], { ...LABEL_LIMITS[1], value: 120 }]);
     });
+
+    test('189700 leaves a rate stored in another unit alone, and moves an old 0.034 lb rate to 0.0344', async () => {
+      await knex('products_catalog').where({ name: ADVION_ROW }).update({ default_rate_per_1000: 0.55, rate_unit: 'oz' });
+      await advionRate.up(knex);
+      let row = await catalog(ADVION_ROW);
+      expect([Number(row.default_rate_per_1000), row.rate_unit]).toEqual([0.55, 'oz']);
+      await knex('products_catalog').where({ name: ADVION_ROW }).update({ default_rate_per_1000: 0.034, rate_unit: 'lb' });
+      await advionRate.up(knex);
+      row = await catalog(ADVION_ROW);
+      expect([Number(row.default_rate_per_1000), row.rate_unit]).toEqual([0.0344, 'lb']);
+    });
   });
 
   describe('the chain that inserted its own canonical rows', () => {
@@ -195,6 +221,7 @@ describeDb('v13 matrix: alias-resolved catalog rows and Advion limits (202610071
     test('up changes no limit and takes no fact away; the rows stay approved with the label limits', async () => {
       const before = await everything();
       await aliasRows.up(knex);
+      await advionRate.up(knex);
       const after = await everything();
       expect(after.limits).toEqual(before.limits);
       expect(after.products).toEqual(before.products);

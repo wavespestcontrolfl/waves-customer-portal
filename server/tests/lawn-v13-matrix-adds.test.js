@@ -515,7 +515,7 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
 describe('Ronstar home-lawn block: turf use, not the pricing class', () => {
   const { lawnProhibitedProductBlock } = require('../services/lawn-prohibited-products');
   const ronstar = { name: 'Ronstar G' };
-  test.each(['office', 'warehouse', 'medical_office', 'commercial', 'Retail'])('%s turf is commercial: allowed', (propertyType) => {
+  test.each(['office', 'warehouse', 'medical_office', 'commercial', 'Retail', 'hoa_common_area_commercial', 'business_park'])('%s turf is commercial: allowed', (propertyType) => {
     expect(lawnProhibitedProductBlock(ronstar, { propertyType })).toBeNull();
   });
   test.each([
