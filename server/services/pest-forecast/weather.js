@@ -96,8 +96,15 @@ async function fetchNwsForecast(lat, lng) {
 // NWS backup (owner 2026-10-08): the same two signals from Open-Meteo's
 // daytime hours, over the same six days, when NWS fails. Null when it cannot
 // answer either; the forecast then falls to its seasonal baseline as before.
-async function fetchOpenMeteoBackup(lat, lng) {
-  const days = ((await getOpenMeteoDaytime(lat, lng)) || []).slice(0, 6);
+// The backup spends only what NWS left of the lookup's old worst case (its
+// two requests at TIMEOUT_MS each) and is skipped when too little remains,
+// so a stalled NWS does not add a third wait on top (Codex #6119 r4).
+const WEATHER_BUDGET_MS = 2 * TIMEOUT_MS;
+const BACKUP_MIN_MS = 1000;
+async function fetchOpenMeteoBackup(lat, lng, startedAt) {
+  const remaining = WEATHER_BUDGET_MS - (Date.now() - startedAt);
+  if (remaining < BACKUP_MIN_MS) return null;
+  const days = ((await getOpenMeteoDaytime(lat, lng, { timeoutMs: remaining })) || []).slice(0, 6);
   const avg = (values) => {
     const nums = values.filter((v) => Number.isFinite(v));
     return nums.length ? Math.round(nums.reduce((a, b) => a + b, 0) / nums.length) : null;
@@ -175,12 +182,13 @@ async function fillSignals({ lat, lng, region, key, now }) {
     : Promise.resolve(null);
 
   let base = { hasWeather: false, tempHighF: null, precipChance: null, recentRainIn: null, source: null };
+  const startedAt = Date.now();
   try {
     const nws = await fetchNwsForecast(lat, lng);
     base = { ...base, ...nws, hasWeather: nws.tempHighF != null || nws.precipChance != null };
   } catch (err) {
     logger.warn?.(`[pest-forecast/weather] NWS lookup failed for ${key}: ${err.message}`);
-    const backup = await fetchOpenMeteoBackup(lat, lng).catch(() => null);
+    const backup = await fetchOpenMeteoBackup(lat, lng, startedAt).catch(() => null);
     if (backup) base = { ...base, ...backup, hasWeather: true };
   }
 

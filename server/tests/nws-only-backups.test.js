@@ -79,6 +79,27 @@ describe('pest forecast weather', () => {
     expect(out).toMatchObject({ hasWeather: true, tempHighF: 88, precipChance: 40, source: 'open_meteo' });
   });
 
+  test('a slow NWS failure leaves no budget: the backup is skipped (Codex #6119 r4)', async () => {
+    let clock = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    // The failing NWS request used 7.5 s of the 8 s budget.
+    global.fetch = jest.fn(async () => { clock += 7500; return { ok: false, status: 503, json: async () => ({}) }; });
+    const { getWeatherSignals, getOpenMeteoDaytime } = load([{ date: '2026-10-10', tempHighF: 88, rainChance: 40 }]);
+    expect((await getWeatherSignals({ lat: 28.8, lng: -81.7, region: 'central' })).hasWeather).toBe(false);
+    expect(getOpenMeteoDaytime).not.toHaveBeenCalled();
+    Date.now.mockRestore();
+  });
+
+  test('a fast NWS failure passes the backup the time that is left', async () => {
+    let clock = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    global.fetch = jest.fn(async () => { clock += 500; return { ok: false, status: 503, json: async () => ({}) }; });
+    const { getWeatherSignals, getOpenMeteoDaytime } = load([{ date: '2026-10-10', tempHighF: 88, rainChance: 40 }]);
+    expect((await getWeatherSignals({ lat: 28.9, lng: -81.8, region: 'central' })).source).toBe('open_meteo');
+    expect(getOpenMeteoDaytime).toHaveBeenCalledWith(28.9, -81.8, { timeoutMs: 7500 });
+    Date.now.mockRestore();
+  });
+
   test('NWS up: Open-Meteo is never asked', async () => {
     global.fetch = jest.fn(async (url) => ({
       ok: true,

@@ -178,9 +178,11 @@ function dailyFromHours(hours) {
  * Open-Meteo daytime (6 AM-6 PM ET) highs and rain chances for the complete
  * dates in the next 7 days, for a reader with its own NWS path that needs a
  * backup (pest forecast). Shares the backup read, its dedupe and the shared
- * client's cache. Never throws; null when unavailable.
+ * client's cache. `timeoutMs` = what the caller's own budget has left
+ * (never longer than the client's deadline). Never throws; null when
+ * unavailable.
  */
-async function getOpenMeteoDaytime(lat, lng) {
+async function getOpenMeteoDaytime(lat, lng, { timeoutMs = FORECAST_BACKUP_MAX_MS } = {}) {
   const latNum = Number(lat);
   const lngNum = Number(lng);
   if (lat == null || lng == null || !Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
@@ -194,7 +196,7 @@ async function getOpenMeteoDaytime(lat, lng) {
   const fromMs = etHour >= 6 && etHour < 18
     ? parseETDateTime(`${etDateString(now)}T06:00`).getTime()
     : Math.floor(now.getTime() / 3600000) * 3600000;
-  const hours = await readOpenMeteoHours(latNum, lngNum, FORECAST_BACKUP_MAX_MS, fromMs).catch(() => null);
+  const hours = await readOpenMeteoHours(latNum, lngNum, Math.min(timeoutMs, FORECAST_BACKUP_MAX_MS), fromMs).catch(() => null);
   const days = hours ? daytimeFromHours(hours) : [];
   return days.length ? days : null;
 }
