@@ -402,14 +402,18 @@ const ACCESS_VERB_DEVICE = /\b((?:unlock|open|get\s+(?:into|through|past)|access
 const ACCESS_DEVICE = /\b(?:gates?|doors?|locks?|padlocks?|keypads?|key\s*pads?|garages?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|entry|entrances?)\b/i;
 const ACCESS_ACTION = /\b(?:enter|entering|type|typing|use|using|punch\w*|key\s+in|press|dial|input|codes?|combo|combination|password|passcode|pin|opens?\s+with|unlocks?\s+with|opened\s+with|word)\b/i;
 function maskAccessSentences(text) {
-  // Run last: a sentence about an entry device and an access action that
-  // still holds a capitalized word or a digit after every other redaction
-  // leaves whole.
-  return splitSentences(text).map((sentence) => {
-    const residue = sentence.replace(/\[[^\]]*\]/g, ' ').replace(/^\s*\S+/, ' ');
-    return ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence) && /\b[A-Z]{2,}\b|\d/.test(residue)
-      ? '[access details removed]' : sentence;
-  }).join(' ');
+  // Run last. A sentence about an entry device and an access action leaves
+  // whole unless an earlier pass already masked its value: a credential can
+  // be plain lowercase words ("the password at the side gate is blue moon")
+  // (Codex P1s #5964 r69, r71).
+  return splitSentences(text).map((sentence) => (isAccessSentence(sentence) ? '[access details removed]' : sentence)).join(' ');
+}
+function isAccessSentence(sentence) {
+  if (!ACCESS_DEVICE.test(sentence) || !ACCESS_ACTION.test(sentence)) return false;
+  // An earlier pass may have masked the wrong words and left the value:
+  // "The password [redacted] the [redacted] gate is blue moon".
+  if (/\b(?:password|passcode|code|combo|combination|pin|word)\b[^.?!]*?\b(?:is|was|=|:)\s+(?!\[)\S+/i.test(sentence)) return true;
+  return !/\[(?:redacted|access details removed)\]/.test(sentence);
 }
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
@@ -1167,8 +1171,16 @@ const VISIT_PROMISE = /\b(?:we|(?:the|a|an|your|our)\s+(?:tech|technician|team(?
 const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
-function statesADate(text, { requiredLines }) {
-  const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
+// "When was this service?": the recorded service date may be repeated exactly
+// (Codex P1 #5964 r71); any other date is still rejected.
+const SERVICE_DATE_QUESTION = /\b(?:when|what\s+(?:day|date))\s+(?:was|did|were)\b|\bdate\s+of\s+(?:this|the|my|our|that)\s+(?:service|visit|treatment|report)\b|\b(?:service|visit|treatment)\s+date\b/i;
+function withoutServiceDate(own, facts, question) {
+  const serviceDate = String(facts?.service_date || '');
+  if (!serviceDate || !SERVICE_DATE_QUESTION.test(String(question || '')) || /\b(?:next|will|return|come\s+back|follow)\b/i.test(own)) return own;
+  return own.split(serviceDate).join(' ').split(serviceDate.replace(/^[A-Za-z]+,\s*/, '')).join(' ');
+}
+function statesADate(text, { requiredLines, facts, question }) {
+  const own = withoutServiceDate(requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text)), facts, question);
   return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY, YEAR, VISIT_TIME_NUMBER, COMPACT_24H, VISIT_PROMISE].some((re) => re.test(own));
 }
 
@@ -1338,8 +1350,8 @@ function numberIsKnown(value, after, sentence, known) {
 const METADATA_FACTS = new Set(['company', 'contact', 'service_date', 'asked_about_product']);
 const OFFICE_PHONE_RE = new RegExp(String(WAVES_SUPPORT_PHONE_DISPLAY).replace(/[()]/g, '\\$&').replace(/\s+/g, '\\s*'), 'g');
 
-function statesUnknownNumber(text, { facts, requiredLines }) {
-  const own = digitsForWords(requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text)))
+function statesUnknownNumber(text, { facts, requiredLines, question }) {
+  const own = digitsForWords(withoutServiceDate(requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text)), facts, question))
     .replace(OFFICE_PHONE_RE, ' ');
   if (!NUMBER_RE.test(own)) return false;
   NUMBER_RE.lastIndex = 0;
@@ -2024,6 +2036,10 @@ function deniesConcern(text, facts) {
   const concernTerms = new Set(stemmedTerms(concern).split(' ').filter((term) => term.length > 2));
   return clausesOf(text).some((clause) => {
     const lower = clause.toLowerCase();
+    // A place attributed to the customer must be in the concern: "You
+    // reported ants in the bedroom" (Codex P1 #5964 r71).
+    if (/\b(?:you|your)\b/.test(lower) && CONCERN_VERB.test(lower) && !NEGATION_RE.test(lower)
+      && (lower.match(FINDING_PLACE_RE) || []).some((place) => !concern.includes(place.replace(/e?s$/, '')))) return true;
     // "Did not mention" is a denial here: the concern is on the report.
     if (!(NOT_CONFIRMED_RE.test(lower) || NEGATION_RE.test(lower)) || /\b(?:whether|unclear|not\s+sure|don['’]?t\s+know|can['’]?t\s+confirm|cannot\s+confirm)\b/.test(lower)) return false;
     if (!/\b(?:you|your)\b/.test(lower) || !CONCERN_VERB.test(lower)) return false;
@@ -2160,7 +2176,7 @@ const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
   // The answer may not hand back an access word either (Codex P2 #5964 r56).
-  ['access_phrase', (text) => splitSentences(text).some((sentence) => ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence) && /[A-Z]{2,}|\d|\b(?:is|was)\s+\S+\s*$|\bwith\s+\S+/.test(sentence.replace(/\[[^\]]*\]/g, ''))) || [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS), ...text.matchAll(ACCESS_VALUE_FIRST), ...text.matchAll(ACCESS_VERB_DEVICE)].length > 0],
+  ['access_phrase', (text) => splitSentences(text).some(isAccessSentence) || [...text.matchAll(ACCESS_PHRASE), ...text.matchAll(ACCESS_WORD_IS), ...text.matchAll(ACCESS_VALUE_FIRST), ...text.matchAll(ACCESS_VERB_DEVICE)].length > 0],
   ['lawn_status_claim', (text, { facts }) => contradictsLawnStatus(text, facts)],
   ['diagnosis_claim', (text, { facts }) => contradictsDiagnosis(text, facts)],
   ['method_claim', (text, { facts }) => statesUnrecordedMethod(text, facts)],
@@ -2514,6 +2530,8 @@ function fixedAnswerTopic(topic, question, data = {}) {
   // assessment" delta, which the sheet does not carry (Codex P1 #5964 r70).
   if (data.serviceLine === 'lawn' && !data.reportV2 && LAWN_PROGRESS_QUESTION.test(question)) return 'legacy_progress';
   if (PHOTO_QUESTION.test(question)) return 'photos';
+  // The blog card's title is not on the fact sheet (Codex P1 #5964 r71).
+  if (/\b(?:blog|article|post|reading|read\s+more)\b/i.test(question)) return 'blog';
   // The page draws a product's zones from zone ids the sheet does not carry,
   // so "where was it applied?" keeps the fixed answer (Codex P1 #5964 r68).
   if (data.serviceLine !== 'pest' && PRODUCT_LOCATION_QUESTION.test(question)) return 'product_location';

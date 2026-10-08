@@ -2478,3 +2478,31 @@ describe('answer screen, Codex round 70', () => {
     expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('unstated_number');
   });
 });
+
+describe('answer screen, Codex round 71', () => {
+  const data = pestData({ applications: [], serviceDate: '2026-10-02', customerConcern: 'Ants seen in the kitchen. The password at the side gate is blue moon.' });
+  const question = 'When was this service?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer, q = question) => screenAskAnswer(answer, { question: q, data, facts });
+
+  test('a lowercase credential sentence leaves whole and is never repeated', () => {
+    expect(facts.customer_concern).toBe('Ants seen in the kitchen. [access details removed]');
+    expect(ask('The password at the side gate is blue moon.')).toBe('access_phrase');
+  });
+
+  test('a place attributed to the customer must be in the concern', () => {
+    expect(ask('You reported ants in the bedroom.', 'Where did I report ants?')).toBe('denies_concern');
+    expect(ask('You reported ants in the kitchen.', 'Where did I report ants?')).toBeNull();
+  });
+
+  test('the recorded service date answers a completed-visit date question only', () => {
+    expect(ask(`This service was on ${facts.service_date}.`)).toBeNull();
+    expect(ask('This service was on October 9, 2026.')).toBe('states_a_date');
+    expect(ask(`Your next visit is ${facts.service_date}.`)).toBe('states_a_date');
+    expect(ask(`This service was on ${facts.service_date}.`, 'What was applied?')).toBe('states_a_date');
+  });
+
+  test('a blog question keeps the fixed answer', () => {
+    expect(ruleAnswerReason(data, [], 'unrouted', 'What is the blog post on my report?')).toBe('blog');
+  });
+});
