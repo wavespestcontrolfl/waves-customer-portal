@@ -292,21 +292,21 @@ describe('FIX 1 wiring in processRecording (structural pin)', () => {
   });
 
   test('the customer-create branch opens only behind the first-name gate and the exact-match predicate', () => {
-    expect(source).toMatch(/\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone && !extracted\.is_voicemail && !v2NonCustomerCallNature/);
+    expect(source).toMatch(/\(createNameFor\('first_name'\) \|\| firstNameAdvisoryCreate\) && phone && !extracted\.is_voicemail && !v2NonCustomerCallNature/);
     const predicate = source.slice(source.indexOf('const firstNameAdvisoryCreate ='), source.indexOf('const sharedPhoneAmbiguity = {}'));
     expect(predicate).toContain('callFirstNameAdvisoryLive()');
-    expect(predicate).toContain("String(extracted.last_name || '').trim()");
+    expect(predicate).toContain("String(createNameFor('last_name') || '').trim()");
     expect(predicate).toContain('firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null)');
   });
 
   test('customer_creation_failed expectation follows the same predicate', () => {
-    expect(source).toMatch(/const customerExpected = !!\(\(extracted\.first_name \|\| firstNameAdvisoryCreate\) && phone/);
+    expect(source).toMatch(/const customerExpected = !!\(\(createNameFor\('first_name'\) \|\| firstNameAdvisoryCreate\) && phone/);
   });
 
   test('the blank-name customer gets its missing_first_name card at creation (fail-soft, one card per call)', () => {
     const start = source.indexOf('Created customer ${customerId} from call recording');
     const site = source.slice(start, source.indexOf('// Both default rows', start));
-    expect(site).toContain("if (!String(extracted.first_name || '').trim()) {");
+    expect(site).toContain("if (!String(createNameFor('first_name') || '').trim()) {");
     expect(site).toContain('fileMissingFirstNameCard(db, { callLogId: call.id, customerId');
     expect(site).toContain('catch (cardErr)');
     // the booking path files through the SAME idempotent helper

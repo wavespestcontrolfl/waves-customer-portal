@@ -529,6 +529,12 @@ describe('processor wiring — one decision, used only where the canonical custo
     expect(src).not.toMatch(/countCustomersWithContactPhone|labeledInbound|NAME_DICTATION_MARKER|name_dictation|applyNameDictationToV2Caller/);
   });
 
+  test('creation eligibility reads the resolved name too', () => {
+    expect(src).toMatch(/const firstNameAdvisoryCreate = !createNameFor\('first_name'\)/);
+    expect(src).toMatch(/\(createNameFor\('first_name'\) \|\| firstNameAdvisoryCreate\) && phone && !extracted\.is_voicemail && !v2NonCustomerCallNature\) \{/);
+    expect(src).toMatch(/const customerExpected = !!\(\(createNameFor\('first_name'\) \|\| firstNameAdvisoryCreate\)/);
+  });
+
   test('the decision reaches candidate staging for the linked customer', () => {
     expect(src).toMatch(/nameOverrides: spelledNameOverrides,/);
   });

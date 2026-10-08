@@ -12475,9 +12475,9 @@ const CallRecordingProcessor = {
     // on the line to book it). The missing first name rides an advisory card.
     // Every other creation guard (phone, voicemail, non-customer nature)
     // still applies at the branch below. Gate off: first_name is required.
-    const firstNameAdvisoryCreate = !extracted.first_name
+    const firstNameAdvisoryCreate = !createNameFor('first_name')
       && require('../config/feature-gates').callFirstNameAdvisoryLive()
-      && !!String(extracted.last_name || '').trim()
+      && !!String(createNameFor('last_name') || '').trim()
       && !addressRecovery?.recovered
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
     const sharedPhoneAmbiguity = {};
@@ -12532,7 +12532,7 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+      } else if ((createNameFor('first_name') || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
         // incident: first name + mangled address became a "real" customer).
@@ -12747,7 +12747,7 @@ const CallRecordingProcessor = {
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
         }
-      } else if (!extracted.first_name) {
+      } else if (!createNameFor('first_name')) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
       }
     }
@@ -14396,7 +14396,7 @@ const CallRecordingProcessor = {
     // customer_creation_failed and pollute failure reporting (codex r4 P2).
     // An explicit operator unlink is an INTENTIONAL customer-less result,
     // never a creation failure to file a card for on every reprocess.
-    const customerExpected = !!((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
+    const customerExpected = !!((createNameFor('first_name') || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !extracted.is_spam && !v2NonCustomerCallNature && !explicitUnlink);
     const customerLanded = !!customerId;
     // Downgraded below if a customer-less recovery lead was expected but its
     // insert failed — that lead is the only durable record for this call, and
