@@ -1276,6 +1276,19 @@ slot search has produced a candidate inside the 3 dates; the coordinates
 must fall inside the service area's coarse box (`service-area.js`); and at
 most 60 reads start per minute per process, past which the build keeps
 today's order. Fail open on every error.
+The estimate page's slot list (`estimate-slot-availability.js`
+`getAvailableSlots`, behind the estimate token routes that list and search
+slots) takes the same gate, rules, service-area check and budget: with a
+slot inside the 3 dates, everything BEHIND the lead cards is reordered by
+rain fit before the display slice. The first card stays the soonest opening
+and a scarce first day's pinned cards stay pinned, so
+`metadata.firstDayAvailability` and its badge keep matching the cards shown.
+A slot moved behind drier ones carries the same one field, `display_tier`
+(integer 1-2; never on a lead card), which the picker's best-times strip
+sorts by first; it is absent otherwise. The token gate, rate limits, signed
+`slotId`s, reserve and commit checks are unchanged. The result rides
+the existing 5-minute wrapper cache, so a gate flip reaches a cached
+estimate within that TTL.
 **Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
 2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
 and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the

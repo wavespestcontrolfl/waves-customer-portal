@@ -3,7 +3,8 @@
  * GATE_CUSTOMER_RAIN_RANK, dark): the same rule the New Appointment picker
  * runs under GATE_BOOKING_RAIN_RANK (rain-fit.js), applied to the offers
  * buildBookingAvailability curates for /book, the inspection link and the
- * public reschedule page.
+ * public reschedule page, and to the estimate page's slot list
+ * (estimate-slot-availability.js).
  *
  * It only changes ORDER: which hours are offered, the full day list, the
  * signed offers and the commit checks are untouched. A recommendation whose
@@ -25,7 +26,8 @@ const GATE = 'GATE_CUSTOMER_RAIN_RANK';
 function servicesToClassify({ serviceIdentity, serviceLabels }) {
   const name = serviceIdentity && (serviceIdentity.serviceType || serviceIdentity.catalogServiceKey);
   if (name) return [{ name, serviceKey: serviceIdentity.catalogServiceKey || null }];
-  return (Array.isArray(serviceLabels) ? serviceLabels : []).filter(Boolean);
+  // Labels, or { name, serviceKey } rows from a caller that has the key.
+  return (Array.isArray(serviceLabels) ? serviceLabels : []).filter((item) => (item && item.name) || typeof item === 'string');
 }
 
 /**
@@ -93,6 +95,77 @@ function startCustomerRainRank({ today, lat, lng, ...rest } = {}) {
   };
 }
 
+/**
+ * The tier function for estimate slots ({ date, windowStart, windowEnd }),
+ * or null (today's order). Same gate, rules, service-area check and budget
+ * as the booking builder; nothing is read unless a slot is inside the rain
+ * horizon. `services` = the estimate's service profile rows or labels;
+ * `point` = its coordinates ({ lat, lng }), null when it has none.
+ */
+async function slotRainTierOf(slots, { services = [], profile = null, point = null, today, db, deps = {} } = {}) {
+  const todayYmd = etDateString(today || new Date());
+  const list = Array.isArray(slots) ? slots : [];
+  if (!list.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
+  const { gateEnvValue } = require('../../config/feature-gates');
+  if (!gateEnvValue(GATE)) return null;
+  // `services` = the rows this appointment performs (the caller narrows a
+  // recurring estimate to its primary service); the whole profile otherwise.
+  const rows = Array.isArray(services) && services.length ? services : (profile && profile.services) || [];
+  const serviceLabels = await estimateServiceIdentities(rows, { profile, db, deps });
+  const tierOf = await customerRainTierOf({ serviceLabels, lat: point?.lat, lng: point?.lng, today, db, deps });
+  return tierOf ? (slot) => tierOf({ date: slot.date, start_time: slot.windowStart, end_time: slot.windowEnd }) : null;
+}
+
+// An estimate's services as { name, serviceKey } for the classifier. A row's
+// display label can differ from the catalog name, so its catalog key settles
+// the identity ahead of it. In order: the verified key frozen on the line
+// (catalogServiceKey); the row resolveCatalogSlotProfile resolved under the
+// capacity gate (resolvedServiceKey); else the same catalog lookup made here
+// for that one row, so the ranking does not depend on the capacity gate
+// (Codex #6127 r2). A lookup that fails or finds nothing leaves the label.
+const MAX_ESTIMATE_SERVICES = 12;
+async function estimateServiceIdentities(rows, { profile, db, deps = {} }) {
+  const out = [];
+  const all = Array.isArray(rows) ? rows : [];
+  for (const service of all.slice(0, MAX_ESTIMATE_SERVICES)) {
+    if (typeof service === 'string') { out.push(service); continue; }
+    const name = service?.label || service?.service;
+    let serviceKey = service?.catalogServiceKey || service?.resolvedServiceKey || null;
+    if (!serviceKey && profile) serviceKey = await catalogKeyForRow(profile, service, { db, deps });
+    out.push({ name, serviceKey });
+  }
+  // Rows past the cap are not looked up, so they cannot be called rain-OK:
+  // one entry with an identity no list knows makes the estimate outdoor
+  // (Codex #6127 r3; the booking path's rule, rain-fit.js bookingServices).
+  if (all.length > MAX_ESTIMATE_SERVICES) out.push({ name: 'More services', serviceKey: 'estimate_services_over_cap' });
+  return out;
+}
+
+async function catalogKeyForRow(profile, service, { db, deps = {} }) {
+  try {
+    const lookup = deps.catalogLinkForProfile || require('../slot-reservation').catalogLinkForProfile;
+    const link = await lookup(db, { ...profile, services: [service] });
+    return (link && link.service_key) || null;
+  } catch (err) {
+    logger.warn(`[customer-rain-rank] estimate catalog lookup failed (label used): ${err.message}`);
+    return null;
+  }
+}
+
+// Stable reorder by rain tier that keeps the first `pinned` items exactly
+// where they are: the caller's lead cards (the soonest opening, a scarce
+// first day) carry promises of their own.
+// A moved item whose tier is above 0 is returned as a copy carrying
+// `display_tier`, because the picker re-sorts its top recommendations by
+// nearby and would otherwise lift a wet nearby slot back up. The pinned
+// items never carry it: they keep today's place on screen too.
+function demoteByRainTier(list, tierOf, pinned = 1) {
+  if (!tierOf || !Array.isArray(list) || list.length <= pinned) return list;
+  const rest = list.slice(pinned).map((item, i) => ({ item, i, tier: tierOf(item) }));
+  rest.sort((a, b) => (a.tier - b.tier) || (a.i - b.i));
+  return [...list.slice(0, pinned), ...rest.map((r) => withDisplayTier(r.item, r.tier))];
+}
+
 // What the client sorts a recommendation by before anything else: the rain
 // tier, sent only when it is above 0 (absent = 0), so a payload with no
 // rain ranking is byte-identical to today's. `rain_tier` itself stays
@@ -111,4 +184,4 @@ function stampRainTiers(candidates, tierOf) {
 // Tier difference for a comparator's first key; 0 for unstamped rows.
 const rainTierDiff = (a, b) => (a.rain_tier ?? 0) - (b.rain_tier ?? 0);
 
-module.exports = { _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
+module.exports = { slotRainTierOf, demoteByRainTier, _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
