@@ -2814,3 +2814,11 @@ describe('answer screen, Codex round 83', () => {
     expect(ruleAnswerReason(data, [], 'applied', 'What was applied today?')).toBeNull();
   });
 });
+
+test('a recorded negative grounds no positive finding (pre-push audit)', () => {
+  const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 70 }, insights: [{ headline: 'Palms', whatWeSaw: 'No scale insects were found on the front palms.' }] } };
+  const question = 'What did you find?';
+  const facts = buildReportAskFacts({ question, data });
+  expect(screenAskAnswer('We found scale insects on the front palms.', { question, data, facts })).toBe('target_list');
+  expect(screenAskAnswer('No scale insects were found on the front palms.', { question, data, facts })).toBeNull();
+});

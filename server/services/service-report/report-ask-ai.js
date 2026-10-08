@@ -1059,6 +1059,11 @@ const PEST_SHAPE_RE = /\b[a-z]+(?:bugs?|worms?|fl(?:y|ies)|miners?|borers?)\b/gi
 
 // The fact-sheet text a term may come from, stemmed.
 const factText = (parts) => stemmedTerms(parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
+// The same text without its negative clauses ("No scale insects were found").
+function positiveFactText(parts) {
+  const raw = parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ');
+  return stemmedTerms(raw.split(/[.;!?"]+|\\n/).filter((clause) => !NEGATION_RE.test(clause)).join(' '));
+}
 const sentenceNames = (sentence, label) => stemmedTerms(sentence).includes(label);
 
 // "We found ants" needs the visit's own record, not the concern alone (Codex
@@ -1089,7 +1094,7 @@ function wrongIntensity(sentence, records) {
   return !records.some((record) => said.every((level) => INTENSITY[level].test(record)));
 }
 
-function ungroundedFinding(text, terms, visitOnly, findings = []) {
+function ungroundedFinding(text, terms, visitOnly, findings = [], positiveVisit = visitOnly) {
   // Each recorded finding on its own, so one finding's place cannot ground
   // another's pest (Codex P1 #5964 r59).
   const records = findings.map((finding) => stemmedTerms(`${finding?.title || ''} ${finding?.detail || ''}`));
@@ -1109,6 +1114,9 @@ function ungroundedFinding(text, terms, visitOnly, findings = []) {
       return wrongPair && NOMINAL_FINDING.test(sentence) && !APPLICATION_VERB.test(sentence) && !ATTRIBUTED_TO_CUSTOMER.test(sentence);
     }
     if (named.some((label) => !visitOnly.includes(label))) return true;
+    // A recorded negative grounds no positive finding: "No scale insects were
+    // found" is not "We found scale insects" (pre-push audit, #5964).
+    if (!NEGATION_RE.test(sentence) && named.some((label) => !positiveVisit.includes(label))) return true;
     // The thing found must be on the visit's record whatever it is called:
     // "We found ganoderma on the front palms" (Codex P1 #5964 r81).
     if (foundObjects(sentence).some((word) => !visitOnly.includes(` ${word} `))) return true;
@@ -1135,7 +1143,7 @@ function leaksTargetList(text, {
   if (terms.some((label) => sentenceNames(text, label) && !allowed.includes(label))) return true;
   // Product wording says what a product is for, not what the visit found
   // (Codex P1 #5964 r66).
-  if (ungroundedFinding(text, terms, factText(recordParts), asArray(facts?.findings))) return true;
+  if (ungroundedFinding(text, terms, factText(recordParts), asArray(facts?.findings), positiveFactText(recordParts))) return true;
   // A term only the question names may be repeated, never confirmed: "Is this
   // root rot?" -> "Yes, your lawn has root rot" (Codex P1s #5964 r37, r39).
   // Only "the report does not say" style uncertainty may repeat it; "is not
