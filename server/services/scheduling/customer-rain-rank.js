@@ -119,11 +119,15 @@ async function slotRainTierOf(slots, { services = [], point = null, today, db, d
 // Stable reorder by rain tier that keeps the first `pinned` items exactly
 // where they are: the caller's lead cards (the soonest opening, a scarce
 // first day) carry promises of their own.
+// A moved item whose tier is above 0 is returned as a copy carrying
+// `display_tier`, because the picker re-sorts its top recommendations by
+// nearby and would otherwise lift a wet nearby slot back up. The pinned
+// items never carry it: they keep today's place on screen too.
 function demoteByRainTier(list, tierOf, pinned = 1) {
-  if (!tierOf || !Array.isArray(list) || list.length <= pinned + 1) return list;
+  if (!tierOf || !Array.isArray(list) || list.length <= pinned) return list;
   const rest = list.slice(pinned).map((item, i) => ({ item, i, tier: tierOf(item) }));
   rest.sort((a, b) => (a.tier - b.tier) || (a.i - b.i));
-  return [...list.slice(0, pinned), ...rest.map((r) => r.item)];
+  return [...list.slice(0, pinned), ...rest.map((r) => withDisplayTier(r.item, r.tier))];
 }
 
 // What the client sorts a recommendation by before anything else: the rain

@@ -1283,8 +1283,10 @@ slot inside the 3 dates, everything BEHIND the lead cards is reordered by
 rain fit before the display slice. The first card stays the soonest opening
 and a scarce first day's pinned cards stay pinned, so
 `metadata.firstDayAvailability` and its badge keep matching the cards shown.
-No payload field is added on this surface; the token gate, rate limits,
-signed `slotId`s, reserve and commit checks are unchanged. The result rides
+A slot moved behind drier ones carries the same one field, `display_tier`
+(integer 1-2; never on a lead card), which the picker's best-times strip
+sorts by first; it is absent otherwise. The token gate, rate limits, signed
+`slotId`s, reserve and commit checks are unchanged. The result rides
 the existing 5-minute wrapper cache, so a gate flip reaches a cached
 estimate within that TTL.
 **Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved

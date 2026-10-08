@@ -54,12 +54,23 @@ describe('selectCustomerFacingSlots with a rain tier', () => {
 });
 
 describe('demoteByRainTier', () => {
+  const list = ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id }));
+  const tier = (x) => ({ a: 2, b: 2, c: 0, d: 2, e: 0 }[x.id]);
+  const ids = (out) => out.map((x) => x.id);
+
   test('stable, and the pinned head never moves', () => {
-    const list = ['a', 'b', 'c', 'd', 'e'];
-    const tier = (x) => ({ a: 2, b: 2, c: 0, d: 2, e: 0 }[x]);
-    expect(demoteByRainTier(list, tier, 1)).toEqual(['a', 'c', 'e', 'b', 'd']);
-    expect(demoteByRainTier(list, tier, 2)).toEqual(['a', 'b', 'c', 'e', 'd']);
+    expect(ids(demoteByRainTier(list, tier, 1))).toEqual(['a', 'c', 'e', 'b', 'd']);
+    expect(ids(demoteByRainTier(list, tier, 2))).toEqual(['a', 'b', 'c', 'e', 'd']);
     expect(demoteByRainTier(list, null, 1)).toBe(list);
+  });
+
+  test('a moved wet item carries display_tier; a dry one and the pinned head do not', () => {
+    const out = demoteByRainTier(list, tier, 1);
+    // 'a' is wet but pinned: untouched, the very same object.
+    expect(out[0]).toBe(list[0]);
+    expect(out.map((x) => x.display_tier)).toEqual([undefined, undefined, undefined, 2, 2]);
+    // The input objects are not mutated.
+    expect(list.every((x) => !('display_tier' in x))).toBe(true);
   });
 });
 
