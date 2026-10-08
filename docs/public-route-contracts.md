@@ -96,8 +96,7 @@ which keep the fixed-rule answer word for word, and photo, lawn-size and
 lawn/tree product-location questions. A narrow part of that guard
 (`reroutedTopic`) also picks the fixed answer itself, gate on or off: a
 question the rule router left generic (`unrouted`, `applied`, `findings`,
-`summary`) that reads as re-entry, a future visit or a care-permission
-question gets that topic's own rule answer (`routeServiceReportQuestion` with
+`summary`) that reads as re-entry or a future visit gets that topic's own rule answer (`routeServiceReportQuestion` with
 `forceTopic`) and that topic in the recorded event. The router's own topic
 always wins, and a question about the completed visit's date is never
 re-routed to the next visit. Termite, rodent,

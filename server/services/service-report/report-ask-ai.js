@@ -2699,13 +2699,10 @@ function reroutedTopic(question) {
   const text = String(question || '');
   if (REENTRY_QUESTION.test(text)) return 'reentry';
   if ((NEXT_VISIT_QUESTION.test(text) || BOOKING_QUESTION.test(text)) && !SERVICE_DATE_QUESTION.test(text)) return 'next_visit';
-  return OWN_CARE_ACTION_QUESTION.test(text) ? 'next_steps' : null;
+  // No care re-route: the next-steps answer does not carry a displayed
+  // mowing hold, so "Can I mow now?" keeps the rule router's own answer.
+  return null;
 }
-// The customer asks about their own lawn or plant care ("Can I mow now",
-// "Is it OK to water?"): never a product question ("Does this spray
-// contain...") or a completed-work question ("When did you spray?").
-const OWN_CARE_VERB = '(?:mow|water|irrigate|fertilize|seed|overseed|aerate|trim|prune|rake|weed|edge|dethatch)(?:ing)?';
-const OWN_CARE_ACTION_QUESTION = new RegExp(`\\b(?:can|could|may|should|shall|do|must)\\s+(?:i|we)\\s+(?:\\w+\\s+){0,3}?${OWN_CARE_VERB}\\b|\\b(?:is\\s+it|it['’]s)\\s+(?:ok(?:ay)?|safe|fine|necessary|needed|time|alright|too\\s+(?:early|soon|late))\\s+(?:for\\s+(?:me|us)\\s+)?to\\s+(?:\\w+\\s+)?${OWN_CARE_VERB}\\b|\\bwhen\\s+(?:can|should|may)\\s+(?:i|we)\\s+(?:\\w+\\s+)?${OWN_CARE_VERB}\\b`, 'i');
 
 function fixedAnswerTopic(topic, question, data = {}) {
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
