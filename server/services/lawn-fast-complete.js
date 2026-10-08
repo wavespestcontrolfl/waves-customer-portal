@@ -543,9 +543,10 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex }) {
   const guide = require('./lawn-treatment-guide');
   const found = await guide.resolveChinch({ svc, structured, knex });
   if (!found) return null;
-  if (!found.productId) return { item: null, note: found.note };
+  const { rungIds, blockedIds } = found;
+  if (!found.productId) return { item: null, note: found.note, rungIds, blockedIds };
   const planned = sheetAddOns.find((addOn) => String(addOn.productId).toLowerCase() === found.productId.toLowerCase());
-  if (planned) return { item: planned, note: found.note };
+  if (planned) return { item: planned, note: found.note, rungIds, blockedIds };
   const catalog = (await loadCatalogRows([found.productId], knex)).get(found.productId) || null;
   const entry = productRuleEntry(found.productId, catalog);
   const staged = found.stagedRow;
@@ -572,6 +573,8 @@ async function chinchOffer({ svc, structured, sheetAddOns, knex }) {
       gateNotes: typeof engine.v13GateNotes === 'function' ? engine.v13GateNotes(gates, { monthNumber: visitMonthOf(svc) }).map((note) => note.text) : [],
     },
     note: found.note,
+    rungIds,
+    blockedIds,
   };
 }
 
@@ -843,7 +846,8 @@ async function loadAssessmentRun(assessment, svc, knex) {
  * the sheet lists, each one's limits read fresh. Read-only; nothing is added or recorded.
  * `{ ok: true, v: 1, assessmentId, cards, weedMix }` (`weedMix` is the Weed spots decision read fresh, the
  * sheet's one source for the weed entry, the weed card and the search exclusion; null when the month has no
- * weed group), and `chinch` (the standing chinch tap's decision read fresh the same way: `{ item, note }`, or null
+ * weed group), `blockedProductIds` (the governed products the fresh read kept out because of a limit, a hold or
+ * a failed limit read: see lawn-treatment-guide.blockedProductIds), and `chinch` (the standing chinch tap's decision read fresh the same way: `{ item, note }`, or null
  * when the protocol stages no chinch product), or `{ ok: false, reason }`: disabled, invalid_assessment,
  * not_found, not_eligible, not_confirmed, not_usable. A plan or limit read that fails throws (a 500:
  * the sheet then shows no cards and works as before).
@@ -859,7 +863,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   if (!assessment) return { ok: false, reason: 'not_found' };
   if (assessment.confirmed_by_tech !== true) return { ok: false, reason: 'not_confirmed' };
   if (!(await assessmentUsableForReport(svc, assessment, knex))) return { ok: false, reason: 'not_usable' };
-  const result = (cards, weedMix = null, chinch = null) => ({ ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch });
+  const result = (cards, weedMix = null, chinch = null, blockedProductIds = []) => ({ ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds });
   // Only a recurring program visit has a plan, and so any product to suggest.
   const loaded = visitType === 'recurring' ? await loadPlan(svc, knex) : null;
   if (!loaded) return result([]);
@@ -881,7 +885,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // No trouble-area store exists yet, so take-all stays the check only.
     troubleAreas: [],
-  }), weedMix, chinch);
+  }), weedMix, chinch, guide.blockedProductIds({ offers, chinch, weedMix }));
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

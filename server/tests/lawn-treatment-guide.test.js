@@ -265,22 +265,25 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
 
   test('a month without the add-ons offers nothing, and nothing is read', async () => {
     const offers = await run([candidate(P_CEL, 'Weed')]);
-    expect(offers).toEqual({ fungus: null, caterpillars: null, dry_spots: null });
+    expect(offers).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [] });
     expect(engine.v13VisitLimits).not.toHaveBeenCalled();
   });
 
   test('a product at a limit, or one the city holds, is never suggested; the next fungicide is not substituted', async () => {
     limited([[P_ART, [{ type: 'annual_max_apps', message: 'limit' }]], [P_DISP, [{ message: 'read failed' }]]]);
     const offers = await run();
-    expect(offers).toEqual({ fungus: null, caterpillars: { item: { productId: P_ACE, name: 'Acelepryn' } }, dry_spots: null });
+    expect(offers).toEqual({ fungus: null, caterpillars: { item: { productId: P_ACE, name: 'Acelepryn' } }, dry_spots: null, blocked: [P_ART, P_DISP] });
     noLimits();
     const held = [candidate(P_ART, 'Artavia', { unavailable: { kind: 'city_hold' } }), candidate(P_VEL, 'Velista')];
-    expect((await run(held)).fungus).toBeNull();
+    const heldOffers = await run(held);
+    expect(heldOffers.fungus).toBeNull();
+    expect(heldOffers.blocked).toEqual([P_ART]);
   });
 
   test('a limit read that fails offers nothing', async () => {
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
-    expect(await run()).toEqual({ fungus: null, caterpillars: null, dry_spots: null });
+    // The read failed: every pick is blocked, not merely without a finding.
+    expect(await run()).toEqual({ fungus: null, caterpillars: null, dry_spots: null, blocked: [P_ART, P_ACE, P_DISP] });
   });
 
   test('take-all is told by the staged trigger, or by the protocol line; large patch and gray leaf spot are not', async () => {
@@ -311,6 +314,29 @@ describe('addOnOffers: the month\'s add-ons by what their staged rows say', () =
   });
 });
 
+describe('blockedProductIds: what the fresh read kept out, per governed kind', () => {
+  const { blockedProductIds } = require('../services/lawn-treatment-guide');
+  test('a clean read blocks nothing, and a pick with no finding is not blocked', () => {
+    expect(blockedProductIds({ offers: { blocked: [] }, chinch: { blockedIds: [] }, weedMix: { mode: 'lead', groupProductIds: [P_CEL, P_CERT], productIds: [P_CEL, P_CERT] } })).toEqual([]);
+    expect(blockedProductIds({})).toEqual([]);
+  });
+  test('the picks, the chinch rungs and the weed group are all named, each once', () => {
+    const ids = blockedProductIds({
+      offers: { blocked: [P_ART, P_ACE] },
+      chinch: { blockedIds: [P_ARENA, P_TALAK] },
+      weedMix: { mode: 'none', groupProductIds: [P_CEL, P_CERT], productIds: [] },
+    });
+    expect(ids.sort()).toEqual([P_ART, P_ACE, P_ARENA, P_TALAK, P_CEL, P_CERT].sort());
+    expect(blockedProductIds({ offers: { blocked: [P_ART] }, chinch: { blockedIds: [P_ART] } })).toEqual([P_ART]);
+  });
+  test('the weed group: the replacement tap blocks the lead side, an unreadable limit blocks all, lead mode blocks none', () => {
+    const group = [P_CEL, P_CERT, uuid(9)];
+    expect(blockedProductIds({ weedMix: { mode: 'replacement', groupProductIds: group, productIds: [uuid(9)] } }).sort()).toEqual([P_CEL, P_CERT].sort());
+    expect(blockedProductIds({ weedMix: { mode: 'unavailable', groupProductIds: group, productIds: [] } })).toHaveLength(3);
+    expect(blockedProductIds({ weedMix: { mode: 'lead', groupProductIds: group, productIds: [P_CEL] } })).toEqual([]);
+  });
+});
+
 describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
   const STRUCTURED = { id: 'protocol-1', version: 'v13' };
   const staged = (productId, name, trigger, month, extra = {}) => ({
@@ -328,7 +354,8 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
 
   test('Arena first, with no note', async () => {
     const found = await run();
-    expect(found).toMatchObject({ productId: P_ARENA, name: 'Arena 50 WDG', note: null });
+    // Both rungs are governed; none is blocked when Arena is offered.
+    expect(found).toMatchObject({ productId: P_ARENA, name: 'Arena 50 WDG', note: null, rungIds: [P_ARENA, P_TALAK], blockedIds: [] });
     // The earliest window's row stands for the product.
     expect(found.stagedRow.month).toBe(4);
     const asked = engine.v13VisitLimits.mock.calls[0][2];
@@ -337,24 +364,25 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
 
   test('Arena at its yearly cap: the bifenthrin product, and the note says so', async () => {
     limited([[P_ARENA, CAP]]);
-    expect(await run()).toMatchObject({ productId: P_TALAK, name: 'Atticus Talak 7.9 F', note: 'Arena yearly limit reached; Atticus is used in its place.' });
+    expect(await run()).toMatchObject({ productId: P_TALAK, name: 'Atticus Talak 7.9 F', note: 'Arena yearly limit reached; Atticus is used in its place.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA] });
   });
 
   test('both at their yearly cap: nothing to offer, and why', async () => {
     limited([[P_ARENA, CAP], [P_TALAK, CAP]]);
-    expect(await run()).toMatchObject({ productId: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.' });
+    expect(await run()).toMatchObject({ productId: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
   });
 
   test('a failed limit read (a block with no type) offers nothing, as the weed mix does', async () => {
     limited([[P_ARENA, [{ message: 'application limits could not be read.' }]]]);
-    expect(await run()).toMatchObject({ productId: null, note: expect.stringMatching(/could not be checked/) });
+    // Nothing is offered, and every rung is blocked (not merely unneeded).
+    expect(await run()).toMatchObject({ productId: null, note: expect.stringMatching(/could not be checked/), rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
     engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
-    expect(await run()).toMatchObject({ productId: null, note: expect.stringMatching(/could not be checked/) });
+    expect(await run()).toMatchObject({ productId: null, note: expect.stringMatching(/could not be checked/), rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
   });
 
   test('another limit on Arena (not the yearly count) holds the offer with the limit\'s words; it does not fall through', async () => {
     limited([[P_ARENA, [{ type: 'min_interval_days', message: 'Arena: wait 14 days.' }]]]);
-    expect(await run()).toMatchObject({ productId: null, note: 'Arena: wait 14 days.' });
+    expect(await run()).toMatchObject({ productId: null, note: 'Arena: wait 14 days.', blockedIds: [P_ARENA, P_TALAK] });
   });
 
   test('Arena not staged: the bifenthrin product alone, with no note', async () => {

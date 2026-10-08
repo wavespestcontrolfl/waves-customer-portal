@@ -233,7 +233,8 @@ const weedMixOf = (data) => {
 // (null when the limits leave nothing to add) and the line that says why, or null.
 const chinchShape = (chinch) => {
   const item = chinch?.item?.productId ? chinch.item : null;
-  return item || chinch?.note ? { item, note: chinch.note || null } : null;
+  const rungIds = Array.isArray(chinch?.rungIds) ? chinch.rungIds : [];
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
@@ -383,7 +384,7 @@ function useTreatmentGuide({ base, request, enabled, assessmentId }) {
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data) } });
+          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [] } });
         } else setState({ for: assessmentId, status: 'failed', guide: null });
       })
       .catch(() => { if (active) setState({ for: assessmentId, status: 'failed', guide: null }); });
@@ -417,44 +418,89 @@ function cardOwnedIds(guide, checks) {
     .flatMap((card) => [...card.productIds, ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
 }
 
-// Before the guide has answered: the products a card may own once it does (the context names them).
-const guidedIdsOf = (ctx) => lowerIds([...ctx.guidedProductIds, ctx.chinch?.item?.productId]);
+// What the guide governs for this visit, and what the LATEST decision does with it. ONE invariant:
+// a product that belongs to a guide-governed kind (the weed group, the chinch rungs, and the month's
+// fungicide, caterpillar and dry-spot picks) may be ON the sheet only if the latest decision offers
+// it, and may be ADDED only through the entry or card the latest decision offers. The latest
+// decision is the fresh guide answer, or, when the read failed, the context's own decisions.
+//   governed  every such product            offered  what the latest decision lets onto the sheet
+//   hidden    kept out of the add-ons list and the search (every governed product that is not
+//             released to the generic list)   locked   no decision yet: the taps wait
+// A pick is RELEASED to the generic list when nothing blocked or holds it and no visible card owns
+// it: a clean answer with no finding for it ("the technician can still treat what he sees"), or a
+// card he dismissed. A blocked pick (a limit, a city hold, a failed limit read) never is.
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), weedOffered: new Set(), chinchOffered: new Set() };
 
-// What the guide's answer offers, by the kind of entry or card that opens a row (row.guided).
-function offeredByKind(guide, ctx) {
-  const ids = (kind) => lowerIds(guide.cards.filter((card) => card.kind === kind).flatMap((card) => [...card.productIds, ...card.items.map((item) => item.productId)]));
+function guideGovernance({ ctx, guide, status, checks }) {
+  if (!ctx.treatmentGuide) return NO_GOVERNANCE;
+  const answered = status === 'answered' && !!guide;
+  const settled = answered || status === 'failed';
+  const cards = answered ? guide.cards : [];
   const weedMix = effectiveWeedMix(guide, ctx);
-  const weedIds = weedMix && ['lead', 'replacement'].includes(weedMix.mode) ? lowerIds(weedMix.productIds) : [];
+  const chinch = effectiveChinch(guide, ctx);
+  const picks = lowerIds(ctx.guidedProductIds);
+  const chinchItem = lowerIds([chinch?.item?.productId]);
+  const weedOffered = weedMix && ['lead', 'replacement'].includes(weedMix.mode) ? lowerIds(weedMix.productIds) : [];
+  const blocked = lowerIds(answered ? guide.blockedProductIds : []);
+  const held = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
+  const cardIds = lowerIds(cards.flatMap((card) => [...card.productIds, ...card.items.map((item) => item.productId)]));
+  const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => card.productIds));
+  const free = settled ? picks.filter((id) => !blocked.includes(id) && !held.includes(id)) : [];
+  const owned = cardOwnedIds(answered ? guide : null, checks);
+  const governed = [...picks, ...(weedMix && weedMix.mode !== 'unavailable' ? lowerIds(weedMix.groupProductIds) : []), ...lowerIds(chinch?.rungIds), ...chinchItem];
   return {
-    weeds: [...ids('weeds'), ...weedIds],
-    chinch: [...ids('chinch'), ...lowerIds([effectiveChinch(guide, ctx)?.item?.productId])],
-    fungus: ids('fungus'),
-    caterpillars: ids('caterpillars'),
-    dry_spots: ids('dry_spots'),
+    enabled: true,
+    locked: !settled,
+    governed: new Set(governed),
+    offered: new Set([...weedOffered, ...chinchItem, ...cardIds, ...free]),
+    hidden: new Set(governed.filter((id) => !free.includes(id) || owned.includes(id))),
+    weedOffered: new Set(weedOffered),
+    chinchOffered: new Set([...chinchItem, ...chinchCardIds]),
   };
 }
 
-// When a second guide answer replaces an earlier decision (a retake, a new confirm), the rows the
-// guide opened that the new answer no longer offers are dropped, and the tech is told. Nothing runs
-// for the first answer (the guide-governed taps were locked until it came).
-function useGuidedRowReconcile({ guide, status, products, ctx }) {
-  const [removed, setRemoved] = useState([]);
+// The rows on the sheet the latest decision does not offer: a governed product it does not offer, or
+// a row an entry opened (weeds, chinch) that its entry no longer offers.
+function staleGuideRows(rows, gov) {
+  return rows.filter((row) => {
+    const id = String(row.productId).toLowerCase();
+    return (gov.governed.has(id) && !gov.offered.has(id))
+      || (row.guided === 'weeds' && !gov.weedOffered.has(id))
+      || (row.guided === 'chinch' && !gov.chinchOffered.has(id));
+  });
+}
+
+// The governance of the latest decision, and its reconciliation. Whenever a decision replaces an
+// earlier one (answered to answered, answered to failed, failed to answered, and after a retake),
+// every row the new decision does not offer is dropped and the tech is told (`removed`). A failed
+// refresh falls back to the context's decisions, so what the context does not offer goes too. The
+// first decision reconciles nothing: the taps were locked until it came.
+function useGuideGovernance({ ctx, guide, status, checks, products }) {
+  const gov = useMemo(() => guideGovernance({ ctx, guide, status, checks }), [ctx, guide, status, checks]);
+  const [removed, setRemoved] = useState({ names: [], why: '' });
   const decided = useRef(false);
   const latest = useRef({});
-  latest.current = { rows: products.rows, removeRows: products.removeRows, ctx };
+  latest.current = { rows: products.rows, removeRows: products.removeRows, gov };
   useEffect(() => {
-    if (status === 'failed') decided.current = true;
-    if (status !== 'answered') return;
+    if (status !== 'answered' && status !== 'failed') return;
     if (decided.current) {
-      const { rows, removeRows, ctx: current } = latest.current;
-      const offered = offeredByKind(guide, current);
-      const stale = rows.filter((row) => row.guided && !(offered[row.guided] || []).includes(String(row.productId).toLowerCase()));
-      removeRows(stale.map((row) => row.productId));
-      setRemoved(stale.map((row) => row.name));
+      const stale = staleGuideRows(latest.current.rows, latest.current.gov);
+      latest.current.removeRows(stale.map((row) => row.productId));
+      setRemoved({ names: stale.map((row) => row.name), why: status === 'failed' ? 'The limits could not be checked.' : 'The limits changed.' });
     }
     decided.current = true;
   }, [guide, status]);
-  return removed;
+  return { gov, removed };
+}
+
+// Complete is held while the guide is still reading (the rows are judged against its answer), and
+// by a governed row the latest decision does not offer (it should be impossible after the
+// reconciliation; the sheet never completes with one).
+function guideHoldReason({ gov, status, rows }) {
+  if (!gov.enabled) return '';
+  if (status === 'pending') return 'Wait for the lawn guide to finish.';
+  const stale = staleGuideRows(rows, gov)[0];
+  return stale ? `Remove ${stale.name}: it is not offered for this lawn right now.` : '';
 }
 
 // ── products ────────────────────────────────────────────────────────────────
@@ -830,7 +876,7 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
   return { label: missingReason, disabled: !progress[can], onClick: () => block.current?.[run]() };
 }
 
-function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
@@ -843,6 +889,8 @@ function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, pho
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
     [!rows.length, ADD_PRODUCTS],
+    // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
+    [guideHold, guideHold],
     [areaHold, areaHold],
     [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
       ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
@@ -1160,8 +1208,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
   // The treatment guide's cards for the confirmed assessment (not one the report would reject), and
   // what the tech checked on each.
-  const { guide, status: guideStatus, locked: guideLocked, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable });
-  const removedByGuide = useGuidedRowReconcile({ guide, status: guideStatus, products, ctx });
+  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable });
+  // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
+  const { gov, removed: removedByGuide } = useGuideGovernance({ ctx, guide, status: guideStatus, checks: guideChecks, products });
   // The one Weed spots decision on screen (the guide's fresh read once it has answered).
   const weedMix = effectiveWeedMix(guide, ctx);
   // The whole-lawn area: this visit property's recorded lawn area (or the area
@@ -1216,15 +1265,12 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // surfactant in the heat, a member or the lead at its yearly limit, the replacement before its
   // turn). Only when the limits could not be read does the entry send the tech to the search.
   const searchCatalog = useMemo(() => {
-    const held = [
-      ...(weedMix && weedMix.mode !== 'unavailable' ? weedMix.groupProductIds || [] : []),
-      // The guide's products come through its cards and entries: not before it has answered, and not
-      // while a card owns them.
-      ...(guideLocked ? guidedIdsOf(ctx) : []),
-      ...cardOwnedIds(guide, guideChecks),
-    ];
-    return held.length ? catalog.filter((product) => !held.some((id) => sameId(id, product.id))) : catalog;
-  }, [catalog, weedMix, guideLocked, ctx, guide, guideChecks]);
+    const held = weedMix && weedMix.mode !== 'unavailable' ? weedMix.groupProductIds || [] : [];
+    // Every guide-governed product that is not released to the generic list comes through its entry
+    // or card only (and, before the guide has answered, not at all).
+    const hidden = (product) => gov.hidden.has(String(product.id).toLowerCase()) || held.some((id) => sameId(id, product.id));
+    return held.length || gov.hidden.size ? catalog.filter((product) => !hidden(product)) : catalog;
+  }, [catalog, weedMix, gov]);
   const picker = useProductPicker({
     line: 'lawn',
     products: searchCatalog,
@@ -1240,7 +1286,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
     inline: true,
   });
 
-  const missingReason = missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
+  const missingReason = missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
@@ -1294,7 +1341,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} guideLocked={guideLocked} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1364,7 +1411,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, weedMix, chinch, guideLocked = false, removedByGuide = [], rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1392,8 +1439,8 @@ function ProductsSection({ ctx, weedMix, chinch, guideLocked = false, removedByG
         </React.Fragment>
       ))}
       <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
-      {removedByGuide.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.join(', ')}. The limits changed.`}</p>}
-      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} guideLocked={guideLocked} guidedIds={guidedIdsOf(ctx)} ownedIds={cardOwnedIds(guide, guideChecks)} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
+      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
@@ -1425,20 +1472,22 @@ function splitAddOns(addOns, weedMix, catalog) {
 // What the add-ons group lists. A product a visible card owns is on the card, not here; a card the
 // guide shows for the weed mix or the chinch bugs IS that entry, so it is not listed twice. Nothing
 // to add (the limit is reached) is still said, as a line.
-function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, ownedIds, catalog }) {
+function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog }) {
   const split = splitAddOns(addOns, weedMix, catalog);
   const cardShown = (kind) => !!guideCards?.some((card) => card.kind === kind) && guideChecks[kind] !== 'none';
   return {
-    items: split.items.filter((item) => !ownedIds.includes(String(item.productId).toLowerCase())),
+    // Before the guide has answered a governed product waits in the list; after, the ones the latest
+    // decision does not release to the list are not listed.
+    items: split.items.filter((item) => gov.locked || !gov.hidden.has(String(item.productId).toLowerCase())),
     weedEntry: split.weedEntry,
     showWeed: !cardShown('weeds') && !!weedMix && (split.weedEntry?.length > 0 || (!weedMix.productIds.length && !!weedMix.note)),
     showChinch: !cardShown('chinch') && !!chinch,
   };
 }
 
-function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCards = null, guideChecks = {}, guideLocked = false, guidedIds = [], ownedIds = [], rows, catalog, locked, onAdd }) {
+function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd }) {
   const titleId = useId();
-  const { items, weedEntry, showWeed, showChinch } = addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, ownedIds, catalog });
+  const { items, weedEntry, showWeed, showChinch } = addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog });
   if (!items.length && !showWeed && !showChinch) return null;
   const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
   const monthName = month ? MONTH_NAMES[month - 1] : null;
@@ -1449,16 +1498,16 @@ function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCar
         <p className="tech-visit-muted">Tap what you applied.</p>
       </div>
       {showWeed && (
-        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} waiting={guideLocked} onAdd={onAdd} />
+        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />
       )}
-      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} on={on} locked={locked} waiting={guideLocked} onAdd={onAdd} />}
+      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />}
       {items.map((item) => (
         <AddOnLine
           key={item.productId}
           item={item}
           onSheet={on.has(String(item.productId).toLowerCase())}
           // A product a guide card may own waits for the card (the fresh guide), then follows it.
-          waiting={guideLocked && guidedIds.includes(String(item.productId).toLowerCase())}
+          waiting={gov.locked && gov.governed.has(String(item.productId).toLowerCase())}
           locked={locked}
           onAdd={onAdd}
         />

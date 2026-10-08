@@ -132,14 +132,16 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
 async function addOnOffers({ candidates, rows, svc, knex }) {
-  const picks = pickAddOns(candidates, rows);
-  const chosen = Object.values(picks).filter(Boolean);
-  const offers = { fungus: null, caterpillars: null, dry_spots: null };
+  const chosen = Object.entries(pickAddOns(candidates, rows)).filter(([, candidate]) => candidate);
+  // `blocked`: the ids of the picks the read did not offer because of a limit, a city hold or a limit
+  // read that failed (a product that merely has no finding is not blocked).
+  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: [] };
   if (!chosen.length) return offers;
-  const capped = await readCaps({ products: chosen.map((c) => c.raw.product), rows, svc, knex });
-  if (!capped) return offers;
-  for (const [kind, candidate] of Object.entries(picks)) {
-    if (candidate) offers[kind] = offerFor(kind, candidate, { capped, rows });
+  const capped = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
+  if (!capped) return { ...offers, blocked: chosen.map(([, c]) => idOf(c.raw.product.id)) };
+  for (const [kind, candidate] of chosen) {
+    offers[kind] = offerFor(kind, candidate, { capped, rows });
+    if (isBlocked(candidate, capped)) offers.blocked.push(idOf(candidate.raw.product.id));
   }
   return offers;
 }
@@ -177,8 +179,10 @@ const isTakeAll = (candidate, rows) => TAKE_ALL_TRIGGER.test(stagedRowOf(rows, c
 // One kind's offer, or null. Any block (a reached cap, another limit, a read that failed and came
 // back as a block with no type, a city hold) keeps the product off the card. A take-all card names
 // no product, so it stands, with `blocked` so a later trouble-area card still holds back.
+const isBlocked = (candidate, capped) => heldByCity(candidate.raw) || (capped.get(idOf(candidate.raw.product.id)) || []).length > 0;
+
 function offerFor(kind, candidate, { capped, rows }) {
-  const blocked = heldByCity(candidate.raw) || (capped.get(idOf(candidate.raw.product.id)) || []).length > 0;
+  const blocked = isBlocked(candidate, capped);
   if (kind === 'fungus' && isTakeAll(candidate, rows)) return { item: candidate.item, takeAll: true, blocked };
   return blocked ? null : { item: candidate.item };
 }
@@ -188,6 +192,18 @@ function offerFor(kind, candidate, { capped, rows }) {
  * something to add (the lead and its members, or the replacement at the lead's cap). `items` are the
  * sheet-shaped add-ons; the card carries them (and the names), and the tap adds exactly those rows.
  */
+/**
+ * The ids of the guide-governed products the fresh read did NOT offer because of a limit, a city hold
+ * or a failed limit read, across every governed kind: the fungicide, caterpillar and dry-spot picks,
+ * the chinch rungs, and the weed group when the tap offers nothing (mode none or unavailable) or hands
+ * the visit to the replacement. The sheet keeps these out of every list; a governed pick that is NOT
+ * here and has no card (no finding) returns to the generic list. Pure.
+ */
+function blockedProductIds({ offers, chinch, weedMix }) {
+  const weedOut = weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [];
+  return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];
+}
+
 function weedOffer(weedMix, items) {
   if (!weedMix || !['lead', 'replacement'].includes(weedMix.mode) || !Array.isArray(weedMix.productIds) || !weedMix.productIds.length) return null;
   const found = weedMix.productIds.map((id) => (items || []).find((item) => idOf(item.productId).toLowerCase() === idOf(id).toLowerCase()));
@@ -205,20 +221,30 @@ function weedOffer(weedMix, items) {
  * on a product holds the offer with the limit's own words; a limit read that failed offers nothing.
  *
  *   null                                          no staged chinch rows (no v13 protocol)
- *   { productId, name, stagedRow, note }          the product to add; `note` says why it is not Arena
- *   { productId: null, note }                     nothing to offer, and why
+ *   { productId, name, stagedRow, note, rungIds, blockedIds }   the product to add; `note` says why it is not Arena
+ *   { productId: null, note, rungIds, blockedIds }               nothing to offer, and why
+ * `rungIds` are all the rungs' products (governed by the guide whether offered or not); `blockedIds` the ones
+ * a limit, or a limit read that failed, kept out.
  */
 async function resolveChinch({ svc, structured, knex }) {
   const engine = require('./waveguard-plan-engine');
   const rows = engine.v13ProtocolRows(structured);
   if (!rows || !rows.size || !structured?.id) return null;
-  const none = (note) => ({ productId: null, name: null, stagedRow: null, note });
+  const none = (note) => ({ productId: null, name: null, stagedRow: null, note, rungIds: [], blockedIds: [] });
   const staged = await stagedChinchRows({ svc, structured, knex });
   if (!staged) return none(CHINCH_LIMITS_UNREAD);
   const products = chinchProducts(staged);
   if (!products.length) return null;
   const capped = await readCaps({ products: products.map((p) => ({ id: p.productId, name: p.name })), rows, svc, knex });
-  return capped ? chooseChinch(products, capped) : none(CHINCH_LIMITS_UNREAD);
+  return withRungs(capped ? chooseChinch(products, capped) : none(CHINCH_LIMITS_UNREAD), products);
+}
+
+// Every rung's product id (all of them are governed by the guide, offered or not), and the rungs the
+// read blocked: all of them when nothing is offered, else the ones before the offered rung.
+function withRungs(result, products) {
+  const rungIds = products.map((product) => product.productId);
+  const offered = rungIds.indexOf(result.productId);
+  return { ...result, rungIds, blockedIds: offered === -1 ? rungIds : rungIds.slice(0, offered) };
 }
 
 // The staged chinch rows of the visit's protocol (any window) with their catalog row, or null when the
@@ -412,6 +438,7 @@ module.exports = {
   addOnOffers,
   pickAddOns,
   weedOffer,
+  blockedProductIds,
   resolveChinch,
   buildCards,
   treatmentGuideFreeze,

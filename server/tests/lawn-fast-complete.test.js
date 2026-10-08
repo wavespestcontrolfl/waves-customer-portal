@@ -590,6 +590,9 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
           productId: P_ARENA, name: 'Test Arena', applicationMethod: 'spot_treatment', amount: null, treatedSqft: null, ratePer1000: null, rateUnit: null, line: null, gateNotes: [],
         }),
         note: null,
+        // Both rungs are governed by the guide, offered or not.
+        rungIds: [P_ARENA, P_TALAK],
+        blockedIds: [],
       });
       expect(ctx.plannedProducts.addOns.map((a) => a.productId)).toEqual([P_LEAD, P_CERT, P_ART, P_ACE, P_DISP]);
     });
@@ -622,7 +625,7 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
     test('both at their cap: a line and no product', async () => {
       live();
       capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: YEARLY });
-      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.' });
+      expect((await context(tablesFor())).plannedProducts.chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
     });
 
     test('a product the month\'s plan holds is the plan\'s own add-on', async () => {
@@ -703,6 +706,8 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
         ok: true, v: 1, assessmentId: CONFIRMED, cards: [],
         weedMix: expect.objectContaining({ mode: 'lead', productIds: [P_LEAD, P_CERT] }),
         chinch: expect.objectContaining({ item: expect.objectContaining({ productId: P_ARENA }) }),
+        // A clean read blocks nothing: a pick without a finding is not blocked.
+        blockedProductIds: [],
       });
     });
 
@@ -713,7 +718,9 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       capsFor({ [P_ARENA]: YEARLY });
       expect((await guide(tables)).chinch).toMatchObject({ item: { productId: P_TALAK }, note: expect.stringMatching(/yearly limit reached/) });
       capsFor({ [P_ARENA]: YEARLY, [P_TALAK]: YEARLY });
-      expect((await guide(tables)).chinch).toEqual({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.' });
+      const both = await guide(tables);
+      expect(both.chinch).toMatchObject({ item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: [P_ARENA, P_TALAK], blockedIds: [P_ARENA, P_TALAK] });
+      expect(both.blockedProductIds).toEqual(expect.arrayContaining([P_ARENA, P_TALAK]));
       // A fresh limit read that fails offers nothing, never Arena.
       v13VisitLimits.mockRejectedValue(new Error('db down'));
       expect((await guide(tables)).chinch).toMatchObject({ item: null, note: expect.stringMatching(/could not be checked/) });
@@ -729,6 +736,33 @@ describe('treatment guide (GATE_LAWN_TREATMENT_GUIDE)', () => {
       }));
       expect(result).toMatchObject({ ok: true, cards: [], weedMix: null, chinch: null });
       expect(v13VisitLimits).not.toHaveBeenCalled();
+    });
+
+    test('blockedProductIds, per governed kind: a cap, a failed limit read, the chinch rungs and the weed group', async () => {
+      live();
+      const tables = tablesFor();
+      // Nothing capped: nothing blocked.
+      expect((await guide(tables)).blockedProductIds).toEqual([]);
+      // The fungicide and the wetting agent at a cap, the lead at its cap (July: no replacement row).
+      capsFor({ [P_ART]: YEARLY, [P_DISP]: YEARLY, [P_LEAD]: YEARLY });
+      const capped = (await guide(tables)).blockedProductIds;
+      expect(capped).toEqual(expect.arrayContaining([P_ART, P_DISP, P_LEAD, P_CERT]));
+      expect(capped).not.toContain(P_ACE);
+      // Arena alone at its cap: the first rung is blocked, the second is the offer.
+      capsFor({ [P_ARENA]: YEARLY });
+      expect((await guide(tables)).blockedProductIds).toEqual([P_ARENA]);
+      // A failed limit read blocks every governed pick, every rung and the weed group.
+      v13VisitLimits.mockRejectedValue(new Error('db down'));
+      const failed = (await guide(tables)).blockedProductIds;
+      expect(failed).toEqual(expect.arrayContaining([P_ART, P_ACE, P_DISP, P_ARENA, P_TALAK, P_LEAD, P_CERT]));
+    });
+
+    test('a city hold blocks its pick too', async () => {
+      live();
+      const held = plan(addOns());
+      held.completionDefaults.addOns[3].unavailable = { kind: 'city_hold' };
+      buildPlanForService.mockResolvedValue(held);
+      expect((await guide(tablesFor())).blockedProductIds).toEqual([P_ACE]);
     });
 
     test('no staged chinch rows, or no plan: the fresh chinch decision is null', async () => {
