@@ -87,20 +87,28 @@ const atLeast = (level, minimum) => level !== null && SEVERITY_RANK[level] >= SE
 function signalsFromAssessment(assessment, run = null) {
   const composite = parseJson(assessment?.composite_scores);
   const severities = parseJson(run?.severities);
-  const rawScores = parseJson(run?.scores_raw);
-  const perPhoto = ['claude_raw', 'gemini_raw'].flatMap((column) => {
-    const reads = parseJson(assessment?.[column]);
-    return Array.isArray(reads) ? reads.filter((read) => read && typeof read === 'object') : [];
-  });
-  const worstRead = (field) => levelOf(worstSeverity(perPhoto.map((read) => read[field]), null));
-  const suppression = numberOrNull(assessment?.weed_suppression) ?? numberOrNull(composite?.weed_suppression);
-  const weedCoverage = suppression !== null ? Math.max(0, Math.min(100, 100 - suppression)) : numberOrNull(rawScores?.weed_coverage);
+  const worstRead = worstReader(assessment);
   return {
-    weedCoverage,
+    weedCoverage: weedCoverageOf(assessment, composite, parseJson(run?.scores_raw)),
     fungus: levelOf(severities?.fungal_activity?.level) ?? worstRead('fungal_activity'),
     insect: levelOf(severities?.insect_damage?.level) ?? worstRead('insect_damage'),
     drought: levelOf(composite?.drought_stress) ?? levelOf(severities?.drought_stress?.level) ?? worstRead('drought_stress'),
   };
+}
+
+// The weed score the technician confirmed: 100 minus the stored suppression, else the run's raw coverage.
+function weedCoverageOf(assessment, composite, rawScores) {
+  const suppression = numberOrNull(assessment?.weed_suppression) ?? numberOrNull(composite?.weed_suppression);
+  return suppression !== null ? Math.max(0, Math.min(100, 100 - suppression)) : numberOrNull(rawScores?.weed_coverage);
+}
+
+// A legacy assessment's worst level of one field across every per-photo model read.
+function worstReader(assessment) {
+  const perPhoto = ['claude_raw', 'gemini_raw'].flatMap((column) => {
+    const reads = parseJson(assessment?.[column]);
+    return Array.isArray(reads) ? reads.filter((read) => read && typeof read === 'object') : [];
+  });
+  return (field) => levelOf(worstSeverity(perPhoto.map((read) => read[field]), null));
 }
 
 // ── the month's add-ons ─────────────────────────────────────────────────────
@@ -118,38 +126,55 @@ const heldByCity = (raw) => raw?.unavailable?.kind === 'city_hold';
  * be read, or that the city holds is never suggested (no card, not a fall-through to the next).
  */
 async function addOnOffers({ candidates, rows, svc, knex }) {
+  const picks = pickAddOns(candidates, rows);
+  const chosen = Object.values(picks).filter(Boolean);
+  const offers = { fungus: null, caterpillars: null, dry_spots: null };
+  if (!chosen.length) return offers;
+  const capped = await readCaps({ products: chosen.map((c) => c.raw.product), rows, svc, knex });
+  if (!capped) return offers;
+  for (const [kind, candidate] of Object.entries(picks)) {
+    if (candidate) offers[kind] = offerFor(kind, candidate, { capped, rows });
+  }
+  return offers;
+}
+
+// The one add-on each kind may suggest: the FIRST fungicide in program order, the others by trigger.
+function pickAddOns(candidates, rows) {
   const order = [...rows.keys()];
   const rank = (candidate) => order.indexOf(idOf(candidate.raw?.substitution?.originalProductId || candidate.raw?.product?.id));
   const withRole = (test) => (candidates || []).filter((candidate) => {
     const row = stagedRowOf(rows, candidate.raw);
     return row && test(row);
   });
-  const picks = {
+  return {
     fungus: withRole((row) => row.role === FUNGICIDE_ROLE).sort((a, b) => rank(a) - rank(b))[0] || null,
     caterpillars: withRole((row) => row.gates?.trigger === CATERPILLAR_TRIGGER)[0] || null,
     dry_spots: withRole((row) => row.gates?.trigger === DRY_SPOT_TRIGGER)[0] || null,
   };
-  const chosen = Object.values(picks).filter(Boolean);
-  const offers = { fungus: null, caterpillars: null, dry_spots: null };
-  if (!chosen.length) return offers;
-  let capped;
+}
+
+// The plan's own limit reader over some products as selected lines: the hard blocks by product id,
+// or null when the read failed (nothing is then suggested).
+async function readCaps({ products, rows, svc, knex }) {
   try {
     const engine = require('./waveguard-plan-engine');
-    ({ capped } = await engine.v13VisitLimits(knex, svc, chosen.map((c) => ({ selected: true, product: c.raw.product })), rows, {}));
+    return (await engine.v13VisitLimits(knex, svc, products.map((product) => ({ selected: true, product })), rows, {})).capped;
   } catch (err) {
     logger.warn(`[lawn-guide] limits unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return offers;
+    return null;
   }
-  for (const [kind, candidate] of Object.entries(picks)) {
-    if (!candidate) continue;
-    const blocked = heldByCity(candidate.raw) || (capped.get(idOf(candidate.raw.product.id)) || []).length > 0;
-    const takeAll = kind === 'fungus' && (TAKE_ALL_TRIGGER.test(stagedRowOf(rows, candidate.raw)?.gates?.trigger || '') || TAKE_ALL_LINE.test(candidate.item?.line || ''));
-    // Any block (a reached cap, another limit, a read that failed and came back as a block with no
-    // type) keeps the product off the card. A take-all card names no product, so it stands.
-    if (blocked && !takeAll) continue;
-    offers[kind] = takeAll ? { item: candidate.item, takeAll: true, blocked } : { item: candidate.item };
-  }
-  return offers;
+}
+
+// Take-all fungus is told by the staged trigger or by the add-on's own protocol line.
+const isTakeAll = (candidate, rows) => TAKE_ALL_TRIGGER.test(stagedRowOf(rows, candidate.raw)?.gates?.trigger || '') || TAKE_ALL_LINE.test(candidate.item?.line || '');
+
+// One kind's offer, or null. Any block (a reached cap, another limit, a read that failed and came
+// back as a block with no type, a city hold) keeps the product off the card. A take-all card names
+// no product, so it stands, with `blocked` so a later trouble-area card still holds back.
+function offerFor(kind, candidate, { capped, rows }) {
+  const blocked = heldByCity(candidate.raw) || (capped.get(idOf(candidate.raw.product.id)) || []).length > 0;
+  if (kind === 'fungus' && isTakeAll(candidate, rows)) return { item: candidate.item, takeAll: true, blocked };
+  return blocked ? null : { item: candidate.item };
 }
 
 /**
@@ -182,10 +207,20 @@ async function resolveChinch({ svc, structured, knex }) {
   const rows = engine.v13ProtocolRows(structured);
   if (!rows || !rows.size || !structured?.id) return null;
   const none = (note) => ({ productId: null, name: null, stagedRow: null, note });
-  let staged;
+  const staged = await stagedChinchRows({ svc, structured, knex });
+  if (!staged) return none(CHINCH_LIMITS_UNREAD);
+  const products = chinchProducts(staged);
+  if (!products.length) return null;
+  const capped = await readCaps({ products: products.map((p) => ({ id: p.productId, name: p.name })), rows, svc, knex });
+  return capped ? chooseChinch(products, capped) : none(CHINCH_LIMITS_UNREAD);
+}
+
+// The staged chinch rows of the visit's protocol (any window) with their catalog row, or null when the
+// read failed.
+async function stagedChinchRows({ svc, structured, knex }) {
   try {
     const { activeProtocolProducts } = require('./lawn-protocol-retired');
-    staged = await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
+    return await activeProtocolProducts(knex('lawn_protocol_products as lpp'), 'lpp')
       .join('lawn_protocol_windows as w', 'lpp.lawn_protocol_window_id', 'w.id')
       .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
       .where('w.lawn_protocol_id', structured.id)
@@ -194,10 +229,13 @@ async function resolveChinch({ svc, structured, knex }) {
       .select('lpp.product_id', 'lpp.product_name', 'lpp.gates', 'lpp.rate_per_1000', 'lpp.rate_unit', 'lpp.sort_order', 'w.month', 'pc.id as catalog_id', 'pc.name as catalog_name', 'pc.active as catalog_active');
   } catch (err) {
     logger.warn(`[lawn-guide] chinch rows unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return none(CHINCH_LIMITS_UNREAD);
+    return null;
   }
-  // One product per trigger, in the program's order, the earliest window's row first; a product the
-  // catalog no longer has or has retired cannot be recorded, so it is not offered.
+}
+
+// One product per trigger, in the program's order, the earliest window's row first; a product the
+// catalog no longer has or has retired cannot be recorded, so it is not offered.
+function chinchProducts(staged) {
   const usable = (Array.isArray(staged) ? staged : []).filter((row) => row.catalog_id && row.catalog_active !== false);
   const products = [];
   for (const trigger of CHINCH_TRIGGERS) {
@@ -208,16 +246,15 @@ async function resolveChinch({ svc, structured, knex }) {
       products.push({ productId: idOf(row.product_id), name: row.catalog_name || row.product_name, stagedRow: row });
     }
   }
-  if (!products.length) return null;
-  let capped;
-  try {
-    ({ capped } = await engine.v13VisitLimits(knex, svc, products.map((p) => ({ selected: true, product: { id: p.productId, name: p.name } })), rows, {}));
-  } catch (err) {
-    logger.warn(`[lawn-guide] chinch limits unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
-    return none(CHINCH_LIMITS_UNREAD);
-  }
-  // v13VisitLimits fails closed per product: a read that failed comes back as a block with no limit
-  // type (a real limit always names one). That is not a reached cap, so nothing is offered.
+  return products;
+}
+
+// Which product the tap adds, from the limit reader's blocks. v13VisitLimits fails closed per product:
+// a read that failed comes back as a block with no limit type (a real limit always names one). That
+// is not a reached cap, so nothing is offered. Only the yearly count hands the tap to the next
+// product; any other limit holds the offer with its own words.
+function chooseChinch(products, capped) {
+  const none = (note) => ({ productId: null, name: null, stagedRow: null, note });
   const blocksOf = (product) => capped.get(product.productId) || [];
   if (products.some((product) => blocksOf(product).some((block) => !block.type))) return none(CHINCH_LIMITS_UNREAD);
   let skipped = null;
@@ -226,7 +263,6 @@ async function resolveChinch({ svc, structured, knex }) {
     if (!blocks.length) {
       return { ...product, note: skipped ? `${shortName(skipped.name)} yearly limit reached; ${shortName(product.name)} is used in its place.` : null };
     }
-    // Only the yearly count hands the tap to the next product; any other limit holds the offer.
     if (!blocks.every((block) => block.type === YEARLY_CAP)) return none(blocks[0].message || CHINCH_LIMIT_REACHED);
     skipped = skipped || product;
   }
@@ -257,77 +293,78 @@ async function troubleAreasOnFile({ svc, knex } = {}) {
  * else. `month` is the visit month, 1 to 12.
  */
 function buildCards({ signals, month, offers = {}, weeds = null, troubleAreas = [] }) {
-  const cards = [];
-  const s = signals || {};
-  if (s.weedCoverage !== null && s.weedCoverage !== undefined && s.weedCoverage >= WEED_MIN_PERCENT && weeds) {
-    cards.push(cardFor('weeds', {
-      title: 'Weed spots',
-      finding: `Photos show weeds on about ${Math.round(s.weedCoverage)}% of the lawn.`,
-      detail: weeds.names.join(', '),
-      note: weeds.note,
-      productIds: weeds.productIds,
-      actionLabel: 'Add weed spots',
-    }));
-  }
-  if (atLeast(s.fungus, 'minor') && offers.fungus?.item) {
-    const { item, takeAll, blocked } = offers.fungus;
-    const finding = `Photos show ${s.fungus} fungus activity.`;
-    if (takeAll && (!troubleAreas.length || blocked)) {
-      // The check only: take-all is treated on known trouble areas, and none is on file.
-      cards.push(cardFor('fungus', { title: 'Fungus', finding, check: CHECKS.fungus, note: TAKE_ALL_NOTE, actionLabel: null }));
-    } else {
-      cards.push(cardFor('fungus', {
-        title: 'Fungus',
-        finding,
-        check: CHECKS.fungus,
-        detail: protocolLine(item),
-        productIds: [item.productId],
-        items: [item],
-        actionLabel: 'I checked. Add it',
-        dismissLabel: 'Nothing found',
-      }));
-    }
-  }
-  const insects = atLeast(s.insect, 'moderate');
-  if (insects && month >= CHINCH_FIRST_MONTH && month <= CHINCH_LAST_MONTH && offers.chinch?.item) {
-    const { item, note } = offers.chinch;
-    cards.push(cardFor('chinch', {
-      title: 'Insects: check for chinch bugs',
-      finding: `Photos show ${s.insect} insect damage.`,
-      check: CHECKS.chinch,
-      detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment.`,
-      note: note || null,
-      productIds: [item.productId],
-      items: [item],
-      actionLabel: 'Found at the edge. Add it',
-      dismissLabel: 'Nothing found',
-    }));
-  }
-  if (insects && offers.caterpillars?.item) {
-    const { item } = offers.caterpillars;
-    cards.push(cardFor('caterpillars', {
-      title: 'Insects: check for caterpillars',
-      finding: `Photos show ${s.insect} insect damage.`,
-      check: CHECKS.caterpillars,
-      detail: protocolLine(item),
-      productIds: [item.productId],
-      items: [item],
-      actionLabel: 'Found them. Add it',
-      dismissLabel: 'Nothing found',
-    }));
-  }
-  if (atLeast(s.drought, 'minor') && offers.dry_spots?.item) {
-    const { item } = offers.dry_spots;
-    cards.push(cardFor('dry_spots', {
-      title: 'Dry spots',
-      finding: `Photos show ${s.drought} drought stress.`,
-      detail: protocolLine(item),
-      productIds: [item.productId],
-      items: [item],
-      actionLabel: `Add ${item.name}`,
-    }));
-  }
-  return cards;
+  const input = { s: signals || {}, month, offers, weeds, troubleAreas };
+  return [weedsCard, fungusCard, chinchCard, caterpillarsCard, dryCard].map((rule) => rule(input)).filter(Boolean);
+}
+
+// One rule per card kind: the input is { s: signals, month, offers, weeds, troubleAreas }; the answer
+// is the card or null.
+function weedsCard({ s, weeds }) {
+  if (!weeds || s.weedCoverage === null || s.weedCoverage === undefined || s.weedCoverage < WEED_MIN_PERCENT) return null;
+  return cardFor('weeds', {
+    title: 'Weed spots',
+    finding: `Photos show weeds on about ${Math.round(s.weedCoverage)}% of the lawn.`,
+    detail: weeds.names.join(', '),
+    note: weeds.note,
+    productIds: weeds.productIds,
+    actionLabel: 'Add weed spots',
+  });
+}
+
+function fungusCard({ s, offers, troubleAreas }) {
+  if (!atLeast(s.fungus, 'minor') || !offers.fungus?.item) return null;
+  const { item, takeAll, blocked } = offers.fungus;
+  const finding = `Photos show ${s.fungus} fungus activity.`;
+  // The check only: take-all is treated on known trouble areas, and none is on file.
+  if (takeAll && (!troubleAreas.length || blocked)) return cardFor('fungus', { title: 'Fungus', finding, check: CHECKS.fungus, note: TAKE_ALL_NOTE, actionLabel: null });
+  return cardFor('fungus', {
+    title: 'Fungus', finding, check: CHECKS.fungus, detail: protocolLine(item), productIds: [item.productId], items: [item],
+    actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
+  });
+}
+
+function chinchCard({ s, month, offers }) {
+  if (!atLeast(s.insect, 'moderate') || month < CHINCH_FIRST_MONTH || month > CHINCH_LAST_MONTH || !offers.chinch?.item) return null;
+  const { item, note } = offers.chinch;
+  return cardFor('chinch', {
+    title: 'Insects: check for chinch bugs',
+    finding: `Photos show ${s.insect} insect damage.`,
+    check: CHECKS.chinch,
+    detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment.`,
+    note: note || null,
+    productIds: [item.productId],
+    items: [item],
+    actionLabel: 'Found at the edge. Add it',
+    dismissLabel: 'Nothing found',
+  });
+}
+
+function caterpillarsCard({ s, offers }) {
+  if (!atLeast(s.insect, 'moderate') || !offers.caterpillars?.item) return null;
+  const { item } = offers.caterpillars;
+  return cardFor('caterpillars', {
+    title: 'Insects: check for caterpillars',
+    finding: `Photos show ${s.insect} insect damage.`,
+    check: CHECKS.caterpillars,
+    detail: protocolLine(item),
+    productIds: [item.productId],
+    items: [item],
+    actionLabel: 'Found them. Add it',
+    dismissLabel: 'Nothing found',
+  });
+}
+
+function dryCard({ s, offers }) {
+  if (!atLeast(s.drought, 'minor') || !offers.dry_spots?.item) return null;
+  const { item } = offers.dry_spots;
+  return cardFor('dry_spots', {
+    title: 'Dry spots',
+    finding: `Photos show ${s.drought} drought stress.`,
+    detail: protocolLine(item),
+    productIds: [item.productId],
+    items: [item],
+    actionLabel: `Add ${item.name}`,
+  });
 }
 
 // ── the record ──────────────────────────────────────────────────────────────

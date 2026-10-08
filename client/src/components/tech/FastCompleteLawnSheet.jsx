@@ -361,6 +361,17 @@ function useTreatmentGuide({ base, request, enabled, assessmentId }) {
   return guide;
 }
 
+// The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
+function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable }) {
+  const guide = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId });
+  const [checkedState, setCheckedState] = useState({ for: null, map: {} });
+  const forId = guide?.assessmentId ?? null;
+  const onGuideCheck = useCallback((kind, value) => setCheckedState((prev) => ({
+    for: forId, map: { ...(prev.for === forId ? prev.map : {}), [kind]: value },
+  })), [forId]);
+  return { guide, guideChecks: checkedState.for === forId ? checkedState.map : {}, onGuideCheck };
+}
+
 // ── products ────────────────────────────────────────────────────────────────
 
 // The plan's quantity as the row starts: the plan's own measure and amount
@@ -1090,14 +1101,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // A confirmed assessment the report would reject (made for the visit's
   // former property) does not count until the tech analyzes again.
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);
-  // The treatment guide: cards for the confirmed assessment (not one the report would reject), and
-  // what the tech checked on each. A new assessment starts with nothing checked.
-  const guide = useTreatmentGuide({ base, request, enabled: ctx.treatmentGuide, assessmentId: unusable ? null : assessmentId });
-  const [checkedState, setCheckedState] = useState({ for: null, map: {} });
-  const guideChecks = checkedState.for === guide?.assessmentId ? checkedState.map : {};
-  const onGuideCheck = useCallback((kind, value) => setCheckedState((prev) => ({
-    for: guide?.assessmentId ?? null, map: { ...(prev.for === guide?.assessmentId ? prev.map : {}), [kind]: value },
-  })), [guide?.assessmentId]);
+  // The treatment guide's cards for the confirmed assessment (not one the report would reject), and
+  // what the tech checked on each.
+  const { guide, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable });
   const [traced, setTraced] = useState(false);
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
