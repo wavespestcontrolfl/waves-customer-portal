@@ -219,10 +219,17 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     await mockPg('leads').insert({ id: mirrorLead, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
     const mirrored = await estimate(c3, { createdAt: minutesAgo(90), data: { lead_id: mirrorLead } });
     await estimate(c3, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    // A mirror whose lead staff re-linked to the sent estimate is stale: no hold.
+    const c4 = await customer();
+    const movedLead = randomUUID();
+    const staleMirror = await estimate(c4, { createdAt: minutesAgo(90), data: { lead_id: movedLead } });
+    const sent4 = await estimate(c4, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    await mockPg('leads').insert({ id: movedLead, estimate_id: sent4, status: 'estimate_sent', first_name: 'Fixture', last_name: 'Retire' });
     const before = await mockPg('leads').where({ id: leadId }).first();
-    expect((await retireDraftsReplacedBySentEstimate({ limit: 1 })).retired).toBe(1);
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
     expect((await row(kept)).archived_at).toBeNull();
     expect((await row(mirrored)).archived_at).toBeNull();
+    expect((await row(staleMirror)).archived_at).not.toBeNull();
     expect((await row(other)).archived_at).not.toBeNull();
     expect((await row(sent)).archived_at).toBeNull();
     const after = await mockPg('leads').where({ id: leadId }).first();

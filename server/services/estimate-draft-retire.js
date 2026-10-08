@@ -63,13 +63,16 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
 // soft-deleted (owner 2026-10-08: a lead's draft stays for staff, and the
 // sweep never writes to leads). Both link forms count: leads.estimate_id and
 // the draft's own estimate_data.lead_id mirror, which the estimator engine
-// keeps as the link when its FK write fails. Closed leads count too: one reopened later
+// keeps as the link when its FK write fails. The mirror is a fallback only,
+// as in resolveEstimateEventLeads: it counts while that lead has no FK link
+// (a lead staff re-linked to the sent estimate no longer holds the draft). Closed leads count too: one reopened later
 // must not point at an archived draft.
 const NO_LIVE_DEPENDENTS_SQL = `(
   NOT EXISTS (SELECT 1 FROM booking_intents b WHERE b.pricing_estimate_id = estimates.id)
   AND NOT EXISTS (
     SELECT 1 FROM leads l
-     WHERE (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data->>'lead_id')
+     WHERE (l.estimate_id = estimates.id
+            OR (l.estimate_id IS NULL AND l.id::text = estimates.estimate_data->>'lead_id'))
        AND l.deleted_at IS NULL
   )
   AND NOT EXISTS (
