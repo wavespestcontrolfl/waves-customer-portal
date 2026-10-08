@@ -2428,7 +2428,7 @@ describe('answer screen, Codex round 68', () => {
   });
 
   test('a variant of a recorded product is not the recorded product', () => {
-    const data = lawnData({ applications: [{ product: { name: 'Bifen I/T' } }] });
+    const data = lawnData({ applications: [{ product: { name: 'Bifen I/T', report_copy: { how_it_works: 'Bifen I/T controls surface insects.' } } }] });
     expect(ruleAnswerReason(data, [], 'applied', 'Was Bifen XTS applied?')).toBe('unrecorded_product');
     expect(ruleAnswerReason(data, [], 'applied', 'Why was Bifen used?')).toBeNull();
   });
@@ -2637,7 +2637,8 @@ describe('answer screen, Codex round 76', () => {
   });
 
   test('the model still answers a product question', () => {
-    expect(ruleAnswerReason(lawn, [], 'applied', 'Why was Merit used?')).toBeNull();
+    const withWording = lawnData({ applications: [{ product: { name: 'Merit', report_copy: { how_it_works: 'Merit controls grubs.' } } }], reportV2: { aftercare: {} } });
+    expect(ruleAnswerReason(withWording, [], 'applied', 'Why was Merit used?')).toBeNull();
   });
 });
 
@@ -2773,5 +2774,43 @@ describe('reroutedTopic: which generic questions get a dedicated rule answer (pr
 
   test.each(['What date was this service?', 'What day did you treat?', 'Did it rain?', 'What was applied?', 'How is my lawn doing?', 'Does this spray contain dinotefuran?', 'When did you spray my yard?', 'Can I mow now'])('%s is not re-routed', (question) => {
     expect(reroutedTopic(question)).toBeNull();
+  });
+});
+
+describe('answer screen, Codex round 83', () => {
+  test('a recorded product name in any case is an exposure word', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' } }] });
+    expect(medicalExposureAnswer('John swallowed alpine wsg', data)).toBeTruthy();
+    expect(medicalExposureAnswer('John swallowed alpine wsg')).toBeNull();
+    expect(medicalExposureAnswer('Did the ants eat the alpine wsg?', data)).toBeNull();
+  });
+
+  test.each(['Did the plants look good?', 'How did the treatment turn out?'])('an outcome question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason({ serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 } } }, [], 'unrouted', question)).toBe('results');
+  });
+
+  test('every rendered finding reaches the facts', () => {
+    const data = pestData({ applications: [], findings: Array.from({ length: 11 }, (_, i) => ({ title: i === 10 ? 'Moisture damage' : `Ant trail ${i}`, detail: '' })) });
+    expect(buildReportAskFacts({ data }).findings).toHaveLength(11);
+  });
+
+  test('a pest as the one entering or returning is not re-routed', () => {
+    const { reroutedTopic } = require('../services/service-report/report-ask-ai');
+    expect(reroutedTopic('Did ants enter the house?')).toBeNull();
+    expect(reroutedTopic('Will the ants return to the kitchen?')).toBeNull();
+    expect(reroutedTopic('Can we use the patio?')).toBe('reentry');
+  });
+
+  test('the router re-routes only a question its rules left generic', () => {
+    const data = pestData({ applications: [], dynamicContext: { reentry: { customerSummary: 'Treated areas are ready once dry.' } } });
+    expect(routeServiceReportQuestion({ question: 'Can we use the patio?', data, rerouteTopic: 'reentry' }).topic).toBe('reentry');
+    const kept = routeServiceReportQuestion({ question: 'What should I do before my next appointment?', data, rerouteTopic: 'next_visit' });
+    expect(kept.topic).toBe('next_steps');
+  });
+
+  test('a purpose question about a product with no recorded wording keeps the fixed answer', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' } }] });
+    expect(ruleAnswerReason(data, [], 'applied', 'Why was Alpine WSG used today?')).toBe('product_purpose');
+    expect(ruleAnswerReason(data, [], 'applied', 'What was applied today?')).toBeNull();
   });
 });

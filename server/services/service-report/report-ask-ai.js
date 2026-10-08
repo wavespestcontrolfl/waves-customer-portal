@@ -830,7 +830,7 @@ function buildReportAskFacts({
   // Every finding the report shows, so the answer cannot deny one (Codex P1
   // #5964 r58).
   const findings = asArray(data.findings)
-    .slice(0, 10)
+    .slice(0, 30)
     .filter(Boolean)
     .map((finding) => ({
       title: clip(finding.title, 120),
@@ -2551,9 +2551,19 @@ const EATER_IN_SENTENCE = new RegExp(`(?:^|[^\\w])${PERSON}\\b`, 'i');
 // "Bit" stays bound to a product (Codex P1 #6038 r1): "mosquitoes bit me" is no ingestion.
 const EAT_VERB_RE = new RegExp(`\\b${EAT_VERBS.replace('|bit|bites?|biting|bitten', '')}\\b`, 'i');
 
-function medicalExposureAnswer(question) {
+// `data` (optional): the report, so a recorded product's name counts as an
+// exposure word in any case: "John swallowed alpine wsg" (Codex P1 #5964 r83).
+function medicalExposureAnswer(question, data = null) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
-  return MEDICAL_CUES.some((cue) => cue.test(text)) || ingestsProduct(text) ? MEDICAL_EXPOSURE_ANSWER : null;
+  if (MEDICAL_CUES.some((cue) => cue.test(text)) || ingestsProduct(text)) return MEDICAL_EXPOSURE_ANSWER;
+  return ingestsRecordedProduct(text, data) ? MEDICAL_EXPOSURE_ANSWER : null;
+}
+function ingestsRecordedProduct(text, data) {
+  const firsts = asArray(data?.applications).map((app) => normalizeKey(app?.product?.name || app?.productName || app?.product_name || '').split(' ')[0])
+    .filter((word) => word && word.length >= 4);
+  if (!firsts.length) return false;
+  return text.split(/(?<=[.!?])\s+/).some((sentence) => EAT_VERB_RE.test(sentence) && !PEST_EATING.test(sentence)
+    && firsts.some((word) => new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(sentence)));
 }
 
 /**
@@ -2607,7 +2617,7 @@ const GRASS_TYPE_QUESTION = /\b(?:grass|turf|sod|lawn)\s+(?:type|kind|variety|sp
 const LAWN_SIZE_QUESTION = /\bhow\s+(?:big|large|much\s+(?:lawn|turf|grass|yard))\b|\b(?:lawn|turf|yard|property)\s+size\b|\bsize\s+of\s+(?:my|the|our)\b|\bsquare\s+f(?:ee|oo)t(?:age)?\b|\bsq\.?\s*ft\b|\bacres?\b|\bacreage\b/i;
 const PRODUCT_LOCATION_QUESTION = /\b(?:spray\w*|treat\w*|do|did|cover\w*|hit|get|got|fertiliz\w*)\s+(?:you\s+)?(?:\w+\s+)?(?:the\s+|my\s+|our\s+)(?:\w+\s+){0,2}?(?:front|back|side|beds?|palms?|trees?|shrubs?|hedges?|zones?|sections?|driveway|fence\s*line|garden|perimeter)\b|\b(?:used|applied|sprayed|spread|put|treated|placed)\b[^?.!]*\b(?:on|in|at|around|near|along|to|by)\s+(?:the\s+|my\s+|our\s+)?(?:\w+\s+){0,2}?(?:front|back|side|yard|lawn|beds?|palms?|trees?|shrubs?|hedges?|zones?|areas?|sections?|driveway|fence|patio|pool|garden|property|perimeter)\b|\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
 // Results, pest pressure and weather asked in any words (owner 2026-10-08).
-const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|precipitation|conditions?|shape|status|outlook|how\s+(?:is|are|was|were|did|does|do|has|have)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?|effective\w*|efficacy|successful\w*|success|work(?:ed|ing|s)?\s*\?|(?:treatment|product|spray|application|visit|service|it)\s+(?:help(?:ed|ing)?|work(?:ed|ing)?|do\s+(?:any|its)\s+\w+)|help(?:ed|ing)?\s*\?|do(?:ing)?\s+any\s+good|make\s+a\s+difference)\b/i;
+const RESULTS_QUESTION = /\b(?:pressure|activity\s+(?:level|score|rating)|gauge|weather|rain\w*|temperature|wind\w*|humid\w*|sunny|cloud\w*|storm\w*|forecast|scores?|rating|health\w*|density|coverage|trend\w*|improv\w*|progress\w*|getting\s+(?:better|worse)|precipitation|conditions?|shape|status|outlook|how\s+(?:is|are|was|were|did|does|do|has|have)\s+(?:my|the|our)\s+(?:lawn|grass|turf|yard|plants?|shrubs?|trees?|palms?|hedges?|landscape|beds?)|doing\s+(?:well|ok(?:ay)?|better|worse)|is\s+it\s+working|did\s+it\s+work|results?|effective\w*|efficacy|successful\w*|success|work(?:ed|ing|s)?\s*\?|(?:treatment|product|spray|application|visit|service|it)\s+(?:help(?:ed|ing)?|work(?:ed|ing)?|do\s+(?:any|its)\s+\w+)|help(?:ed|ing)?\s*\?|do(?:ing)?\s+any\s+good|make\s+a\s+difference|look(?:s|ed|ing)?\s+(?:good|bad|ok(?:ay)?|better|worse|healthy|fine|great)|turn(?:ed|ing|s)?\s+out|outcome|how\s+did\s+(?:it|that|this|the\s+\w+)\s+go|pay(?:ing)?\s+off|paid\s+off)\b/i;
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
@@ -2695,8 +2705,12 @@ const FIXED_INTENTS = [
 // or null. Narrow on purpose: only intents with a dedicated rule answer and
 // no reading as a question about the completed visit ("What date was this
 // service?" is not a next-visit question) (pre-push audit, #5964).
+// A pest as the one entering or returning is a findings question: "Did ants
+// enter the house?", "Will the ants return to the kitchen?" (Codex P1 #5964 r83).
+const PEST_SUBJECT_QUESTION = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|pests?|bugs?|insects?|spiders?|rodents?|rats?|mice|mouse|termites?|mosquito(?:es)?|fleas?|ticks?|wasps?|bees?|weeds?|fungus|they|them)\b/i;
 function reroutedTopic(question) {
   const text = String(question || '');
+  if (PEST_SUBJECT_QUESTION.test(text)) return null;
   if (REENTRY_QUESTION.test(text)) return 'reentry';
   if ((NEXT_VISIT_QUESTION.test(text) || BOOKING_QUESTION.test(text)) && !SERVICE_DATE_QUESTION.test(text)) return 'next_visit';
   // No care re-route: the next-steps answer does not carry a displayed
@@ -2711,6 +2725,7 @@ function fixedAnswerTopic(topic, question, data = {}) {
   return intent ? intent[0] : null;
 }
 
+const PRODUCT_PURPOSE_QUESTION = /\b(?:why|purpose|reason)\b[^?.!]*\b(?:products?|treatments?|spray\w*|chemicals?|used?|using|appl\w*|put\s+down|chosen|chose|picked?)\b|\b(?:products?|treatments?|spray|chemicals?)\b[^?.!]*\b(?:why|purpose|reason)\b|\bwhat\s+(?:is|was|are|were)\s+(?!you\b|we\b)[^?.!]*\b(?:used\s+)?for\b|\bwhat\s+(?:does|did)\s+(?!you\b|we\b|they\b|the\s+tech)[^?.!]*\bdo\b/i;
 function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question = '') {
   if (!AI_SERVICE_LINES.has(data.serviceLine)) return 'service_line';
   // A question about a product the report does not record ("Did you use
@@ -2723,6 +2738,12 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
   if (require('../../../shared/specialty-service-closeouts').specialtyServiceKey({
     serviceKey: data.serviceKey, serviceType: data.serviceType || data.serviceDisplayName,
   })) return 'specialty_service';
+  // The product card computes its own Purpose and "Why used today" text when
+  // a product has no recorded wording; the sheet does not carry it, so a
+  // purpose question about such a product keeps the fixed answer (Codex P1
+  // on b8360a829e).
+  if (PRODUCT_PURPOSE_QUESTION.test(String(question || ''))
+    && asArray(data.applications).map(productFacts).filter(Boolean).some((product) => !product.what_it_does)) return 'product_purpose';
   const fixedTopic = fixedAnswerTopic(topic, String(question || ''), data);
   if (fixedTopic) return fixedTopic;
   if (data.typedReport) return 'typed_report';

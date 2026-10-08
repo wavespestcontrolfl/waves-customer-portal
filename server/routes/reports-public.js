@@ -226,6 +226,30 @@ const reportLimiter = rateLimit({
 // replica or a restart gets its own count.
 const reportAskBudgetStore = new rateLimit.MemoryStore();
 reportAskBudgetStore.init({ windowMs: 24 * 60 * 60 * 1000 });
+// The shared count (Codex P1 #5964 r83): every recorded Ask question is a
+// service_report_events row, so the last 24 hours of those rows for this
+// report and this IP is one count for every replica and it survives a
+// restart. It counts every recorded question, not only model answers, so it
+// is the stricter of the two. A failed read falls back to the in-process
+// reservation alone.
+const REPORT_ASK_DAILY = { report: 40, ip: 120 };
+async function reportAskUseLastDay(service, ipHash, dbConn = db) {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const count = async (where) => Number((await dbConn('service_report_events')
+      .where({ event_name: 'report_question_asked', ...where }).where('created_at', '>=', since).count('* as n').first())?.n || 0);
+    return { report: await count({ service_record_id: service.id }), ip: ipHash ? await count({ ip_hash: ipHash }) : 0 };
+  } catch (err) {
+    logger.warn(`[reports-public] report ask budget read failed: ${err.message}`);
+    return { report: 0, ip: 0 };
+  }
+}
+async function reportAskBudgetFor(service, req, deps = {}) {
+  const ipHash = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
+  const used = await (deps.useLastDay || reportAskUseLastDay)(service, ipHash);
+  if (used.report >= REPORT_ASK_DAILY.report || used.ip >= REPORT_ASK_DAILY.ip) return false;
+  return takeReportAskBudget([[`report:${service.id}`, REPORT_ASK_DAILY.report], [`ip:${ipHash}`, REPORT_ASK_DAILY.ip]], deps.store);
+}
 async function takeReportAskBudget(keys, store = reportAskBudgetStore) {
   // Reserve first, then check: increment() is the store's atomic step (and it
   // restarts an expired window), so concurrent requests cannot all read the
@@ -1908,26 +1932,13 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
-    const firstRoute = routeServiceReportQuestion({
-      question,
-      data,
-      nextAppointment,
+    // A question the rules leave generic that reads as re-entry or a future
+    // visit gets that topic's own rule answer, gate on or off (reroutedTopic;
+    // the router keeps its own topics' precedence).
+    const reportAsk = require('../services/service-report/report-ask-ai');
+    const routed = routeServiceReportQuestion({
+      question, data, nextAppointment, rerouteTopic: reportAsk.reroutedTopic(question),
     });
-    // The Ask AI fixed-intent guard recognizes more wordings than the rule
-    // router ("Can we use the patio?" is re-entry, "Are you due back?" is the
-    // next visit). When it names a topic the router has a dedicated answer
-    // for, that answer is the one given, gate on or off, so a question the
-    // model may not answer never falls to the generic summary (pre-push
-    // audit, #5964).
-    // The rule router's own re-entry, watering, advice and next-visit choices
-    // keep their precedence ("Can my dog go outside before your next visit?"
-    // stays re-entry): only a question it left generic may be re-routed, and
-    // only to re-entry, a future visit or next steps (reroutedTopic).
-    const routerLeftGeneric = ['unrouted', 'applied', 'findings', 'summary'].includes(firstRoute.topic);
-    const fixedTopic = routerLeftGeneric ? require('../services/service-report/report-ask-ai').reroutedTopic(question) : null;
-    const routed = fixedTopic
-      ? routeServiceReportQuestion({ question, data, nextAppointment, forceTopic: fixedTopic })
-      : firstRoute;
     const { topic } = routed;
     let { answer } = routed;
     // GATE_REPORT_ASK_AI (dark): Claude Sonnet 5.5 writes the answer from the
@@ -1944,21 +1955,17 @@ router.post('/:token/ask', async (req, res, next) => {
     // A question that reports a symptom or an exposure gets the fixed Poison
     // Control / 911 answer on every report and with the gate off too: the
     // fixed-rule answers have no medical handling. No model call.
-    const { medicalExposureAnswer, exposureSafetyLine } = require('../services/service-report/report-ask-ai');
-    const urgent = medicalExposureAnswer(question);
+    const { medicalExposureAnswer, exposureSafetyLine, answerReportQuestionWithAI } = reportAsk;
+    const urgent = medicalExposureAnswer(question, data);
     if (urgent) {
       answer = urgent;
     } else if (require('../config/feature-gates').reportAskAiLive?.() === true) {
-      const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
-      // Daily paid-call ceiling per report link and per IP (Codex P1 #5964
-      // r74): past it, the fixed-rule answer above stands.
-      const ipKey = hashPublicIp(req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress);
+      // Daily paid-call ceiling per report and per IP (Codex P1s #5964 r74,
+      // r83): past it, the fixed-rule answer above stands.
       const ai = await answerReportQuestionWithAI({
         question, data, nextAppointment, requiredLines: routed.requiredLines, topic,
-      }, {
-        takeBudget: () => takeReportAskBudget([[`report:${String(req.params.token).slice(0, 64)}`, 40], [`ip:${ipKey}`, 120]]),
-      });
-      if (ai) answer = ai.answer;
+      }, { takeBudget: () => reportAskBudgetFor(service, req) });
+      answer = ai ? ai.answer : answer;
     }
     // A question that mentions spray and a person, pet or body part gets the
     // fixed Poison Control line before the answer (owner 2026-10-05, #6016).
@@ -2763,3 +2770,4 @@ module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
 module.exports.takeReportAskBudget = takeReportAskBudget;
+module.exports.reportAskBudgetFor = reportAskBudgetFor;

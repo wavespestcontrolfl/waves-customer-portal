@@ -831,8 +831,16 @@ function answerForTopic(topic, { data, nextAppointment }) {
   return { topic, answer: builders[topic](), requiredLines: required };
 }
 
-function routeServiceReportQuestion({ forceTopic = null, ...input } = {}) {
-  return (forceTopic && answerForTopic(forceTopic, input)) || routeByRules(input);
+// `forceTopic`: answer as that topic. `rerouteTopic`: answer as that topic
+// only when the rules below leave the question generic, so the router's own
+// re-entry, watering, advice and next-visit choices keep their precedence
+// ("Can my dog go outside before your next visit?" stays re-entry).
+const GENERIC_TOPICS = new Set(['unrouted', 'applied', 'findings', 'summary']);
+function routeServiceReportQuestion({ forceTopic = null, rerouteTopic = null, ...input } = {}) {
+  const forced = forceTopic && answerForTopic(forceTopic, input);
+  if (forced) return forced;
+  const routed = routeByRules(input);
+  return (rerouteTopic && GENERIC_TOPICS.has(routed.topic) && answerForTopic(rerouteTopic, input)) || routed;
 }
 
 function routeByRules({

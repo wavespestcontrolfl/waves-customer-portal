@@ -1261,6 +1261,19 @@ describe('the report Ask paid-call budget (Codex P1s #5964 r74, r77)', () => {
     store.shutdown?.();
   });
 
+  test('the shared count from recorded questions stops the model across replicas', async () => {
+    const { reportAskBudgetFor } = require('../routes/reports-public');
+    const rateLimit = require('express-rate-limit');
+    const store = new rateLimit.MemoryStore();
+    store.init({ windowMs: 60 * 1000 });
+    const req = { ip: '203.0.113.9', headers: {} };
+    const service = { id: 'svc-budget-shared' };
+    expect(await reportAskBudgetFor(service, req, { store, useLastDay: async () => ({ report: 40, ip: 3 }) })).toBe(false);
+    expect(await reportAskBudgetFor(service, req, { store, useLastDay: async () => ({ report: 2, ip: 120 }) })).toBe(false);
+    expect(await reportAskBudgetFor(service, req, { store, useLastDay: async () => ({ report: 2, ip: 3 }) })).toBe(true);
+    store.shutdown?.();
+  });
+
   test('concurrent reservations cannot pass the cap', async () => {
     const rateLimit = require('express-rate-limit');
     const { takeReportAskBudget } = require('../routes/reports-public');
