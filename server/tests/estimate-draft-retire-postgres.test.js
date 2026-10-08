@@ -155,10 +155,10 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).archived_at).toBeNull();
   });
 
-  test('drafts with a booking handoff, a clarify text or a website quote are kept; a lead link is cleared; bells close', async () => {
+  test('drafts with a booking handoff, a clarify text or a website quote are kept; a closed lead is no hold and keeps its link; bells close', async () => {
     const { autoDraft, staffDraft } = await sentAfterTwoDrafts();
     const leadId = randomUUID();
-    await mockPg('leads').insert({ id: leadId, estimate_id: autoDraft, first_name: 'Fixture', last_name: 'Retire' });
+    await mockPg('leads').insert({ id: leadId, estimate_id: autoDraft, status: 'lost', first_name: 'Fixture', last_name: 'Retire' });
     const c = await customer();
     const handoff = await estimate(c, { createdAt: minutesAgo(60) });
     const clarify = await estimate(c, { createdAt: minutesAgo(60) });
@@ -176,7 +176,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(oldClarify)).archived_at).not.toBeNull();
     expect((await row(staffDraft)).archived_at).not.toBeNull();
     expect((await row(autoDraft)).archived_at).not.toBeNull();
-    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBeNull();
+    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBe(autoDraft);
     for (const id of [handoff, clarify, wizard, assessmentLinked]) expect((await row(id)).archived_at).toBeNull();
     const bell = await mockPg('notifications').where({ id: bellId }).first();
     expect(bell.done_at).not.toBeNull();
@@ -194,34 +194,6 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(sameDoor);
   });
 
-  test('an unlinked lead is advanced to the sent estimate when it is the single contact match', async () => {
-    const c = await customer();
-    const draft = await estimate(c, { createdAt: minutesAgo(90), customer_phone: '+12025550177' });
-    const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10), customer_phone: '+12025550177' });
-    const leadId = randomUUID();
-    await mockPg('leads').insert({ id: leadId, estimate_id: draft, status: 'new', phone: '+12025550177', first_name: 'Fixture', last_name: 'Retire', created_at: minutesAgo(120) });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
-    const lead = await mockPg('leads').where({ id: leadId }).first();
-    expect(lead.estimate_id).toBe(sent);
-    expect(lead.status).toBe('estimate_sent');
-    // A legacy sent row (no channel record) is still a real send: the lead qualifies.
-    expect(lead.is_qualified).toBe(true);
-  });
-
-  test('no replay when a lead already owns the sent estimate', async () => {
-    const { autoDraft, sent } = await sentAfterTwoDrafts();
-    const draftLead = randomUUID();
-    const sentLead = randomUUID();
-    await mockPg('leads').insert([
-      { id: draftLead, estimate_id: autoDraft, status: 'new', first_name: 'Fixture', last_name: 'Retire' },
-      { id: sentLead, estimate_id: sent, status: 'estimate_sent', first_name: 'Fixture', last_name: 'Retire' },
-    ]);
-    const before = await mockPg('lead_activities').where({ lead_id: sentLead }).count('* as n').first();
-    await retireDraftsReplacedBySentEstimate();
-    expect((await mockPg('leads').where({ id: draftLead }).first()).estimate_id).toBeNull();
-    expect((await mockPg('lead_activities').where({ lead_id: sentLead }).count('* as n').first()).n).toBe(before.n);
-  });
-
   test('a draft with an uncertain send attempt is kept', async () => {
     const c = await customer();
     const uncertain = await estimate(c, { createdAt: minutesAgo(90), data: { manualSendAttempts: [{ key: 'k1', startedAt: minutesAgo(80).toISOString() }] } });
@@ -232,35 +204,27 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(resolved)).archived_at).not.toBeNull();
   });
 
-  test('a viewed replacement advances the lead to viewed; an accepted one keeps a lead-linked draft', async () => {
-    const c = await customer();
-    const draft = await estimate(c, { createdAt: minutesAgo(90), customer_phone: '+12025550188' });
-    await estimate(c, { status: 'viewed', createdAt: minutesAgo(20), sentAt: minutesAgo(10), customer_phone: '+12025550188' });
-    const leadId = randomUUID();
-    await mockPg('leads').insert({ id: leadId, estimate_id: draft, status: 'new', phone: '+12025550188', first_name: 'Fixture', last_name: 'Retire', created_at: minutesAgo(120) });
-    const c2 = await customer();
-    const keptDraft = await estimate(c2, { createdAt: minutesAgo(90) });
-    await estimate(c2, { status: 'accepted', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
-    await mockPg('leads').insert({ id: randomUUID(), estimate_id: keptDraft, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
-    expect((await mockPg('leads').where({ id: leadId }).first()).status).toBe('estimate_viewed');
-    expect((await row(keptDraft)).archived_at).toBeNull();
-  });
-
-  test('kept candidates do not use up the batch', async () => {
+  test('an open lead keeps its draft for staff, and the sweep writes nothing to leads', async () => {
     const c = await customer();
     const kept = await estimate(c, { createdAt: minutesAgo(90) });
-    await estimate(c, { status: 'accepted', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
-    await mockPg('leads').insert({ id: randomUUID(), estimate_id: kept, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+    const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    const leadId = randomUUID();
+    await mockPg('leads').insert({ id: leadId, estimate_id: kept, status: 'contacted', first_name: 'Fixture', last_name: 'Retire' });
     const c2 = await customer();
     const other = await estimate(c2, { createdAt: minutesAgo(90) });
     await estimate(c2, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    const before = await mockPg('leads').where({ id: leadId }).first();
     expect((await retireDraftsReplacedBySentEstimate({ limit: 1 })).retired).toBe(1);
     expect((await row(kept)).archived_at).toBeNull();
     expect((await row(other)).archived_at).not.toBeNull();
+    expect((await row(sent)).archived_at).toBeNull();
+    const after = await mockPg('leads').where({ id: leadId }).first();
+    expect(after.estimate_id).toBe(kept);
+    expect(after.status).toBe('contacted');
+    expect(String(after.updated_at)).toBe(String(before.updated_at));
   });
 
-  test('an undelivered report or restart mint is not a send; a declined replacement unlinks without a replay', async () => {
+  test('an undelivered report or restart mint is not a send; a declined real send still retires a draft', async () => {
     const c = await customer();
     const draft = await estimate(c, { createdAt: minutesAgo(90) });
     await estimate(c, { status: 'sent', source: 'service_report_cta', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
@@ -269,31 +233,9 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const c2 = await customer();
     const draft2 = await estimate(c2, { createdAt: minutesAgo(90), customer_phone: '+12025550199' });
     await estimate(c2, { status: 'declined', createdAt: minutesAgo(20), sentAt: minutesAgo(10), customer_phone: '+12025550199' });
-    const leadId = randomUUID();
-    await mockPg('leads').insert({ id: leadId, estimate_id: draft2, status: 'new', phone: '+12025550199', first_name: 'Fixture', last_name: 'Retire', created_at: minutesAgo(120) });
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
     expect((await row(draft)).archived_at).toBeNull();
-    const lead = await mockPg('leads').where({ id: leadId }).first();
-    expect(lead.estimate_id).toBeNull();
-    expect(lead.status).toBe('new');
-  });
-
-  test('a lead linked after the pair read keeps a draft whose replacement is accepted', async () => {
-    const lateLink = async (draftId) => {
-      const realRaw = mockPg.raw;
-      mockPg.raw = async (...args) => {
-        const out = await realRaw.apply(mockPg, args);
-        mockPg.raw = realRaw;
-        await mockPg('leads').insert({ id: randomUUID(), estimate_id: draftId, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
-        return out;
-      };
-    };
-    const c = await customer();
-    const draft = await estimate(c, { createdAt: minutesAgo(90) });
-    await estimate(c, { status: 'accepted', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
-    await lateLink(draft);
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
-    expect((await row(draft)).archived_at).toBeNull();
+    expect((await row(draft2)).archived_at).not.toBeNull();
   });
 
   test('six newer other-door sends with property ids do not outrank the same-address send', async () => {
@@ -338,43 +280,12 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     }
   });
 
-  test('a draft younger than the settle window is kept; an accepted estimate keeps a lead-linked draft from an older send', async () => {
+  test('a draft younger than the settle window is kept', async () => {
     const c = await customer();
     const fresh = await estimate(c, { createdAt: minutesAgo(12), updatedAt: minutesAgo(12) });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(8), sentAt: minutesAgo(5) });
-    const c2 = await customer();
-    const linked = await estimate(c2, { createdAt: minutesAgo(200) });
-    await estimate(c2, { status: 'sent', createdAt: minutesAgo(150), sentAt: minutesAgo(140) });
-    await estimate(c2, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
-    await mockPg('leads').insert({ id: randomUUID(), estimate_id: linked, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
-    // An accepted estimate for ANOTHER property does not keep a linked draft.
-    const c3 = await customer();
-    const linkedOtherDoor = await estimate(c3, { createdAt: minutesAgo(200) });
-    await estimate(c3, { status: 'sent', createdAt: minutesAgo(150), sentAt: minutesAgo(140) });
-    await estimate(c3, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90), address: '500 Elsewhere Blvd, Testville, FL 34000' });
-    await mockPg('leads').insert({ id: randomUUID(), estimate_id: linkedOtherDoor, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
-    expect((await row(fresh)).archived_at).toBeNull();
-    expect((await row(linked)).archived_at).toBeNull();
-    expect((await row(linkedOtherDoor)).archived_at).not.toBeNull();
-  });
-
-  test('an estimate accepted after the pair read still keeps a lead-linked draft', async () => {
-    const c = await customer();
-    const draft = await estimate(c, { createdAt: minutesAgo(200) });
-    await estimate(c, { status: 'sent', createdAt: minutesAgo(150), sentAt: minutesAgo(140) });
-    const laterSent = await estimate(c, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
-    await mockPg('leads').insert({ id: randomUUID(), estimate_id: draft, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
-    // The acceptance lands right after the pair read.
-    const realRaw = mockPg.raw;
-    mockPg.raw = async (...args) => {
-      const out = await realRaw.apply(mockPg, args);
-      mockPg.raw = realRaw;
-      await mockPg('estimates').where({ id: laterSent }).update({ status: 'accepted' });
-      return out;
-    };
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
-    expect((await row(draft)).archived_at).toBeNull();
+    expect((await row(fresh)).archived_at).toBeNull();
   });
 
   test('the fence is the last real delivery, not a sent_at a failed resend moved', async () => {
@@ -389,14 +300,19 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     // The older tracking shape: sent channels listed, no lastDeliveredAt. It is a real send.
     const c3 = await customer();
     const draft3 = await estimate(c3, { createdAt: minutesAgo(200) });
-    await estimate(c3, { status: 'viewed', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { attemptedAt: minutesAgo(90).toISOString(), sentChannels: ['sms'], failedChannels: [] } } });
+    await estimate(c3, { status: 'viewed', createdAt: minutesAgo(100), sentAt: minutesAgo(90), viewed_at: minutesAgo(80), data: { deliveryState: { attemptedAt: minutesAgo(90).toISOString(), sentChannels: ['sms'], failedChannels: [] } } });
+    // The same shape never opened by the customer may be a suppressed send: not proof.
+    const c4 = await customer();
+    const draft4 = await estimate(c4, { createdAt: minutesAgo(200) });
+    await estimate(c4, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90), data: { deliveryState: { attemptedAt: minutesAgo(90).toISOString(), sentChannels: ['sms'], failedChannels: [] } } });
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
     expect((await row(draft3)).archived_at).not.toBeNull();
+    expect((await row(draft4)).archived_at).toBeNull();
     expect((await row(edited)).archived_at).toBeNull();
     expect((await row(draft2)).archived_at).toBeNull();
   });
 
-  test('a soft-deleted lead does not hold a draft against an accepted estimate; the newest same-door send is the one recorded', async () => {
+  test('a soft-deleted lead is no hold and keeps its link; the newest same-door send is the one recorded', async () => {
     const c = await customer();
     const draft = await estimate(c, { createdAt: minutesAgo(300) });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(250), sentAt: minutesAgo(240) });
@@ -405,25 +321,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     await mockPg('leads').insert({ id: leadId, estimate_id: draft, status: 'new', first_name: 'Fixture', last_name: 'Retire', deleted_at: minutesAgo(50) });
     expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
     expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(newest);
-    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBeNull();
-  });
-
-  test('an established customer lead detaches and attaches straight to the unowned replacement; a closed lead is no hold', async () => {
-    const c = await customer();
-    const draft = await estimate(c, { createdAt: minutesAgo(200) });
-    const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
-    const leadId = randomUUID();
-    // customer-linked lead with no phone/email: only the direct attach can reach it
-    await mockPg('leads').insert({ id: leadId, estimate_id: draft, customer_id: c, status: 'contacted', first_name: 'Fixture', last_name: 'Retire' });
-    const c2 = await customer();
-    const draft2 = await estimate(c2, { createdAt: minutesAgo(200) });
-    await estimate(c2, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
-    await mockPg('leads').insert({ id: randomUUID(), estimate_id: draft2, status: 'won', first_name: 'Fixture', last_name: 'Retire' });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
-    const lead = await mockPg('leads').where({ id: leadId }).first();
-    expect(lead.estimate_id).toBe(sent);
-    expect(lead.status).toBe('estimate_sent');
-    expect((await row(draft2)).archived_at).not.toBeNull();
+    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBe(draft);
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {

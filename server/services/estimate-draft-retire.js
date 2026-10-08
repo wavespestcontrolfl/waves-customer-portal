@@ -17,8 +17,10 @@
  *   - same property: same property_id when both rows have one, else the same
  *     address (no address = kept);
  *   - no live delivery claim, estimator-engine hold or address hold;
- *   - the sent estimate is a real send: not reset to draft and not carrying
- *     a call-linkage invalidation marker.
+ *   - no OPEN lead links to it (owner 2026-10-08): such a draft is a live
+ *     opportunity and stays for staff. The sweep writes nothing to leads;
+ *   - the sent estimate is a real send: delivered, not reset to draft and
+ *     not carrying a call-linkage invalidation marker.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -27,14 +29,11 @@ const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_E
 
 const RETIRE_BATCH_LIMIT = 200;
 const RETIRE_CLOSER = 'estimate-draft-retire';
-const DELIVERED_CHANNEL_UNKNOWN = 'delivered_channel_unknown';
 // A draft younger than this is still being finished by its creator: the
 // estimator engine posts its "draft ready" bell and parks clarifications
 // after the insert, and the lead webhook's background triage rewrites the
 // row. None of them hold the estimate lock, so the sweep waits them out.
 const DRAFT_SETTLE_MINUTES = 30;
-// Thrown inside the per-draft transaction to roll an archive back.
-class KeepDraft extends Error {}
 // lock_not_available (NOWAIT / lock_timeout) and deadlock_detected: another
 // writer holds a row this draft needs. Skipped; the next tick retries.
 const BUSY_ROW_CODES = new Set(['55P03', '40P01']);
@@ -57,13 +56,20 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
   AND ${ADDRESS_UNVERIFIED_ABSENT_SQL}
 )`;
 
-// A draft with its own live lifecycle is never retired (codex #6081 r1-r6):
-// an assessment-linked pre-draft (ASSESSMENT_EXCEPTION_ABSENT_SQL, kept for
-// staff to price after the visit), a booking-page handoff (booking_intents, which the public capture can
-// re-open) or a staged clarification text. A linked lead is not a blocker:
-// the link is cleared, as the Delete action does (see retireOneDraft).
+// A draft with its own live lifecycle is never retired: an assessment-linked
+// pre-draft (ASSESSMENT_EXCEPTION_ABSENT_SQL, kept for staff to price after
+// the visit), a booking-page handoff (booking_intents, which the public
+// capture can re-open), a staged clarification text, or an OPEN lead (owner
+// 2026-10-08: a live opportunity stays for staff, and the sweep never writes
+// to leads). A closed or soft-deleted lead keeps its estimate_id and is not a
+// hold; its link is left as it is.
 const NO_LIVE_DEPENDENTS_SQL = `(
   NOT EXISTS (SELECT 1 FROM booking_intents b WHERE b.pricing_estimate_id = estimates.id)
+  AND NOT EXISTS (
+    SELECT 1 FROM leads l
+     WHERE l.estimate_id = estimates.id AND l.deleted_at IS NULL
+       AND l.status IN (${OPEN_LEAD_STATUSES.map((st) => `'${st}'`).join(', ')})
+  )
   AND NOT EXISTS (
     SELECT 1 FROM message_drafts m
      WHERE m.intent = 'estimate_clarify'
@@ -118,10 +124,14 @@ function sameProperty(pair) {
 // witness (deliveryState.lastDeliveredAt, or the older shape below), with
 // sent_at only for legacy rows that have no delivery tracking. sent_at alone is not a fence: a resend attempt that
 // delivers on no channel still overwrites it.
-// The older tracking shape (2026-07 to 2026-08) has no lastDeliveredAt: a
-// non-empty sentChannels list is its delivery witness and attemptedAt its time.
+// The older tracking shape (2026-07 to 2026-08) has no lastDeliveredAt. A
+// non-empty sentChannels list alone is NOT proof: a suppressed SMS or an
+// idempotent email "success" records a channel with nothing delivered. It
+// counts only when the customer opened the estimate (viewed_at), with
+// attemptedAt as its time.
 const SENT_CHANNELS_SQL = (alias) => `(jsonb_typeof(${alias}.estimate_data #> '{deliveryState,sentChannels}') = 'array'
-  AND jsonb_array_length(${alias}.estimate_data #> '{deliveryState,sentChannels}') > 0)`;
+  AND jsonb_array_length(${alias}.estimate_data #> '{deliveryState,sentChannels}') > 0
+  AND ${alias}.viewed_at IS NOT NULL)`;
 const DELIVERED_AT_SQL = (alias) => `((${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}') ~ '^[0-9]{4}-')`;
 const SENT_TIME_SQL = (alias) => `(CASE
   WHEN ${DELIVERED_AT_SQL(alias)}
@@ -151,88 +161,31 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
-const isOpenLead = (lead) => !lead.deleted_at && OPEN_LEAD_STATUSES.includes(lead.status);
-
-// Unlink every lead from the retired draft. The sent estimate may already
-// belong to another lead (by FK or by its estimate_data mirror). Then
-// replay the send for the now-unlinked lead the way the send backfill does
-// (scripts/backfill-estimate-sent-lead-status.js): the canonical resolver
-// links and advances it only when it is the sent estimate's single
-// unambiguous open lead, as of the send time. Lead state only; it sends
-// nothing. Replayed only for a live courtship (the backfill's own rule:
-// unarchived sent/viewed rows) that no lead owns yet: an owned send is
-// accounted for, and a replay would only re-record it there. A viewed
-// replacement then replays the view.
-async function detachLeads(trx, { pair, draftId, leads, sentRow }) {
-  await trx('leads').whereIn('id', leads.map((l) => l.id)).where({ estimate_id: draftId })
-    .update({ estimate_id: null, updated_at: trx.fn.now() });
-  if (sentRow.archived_at || !['sent', 'viewed'].includes(sentRow.status)) return;
-  if (await trx('leads').where({ estimate_id: pair.sent_id }).first('id')) return;
-  const link = require('./lead-estimate-link');
-  // The detached lead is KNOWN, so when it is the draft's one open lead and
-  // the unowned replacement names no other lead, it is attached directly
-  // through the canonical attach (its own closed-lead and contact-match
-  // checks). The resolver's fuzzy fallback would miss an established
-  // customer's add-on lead. A refusal leaves the lead unlinked.
-  const open = leads.filter(isOpenLead);
-  const mirrorLeadId = sentRow.mirror_lead_id || null;
-  if (open.length === 1 && (!mirrorLeadId || String(mirrorLeadId) === String(open[0].id))) {
-    await link.attachLeadToEstimate({ database: trx, leadId: open[0].id, estimateId: pair.sent_id })
-      .catch((err) => { if (!err?.statusCode) throw err; });
-  }
-  const replay = { estimateId: pair.sent_id, performedBy: RETIRE_CLOSER, database: trx, originatingNotAfter: pair.sent_at };
-  // The send is real (SENT_EVIDENCE_SQL), so the rescued lead qualifies. Only
-  // the channels the delivery record proves count for the contact-wide
-  // answered stamp: with none recorded (a legacy row, or a later failed
-  // resend cleared them) the list names no sms/email channel, so no other
-  // lead is stamped, yet it is not the EMPTY list that means "nothing was
-  // delivered" and would skip qualification.
-  const recorded = (Array.isArray(sentRow.sent_channels) ? sentRow.sent_channels : []).filter((ch) => ch === 'sms' || ch === 'email');
-  const sentChannels = recorded.length ? recorded : [DELIVERED_CHANNEL_UNKNOWN];
-  await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at, sentChannels });
-  if (sentRow.status === 'viewed') await link.markLinkedLeadEstimateViewed(replay);
-}
-
-// Archive one draft, clear a lead link to it, and mark its open "draft
-// ready" bells done, in one transaction. Lock order: the draft, then its
-// leads, then the sent estimate, each NOWAIT (a busy row skips this draft for
-// the tick). Holding the sent estimate FOR UPDATE means a revise (address
-// move), a linkage invalidation or a Pipeline link of it (which takes FOR
-// SHARE) either committed before the checks below or cannot proceed until
-// this commits, so nothing changes its owner between the owner check and the
-// send replay.
+// Archive one draft and mark its open "draft ready" bells done, in one
+// transaction. Lock order: the draft, then the sent estimate, each NOWAIT (a
+// busy row skips this draft for the tick), so the sweep never waits on one
+// row while holding another. A Pipeline link takes the draft FOR SHARE NOWAIT
+// before its write: it either committed first (the open-lead predicate in
+// DRAFT_ELIGIBLE_SQL then keeps the draft) or is refused until this commits
+// and then sees the archive.
 async function retireOneDraft(trx, pair) {
-  // The sweep never waits behind another writer. A busy row means "not this
-  // tick" (lock_not_available is skipped by the caller).
   await trx.raw("SET LOCAL lock_timeout = '1500ms'");
-  // Draft, then its leads, then the sent estimate — every lock NOWAIT, so
-  // the sweep never waits on one row while holding another, whatever order
-  // another writer uses (call-linkage reconciliation: draft then lead; an
-  // estimate save: lead then draft; acceptance: estimate then lead).
   const held = await trx.raw('SELECT id FROM estimates WHERE id = ? FOR UPDATE NOWAIT', [pair.draft_id]);
   if (!held?.rows?.length) return null;
-  const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().noWait().select('id', 'deleted_at', 'status');
-  // A soft-deleted or closed lead keeps its estimate_id; it is unlinked like
-  // the rest but is not open work for the accepted-estimate hold.
-  const hasLiveLead = () => leads.some(isOpenLead);
+  // The send is judged again on the current row: still a real delivery at
+  // the same door and time the read saw.
   const sent = await trx.raw(`
-    SELECT id, status, archived_at, estimate_data #> '{deliveryState,sentChannels}' AS sent_channels,
-           estimate_data ->> 'lead_id' AS mirror_lead_id
-      FROM estimates s
+    SELECT id FROM estimates s
      WHERE s.id = ?
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
        AND date_trunc('milliseconds', ${SENT_TIME_SQL('s')}) = date_trunc('milliseconds', ?::timestamptz)
        AND ${SENT_EVIDENCE_SQL('s')}
-     FOR UPDATE NOWAIT
+     FOR SHARE NOWAIT
   `, [pair.sent_id, pair.sent_property_id, pair.sent_address, pair.sent_at]);
   if (!sent?.rows?.length) return null;
-  // An ACCEPTED replacement would need the lead converted; that is the
-  // acceptance flow's decision, not this sweep's. Keep a lead-linked draft.
-  const sentStatus = sent.rows[0].status;
-  if (hasLiveLead() && sentStatus === 'accepted') return null;
   // Every draft predicate re-checked on the row itself: a draft edited,
-  // sent, claimed or newly linked since the read is left alone.
+  // sent, claimed or linked to an open lead since the read is left alone.
   const result = await trx.raw(`
     UPDATE estimates
        SET archived_at = NOW(),
@@ -252,25 +205,6 @@ async function retireOneDraft(trx, pair) {
   `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.draft_property_id, pair.draft_address, pair.sent_id]);
   const row = result?.rows?.[0];
   if (!row) return null;
-  // A lead linked between the first lock (which locks nothing when no lead
-  // points here yet) and the archive is picked up now, under the draft's row
-  // lock. For an accepted replacement the whole retirement is undone.
-  const lateLeads = await trx('leads').where({ estimate_id: row.id }).whereNotIn('id', leads.map((l) => l.id)).forUpdate().noWait().select('id', 'deleted_at', 'status');
-  leads.push(...lateLeads);
-  // With any lead on the draft (found at the first lock or just now), the
-  // accepted-at-this-door hold is judged again on current rows: the first
-  // read may predate the link or the acceptance. A hit undoes the archive.
-  if (hasLiveLead()) {
-    const acceptedNow = (await trx.raw(`
-      SELECT a.property_id, a.address
-        FROM estimates d
-        JOIN estimates a ON a.customer_id = d.customer_id AND a.id <> d.id
-                        AND a.status = 'accepted' AND a.created_at > d.created_at
-       WHERE d.id = ?
-    `, [row.id]))?.rows || [];
-    if (acceptedNow.some((a) => sameProperty({ ...pair, sent_property_id: a.property_id, sent_address: a.address }))) throw new KeepDraft();
-  }
-  if (leads.length) await detachLeads(trx, { pair, draftId: row.id, leads, sentRow: sent.rows[0] });
   // The canonical system close (notification-service done contract): the
   // closer is named, read state follows, a person's earlier Done is kept.
   const { doneColumns, openToCloser } = require('./notification-service')._private;
@@ -305,14 +239,7 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   // WRITES are capped at `batch`.
   const pairs = (await conn.raw(`
     SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
-           s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address,
-           CASE WHEN EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id AND l.deleted_at IS NULL
-                               AND l.status IN (${OPEN_LEAD_STATUSES.map((st) => `'${st}'`).join(', ')})) THEN (
-             SELECT json_agg(json_build_object('property_id', a.property_id, 'address', a.address))
-               FROM estimates a
-              WHERE a.customer_id = d.customer_id AND a.id <> d.id
-                AND a.status = 'accepted' AND a.created_at > d.created_at
-           ) END AS accepted_later
+           s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address
       FROM (SELECT * FROM estimates WHERE ${DRAFT_ELIGIBLE_SQL}) d
       CROSS JOIN LATERAL (
         SELECT s.id, ${SENT_TIME_SQL('s')} AS sent_at, s.property_id, s.address,
@@ -333,37 +260,24 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
      ORDER BY d.id, s.rank
   `))?.rows || [];
 
-  // First matching send per draft (the lateral lists same-door sends first).
-  // No cap here: a candidate retireOneDraft keeps (accepted replacement with
-  // a lead, a row changed since the read) must not use up the batch.
-  // A lead-linked draft with a later ACCEPTED estimate at the same door is
-  // kept whole: that lead belongs to the acceptance flow, so an older sent
-  // estimate must not retire the draft and take the lead instead. An accepted
-  // estimate for another property does not count.
-  const acceptedAtDoor = (pair) => (pair.accepted_later || []).some((accepted) => sameProperty({
-    draft_property_id: pair.draft_property_id,
-    draft_address: pair.draft_address,
-    sent_property_id: accepted.property_id,
-    sent_address: accepted.address,
-  }));
-  // Rows arrive ranked per draft (ORDER BY d.id, s.rank): keep the first match.
+  // Rows arrive ranked per draft (ORDER BY d.id, s.rank): keep the first
+  // same-door send.
   const byDraft = new Map();
   for (const pair of pairs) {
-    if (!byDraft.has(pair.draft_id) && sameProperty(pair) && !acceptedAtDoor(pair)) byDraft.set(pair.draft_id, pair);
+    if (!byDraft.has(pair.draft_id) && sameProperty(pair)) byDraft.set(pair.draft_id, pair);
   }
   const chosen = [...byDraft.values()];
 
   const rows = [];
-  // The kept-forever shape (a lead-linked draft whose replacement is accepted)
-  // is filtered in the read above, so what returns null here is transient (a
-  // busy row, a change since the read). Attempts are capped too, so a run
-  // opens at most 2 x batch transactions.
+  // What returns null here is transient (a busy row, a change since the
+  // read). Attempts are capped too, so a run opens at most 2 x batch
+  // transactions.
   let attempts = 0;
   for (const pair of chosen) {
     if (rows.length >= batch || attempts >= batch * 2) break;
     attempts += 1;
     const row = await conn.transaction((trx) => retireOneDraft(trx, pair))
-      .catch((err) => { if (err instanceof KeepDraft || BUSY_ROW_CODES.has(err?.code)) return null; throw err; });
+      .catch((err) => { if (BUSY_ROW_CODES.has(err?.code)) return null; throw err; });
     if (!row) continue;
     rows.push({ ...row, sent_id: pair.sent_id });
     logger.info(`[estimate-draft-retire] archived draft ${row.id} (customer ${row.customer_id}): replaced by sent estimate ${pair.sent_id}`);
