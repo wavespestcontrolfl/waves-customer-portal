@@ -80,6 +80,11 @@ export default function MobileServiceEditModal({
   const [error, setError] = useState(null);
   const [sharedStopAsk, setSharedStopAsk] = useState(false);
   const [showStaffPicker, setShowStaffPicker] = useState(false);
+  // Auto-dispatch lock: recurring occurrences only. Saved through its own PATCH
+  // after update-details, and only when the tech changed the box.
+  const showAutoDispatchLock = !!(service?.isRecurring && service?.recurringParentId);
+  const autoDispatchLockedSeed = service?.autoDispatchLocked === true;
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
 
   const baseName = useMemo(() => baseServiceName(service?.serviceType), [service?.serviceType]);
   const headerTitle = service?.serviceType || 'Service';
@@ -152,6 +157,16 @@ export default function MobileServiceEditModal({
       ];
       if (savedWarnings.length) {
         showScheduleSaveNotice(`Saved.\n\n${savedWarnings.join('\n\n')}`);
+      }
+      if (showAutoDispatchLock && autoDispatchLocked !== autoDispatchLockedSeed) {
+        try {
+          await adminFetch(`/admin/auto-dispatch/services/${service.id}/lock`, {
+            method: 'PATCH',
+            body: JSON.stringify({ locked: autoDispatchLocked }),
+          });
+        } catch (lockErr) {
+          showScheduleSaveNotice(`Saved, but the auto-dispatch setting was not changed: ${apiErrorMessage(lockErr, 'Failed to save')}. Reopen this visit to retry it.`);
+        }
       }
       onSaved?.();
     } catch (e) {
@@ -407,6 +422,30 @@ export default function MobileServiceEditModal({
             mins
           </span>
         </div>
+
+        {showAutoDispatchLock && (
+          <label
+            className="bg-white border-b border-hairline border-zinc-200 flex items-start gap-3"
+            style={{ padding: '14px 16px', cursor: 'pointer' }}
+          >
+            <input
+              type="checkbox"
+              checked={autoDispatchLocked}
+              onChange={(e) => setAutoDispatchLocked(e.target.checked)}
+              disabled={saving}
+              className="u-focus-ring"
+              style={{ width: 22, height: 22, marginTop: 1, accentColor: '#18181B' }}
+            />
+            <div className="flex-1 min-w-0">
+              <div className="text-zinc-900 font-medium" style={{ fontSize: 15 }}>
+                Keep auto-dispatch off this visit
+              </div>
+              <div className="text-ink-tertiary" style={{ fontSize: 14, marginTop: 2 }}>
+                Auto-dispatch will not move this visit. Changing the date or time here turns this on.
+              </div>
+            </div>
+          </label>
+        )}
 
         {/* Notes */}
         <div

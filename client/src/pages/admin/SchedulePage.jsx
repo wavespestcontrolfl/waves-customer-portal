@@ -2096,6 +2096,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return derived != null ? String(derived) : "";
     })(),
   });
+  // Auto-dispatch lock (recurring occurrences only). Saved through its own
+  // PATCH after update-details, only when the box was changed; the server
+  // may also set the lock itself when the date or time changes.
+  const showAutoDispatchLock = !!(service.isRecurring && service.recurringParentId);
+  const autoDispatchLockedSeed = service.autoDispatchLocked === true;
+  const [autoDispatchLocked, setAutoDispatchLocked] = useState(autoDispatchLockedSeed);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveErrorState] = useState("");
@@ -4015,6 +4021,18 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         } catch (patchErr) {
           showScheduleSaveNotice(
             `Appointment saved, but the re-entry correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
+          );
+        }
+      }
+      if (showAutoDispatchLock && autoDispatchLocked !== autoDispatchLockedSeed) {
+        try {
+          await adminFetch(`/admin/auto-dispatch/services/${service.id}/lock`, {
+            method: "PATCH",
+            body: JSON.stringify({ locked: autoDispatchLocked }),
+          });
+        } catch (patchErr) {
+          showScheduleSaveNotice(
+            `Appointment saved, but the auto-dispatch setting was not changed: ${patchErr.message}. Reopen the appointment to retry it.`,
           );
         }
       }
@@ -6357,6 +6375,35 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     the new appointment time.
                   </div>{" "}
                 </div>
+              )}{" "}
+              {showAutoDispatchLock && (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 10,
+                    marginBottom: 14,
+                    cursor: "pointer",
+                  }}
+                >
+                  {" "}
+                  <input
+                    type="checkbox"
+                    checked={autoDispatchLocked}
+                    onChange={(e) => setAutoDispatchLocked(e.target.checked)}
+                    disabled={saving}
+                    style={{ width: 17, height: 17, marginTop: 2, accentColor: "#18181B" }}
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div style={{ fontSize: 14, fontWeight: 500 }}>
+                      Keep auto-dispatch off this visit
+                    </div>{" "}
+                    <div style={{ fontSize: 14, color: D.muted }}>
+                      Auto-dispatch will not move this visit. Changing the date or time here turns this on.
+                    </div>{" "}
+                  </div>{" "}
+                </label>
               )}{" "}
               <div
                 style={{

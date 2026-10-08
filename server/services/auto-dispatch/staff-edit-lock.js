@@ -8,7 +8,8 @@
  * time staff just chose (known limit of #6055). The edit now sets the visit's
  * own auto_dispatch_locked flag instead — the existing staff lock every
  * auto-dispatch path already honors (eligibility MANUALLY_LOCKED, apply.js
- * re-read) and staff can clear on the auto-dispatch screen. No reschedule_log
+ * re-read). Staff see and clear it with the "Keep auto-dispatch off this visit"
+ * box on the edit form (PATCH /admin/auto-dispatch/services/:id/lock). No reschedule_log
  * row is written, so the ~20 readers of that table see no change.
  *
  * Pure: decides from the locked row before the edit and the update about to be
@@ -17,7 +18,9 @@
  */
 const { toDateStr } = require('./dates');
 
-const LIVE_STATUSES = new Set(['pending', 'confirmed']);
+// en_route / on_site count too: the edit route rewinds a moved live visit to
+// 'confirmed' later in the same save, so the status this save persists is live.
+const LIVE_STATUSES = new Set(['pending', 'confirmed', 'en_route', 'on_site']);
 const hhmm = (t) => (t == null || t === '' ? null : String(t).slice(0, 5));
 
 // True when this edit puts a live recurring child occurrence on a slot a person

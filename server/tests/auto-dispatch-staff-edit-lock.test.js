@@ -26,6 +26,11 @@ describe('staffEditLocksVisit', () => {
     expect(staffEditLocksVisit(before({ window_start: null, window_end: null }), { scheduled_date: '2026-10-20' })).toBe(false);
   });
 
+  test('a live visit the route rewinds to confirmed on a date move locks too', () => {
+    expect(staffEditLocksVisit(before({ status: 'en_route' }), { scheduled_date: '2026-10-20' })).toBe(true);
+    expect(staffEditLocksVisit(before({ status: 'on_site' }), { scheduled_date: '2026-10-20' })).toBe(true);
+  });
+
   test('non-recurring, template and terminal rows never lock', () => {
     expect(staffEditLocksVisit(before({ is_recurring: false }), { window_start: '13:00' })).toBe(false);
     expect(staffEditLocksVisit(before({ recurring_parent_id: null }), { window_start: '13:00' })).toBe(false);
