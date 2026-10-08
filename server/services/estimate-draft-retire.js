@@ -112,6 +112,15 @@ function sameProperty(pair) {
   return unit(pair.draft_address) === unit(pair.sent_address);
 }
 
+// When the customer last actually received the estimate: the delivery
+// witness (deliveryState.lastDeliveredAt), with sent_at only for legacy rows
+// that have none. sent_at alone is not a fence: a resend attempt that
+// delivers on no channel still overwrites it.
+const SENT_TIME_SQL = (alias) => `(CASE
+  WHEN (${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}') ~ '^[0-9]{4}-'
+    THEN (${alias}.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz
+  ELSE ${alias}.sent_at END)`;
+
 // A real send by staff or a verified flow. Website quote rows (quote_wizard)
 // never count: /api/public/quote/calculate is unauthenticated, so a caller
 // who knows a prospect's email and address could otherwise mint a "sent" row
@@ -149,9 +158,10 @@ async function retireOneDraft(trx, pair) {
      WHERE s.id = ?
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
+       AND date_trunc('milliseconds', ${SENT_TIME_SQL('s')}) = date_trunc('milliseconds', ?::timestamptz)
        AND ${SENT_EVIDENCE_SQL('s')}
      FOR UPDATE NOWAIT
-  `, [pair.sent_id, pair.sent_property_id, pair.sent_address]);
+  `, [pair.sent_id, pair.sent_property_id, pair.sent_address, pair.sent_at]);
   if (!sent?.rows?.length) return null;
   // An ACCEPTED replacement would need the lead converted; that is the
   // acceptance flow's decision, not this sweep's. Keep a lead-linked draft.
@@ -263,16 +273,16 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
            ) END AS accepted_later
       FROM (SELECT * FROM estimates WHERE ${DRAFT_ELIGIBLE_SQL}) d
       CROSS JOIN LATERAL (
-        SELECT s.id, s.sent_at, s.property_id, s.address
+        SELECT s.id, ${SENT_TIME_SQL('s')} AS sent_at, s.property_id, s.address
           FROM estimates s
          WHERE s.customer_id = d.customer_id
            AND s.id <> d.id
            AND ${SENT_EVIDENCE_SQL('s')}
            AND s.created_at > d.created_at
-           AND d.updated_at <= s.sent_at
+           AND d.updated_at <= ${SENT_TIME_SQL('s')}
          ORDER BY COALESCE(s.property_id = d.property_id, false) DESC,
                   COALESCE(LOWER(TRIM(s.address)) = LOWER(TRIM(d.address)), false) DESC,
-                  s.sent_at DESC
+                  ${SENT_TIME_SQL('s')} DESC
          LIMIT ${SENDS_PER_DRAFT}
       ) s
   `))?.rows || [];

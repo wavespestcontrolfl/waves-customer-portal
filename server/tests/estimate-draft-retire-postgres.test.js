@@ -375,6 +375,15 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).archived_at).toBeNull();
   });
 
+  test('the fence is the last real delivery, not a sent_at a failed resend moved', async () => {
+    const c = await customer();
+    // Delivered 60 min ago; the draft was edited 30 min ago; a resend that delivered nothing stamped sent_at 5 min ago.
+    const edited = await estimate(c, { createdAt: minutesAgo(200), updatedAt: minutesAgo(30) });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(5), data: { deliveryState: { firstDeliveredAt: minutesAgo(60).toISOString(), lastDeliveredAt: minutesAgo(60).toISOString() } } });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
+    expect((await row(edited)).archived_at).toBeNull();
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();
