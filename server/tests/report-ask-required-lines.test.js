@@ -670,16 +670,15 @@ describe('which questions reach the model', () => {
     expect(callModel).not.toHaveBeenCalled();
   });
 
-  test('a system-written pet line still goes to the model and must appear verbatim', async () => {
+  // A re-entry question keeps the fixed answer, which states the pet line
+  // word for word, with no model call (Codex security P1 #5964 r59, r70).
+  test('a re-entry question with a system-written pet line keeps the fixed answer', async () => {
     const data = pestData({ dynamicContext: { reentry: { customerSummary: 'Treated areas are ready for normal use.', petAdvisory: 'Keep pets off treated zones until dry.' } } });
     const routed = route('When can my dog go back outside?', data);
     expect(routed.requiredLines.every((line) => line.source === 'system')).toBe(true);
-    const good = `Soon. ${texts(routed).join(' ')}`;
-    const { out, callModel } = await ask(data, 'When can my dog go back outside?', routed.requiredLines, good);
-    expect(out.answer).toBe(good);
-    expect(callModel).toHaveBeenCalledTimes(1);
-    const dropped = await ask(data, 'When can my dog go back outside?', routed.requiredLines, 'Soon, once it is dry.');
-    expect(dropped.out).toBeNull();
+    const { out, callModel } = await ask(data, 'When can my dog go back outside?', routed.requiredLines, `Soon. ${texts(routed).join(' ')}`);
+    expect(out).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
   });
 
   test('a lawn report and a tree & shrub report still use the model', async () => {
@@ -2458,4 +2457,24 @@ test('a one-day rain reading never grounds a weekly total (pre-push audit)', () 
   const facts = buildReportAskFacts({ data });
   expect(screenAskAnswer('The lawn received 0.5 inches of rain over the past week.', { question: 'q', data, facts })).toBe('unstated_number');
   expect(screenAskAnswer('The lawn received 1.23 inches of rain over the past week.', { question: 'q', data, facts })).toBeNull();
+});
+
+describe('answer screen, Codex round 70', () => {
+  test.each(['When is the yard usable?', 'Can we use the patio?', 'Are treated spaces okay to enter?'])('an implicit re-entry question keeps the fixed answer: %s', (question) => {
+    expect(ruleAnswerReason(lawnData(), [], 'unrouted', question)).toBe('reentry');
+  });
+
+  test('a legacy lawn progress question keeps the fixed answer', () => {
+    expect(ruleAnswerReason(lawnData({ reportV2: null }), [], 'unrouted', 'How has my lawn changed since the first assessment?')).toBe('legacy_progress');
+  });
+
+  test('the snapshot treatment summary stands in for a missing lead', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, snapshot: { treatmentSummary: 'We applied a weed control and a fertilizer.' } } });
+    expect(buildReportAskFacts({ data }).lawn_report.applied_today).toBe('We applied a weed control and a fertilizer.');
+  });
+
+  test.each(['A dozen shrubs had issues.', 'A couple of palms showed damage.'])('a lexical count is grounded like a number: %s', (answer) => {
+    const data = { serviceLine: 'tree_shrub', applications: [], reportV2: { snapshot: { overallScore: 80 } } };
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('unstated_number');
+  });
 });

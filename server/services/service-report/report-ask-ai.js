@@ -668,7 +668,9 @@ function lawnLeadFacts(v2, text) {
   return {
     headline: text(lead.headline || snapshot.statusHeadline, 200),
     why: text(lead.why || snapshot.rootCause || snapshot.scoreExplanation, 300),
-    applied_today: text(lead.applied, 300),
+    // The snapshot hero's "What we applied today" box when there is no lead
+    // (Codex P1 #5964 r70).
+    applied_today: text(lead.applied || snapshot.treatmentSummary, 300),
     your_part: texts(lead.yourPart, 2, 240),
     next: text(lead.next, 240),
     what_to_expect: text(lead.whatToExpect, 300),
@@ -1217,6 +1219,13 @@ const UNIT_AHEAD_RE = /^\s*(?:inch|in\.|["”]|out\s+of\s+(?:100|5)|points?\b|\/
 // "a quarter inch" -> 0.25, "three quarters of an inch" -> 0.75 (Codex P1
 // #5964 r32).
 const FRACTION_WORDS = [
+  // Lexical counts: "a dozen shrubs", "a couple of palms" (Codex P1 #5964 r70).
+  [/\bhalf\s+a\s+dozen\b/gi, () => '6'],
+  [/\b(?:a|one)\s+dozen\b/gi, () => '12'],
+  [/\b(two|three|four|five)\s+dozen\b/gi, (m, n) => String(SMALL_NUMBERS.indexOf(n.toLowerCase()) * 12)],
+  [/\bdozens?\b/gi, () => '12'],
+  [/\b(?:a\s+)?couple(?:\s+of)?\b/gi, () => '2'],
+  [/\b(?:a\s+)?pair\s+of\b/gi, () => '2'],
   [/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+and\s+a\s+half\b/gi, (m, n) => String(SMALL_NUMBERS.indexOf(n.toLowerCase()) + 0.5)],
   [/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+and\s+a\s+quarter\b/gi, (m, n) => String(SMALL_NUMBERS.indexOf(n.toLowerCase()) + 0.25)],
   [/\bthree[\s-]+quarters?(?:\s+of)?(?:\s+an?)?\b/gi, () => '0.75'],
@@ -2438,6 +2447,9 @@ function asksAboutSchedule(question) {
 // model has no ground for keeps the fixed answer (Codex P1 #5964 r57).
 const CARE_VERB_Q = '(?:mow\\w*|water\\w*|irrigat\\w*|fertiliz\\w*|spray\\w*|seed\\w*|overseed\\w*|aerat\\w*|trim\\w*|prun\\w*|cut\\w*|weed\\w*|rak\\w*|sod\\w*|dethatch\\w*|edg(?:e|ing)|plant\\w*|sprinkler\\w*)';
 const CARE_PERMISSION_QUESTION = new RegExp(`\\b${CARE_VERB_Q}\\b[^?.!]*\\b(?:ok(?:ay)?|fine|allowed|alright|all\\s+right|safe|problem|issue|good\\s+idea|bad\\s+idea|permitted|necessary|needed|time|wait|too\\s+(?:soon|early|late))\\b|\\b(?:can|could|may|should|shall|would|will|do|does|is|are|when)\\b[^?.!]{0,40}\\b${CARE_VERB_Q}\\b[^.!]*\\?`, 'i');
+const REENTRY_PLACE = '(?:yard|patio|lawn|grass|lanai|pool|deck|porch|rooms?|kitchen|garage|house|home|areas?|spaces?|zones?|spots?|outside|inside|playset|play\\s*area|garden|beds?)';
+const REENTRY_QUESTION = new RegExp(`\\b(?:usable|re-?ent\\w*|ready\\s+(?:to|for)\\s+(?:use|go|enter|play)|dry\\s+(?:yet|time|enough))\\b|\\b(?:use|enter|go\\s+(?:back\\s+)?(?:in|into|on|onto|out|outside)|walk\\s+on|play\\s+(?:in|on)|step\\s+on|sit\\s+on|be\\s+(?:in|on))\\s+(?:the|our|my|treated|that|this)\\s+(?:\\w+\\s+)?${REENTRY_PLACE}\\b|\\b(?:ok(?:ay)?|safe|fine|alright)\\s+(?:to|for)\\s+(?:\\w+\\s+){0,3}?(?:enter|go|use|walk|play|be|come|return)\\b|\\bhow\\s+long\\b[^?.!]*\\b(?:dry|wait|stay\\s+off|keep\\s+off|before)\\b|\\bwhen\\s+(?:can|is|are|will|may)\\b[^?.!]*\\b(?:${REENTRY_PLACE}|pets?|dogs?|cats?|kids?|children|family)\\b[^?.!]*\\b(?:usable|ready|use|back|out|in|on|go|play|enter|ok(?:ay)?|safe|dry)\\b`, 'i');
+const LAWN_PROGRESS_QUESTION = /\b(?:chang\w*|progress\w*|improv\w*|since|trend\w*|compar\w*|better|worse|before|first\s+(?:visit|assessment)|over\s+time|history)\b/i;
 const LAWN_SIZE_QUESTION = /\bhow\s+(?:big|large|much\s+(?:lawn|turf|grass|yard))\b|\b(?:lawn|turf|yard|property)\s+size\b|\bsize\s+of\s+(?:my|the|our)\b|\bsquare\s+f(?:ee|oo)t(?:age)?\b|\bsq\.?\s*ft\b|\bacres?\b|\bacreage\b/i;
 const PRODUCT_LOCATION_QUESTION = /\bwhere\b[^?.!]*\b(?:appl\w*|put|spray\w*|spread|used|use|treat\w*|went|go|placed|zones?|areas?)\b|\bwhich\s+(?:zones?|areas?|parts?|beds?|sections?)\b|\b(?:what|which)\s+(?:part|zone|area)\s+of\b/i;
 const PHOTO_QUESTION = /\b(?:photos?|pictures?|pics?|images?|snapshots?|camera)\b/i;
@@ -2495,6 +2507,12 @@ const FIXED_TOPICS = new Set(['next_visit', 'reentry', 'watering', 'next_steps']
 function fixedAnswerTopic(topic, question, data = {}) {
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   if (FIXED_TOPICS.has(topic)) return topic;
+  // Re-entry asked in other words: "When is the yard usable?", "Can we use
+  // the patio?" (Codex P1 #5964 r70).
+  if (REENTRY_QUESTION.test(question)) return 'reentry';
+  // A legacy lawn page (no reportV2) draws its own trend and "since first
+  // assessment" delta, which the sheet does not carry (Codex P1 #5964 r70).
+  if (data.serviceLine === 'lawn' && !data.reportV2 && LAWN_PROGRESS_QUESTION.test(question)) return 'legacy_progress';
   if (PHOTO_QUESTION.test(question)) return 'photos';
   // The page draws a product's zones from zone ids the sheet does not carry,
   // so "where was it applied?" keeps the fixed answer (Codex P1 #5964 r68).
