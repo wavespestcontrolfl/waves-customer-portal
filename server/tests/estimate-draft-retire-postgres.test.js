@@ -294,6 +294,20 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(draft)).archived_at).toBeNull();
   });
 
+  test('six newer other-door sends with property ids do not outrank the same-address send', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(200) });
+    const sameDoor = await estimate(c, { status: 'sent', createdAt: minutesAgo(190), sentAt: minutesAgo(180) });
+    // The draft has no property_id, so the property match is NULL for these.
+    const otherProperty = randomUUID();
+    await mockPg('customer_properties').insert({ id: otherProperty, customer_id: c });
+    for (let i = 0; i < 6; i += 1) {
+      await estimate(c, { status: 'sent', createdAt: minutesAgo(100 - i), sentAt: minutesAgo(90 - i), address: `${700 + i} Elsewhere Blvd, Testville, FL 34000`, property_id: otherProperty });
+    }
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    expect((await row(draft)).estimate_data.retiredBySentEstimate.estimate_id).toBe(sameDoor);
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();

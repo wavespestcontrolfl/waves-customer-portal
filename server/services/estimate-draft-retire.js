@@ -235,8 +235,8 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
            AND ${SENT_EVIDENCE_SQL('s')}
            AND s.created_at > d.created_at
            AND d.updated_at <= s.sent_at
-         ORDER BY (s.property_id IS NOT NULL AND s.property_id = d.property_id) DESC,
-                  (LOWER(TRIM(s.address)) = LOWER(TRIM(d.address))) DESC,
+         ORDER BY COALESCE(s.property_id = d.property_id, false) DESC,
+                  COALESCE(LOWER(TRIM(s.address)) = LOWER(TRIM(d.address)), false) DESC,
                   s.sent_at DESC
          LIMIT ${SENDS_PER_DRAFT}
       ) s
