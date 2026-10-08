@@ -654,7 +654,17 @@ async function fetchOpenMeteoPeriods(place) {
   if (!now || !Number.isFinite(now.temperature_f)) return null;
   const etHour = (at) => etParts(new Date(at)).hour;
   const isNight = (at) => etHour(at) >= 18 || etHour(at) < 6;
-  const nightTemps = forecast.hourly.filter((h) => isNight(h.at) && Number.isFinite(h.temperature_f)).map((h) => h.temperature_f);
+  // Tonight = the first unbroken run of night hours (6 PM-6 AM ET) from now.
+  // The window is 24 h, so after dark it also reaches tomorrow evening:
+  // those hours belong to the next night.
+  const nightTemps = [];
+  let inNight = false;
+  for (const h of forecast.hourly) {
+    if (isNight(h.at)) {
+      inNight = true;
+      if (Number.isFinite(h.temperature_f)) nightTemps.push(h.temperature_f);
+    } else if (inNight) break;
+  }
   const round = (v) => (Number.isFinite(v) ? Math.round(v) : undefined);
   const nightLow = nightTemps.length ? Math.round(Math.min(...nightTemps)) : undefined;
   return [

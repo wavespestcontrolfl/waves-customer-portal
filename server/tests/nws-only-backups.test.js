@@ -116,7 +116,18 @@ describe('portal Local Conditions tile', () => {
         ok: true,
         json: async () => ({
           current: { time: Math.floor(Date.now() / 1000), temperature_2m: 81.6, relative_humidity_2m: 77, wind_speed_10m: 11.4, weather_code: 95 },
-          hourly: { time: times, temperature_2m: times.map(() => 73.2), precipitation: times.map(() => 0) },
+          // Tonight's hours read 73.2; the day after and the NEXT night read
+          // colder, and must not set tonight's low.
+          hourly: {
+            time: times,
+            temperature_2m: times.map((t) => {
+              const etHour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23' }).format(t * 1000));
+              const night = etHour >= 18 || etHour < 6;
+              const firstNight = t * 1000 < Date.parse(at) + 19 * 3600000;
+              return night && firstNight ? 73.2 : night ? 60 : 88;
+            }),
+            precipitation: times.map(() => 0),
+          },
         }),
       };
     });
