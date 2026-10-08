@@ -147,6 +147,15 @@ test('a shown overview maps elements to urls, keeps reference titles and flags a
   expect(summary).toMatchObject({ shown: 2, costUsd: 0.008 });
 });
 
+test('with no top-level markdown, a video element adds its title and snippet to the answer', async () => {
+  mockQueries = [q()];
+  dataforseo.request.mockResolvedValue(serp([{ type: 'knowledge_graph_ai_overview_item', items: [
+    { type: 'ai_overview_video_element', url: 'https://video.example/v', title: 'Waves Pest Control lawn tips', snippet: 'Brown patch explained.' },
+  ] }]));
+  await runPinnedCaptures({ pass: 'am' });
+  expect(mockInserts[0].answer_markdown).toBe('Waves Pest Control lawn tips Brown patch explained.');
+});
+
 test('with no top-level markdown, nested component text forms the answer', async () => {
   mockQueries = [q()];
   dataforseo.request.mockResolvedValue(serp([{ type: 'knowledge_graph_ai_overview_item', items: [
