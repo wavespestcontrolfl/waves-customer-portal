@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v24');
-    expect(PROMPT_HASH).toMatch(/^v24-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v25');
+    expect(PROMPT_HASH).toMatch(/^v25-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
@@ -358,7 +358,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.24.0');
+    expect(SCHEMA_VERSION).toBe('1.25.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
@@ -379,5 +379,27 @@ describe('migration columns', () => {
   test('exports up and down functions', () => {
     expect(typeof migration.up).toBe('function');
     expect(typeof migration.down).toBe('function');
+  });
+});
+
+// A realtor's call named a home inspector and the profile note read "Switching
+// from" that inspector: the field had no description, so any company fit.
+describe('customer_history.competitor_name is a pest or lawn provider only', () => {
+  const describedIn = (file) => require(`../schemas/${file}`)
+    .properties.customer_history.properties.competitor_name.description;
+
+  test.each([
+    'call-extraction.model-output.schema.json',
+    'call-extraction.persisted.schema.json',
+  ])('%s names the provider and excludes other businesses', (file) => {
+    const description = describedIn(file);
+    expect(description).toMatch(/pest control or lawn care company/);
+    expect(description).toMatch(/null for any other business/);
+    expect(description).toMatch(/home inspector/);
+  });
+
+  test('both schemas carry the same description', () => {
+    expect(describedIn('call-extraction.model-output.schema.json'))
+      .toBe(describedIn('call-extraction.persisted.schema.json'));
   });
 });

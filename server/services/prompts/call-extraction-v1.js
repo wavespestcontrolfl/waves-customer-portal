@@ -134,7 +134,10 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // price_is_final precedent): the model judges over the WHOLE call whether any price came up
 // (a bare amount from either side counts), and the no-price assessment booking requires
 // exactly false. New field and instruction: a new cohort.
-const PROMPT_VERSION = 'v24';
+// v25: customer_history.competitor_name gets a schema description (a pest or lawn provider
+// only). A realtor's call named a home inspector, and the profile note read "Switching from"
+// that inspector. Schema text changes the output contract: a new cohort.
+const PROMPT_VERSION = 'v25';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
