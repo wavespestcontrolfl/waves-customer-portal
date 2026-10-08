@@ -272,19 +272,10 @@ function chooseChinch(products, capped) {
 // ── the cards ───────────────────────────────────────────────────────────────
 
 const cardFor = (kind, fields) => ({
-  kind, title: '', finding: '', check: null, detail: null, note: null, productIds: [], items: [],
+  kind, title: '', finding: '', check: null, detail: null, note: null, productIds: [], heldProductIds: [], items: [],
   actionLabel: 'Add it', dismissLabel: null, ...fields,
 });
 const protocolLine = (item) => item.line || item.name;
-
-/**
- * The trouble areas on file for the lawn (the places take-all is treated), today always none: the
- * store does not exist yet. The one seam a later change fills; buildCards shows the take-all
- * product only when this returns something.
- */
-async function troubleAreasOnFile({ svc, knex } = {}) {
-  return [];
-}
 
 /**
  * The cards for a confirmed assessment, in screen order. `offers` is `{ fungus, caterpillars,
@@ -318,7 +309,10 @@ function fungusCard({ s, offers, troubleAreas }) {
   const { item, takeAll, blocked } = offers.fungus;
   const finding = `Photos show ${s.fungus} fungus activity.`;
   // The check only: take-all is treated on known trouble areas, and none is on file.
-  if (takeAll && (!troubleAreas.length || blocked)) return cardFor('fungus', { title: 'Fungus', finding, check: CHECKS.fungus, note: TAKE_ALL_NOTE, actionLabel: null });
+  // The product is held, not offered: it names no add button and must not be addable from anywhere else.
+  if (takeAll && (!troubleAreas.length || blocked)) {
+    return cardFor('fungus', { title: 'Fungus', finding, check: CHECKS.fungus, note: TAKE_ALL_NOTE, heldProductIds: [item.productId], actionLabel: null });
+  }
   return cardFor('fungus', {
     title: 'Fungus', finding, check: CHECKS.fungus, detail: protocolLine(item), productIds: [item.productId], items: [item],
     actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
@@ -410,8 +404,8 @@ module.exports = {
   CHINCH_TRIGGERS,
   signalsFromAssessment,
   addOnOffers,
+  pickAddOns,
   weedOffer,
-  troubleAreasOnFile,
   resolveChinch,
   buildCards,
   treatmentGuideFreeze,

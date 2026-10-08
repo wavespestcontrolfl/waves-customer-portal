@@ -527,6 +527,18 @@ async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
   }
 }
 
+// GATE_LAWN_TREATMENT_GUIDE: the month's add-ons a guide card may own (the fungicide, the caterpillar
+// and the wetting-agent rows, by what their staged rows say), as `{ guidedProductIds }` or `{}`. The
+// sheet holds their taps until the fresh guide has answered, so a card never finds its product
+// already on the sheet. Pure; no limit read.
+function guidedProductIds(loaded, sheet) {
+  if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
+  const guide = require('./lawn-treatment-guide');
+  const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
+  const picks = guide.pickAddOns(loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows);
+  return { guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId) };
+}
+
 async function chinchOffer({ svc, structured, sheetAddOns, knex }) {
   const guide = require('./lawn-treatment-guide');
   const found = await guide.resolveChinch({ svc, structured, knex });
@@ -654,6 +666,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
       addOns: sheet.addOns,
       ...(await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures })),
       ...(await loadChinch({ loaded, sheet, svc, knex, readFailures })),
+      ...guidedProductIds(loaded, sheet),
     };
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
@@ -866,7 +879,8 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     month: visitMonthOf(svc),
     offers: { ...offers, chinch },
     weeds: guide.weedOffer(weedMix, sheet.addOns),
-    troubleAreas: await guide.troubleAreasOnFile({ svc, knex }),
+    // No trouble-area store exists yet, so take-all stays the check only.
+    troubleAreas: [],
   }), weedMix, chinch);
 }
 

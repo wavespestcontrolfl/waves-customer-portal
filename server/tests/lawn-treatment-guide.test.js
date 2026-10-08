@@ -122,6 +122,8 @@ describe('buildCards: the rule table', () => {
       expect(card).toMatchObject({
         kind: 'fungus', check: 'Check first: look at the blades and the edge of the patch.', note: 'Take-all is treated on known trouble areas only. None is on file for this lawn.',
         detail: null, productIds: [], items: [], actionLabel: null, dismissLabel: null,
+        // The product is held, not offered: the sheet keeps it out of every other list.
+        heldProductIds: [P_ART],
       });
     });
     test('the seam: with a trouble area on file the product shows as for any fungus card', () => {
@@ -132,6 +134,9 @@ describe('buildCards: the rule table', () => {
       const offers = { ...OFFERS, fungus: { ...TAKE_ALL.fungus, blocked: true } };
       const [card] = buildCards({ signals: { weedCoverage: 0, fungus: 'moderate', insect: 'none', drought: 'none' }, month: 4, offers, troubleAreas: [{ id: 'area-1' }] });
       expect(card).toMatchObject({ productIds: [], actionLabel: null });
+    });
+    test('an offered fungus card holds nothing back', () => {
+      expect(run({ fungus: 'minor' })[0].heldProductIds).toEqual([]);
     });
     test('no fungus finding, no card', () => {
       expect(run({ fungus: 'none' }, { offers: { ...OFFERS, ...TAKE_ALL } })).toEqual([]);
