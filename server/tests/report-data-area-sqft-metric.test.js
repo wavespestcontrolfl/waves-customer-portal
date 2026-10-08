@@ -21,6 +21,12 @@ describe('area_sqft counts whole-lawn rows only', () => {
     expect(sqft(app('granular_broadcast', 6000), app(method, 250))).toBe(6000);
   });
 
+  // A legacy row with no stored method gets one inferred from its category (every herbicide
+  // reads as a spot): its recorded area is a whole-lawn area and still counts.
+  test('an INFERRED spot method keeps its area in the total', () => {
+    expect(sqft({ ...app('spot_treatment', 6000), methodInferred: true }, app('spot_treatment', 250))).toBe(6000);
+  });
+
   test('only spot rows: no area (null, as with no area at all)', () => {
     expect(sqft(app('spot_treatment', 250), app('spot_treatment', 100))).toBeNull();
   });

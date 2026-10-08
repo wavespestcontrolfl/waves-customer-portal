@@ -103,6 +103,30 @@ async function currentTempF(svc) {
 // The surfactant is the member that states a concentration (a percent of the tank), not a rate.
 const isSurfactant = (item) => !!item.gates?.concentration;
 
+// Lead mode: the lead and its open members, with the surfactant judged by the air temperature.
+async function leadMix({ base, lead, members, isCapped, svc }) {
+  // A member at its own yearly cap stays off the tap, as the lead does.
+  const open = members.filter((item) => !isCapped(item));
+  const surfactant = open.find(isSurfactant) || null;
+  let tempF = null;
+  let surfactantNote = null;
+  let included = !!surfactant;
+  if (surfactant) {
+    tempF = await currentTempF(svc);
+    if (tempF == null) surfactantNote = SURFACTANT_CHECK_NOTE;
+    else if (tempF >= SURFACTANT_MAX_TEMP_F) { included = false; surfactantNote = SURFACTANT_LEFT_OUT; }
+  }
+  const leftOut = members.filter(isCapped).map((item) => `${shortName(item.product.name)} yearly limit reached; left out.`);
+  return {
+    ...base,
+    mode: 'lead',
+    productIds: [lead, ...open.filter((item) => item !== surfactant || included)].map(idOf),
+    note: [surfactantNote, ...leftOut].filter(Boolean).join(' ') || null,
+    surfactant: surfactant ? { productId: idOf(surfactant), included, note: surfactantNote } : null,
+    tempF,
+  };
+}
+
 /**
  * The context's `plannedProducts.weedMix`, or null when the add-ons hold no weed group.
  *   mode            'lead' (the tap adds productIds: the lead and its members), 'replacement' (the
@@ -165,26 +189,7 @@ async function buildWeedMix({ addOns, svc, structured, knex }) {
   if (monthOf(svc) === LEAD_ONLY_MONTH) {
     return { ...base, mode: 'lead', productIds: [idOf(lead)], note: `February: ${shortName(lead.product.name)} only while the lawn greens up.` };
   }
-  // A member at its own yearly cap stays off the tap, as the lead does.
-  const open = members.filter((item) => !isCapped(item));
-  const surfactant = open.find(isSurfactant) || null;
-  let tempF = null;
-  let surfactantNote = null;
-  let included = !!surfactant;
-  if (surfactant) {
-    tempF = await currentTempF(svc);
-    if (tempF == null) surfactantNote = SURFACTANT_CHECK_NOTE;
-    else if (tempF >= SURFACTANT_MAX_TEMP_F) { included = false; surfactantNote = SURFACTANT_LEFT_OUT; }
-  }
-  const leftOut = members.filter(isCapped).map((item) => `${shortName(item.product.name)} yearly limit reached; left out.`);
-  return {
-    ...base,
-    mode: 'lead',
-    productIds: [lead, ...open.filter((item) => item !== surfactant || included)].map(idOf),
-    note: [surfactantNote, ...leftOut].filter(Boolean).join(' ') || null,
-    surfactant: surfactant ? { productId: idOf(surfactant), included, note: surfactantNote } : null,
-    tempF,
-  };
+  return leadMix({ base, lead, members, isCapped, svc });
 }
 
 module.exports = { SURFACTANT_MAX_TEMP_F, REPLACEMENT_MONTHS, weedMixGroup, buildWeedMix, currentTempF };
