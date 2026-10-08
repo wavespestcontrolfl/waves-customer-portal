@@ -1553,18 +1553,20 @@ const AREA_ADDONS = {
       tiers: [1000, 2000, 3500],
       maxPerYear: 2,
     },
-    // Arena 50 WDG at 0.29 oz/1,000 ($9.87/oz). Area is the TREATED area
-    // (damage plus the green edge), not the dead patch. 0.29 oz/1,000 is
-    // 12.8 oz/acre, the clothianidin limit per acre per season, so one
-    // application at this rate is the yearly maximum on that area.
+    // Arena 50 WDG at 0.147 oz/1,000 (6.4 oz/acre, $9.87/oz): the Florida
+    // 2(ee) rate for southern chinch bug on St. Augustine (sheet expires
+    // 2028-12-31, on file in Staff documents; the applicator carries it).
+    // Two applications 8 weeks apart equal the season limit of 12.8 oz/acre.
+    // St. Augustine only: another grass needs the main-label rate. Area is
+    // the TREATED area (damage plus the green edge), not the dead patch.
     lawn_insect_spot: {
       name: 'Lawn Insect Spot Treatment',
       areaLabel: 'treated lawn',
-      materialPer1000: 2.86,
+      materialPer1000: 1.45,
       setupMin: 8,
       minPer1000: 6,
       tiers: [1000, 2000, 3500],
-      maxPerYear: 1,
+      maxPerYear: 2,
     },
     // Topchoice at 2 lb/1,000 ($1.83/lb), broadcast once a year.
     fire_ant_yard: {

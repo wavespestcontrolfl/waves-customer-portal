@@ -26,8 +26,8 @@ describe('area add-on treatment pricing', () => {
     ['bed_pre_emergent', 2000, 139, 109],
     ['bed_pre_emergent', 3500, 199, 169],
     ['lawn_insect_spot', 1000, 79, 49],
-    ['lawn_insect_spot', 2000, 99, 69],
-    ['lawn_insect_spot', 3500, 119, 89],
+    ['lawn_insect_spot', 2000, 89, 59],
+    ['lawn_insect_spot', 3500, 109, 79],
     ['fire_ant_yard', 3000, 99, 69],
     ['fire_ant_yard', 5000, 129, 99],
     ['fire_ant_yard', 8000, 169, 139],
@@ -54,7 +54,7 @@ describe('area add-on treatment pricing', () => {
 
   test('an area inside a tier prices at the top of that tier', () => {
     const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1200 });
-    expect(line).toMatchObject({ price: 99, tierSqFt: 2000, areaSqFt: 1200 });
+    expect(line).toMatchObject({ price: 89, tierSqFt: 2000, areaSqFt: 1200 });
   });
 
   test('a same-trip add-on drops only the drive cost', () => {
@@ -101,8 +101,9 @@ describe('area add-on treatment pricing', () => {
   });
 
   test('more applications than the yearly limit is a custom quote', () => {
-    // Arena reaches its yearly label limit in one full-rate application.
-    const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 2 });
+    // Two half-rate Arena applications equal the season limit; a third passes it.
+    expect(priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 2 }).price).toBe(158);
+    const line = priceAreaAddOn('lawn_insect_spot', { areaSqFt: 1000, applications: 3 });
     expect(line).toMatchObject({
       price: null,
       requiresCustomQuote: true,
