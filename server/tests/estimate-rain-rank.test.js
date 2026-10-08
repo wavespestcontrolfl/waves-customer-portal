@@ -109,6 +109,9 @@ describe('slotRainTierOf', () => {
     // Spray work sold under a label that reads like an inspection: outdoor, tier 2.
     const spray = await slotRainTierOf([slot(D1, '14:00')], { services: [{ label: 'Home Inspection Visit', catalogServiceKey: 'pest_general_quarterly' }], ...opts });
     expect(spray(slot(D1, '14:00'))).toBe(2);
+    // A recurring row has no frozen key, only the one the catalog lookup resolved.
+    const resolved = await slotRainTierOf([slot(D1, '14:00')], { services: [{ label: 'Rodent Program', service: 'rodent_bait', resolvedServiceKey: 'rodent_bait_quarterly' }], ...opts });
+    expect(resolved(slot(D1, '14:00'))).toBe(0);
     spy.mockRestore();
   });
 

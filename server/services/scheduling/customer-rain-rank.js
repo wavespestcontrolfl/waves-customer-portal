@@ -107,11 +107,13 @@ async function slotRainTierOf(slots, { services = [], point = null, today, db, d
   const list = Array.isArray(slots) ? slots : [];
   if (!list.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
   // An estimate's services are profile rows or names. A row keeps its
-  // verified catalog key (catalogServiceKey): its display label can differ
-  // from the catalog name, and the key settles the identity ahead of it.
+  // catalog key — the verified one frozen on the line (catalogServiceKey),
+  // else the row resolveCatalogSlotProfile resolved (resolvedServiceKey):
+  // its display label can differ from the catalog name, and the key settles
+  // the identity ahead of it.
   const serviceLabels = (Array.isArray(services) ? services : []).map((service) => (typeof service === 'string'
     ? service
-    : { name: service?.label || service?.service, serviceKey: service?.catalogServiceKey || null }));
+    : { name: service?.label || service?.service, serviceKey: service?.catalogServiceKey || service?.resolvedServiceKey || null }));
   const tierOf = await customerRainTierOf({ serviceLabels, lat: point?.lat, lng: point?.lng, today, db, deps });
   return tierOf ? (slot) => tierOf({ date: slot.date, start_time: slot.windowStart, end_time: slot.windowEnd }) : null;
 }

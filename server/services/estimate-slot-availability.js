@@ -876,6 +876,12 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   };
 }
 
+// { resolvedServiceKey } for a resolved catalog row; nothing when the lookup
+// found none, so a profile without one keeps today's exact shape.
+function resolvedKeyOf(catalog) {
+  return catalog && catalog.service_key ? { resolvedServiceKey: catalog.service_key } : {};
+}
+
 /** Keep classification synchronous; resolve catalog allowances once at every
  * booking boundary. This is also used inside reserve/commit transactions. */
 async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
@@ -902,7 +908,10 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
       throw unavailable;
     }
     const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes, { preserveCapacity: userOpts.preserveCapacity });
-    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
+    // resolvedServiceKey: the catalog row this lookup resolved (cadence or
+    // engine key), kept for the rain ranking, which classifies by catalog
+    // identity (Codex #6127 r1). Internal: stripped from the public profile.
+    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0), ...resolvedKeyOf(catalog) });
   }
   const capacity = profile.reservationServiceMix
     ? require('./combined-visit-capacity').capacityForServices(services, services.map(service => service.durationMinutes)) : null;
@@ -1839,6 +1848,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       const publicService = { ...service };
       delete publicService.engineKey;
       delete publicService.catalogServiceKey;
+      delete publicService.resolvedServiceKey;
       return publicService;
     }),
   };
