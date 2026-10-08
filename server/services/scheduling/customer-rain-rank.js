@@ -3,7 +3,8 @@
  * GATE_CUSTOMER_RAIN_RANK, dark): the same rule the New Appointment picker
  * runs under GATE_BOOKING_RAIN_RANK (rain-fit.js), applied to the offers
  * buildBookingAvailability curates for /book, the inspection link and the
- * public reschedule page.
+ * public reschedule page, and to the estimate page's slot list
+ * (estimate-slot-availability.js).
  *
  * It only changes ORDER: which hours are offered, the full day list, the
  * signed offers and the commit checks are untouched. A recommendation whose
@@ -93,6 +94,34 @@ function startCustomerRainRank({ today, lat, lng, ...rest } = {}) {
   };
 }
 
+/**
+ * The tier function for estimate slots ({ date, windowStart, windowEnd }),
+ * or null (today's order). Same gate, rules, service-area check and budget
+ * as the booking builder; nothing is read unless a slot is inside the rain
+ * horizon. `services` = the estimate's service profile rows or labels;
+ * `point` = its coordinates ({ lat, lng }), null when it has none.
+ */
+async function slotRainTierOf(slots, { services = [], point = null, today, db, deps } = {}) {
+  const todayYmd = etDateString(today || new Date());
+  const list = Array.isArray(slots) ? slots : [];
+  if (!list.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
+  // An estimate's services are profile rows ({ label, service }) or names.
+  const serviceLabels = (Array.isArray(services) ? services : [])
+    .map((service) => (typeof service === 'string' ? service : service?.label || service?.service));
+  const tierOf = await customerRainTierOf({ serviceLabels, lat: point?.lat, lng: point?.lng, today, db, deps });
+  return tierOf ? (slot) => tierOf({ date: slot.date, start_time: slot.windowStart, end_time: slot.windowEnd }) : null;
+}
+
+// Stable reorder by rain tier that keeps the first `pinned` items exactly
+// where they are: the caller's lead cards (the soonest opening, a scarce
+// first day) carry promises of their own.
+function demoteByRainTier(list, tierOf, pinned = 1) {
+  if (!tierOf || !Array.isArray(list) || list.length <= pinned + 1) return list;
+  const rest = list.slice(pinned).map((item, i) => ({ item, i, tier: tierOf(item) }));
+  rest.sort((a, b) => (a.tier - b.tier) || (a.i - b.i));
+  return [...list.slice(0, pinned), ...rest.map((r) => r.item)];
+}
+
 // What the client sorts a recommendation by before anything else: the rain
 // tier, sent only when it is above 0 (absent = 0), so a payload with no
 // rain ranking is byte-identical to today's. `rain_tier` itself stays
@@ -111,4 +140,4 @@ function stampRainTiers(candidates, tierOf) {
 // Tier difference for a comparator's first key; 0 for unstamped rows.
 const rainTierDiff = (a, b) => (a.rain_tier ?? 0) - (b.rain_tier ?? 0);
 
-module.exports = { _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };
+module.exports = { slotRainTierOf, demoteByRainTier, _test: { _forecastStarts, FORECAST_BUDGET }, startCustomerRainRank, customerRainTierOf, stampRainTiers, withDisplayTier, rainTierDiff, GATE };

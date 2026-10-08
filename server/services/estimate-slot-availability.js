@@ -48,6 +48,7 @@ const {
 } = require('./scheduling/customer-windows');
 const { selfServeNoticeMinutes } = require('./scheduling/self-serve-notice');
 const { isEnabled } = require('../config/feature-gates');
+const { slotRainTierOf, demoteByRainTier } = require('./scheduling/customer-rain-rank');
 const { getDailyRainOutlookBounded } = require('./weather-forecast');
 const {
   pricingBundleMatchesEstimateTotals,
@@ -1401,7 +1402,13 @@ function routeFirstOrder(sorted) {
   return [soonest, ...routeFit, ...rest];
 }
 
-function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
+// `rainTierOf` (GATE_CUSTOMER_RAIN_RANK, scheduling/customer-rain-rank.js):
+// a stable reorder by rain fit of everything BEHIND the lead cards. The
+// soonest opening stays the first card, and a scarce first day's pinned
+// cards stay pinned (the "N openings today" badge counts them), so every
+// promise above holds at any gate setting; only the spread after them
+// changes, before the display slice.
+function selectCustomerFacingSlots(slots, limit, { routeFirst = false, rainTierOf = null } = {}) {
   const safeLimit = Math.max(0, Number(limit) || 0);
   if (!safeLimit) return [];
 
@@ -1430,10 +1437,10 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
   const firstDaySlots = sorted.filter((s) => s?.date === firstDay);
   if (firstDaySlots.length > 1 && firstDaySlots.length <= SCARCE_FIRST_DAY_MAX) {
     const rest = diversified.filter((s) => s?.date !== firstDay);
-    return [...firstDaySlots, ...rest].slice(0, safeLimit);
+    return demoteByRainTier([...firstDaySlots, ...rest], rainTierOf, firstDaySlots.length).slice(0, safeLimit);
   }
 
-  return diversified.slice(0, safeLimit);
+  return demoteByRainTier(diversified, rainTierOf, 1).slice(0, safeLimit);
 }
 
 // Drop any candidate the reserve gate would reject, so every offered slot is
@@ -2185,8 +2192,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
+  // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
+  // the gate off, no slot inside the next 3 dates, or any failure.
+  const rainTierOf = await slotRainTierOf(funneledBookable, { services: serviceProfile.services, point: coords, db });
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
+    rainTierOf,
   });
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
