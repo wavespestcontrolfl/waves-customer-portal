@@ -1026,3 +1026,37 @@ test('update_customer monthly-rate edit lists every bill line, the total and the
   expect(labels).toContain('Monthly bill total: $41.33 → $60.33 (replaces the whole bill)');
   expect(labels).toContain('No price-change notice is sent to the customer');
 });
+
+// Owner 2026-10-08 (GATE_IB_TIER_UPGRADE_EMAIL): a card that will email the
+// customer the tier-upgrade notice says so in its own line, and never also
+// says that no price notice goes or that the only contact is a double-opt-in.
+test('update_customer tier-upgrade email: one comms line, the no-notice line gone, the card marked as contacting the customer', () => {
+  const rate_change = {
+    billing_mode: 'monthly_membership', replaces_whole_bill: true,
+    lines: [{ label: 'Pest control', before: 100, after: 90 }], total_before: 100, total_after: 90,
+  };
+  const tier_upgrade_email = { first_name: 'Taylor', from_tier: 'Bronze', to_tier: 'Gold' };
+  const build = (updates, preview) => buildContract({
+    toolName: 'update_customer', params: { customer_id: 'c1', updates }, displayParams: { updates }, preview,
+  });
+  const line = "Emails Taylor the Gold upgrade notice after the update is saved (plan moved up from Bronze, with the new monthly rate). Attempted, not guaranteed: it does not go if their email is turned off or the send fails, and the customer's interaction history records the result";
+
+  const promised = build({ waveguard_tier: 'Gold', monthly_rate: 90 }, { rate_change, tier_upgrade_email });
+  expect(promised.effects.filter((e) => e.kind === 'comms').map((e) => e.label)).toEqual([line]);
+  expect(promised.effects.map((e) => e.label)).not.toContain('No price-change notice is sent to the customer');
+  expect(promised).toMatchObject({ notifies_customer: true, irreversible: true });
+
+  // With an email change on the same card: its own double-opt-in line stays,
+  // and the "conditional double-opt-in re-send only" label is not added.
+  const withEmail = build({ waveguard_tier: 'Gold', monthly_rate: 90, email: 'new@example.invalid' }, { rate_change, tier_upgrade_email });
+  const comms = withEmail.effects.filter((e) => e.kind === 'comms').map((e) => e.label);
+  expect(comms).toContain(line);
+  expect(comms.some((l) => /double-opt-in email to the NEW address/.test(l))).toBe(true);
+  expect(comms.some((l) => /re-send only/.test(l))).toBe(false);
+
+  // Not promised: the same card is byte-for-byte the card of before.
+  const plain = build({ waveguard_tier: 'Gold', monthly_rate: 90 }, { rate_change });
+  expect(plain.effects.filter((e) => e.kind === 'comms')).toEqual([]);
+  expect(plain.effects.map((e) => e.label)).toContain('No price-change notice is sent to the customer');
+  expect(plain).toMatchObject({ notifies_customer: false, irreversible: false });
+});
