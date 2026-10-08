@@ -316,6 +316,9 @@ const READ_ONLY = [
   'list_gap_reports',
   // needs-me-tools.js: read-only list over open admin alerts and standing conditions.
   'needs_me',
+  // choice-tools.js: tap-to-answer buttons for a "which value?" question.
+  // Display only: reads no rows, writes nothing, creates no pending action.
+  'offer_choices',
   // billing-reader-tools.js (W9): read-only per-customer invoice list and invoice detail
   // with a payments timeline (attempts kept apart from received payments).
   'get_customer_invoices', 'get_invoice_detail',
