@@ -560,7 +560,9 @@ router.get('/weather', async (req, res, next) => {
     const humidity = current.relativeHumidity?.value || 70;
     const wind = current.windSpeed || '5 mph';
     const shortForecast = current.shortForecast || 'Partly Cloudy';
-    const nightTemp = tonight.temperature || 72;
+    // nightLow: the Open-Meteo backup's overnight minimum, kept apart from its
+    // current reading (an NWS night period's temperature already is the low).
+    const nightTemp = tonight.nightLow || tonight.temperature || 72;
 
     const result = {
       location: place.label,
@@ -654,16 +656,20 @@ async function fetchOpenMeteoPeriods(place) {
   const isNight = (at) => etHour(at) >= 18 || etHour(at) < 6;
   const nightTemps = forecast.hourly.filter((h) => isNight(h.at) && Number.isFinite(h.temperature_f)).map((h) => h.temperature_f);
   const round = (v) => (Number.isFinite(v) ? Math.round(v) : undefined);
+  const nightLow = nightTemps.length ? Math.round(Math.min(...nightTemps)) : undefined;
   return [
     {
       isDaytime: !isNight(now.at),
+      // After dark this period is also "tonight": its low must not be the
+      // current reading.
+      nightLow,
       temperature: round(now.temperature_f),
       relativeHumidity: { value: round(now.humidity_pct) },
       windSpeed: Number.isFinite(now.wind_mph) ? `${Math.round(now.wind_mph)} mph` : undefined,
       shortForecast: weatherCodeLabel(now.weather_code) || undefined,
       detailedForecast: '',
     },
-    { isDaytime: false, temperature: nightTemps.length ? Math.round(Math.min(...nightTemps)) : undefined },
+    { isDaytime: false, temperature: nightLow },
   ];
 }
 

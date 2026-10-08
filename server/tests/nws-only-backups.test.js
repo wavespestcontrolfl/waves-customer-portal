@@ -105,7 +105,9 @@ describe('portal Local Conditions tile', () => {
     return body;
   };
 
-  test('NWS down: real current conditions from Open-Meteo, not the seasonal defaults', async () => {
+  // Noon ET and 10 PM ET: the low must be the night minimum at both.
+  test.each([['2026-10-08T16:00:00Z', true], ['2026-10-09T02:00:00Z', false]])('NWS down at %s: real current conditions from Open-Meteo, not the seasonal defaults', async (at, isDay) => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse(at));
     const hour0 = Math.floor(Date.now() / 3600000) * 3600;
     const times = Array.from({ length: 30 }, (_, i) => hour0 + i * 3600);
     global.fetch = jest.fn(async (url) => {
@@ -120,8 +122,11 @@ describe('portal Local Conditions tile', () => {
     });
     const out = await get({ city: 'Sarasota', zip: '34236' });
     expect(out).toMatchObject({ location: 'Sarasota, FL', temp: 82, humidity: 77, wind: '11 mph', forecast: 'Thunderstorms' });
-    // Tonight's low comes from the night hours (or the current reading after dark).
-    expect([73, 82]).toContain(out.nightTemp);
+    // Tonight's low is the night hours' minimum, by day and after dark alike:
+    // never the current reading.
+    expect(out.nightTemp).toBe(73);
+    expect(out.isDaytime).toBe(isDay);
+    Date.now.mockRestore();
   });
 
   test('both down: the seasonal fallback, as before', async () => {
