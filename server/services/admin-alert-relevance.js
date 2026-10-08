@@ -61,7 +61,9 @@
  * promise-chaser bell once the promise it chases is closed, and a portal chat
  * hand-off about adding a service once an estimate is handed off to that
  * customer. A self-booked re-service bell (owner 2026-10-05) closes once its
- * booked visit is completed, cancelled or gone. Every other missed-call bell and portal chat topic stays a
+ * booked visit is completed, cancelled or gone. A phone-booking rain notice
+ * (owner 2026-10-08) closes once its visit is closed, gone, moved off the
+ * date or start it was booked for, or past its date. Every other missed-call bell and portal chat topic stays a
  * person's to close. A promise-chaser retirement is final (`rearm: false`),
  * like the close its own emitter writes inside its 30-minute window: a
  * promise reopened later is the promise list's and the SLA pager's to
@@ -404,6 +406,23 @@ function reserviceVisitClosed(s) {
   return CLOSED_VISIT_STATUSES.has(String(s.visit.status)) ? 'Visit is closed' : null;
 }
 
+// A phone-booking rain notice (call-booking-rain-flag.js) is about ONE visit
+// at the date and start it was booked for: done once that visit is closed or
+// gone, was moved off that date or start (the forecast it quoted no longer
+// describes the visit), or its date has passed. Its emitter raises it once
+// per visit and never again, so a retire never fights it.
+function callBookingRainSettled(s) {
+  if (!s.refs.visitId) return null;
+  if (!s.visit) return 'Visit is gone';
+  if (CLOSED_VISIT_STATUSES.has(String(s.visit.status))) return 'Visit is closed';
+  const day = String(s.visit.service_date || '');
+  const bookedDay = String(s.meta.scheduled_date || '');
+  const bookedStart = String(s.meta.window_start || '').slice(0, 5);
+  if (DATE_RE.test(bookedDay) && day !== bookedDay) return 'Visit was moved';
+  if (bookedStart && String(s.visit.window_start || '').slice(0, 5) !== bookedStart) return 'Visit was moved';
+  return DATE_RE.test(day) && day < s.todayET ? 'Visit date has passed' : null;
+}
+
 // Alert classes: category (+ dedupeKey prefix, looked up in each emitter) → a
 // rule returning null while the alert is still relevant, else a short reason.
 const CLASSES = [
@@ -431,6 +450,9 @@ const CLASSES = [
   },
   { // reservice-public.js ringReserviceBooked — one bell per self-booked visit
     key: 'reservice_booked', categories: ['schedule'], prefix: 'reservice-booked:', match: (meta) => meta.triggerKey === 'reservice_self_booked', rule: reserviceVisitClosed,
+  },
+  { // call-booking-rain-flag.js — one notice per phone-booked visit
+    key: 'call_booking_rain', categories: ['schedule'], prefix: 'call-booking-rain:', rule: callBookingRainSettled,
   },
   { // ai-assistant/assistant.js notifyTeamOfEscalation — one bell per hand-off
     key: 'portal_chat_add_service', categories: ['alert'], prefix: PORTAL_CHAT_PREFIX, match: isAddServiceChat, rule: addServiceQuoted,
