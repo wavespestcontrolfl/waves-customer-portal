@@ -215,6 +215,9 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     const at = src.indexOf('const fileTextNumberCard = async');
     const section = src.slice(at, at + 3200);
     expect(section).toMatch(/if \(refresh\) \{[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)\s*\.update\(\{ payload: item\.payload/);
+    // …inside ONE transaction that takes the per-call triage lock first and checks the processing claim
+    expect(section).toMatch(/await db\.transaction\(async \(trx\) => \{\s*await lockTriageCall\(trx, call\.id\);\s*const owner = await trx\('call_log'\)\.where\(\{ id: call\.id, processing_token: procToken \}\)\.forUpdate\(\)/);
+    expect(section.indexOf('lockTriageCall(trx, call.id)')).toBeLessThan(section.indexOf('if (refresh) {'));
     expect(section).not.toContain('.merge(');
   });
 
