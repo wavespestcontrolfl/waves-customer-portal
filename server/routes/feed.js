@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const localNewsStore = require('../services/local-news-store');
-const { etParts } = require('../utils/datetime-et');
+const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { getForecast } = require('../services/pest-forecast/forecast');
 const { LOCATIONS, BY_SLUG, resolveZip } = require('../services/pest-forecast/locations');
 const { portalYardCalendarLive } = require('../config/feature-gates');
@@ -632,13 +632,17 @@ function resolveWeatherLocation(...sources) {
   return WEATHER_FALLBACK_LOCATION;
 }
 
+// One deadline for the whole NWS read (both requests and their bodies): a
+// connection that stalls must end, or the Open-Meteo backup never runs.
+const NWS_DEADLINE_MS = 5000;
 async function fetchNwsPeriods(place) {
+  const signal = AbortSignal.timeout(NWS_DEADLINE_MS);
   const headers = { 'User-Agent': 'WavesCustomerPortal/1.0 (waves@wavespestcontrol.com)' };
-  const pointRes = await fetch(`https://api.weather.gov/points/${place.lat},${place.lng}`, { headers });
+  const pointRes = await fetch(`https://api.weather.gov/points/${place.lat},${place.lng}`, { headers, signal });
   if (!pointRes.ok) return null;
   const forecastUrl = (await pointRes.json()).properties?.forecast;
   if (!forecastUrl) return null;
-  const forecastRes = await fetch(forecastUrl, { headers });
+  const forecastRes = await fetch(forecastUrl, { headers, signal });
   if (!forecastRes.ok) return null;
   return (await forecastRes.json()).properties?.periods || [];
 }
@@ -649,11 +653,17 @@ async function fetchNwsPeriods(place) {
 // outage, not the seasonal defaults. Null when Open-Meteo cannot answer.
 async function fetchOpenMeteoPeriods(place) {
   const { fetchPropertyForecast, weatherCodeLabel } = require('../services/service-report/application-conditions');
-  const forecast = await fetchPropertyForecast({ latitude: place.lat, longitude: place.lng }).catch(() => null);
-  const now = forecast?.status === 'ok' ? forecast.current : null;
-  if (!now || !Number.isFinite(now.temperature_f)) return null;
   const etHour = (at) => etParts(new Date(at)).hour;
   const isNight = (at) => etHour(at) >= 18 || etHour(at) < 6;
+  // After dark the window starts at the 6 PM that began this night, so the
+  // low also counts the night hours already past (a 2 AM minimum read at
+  // 5 AM). By day it starts now and reaches tonight.
+  const nowDate = new Date(Date.now());
+  const nightStart = parseETDateTime(`${etDateString(etHour(nowDate) < 6 ? addETDays(nowDate, -1) : nowDate)}T18:00`);
+  const from = isNight(nowDate) ? nightStart : undefined;
+  const forecast = await fetchPropertyForecast({ latitude: place.lat, longitude: place.lng, from }).catch(() => null);
+  const now = forecast?.status === 'ok' ? forecast.current : null;
+  if (!now || !Number.isFinite(now.temperature_f)) return null;
   // Tonight = the first unbroken run of night hours (6 PM-6 AM ET) from now.
   // The window is 24 h, so after dark it also reaches tomorrow evening:
   // those hours belong to the next night.

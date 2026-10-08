@@ -140,6 +140,51 @@ describe('portal Local Conditions tile', () => {
     Date.now.mockRestore();
   });
 
+  test('5 AM ET: the low counts the night hours already past', async () => {
+    const at = Date.parse('2026-10-09T09:00:00Z'); // 5 AM ET
+    jest.spyOn(Date, 'now').mockReturnValue(at);
+    const first = Math.floor(at / 3600000) * 3600 - 14 * 3600;
+    const times = Array.from({ length: 48 }, (_, i) => first + i * 3600);
+    global.fetch = jest.fn(async (url) => {
+      if (!isOpenMeteo(url)) return { ok: false };
+      return {
+        ok: true,
+        json: async () => ({
+          current: { time: at / 1000, temperature_2m: 75.2, relative_humidity_2m: 90, wind_speed_10m: 3, weather_code: 0 },
+          // 70 at 2 AM ET (06:00Z), 75 through the rest of the night, 55 the NEXT night.
+          hourly: {
+            time: times,
+            temperature_2m: times.map((t) => (t * 1000 === Date.parse('2026-10-09T06:00:00Z') ? 70 : t * 1000 > at + 12 * 3600000 ? 55 : 75)),
+            precipitation: times.map(() => 0),
+          },
+        }),
+      };
+    });
+    const out = await get({ city: 'Sarasota', zip: '34236' });
+    expect(out.isDaytime).toBe(false);
+    expect(out.temp).toBe(75);
+    expect(out.nightTemp).toBe(70);
+    Date.now.mockRestore();
+  });
+
+  test('the NWS read carries a deadline, and a stalled NWS that aborts falls to the backup', async () => {
+    const hour0 = Math.floor(Date.now() / 3600000) * 3600;
+    const times = Array.from({ length: 30 }, (_, i) => hour0 + i * 3600);
+    global.fetch = jest.fn(async (url) => {
+      if (!isOpenMeteo(url)) throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+      return {
+        ok: true,
+        json: async () => ({
+          current: { time: Math.floor(Date.now() / 1000), temperature_2m: 80, relative_humidity_2m: 70, wind_speed_10m: 5, weather_code: 3 },
+          hourly: { time: times, temperature_2m: times.map(() => 72), precipitation: times.map(() => 0) },
+        }),
+      };
+    });
+    const out = await get({ city: 'Venice', zip: '34285' });
+    expect(global.fetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+    expect(out).toMatchObject({ temp: 80, forecast: 'Cloudy' });
+  });
+
   test('both down: the seasonal fallback, as before', async () => {
     global.fetch = jest.fn(async () => ({ ok: false }));
     const out = await get({ city: 'Naples', zip: '34102' });
