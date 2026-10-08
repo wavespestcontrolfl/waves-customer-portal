@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef, useCallback, useId, createContext, useContext } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
@@ -48,6 +48,7 @@ import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
 import useSheetViewport from '../hooks/useSheetViewport';
+import { celsiusCapTip } from '../lib/celsiusCapCopy';
 import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_RUN_MINUTES } from '@waves/irrigation-runtime';
 
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
@@ -9068,7 +9069,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
 // =========================================================================
 // KNOWLEDGE BASE TAB — SWFL-specific pest & lawn content
 // =========================================================================
-const ARTICLES = [
+// The Celsius tip follows the program: the stats route's celsiusMaxPerYear (2 under the v13 lawn
+// program, 3 before it), never a number written here.
+const buildArticles = ({ celsiusMaxPerYear = null } = {}) => [
   {
     id: 1, icon: 'bug', category: 'Pests',
     title: 'Why Ghost Ants Love Your Kitchen',
@@ -9091,7 +9094,7 @@ const ARTICLES = [
     id: 4, icon: 'palm', category: 'Lawn Care',
     title: 'Dollar Weed: What It Tells You',
     summary: 'Dollar weed (Hydrocotyle) is actually an indicator plant — it thrives in overwatered areas. If you see it spreading, your irrigation is probably too aggressive.',
-    tips: ['Reduce irrigation runtime by 5-10 minutes per zone', 'Water deeply but less frequently (2-3x per week max)', 'We spot-treat with Celsius WG (max 3 applications/year)', 'Proper irrigation is the real long-term fix'],
+    tips: ['Reduce irrigation runtime by 5-10 minutes per zone', 'Water deeply but less frequently (2-3x per week max)', celsiusCapTip(celsiusMaxPerYear), 'Proper irrigation is the real long-term fix'],
   },
   {
     id: 5, icon: 'bug', category: 'Pests',
@@ -9106,6 +9109,21 @@ const ARTICLES = [
     tips: ['Damage looks like drought stress — yellowing then browning at edges', 'Peak season is July-September in the hottest, sunniest spots', 'Thatch buildup over 0.5" increases risk — ask us about dethatching', 'We rotate insecticide modes of action to prevent resistance'],
   },
 ];
+
+// The Learn articles with the figures the server owns. Nothing renders the article list today (the old
+// module-level ARTICLES constant was never used, so its Celsius tip could only ever have shown a bare
+// default); this is the one entry point to render it from: it reads the Celsius yearly limit from the
+// stats response (/services/stats/summary celsiusMaxPerYear), so the tip says 2 under the v13 lawn
+// program and 3 before it, and names no number until the stats arrive.
+function useLearnArticles() {
+  const [celsiusMaxPerYear, setCelsiusMaxPerYear] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.getServiceStats().then((d) => { if (live) setCelsiusMaxPerYear(d?.celsiusMaxPerYear ?? null); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  return useMemo(() => buildArticles({ celsiusMaxPerYear }), [celsiusMaxPerYear]);
+}
 
 // Local Conditions slot on the Learn tab. GATE_PORTAL_YARD_CALENDAR (dark): the
 // server answers {available:false} off the gate and the existing
@@ -17665,4 +17683,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };
+export { buildArticles, useLearnArticles, ChatWidget, LocalConditionsSlot, WeatherPestWidget, ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, VisitsTab, ReportIssueOverlay, PortalGlassContext };

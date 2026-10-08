@@ -25541,10 +25541,19 @@ const TRACK_SAFETY_RULES = {
   ],
 };
 
+/* Overrides for a lawn payload that carries its own safety_rules (the v13 program,
+   GATE_LAWN_V13): Celsius is limited to 2 applications a year there. The base list above keeps the
+   legacy wording (3) for the gate-off protocol. */
+const PRODUCT_DESCRIPTIONS_V13 = {
+  "celsius wg": "selective weed killer for warm-season grass (max 2x/year)",
+  celsius: "selective weed killer for warm-season grass (max 2x/year)",
+};
+
 /* Named exports for V2 reuse (ProtocolReferenceTabV2) */
 export {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
+  PRODUCT_DESCRIPTIONS_V13,
   TRACK_SAFETY_RULES,
   stripLegacyBoilerplate,
 };

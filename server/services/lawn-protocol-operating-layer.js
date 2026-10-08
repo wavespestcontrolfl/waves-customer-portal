@@ -218,6 +218,21 @@ function windowForVisit(protocol, windowKey, month) {
   return protocol.windows.find(match) || null;
 }
 
+// A staged v13 row can carry a cap figure (gates.annualMaxApps, annual_counter.maxApplications) above
+// the cap the app enforces (a stale row, an older value): every reader sees min(row, v13 cap), so a
+// screen never advertises more than the plan and the closeout allow. Gate off, or not a v13
+// protocol: the rows as stored.
+async function withV13CapMetadata(knex, protocol, products) {
+  if (protocol?.version !== LAWN_V13_VERSION || !products.length) return products;
+  const caps = require('../config/lawn-v13-count-caps');
+  const clamped = [];
+  for (const product of products) {
+    const entry = await caps.v13CapEntryFor(knex, product.product_id, product.product_name);
+    clamped.push(caps.withEntryCapMetadata(entry, product));
+  }
+  return clamped;
+}
+
 async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false } = {}) {
   // An appointment's assigned version must not fall through to the currently
   // active protocol when that assignment can no longer be resolved.
@@ -255,7 +270,7 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
   return {
     protocol,
     window,
-    products: products.map(normalizeProduct),
+    products: await withV13CapMetadata(knex, protocol, products.map(normalizeProduct)),
     gates: protocol.gates,
   };
 }

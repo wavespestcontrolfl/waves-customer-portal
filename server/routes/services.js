@@ -11,6 +11,8 @@ const { authenticate } = require('../middleware/auth');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const { listPortalServiceHistory, parseJsonObject, suppressesCustomerArtifacts } = require('../services/portal-service-history');
 const { etDateString } = require('../utils/datetime-et');
+const { celsiusYtdCap } = require('../config/lawn-v13-count-caps');
+const { celsiusApplicationsThisYear } = require('../services/celsius-application-count');
 const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
 router.use(authenticate);
@@ -148,19 +150,18 @@ router.get('/stats/summary', async (req, res, next) => {
       .select('thatch_measurement', 'service_date')
       .first();
 
-    // Count Celsius applications this year (cap tracking)
-    const celsiusApps = await db('service_products')
-      .join('service_records', 'service_products.service_record_id', 'service_records.id')
-      .where({ 'service_records.customer_id': req.customerId })
-      .where('service_records.service_date', '>=', etYearStart)
-      .where('service_products.product_name', 'ilike', '%celsius%')
-      .count('service_products.id as count')
-      .first();
+    // Celsius applications this year (cap tracking), per lawn like the cap itself: the selected
+    // property's when the session is scoped to one, else the busiest lawn's.
+    const scope = await resolveSessionScope(req);
+    const celsiusCount = await celsiusApplicationsThisYear(req.customerId, etYearStart, {
+      propertyId: scope && scope.scoped && scope.property ? scope.property.id : null,
+    });
 
     res.json({
       servicesYTD: parseInt(servicesYTD.count),
-      celsiusApplicationsThisYear: parseInt(celsiusApps.count),
-      celsiusMaxPerYear: 3,
+      celsiusApplicationsThisYear: celsiusCount,
+      // The one canonical reader: 2 under the v13 lawn program, 3 before it (GATE_LAWN_V13 off).
+      celsiusMaxPerYear: celsiusYtdCap(),
       thatch: {
         current: latestThatch ? parseFloat(latestThatch.thatch_measurement) : null,
         initial: firstThatch ? parseFloat(firstThatch.thatch_measurement) : null,
