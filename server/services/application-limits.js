@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
-const { applyV13CountCaps } = require('../config/lawn-v13-count-caps');
+const { applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
 const { worstPropertyCount } = require('../utils/property-counts');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
@@ -39,6 +39,15 @@ function capShare(row) {
   if (rate != null) return { share: rate / cap, estimated: false };
   rate = rateInUnit(row.default_rate_per_1000, row.catalog_rate_unit, unit);
   return rate == null ? null : { share: rate / cap, estimated: true };
+}
+
+// One earlier application as a share of a v13 yearly amount cap (the synthetic row of lawn-v13-count-caps):
+// capShare's reading (recorded rate, else quantity over area, else the catalog default), and when none of
+// those can size it the row's fallback rate (Arena: the old 0.29 oz, the whole year) - never left uncounted.
+function v13AmountShare(row, limit) {
+  const sized = capShare({ ...row, limit_value: limit.limit_value, limit_unit: limit.limit_unit });
+  if (sized) return sized;
+  return { share: Number(limit.fallback_rate) / Number(limit.limit_value), estimated: true };
 }
 
 // What could not be counted exactly, for the end of a cap message.
@@ -194,6 +203,7 @@ class ApplicationLimitChecker {
 
       case 'annual_max_rate': {
         if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, { ...ctx, proposedDate }, database);
+        if (limit.match_type === V13_AMOUNT) return this.evaluateV13AmountCap(limit, product, { ...ctx, proposedDate }, database);
         const totalApplied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
         const maxRate = limitValue;
         if (totalApplied >= maxRate * 0.95) return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
@@ -312,6 +322,44 @@ class ApplicationLimitChecker {
     return { violated: false, current: pct(used), max: 100 };
   }
 
+  // The v13 yearly AMOUNT cap on one product (Arena: 0.294 oz per 1,000 sq ft, GATE_LAWN_V13): the lawn's
+  // recorded applications of this product this year, each as a share of the cap (an unreadable one counts
+  // at the cap row's fallback rate), plus the application being planned. Per 1,000 sq ft of the treated
+  // area, as the shared active-ingredient cap reads it: a spot is its recorded rate, not scaled to its area.
+  async evaluateV13AmountCap(limit, product, ctx, database = db) {
+    const query = database('property_application_history as pah')
+      .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
+      .where('pah.customer_id', ctx.customerId)
+      .where('pah.product_id', product.id)
+      .where('pah.application_date', '>=', ctx.yearStart)
+      .where('pah.application_date', '<=', etCalendarDayOf(ctx.proposedDate))
+      .whereNull('pah.retracted_at')
+      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
+        'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+    scopeHistoryToTreatment(query, database, { propertyId: ctx.propertyId, excludeScheduledServiceId: ctx.excludeScheduledServiceId }, 'pah');
+    const history = await query;
+    let used = 0;
+    let estimated = 0;
+    for (const row of history) {
+      const sized = v13AmountShare(row, limit);
+      used += sized.share;
+      if (sized.estimated) estimated += 1;
+    }
+    const cap = Number(limit.limit_value);
+    const sizedProposal = ctx.proposed ? rateInUnit(ctx.proposed.ratePer1000, ctx.proposed.unit, capUnitOf(limit.limit_unit)) : null;
+    // A planned application that cannot be sized counts at the fallback rate: fail closed.
+    const adds = !ctx.proposed ? 0 : (sizedProposal > 0 ? sizedProposal : Number(limit.fallback_rate)) / cap;
+    const total = used + adds;
+    const detail = estimated ? ` (${estimated} earlier application${estimated === 1 ? '' : 's'} sized at the standard rate)` : '';
+    const label = `${product.name}: this year's applications on the lawn total ${pct(used)}% of the yearly label amount (${limit.limit_value} ${capUnitOf(limit.limit_unit)} per 1,000 sq ft)`;
+    const withThis = adds ? `; this application brings it to ${pct(total)}%` : '';
+    if (used >= 1 - 1e-9 || total > 1 + 1e-9) {
+      return { violated: true, message: `${label}${withThis} — ${used >= 1 - 1e-9 ? 'LIMIT REACHED' : 'THIS APPLICATION WOULD EXCEED IT'}${detail}.`, current: pct(used), max: 100 };
+    }
+    if (total >= AI_CAP_APPROACHING) return { approaching: true, message: `${label}${withThis}${detail}.`, current: pct(used), max: 100 };
+    return { violated: false, current: pct(used), max: 100 };
+  }
+
   async getPropertyComplianceStatus(customerId) {
     const customer = await db('customers').where({ id: customerId }).first();
     const county = this.getCounty(customer);
@@ -420,9 +468,10 @@ class ApplicationLimitChecker {
     const violations = [];
     for (const limit of limits) {
       const max = Number(limit.limit_value);
-      const violation = limit.limit_type === 'annual_max_apps'
-        ? await this.auditAnnualCount(others, product, day, max)
-        : await this.auditInterval(others, product, day, max);
+      let violation;
+      if (limit.limit_type === 'annual_max_apps') violation = await this.auditAnnualCount(others, product, day, max);
+      else if (limit.match_type === V13_AMOUNT) violation = await this.auditAmount(database, customerId, product, day, limit, opts);
+      else violation = await this.auditInterval(others, product, day, max);
       if (violation) violations.push({ ...violation, limitId: limit.id, description: limit.description });
     }
     return violations;
@@ -433,6 +482,26 @@ class ApplicationLimitChecker {
     const rows = await others().where('application_date', '>=', `${year}-01-01`).where('application_date', '<=', `${year}-12-31`).select('id');
     if (rows.length < max) return null;
     return { type: 'annual_max_apps', message: `${product.name}: ${rows.length}/${max} other applications in ${year} — LIMIT REACHED.`, current: rows.length, max };
+  }
+
+  // The yearly amount: every other application of the product in the calendar year of the date (before and
+  // after it) plus this visit's own recorded ones must fit the cap. A visit with no ledger rows of its own
+  // adds nothing (only the others filling the cap is flagged), as the count audit does.
+  async auditAmount(database, customerId, product, day, limit, opts = {}) {
+    const year = day.slice(0, 4);
+    const yearRows = (query) => query.where({ 'pah.customer_id': customerId, 'pah.product_id': product.id }).whereNull('pah.retracted_at')
+      .where('pah.application_date', '>=', `${year}-01-01`).where('pah.application_date', '<=', `${year}-12-31`)
+      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+    const base = () => database('property_application_history as pah').leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id');
+    const others = await scopeHistoryToTreatment(yearRows(base()), database, opts, 'pah');
+    const own = opts.excludeScheduledServiceId
+      ? await scopeHistoryToTreatment(yearRows(base()), database, { propertyId: opts.propertyId }, 'pah')
+        .whereIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
+      : [];
+    const used = others.reduce((sum, row) => sum + v13AmountShare(row, limit).share, 0);
+    const total = used + own.reduce((sum, row) => sum + v13AmountShare(row, limit).share, 0);
+    if (total <= 1 + 1e-9 && used < 1 - 1e-9) return null;
+    return { type: 'annual_max_rate', message: `${product.name}: ${pct(total)}% of the yearly label amount in ${year} — LIMIT EXCEEDED.`, current: pct(total), max: 100 };
   }
 
   async auditInterval(others, product, day, min) {

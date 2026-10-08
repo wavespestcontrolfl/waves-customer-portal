@@ -1937,6 +1937,7 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
 const HARD_COUNT_LIMIT_LABELS = {
   annual_max_apps: 'yearly application limit',
   min_interval_days: 'minimum days between applications',
+  annual_max_rate: 'yearly amount limit',
 };
 const MAX_RAW_SUBMITTED_PRODUCTS = 200;
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2054,9 +2055,11 @@ async function recordedProductLimitFindings({ svc, record, database = db } = {})
 
 // The office's side of a finding: one admin notification per product and finding code (deduped, so
 // a retry or a resume rings once). Never throws and never blocks the closeout.
-const limitFigure = (finding) => (finding.limitType === 'min_interval_days'
-  ? `only ${finding.current} days from another application, minimum ${finding.max}`
-  : `${finding.current} of ${finding.max} already used`);
+const limitFigure = (finding) => {
+  if (finding.limitType === 'min_interval_days') return `only ${finding.current} days from another application, minimum ${finding.max}`;
+  if (finding.limitType === 'annual_max_rate') return `${finding.current}% of the yearly label amount used`;
+  return `${finding.current} of ${finding.max} already used`;
+};
 
 // One bell per record, finding code, product AND limit type (a product over both its yearly count and
 // its minimum interval rings for each).
@@ -2076,7 +2079,9 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const why = !over ? 'A lawn visit was recorded, but its product limits could not be checked.'
         : finding.limitType === 'min_interval_days'
           ? `${name}: only ${finding.current} days since another application, minimum ${finding.max}.`
-          : `${name} is over its yearly limit: ${finding.current} of ${finding.max} already used.`;
+          : finding.limitType === 'annual_max_rate'
+            ? `${name} is over its yearly amount limit: ${finding.current}% used.`
+            : `${name} is over its yearly limit: ${finding.current} of ${finding.max} already used.`;
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',

@@ -12,7 +12,10 @@
  *                                 but do not exceed 12.8 oz per acre per year", 0.4 lb clothianidin per
  *                                 acre), so two passes reach the yearly limit. The 56 days (8 weeks)
  *                                 between passes is the company's own rule, not a label interval (it follows
- *                                 the manufacturer's former Florida recommendation): an entry's
+ *                                 the manufacturer's former Florida recommendation). The label's limit is
+ *                                 an AMOUNT, so the entry also carries annualAmount (0.294 oz per 1,000 sq ft
+ *                                 a year, hard block): the lawn's recorded Arena rates plus the one being
+ *                                 planned must fit it (an unreadable rate counts as the old 0.29 oz). An entry's
  *                                 minIntervalDays adds a synthetic hard_block min_interval_days limit the
  *                                 same way (a stored product-level row is raised to it, never lowered).
  *   Certainty Turf Herbicide  2   new cap: synthetic limit.
@@ -35,6 +38,15 @@ const V13_COUNT_CAPS = Object.freeze([
     name: 'Arena 50 WDG',
     cap: 2,
     description: `Arena 50 WDG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label's turf range): two applications reach the label's yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre).`,
+    // The label's limit is an AMOUNT (12.8 oz per acre = 0.294 oz per 1,000 sq ft a year, 0.4 lb clothianidin per acre), so
+    // the count of 2 alone would let a lawn that took the old 0.29 oz rate take a second pass. A history row that cannot be
+    // sized counts at fallbackRate (the old rate = the whole year).
+    annualAmount: {
+      cap: 0.294,
+      unit: 'oz/1000sf/year',
+      fallbackRate: 0.29,
+      description: 'Arena 50 WDG: no more than 12.8 oz per acre (0.294 oz per 1,000 sq ft) a year under the v13 lawn program, all applications on the lawn added up (label: 0.4 lb clothianidin per acre per year). An earlier application with no readable rate counts as 0.29 oz.',
+    },
     minIntervalDays: 56,
     intervalDescription: `Arena 50 WDG: at least 56 days (8 weeks) between applications on a lawn under the v13 lawn program (${LABEL}; the company's own spacing, not a label interval).`,
   },
@@ -133,7 +145,8 @@ function withEntryCaps(entry, limits, productId = null) {
       const value = Number.isFinite(stored) ? Math.min(stored, entry.cap) : entry.cap;
       return { ...limit, limit_value: value, severity: 'hard_block' };
     });
-  return withEntryInterval(entry, counted, productId);
+  const timed = withEntryInterval(entry, counted, productId);
+  return entry.annualAmount && !timed.some((limit) => limit.match_type === V13_AMOUNT) ? [...timed, syntheticAmountLimit(entry, productId)] : timed;
 }
 
 const isProductInterval = (limit) => limit.limit_type === 'min_interval_days' && (limit.match_type || 'product') === 'product';
@@ -164,6 +177,26 @@ function withEntryInterval(entry, rows, productId = null) {
     const value = Number.isFinite(stored) ? Math.max(stored, entry.minIntervalDays) : entry.minIntervalDays;
     return { ...limit, limit_value: value, severity: 'hard_block' };
   });
+}
+
+// The match_type of the synthetic yearly-amount row. application-limits evaluates it; no stored row ever carries it.
+const V13_AMOUNT = 'v13_amount';
+
+function syntheticAmountLimit(entry, productId = null) {
+  const amount = entry.annualAmount;
+  return {
+    id: null,
+    product_id: productId,
+    match_type: V13_AMOUNT,
+    match_value: null,
+    limit_type: 'annual_max_rate',
+    limit_value: amount.cap,
+    limit_unit: amount.unit,
+    severity: 'hard_block',
+    description: amount.description,
+    fallback_rate: amount.fallbackRate,
+    synthetic: true,
+  };
 }
 
 // withEntryCaps for a product, resolving its entry through the id map.
@@ -206,5 +239,7 @@ module.exports = {
   CELSIUS_YTD_CAP, CELSIUS_YTD_CAP_LEGACY, celsiusYtdCap,
   withEntryCapMetadata,
   syntheticIntervalLimit,
+  syntheticAmountLimit,
+  V13_AMOUNT,
   V13_COUNT_CAPS, v13CountCapFor, v13CapEntryFor, capIdMap, resetV13CapIdentity, withEntryCaps, applyV13CountCaps, syntheticCountLimit,
 };

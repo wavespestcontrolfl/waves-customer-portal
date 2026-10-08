@@ -233,9 +233,29 @@ postgres('closeout: a hard product count limit flags, never refuses', () => {
       }
       const out = await complete(f, { products: [product(f, { productId: arena.id, rate: 0.29 })] });
       expect(out.status).toBe(200);
-      expect(out.body.completionAdvisories).toEqual([expect.stringMatching(/^Recorded\. The office will review: Arena 50 WDG is over its yearly application limit\.$/)]);
+      // Three passes at 0.29 oz break both the yearly count of 2 and the yearly amount (0.294 oz per 1,000 sq ft).
+      expect(out.body.completionAdvisories).toEqual([
+        'Recorded. The office will review: Arena 50 WDG is over its yearly application limit.',
+        'Recorded. The office will review: Arena 50 WDG is over its yearly amount limit.',
+      ]);
       expect(await mockPg('property_application_history').where({ customer_id: f.customerId, product_id: arena.id }).whereNull('retracted_at')).toHaveLength(3);
     } finally { await cleanup(f); }
+  });
+
+  test('Arena yearly amount: a second pass at 0.147 oz after one old 0.29 oz pass is flagged for the amount only; after one 0.147 pass it is not flagged', async () => {
+    for (const [prior, flagged] of [[0.29, true], [0.147, false]]) {
+      const f = await seedLawnVisit({ priorApplications: 0 });
+      try {
+        const arena = await mockPg('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+        const year = new Date().getFullYear();
+        const [past] = await mockPg('scheduled_services').insert({ customer_id: f.customerId, property_id: f.propertyId, scheduled_date: `${year}-01-05`, service_type: 'Lawn fixture', status: 'completed' }).returning('*');
+        const [rec] = await mockPg('service_records').insert({ customer_id: f.customerId, scheduled_service_id: past.id, service_date: `${year}-01-05`, service_type: 'Lawn fixture' }).returning('*');
+        await mockPg('property_application_history').insert({ customer_id: f.customerId, product_id: arena.id, application_date: `${year}-01-05`, application_rate: prior, rate_unit: 'oz', service_record_id: rec.id });
+        const out = await complete(f, { products: [product(f, { productId: arena.id, rate: 0.147 })] });
+        expect(out.status).toBe(200);
+        expect(out.body.completionAdvisories || []).toEqual(flagged ? ['Recorded. The office will review: Arena 50 WDG is over its yearly amount limit.'] : []);
+      } finally { await cleanup(f); }
+    }
   });
 
   test('more than 200 raw products is a 400 before any write', async () => {
