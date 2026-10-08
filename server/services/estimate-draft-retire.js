@@ -25,6 +25,9 @@ const logger = require('./logger');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_EXCEPTION_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const RETIRE_BATCH_LIMIT = 200;
+const RETIRE_CLOSER = 'estimate-draft-retire';
+// Thrown inside the per-draft transaction to roll an archive back.
+class KeepDraft extends Error {}
 // Sends checked per draft (same-door first): bounds the read per draft.
 const SENDS_PER_DRAFT = 5;
 
@@ -162,6 +165,12 @@ async function retireOneDraft(trx, pair) {
   `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.draft_property_id, pair.draft_address, pair.sent_id]);
   const row = result?.rows?.[0];
   if (!row) return null;
+  // A lead linked between the first lock (which locks nothing when no lead
+  // points here yet) and the archive is picked up now, under the draft's row
+  // lock. For an accepted replacement the whole retirement is undone.
+  const lateLeads = await trx('leads').where({ estimate_id: row.id }).whereNotIn('id', leads.map((l) => l.id)).forUpdate().select('id');
+  if (lateLeads.length && sentStatus === 'accepted') throw new KeepDraft();
+  leads.push(...lateLeads);
   // Unlink, never re-point: the sent estimate may already belong to another
   // lead (by FK or by its estimate_data mirror), and staff can link it.
   if (leads.length) {
@@ -177,15 +186,18 @@ async function retireOneDraft(trx, pair) {
     const sentOwned = await trx('leads').where({ estimate_id: pair.sent_id }).first('id');
     if (replaySend && !sentOwned) {
       const link = require('./lead-estimate-link');
-      const replay = { estimateId: pair.sent_id, performedBy: 'estimate-draft-retire', database: trx, originatingNotAfter: pair.sent_at };
+      const replay = { estimateId: pair.sent_id, performedBy: RETIRE_CLOSER, database: trx, originatingNotAfter: pair.sent_at };
       await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at });
       if (sentStatus === 'viewed') await link.markLinkedLeadEstimateViewed(replay);
     }
   }
-  await trx('notifications')
-    .whereRaw("metadata->>'estimateId' = ?", [String(row.id)])
-    .whereNull('done_at')
-    .update({ done_at: trx.fn.now(), resolution: 'estimate_draft_replaced' });
+  // The canonical system close (notification-service done contract): the
+  // closer is named, read state follows, a person's earlier Done is kept.
+  const { doneColumns, openToCloser } = require('./notification-service')._private;
+  await openToCloser(
+    trx('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'estimateId' = ?", [String(row.id)]),
+    RETIRE_CLOSER,
+  ).update(doneColumns({ by: RETIRE_CLOSER, resolution: 'A newer estimate was sent, so this draft was archived', keepExisting: true, conn: trx }));
   return row;
 }
 
@@ -238,7 +250,8 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   const rows = [];
   for (const pair of chosen) {
     if (rows.length >= batch) break;
-    const row = await conn.transaction((trx) => retireOneDraft(trx, pair));
+    const row = await conn.transaction((trx) => retireOneDraft(trx, pair))
+      .catch((err) => { if (err instanceof KeepDraft) return null; throw err; });
     if (!row) continue;
     rows.push({ ...row, sent_id: pair.sent_id });
     logger.info(`[estimate-draft-retire] archived draft ${row.id} (customer ${row.customer_id}): replaced by sent estimate ${pair.sent_id}`);

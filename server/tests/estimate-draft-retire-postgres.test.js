@@ -180,7 +180,9 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     for (const id of [handoff, clarify, wizard, assessmentLinked]) expect((await row(id)).archived_at).toBeNull();
     const bell = await mockPg('notifications').where({ id: bellId }).first();
     expect(bell.done_at).not.toBeNull();
-    expect(bell.resolution).toBe('estimate_draft_replaced');
+    expect(bell.done_by).toBe('estimate-draft-retire');
+    expect(bell.read_at).not.toBeNull();
+    expect(bell.resolution).toContain('newer estimate was sent');
   });
 
   test('a newer send for another property does not hide the send that replaced the draft', async () => {
@@ -272,6 +274,24 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const lead = await mockPg('leads').where({ id: leadId }).first();
     expect(lead.estimate_id).toBeNull();
     expect(lead.status).toBe('new');
+  });
+
+  test('a lead linked after the pair read keeps a draft whose replacement is accepted', async () => {
+    const lateLink = async (draftId) => {
+      const realRaw = mockPg.raw;
+      mockPg.raw = async (...args) => {
+        const out = await realRaw.apply(mockPg, args);
+        mockPg.raw = realRaw;
+        await mockPg('leads').insert({ id: randomUUID(), estimate_id: draftId, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+        return out;
+      };
+    };
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(90) });
+    await estimate(c, { status: 'accepted', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    await lateLink(draft);
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
+    expect((await row(draft)).archived_at).toBeNull();
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
