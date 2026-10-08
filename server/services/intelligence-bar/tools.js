@@ -30,6 +30,12 @@ const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
+// What the update_customer description tells the model about price notices.
+// Read once at load, like the rest of the description: the gate is an
+// environment variable, and setting it restarts the server.
+const PRICE_NOTICE_DISCLOSURE = require('../../config/feature-gates').ibTierUpgradeEmailLive?.()
+  ? 'No price-change notice is sent to the customer, with one exception: a card that changes only waveguard_tier and monthly_rate, moves the customer to a higher tier, and leaves a monthly-billed rate above zero emails the customer the tier upgrade notice after Confirm. The preview result and the card say when that email applies; tell the operator.'
+  : 'No price-change notice is sent to the customer.';
 const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../customer-contact-fanout');
 const {
   normalizeContactName,
@@ -214,7 +220,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
-monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. No price-change notice is sent to the customer.
+monthly_rate is the customer's WHOLE monthly bill, the sum of every service they pay for monthly (get_customer_detail lists the lines as monthly_bill). Pass the new TOTAL as updates.monthly_rate, and when the customer already has a rate also pass rate_service: the one service whose price changes (for example "lawn" when adding lawn to a pest plan), or "whole_bill" only when the operator really means to replace everything. Never put one service's price in monthly_rate. Changing the tier does not change any price. ${PRICE_NOTICE_DISCLOSURE}
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
       type: 'object',

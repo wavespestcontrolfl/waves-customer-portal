@@ -21,6 +21,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 
 const PIN_PARAM = '_tier_upgrade_email';
+// The only fields a card may change and still send the email.
+const EMAIL_CARD_FIELDS = new Set(['waveguard_tier', 'monthly_rate']);
 
 function live() {
   return require('../../config/feature-gates').ibTierUpgradeEmailLive();
@@ -72,6 +74,11 @@ function eligibility(before = {}, after = {}) {
   if (after.deleted_at || after.active === false || after.pipeline_stage === 'churned') {
     return { eligible: false, reason: 'inactive' };
   }
+  // The email's "% off" lines need figures: a tier discount or the one-time
+  // perk configured to zero means the sender would refuse, so the card must
+  // not promise the email and the commit must not report it started.
+  const figures = require('../account-membership-email')._private.tierBenefitFigures(after.waveguard_tier);
+  if (!figures.recurringDiscountPct || !figures.oneTimeDiscountPct) return { eligible: false, reason: 'tier_benefit_unavailable' };
   return { eligible: true, from: membershipTierKey(before.waveguard_tier), to: membershipTierKey(after.waveguard_tier) };
 }
 
@@ -84,10 +91,10 @@ async function proposal(customerId, updates) {
   if (!live()) return null;
   if (!customerId || !updates || typeof updates !== 'object') return null;
   if (updates.waveguard_tier === undefined || updates.monthly_rate === undefined) return null;
-  // A card that also moves the stage or the active flag decides at commit
-  // who is still an active customer (lifecycle stamps, the churn guard). The
-  // card cannot promise an email on top of that, so it does not.
-  if (updates.pipeline_stage !== undefined || updates.active !== undefined) return null;
+  // Only a card that changes the tier and the rate and nothing else. The
+  // email says "Nothing else changes", so a card that also edits a name, a
+  // phone, an address, the stage or the active flag sends no email.
+  if (Object.keys(updates).some((field) => !EMAIL_CARD_FIELDS.has(field))) return null;
 
   const before = await db('customers').where('id', customerId).first(
     'id', 'first_name', 'company_name', 'email', 'waveguard_tier', 'waveguard_tier_source',
@@ -100,8 +107,6 @@ async function proposal(customerId, updates) {
     // The executor stamps a tier written here as 'manual' (tools.js sanitizeUpdates).
     waveguard_tier_source: updates.waveguard_tier ? 'manual' : null,
     monthly_rate: updates.monthly_rate,
-    ...(updates.first_name !== undefined ? { first_name: updates.first_name } : {}),
-    ...(updates.email !== undefined ? { email: updates.email } : {}),
   };
   const verdict = eligibility(before, after);
   if (!verdict.eligible) return null;
@@ -134,6 +139,7 @@ function cardLine(display) {
 
 const NOT_SENT_TEXT = {
   gate_off: 'the tier upgrade email was switched off after the card was shown',
+  tier_benefit_unavailable: 'the discount for this tier is set to zero in pricing',
 };
 
 /**

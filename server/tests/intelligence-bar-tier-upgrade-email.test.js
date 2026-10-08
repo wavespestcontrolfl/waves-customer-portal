@@ -156,10 +156,49 @@ describe('proposal: what the card may promise', () => {
     expect(await TierUpgradeEmail.proposal(CUSTOMER_ID, UPGRADE)).toBeNull();
   });
 
-  test('an email address added on the same card counts as on file', async () => {
-    stubRows({ customer: { ...MEMBER, email: null } });
-    const result = await TierUpgradeEmail.proposal(CUSTOMER_ID, { ...UPGRADE, email: 'new@example.invalid' });
-    expect(result.pin).toEqual(PIN);
+  // The email says "Nothing else changes": a card that edits anything besides
+  // the tier and the rate promises no email (Codex #6122 r2).
+  test.each([
+    ['an email address', { email: 'new@example.invalid' }],
+    ['a phone', { phone: '+15555550100' }],
+    ['a name', { first_name: 'Jordan' }],
+    ['an address', { address_line1: '100 Example Way' }],
+  ])('a card that also changes %s promises nothing', async (_label, extra) => {
+    stubRows();
+    expect(await TierUpgradeEmail.proposal(CUSTOMER_ID, { ...UPGRADE, ...extra })).toBeNull();
+  });
+
+  // A discount configured to zero: the sender would refuse, so the card
+  // promises nothing and a commit never reports the email as started.
+  test('a tier whose discount is set to zero promises nothing, and a commit reports not sent', async () => {
+    const { WAVEGUARD } = require('../services/pricing-engine/constants');
+    const saved = WAVEGUARD.tiers.silver.discount;
+    WAVEGUARD.tiers.silver.discount = 0;
+    try {
+      stubRows();
+      expect(await TierUpgradeEmail.proposal(CUSTOMER_ID, UPGRADE)).toBeNull();
+      const result = TierUpgradeEmail.afterCommit({ pin: PIN, customerId: CUSTOMER_ID, before: MEMBER, after: { ...MEMBER, ...UPGRADE }, operationId: ACTION_ID });
+      expect(result).toMatchObject({ tier_upgrade_email: 'not_sent', tier_upgrade_email_reason: 'tier_benefit_unavailable' });
+      expect(mockSendTierUpgraded).not.toHaveBeenCalled();
+    } finally {
+      WAVEGUARD.tiers.silver.discount = saved;
+    }
+  });
+
+  // The upgrade direction is the pricing engine's fixed tier rank, whatever
+  // the configurable service thresholds say.
+  test('tier order does not follow edited service thresholds', () => {
+    const { WAVEGUARD } = require('../services/pricing-engine/constants');
+    const saved = { silver: WAVEGUARD.tiers.silver.minServices, gold: WAVEGUARD.tiers.gold.minServices };
+    WAVEGUARD.tiers.silver.minServices = 9;
+    WAVEGUARD.tiers.gold.minServices = 1;
+    try {
+      expect(TierUpgradeEmail.eligibility({ ...MEMBER, waveguard_tier: 'Silver' }, { ...MEMBER, waveguard_tier: 'Gold', monthly_rate: 80 })).toMatchObject({ eligible: true, from: 'silver', to: 'gold' });
+      expect(TierUpgradeEmail.eligibility({ ...MEMBER, waveguard_tier: 'Gold' }, { ...MEMBER, waveguard_tier: 'Silver', monthly_rate: 80 })).toMatchObject({ eligible: false, reason: 'not_an_upgrade' });
+    } finally {
+      WAVEGUARD.tiers.silver.minServices = saved.silver;
+      WAVEGUARD.tiers.gold.minServices = saved.gold;
+    }
   });
 });
 
@@ -251,5 +290,32 @@ describe('update_customer commit: the email the card promised', () => {
     db.__qb.select.mockResolvedValue([{ ...MEMBER, id: A, monthly_rate: '0', waveguard_tier: 'Bronze' }]);
     await executeTool('bulk_update_customers', { customer_ids: [A], updates: UPGRADE, _tier_upgrade_email: PIN }, { operationId: ACTION_ID });
     expect(mockSendTierUpgraded).not.toHaveBeenCalled();
+  });
+});
+
+// What the model is told about notices follows the gate (Codex #6122 r2).
+describe('update_customer tool description', () => {
+  const descriptionWith = (gate) => {
+    const saved = process.env.GATE_IB_TIER_UPGRADE_EMAIL;
+    if (gate === undefined) delete process.env.GATE_IB_TIER_UPGRADE_EMAIL; else process.env.GATE_IB_TIER_UPGRADE_EMAIL = gate;
+    let description;
+    try {
+      jest.isolateModules(() => {
+        description = require('../services/intelligence-bar/tools').TOOLS.find((tool) => tool.name === 'update_customer').description;
+      });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_IB_TIER_UPGRADE_EMAIL; else process.env.GATE_IB_TIER_UPGRADE_EMAIL = saved;
+    }
+    return description;
+  };
+
+  test('gate off: says no price-change notice is sent, and nothing about an upgrade email', () => {
+    const description = descriptionWith(undefined);
+    expect(description).toContain('No price-change notice is sent to the customer.');
+    expect(description).not.toMatch(/tier upgrade notice/);
+  });
+
+  test('gate on: names the tier upgrade email as the one exception', () => {
+    expect(descriptionWith('true')).toMatch(/with one exception: .*emails the customer the tier upgrade notice after Confirm/);
   });
 });

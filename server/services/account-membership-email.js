@@ -954,15 +954,13 @@ async function sendMembershipUpdated({
   });
 }
 
-// WaveGuard tiers, lowest first, from the pricing constants (never a typed
-// list): -1 for a blank, sentinel ("None", "Commercial") or unknown tier.
+// WaveGuard tiers, lowest first: the pricing engine's own fixed rank
+// (pricing-engine/discount-engine.js tierRank). Never derived from the
+// configurable minServices thresholds, which are not validated as ascending.
+// -1 for a blank, sentinel ("None", "Commercial") or unknown tier.
+const WAVEGUARD_TIER_ORDER = ['bronze', 'silver', 'gold', 'platinum'];
 function waveguardTierRank(value) {
-  const { WAVEGUARD } = require('./pricing-engine/constants');
-  const { membershipTierKey } = require('./membership-state');
-  const order = Object.entries(WAVEGUARD.tiers)
-    .sort((a, b) => Number(a[1].minServices) - Number(b[1].minServices))
-    .map(([key]) => key);
-  return order.indexOf(membershipTierKey(value));
+  return WAVEGUARD_TIER_ORDER.indexOf(require('./membership-state').membershipTierKey(value));
 }
 
 function tierDisplayName(value) {
