@@ -312,6 +312,81 @@ describe('track-transitions lifecycle side effects', () => {
     expect(sendTechArrived).not.toHaveBeenCalled();
   });
 
+  describe('markOnProperty backdated arrival (GPS sample delivered late)', () => {
+    const arrivedAt = new Date(Date.now() - 40 * 60 * 1000);
+    const lateSvc = (id) => ({
+      id,
+      customer_id: 'cust-bd',
+      technician_id: 'tech-bd',
+      status: 'en_route',
+      track_state: 'en_route',
+      cancelled_at: null,
+      arrival_sms_sent_at: null,
+      en_route_at: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    test('stamps the sample time, marks the arrival handled and sends no text', async () => {
+      const update = query(1);
+      db
+        .mockReturnValueOnce(query(lateSvc('job-bd')))
+        .mockReturnValueOnce(update)
+        .mockReturnValueOnce(query({ current_job_id: 'job-bd' })); // tech_status row
+
+      const result = await trackTransitions.markOnProperty('job-bd', { arrivedAt, suppressArrivalSms: true });
+
+      expect(result).toMatchObject({ ok: true, state: 'on_property', arrivedAt });
+      const payload = update.update.mock.calls[0][0];
+      expect(payload).toMatchObject({
+        track_state: 'on_property',
+        arrived_at: arrivedAt,
+        actual_start_time: arrivedAt,
+        check_in_time: arrivedAt,
+        // handled: a later manual start or geofence ENTER must not text either
+        arrival_sms_sent_at: expect.any(Date),
+      });
+      expect(sendTechArrived).not.toHaveBeenCalled();
+      expect(setTechJobStatus).toHaveBeenCalledWith({ tech_id: 'tech-bd', status: 'on_site', current_job_id: 'job-bd' });
+    });
+
+    test('does not repoint a tech who has moved on to another job', async () => {
+      db
+        .mockReturnValueOnce(query(lateSvc('job-bd2')))
+        .mockReturnValueOnce(query(1))
+        .mockReturnValueOnce(query({ current_job_id: 'job-next' }));
+
+      const result = await trackTransitions.markOnProperty('job-bd2', { arrivedAt, suppressArrivalSms: true });
+
+      expect(result.ok).toBe(true);
+      expect(setTechJobStatus).not.toHaveBeenCalled();
+    });
+
+    test('a live arrival keeps stamping now and leaves the arrival guard to the sender', async () => {
+      const update = query(1);
+      db
+        .mockReturnValueOnce(query(lateSvc('job-live')))
+        .mockReturnValueOnce(update);
+
+      await trackTransitions.markOnProperty('job-live', { suppressArrivalSms: true });
+
+      const payload = update.update.mock.calls[0][0];
+      expect(payload).not.toHaveProperty('arrival_sms_sent_at');
+      expect(payload.arrived_at.getTime()).toBeGreaterThan(arrivedAt.getTime());
+    });
+
+    test('a future arrivedAt is ignored: the arrival is stamped now', async () => {
+      const update = query(1);
+      db
+        .mockReturnValueOnce(query(lateSvc('job-fut')))
+        .mockReturnValueOnce(update);
+
+      await trackTransitions.markOnProperty('job-fut', { arrivedAt: new Date(Date.now() + 3600 * 1000), suppressArrivalSms: true });
+
+      const payload = update.update.mock.calls[0][0];
+      expect(payload).not.toHaveProperty('arrival_sms_sent_at');
+      expect(payload.arrived_at.getTime()).toBeLessThanOrEqual(Date.now());
+    });
+  });
+
   test('markOnProperty race-loser still sends the arrival SMS when the flip-winner suppressed it', async () => {
     // A geofence drive-past wins the scheduled->on_property flip with
     // suppressArrivalSms, leaving the guard NULL. A real (non-suppressed)

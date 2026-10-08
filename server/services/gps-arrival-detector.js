@@ -5,6 +5,7 @@ const { ensureCustomerGeocoded } = require('./geocoder');
 const { recordAuditEvent } = require('./audit-log');
 const { stampedAddressDiverges } = require('./stamped-address');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
+const { gpsArrivalLateSamplesLive } = require('../config/feature-gates');
 
 const SETTINGS_KEYS = [
   'gps_arrival.enabled',
@@ -27,8 +28,39 @@ const GEOCODE_TIMEOUT_MS = 1200;
 const MAX_SAMPLE_AGE_MS = 10 * 60 * 1000;
 const SAMPLE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
 const EN_ROUTE_TIMESTAMP_TOLERANCE_MS = 2 * 60 * 1000;
+// GATE_GPS_ARRIVAL_LATE_SAMPLES: a sample older than MAX_SAMPLE_AGE_MS is still
+// usable up to this age (Bouncie has delivered trip-data 35-60 minutes late).
+const LATE_SAMPLE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const LATE_CANDIDATE_LIMIT = 10;
+const NOT_MARKED_ACTION = 'gps_arrival.not_marked';
+const NOT_MARKED_MEMO_MAX = 2000;
+const SERVICE_COLUMNS = [
+  's.id',
+  's.customer_id',
+  's.technician_id',
+  's.track_state',
+  's.status',
+  's.cancelled_at',
+  's.completed_at',
+  's.arrived_at',
+  's.en_route_at',
+  's.lat as service_lat',
+  's.lng as service_lng',
+  's.service_address_line1 as service_address_line1',
+  's.service_address_zip as service_address_zip',
+  's.service_address_city as service_address_city',
+  'c.address_line1 as customer_address_line1',
+  'c.zip as customer_zip',
+  'c.city as customer_city',
+  'c.latitude as customer_latitude',
+  'c.longitude as customer_longitude',
+];
 
 let configCache = null;
+// visit:reason keys already written (or found written) by this process, so a
+// parked truck costs no query per sample. The audit_log lookup behind it is
+// the durable half: it survives restarts and a second instance.
+const notMarkedRecorded = new Set();
 
 function finiteNumber(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -264,27 +296,27 @@ async function loadCurrentService(currentJobId) {
   return db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.id', currentJobId)
-    .first(
-      's.id',
-      's.customer_id',
-      's.technician_id',
-      's.track_state',
-      's.status',
-      's.cancelled_at',
-      's.completed_at',
-      's.arrived_at',
-      's.en_route_at',
-      's.lat as service_lat',
-      's.lng as service_lng',
-      's.service_address_line1 as service_address_line1',
-      's.service_address_zip as service_address_zip',
-      's.service_address_city as service_address_city',
-      'c.address_line1 as customer_address_line1',
-      'c.zip as customer_zip',
-      'c.city as customer_city',
-      'c.latitude as customer_latitude',
-      'c.longitude as customer_longitude'
-    );
+    .first(...SERVICE_COLUMNS);
+}
+
+// Late-sample candidates: this technician's visits that went en route no later
+// than the sample time (plus the usual tolerance) and not more than 6 hours
+// before it. The caller keeps only the ones still en route now.
+async function loadLateCandidates(techId, pointMs) {
+  return db('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where('s.technician_id', techId)
+    .whereNull('s.cancelled_at')
+    .whereNull('s.completed_at')
+    .whereNotNull('s.en_route_at')
+    .where('s.en_route_at', '<=', new Date(pointMs + EN_ROUTE_TIMESTAMP_TOLERANCE_MS))
+    .where('s.en_route_at', '>=', new Date(pointMs - LATE_SAMPLE_MAX_AGE_MS))
+    .where(function enRoute() {
+      this.where('s.track_state', 'en_route').orWhere('s.status', 'en_route');
+    })
+    .orderBy('s.en_route_at', 'desc')
+    .limit(LATE_CANDIDATE_LIMIT)
+    .select(SERVICE_COLUMNS);
 }
 
 function isEnRouteService(service) {
@@ -295,22 +327,236 @@ function isEnRouteService(service) {
   return service.track_state === 'en_route' || service.status === 'en_route';
 }
 
-async function auditArrival({ service, techStatus, destination, distance, point, decision, result, error }) {
-  await recordAuditEvent({
-    actor_type: 'system:gps-arrival',
-    action: result?.ok ? 'gps_arrival.mark_on_property' : 'gps_arrival.mark_on_property_failed',
-    resource_type: 'scheduled_service',
-    resource_id: service.id,
-    metadata: {
-      tech_id: techStatus.tech_id || null,
+function sampleAgeSeconds(point, now = Date.now()) {
+  const pointMs = timestampMs(point?.reported_at);
+  return pointMs == null ? null : Math.round((now - pointMs) / 1000);
+}
+
+function auditAction({ notMarked, result }) {
+  if (notMarked) return NOT_MARKED_ACTION;
+  return result?.ok ? 'gps_arrival.mark_on_property' : 'gps_arrival.mark_on_property_failed';
+}
+
+function auditMetadata({ techStatus, destination, distance, point, decision, result, error, notMarked, late }) {
+  if (notMarked) {
+    return {
+      reason: notMarked.reason,
+      detail: notMarked.detail || null,
+      tech_id: techStatus?.tech_id || null,
       destination_source: destination.source,
-      distance_meters: distance == null ? null : Math.round(distance),
+      distance_m: Math.round(distance),
       speed_mph: finiteNumber(point?.speed_mph),
       ignition: point?.ignition ?? null,
-      decision_reason: decision.reason,
-      mark_on_property_result: result || null,
-      error: error ? error.message : null,
-    },
+      sample_age_s: sampleAgeSeconds(point),
+    };
+  }
+  return {
+    tech_id: techStatus.tech_id || null,
+    destination_source: destination.source,
+    distance_meters: distance == null ? null : Math.round(distance),
+    speed_mph: finiteNumber(point?.speed_mph),
+    ignition: point?.ignition ?? null,
+    decision_reason: decision.reason,
+    mark_on_property_result: result || null,
+    error: error ? error.message : null,
+    ...(late ? { late_sample: true, sample_age_s: sampleAgeSeconds(point) } : {}),
+  };
+}
+
+// The one audit writer for this detector. Three row kinds: an arrival marked
+// (gps_arrival.mark_on_property), a mark that failed (..._failed), and, with
+// `notMarked` ({ reason, detail }), gps_arrival.not_marked: the truck was
+// inside the arrival radius and no arrival was marked. `late` flags a mark
+// that came from a late-delivered sample.
+async function auditArrival(args) {
+  const { service } = args;
+  await recordAuditEvent({
+    actor_type: 'system:gps-arrival',
+    action: auditAction(args),
+    resource_type: 'scheduled_service',
+    resource_id: service.id,
+    metadata: auditMetadata(args),
+  });
+}
+
+// At most one not_marked row per visit + reason. The in-memory key is taken
+// before the first await, so two samples racing in one process cannot both
+// pass; the audit_log lookup carries the limit across restarts and instances.
+async function claimNotMarkedSlot(serviceId, reason) {
+  const key = `${serviceId}:${reason}`;
+  if (notMarkedRecorded.has(key)) return false;
+  if (notMarkedRecorded.size >= NOT_MARKED_MEMO_MAX) notMarkedRecorded.clear();
+  notMarkedRecorded.add(key);
+  try {
+    const existing = await db('audit_log')
+      .where({ resource_type: 'scheduled_service', resource_id: serviceId, action: NOT_MARKED_ACTION })
+      .whereRaw("metadata->>'reason' = ?", [reason])
+      .first('id');
+    return !existing;
+  } catch (err) {
+    notMarkedRecorded.delete(key);
+    throw err;
+  }
+}
+
+// Diagnostics only; the caller's result never changes. Records ONLY when the
+// sample is inside the arrival radius of the visit (a far-away sample is
+// normal driving). Never throws.
+async function recordNotMarked({ service, techStatus, point, config, reason, detail = null, destination = null, distance = null }) {
+  try {
+    const dest = destination || await resolveDestination(service);
+    const dist = distance ?? (dest ? distanceMeters(point?.lat, point?.lng, dest.lat, dest.lng) : null);
+    if (dist == null || dist > config.radiusMeters) return;
+    if (!(await claimNotMarkedSlot(service.id, reason))) return;
+    await auditArrival({ service, techStatus, destination: dest, distance: dist, point, notMarked: { reason, detail } });
+  } catch (err) {
+    logger.warn(`[gps-arrival] not-marked diagnostic failed for ${service?.id}: ${err.message}`);
+  }
+}
+
+// A sample that tech_status did not accept as its current position (older than
+// what tech_status already holds). The visit is looked up only to find out
+// whether the truck was inside the radius of an en-route job.
+async function recordSupersededSample({ techStatus, point, config }) {
+  try {
+    const service = await loadCurrentService(techStatus.current_job_id);
+    if (!service || !isEnRouteService(service)) return;
+    await recordNotMarked({ service, techStatus, point, config, reason: 'stale_location_sample' });
+  } catch (err) {
+    logger.warn(`[gps-arrival] superseded-sample diagnostic failed: ${err.message}`);
+  }
+}
+
+function serviceRejection({ service, techStatus, point }) {
+  if (service.technician_id && techStatus.tech_id && service.technician_id !== techStatus.tech_id) {
+    return 'technician_mismatch';
+  }
+  if (!isEnRouteService(service)) return 'service_not_en_route';
+  const timing = validateSampleTiming({ techStatus, point, service });
+  return timing.ok ? null : timing.reason;
+}
+
+// An open visit with no arrival yet. A visit that already arrived, or closed,
+// and keeps pinging from its own driveway is not a missed arrival.
+function isOpenWithoutArrival(service) {
+  return !service.arrived_at && !service.completed_at && !service.cancelled_at
+    && !['completed', 'cancelled', 'skipped', 'no_show'].includes(service.status);
+}
+
+async function markAndAudit({ service, techStatus, destination, distance, point, decision, config, markOptions, late = null }) {
+  let result = null;
+  try {
+    result = await trackTransitions.markOnProperty(service.id, markOptions);
+    await auditArrival({ service, techStatus, destination, distance, point, decision, result, late });
+    if (!result?.ok) {
+      await recordNotMarked({
+        service, techStatus, point, config, destination, distance,
+        reason: 'mark_on_property_failed', detail: result?.reason || null,
+      });
+    }
+    return {
+      ok: result?.ok === true,
+      reason: result?.ok ? 'marked_on_property' : 'mark_on_property_failed',
+      state: result?.state || null,
+      distanceMeters: distance,
+      result,
+    };
+  } catch (err) {
+    logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
+    await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err, late });
+    await recordNotMarked({
+      service, techStatus, point, config, destination, distance,
+      reason: 'mark_on_property_failed', detail: err.message,
+    });
+    return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance };
+  }
+}
+
+function isLateSample(point, now = Date.now()) {
+  if (!gpsArrivalLateSamplesLive()) return false;
+  const pointMs = timestampMs(point?.reported_at);
+  if (pointMs == null) return false;
+  const age = now - pointMs;
+  return age > MAX_SAMPLE_AGE_MS && age <= LATE_SAMPLE_MAX_AGE_MS;
+}
+
+async function evaluateLateCandidate({ service, point, config }) {
+  const destination = await resolveDestination(service);
+  if (!destination) return null;
+  const distance = distanceMeters(point.lat, point.lng, destination.lat, destination.lng);
+  const decision = buildArrivalDecision({
+    distance,
+    speedMph: point.speed_mph,
+    ignition: point.ignition,
+    config,
+  });
+  return { service, destination, distance, decision };
+}
+
+/**
+ * GATE_GPS_ARRIVAL_LATE_SAMPLES. Bouncie sometimes delivers trip-data 35-60
+ * minutes late, so a sample that was inside the radius and slow is older than
+ * MAX_SAMPLE_AGE_MS when it arrives. The live checks cannot validate such a
+ * sample (the tech's current position has moved past it, and tech_status
+ * keeps the newer point), so it is validated against the VISIT instead:
+ *   - the technician is the one the device is mapped to (techStatus.tech_id)
+ *     and the visit is assigned to that same technician;
+ *   - the sample is no older than 6 hours and not in the future;
+ *   - the visit was en route at the sample time (en_route_at no later than the
+ *     sample plus the 2-minute tolerance) and is STILL en route now (never
+ *     completed, cancelled or already on property);
+ *   - the sample is inside the arrival radius and slow, by the same decision
+ *     the live path uses.
+ * If the tech has since started another visit, only visits that were en route
+ * at the sample time are candidates, and the arrival is made only when exactly
+ * one candidate qualifies; two qualifying visits are recorded as ambiguous.
+ * The arrival carries the SAMPLE's time (never earlier than en_route_at) and
+ * never texts the customer: a text saying "arrived" an hour late is wrong.
+ */
+async function maybeMarkArrivedFromLateSample({ techStatus, point, config }) {
+  const techId = techStatus?.tech_id;
+  if (!techId || validLatitude(point?.lat) == null || validLongitude(point?.lng) == null) {
+    return { ok: false, reason: 'late_sample_unattributable' };
+  }
+  const pointMs = timestampMs(point.reported_at);
+
+  let candidates;
+  try {
+    candidates = await loadLateCandidates(techId, pointMs);
+  } catch (err) {
+    logger.warn(`[gps-arrival] late-sample lookup failed for ${techId}: ${err.message}`);
+    return { ok: false, reason: 'service_lookup_failed' };
+  }
+
+  const evaluated = [];
+  for (const service of (candidates || []).filter(isEnRouteService)) {
+    const entry = await evaluateLateCandidate({ service, point, config });
+    if (entry) evaluated.push(entry);
+  }
+
+  const arriving = evaluated.filter((entry) => entry.decision.arrived);
+  if (arriving.length > 1) {
+    for (const entry of arriving) {
+      await recordNotMarked({ ...entry, techStatus, point, config, reason: 'late_sample_ambiguous' });
+    }
+    return { ok: false, reason: 'late_sample_ambiguous' };
+  }
+  if (arriving.length === 0) {
+    for (const entry of evaluated) {
+      await recordNotMarked({ ...entry, techStatus, point, config, reason: entry.decision.reason });
+    }
+    return { ok: false, reason: evaluated[0]?.decision.reason || 'no_en_route_visit_at_sample_time' };
+  }
+
+  const entry = arriving[0];
+  const arrivedAt = new Date(Math.max(pointMs, timestampMs(entry.service.en_route_at)));
+  return markAndAudit({
+    ...entry,
+    techStatus,
+    point,
+    config,
+    late: true,
+    markOptions: { actingTechId: techId, expectTechnicianId: techId, arrivedAt, suppressArrivalSms: true },
   });
 }
 
@@ -332,6 +578,8 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
   const config = await loadConfig(configOverride);
   if (!config.enabled) return { ok: false, reason: 'disabled' };
 
+  if (isLateSample(point)) return maybeMarkArrivedFromLateSample({ techStatus, point, config });
+
   const currentJobId = techStatus?.current_job_id;
   if (!currentJobId) return { ok: false, reason: 'no_current_job' };
 
@@ -341,6 +589,7 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
     return { ok: false, reason: 'missing_tech_location' };
   }
   if (!isAcceptedCurrentSample({ techLat, techLng, point })) {
+    await recordSupersededSample({ techStatus, point, config });
     return { ok: false, reason: 'stale_location_sample' };
   }
 
@@ -353,15 +602,12 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
   }
 
   if (!service) return { ok: false, reason: 'service_not_found' };
-  if (service.technician_id && techStatus.tech_id && service.technician_id !== techStatus.tech_id) {
-    return { ok: false, reason: 'technician_mismatch' };
-  }
-  if (!isEnRouteService(service)) {
-    return { ok: false, reason: 'service_not_en_route' };
-  }
-  const sampleTiming = validateSampleTiming({ techStatus, point, service });
-  if (!sampleTiming.ok) {
-    return { ok: false, reason: sampleTiming.reason };
+  const rejection = serviceRejection({ service, techStatus, point });
+  if (rejection) {
+    if (isOpenWithoutArrival(service)) {
+      await recordNotMarked({ service, techStatus, point, config, reason: rejection });
+    }
+    return { ok: false, reason: rejection };
   }
 
   const destination = await resolveDestination(service);
@@ -378,6 +624,7 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
   });
 
   if (!decision.arrived) {
+    await recordNotMarked({ service, techStatus, point, config, destination, distance, reason: decision.reason });
     return {
       ok: false,
       reason: decision.reason,
@@ -385,28 +632,17 @@ async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = nul
     };
   }
 
-  let result = null;
-  try {
-    // techStatus.tech_id is the tech reporting this GPS sample; the guard above
-    // already rejects a tech/assignment mismatch, so it's the one arriving.
-    result = await trackTransitions.markOnProperty(service.id, { actingTechId: techStatus.tech_id });
-    await auditArrival({ service, techStatus, destination, distance, point, decision, result });
-    return {
-      ok: result?.ok === true,
-      reason: result?.ok ? 'marked_on_property' : 'mark_on_property_failed',
-      state: result?.state || null,
-      distanceMeters: distance,
-      result,
-    };
-  } catch (err) {
-    logger.error(`[gps-arrival] markOnProperty failed for ${service.id}: ${err.message}`);
-    await auditArrival({ service, techStatus, destination, distance, point, decision, result, error: err });
-    return { ok: false, reason: 'mark_on_property_threw', distanceMeters: distance };
-  }
+  // techStatus.tech_id is the tech reporting this GPS sample; the guard above
+  // already rejects a tech/assignment mismatch, so it's the one arriving.
+  return markAndAudit({
+    service, techStatus, destination, distance, point, decision, config,
+    markOptions: { actingTechId: techStatus.tech_id },
+  });
 }
 
 function resetConfigCache() {
   configCache = null;
+  notMarkedRecorded.clear();
 }
 
 module.exports = {
@@ -417,6 +653,7 @@ module.exports = {
     distanceMeters,
     finiteNumber,
     isAcceptedCurrentSample,
+    isLateSample,
     validateSampleTiming,
     loadConfig,
     resetConfigCache,

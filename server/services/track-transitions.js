@@ -989,9 +989,56 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
   return outcome;
 }
 
+// Backdated arrival: a GPS sample that reached us late (gps-arrival-detector,
+// GATE_GPS_ARRIVAL_LATE_SAMPLES) passes opts.arrivedAt, the instant the truck
+// was really at the property. arrived_at, actual_start_time and check_in_time
+// take that instant, so time on site is the real one. Only a past instant
+// counts; anything else is an ordinary arrival stamped now.
+function backdatedArrivalAt(opts) {
+  const at = finiteDate(opts.arrivedAt);
+  return at && at.getTime() <= Date.now() ? at : null;
+}
+
+function onSiteStampAt(opts, fallback = new Date()) {
+  return backdatedArrivalAt(opts) || fallback;
+}
+
+// A backdated arrival never texts the customer, now or later. The flip stamps
+// the arrival guard as handled, so a later signal on the same visit (a manual
+// start, a geofence ENTER) cannot send "has arrived" hours after the fact.
+function backdatedArrivalGuard(opts, now) {
+  return backdatedArrivalAt(opts) ? { arrival_sms_sent_at: now } : {};
+}
+
+// Tech board row for the arriving tech. A backdated arrival must not repoint a
+// technician who has moved on: the row flips to on_site only while this visit
+// is still their current job.
+async function syncTechOnSite(row, opts, label) {
+  if (!row.technician_id) return;
+  try {
+    if (backdatedArrivalAt(opts)) {
+      const board = await db('tech_status').where({ tech_id: row.technician_id }).first('current_job_id');
+      if (!board || String(board.current_job_id || '') !== String(row.id)) return;
+    }
+    await setTechJobStatus({
+      tech_id: row.technician_id,
+      status: 'on_site',
+      current_job_id: row.id,
+    });
+  } catch (err) {
+    logger.error(`[track-transitions] tech_status on_site ${label} failed: ${err.message}`);
+  }
+}
+
 /**
  * Phase 1 stub. Phase 2 wires this into geofence dwell detection.
  * Safe to call manually; just flips state when called from en_route.
+ *
+ * opts.arrivedAt (GPS late-sample arrival): the past instant the truck was at
+ * the property. arrived_at / actual_start_time / check_in_time take it, the
+ * arrival guard is stamped handled so no "has arrived" text ever follows, and
+ * the tech board flips to on_site only while this is still the tech's current
+ * job. The caller also passes suppressArrivalSms (no text, no visit fan-out).
  */
 async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
@@ -1115,7 +1162,7 @@ async function markOnProperty(serviceId, opts = {}) {
     // Idempotent re-entry: a prior signal already flipped the state. Re-sync the
     // operational side effects and let the tail call retry a still-unsent arrival
     // (guard NULL) — a no-op once stamped.
-    const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, svc.arrived_at || new Date());
+    const lifecycleUpdates = buildOnSiteLifecycleUpdates(svc, svc.arrived_at || onSiteStampAt(opts));
     if (Object.keys(lifecycleUpdates).length > 0) {
       await db('scheduled_services')
         .where({ id: serviceId })
@@ -1126,24 +1173,14 @@ async function markOnProperty(serviceId, opts = {}) {
     } catch (err) {
       logger.error(`[track-transitions] sync on_site status failed: ${err.message}`);
     }
-    if (svc.technician_id) {
-      try {
-        await setTechJobStatus({
-          tech_id: svc.technician_id,
-          status: 'on_site',
-          current_job_id: svc.id,
-        });
-      } catch (err) {
-        logger.error(`[track-transitions] tech_status on_site idempotent sync failed: ${err.message}`);
-      }
-    }
+    await syncTechOnSite(svc, opts, 'idempotent sync');
     emitCustomerTrackRefresh(svc, 'on_property', svc.arrived_at || lifecycleUpdates.arrived_at || new Date());
     arrivalRow = svc;
     claimArrivedAt = svc.arrived_at || lifecycleUpdates.arrived_at || null;
     result = { ok: true, state: 'on_property', arrivedAt: svc.arrived_at || lifecycleUpdates.arrived_at || null };
   } else {
     const now = new Date();
-    const onSiteUpdates = buildOnSiteLifecycleUpdates(svc, now);
+    const onSiteUpdates = buildOnSiteLifecycleUpdates(svc, onSiteStampAt(opts, now));
     // The flip is bound to the observed status/date and full lifecycle
     // snapshot: a reschedule committing after the read can reset the row
     // onto a NEW date with track_state='scheduled', and an id+state match
@@ -1160,6 +1197,7 @@ async function markOnProperty(serviceId, opts = {}) {
         .update({
           track_state: 'on_property',
           ...onSiteUpdates,
+          ...backdatedArrivalGuard(opts, now),
           updated_at: now,
         });
     });
@@ -1186,17 +1224,7 @@ async function markOnProperty(serviceId, opts = {}) {
       if (opts.expectTechnicianId && String(fresh.technician_id || '') !== String(opts.expectTechnicianId)) {
         return { ok: false, reason: 'technician_changed' };
       }
-      if (fresh?.technician_id && fresh.track_state === 'on_property') {
-        try {
-          await setTechJobStatus({
-            tech_id: fresh.technician_id,
-            status: 'on_site',
-            current_job_id: fresh.id,
-          });
-        } catch (err) {
-          logger.error(`[track-transitions] tech_status on_site race sync failed: ${err.message}`);
-        }
-      }
+      await syncTechOnSite(fresh, opts, 'race sync');
       if (fresh?.track_state === 'on_property') {
         arrivalRow = fresh;
         claimArrivedAt = fresh.arrived_at || null;
@@ -1208,21 +1236,11 @@ async function markOnProperty(serviceId, opts = {}) {
       } catch (err) {
         logger.error(`[track-transitions] sync on_site status failed: ${err.message}`);
       }
-      if (svc.technician_id) {
-        try {
-          await setTechJobStatus({
-            tech_id: svc.technician_id,
-            status: 'on_site',
-            current_job_id: svc.id,
-          });
-        } catch (err) {
-          logger.error(`[track-transitions] tech_status on_site sync failed: ${err.message}`);
-        }
-      }
+      await syncTechOnSite(svc, opts, 'sync');
       emitCustomerTrackRefresh(svc, 'on_property', now);
       arrivalRow = svc;
       claimArrivedAt = svc.arrived_at || onSiteUpdates.arrived_at || null;
-      result = { ok: true, state: 'on_property', arrivedAt: now };
+      result = { ok: true, state: 'on_property', arrivedAt: onSiteStampAt(opts, now) };
     }
   }
 
