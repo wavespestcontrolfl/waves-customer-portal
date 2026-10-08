@@ -224,6 +224,15 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(section).toMatch(/reason_code: 'callback_number_needed'[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)[^]*?no_text_hold/);
   });
 
+  test('the hold arm stamps open callback cards in its own transaction, and Resolve reads the LIVE payload under the lock', () => {
+    const holds = fs.readFileSync(require.resolve('../services/disclaimed-number-holds'), 'utf8');
+    expect(holds).toMatch(/const recorded = await recordDisclaimedNumberHold[^]*?if \(noTextHold\) \{[^]*?no_text_hold/);
+    expect(src).toContain('noTextHold: noTextHoldArming');
+    expect(src.split('noTextHoldArming = aniCannotText(').length - 1).toBe(2);
+    const triage = fs.readFileSync(require.resolve('../routes/admin-triage'), 'utf8');
+    expect(triage).toContain('noTextHold: cardCarriesNoTextHold(liveCard ? { payload: liveCard.payload } : item)');
+  });
+
   test('a hard-vetoed no-text call gets neither the hold nor the card (the veto the pipeline applies)', () => {
     expect(src).toContain('const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);');
     expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');

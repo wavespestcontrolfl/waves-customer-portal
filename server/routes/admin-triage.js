@@ -695,7 +695,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // Round 7 P1: this is the VERIFIED_SAME_NUMBER meaning — the one
       // action that lifts the number-keyed row too (see the helper).
       const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
-        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, noTextHold: cardCarriesNoTextHold(item),
+        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, noTextHold: cardCarriesNoTextHold(liveCard ? { payload: liveCard.payload } : item),
       });
       callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }

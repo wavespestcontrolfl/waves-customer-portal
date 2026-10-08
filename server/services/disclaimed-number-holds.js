@@ -103,7 +103,7 @@ async function recordDisclaimedNumberHold({ phone, customerId = null, callLogId,
  * touch after it (triage_items, scheduled_services, disclaimed_number_holds)
  * are only ever reached by one of the two at a time — no deadlock cycle.
  */
-async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, conn = db }) {
+async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, procToken = null, procGeneration = null, noTextHold = false, conn = db }) {
   if (!holdPhoneKey(phone) || !callLogId) return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn });
   const { lockTriageCall } = require('../utils/triage-locks');
   return conn.transaction(async (trx) => {
@@ -116,7 +116,17 @@ async function armDisclaimedNumberHold({ phone, customerId = null, callLogId, pr
       const owned = await claim.forUpdate().first('id');
       if (!owned) return { recorded: false, claimLost: true };
     }
-    return recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx });
+    const recorded = await recordDisclaimedNumberHold({ phone, customerId, callLogId, conn: trx });
+    if (noTextHold) {
+      // A hold armed because the VALID extraction said the line cannot get texts: mark any callback_number_needed
+      // card an earlier pass left open, in this same transaction under the per-call lock, so its Resolve can
+      // never release the hold we just armed (it would otherwise carry no marker).
+      await trx('triage_items')
+        .where({ call_log_id: callLogId, reason_code: 'callback_number_needed' })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({ payload: trx.raw('COALESCE(payload, \'{}\'::jsonb) || \'{"no_text_hold": true}\'::jsonb') });
+    }
+    return recorded;
   });
 }
 

@@ -10963,12 +10963,14 @@ const CallRecordingProcessor = {
     // outcome as the stillOwnsClaim boundaries — it must never arm, or
     // re-arm over a human clearance, from a stale extraction.
     let callbackNumberHoldArmed = false;
+    // Set by each decision point just before it arms: the hold rests on a VALID ani_cannot_text.
+    let noTextHoldArming = false;
     const armCallbackNumberHoldAtDecision = async () => {
       if (callbackNumberHoldArmed) return true;
       try {
         const armed = await require('./disclaimed-number-holds').armDisclaimedNumberHold({
           phone: contactPhone, customerId: call.customer_id || null, callLogId: call.id,
-          procToken, procGeneration,
+          procToken, procGeneration, noTextHold: noTextHoldArming,
         });
         if (armed?.claimLost) return false;
         callbackNumberHoldArmed = true;
@@ -11670,6 +11672,7 @@ const CallRecordingProcessor = {
             // Round 7 P1: persisted NOW — before the route decision, the
             // advisory card below, and anything else this pass awaits.
             // Round 8 P1: a lost claim abandons the pass (nothing written).
+            noTextHoldArming = aniCannotText(v2Extraction?.caller);
             if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
             if (aniCannotText(v2Extraction?.caller)) await fileTextNumberCard(v2Extraction, call.customer_id || null, { failClosed: true });
           }
@@ -12007,6 +12010,7 @@ const CallRecordingProcessor = {
           // Round 7 P1: persisted NOW — before the bridge files the card
           // below and before any further awaited work.
           // Round 8 P1: a lost claim abandons the pass (nothing written).
+          noTextHoldArming = aniCannotText(v2Ext?.caller);
           if (!(await armCallbackNumberHoldAtDecision())) return abandonToPeer('the disclaimed-number hold write');
           if (aniCannotText(v2Ext?.caller)) await fileTextNumberCard(v2Ext, call.customer_id || null, { failClosed: true });
         }

@@ -263,7 +263,7 @@ describe('round-7 P1 — the number hold is persisted when the flag is decided',
     expect(idx).toBeGreaterThan(-1);
     const body = src.slice(idx, src.indexOf('\n    };', idx));
     // Round 8 P1: the write now carries the pass's processing claim.
-    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*procToken, procGeneration,\s*\}\)/);
+    expect(body).toMatch(/armDisclaimedNumberHold\(\{\s*phone: contactPhone, customerId: call\.customer_id \|\| null, callLogId: call\.id,\s*procToken, procGeneration,(?: noTextHold: noTextHoldArming,)?\s*\}\)/);
     expect(body).toMatch(/failClosed\.code = 'DISCLAIMED_NUMBER_HOLD_WRITE_FAILED'/);
     expect(body).toMatch(/throw failClosed;/);
     expect(body).not.toMatch(/holdErr\.message/);
