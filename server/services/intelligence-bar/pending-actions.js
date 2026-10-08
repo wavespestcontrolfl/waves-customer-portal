@@ -371,10 +371,13 @@ async function createPendingAction({ toolName, params, requestedBy, taskId, requ
   return taskId || intent ? db.transaction(persist) : persist(db);
 }
 
-// The task's steps; a retired expired step (replaced by a fresh card) is not one.
+// A task's steps among its card rows: a retired expired step (replaced by a
+// fresh card) is not one. Every reader of a task's cards goes through this,
+// so the task list and the task detail report the same state.
+const taskSteps = rows => rows.filter(row => !isReplacedStep(row));
+
 async function forTask(taskId, requestedBy) {
-  const rows = await db('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) }).orderBy('created_at');
-  return rows.filter(row => !isReplacedStep(row));
+  return taskSteps(await db('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) }).orderBy('created_at'));
 }
 
 /**
@@ -575,4 +578,5 @@ module.exports = {
   getActionReceipt,
   attachThread,
   forTask,
+  taskSteps,
 };

@@ -1803,6 +1803,12 @@ async function productChoiceCard({ params, prompt = null, previewProductName = n
   };
 }
 
+// Whether a product may still be picked: the same active filter the
+// shortlist is built with, read again at the moment of the choice.
+async function productIsActive(productId, q = db) {
+  return !!(await q('products_catalog').where({ id: productId, active: true }).first('id'));
+}
+
 // A product-identity refusal of adjust_stock becomes a picker card when the
 // operator's words qualify (productChoicesFor); otherwise null.
 async function offerProductChoice(toolName, refusal, params, prompt, previewProductName = null) {
@@ -2051,4 +2057,4 @@ async function updateRestockRequest(input, actionContext) {
 }
 
 module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT,
-  productChoiceCard, stockProposalTarget };
+  productChoiceCard, stockProposalTarget, productIsActive };

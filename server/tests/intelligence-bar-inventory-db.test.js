@@ -298,6 +298,12 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(proposed.body.pendingActions).toHaveLength(1);
     const picker = proposed.body.pendingActions[0];
     expect(picker.contract.product_choices.map((c) => c.product_id).sort()).toEqual([ten.id, twenty.id].sort());
+    // A listed product made inactive since: refused, the picker stays usable.
+    await db('products_catalog').where({ id: ten.id }).update({ active: false });
+    const inactive = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: ten.id });
+    expect(inactive).toMatchObject({ status: 409, body: { code: 'product_inactive' } });
+    expect((await db('ib_pending_actions').where({ id: picker.id }).first()).status).toBe('pending');
+    await db('products_catalog').where({ id: ten.id }).update({ active: true });
     const forged = await api('/api/admin/intelligence-bar/choose-product', { pending_action_id: picker.id, contract_hash: picker.contract_hash, product_id: outsider.id });
     expect(forged).toMatchObject({ status: 409, body: { code: 'product_not_offered' } });
     // A failure while making the new card rolls the claim back (Codex #6111 r2):
@@ -420,6 +426,11 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: old.id, contract_hash: old.contract_hash })).status).toBe(409);
     expect((await api('/api/admin/intelligence-bar/confirm-action', { pending_action_id: fresh.id, contract_hash: fresh.contract_hash })).body.success).toBe(true);
     expect(await onHand(row.id)).toBe(12);
+    // The task list and the task detail agree: the replaced expired step counts in neither.
+    const detail = await api(`/api/admin/intelligence-bar/tasks/${taskId}?session_id=${sessionId}`);
+    const listed = (await api(`/api/admin/intelligence-bar/tasks?session_id=${sessionId}`)).body.tasks.find((t) => t.id === taskId);
+    expect(detail.body.taskState).toBe('ready_to_continue');
+    expect(listed.state).toBe(detail.body.taskState);
   }, 40000);
 
   test('a chosen card that expired continues as a fresh picker in the same task', async () => {

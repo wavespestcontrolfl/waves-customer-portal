@@ -158,7 +158,7 @@ async function list(actorId, sessionId) {
     .orderBy('created_at', 'desc').select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at',
       db.raw("(request->>'had_images')::boolean AS had_images"));
   if (!tasks.length) return tasks;
-  const actions = await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id));
+  const actions = PendingActions.taskSteps(await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id)));
   const recent = new Set(latest);
   return tasks.map(task => {
     const receipts = actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt);

@@ -2142,6 +2142,11 @@ async function proposeChosenProduct(req, action, productId, trx) {
   if (!(offeredProductIds(action.params) || []).includes(productId)) {
     return { status: 409, body: { error: 'That product was not on this card. Nothing was written.', code: 'product_not_offered' } };
   }
+  // Made inactive since the card listed it: the claim rolls back, so the
+  // operator picks another product on the same card.
+  if (!(await require('../services/intelligence-bar/procurement-tools').productIsActive(productId, trx))) {
+    return { status: 409, body: { error: 'That product is no longer active — pick another.', code: 'product_inactive' } };
+  }
   const input = publicCardInput('adjust_stock', action.params);
   delete input.product_name;
   // A task's picker hands its step to the new card: the task keeps waiting

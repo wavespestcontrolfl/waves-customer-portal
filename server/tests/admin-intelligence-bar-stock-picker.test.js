@@ -66,6 +66,7 @@ jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], exec
 const mockExecuteProcurementTool = jest.fn();
 const mockStockTarget = jest.fn();
 const mockChoiceCard = jest.fn();
+const mockProductIsActive = jest.fn(async () => true);
 jest.mock('../services/intelligence-bar/procurement-tools', () => {
   const actual = jest.requireActual('../services/intelligence-bar/procurement-tools');
   return {
@@ -73,6 +74,7 @@ jest.mock('../services/intelligence-bar/procurement-tools', () => {
     executeProcurementTool: (...args) => mockExecuteProcurementTool(...args),
     stockProposalTarget: (...args) => mockStockTarget(...args),
     productChoiceCard: (...args) => mockChoiceCard(...args),
+    productIsActive: (...args) => mockProductIsActive(...args),
   };
 });
 jest.mock('../services/intelligence-bar/revenue-tools', () => ({ REVENUE_TOOLS: [], executeRevenueTool: jest.fn() }));
@@ -180,6 +182,7 @@ beforeEach(() => {
     id: NEW_ID, tool_name: toolName, summary, status: 'pending', expires_at: new Date(Date.now() + 600000).toISOString(),
   }));
   mockChoiceCard.mockResolvedValue(PICKER_CARD);
+  mockProductIsActive.mockResolvedValue(true);
   // A re-proposal is grounded on the stored product; /query cards get a picker.
   mockStockTarget.mockImplementation(async ({ grounded, preview }) => {
     if (!grounded) return { productChoice: PICKER_CARD };
@@ -307,6 +310,22 @@ describe('/choose-product', () => {
     expect(mockRecordResult).not.toHaveBeenCalled();
     expect(mockCreatePendingAction).not.toHaveBeenCalled();
     expect(mockAttachThread).not.toHaveBeenCalled();
+  });
+
+  test('a product made inactive since the card listed it is refused; the choice rolls back so another can be picked', async () => {
+    mockGetPendingRow.mockResolvedValue(pickerRow());
+    mockClaimForConfirm.mockResolvedValue({ action: { ...pickerRow(), status: 'confirmed' } });
+    mockProductIsActive.mockResolvedValue(false);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await post(baseUrl, 'choose-product', { pending_action_id: CHOICE_ID, contract_hash: 'hash-choice', product_id: PRODUCT_A });
+      expect(status).toBe(409);
+      expect(body).toEqual({ error: 'That product is no longer active — pick another.', code: 'product_inactive' });
+    });
+    // Checked inside the claim's transaction.
+    expect(mockProductIsActive).toHaveBeenCalledWith(PRODUCT_A, { isTrx: true });
+    expect(mockRecordResult).not.toHaveBeenCalled();
+    expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    expect(mockExecuteProcurementTool).not.toHaveBeenCalled();
   });
 
   test('an unlisted id names the reason', async () => {
