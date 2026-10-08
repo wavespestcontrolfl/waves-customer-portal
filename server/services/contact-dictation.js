@@ -69,10 +69,12 @@ const NAME_SPELLING_LETTERS_RE = new RegExp([
   String.raw`\b[A-Za-z]\s+as\s+in\s+[A-Za-z]{3,}\b`,
   // "V like Victor" / "S for Sam": a capital letter (never "I like pizza")...
   String.raw`\b[A-HJ-Z]\s+(?:like|for)\s+(?:in\s+)?[A-Za-z]{3,}\b`,
-  // Two or more separated single letters shortly after the word "name" ("last name is l e e").
-  String.raw`\b[Nn]ame\b[^.?!\n]{0,40}?\b(?:[A-Za-z][\s,-]+)+[A-Za-z]\b(?![A-Za-z'’])`,
+  // Three or more separated single letters shortly after the word "name" ("last name is l e e").
+  String.raw`\b[Nn]ame\b[^.?!\n]{0,40}?\b(?:[A-Za-z][\s,-]+){2,}[A-Za-z]\b(?![A-Za-z'’])`,
 ].join('|'), '');
 // ...or any casing when the word starts with the letter it names ("v like victor").
+// A two-letter name only when the spelling repeats the name just spoken ("Li, L-I").
+const NAME_SPELLING_TWO_LETTER_RE = /\b([a-z])([a-z])\b[\s,.]+\1\s*[-.,\s]\s*\2\b/i;
 const NAME_SPELLING_PHONETIC_RE = /\b([a-z])\s+(?:as|like|for)\s+(?:in\s+)?\1[a-z]{2,}\b/i;
 // Suffix coverage for the service area's street vocabulary — Fruitville ROAD,
 // Abalone LOOP, Sandy COVE etc. previously tripped no signal, so the
@@ -91,7 +93,7 @@ function detectContactDictationSignals(transcript) {
   const t = String(transcript || '');
   const email = EMAIL_SIGNAL_RE.test(t) || (/@/.test(t) && SPELLING_SIGNAL_RE.test(t));
   const address = ADDRESS_SIGNAL_RE.test(t);
-  const name = NAME_SPELLING_WORD_RE.test(t) || NAME_SPELLING_LETTERS_RE.test(t) || NAME_SPELLING_PHONETIC_RE.test(t);
+  const name = NAME_SPELLING_WORD_RE.test(t) || NAME_SPELLING_LETTERS_RE.test(t) || NAME_SPELLING_PHONETIC_RE.test(t) || NAME_SPELLING_TWO_LETTER_RE.test(t);
   return { email, address, name, any: email || address || name };
 }
 
@@ -321,6 +323,10 @@ function spelledAfterNameWording(raw, sources) {
     for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) {
       const turnStart = text.lastIndexOf('\n', at) + 1;
       const turn = text.slice(turnStart, at + needle.length);
+      // Only a turn explicitly labeled Caller: counts. An agent read-back
+      // ("Agent: your last name is spelled ...") or an unlabeled / Speaker-N
+      // line never evidences the caller's own name.
+      if (!/^\s*caller\s*:/.test(turn)) continue;
       const wording = [...turn.matchAll(NAME_WORDING_RE)].pop();
       const tail = wording ? turn.slice(wording.index + wording[0].length) : '';
       // Email wording anywhere from the name wording to the END of the turn counts:

@@ -4036,6 +4036,19 @@ async function missingFirstNameCardStillOpen(conn, callLogId) {
   return !!card;
 }
 
+// Live customers carrying this phone in any contact slot (a shared line is > 1).
+async function countCustomersWithContactPhone(contactKey, conn = db) {
+  const predicateFor = (col) => (contactKey.length === 10
+    ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
+    : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
+  const row = await conn('customers').whereNull('deleted_at')
+    .where(function orPhones() {
+      for (const col of CONTACT_MATCH_PHONE_COLS) this.orWhereRaw(predicateFor(col), [contactKey]);
+    })
+    .count('* as n').first();
+  return parseInt(row?.n || 0, 10);
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
@@ -11092,22 +11105,31 @@ const CallRecordingProcessor = {
         // quote whenever a grounded caller spelling with name context exists for
         // a name the policy changed or the record already holds, so staging never
         // falls back to a different V2 mishearing.
-        const nameChanges = applyNameDictationPolicy({ current: extracted, dictation: contactDictation });
+        // Narrowing: only inbound calls with an explicitly labeled transcript (outbound
+        // diarization can swap the labels; unlabeled / Speaker-N text never attributes speech).
+        const labeledInbound = !isOutboundCall(call) && /^\s*caller\s*:/im.test(transcription);
+        const nameChanges = labeledInbound ? applyNameDictationPolicy({ current: extracted, dictation: contactDictation }) : {};
         const spelledNames = ['first_name', 'last_name']
-          .map((field) => ({ field, spelled: callerSpelledName(contactDictation, field) }))
+          .map((field) => ({ field, spelled: labeledInbound ? callerSpelledName(contactDictation, field) : null }))
           .filter(({ field, spelled }) => spelled?.nameContext
             && (nameChanges[field] || String(extracted[field] || '').trim() === spelled.value));
         if (spelledNames.length) {
-          const linkedCustomerId = call.customer_id
-            || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
-            || null;
-          for (const { field, spelled } of spelledNames) {
-            if (!linkedCustomerId) extracted[field] = spelled.value;
-            spelledNameOverrides[field] = { value: spelled.value, confidence: spelled.confidence, quote: spelled.quote };
+          // Shared phone: when more than one live customer carries the call phone, the
+          // account choice itself rests on the misheard name — change nothing and stage
+          // nothing. One phone match is an existing customer (candidate only); none is
+          // a new caller (the flat record takes the spelled name).
+          const phoneKeyForCall = phoneKey(contactPhone);
+          const phoneMatches = phoneKeyForCall ? await countCustomersWithContactPhone(phoneKeyForCall).catch(() => 2) : 0;
+          if (phoneMatches <= 1) {
+            const linkedCustomerId = call.customer_id || phoneMatches === 1;
+            for (const { field, spelled } of spelledNames) {
+              if (!linkedCustomerId) extracted[field] = spelled.value;
+              spelledNameOverrides[field] = { value: spelled.value, confidence: spelled.confidence, quote: spelled.quote };
+            }
           }
         }
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
-        if (spelledNames.length) logger.info(`[call-proc-dictation] Caller-spelled name field(s) for ${maskSid(callSid)}: ${spelledNames.map((n) => n.field).join(', ')}`);
+        if (Object.keys(spelledNameOverrides).length) logger.info(`[call-proc-dictation] Caller-spelled name field(s) for ${maskSid(callSid)}: ${Object.keys(spelledNameOverrides).join(', ')}`);
         const emailDecision = applyEmailDictationPolicy({ extracted, dictation: contactDictation });
         dictationEmailPayload = emailDecision.payload;
         if (emailDecision.adopt) {

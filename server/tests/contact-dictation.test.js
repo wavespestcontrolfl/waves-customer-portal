@@ -39,10 +39,14 @@ describe('detectContactDictationSignals', () => {
     expect(detectContactDictationSignals('Caller: I like in-ground sprinklers and I like pizza.').name).toBe(false);
     expect(detectContactDictationSignals('Caller: can you come on the 14-15 or 3-4-5 weekend').name).toBe(false);
     expect(detectContactDictationSignals('Caller: Varnum, V-A-R-N-U-M.').any).toBe(true);
+    // A two-letter name is accepted only when anchored by the name just spoken.
+    expect(detectContactDictationSignals('Caller: my last name is Li, L-I').name).toBe(true);
+    expect(detectContactDictationSignals('Caller: my last name is L E').name).toBe(false);
+    expect(detectContactDictationSignals('Caller: press A B to continue, I mean A-B').name).toBe(false);
   });
   test('lowercase spaced runs and short spelled names trip the name signal', () => {
     for (const line of ['Caller: v a r n u m', 'Caller: L-E-E', 'Caller: l-e-e', 'Caller: my last name is l e e',
-      'Caller: Smith, S, M, I, T, H', 'Caller: my last name is L E']) {
+      'Caller: Smith, S, M, I, T, H', 'Caller: Li, L-I', 'Caller: it is Li, L I']) {
       expect(detectContactDictationSignals(line).name).toBe(true);
     }
   });
@@ -337,6 +341,15 @@ describe('spelled-name decoding', () => {
       expect(ctx('Agent: how do you spell that?\nCaller: my last name is Jones, J-O-N-E-S', 'J-O-N-E-S')).toBe(true);
       expect(ctx('Caller: it is spelled J O N E S', 'J O N E S')).toBe(true);
     });
+    test('an agent read-back never counts, and neither does an unlabeled or Speaker-N line', () => {
+      const e = [{ raw_spoken: 'S-M-Y-T-H', spelled_value: 'Smyth', field: 'last_name', whose: 'caller', confidence: 0.95 }];
+      const nc = (...src) => sanitizeNameEntries(e, src)[0].name_context;
+      expect(nc('Agent: your last name is spelled S-M-Y-T-H, correct?')).toBe(false);
+      expect(nc('Agent: your last name is spelled S-M-Y-T-H')).toBe(false);
+      expect(nc('Speaker 1: my last name is S-M-Y-T-H')).toBe(false);
+      expect(nc('my last name is S-M-Y-T-H')).toBe(false);
+      expect(nc('Agent: your last name is S-M-Y-T-H\nCaller: yes my last name is S-M-Y-T-H')).toBe(true);
+    });
     test('scans every source and every occurrence until one qualifies', () => {
       const entry = [{ raw_spoken: 'J-O-N-E-S', spelled_value: 'Jones', field: 'last_name', whose: 'caller', confidence: 0.95 }];
       expect(sanitizeNameEntries(entry, ['Caller: J-O-N-E-S', 'Caller: my last name is J-O-N-E-S'])[0].name_context).toBe(true);
@@ -470,13 +483,19 @@ describe('spelled-name decoding', () => {
 describe('processor wiring — the spelled name goes to the flat record and the staged candidate only', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
   test('the V2 extraction is never rewritten and no cohort marker or version suffix exists', () => {
-    const at = src.indexOf('applyNameDictationPolicy({ current: extracted');
+    const at = src.indexOf('const labeledInbound =');
     expect(at).toBeGreaterThan(0);
     const block = src.slice(at, at + 2600);
     // Decoder-backed override for a changed name or one the record already holds.
     expect(block).toMatch(/nameChanges\[field\] \|\| String\(extracted\[field\] \|\| ''\)\.trim\(\) === spelled\.value/);
     // The flat record takes the spelling only for a NEW caller; an existing customer gets the staged candidate alone.
-    expect(block).toMatch(/linkedCustomerId = call\.customer_id/);
+    // Inbound + labeled transcript only (outbound / unlabeled: no change, no staging).
+    expect(block).toMatch(/labeledInbound = !isOutboundCall\(call\) && \/\^\\s\*caller\\s\*:\/im\.test\(transcription\)/);
+    expect(block).toMatch(/labeledInbound \? applyNameDictationPolicy/);
+    // Shared phone (> 1 live customer): nothing changes and nothing is staged.
+    expect(block).toMatch(/countCustomersWithContactPhone\(phoneKeyForCall\)\.catch\(\(\) => 2\)/);
+    expect(block).toMatch(/if \(phoneMatches <= 1\) \{/);
+    expect(block).toMatch(/linkedCustomerId = call\.customer_id \|\| phoneMatches === 1/);
     expect(block).toMatch(/if \(!linkedCustomerId\) extracted\[field\] = spelled\.value;/);
     expect(block).toMatch(/spelledNameOverrides\[field\] = \{ value: spelled\.value, confidence: spelled\.confidence, quote: spelled\.quote \}/);
     expect(block).not.toMatch(/v2Result/);
