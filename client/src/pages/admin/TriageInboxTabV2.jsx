@@ -357,20 +357,33 @@ export function FamilyEvidence({ payload, openCustomerIds = null }) {
 
 // name_spelling_differs (advisory): every spelling the caller gave that differs from the saved name, each
 // with the caller turn it came from. The card text names the first; `also` lists any other field.
-export function NameSpellingEvidence({ payload }) {
+export function NameSpellingEvidence({ payload, openCustomerIds = null }) {
   const p = parsePayload(payload);
   if (!p?.spelled_value) return null;
   const all = [p, ...(Array.isArray(p.also) ? p.also : [])].filter((d) => d && d.spelled_value);
+  // The record the spelling was compared against (the filing-time customer, resolved to its live merge
+  // survivor by the server), never the call's current link.
+  const ids = [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds : Array.isArray(p.customer_ids) ? p.customer_ids : [])
+    .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))];
+  const against = p.compared_against?.name
+    ? `${p.compared_against.name} (${p.compared_against.source === "customer" ? "customer record" : "name heard on this call"})`
+    : null;
   return (
     <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
       <div className="text-11 text-ink-tertiary font-medium mb-1">Check the name</div>
       {p.card_text && <div className="text-14 text-zinc-900 mb-1">{p.card_text}</div>}
+      {against && <div className="text-14 text-ink-secondary"><span className="text-ink-tertiary">Compared against:</span> {against}</div>}
       {all.map((d) => (
         <div key={`${d.field}-${d.spelled_value}`} className="text-14 text-ink-secondary">
           <span className="text-ink-tertiary">{String(d.field || "name").replace(/_/g, " ")}:</span>{" "}
           caller spelled {d.spelled_value}; record says {d.saved_value}
           {d.quote ? ` — “${d.quote}”` : ""}
         </div>
+      ))}
+      {ids.map((id, i) => (
+        <a key={id} href={`/admin/customers?customerId=${id}`} className="inline-block mt-1 mr-3 text-14 font-medium text-zinc-900 underline">
+          {ids.length > 1 ? `Open customer ${i + 1}` : "Open customer"}
+        </a>
       ))}
     </div>
   );

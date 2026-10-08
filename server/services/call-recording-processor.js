@@ -4029,28 +4029,37 @@ async function fileMissingFirstNameCard(conn, { callLogId, customerId, extractio
 
 // The name_spelling_differs card (advisory, card-only): the caller spelled their own name
 // and the spelling differs (letters, any case) from the name being saved for the caller
-// (the linked customer's name when linked, else the extracted name). ONE open card per call;
-// a reprocess refreshes it in place (its updated_at moves, so a stale Resolve / Dismiss
-// refuses), and a spelling the office already resolved or dismissed on this call is not
-// re-filed. Never writes a name. Fail-open: a failure here never affects the call.
-async function fileNameSpellingCard(conn, { callLogId, customerId, extracted = {}, dictation, v2Result = null }) {
+// (the linked customer's name when linked, else the extracted name). ONE open card per call.
+// Inbound calls only (outbound diarization can swap the speaker labels). Runs under the per-call
+// triage lock and the processing-token fence (a pass that lost its claim files nothing). A
+// reprocess refreshes an OPEN card in place (an operator's in_progress card is never touched);
+// only a discrepancy a HUMAN settled on this call is not re-filed (a recording-swap or auto close
+// does not suppress it). The payload records which customer the spelling was compared against
+// (customer_ids, rendered and merge-survivor-resolved like the other owed-customer cards), or says
+// the comparison was against the name heard on the call. Never writes a name. Fail-open.
+async function fileNameSpellingCard(conn, {
+  callLogId, customerId, extracted = {}, dictation, v2Result = null, procToken = null, isOutbound = false,
+}) {
   try {
+    if (isOutbound) return false;
     const extraction = v2Result?.extraction || { meta: { call_summary: extracted?.call_summary || null } };
     const customer = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
     const saved = Object.fromEntries(['first_name', 'last_name']
       .map((f) => [f, String(customer?.[f] || '').trim() || extracted?.[f] || null]));
     const differences = nameSpellingDifferences({ dictation, saved });
     if (!differences.length) return false;
-    // The settled-card read and the insert / refresh run under the per-call triage lock (the
-    // global lock order), so a Resolve / Dismiss that settles the card and this refresh
-    // serialize: the card is never refreshed back open from a stale read.
+    const comparedAgainst = {
+      source: customer ? 'customer' : 'extracted',
+      name: [saved.first_name, saved.last_name].filter(Boolean).join(' ') || null,
+    };
     const asObject = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
     return await conn.transaction(async (trx) => {
       await lockTriageCall(trx, callLogId);
-      const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs' })
+      if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
+      const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
         .whereIn('status', ['resolved', 'dismissed']).select('payload');
       // Each discrepancy (field, spelling, saved name) is judged on its own against every
-      // settled card's evidence (its main entry and its `also` list).
+      // human-settled card's evidence (its main entry and its `also` list).
       const key = (d) => `${d?.field}|${d?.spelled_value}|${d?.saved_value}`;
       const seen = new Set(settled.flatMap((r) => { const o = asObject(r.payload); return [o, ...(Array.isArray(o.also) ? o.also : [])]; }).map(key));
       const [top, ...others] = differences.filter((d) => !seen.has(key(d)));
@@ -4061,10 +4070,18 @@ async function fileNameSpellingCard(conn, { callLogId, customerId, extracted = {
           flag: 'name_spelling_differs',
           extraction,
           severity: 'advisory',
-          extraPayload: { ...top, card_text: nameSpellingCardText(top), also: others },
+          extraPayload: {
+            ...top,
+            card_text: nameSpellingCardText(top),
+            also: others,
+            compared_against: comparedAgainst,
+            customer_ids: customer && customerId ? [String(customerId)] : [],
+          },
         }))
         .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-        .merge(['payload', 'summary', 'updated_at']);
+        .merge(['payload', 'summary', 'updated_at'])
+        .where('triage_items.status', 'open');
+      await syncCallReviewStatus(trx, callLogId);
       return true;
     });
   } catch (err) {
@@ -12790,6 +12807,8 @@ const CallRecordingProcessor = {
       extracted,
       dictation: contactDictation,
       v2Result,
+      procToken,
+      isOutbound: isOutboundCall(call),
     });
 
     // Pre-linked calls (call.customer_id set at ring time by the inbound

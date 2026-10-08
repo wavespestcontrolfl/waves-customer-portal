@@ -20,7 +20,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 // Cards whose payload.customer_ids lists the customers to open: the list resolves each to its live merge
 // survivor (owed_customer_open_ids).
-const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];
+const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates', 'name_spelling_differs'];
 // Cards only an admin sees and settles: property-role proposals embed the customer's other property
 // addresses, and a family-account suggestion lists customers and the caller's number for the office to
 // link. Hidden from the tech list and counts, and refused on every shared transition.

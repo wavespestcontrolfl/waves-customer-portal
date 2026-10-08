@@ -289,6 +289,9 @@ const EMAIL_WORDING_RE = /e-?mail|@|\bdot\b|\bat\b[^\n]{0,25}\b(?:dot|gmail|yaho
 const squash = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
 const nameKey = (v) => String(v || '').toLowerCase().replace(/[^\p{L}]/gu, '');
 
+// Spoken punctuation that joins parts of one spelled name; it adds no letter and does not end the run.
+const SPOKEN_JOINER_RE = /^(?:apostrophe|hyphen|dash|space|['’])$/i;
+
 // The letters a spelling actually spells: runs of single-letter tokens, with
 // "S as in Sam" reduced to its letter. Words, and apostrophe words like "it's",
 // are never single-letter tokens.
@@ -297,6 +300,7 @@ function spelledLetterRuns(raw) {
   const runs = [];
   let run = '';
   for (const tok of reduced.split(/[\s,.\-]+/).filter(Boolean)) {
+    if (SPOKEN_JOINER_RE.test(tok)) continue; // "O apostrophe N-E-I-L", "M-A-R-Y hyphen A-N-N": same run
     if (/^[A-Za-z]$/.test(tok)) run += tok.toLowerCase();
     else { if (run) runs.push(run); run = ''; }
   }

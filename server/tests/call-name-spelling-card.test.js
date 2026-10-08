@@ -16,6 +16,13 @@ jest.mock('../config/twilio-numbers', () => ({
   getLeadSourceFromNumber: jest.fn(() => ({ source: 'phone_call' })),
 }));
 
+const mockLock = jest.fn().mockResolvedValue(undefined);
+const mockSyncStatus = jest.fn().mockResolvedValue('open');
+jest.mock('../utils/triage-locks', () => ({
+  lockTriageCall: (...a) => mockLock(...a),
+  syncCallReviewStatus: (...a) => mockSyncStatus(...a),
+}));
+
 const fs = require('fs');
 const path = require('path');
 const { _test } = require('../services/call-recording-processor');
@@ -32,19 +39,30 @@ const dictation = (over = {}, ...sources) => ({
 });
 
 // Minimal knex stand-in: customers.first, triage_items settled-lookup, and the insert upsert.
-function makeConn({ customer = null, settled = [] } = {}) {
+function makeConn({ customer = null, settled = [], claimHeld = true } = {}) {
   const writes = [];
+  const settledWheres = [];
   const conn = (table) => {
     if (table === 'customers') return { where: () => ({ first: async () => customer }) };
+    if (table === 'call_log') {
+      return {
+        where: (w) => ({
+          forUpdate: () => ({ first: async () => { conn.fenced = w; return claimHeld ? { id: w.id } : undefined; } }),
+          update: async () => 1,
+          count: () => ({ first: async () => ({ n: 1 }) }),
+        }),
+      };
+    }
     return {
-      where: () => ({ whereIn: () => ({ select: async () => settled }) }),
+      where: (w) => { settledWheres.push(w); return { whereIn: () => ({ select: async () => settled }), whereIn2: null, count: () => ({ first: async () => ({ n: 1 }) }) }; },
       insert: (row) => ({
         onConflict: (target) => ({
-          merge: async (cols) => { writes.push({ row, target, cols }); },
+          merge: (cols) => ({ where: async (col, val) => { writes.push({ row, target, cols, mergeWhere: [col, val] }); } }),
         }),
       }),
     };
   };
+  conn.settledWheres = settledWheres;
   conn.raw = (sql) => sql;
   conn.transaction = async (fn) => { conn.locked = true; return fn(conn); };
   conn.writes = writes;
@@ -61,6 +79,8 @@ const file = (conn, over = {}) => fileNameSpellingCard(conn, {
 });
 
 describe('fileNameSpellingCard', () => {
+  beforeEach(() => { mockLock.mockClear(); mockSyncStatus.mockClear(); });
+
   test('files ONE advisory name_review card with the spelling, saved name, caller turn and confidence', async () => {
     const conn = makeConn();
     expect(await file(conn)).toBe(true);
@@ -80,8 +100,48 @@ describe('fileNameSpellingCard', () => {
     // One open card per call, refreshed in place on a reprocess.
     expect(target).toBe("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')");
     expect(cols).toEqual(['payload', 'summary', 'updated_at']);
-    // Read + upsert ran inside a transaction (the per-call triage lock is taken first).
+    // Only an OPEN card is refreshed (an operator's in_progress card is never touched).
+    expect(conn.writes[0].mergeWhere).toEqual(['triage_items.status', 'open']);
+    // Read + upsert ran inside a transaction, under the per-call triage lock, and the call's review status is synced.
     expect(conn.locked).toBe(true);
+    expect(mockLock).toHaveBeenCalledWith(conn, 'call-1');
+    expect(mockSyncStatus).toHaveBeenCalledWith(conn, 'call-1');
+  });
+
+  test('outbound calls file nothing (outbound diarization can swap the labels)', async () => {
+    const conn = makeConn();
+    expect(await file(conn, { isOutbound: true })).toBe(false);
+    expect(conn.writes).toEqual([]);
+  });
+
+  test('fenced to the processing claim: the token row is locked FOR UPDATE inside the transaction; a lost claim files nothing', async () => {
+    const held = makeConn();
+    expect(await file(held, { procToken: 'tok-1' })).toBe(true);
+    expect(held.fenced).toEqual({ id: 'call-1', processing_token: 'tok-1' });
+    const lost = makeConn({ claimHeld: false });
+    expect(await file(lost, { procToken: 'tok-1' })).toBe(false);
+    expect(lost.writes).toEqual([]);
+  });
+
+  test('only a card a HUMAN settled suppresses a re-file', async () => {
+    const conn = makeConn();
+    await file(conn);
+    expect(conn.settledWheres).toContainEqual({ call_log_id: 'call-1', reason_code: 'name_spelling_differs', resolution_source: 'human' });
+  });
+
+  test('the payload names the customer compared against (merge-survivor-resolved list), or says it was the heard name', async () => {
+    const linked = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+    await file(linked, { customerId: 'cust-1' });
+    expect(JSON.parse(linked.writes[0].row.payload)).toMatchObject({
+      customer_ids: ['cust-1'],
+      compared_against: { source: 'customer', name: 'Quentrell Sirov' },
+    });
+    const unlinked = makeConn();
+    await file(unlinked);
+    expect(JSON.parse(unlinked.writes[0].row.payload)).toMatchObject({
+      customer_ids: [],
+      compared_against: { source: 'extracted', name: 'Quentrell Sirov' },
+    });
   });
 
   test('equal letters (any case): no card', async () => {
@@ -129,6 +189,7 @@ describe('fileNameSpellingCard', () => {
   test('fails open', async () => {
     const boom = () => { throw new Error('db down'); };
     boom.raw = (s) => s;
+    boom.settledWheres = [];
     boom.transaction = async () => { throw new Error('db down'); };
     expect(await file(boom)).toBe(false);
   });
@@ -138,7 +199,7 @@ describe('fileNameSpellingCard', () => {
     expect(src).not.toMatch(/createNameFor|callerNameForWrites|spelledNameOverrides|nameOverrides|applyNameDictation/);
     const at = src.indexOf('await fileNameSpellingCard(db, {');
     expect(at).toBeGreaterThan(0);
-    expect(src.slice(at, at + 400)).toMatch(/dictation: contactDictation,\n\s+v2Result,/);
+    expect(src.slice(at, at + 400)).toMatch(/dictation: contactDictation,\n\s+v2Result,\n\s+procToken,\n\s+isOutbound: isOutboundCall\(call\),/);
   });
 });
 
@@ -155,6 +216,8 @@ describe('the card is wired like the other name_review cards', () => {
     expect(src).toMatch(/\.whereNotIn\('reason_code', \[[^\]]*'name_spelling_differs'/s);
     expect(src).toMatch(/const NOT_A_VERDICT_MESSAGES = \{[^}]*name_spelling_differs/s);
     // Open to the office: not in the admin-only set.
+    // The card's customer list resolves to merge survivors like the other owed-customer cards.
+    expect(src).toMatch(/const OWED_CUSTOMER_LIST_REASONS = \[[^\]]*'name_spelling_differs'/);
     expect(src).not.toMatch(/const ADMIN_ONLY_REASONS = \[[^\]]*name_spelling_differs/s);
   });
 

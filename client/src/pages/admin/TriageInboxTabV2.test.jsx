@@ -334,6 +334,25 @@ describe('NameSpellingEvidence', () => {
     expect(screen.getByText(/caller spelled Kwentrell; record says Quentrell/)).toHaveTextContent('first name K-W-E-N-T-R-E-L-L');
   });
 
+  it('shows who it was compared against and opens THAT customer (the server-resolved survivor), not the call link', () => {
+    const A = '11111111-2222-4333-8444-555555555555';
+    const B = '66666666-7777-4888-8999-000000000000';
+    const payload = JSON.stringify({
+      spelled_value: 'Serov', saved_value: 'Sirov', field: 'last_name', customer_ids: [A],
+      compared_against: { source: 'customer', name: 'Quentrell Sirov' },
+    });
+    const { rerender } = render(<NameSpellingEvidence payload={payload} />);
+    expect(screen.getByText(/Compared against:/).parentElement).toHaveTextContent('Quentrell Sirov (customer record)');
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    // A merged-away customer opens its survivor (the server's open ids win).
+    rerender(<NameSpellingEvidence payload={payload} openCustomerIds={[B]} />);
+    expect(screen.getByRole('link', { name: 'Open customer' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    // An unlinked call compares against the heard name and links nothing.
+    rerender(<NameSpellingEvidence payload={JSON.stringify({ spelled_value: 'Serov', saved_value: 'Sirov', customer_ids: [], compared_against: { source: 'extracted', name: 'Quentrell Sirov' } })} />);
+    expect(screen.getByText(/Compared against:/).parentElement).toHaveTextContent('name heard on this call');
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
   it('renders nothing without a spelling', () => {
     const { container } = render(<NameSpellingEvidence payload={{ flag: 'name_spelling_differs' }} />);
     expect(container.firstChild).toBeNull();

@@ -333,6 +333,20 @@ describe('spelled names — card-only', () => {
       expect(names([entry({ raw_spoken: 'Serov', spelled_value: 'Serov' })], 'Caller: Serov')).toEqual([]); // said, not spelled
       expect(sanitizeNameEntries([entry()])).toEqual([]); // no sources, nothing grounded
     });
+    test('spoken punctuation joins the run: O apostrophe N-E-I-L is O\'Neil, M-A-R-Y hyphen A-N-N is Mary-Ann', () => {
+      const neil = names([entry({ raw_spoken: 'O apostrophe N-E-I-L', spelled_value: "O'NEIL" })], 'Caller: my last name is O apostrophe N-E-I-L');
+      expect(neil).toHaveLength(1);
+      expect(neil[0].spelled_value).toBe("O'Neil");
+      const mary = names([entry({ field: 'first_name', raw_spoken: 'M-A-R-Y hyphen A-N-N', spelled_value: 'MARY-ANN' })], 'Caller: my first name is M-A-R-Y hyphen A-N-N');
+      expect(mary[0].spelled_value).toBe('Mary-Ann');
+      expect(names([entry({ raw_spoken: 'D dash E space L-A', spelled_value: 'DELA' })], 'Caller: my last name is D dash E space L-A')).toHaveLength(1);
+      // The letters still have to make the value; punctuation words add nothing.
+      expect(names([entry({ raw_spoken: 'O apostrophe N-E-I-L', spelled_value: "O'BRIEN" })], 'Caller: O apostrophe N-E-I-L')).toEqual([]);
+      // ...and compare by letters: no card when the record already has O'Neil / Oneil.
+      const d = { names: names([entry({ raw_spoken: 'O apostrophe N-E-I-L', spelled_value: "O'NEIL" })], 'Caller: my last name is O apostrophe N-E-I-L') };
+      expect(nameSpellingDifferences({ dictation: d, saved: { last_name: 'Oneil' } })).toEqual([]);
+      expect(nameSpellingDifferences({ dictation: d, saved: { last_name: 'Onell' } })).toHaveLength(1);
+    });
     test('spaced letters and phonetic markers ground; the value is cased by the repo rule', () => {
       expect(names([entry({ raw_spoken: 'S E R O V' })], 'Caller: S E R O V')).toHaveLength(1);
       expect(names([entry({ raw_spoken: 'S as in Sam, E, R, O, V' })], 'Caller: S as in Sam, E, R, O, V')).toHaveLength(1);
