@@ -230,6 +230,8 @@ async function fileFamilyAccountCard({
         .onConflict(trx.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
         .merge({ payload: item.payload, updated_at: new Date() })
         .where('triage_items.status', 'open');
+      // The call counts as review-open while this card is open (nothing else in the pass opens it).
+      await syncCallReviewStatus(trx, call.id);
     });
     return suggestion;
   } catch (e) {

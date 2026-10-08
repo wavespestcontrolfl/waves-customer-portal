@@ -230,6 +230,7 @@ const SKIP = !process.env.DATABASE_URL;
     const row = await trx('call_log').where({ id: callLogId }).first();
     expect(row.customer_id).toBeNull();
     expect(row.metadata).toEqual({});
+    expect(row.review_status).toBe('open'); // counted as review-open while the card is open
     expect(await trx('recipient_optin').where({ customer_id: mom })).toHaveLength(0);
   });
 
