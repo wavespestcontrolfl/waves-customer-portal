@@ -790,14 +790,18 @@ async function linkOpportunityRecords({
   }
 
   return database.transaction(async (trx) => {
-    const lead = await trx('leads').where('id', cleanLeadId).whereNull('deleted_at').first();
+    // Lead row first, then the estimate (the order every lead+estimate writer
+    // takes). The estimate is held FOR SHARE until this link commits, so an
+    // archive of it (staff, or the draft-retire sweep) either lands first and
+    // is seen here, or waits and then finds this lead linked.
+    const lead = await trx('leads').where('id', cleanLeadId).whereNull('deleted_at').forUpdate().first();
     if (!lead) {
       const err = new Error('Lead not found');
       err.status = 404;
       throw err;
     }
 
-    const estimate = await trx('estimates').where('id', cleanEstimateId).first();
+    const estimate = await trx('estimates').where('id', cleanEstimateId).forShare().first();
     if (!estimate || estimate.archived_at) {
       const err = new Error('Estimate not found');
       err.status = 404;

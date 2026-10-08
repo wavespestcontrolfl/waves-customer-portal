@@ -121,8 +121,11 @@ async function createOrUpdateDraftEstimate(customer, interest) {
   const customerName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Lead';
 
   if (existingDraft) {
+    // updated_at is stamped: a customer completing this shell is fresh work
+    // (the draft-retire sweep reads it to keep drafts touched after a send).
     const updates = {
       service_interest: serviceLabel,
+      updated_at: new Date(),
     };
     if (!existingDraft.address && customer.address_line1) updates.address = customer.address_line1;
     if (!existingDraft.customer_phone && customer.phone) updates.customer_phone = customer.phone;

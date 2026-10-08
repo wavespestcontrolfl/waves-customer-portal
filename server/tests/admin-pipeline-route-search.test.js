@@ -211,6 +211,10 @@ function createFakeDb(seed = {}) {
     const rowMatches = (row) => wheres.every(([key, value]) => row[key] === value)
       && nullColumns.every((column) => row[column] === null || row[column] === undefined);
     const query = {
+      // Row locks are no-ops in the fake: the link takes lead FOR UPDATE and
+      // estimate FOR SHARE.
+      forUpdate() { return this; },
+      forShare() { return this; },
       whereNull(column) {
         nullColumns.push(column);
         return this;
