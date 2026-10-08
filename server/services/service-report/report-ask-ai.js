@@ -423,8 +423,15 @@ function isAccessSentence(sentence) {
   // whatever its verb ("At the gatehouse, whisper blue moon"); a plain gate,
   // door or garage sentence needs an access action, so "ants near the garage
   // door" stays (Codex security P2 #5964 r77).
-  return ACCESS_ONLY_PLACE.test(sentence) || (ACCESS_DEVICE.test(sentence) && ACCESS_ACTION.test(sentence));
+  if (ACCESS_ONLY_PLACE.test(sentence)) return true;
+  if (!ACCESS_DEVICE.test(sentence)) return false;
+  // No verb list can name every way to state a credential ("The side gate
+  // uses blue moon"), so a gate, door or garage sentence stays only when it
+  // is plainly about pests or the service (Codex security P2 #5964 r82).
+  // A bare label ("Garage", "Front door") is a place name, not a sentence.
+  return ACCESS_ACTION.test(sentence) || (sentence.trim().split(/\s+/).length >= 3 && !SERVICE_CONTEXT.test(sentence));
 }
+const SERVICE_CONTEXT = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|spiders?|wasps?|bees?|hornets?|termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?|fleas?|ticks?|weeds?|fung\w*|nests?|webs?|trails?|droppings|activity|pests?|bugs?|insects?|treat\w*|spray\w*|appl\w*|seal\w*|inspect\w*|found|saw|seen|notic\w*|cracks?|gaps?|leaks?|damage\w*|grass|lawn|shrubs?|trees?|plants?|beds?|mulch|granules?|bait\w*|servic\w*)\b/i;
 const ACCESS_ONLY_PLACE = /\b(?:guards?|gatehouse|guard\s*house|security\s+(?:desk|guard|gate|booth|office)|front\s+desk|concierge|keypads?|key\s*pads?|lock\s*box(?:es)?|lockbox(?:es)?|key\s*box(?:es)?|key\s*safes?|padlocks?|passcodes?|passwords?|pass\s*phrases?|gate\s+codes?|door\s+codes?|access\s+codes?|entry\s+codes?|combinations?)\b/i;
 const SPLIT_ACCESS_CODE = /\b((?:gate|door|code|lock|keypad|key\s*pad|entry|garage|access|combo|combination|passcode|pin|opens?\s+with|buzz(?:er)?)\b[^.?!\d]{0,30}?)\d{1,6}(?:\s*[-/.#*]\s*\d{1,6})+\b/gi;
 const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
@@ -1071,6 +1078,17 @@ function foundObjects(sentence) {
 }
 const FINDING_PLACE_WORD = /^(?:attic|roof|garage|kitchen|bathroom|bedroom|closet|pantry|laundry|cabinet|sink|baseboard|wall|ceiling|eave|soffit|vent|window|door|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|lawn|bed|tree|shrub|palm|hedge|driveway|sidewalk|basement|front|back|side|home|house|property|exterior|interior)s?$/;
 
+const INTENSITY = [
+  /\b(?:light|minor|low|slight|small|few|minimal|occasional|isolated|limited|mild)\b/i,
+  /\b(?:moderate|medium|some|noticeable)\b/i,
+  /\b(?:heavy|severe|major|significant|high|extensive|many|lots|widespread|large|serious|substantial|infest\w*)\b/i,
+];
+function wrongIntensity(sentence, records) {
+  const said = INTENSITY.map((re, level) => (re.test(sentence) ? level : -1)).filter((level) => level !== 1 && level >= 0);
+  if (!said.length) return false;
+  return !records.some((record) => said.every((level) => INTENSITY[level].test(record)));
+}
+
 function ungroundedFinding(text, terms, visitOnly, findings = []) {
   // Each recorded finding on its own, so one finding's place cannot ground
   // another's pest (Codex P1 #5964 r59).
@@ -1081,6 +1099,9 @@ function ungroundedFinding(text, terms, visitOnly, findings = []) {
     const places = (sentence.toLowerCase().match(FINDING_PLACE_RE) || []).map((place) => stemmedTerms(place).trim());
     const own = records.filter((record) => named.some((label) => record.includes(label)));
     const wrongPair = own.length > 0 && places.length > 0 && !own.some((record) => places.every((place) => record.includes(place)));
+    // Intensity must match the recorded finding: "heavy ant activity" on a
+    // "Light ant activity" finding (Codex P1 #5964 r82).
+    if (own.length > 0 && wrongIntensity(sentence, own)) return true;
     if (!FINDING_CLAIM.test(sentence)) {
       // A nominal claim keeps the place too: "The report lists ants in the
       // bedroom", "There was ant activity in the bedroom" (Codex P1 #5964
@@ -1528,6 +1549,7 @@ function mentions(sentence, product) {
 // A sentence that names a product must match its applied_where; one that
 // says where something was applied without a name ("It was applied inside")
 // must match some recorded product (Codex P1 #5964 r20-r21).
+const SPECIFIC_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathrooms?|bedrooms?|closets?|pantry|laundry|cabinets?|sinks?|baseboards?|ceilings?|eaves|soffits?|vents?|windows?|doors?|foundation|lanai|patio|pool|deck|porch|shed|fence|driveway|sidewalk|basement|sunroom|living\s+room|dining\s+room|office|stairs?|gutters?|chimney|mailbox)\b/g;
 function statesWrongScope(text, { facts }) {
   const products = asArray(facts?.products).filter((product) => product?.name);
   // No recorded application: an answer may not say one happened ("We
@@ -1538,8 +1560,13 @@ function statesWrongScope(text, { facts }) {
     return splitSentences(matchForm(text)).flatMap((sentence) => sentence.split(/[;,:]\s*|\s+(?:but|and|while|whereas|though|although)\s+/i))
       .some((clause) => (APPLICATION_CLAIM.test(clause) || TREATMENT_EVENT.test(clause)) && !NEGATION_RE.test(clause));
   }
+  // A specific place ("on the roof", "around the pool") must be on the sheet:
+  // applied_where only says inside or outside (Codex P1 #5964 r82).
+  const sheet = JSON.stringify([facts?.products, facts?.report_sections, facts?.findings, facts?.areas_serviced, facts?.visit_summary, facts?.waves_summary]).toLowerCase();
   return splitSentences(matchForm(text)).some((sentence) => {
     const named = products.filter((product) => mentions(sentence, product));
+    const applies = named.length > 0 || APPLICATION_VERB.test(sentence) || TREATMENT_EVENT.test(sentence);
+    if (applies && !NEGATION_RE.test(sentence) && (sentence.toLowerCase().match(SPECIFIC_PLACE_RE) || []).some((place) => !sheet.includes(place.replace(/\s+/g, ' ').replace(/e?s$/, '')))) return true;
     if (named.length) return named.some((product) => wrongPlace(sentence, String(product.applied_where || '')));
     // Noun-led treatment claims too ("The treatment took place inside") (Codex
     // P1 #5964 r33).
@@ -1643,6 +1670,11 @@ function namesVariantOf(text, product) {
   });
 }
 
+const LOWER_PRODUCT_NOUN = '(?:product|chemical|pesticide|insecticide|herbicide|fungicide|fertilizer|brand)s?';
+const LOWER_PRODUCT_IDENTITY_RE = new RegExp(`\\b${LOWER_PRODUCT_NOUN}\\s+(?:used\\s+|applied\\s+|today\\s+)?(?:was|is)\\s+(?:called\\s+|named\\s+)?([a-z][\\w-]+)|\\b([a-z][\\w-]+)\\s+(?:was|is)\\s+(?:the|our|your)\\s+(?:\\w+\\s+)?${LOWER_PRODUCT_NOUN}\\b`, 'gi');
+const IDENTITY_STOP = new Set(('applied used sprayed spread placed put listed recorded noted named shown chosen selected picked labeled labelled designed made meant intended rated approved registered '
+  + 'not a an the one it this that these those what which there here outside inside also only still already just today yesterday safe ready dry wet done finished part same right wrong main other another '
+  + 'for on in at by to with from around along near over under and or but because so when where while after before during').split(' '));
 function namesUnrecordedProduct(text, { facts }) {
   const known = new Set(asArray(facts?.products).flatMap((product) => normalizeKey(product.name).split(' ')));
   for (const word of normalizeKey(facts?.technician_first_name || '').split(' ')) known.add(word);
@@ -1653,6 +1685,10 @@ function namesUnrecordedProduct(text, { facts }) {
   // "The product was Roundup", "Roundup was the product" (Codex P1 #5964 r55).
   const identity = [...matchForm(text).matchAll(PRODUCT_IDENTITY_RE)].map((m) => m[1] || m[2]);
   if (identity.some((name) => normalizeKey(name).split(' ').some((word) => word && !known.has(word) && !SENTENCE_WORDS.has(word)))) return true;
+  // Any case: "roundup was the product", "the product was roundup" (Codex P1
+  // #5964 r82). "Treatment" is left out here: "the treatment was applied".
+  const lowerIdentity = [...matchForm(text).matchAll(LOWER_PRODUCT_IDENTITY_RE)].map((m) => (m[1] || m[2]).toLowerCase());
+  if (lowerIdentity.some((word) => !known.has(word) && !IDENTITY_STOP.has(word))) return true;
   return splitSentences(matchForm(text)).some((sentence) => {
     if (!APPLICATION_VERB.test(sentence)) return false;
     // The opening word is a name only as the subject ("Roundup was applied");
@@ -1946,6 +1982,12 @@ const WORK_FACT_WORDS = {
 };
 const WORK_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathrooms?|bedrooms?|closets?|pantry|laundry|cabinets?|sinks?|baseboards?|walls?|ceilings?|eaves|soffits?|vents?|windows?|doors?|entry\s+points?|gaps?|cracks?|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|beds?|trees?|shrubs?|palms?|nests?|hives?|mounds?|droppings|burrows?|traps?|stations?)\b/g;
 const WORK_ACTOR = /\b(?:we|i|our|tech\w*|technician|crew|team|[A-Z][a-z]+)\b|\b(?:was|were|has\s+been|have\s+been|got)\s+\w+ed\b|^\s*(?:yes|yep|correct)\b/;
+const WORK_OBJECT_RE = /\b(?:inspect(?:ed|ing)?|check(?:ed)?|examin\w*|survey\w*|seal(?:ed|ing)?|caulk\w*|plugg?(?:ed|ing)|patch(?:ed|ing)|remov\w*|vacuum\w*|repair\w*|fix(?:ed)?|replac\w*|install\w*|trimm?(?:ed|ing)|prun(?:ed|ing)|servic(?:ed|ing))\s+(?:around\s+|under\s+|inside\s+|behind\s+|along\s+)?(?:the\s+|a\s+|an\s+|your\s+|all\s+(?:the\s+)?|every\s+|both\s+)?([a-z][\w-]*)(?:\s+([a-z][\w-]*))?/g;
+const WORK_OBJECT_STOP = new Set('it them this that these those everything anything something nothing area areas home house property outside inside exterior interior today and for with during on in at to as where there here again also carefully closely thoroughly visit service treatment your our their'.split(' '));
+function workObjects(lower) {
+  return [...lower.matchAll(WORK_OBJECT_RE)].flatMap((m) => (WORK_OBJECT_STOP.has(m[1]) ? [] : [m[1], m[2]]))
+    .filter((word) => word && word.length > 3 && !WORK_OBJECT_STOP.has(word)).map((word) => word.replace(/e?s$/, ''));
+}
 function claimsUnrecordedWork(text, facts) {
   const sheet = JSON.stringify([facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.products, facts?.areas_serviced]).toLowerCase();
   const areas = asArray(facts?.areas_serviced).join(' ').toLowerCase();
@@ -1968,6 +2010,9 @@ function claimsUnrecordedWork(text, facts) {
     // report says we did (Codex P1 #5964 r47).
     if (NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause)) return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && recorded(kind));
     if (!WORK_ACTOR.test(clause)) return false;
+    // The object worked on must be on the sheet even when it is no listed
+    // place: "We inspected the sunroom" (Codex P1 #5964 r82).
+    if (WORK_CLAIMS.some(([, re]) => re.test(lower)) && workObjects(lower).some((word) => !sheet.includes(word) && !areas.includes(word))) return true;
     return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && !recorded(kind));
   });
 }
@@ -2160,7 +2205,7 @@ function contradictsDiagnosis(text, facts) {
 const METHOD_SUBJECT = /\b(?:it|this|that|the\s+(?:product|treatment|application|method|material))\b/i;
 const METHOD_NOUN_RE = /\b(?:method|technique|application\s+method|delivery)\s+(?:was|is)\s+(?:an?\s+|by\s+|through\s+|via\s+)?([a-z]+)/i;
 const NEUTRAL_PARTICIPLES = new Set('applied used treated placed listed recorded noted mentioned included needed required chosen selected picked labeled labelled approved designed made intended scheduled completed finished targeted aimed rated registered put done found seen observed reported based focused concentrated limited kept left allowed'.split(' '));
-const PRODUCT_VERB_RE = /\b(?:was|were|got|been|is|are)\s+(?:\w+ly\s+)?([a-z]+(?:ed|en))\b|\b(?:we|i|tech\w*|technician|crew)\s+(?:\w+ly\s+)?([a-z]+ed)\b/gi;
+const PRODUCT_VERB_RE = /\b(?:was|were|got|been|is|are)\s+(?:\w+ly\s+)?([a-z]+(?:ed|en))\b|\b(?:we|i|they|he|she|someone|waves|tech\w*|technician|crew|team)\s+(?:\w+ly\s+)?([a-z]+ed)\b/gi;
 function statesUnrecordedMethod(text, facts) {
   const products = asArray(facts?.products).filter((product) => product?.name && product.how_applied);
   if (!products.length) return false;
@@ -2487,9 +2532,12 @@ const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}\\s+${INGESTED_AMOUNT}
 // eater, get the emergency answer. "Swallowed grass from the lawn after
 // pesticide was sprayed", "got pesticide on its paws and licked them". A
 // false alarm costs one answer; a missed exposure is worse.
+// A brand name is an exposure word too: "John swallowed Alpine WSG" (Codex P1
+// #5964 r82). The verb's object starts with a capital, mid-sentence.
+const EATS_NAMED_THING = new RegExp(`\\b${EAT_VERBS.replace('|bit|bites?|biting|bitten', '')}\\s+(?:some\\s+|the\\s+|a\\s+|an\\s+|our\\s+|your\\s+)?[A-Z][\\w-]+`);
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence) || EAT_VERB_RE.test(sentence))
-    && EXPOSURE_WORD.test(sentence)
+    && (EXPOSURE_WORD.test(sentence) || EATS_NAMED_THING.test(sentence))
     && (PERSON_EATS.test(sentence) || ((EATER_ACTS.test(sentence) || (EATER_IN_SENTENCE.test(sentence) && !PASSIVE_NO_EATER.test(sentence))) && !PEST_EATING.test(sentence))));
 }
 // A person or pet right before the eating verb wins over a pest elsewhere in

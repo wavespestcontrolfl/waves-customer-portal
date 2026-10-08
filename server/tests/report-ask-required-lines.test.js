@@ -2259,7 +2259,7 @@ test('a pet eating wins over a pest elsewhere in the sentence (pre-push audit)',
 describe('answer screen, Codex round 61', () => {
   test('a verb-device-value credential is masked and never repeated', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Unlock the side gate with BLUE MOON. Ants by the pool.' } });
-    expect(facts.customer_concern).toBe('Unlock the side gate with [redacted]. Ants by the pool.');
+    expect(facts.customer_concern).toBe('[access details removed] Ants by the pool.');
     expect(screenAskAnswer('Unlock the side gate with BLUE MOON.', { question: 'q', data: pestData({ applications: [] }), facts })).toBe('access_phrase');
   });
 
@@ -2707,5 +2707,49 @@ describe('answer screen, Codex round 81', () => {
 
   test.each(['We found scale insects on the front palms.', 'We found some activity near the palms.'])('a recorded or generic finding passes: %s', (answer) => {
     expect(ask(answer)).toBeNull();
+  });
+});
+
+describe('answer screen, Codex round 82', () => {
+  const data = pestData({
+    technicianName: 'Alex',
+    applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside', method: 'Spot spray' }],
+    reportSections: [{ title: 'Visit', text: 'We inspected the attic.' }],
+    findings: [{ title: 'Light ant activity', detail: 'A few ants in the kitchen.' }],
+    customerConcern: 'The side gate uses blue moon. Ants near the garage door.',
+  });
+  const question = 'What did you do?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test('a gate sentence with no pest or service context leaves whole', () => {
+    expect(facts.customer_concern).toBe('[access details removed] Ants near the garage door.');
+  });
+
+  test('work at a place the report does not name is rejected', () => {
+    expect(ask('We inspected the sunroom.')).toBe('unrecorded_work');
+    expect(ask('We inspected the attic.')).toBeNull();
+  });
+
+  test.each(['They poured Alpine WSG.', 'They mopped Alpine WSG.'])('a method after a third-person actor is judged: %s', (answer) => {
+    expect(ask(answer)).toBe('method_claim');
+  });
+
+  test.each(['roundup was the product.', 'the product was roundup.'])('a lowercase product identity is judged: %s', (answer) => {
+    expect(ask(answer)).toBe('unrecorded_product');
+  });
+
+  test.each(['Alpine WSG was applied on the roof.', 'Alpine WSG was applied around the pool.'])('a specific application place must be recorded: %s', (answer) => {
+    expect(ask(answer)).toBe('scope_claim');
+  });
+
+  test('a finding keeps its recorded intensity', () => {
+    expect(ask('We found heavy ant activity in the kitchen.')).toBe('target_list');
+    expect(ask('We found light ant activity in the kitchen.')).toBeNull();
+  });
+
+  test('swallowing a named product gets the medical answer', () => {
+    expect(medicalExposureAnswer('John swallowed Alpine WSG.')).toBeTruthy();
+    expect(medicalExposureAnswer('John swallowed his pride.')).toBeNull();
   });
 });
