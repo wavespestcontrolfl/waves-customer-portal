@@ -334,7 +334,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [response, setResponse] = useState(null);
   const [pendingActions, setPendingActions] = useState([]);
   // Tap-to-answer buttons from the live reply (payload `choices`, server
-  // offer_choices). They belong to that one reply: any newer request, a
+  // offer_choices): plain strings, each both the button text and the text a
+  // tap sends. They belong to that one reply: any newer request, a
   // recalled task or thread, New chat or a page change drops them, so an old
   // question can never be answered by a tap.
   const [choices, setChoices] = useState(null);
@@ -666,7 +667,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           setResponse(data.response);
           setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
           setActiveTask(data.taskId ? data : null);
-          setChoices(Array.isArray(data.choices) && data.choices.length ? data.choices : null);
+          setChoices(Array.isArray(data.choices) ? data.choices.filter(choice => typeof choice === "string" && choice.trim()) : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
           knowledgeGaps.load(data.knowledgeMisses, data.taskId || null);
           setConversationHistory(data.conversationHistory || []);
@@ -722,6 +723,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
     const epoch = ++threadEpochRef.current;
     submittingRef.current = true;
     setLoading(true);
+    // Cleared when the refresh starts, like submit: a failed refresh must not
+    // bring the old buttons back under its error.
+    setChoices(null);
     try {
       const data = await adminFetch(operation ? `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}/${operation}`
         : `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionIdRef.current)}`,
@@ -730,8 +734,6 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
       if (threadEpochRef.current !== epoch) return;
       setActiveTask(data);
       setResponse(data.response);
-      // A recalled or continued task shows its saved answer without buttons.
-      setChoices(null);
       setConversationHistory(data.conversationHistory || []);
       setThreadId(data.threadId || null);
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
@@ -769,8 +771,12 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   // A tap is the operator's next message: the same submit a typed prompt
   // takes (same thread, task and request key). The text also goes into the
   // composer, so a failed request keeps it for a retry like typed text.
-  const chooseAnswer = (reply) => { setPrompt(reply); submit(reply); };
+  const chooseAnswer = (label) => { setPrompt(label); submit(label); };
   const choicesDisabled = loading || attachmentsLoading || dictationPending;
+  // Never beside a confirmation card or a receipt, whichever request made it:
+  // a legacy card retained across requests (pendingActions) or the open
+  // task's cards and receipts. The server only knows this turn's cards.
+  const shownChoices = pendingActions.length || activeTask?.pendingActions?.length || activeTask?.receipts?.length ? null : choices;
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
     onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved}  variant="dark" />;
@@ -900,7 +906,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
         loading={loading}
         response={response}
         pendingActions={pendingActions}
-        choices={choices}
+        choices={shownChoices}
         chooseAnswer={chooseAnswer}
         choicesDisabled={choicesDisabled}
         taskCard={taskCard}
@@ -1202,7 +1208,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
             {taskCard}
             {" "}
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
-            <ChoiceButtons choices={choices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="dark" />
+            <ChoiceButtons choices={shownChoices} onChoose={chooseAnswer} disabled={choicesDisabled} variant="dark" />
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
             <KnowledgeGapPrompt gaps={knowledgeGaps.gaps} update={knowledgeGaps.update} save={saveKnowledgeGap} variant="dark" />
           </div>
@@ -1723,8 +1729,9 @@ function IntelligenceResponse({ response, activity, task, variant }) {
   </>;
 }
 
-// Tap-to-answer buttons under the reply that asked "which value?". A tap only
-// sends that option's reply as the operator's next message; it confirms
+// Tap-to-answer buttons under the reply that asked "which value?". A tap
+// sends exactly the text on the button as the operator's next message (there
+// is no other text behind a button); it confirms
 // nothing (a write is confirmed on its card). One tap answers: submit takes
 // one request at a time, and starting it removes this set.
 function ChoiceButtons({ choices, onChoose, disabled: locked, variant }) {
@@ -1732,12 +1739,12 @@ function ChoiceButtons({ choices, onChoose, disabled: locked, variant }) {
   const light = variant === "light";
   return (
     <div role="group" aria-label="Answer choices" style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "12px 0" }}>
-      {choices.map((choice) => (
+      {choices.map((label) => (
         <button
-          key={choice.label}
+          key={label}
           type="button"
           disabled={locked}
-          onClick={() => onChoose(choice.reply)}
+          onClick={() => onChoose(label)}
           style={{
             minHeight: 44,
             padding: "8px 16px",
@@ -1752,7 +1759,7 @@ function ChoiceButtons({ choices, onChoose, disabled: locked, variant }) {
             opacity: locked ? 0.6 : 1,
           }}
         >
-          {choice.label}
+          {label}
         </button>
       ))}
     </div>

@@ -3196,7 +3196,7 @@ RULES:
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
 - Lead with the actual outcome or pending approval and a record link. Normally use at most 80 words; expand only when the operator asks or the effects need explanation.
 - Number read-back: when the operator gives a money amount, date, time, quantity or rate that differs from a value you stated or asked them to confirm in your previous turn, act on neither. Ask one short question naming both ("You said $60.33, but earlier it was $61.33. Which one?") and prepare no card until they answer. Voice dictation often mishears digits.
-- Answer buttons: when you must ask the operator to choose between two to four specific values (amounts, dates, times, quantities, products, or customers already named) and offer_choices is in your tools, call it with those exact values, then ask the question in your reply text as usual. A tap only sends that value back as the operator's next message. Never use it for a yes/no or to confirm a write: a write is confirmed only on its confirmation card, and a button never confirms, approves or commits anything.
+- Answer buttons: when you must ask the operator to choose between two to four specific values (amounts, dates, times, quantities, products, or customers already named) and offer_choices is in your tools, call it with those exact values as the operator would say them ("$61.33", not a sentence), then ask the question in your reply text as usual. A button shows the value and a tap sends exactly that value as the operator's next message: treat it as their answer to the question you just asked. Never use it for a yes/no or to confirm a write: a write is confirmed only on its confirmation card, and a button never confirms, approves or commits anything.
 - Format numbers nicely: $1,234.56 not 1234.56
 - Use emoji sparingly for visual scanning: ⚠️ for issues, ✅ for healthy, 📅 for scheduling, 💰 for money
 
@@ -3496,7 +3496,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // search text can carry a customer's name, address or phone.
     const knowledgeMisses = new Set();
     // Tap-to-answer buttons for this reply (offer_choices, choice-tools.js):
-    // the validated list from the latest successful call, client-only.
+    // the validated labels, client-only, and only while offer_choices is the
+    // LAST tool that ran before the terminal answer. Any later tool call
+    // clears them: the answer then no longer is the question they belong to.
     let offeredChoices = null;
 
     // Tool-use loop
@@ -3775,7 +3777,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
         toolResults.push({ name: toolUse.name, result });
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
-        if (toolUse.name === OFFER_CHOICES_TOOL_NAME) offeredChoices = !failed && result?.status === 'choices_shown' ? result.choices : null;
+        offeredChoices = toolUse.name === OFFER_CHOICES_TOOL_NAME && !failed && result?.status === 'choices_shown' ? result.choices : null;
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.
         if (result?.code === 'target_clarification_required') unresolvedClarifications.set(callKey(toolUse), { operation: operationKey(toolUse), round });
@@ -3803,6 +3805,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
+      offeredChoices = null; // no question was asked, so there is nothing to answer
     }
     // Gap reports: records only when this reply says the bar could not do
     // something. Awaited — flush() never rejects and writes nothing on an
@@ -3954,8 +3957,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // Knowledge searches that came back empty, for the "add to knowledge
       // gaps" prompt. Absent when there were none.
       ...(knowledgeMisses.size ? { knowledgeMisses: [...knowledgeMisses] } : {}),
-      // Tap-to-answer buttons (offer_choices). A tap only sends that option's
-      // reply as the operator's next message. Absent when the model offered
+      // Tap-to-answer buttons (offer_choices): plain strings. A tap sends
+      // exactly the button text as the operator's next message. Absent when the model offered
       // none, and dropped when this turn made a card or committed a direct
       // edit: a button must never sit beside a Confirm control or a receipt.
       ...(offeredChoices && !pendingProposals.length && !directActionIds.length ? { choices: offeredChoices } : {}),

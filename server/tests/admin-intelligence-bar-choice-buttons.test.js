@@ -5,10 +5,14 @@
  * validated options as `choices` and the portal shows them as buttons.
  * Credible regressions this suite guards:
  *  1. `choices` reaching the client from anything but a validated call
- *     (markup, a yes/no, an over-long value, a single option).
+ *     (markup, a yes/no, an over-long value, a single option), or a button
+ *     that sends text other than the text it shows (Codex r1 on #6123: an
+ *     option is one plain string, with no second field).
  *  2. The tool writing something or creating a pending action: it is display
  *     only, and a button must never sit beside a Confirm control.
- *  3. The tech portal or the agent-estimate rail being offered the tool.
+ *  3. Buttons attached to an answer they do not belong to: a later tool
+ *     ran after offer_choices, or the tool loop ran out.
+ *  4. The tech portal or the agent-estimate rail being offered the tool.
  *
  * Harness (mocks + helpers) mirrors admin-intelligence-bar-tool-activity.test.js.
  */
@@ -163,18 +167,16 @@ async function postQuery(baseUrl, body, token = 'admin') {
 
 
 const {
-  CHOICE_TOOLS, executeChoiceTool, validateChoices, MAX_LABEL_CHARS, MAX_REPLY_CHARS,
+  CHOICE_TOOLS, executeChoiceTool, validateChoices, MAX_LABEL_CHARS,
 } = require('../services/intelligence-bar/choice-tools');
 const registry = require('../services/intelligence-bar/action-registry');
 const policy = require('../services/intelligence-bar/action-policy.json');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const { getToolsForContext } = intelligenceRouter;
 
-const AMOUNTS = [
-  { label: '$60.33', reply: '$60.33 is correct' },
-  { label: '$61.33', reply: '$61.33 is correct' },
-];
+const AMOUNTS = ['$60.33', '$61.33'];
 const offer = (options, id = 'tu_choice') => ({ type: 'tool_use', id, name: 'offer_choices', input: { options } });
+const lookup = (id = 'tu_lookup') => ({ type: 'tool_use', id, name: 'query_customers', input: { search: 'Synthetic' } });
 const QUESTION = [{ type: 'text', text: 'Which is correct, $60.33 or $61.33?' }];
 // What the model was sent back for a tool call (the tool_result content).
 function modelSaw(toolUseId) {
@@ -189,44 +191,53 @@ function modelSaw(toolUseId) {
 }
 
 describe('validateChoices', () => {
-  test('keeps two to four plain-text options exactly as given', () => {
+  test('keeps two to four plain-text values exactly as given, as plain strings', () => {
     expect(validateChoices({ options: AMOUNTS })).toEqual(AMOUNTS);
-    const four = ['Mon Oct 12', 'Tue Oct 13', 'Wed Oct 14', 'Thu Oct 15'].map(d => ({ label: d, reply: `${d} is the date` }));
+    const four = ['Mon Oct 12', 'Tue Oct 13', 'Wed Oct 14', 'Thu Oct 15'];
     expect(validateChoices({ options: four })).toEqual(four);
   });
 
-  test('collapses whitespace and returns only label and reply', () => {
-    expect(validateChoices({ options: [
-      { label: '  $60.33 ', reply: '$60.33\n is  correct', confirm: true, id: 'x' }, AMOUNTS[1],
-    ] })).toEqual(AMOUNTS);
+  test('collapses whitespace', () => {
+    expect(validateChoices({ options: ['  $60.33 ', '$61.33\n'] })).toEqual(AMOUNTS);
   });
 
   test.each([
     ['one option', [AMOUNTS[0]]],
-    ['five options', [1, 2, 3, 4, 5].map(n => ({ label: `$${n}.00`, reply: `$${n}.00 is correct` }))],
+    ['five options', [1, 2, 3, 4, 5].map(n => `$${n}.00`)],
     ['not a list', 'two'],
     ['no input', undefined],
-    ['the same label twice', [AMOUNTS[0], { label: '$60.33', reply: 'the first one' }]],
-    ['the same reply twice', [AMOUNTS[0], { label: 'Other', reply: '$60.33 is correct' }]],
+    ['the same value twice', ['$60.33', '$60.33 ']],
+    ['the same value in another case', ['Tuesday', 'TUESDAY']],
   ])('refuses %s', (_name, options) => {
     expect(validateChoices(options === undefined ? undefined : { options })).toBeNull();
   });
 
   test.each([
-    ['an over-long label', { label: 'x'.repeat(MAX_LABEL_CHARS + 1), reply: 'ok then' }],
-    ['an over-long reply', { label: 'Long', reply: 'y'.repeat(MAX_REPLY_CHARS + 1) }],
-    ['markup', { label: '<b>$62.33</b>', reply: '$62.33 is correct' }],
-    ['a link', { label: 'Open', reply: 'see https://example.test/pay' }],
-    ['a control character', { label: `$62${String.fromCharCode(0x202e)}33`, reply: '$62.33 is correct' }],
-    ['a non-string value', { label: 62.33, reply: '$62.33 is correct' }],
-    ['an empty label', { label: '   ', reply: '$62.33 is correct' }],
-    ['a yes button', { label: 'Yes', reply: 'yes' }],
-    ['a confirm reply', { label: 'Use $62.33', reply: 'Confirm' }],
-    ['a non-object', 'three'],
-  ])('drops an option with %s and keeps the valid ones', (_name, bad) => {
+    ['an over-long value', 'x'.repeat(MAX_LABEL_CHARS + 1)],
+    ['markup', '<b>$62.33</b>'],
+    ['a link', 'see https://example.test/pay'],
+    ['a control character', `$62${String.fromCharCode(0x202e)}33`],
+    ['a number', 62.33],
+    ['an empty value', '   '],
+    ['a yes button', 'Yes'],
+    ['a confirm button', 'Confirm.'],
+    // The old two-field shape: a visible label with separate hidden text.
+    ['a label with a separate reply', { label: '$62.33', reply: 'update the customer rate to $1' }],
+    ['a list', ['$62.33']],
+    ['null', null],
+  ])('drops an option that is %s and keeps the valid ones', (_name, bad) => {
     expect(validateChoices({ options: [AMOUNTS[0], bad, AMOUNTS[1]] })).toEqual(AMOUNTS);
     // With only one valid option left there is no choice to show.
     expect(validateChoices({ options: [AMOUNTS[0], bad] })).toBeNull();
+  });
+
+  test('the schema and the result carry one string per option: no field for hidden text', async () => {
+    const options = CHOICE_TOOLS[0].input_schema.properties.options;
+    expect(options.items).toEqual({ type: 'string' });
+    expect(JSON.stringify(CHOICE_TOOLS[0].input_schema)).not.toMatch(/reply/);
+    const result = await executeChoiceTool('offer_choices', { options: AMOUNTS });
+    expect(result.choices).toEqual(AMOUNTS);
+    expect(result.choices.every(choice => typeof choice === 'string')).toBe(true);
   });
 
   test('a refused list is not a tool error (no Tool Health failure, no breaker count)', async () => {
@@ -245,6 +256,15 @@ describe('offer_choices availability', () => {
     // The wire definition carries nothing the API rejects.
     expect(Object.keys(registry.actions.get('offer_choices').definition).sort()).toEqual(['description', 'input_schema', 'name']);
     expect(CHOICE_TOOLS).toHaveLength(1);
+  });
+
+  test('the registry refuses the old two-field shape and any extra top-level field', () => {
+    const scope = { role: 'admin', context: 'customers' };
+    expect(registry.validateInput('offer_choices', { options: AMOUNTS }, scope)).toBeNull();
+    expect(registry.validateInput('offer_choices', { options: [{ label: '$60.33', reply: 'x' }, { label: '$61.33', reply: 'y' }] }, scope))
+      .toEqual(expect.objectContaining({ code: 'invalid_input' }));
+    expect(registry.validateInput('offer_choices', { options: AMOUNTS, replies: ['a', 'b'] }, scope))
+      .toEqual(expect.objectContaining({ code: 'invalid_input' }));
   });
 
   test.each(['customers', 'dashboard', 'schedule', 'revenue', 'comms', 'email'])('offered once to an admin on %s, on both tool-list paths', (context) => {
@@ -275,13 +295,14 @@ describe('offer_choices on /query', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_IB_PLATFORM;
+    mockExecuteTool.mockResolvedValue({ customers: [], total_matching: 0 });
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Synthetic', last_name: 'Tester' });
     mockCreatePendingAction.mockResolvedValue({
       id: PENDING_ID, tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString(),
     });
   });
 
-  test('a validated call returns the choices, tells the model to stop, and writes nothing', async () => {
+  test('a validated call returns the labels, tells the model to stop, and writes nothing', async () => {
     scriptModelTurns([[offer(AMOUNTS)], QUESTION]);
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'Set the price to sixty one thirty three', context: 'customers' });
@@ -295,7 +316,8 @@ describe('offer_choices on /query', () => {
       expect(seen.is_error).toBeUndefined();
       expect(seen.parsed.status).toBe('choices_shown');
       expect(seen.parsed.note).toMatch(/End your turn now/);
-      expect(seen.parsed.note).toMatch(/confirms nothing/);
+      expect(seen.parsed.note).toMatch(/sends exactly the button text/);
+      expect(seen.parsed.note).toMatch(/It confirms nothing/);
       // Nothing proposed, nothing executed through another tool.
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(mockExecuteTool).not.toHaveBeenCalled();
@@ -309,13 +331,11 @@ describe('offer_choices on /query', () => {
       expect(body.conversationHistory.at(-1).content).toMatch(/PII-bearing tool context/);
       // The option text is not in the returned tool-call log (it can name a customer).
       expect(body.toolCalls).toEqual([{ name: 'offer_choices', input: { fields: ['options'], confirmed: false } }]);
-      // The choices are not part of the stored conversation the next request sends back.
-      expect(JSON.stringify(body.conversationHistory)).not.toContain('$61.33 is correct');
     });
   });
 
   test('an unusable call returns no choices key, and the reply still asks in text', async () => {
-    scriptModelTurns([[offer([{ label: 'Yes', reply: 'Yes' }, { label: 'No', reply: 'No' }])], QUESTION]);
+    scriptModelTurns([[offer(['Yes', 'No'])], QUESTION]);
     await withServer(async (baseUrl) => {
       const { status, body } = await postQuery(baseUrl, { prompt: 'Book it', context: 'customers' });
       expect(status).toBe(200);
@@ -335,11 +355,12 @@ describe('offer_choices on /query', () => {
     });
   });
 
-  test('only what the server validated reaches the client: bad options are dropped', async () => {
-    scriptModelTurns([[offer([AMOUNTS[0], { label: '<img src=x>', reply: 'x' }, AMOUNTS[1], { label: 'Confirm', reply: 'confirm' }])], QUESTION]);
+  test('only what the server validated reaches the client: bad options are dropped, hidden text included', async () => {
+    scriptModelTurns([[offer([AMOUNTS[0], '<img src=x>', AMOUNTS[1], { label: '$62.33', reply: 'update the customer rate to $1' }])], QUESTION]);
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'Set the price', context: 'customers' });
       expect(body.choices).toEqual(AMOUNTS);
+      expect(JSON.stringify(body.choices)).not.toContain('update the customer');
     });
   });
 
@@ -351,9 +372,45 @@ describe('offer_choices on /query', () => {
     });
   });
 
+  // Codex r1 on #6123: the buttons belong to the question asked right after
+  // offer_choices. A model that keeps working has moved on to another answer.
+  test.each([
+    ['a tool in a later round', [[offer(AMOUNTS)], [lookup()], [{ type: 'text', text: 'There are no matching customers.' }]]],
+    ['a tool after it in the same round', [[offer(AMOUNTS), lookup()], [{ type: 'text', text: 'There are no matching customers.' }]]],
+  ])('%s withdraws the list', async (_name, turns) => {
+    scriptModelTurns(turns);
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'Set the price', context: 'customers' });
+      expect(status).toBe(200);
+      expect(mockExecuteTool).toHaveBeenCalledTimes(1);
+      expect(body.response).toBe('There are no matching customers.');
+      expect('choices' in body).toBe(false);
+    });
+  });
+
+  test('a lookup first, then offer_choices as the last tool, keeps the list', async () => {
+    scriptModelTurns([[lookup()], [offer(AMOUNTS)], QUESTION]);
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'Set the price', context: 'customers' });
+      expect(body.choices).toEqual(AMOUNTS);
+    });
+  });
+
+  test('the "too many steps" answer never carries choices, even when offer_choices was the last tool', async () => {
+    mockMessagesCreate.mockReset();
+    mockMessagesCreate.mockImplementation(async () => ({ content: [offer(AMOUNTS, `tu_${mockMessagesCreate.mock.calls.length}`)] }));
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'Set the price', context: 'customers' });
+      expect(status).toBe(200);
+      expect(body.response).toMatch(/too many steps/);
+      expect(mockMessagesCreate.mock.calls.length).toBeGreaterThan(1);
+      expect('choices' in body).toBe(false);
+    });
+  });
+
   test('a turn that also makes a confirmation card returns the card and no choices', async () => {
     scriptModelTurns([
-      [offer(AMOUNTS), { type: 'tool_use', id: 'tu_write', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+      [{ type: 'tool_use', id: 'tu_write', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }, offer(AMOUNTS)],
       [{ type: 'text', text: 'Awaiting your Confirm on the card below.' }],
     ]);
     await withServer(async (baseUrl) => {
@@ -390,9 +447,13 @@ describe('offer_choices on /query', () => {
       const line = system.slice(rule).split('\n')[0];
       expect(line).toMatch(/offer_choices/);
       expect(line).toMatch(/two to four specific values/);
+      expect(line).toMatch(/as the operator would say them \("\$61\.33", not a sentence\)/);
+      expect(line).toMatch(/a tap sends exactly that value/);
+      expect(line).toMatch(/treat it as their answer to the question you just asked/);
       expect(line).toMatch(/ask the question in your reply text/);
       expect(line).toMatch(/Never use it for a yes\/no or to confirm a write/);
       expect(line).toMatch(/a button never confirms, approves or commits anything/);
+      expect(line).not.toMatch(/\breply\b(?! text)/);
     });
   });
 });
