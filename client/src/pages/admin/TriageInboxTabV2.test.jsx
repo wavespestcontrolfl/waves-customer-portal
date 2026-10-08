@@ -733,18 +733,13 @@ describe('Save to notes on second-contact cards', () => {
   const contact = { name_full: 'Pat Sample', phone_e164: '+19415550123', email: 'pat.sample@example.com', role: 'property_owner' };
   const card = (id, name, payload) => ({ ...ordinary, id, first_name: name, last_name: 'Contact', reason_code: 'secondary_contact_captured',
     feedback_verdict: null, payload: { flag: 'secondary_contact_captured', ...payload } });
-  const secondCard = card('second', 'Second', { secondary_contact: contact });
+  // The server marks the cards the action applies to; the screen only reads the flag.
+  const secondCard = { ...card('second', 'Second', { secondary_contact: contact }), can_save_contact_note: true };
   const refused = [
-    card('name-only', 'NameOnly', { secondary_contact: { name_full: 'Pat Sample' } }),
-    card('wants', 'Wants', { secondary_contact: { ...contact, wants_notifications: true } }),
-    card('texts', 'Texts', { secondary_contact: { ...contact, wants_appointment_texts: true } }),
-    card('onsite', 'OnSite', { secondary_contact: { ...contact, on_site: true } }),
-    card('payer', 'Payer', { secondary_contact: { ...contact, is_billing_party: true } }),
-    card('others', 'Others', { secondary_contact: contact, other_parties_mentioned: true }),
-    card('two', 'Two', { secondary_contact: contact, secondary_contacts: [contact, { name_full: 'Robin Example', email: 'robin@example.com' }] }),
+    card('unmarked', 'Unmarked', { secondary_contact: contact }),
+    { ...card('refused', 'Refused', { secondary_contact: { ...contact, wants_notifications: true } }), can_save_contact_note: false },
   ];
-  // The array's first entry mirrors the singleton: a card with only the mirror still names one person.
-  const mirrorOnly = card('mirror', 'Mirror', { secondary_contact: contact, secondary_contacts: [contact] });
+  const mirrorOnly = { ...card('mirror', 'Mirror', { secondary_contact: contact, secondary_contacts: [contact] }), can_save_contact_note: true };
   let listItems;
 
   beforeEach(() => {
@@ -754,7 +749,7 @@ describe('Save to notes on second-contact cards', () => {
       : { ok: true }));
   });
 
-  it('shows the button only on a card that names exactly one non-recipient person', async () => {
+  it('shows the button only on a card the server marked as saveable', async () => {
     render(<TriageInboxTabV2 isAdmin />);
     await screen.findByText('Second Contact');
     const buttons = (name) => within(screen.getByText(name).closest('.py-4')).queryAllByRole('button', { name: 'Save to notes' });

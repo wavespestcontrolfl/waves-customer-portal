@@ -354,24 +354,14 @@ export function FamilyEvidence({ payload, openCustomerIds = null }) {
   );
 }
 
-// A second-contact card can be filed as a customer note only when it names exactly one person who is not
-// a message recipient. Mirrors secondContactNote in server/routes/admin-triage.js (the server re-checks);
-// the entries are the ones ConfirmEvidence shows: the singleton, then secondary_contacts after its first.
-function canSaveContactNote(payload) {
-  const p = parsePayload(payload);
-  const c = p?.secondary_contact;
-  if (!c || typeof c !== "object" || p.other_parties_mentioned === true) return false;
-  if ((Array.isArray(p.secondary_contacts) ? p.secondary_contacts.slice(1) : []).some(Boolean)) return false;
-  if (['wants_notifications', 'wants_appointment_texts', 'on_site', 'is_billing_party'].some((flag) => c[flag] === true)) return false;
-  return !!(c.name_full || c.first_name || c.last_name) && !!(c.phone || c.phone_e164 || c.email);
-}
-
-// The shared evidence panel plus the one-tap "Save to notes" (admin, open cards only).
-function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, busy, onSave }) {
+// The shared evidence panel plus the one-tap "Save to notes" (admin, open cards only). The SERVER decides
+// which cards qualify (can_save_contact_note on the list item: one person, not a message recipient or
+// payer, a usable phone or email), so this screen holds no second copy of that rule.
+function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, canSave, busy, onSave }) {
   return (
     <>
       <ConfirmEvidence payload={payload} reasonCode={reasonCode} />
-      {isOpenView && isAdmin && canSaveContactNote(payload) && (
+      {isOpenView && isAdmin && canSave && (
         <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={onSave}
           title="Adds this person to the customer's notes. They do not get messages.">
           {busy ? "Saving…" : "Save to notes"}
@@ -1249,7 +1239,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, isOpenView, isAdmin, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, isOpenView, isAdmin, canSave: item.can_save_contact_note === true, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">

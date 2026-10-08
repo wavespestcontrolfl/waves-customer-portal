@@ -203,7 +203,7 @@ function tracked(fake, { relinkAfterFirstCallRead = false } = {}) {
     const name = String(table).split(' ')[0];
     const api = fake.conn(table);
     const forUpdate = api.forUpdate;
-    if (name === 'customers' || name === 'call_log') {
+    if (name === 'customers' || name === 'call_log' || name === 'triage_items') {
       api.forUpdate = (...a) => { events.push(`lock:${name}`); return forUpdate.apply(api, a); };
     }
     if (name === 'customers') {
@@ -231,6 +231,34 @@ beforeEach(() => {
   db.mockReset();
 });
 
+describe('the list stamps which second-contact cards the action applies to', () => {
+  // The list route runs this over its items; the screen reads the flag and holds no copy of the rule.
+  const { stampSaveContactNote } = triageRouter.__private;
+  const flag = (payload, reason = 'secondary_contact_captured') => {
+    const items = [{ id: CARD_ID, reason_code: reason, payload }];
+    stampSaveContactNote(items);
+    return items[0].can_save_contact_note;
+  };
+  const one = CONTACT_PAYLOAD.secondary_contact;
+
+  it('true for one non-recipient person with a usable phone or email, also from a string payload', () => {
+    expect(flag(CONTACT_PAYLOAD)).toBe(true);
+    expect(flag(JSON.stringify(CONTACT_PAYLOAD))).toBe(true);
+  });
+
+  it('false for a recipient, a payer, a second person, and a name whose only phone is impossible', () => {
+    expect(flag({ secondary_contact: { ...one, wants_notifications: true } })).toBe(false);
+    expect(flag({ secondary_contact: { ...one, is_billing_party: true } })).toBe(false);
+    expect(flag({ secondary_contact: one, other_parties_mentioned: true })).toBe(false);
+    expect(flag({ secondary_contact: { name_full: 'Pat Sample', phone_e164: '+11735550123' } })).toBe(false);
+    expect(flag('not json')).toBe(false);
+  });
+
+  it('leaves other cards unmarked', () => {
+    expect(flag(CONTACT_PAYLOAD, 'missing_last_name')).toBeUndefined();
+  });
+});
+
 describe('POST /admin/triage/:id/save-contact-note', () => {
   it('writes one dated line to crm_notes only, resolves the card, and locks customer before call row', async () => {
     const fake = fixture();
@@ -253,7 +281,7 @@ describe('POST /admin/triage/:id/save-contact-note', () => {
       status: 'resolved', resolution_source: 'human', resolution_note: 'contact saved to customer notes', assigned_to: 'tech-1',
     });
     expect(fake.tables.call_log[0].review_status).toBe('resolved');
-    expect(events.filter((e) => typeof e === 'string')).toEqual(['lock:customers', 'lock:call_log']);
+    expect(events.filter((e) => typeof e === 'string')).toEqual(['lock:customers', 'lock:call_log', 'lock:triage_items']);
   });
 
   it('tags the note with the call\'s Eastern day, not the UTC day', async () => {

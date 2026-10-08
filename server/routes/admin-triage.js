@@ -382,6 +382,10 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // The second-contact "Save to notes" action: the server's own rule decides
+    // which cards qualify, so the screen holds no second copy of it.
+    stampSaveContactNote(items);
+
     res.json({ items, counts });
   } catch (err) {
     logger.error(`[admin-triage] list failed: ${err.message}`);
@@ -548,7 +552,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // newer one. Same rule as Apply — required (the lane is dark, no
     // legacy clients); checked under the lock.
     if (beforeTransition) await beforeTransition(trx);
-    const live = await trx('triage_items').where({ id }).first('updated_at', 'payload');
+    // Row-locked (after the advisory lock and the hold rows: the GLOBAL LOCK
+    // ORDER above): the processor's reprocess refresh updates this open row
+    // WITHOUT the advisory lock, so an unlocked read let a refresh commit
+    // between the version check and the update below and be closed unseen.
+    // Locked, a refresh either committed first (the version check refuses) or
+    // waits for this transaction and then finds no open row to merge into.
+    const live = await trx('triage_items').where({ id }).forUpdate().first('updated_at', 'payload');
     // Promise cards can gain another commitment while this action waits for
     // the call lock. The operator must review that newer payload before a
     // Resolve/Dismiss settles every commitment now attached to the card.
@@ -1536,8 +1546,16 @@ router.post('/:id/apply-property-roles', async (req, res) => {
 // first entry (entry 0 is the raw V2 mirror of the singleton, never written).
 // Anything more, a contact the slot writer owns (wants_notifications, an
 // on-site opt-in candidate) or a missing name/phone/email is refused whole, so
-// a card is never closed over a party that was not filed. The client mirrors
-// this rule (canSaveContactNote in TriageInboxTabV2.jsx).
+// a card is never closed over a party that was not filed. The list route
+// stamps the verdict on each card (can_save_contact_note) for the screen.
+function stampSaveContactNote(items) {
+  for (const item of items) {
+    if (item.reason_code !== 'secondary_contact_captured') continue;
+    const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+    item.can_save_contact_note = !secondContactNote(payload).refusal;
+  }
+}
+
 function secondContactNote(payload) {
   const { isImpossibleNanpPhone } = require('../utils/phone');
   const oneLine = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
@@ -2554,4 +2572,5 @@ module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
-  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL };
+  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL,
+  stampSaveContactNote };
