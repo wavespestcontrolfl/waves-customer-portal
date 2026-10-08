@@ -381,6 +381,40 @@ function nameSpellingDifferences({ dictation = null, saved = {} } = {}) {
   return out;
 }
 
+/**
+ * The name_spelling_differs card payload: the main discrepancy, the card text, the other
+ * differing entries, and WHAT it was compared against (the linked customer's record, whose id
+ * the card carries so the office opens that record, or the name heard on the call). Pure.
+ */
+function nameSpellingCardPayload({ top, others = [], saved = {}, filingCustomer = null }) {
+  return {
+    ...top,
+    card_text: nameSpellingCardText(top),
+    also: others,
+    compared_against: {
+      source: filingCustomer ? 'customer' : 'extracted',
+      name: [saved.first_name, saved.last_name].filter(Boolean).join(' ') || null,
+    },
+    customer_ids: [filingCustomer].filter(Boolean),
+  };
+}
+
+/**
+ * Drop the discrepancies a HUMAN already settled for the SAME filing customer (or unlinked):
+ * each is judged on its own (customer, field, spelling, saved name) against every settled card's
+ * evidence (its main entry and its `also` list), so a decision for customer A does not suppress
+ * the same discrepancy for customer B after a relink. `settledPayloads` are the settled cards'
+ * payload objects. Pure.
+ */
+function unsettledNameDifferences(differences, settledPayloads, filingCustomer) {
+  const key = (d, who) => `${who}|${d?.field}|${d?.spelled_value}|${d?.saved_value}`;
+  const seen = new Set((settledPayloads || []).flatMap((o) => {
+    const who = String((Array.isArray(o?.customer_ids) && o.customer_ids[0]) || 'unlinked');
+    return [o, ...(Array.isArray(o?.also) ? o.also : [])].map((d) => key(d, who));
+  }));
+  return differences.filter((d) => !seen.has(key(d, filingCustomer || 'unlinked')));
+}
+
 // "Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs."
 function nameSpellingCardText({ spelled_value: spelled, saved_value: saved }) {
   const letters = nameKey(spelled).toUpperCase().split('').join('-');
@@ -440,6 +474,8 @@ module.exports = {
   applyEmailDictationPolicy,
   nameSpellingDifferences,
   nameSpellingCardText,
+  unsettledNameDifferences,
+  nameSpellingCardPayload,
   sanitizeEmailCandidates,
   sanitizeNameEntries,
   buildDecoderPrompt,

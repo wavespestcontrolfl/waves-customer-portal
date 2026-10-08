@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingDifferences, nameSpellingCardText, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, nameSpellingDifferences, nameSpellingCardText, unsettledNameDifferences, nameSpellingCardPayload, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -4042,37 +4042,28 @@ async function fileNameSpellingCard(conn, {
 }) {
   try {
     if (isOutbound) return false;
-    const extraction = v2Result?.extraction || { meta: { call_summary: extracted?.call_summary || null } };
+    const extraction = v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } };
     // A third party (family member, agent, tenant, buyer ...) is not the account holder: their
     // spelling is never compared with the linked customer's record. An unlinked call still compares
     // against the extracted caller name.
     if (customerId && isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return false;
     const customer = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
     const saved = Object.fromEntries(['first_name', 'last_name']
-      .map((f) => [f, String(customer?.[f] || '').trim() || extracted?.[f] || null]));
+      .map((f) => [f, String(customer?.[f] || '').trim() || extracted[f] || null]));
     const differences = nameSpellingDifferences({ dictation, saved });
     if (!differences.length) return false;
-    const comparedAgainst = {
-      source: customer ? 'customer' : 'extracted',
-      name: [saved.first_name, saved.last_name].filter(Boolean).join(' ') || null,
-    };
-    const asObject = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
+    const filingCustomer = customer && customerId ? String(customerId) : null;
     return await conn.transaction(async (trx) => {
       await lockTriageCall(trx, callLogId);
       if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
       const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
         .whereIn('status', ['resolved', 'dismissed']).select('payload');
-      // Each discrepancy (filing customer, field, spelling, saved name) is judged on its own against
-      // every human-settled card's evidence (its main entry and its `also` list): a decision for
-      // customer A does not suppress the same discrepancy for customer B after a relink.
-      const filingCustomer = customer && customerId ? String(customerId) : 'unlinked';
-      const key = (d, who) => `${who}|${d?.field}|${d?.spelled_value}|${d?.saved_value}`;
-      const seen = new Set(settled.flatMap((r) => {
-        const o = asObject(r.payload);
-        const who = (Array.isArray(o.customer_ids) && o.customer_ids[0]) || 'unlinked';
-        return [o, ...(Array.isArray(o.also) ? o.also : [])].map((d) => key(d, String(who)));
-      }));
-      const [top, ...others] = differences.filter((d) => !seen.has(key(d, filingCustomer)));
+      const asObject = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return {}; } })() : (p || {}));
+      const [top, ...others] = unsettledNameDifferences(
+        differences,
+        settled.map((r) => asObject(r.payload)),
+        filingCustomer,
+      );
       if (!top) return false;
       await trx('triage_items')
         .insert(buildTriageItem({
@@ -4080,13 +4071,7 @@ async function fileNameSpellingCard(conn, {
           flag: 'name_spelling_differs',
           extraction,
           severity: 'advisory',
-          extraPayload: {
-            ...top,
-            card_text: nameSpellingCardText(top),
-            also: others,
-            compared_against: comparedAgainst,
-            customer_ids: customer && customerId ? [String(customerId)] : [],
-          },
+          extraPayload: nameSpellingCardPayload({ top, others, saved, filingCustomer }),
         }))
         .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
         .merge(['payload', 'summary', 'updated_at'])

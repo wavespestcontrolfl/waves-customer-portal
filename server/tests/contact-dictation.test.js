@@ -9,6 +9,8 @@ const {
   applyEmailDictationPolicy,
   nameSpellingDifferences,
   nameSpellingCardText,
+  unsettledNameDifferences,
+  nameSpellingCardPayload,
   sanitizeNameEntries,
   sanitizeEmailCandidates,
   buildDecoderPrompt,
@@ -419,6 +421,26 @@ describe('spelled names — card-only', () => {
   test('the card text reads as the owner worded it', () => {
     expect(nameSpellingCardText({ spelled_value: 'Serov', saved_value: 'Sirov' }))
       .toBe('Caller spelled their name S-E-R-O-V; the record says Sirov. Fix the name if the spelling is theirs.');
+  });
+
+  test('unsettledNameDifferences keys on the filing customer, field, spelling and saved name (main entry and also list)', () => {
+    const d = { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov' };
+    const f = { field: 'first_name', spelled_value: 'Kwent', saved_value: 'Quent' };
+    const settledA = [{ ...d, customer_ids: ['A'], also: [f] }];
+    expect(unsettledNameDifferences([d, f], settledA, 'A')).toEqual([]);
+    expect(unsettledNameDifferences([d, f], settledA, 'B')).toEqual([d, f]);
+    expect(unsettledNameDifferences([d, f], settledA, null)).toEqual([d, f]);
+    expect(unsettledNameDifferences([d], [{ ...d, customer_ids: [] }], null)).toEqual([]);
+    expect(unsettledNameDifferences([d], [{ ...d, saved_value: 'Sirof', customer_ids: ['A'] }], 'A')).toEqual([d]);
+  });
+
+  test('nameSpellingCardPayload says what the spelling was compared against', () => {
+    const top = { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', quote: 'q', confidence: 0.9 };
+    const saved = { first_name: 'Quentrell', last_name: 'Sirov' };
+    expect(nameSpellingCardPayload({ top, saved, filingCustomer: 'A' })).toMatchObject({
+      customer_ids: ['A'], compared_against: { source: 'customer', name: 'Quentrell Sirov' }, also: [],
+    });
+    expect(nameSpellingCardPayload({ top, saved })).toMatchObject({ customer_ids: [], compared_against: { source: 'extracted' } });
   });
 
   test('nothing in the decoder module writes or rewrites a name', () => {
