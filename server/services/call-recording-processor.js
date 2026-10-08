@@ -135,7 +135,7 @@ function recoveryMarkerPayload(db, passStamp) {
     : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
-const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, applyNameDictationPolicy, callerSpelledName, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
+const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, spelledNameDecision, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, routeDecisionFamilyVersions, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
@@ -4034,19 +4034,6 @@ async function missingFirstNameCardStillOpen(conn, callLogId) {
     .where({ call_log_id: callLogId, reason_code: 'missing_first_name' })
     .whereIn('status', ['open', 'in_progress']).first('id');
   return !!card;
-}
-
-// Live customers carrying this phone in any contact slot (a shared line is > 1).
-async function countCustomersWithContactPhone(contactKey, conn = db) {
-  const predicateFor = (col) => (contactKey.length === 10
-    ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
-    : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
-  const row = await conn('customers').whereNull('deleted_at')
-    .where(function orPhones() {
-      for (const col of CONTACT_MATCH_PHONE_COLS) this.orWhereRaw(predicateFor(col), [contactKey]);
-    })
-    .count('* as n').first();
-  return parseInt(row?.n || 0, 10);
 }
 
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
@@ -10297,6 +10284,9 @@ const CallRecordingProcessor = {
     // decoder's own confidence and quote: the candidate staging carries them (the V2
     // extraction is never rewritten, so its caller_identity confidence does not apply).
     const spelledNameOverrides = {};
+    // The name a NEW customer / lead is created with: the caller's spelling when the decoder
+    // decided one, else what was extracted.
+    const createNameFor = (field) => spelledNameOverrides[field]?.value ?? extracted[field];
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -11091,44 +11081,19 @@ const CallRecordingProcessor = {
       }
       if (contactDictation) {
         // A last/first name the CALLER spelled out letter by letter beats the
-        // misheard word. The decoder model judged whose name each spelling is;
-        // the policy only acts with name context, on an empty or near-identical
-        // (misheard) name. The V2 extraction is never touched, and secondary
-        // contacts are never touched.
-        //  - NEW caller (no linked customer): the V1/flat `extracted` record takes
-        //    the spelled name, so the customer/lead is created with it.
-        //  - EXISTING customer: `extracted` is left as heard (the backfill paths
-        //    must not write a spelled name onto the row); the spelled value
-        //    reaches the customer only as a staged candidate through the
-        //    GATE_CONTACT_CORRECTION lane and its own gates.
-        // Either way the spelling is staged with the decoder's confidence and
-        // quote whenever a grounded caller spelling with name context exists for
-        // a name the policy changed or the record already holds, so staging never
-        // falls back to a different V2 mishearing.
-        // Narrowing: only inbound calls with an explicitly labeled transcript (outbound
-        // diarization can swap the labels; unlabeled / Speaker-N text never attributes speech).
-        const labeledInbound = !isOutboundCall(call) && /^\s*caller\s*:/im.test(transcription);
-        const nameChanges = labeledInbound ? applyNameDictationPolicy({ current: extracted, dictation: contactDictation }) : {};
-        const spelledNames = ['first_name', 'last_name']
-          .map((field) => ({ field, spelled: labeledInbound ? callerSpelledName(contactDictation, field) : null }))
-          .filter(({ field, spelled }) => spelled?.nameContext
-            && (nameChanges[field] || String(extracted[field] || '').trim() === spelled.value));
-        if (spelledNames.length) {
-          // Shared phone: when more than one live customer carries the call phone, the
-          // account choice itself rests on the misheard name — change nothing and stage
-          // nothing. One phone match is an existing customer (candidate only); none is
-          // a new caller (the flat record takes the spelled name).
-          // The phone downstream customer matching uses (a spoken number can override the ANI),
-          // and the ANI itself: the stricter count wins.
-          const phoneKeys = [...new Set([contactPhone, resolveCallContactPhone(call, extracted.phone)].map(phoneKey).filter(Boolean))];
-          const phoneMatches = Math.max(0, ...await Promise.all(phoneKeys.map((k) => countCustomersWithContactPhone(k).catch(() => 2))));
-          if (phoneMatches <= 1) {
-            const linkedCustomerId = call.customer_id || phoneMatches === 1;
-            for (const { field, spelled } of spelledNames) {
-              if (!linkedCustomerId) extracted[field] = spelled.value;
-              spelledNameOverrides[field] = { value: spelled.value, confidence: spelled.confidence, quote: spelled.quote };
-            }
-          }
+        // misheard word. One DECISION is computed here (grounded, Caller-labeled,
+        // inbound, name context, same name misheard or empty) and carried, not
+        // applied: `extracted` is never touched, and nothing here looks up who the
+        // customer is. The decision is used only where the canonical customer is
+        // known: the new-customer and new-lead inserts (createNameFor) and the
+        // candidate staging for a linked customer (nameOverrides, decoder
+        // confidence + quote). An existing customer's row is never written by this
+        // code; the GATE_CONTACT_CORRECTION lane and its gates decide. Narrowing:
+        // inbound calls with an explicitly labeled transcript only (outbound
+        // diarization can swap labels; unlabeled / Speaker-N text never attributes
+        // speech). V2 extraction and secondary contacts are never touched.
+        if (!isOutboundCall(call) && /^\s*caller\s*:/im.test(transcription)) {
+          Object.assign(spelledNameOverrides, spelledNameDecision({ current: extracted, dictation: contactDictation }));
         }
         // Field NAMES only — values are caller PII (AGENTS.md PII-in-logs).
         if (Object.keys(spelledNameOverrides).length) logger.info(`[call-proc-dictation] Caller-spelled name field(s) for ${maskSid(callSid)}: ${Object.keys(spelledNameOverrides).join(', ')}`);
@@ -12616,8 +12581,8 @@ const CallRecordingProcessor = {
           // Lazy require: route module from a service (load-cycle risk).
           const { ensureCustomerAccount } = require('../routes/admin-customers');
           const account = await ensureCustomerAccount(db, {
-            firstName: extracted.first_name || '',
-            lastName: extracted.last_name || null,
+            firstName: createNameFor('first_name') || '',
+            lastName: createNameFor('last_name') || null,
             phone,
             email: extracted.email || null,
           });
@@ -12648,8 +12613,8 @@ const CallRecordingProcessor = {
               // customers.first_name is NOT NULL: the advisory-create path
               // (last name only) stores '' — every greeting falls back to
               // "there" (see the audit in the PR notes).
-              first_name: extracted.first_name || '',
-              last_name: extracted.last_name || null,
+              first_name: createNameFor('first_name') || '',
+              last_name: createNameFor('last_name') || null,
               phone,
               email: extracted.email || null,
               address_line1: addrLine || null,
@@ -12699,7 +12664,7 @@ const CallRecordingProcessor = {
           // A customer created on a last name alone (GATE_CALL_FIRST_NAME_ADVISORY) gets
           // its owed-first-name card NOW, so every blank-name customer has one whether
           // or not a booking follows. Fail-soft: a card failure never undoes the create.
-          if (!String(extracted.first_name || '').trim()) {
+          if (!String(createNameFor('first_name') || '').trim()) {
             try {
               await fileMissingFirstNameCard(db, { callLogId: call.id, customerId, extraction: v2CanonicalExtraction || undefined, extracted });
               if (!bridgeNeedsConfirmation.includes('missing_first_name')) bridgeNeedsConfirmation.push('missing_first_name');
@@ -12723,7 +12688,7 @@ const CallRecordingProcessor = {
           await flagNonMobileCallCustomer({
             customerId,
             phone,
-            name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+            name: [createNameFor('first_name'), createNameFor('last_name')].filter(Boolean).join(' ') || null,
           });
 
           // caller_id_disclaimed (schema 1.14.0, live miss 2026-09-25, call
@@ -12776,8 +12741,8 @@ const CallRecordingProcessor = {
           newsletterCandidate = {
             customerId,
             email: extracted.email,
-            firstName: capitalizeName(extracted.first_name),
-            lastName: extracted.last_name ? capitalizeName(extracted.last_name) : null,
+            firstName: capitalizeName(createNameFor('first_name')),
+            lastName: createNameFor('last_name') ? capitalizeName(createNameFor('last_name')) : null,
           };
         } catch (err) {
           logger.error(`[call-proc] Customer creation failed: ${err.message}`);
@@ -14925,8 +14890,8 @@ const CallRecordingProcessor = {
             // A name may be absent (caller never stated it) — store null, not an
             // empty string, so leadContactCompleteness reads it as missing and
             // the lead surfaces UNqualified for the office to complete.
-            first_name: capitalizeName(extracted.first_name) || null,
-            last_name: capitalizeName(extracted.last_name) || null,
+            first_name: capitalizeName(createNameFor('first_name')) || null,
+            last_name: capitalizeName(createNameFor('last_name')) || null,
             email: extracted.email || null,
             // 'voicemail' is an established lead_type (admin-agents
             // isMissedCallLead treats it as a missed call needing outreach).
@@ -15940,8 +15905,8 @@ const CallRecordingProcessor = {
                   lead_source_id: leadSourceId,
                   customer_id: customerId || null,
                   phone,
-                  first_name: capitalizeName(extracted.first_name) || null,
-                  last_name: capitalizeName(extracted.last_name) || null,
+                  first_name: capitalizeName(createNameFor('first_name')) || null,
+                  last_name: capitalizeName(createNameFor('last_name')) || null,
                   email: extracted.email || null,
                   address: composedLeadAddress || null,
                   city: extracted.city || null,
@@ -16010,8 +15975,8 @@ const CallRecordingProcessor = {
                   lead_source_id: leadSourceId,
                   customer_id: customerId || null,
                   phone: null,
-                  first_name: capitalizeName(extracted.first_name) || null,
-                  last_name: capitalizeName(extracted.last_name) || null,
+                  first_name: capitalizeName(createNameFor('first_name')) || null,
+                  last_name: capitalizeName(createNameFor('last_name')) || null,
                   email: extracted.email || null,
                   // Composed (street + unit) — this row loops back as
                   // `current`, and the fill-only pass above skips a

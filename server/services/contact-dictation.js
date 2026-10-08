@@ -35,6 +35,7 @@
  */
 
 const logger = require('./logger');
+const { properCase } = require('../utils/name-case');
 const { cleanValidEmailOrNull, looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 
 const ENABLED = () => process.env.CONTACT_DICTATION_ENABLED !== 'false';
@@ -279,14 +280,6 @@ async function decodeDictatedContacts({ transcript, contactPassTranscript = null
 const NAME_FIELDS = ['first_name', 'last_name'];
 const SPELLED_NAME_RE = /^\p{L}[\p{L}'’ -]{0,48}\p{L}$/u;
 
-// Title-case a spelling the model returned in one case ("SEROV", "serov");
-// a mixed-case value ("McLoughlin") is the model's reading of the letters and
-// stays as is.
-function caseSpelledName(value) {
-  if (value !== value.toUpperCase() && value !== value.toLowerCase()) return value;
-  return value.toLowerCase().replace(/(^|[\s'’-])(\p{L})/gu, (_m, sep, ch) => sep + ch.toUpperCase());
-}
-
 const squash = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 // The letters a spelling actually spells: runs of single-letter tokens, with
@@ -361,7 +354,7 @@ function sanitizeNameEntries(entries, sources = []) {
     if (!spelledLetterRuns(n.raw_spoken).includes(key)) continue;
     out.push({
       raw_spoken: String(n.raw_spoken).slice(0, 300),
-      spelled_value: caseSpelledName(spelled),
+      spelled_value: properCase(spelled),
       field: n.field,
       whose: n?.whose === 'caller' ? 'caller' : 'other',
       confidence: Math.max(0, Math.min(1, Number(n?.confidence) || 0)),
@@ -426,11 +419,33 @@ function applyNameDictationPolicy({ current = {}, dictation = null } = {}) {
   for (const field of NAME_FIELDS) {
     const spelled = callerSpelledName(dictation, field);
     const existing = String(current[field] || '').trim();
-    if (!spelled || existing === spelled.value) continue;
+    // Same letters (any casing) already: keep the extracted value as it is.
+    if (!spelled || nameKey(existing) === nameKey(spelled.value)) continue;
     // One rule for fill and replace: no name context, no change.
     if (spelled.nameContext && (!existing || sameNameMisheard(existing, spelled.value))) changes[field] = spelled.value;
   }
   return changes;
+}
+
+/**
+ * The name decision the processor carries to the places that know the canonical
+ * customer: { first_name|last_name: { value, confidence, quote } } for every
+ * field with a grounded caller spelling that has name context and either
+ * changes the extracted name (value = the repo-cased spelling) or already
+ * matches its letters (value = the extracted value, unchanged). Pure; it
+ * never touches the extraction.
+ */
+function spelledNameDecision({ current = {}, dictation = null } = {}) {
+  const changes = applyNameDictationPolicy({ current, dictation });
+  const out = {};
+  for (const field of NAME_FIELDS) {
+    const spelled = callerSpelledName(dictation, field);
+    const existing = String(current[field] || '').trim();
+    if (!spelled?.nameContext) continue;
+    const value = changes[field] || (existing && nameKey(existing) === nameKey(spelled.value) ? existing : null);
+    if (value) out[field] = { value, confidence: spelled.confidence, quote: spelled.quote };
+  }
+  return out;
 }
 
 /**
@@ -485,6 +500,7 @@ module.exports = {
   decodeDictatedContacts,
   applyEmailDictationPolicy,
   applyNameDictationPolicy,
+  spelledNameDecision,
   callerSpelledName,
   sanitizeEmailCandidates,
   sanitizeNameEntries,

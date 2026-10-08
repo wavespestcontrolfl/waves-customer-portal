@@ -8,6 +8,7 @@ const {
   decodeDictatedContacts,
   applyEmailDictationPolicy,
   applyNameDictationPolicy,
+  spelledNameDecision,
   callerSpelledName,
   sanitizeNameEntries,
   sanitizeEmailCandidates,
@@ -412,7 +413,6 @@ describe('spelled-name decoding', () => {
     ['one swapped vowel', 'McDermond', 'McDarmond'],
     ['one swapped letter', 'Varnum', 'Varnim'],
     ['two edits on a long name', 'Orlmeyer', 'Earlmeyer'],
-    ['same letters, wrong case', 'McDermond', 'Mcdermond'],
   ])('replaces the misheard caller surname: %s', (_label, spelled, heard) => {
     const out = applyNameDictationPolicy({
       current: { first_name: 'Quentrell', last_name: heard },
@@ -480,27 +480,75 @@ describe('spelled-name decoding', () => {
   });
 });
 
-describe('processor wiring — the spelled name goes to the flat record and the staged candidate only', () => {
+describe('spelledNameDecision — casing and the carried decision', () => {
+  const d = (spelled, over = {}) => ({
+    emails: [],
+    addresses: [],
+    names: sanitizeNameEntries([{
+      raw_spoken: `Caller: my last name is ${spelled.split('').join('-').toUpperCase()}`,
+      spelled_value: spelled.toUpperCase(),
+      field: 'last_name',
+      whose: 'caller',
+      confidence: 0.95,
+      ...over,
+    }], [`Caller: my last name is ${spelled.split('').join('-').toUpperCase()}`]),
+  });
+
+  test('the spelled value uses the repo proper-case (Mc / Mac / O\' / hyphen)', () => {
+    expect(spelledNameDecision({ current: { last_name: 'Mcglaughlin' }, dictation: d('McLoughlin') }).last_name.value).toBe('McLoughlin');
+    expect(spelledNameDecision({ current: {}, dictation: d('OBRIEN-SMITH') }).last_name.value).toBe('Obrien-Smith');
+    expect(sanitizeNameEntries([{ raw_spoken: 'Caller: O-\'-B-R-I-E-N', spelled_value: "O'BRIEN", field: 'last_name', whose: 'caller', confidence: 0.9 }], ["Caller: O-'-B-R-I-E-N"])).toEqual([]);
+  });
+
+  test('extracted letters already equal the spelled letters: keep the extracted value (MCLOUGHLIN vs McLoughlin)', () => {
+    expect(applyNameDictationPolicy({ current: { last_name: 'McLoughlin' }, dictation: d('McLoughlin') })).toEqual({});
+    const out = spelledNameDecision({ current: { last_name: 'McLoughlin' }, dictation: d('MCLOUGHLIN') });
+    // The decoder's confidence is carried for staging, but the value is the extracted one, unchanged.
+    expect(out.last_name).toMatchObject({ value: 'McLoughlin', confidence: 0.95 });
+    expect(spelledNameDecision({ current: { last_name: 'MCLOUGHLIN' }, dictation: d('McLoughlin') }).last_name.value).toBe('MCLOUGHLIN');
+  });
+
+  test('no decision without name context, for a far name, or for someone else', () => {
+    expect(spelledNameDecision({ current: { last_name: 'Smith' }, dictation: d('Varnum') })).toEqual({});
+    expect(spelledNameDecision({ current: {}, dictation: d('Varnum', { whose: 'other' }) })).toEqual({});
+    const noCtx = { emails: [], addresses: [], names: sanitizeNameEntries([{ raw_spoken: 'V-A-R-N-U-M', spelled_value: 'Varnum', field: 'last_name', whose: 'caller', confidence: 0.95 }], ['Caller: sure, V-A-R-N-U-M']) };
+    expect(spelledNameDecision({ current: {}, dictation: noCtx })).toEqual({});
+  });
+});
+
+describe('processor wiring — one decision, used only where the canonical customer is known', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-  test('the V2 extraction is never rewritten and no cohort marker or version suffix exists', () => {
-    const at = src.indexOf('const labeledInbound =');
+
+  test('the decision is computed from inbound labeled calls, applies nothing to `extracted`, and does no customer lookup', () => {
+    const at = src.indexOf('spelledNameDecision({ current: extracted');
     expect(at).toBeGreaterThan(0);
-    const block = src.slice(at, at + 2600);
-    // Decoder-backed override for a changed name or one the record already holds.
-    expect(block).toMatch(/nameChanges\[field\] \|\| String\(extracted\[field\] \|\| ''\)\.trim\(\) === spelled\.value/);
-    // The flat record takes the spelling only for a NEW caller; an existing customer gets the staged candidate alone.
-    // Inbound + labeled transcript only (outbound / unlabeled: no change, no staging).
-    expect(block).toMatch(/labeledInbound = !isOutboundCall\(call\) && \/\^\\s\*caller\\s\*:\/im\.test\(transcription\)/);
-    expect(block).toMatch(/labeledInbound \? applyNameDictationPolicy/);
-    // Shared phone (> 1 live customer): nothing changes and nothing is staged.
-    expect(block).toMatch(/resolveCallContactPhone\(call, extracted\.phone\)/);
-    expect(block).toMatch(/countCustomersWithContactPhone\(k\)\.catch\(\(\) => 2\)/);
-    expect(block).toMatch(/if \(phoneMatches <= 1\) \{/);
-    expect(block).toMatch(/linkedCustomerId = call\.customer_id \|\| phoneMatches === 1/);
-    expect(block).toMatch(/if \(!linkedCustomerId\) extracted\[field\] = spelled\.value;/);
-    expect(block).toMatch(/spelledNameOverrides\[field\] = \{ value: spelled\.value, confidence: spelled\.confidence, quote: spelled\.quote \}/);
-    expect(block).not.toMatch(/v2Result/);
-    expect(src).not.toMatch(/NAME_DICTATION_MARKER|name_dictation|applyNameDictationToV2Caller/);
+    const block = src.slice(at - 400, at + 400);
+    expect(block).toMatch(/!isOutboundCall\(call\) && \/\^\\s\*caller\\s\*:\/im\.test\(transcription\)/);
+    expect(block).toMatch(/Object\.assign\(spelledNameOverrides, spelledNameDecision/);
+    expect(block).not.toMatch(/extracted\[field\] =|findCustomerForCallContact|countCustomers/);
+    expect(src).not.toMatch(/countCustomersWithContactPhone|labeledInbound|NAME_DICTATION_MARKER|name_dictation|applyNameDictationToV2Caller/);
+  });
+
+  test('the decision reaches candidate staging for the linked customer', () => {
     expect(src).toMatch(/nameOverrides: spelledNameOverrides,/);
+  });
+
+  // A slot-only match that findCustomerForCallContact rejects ends in the create branch, which
+  // reads the names through createNameFor, so the NEW customer / lead carries the spelled name.
+  test('every new-customer and new-lead insert reads the name through createNameFor', () => {
+    expect(src).toMatch(/const createNameFor = \(field\) => spelledNameOverrides\[field\]\?\.value \?\? extracted\[field\];/);
+    const customerInsert = src.slice(src.indexOf("trx('customers').insert(applyContactNormalization({"), src.indexOf("trx('customers').insert(applyContactNormalization({") + 900);
+    expect(customerInsert).toMatch(/first_name: createNameFor\('first_name'\) \|\| ''/);
+    expect(customerInsert).toMatch(/last_name: createNameFor\('last_name'\) \|\| null/);
+    const account = src.slice(src.indexOf('ensureCustomerAccount(db, {'), src.indexOf('ensureCustomerAccount(db, {') + 300);
+    expect(account).toMatch(/firstName: createNameFor\('first_name'\)/);
+    // The three lead inserts (new lead, shared-line conflict mint, claim-race mint).
+    for (const marker of ["db('leads').insert({\n            lead_source_id", 'const [conflictFresh] = await db(\'leads\').insert({', 'const [raceFresh] = await db(\'leads\').insert({']) {
+      const i = src.indexOf(marker);
+      expect(i).toBeGreaterThan(0);
+      const body = src.slice(i, i + 1100);
+      expect(body).toMatch(/first_name: capitalizeName\(createNameFor\('first_name'\)\) \|\| null/);
+      expect(body).toMatch(/last_name: capitalizeName\(createNameFor\('last_name'\)\) \|\| null/);
+    }
   });
 });
