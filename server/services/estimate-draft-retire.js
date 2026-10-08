@@ -243,6 +243,7 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
            AND ${SENT_EVIDENCE_SQL('s')}
            AND s.created_at > d.created_at
            AND d.updated_at <= s.sent_at
+           AND NOT (s.status = 'accepted' AND EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id))
          ORDER BY COALESCE(s.property_id = d.property_id, false) DESC,
                   COALESCE(LOWER(TRIM(s.address)) = LOWER(TRIM(d.address)), false) DESC,
                   s.sent_at DESC
@@ -256,8 +257,14 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   const chosen = [...new Map(pairs.filter(sameProperty).reverse().map((p) => [p.draft_id, p])).values()];
 
   const rows = [];
+  // The kept-forever shape (a lead-linked draft whose replacement is accepted)
+  // is filtered in the read above, so what returns null here is transient (a
+  // busy row, a change since the read). Attempts are capped too, so a run
+  // opens at most 2 x batch transactions.
+  let attempts = 0;
   for (const pair of chosen) {
-    if (rows.length >= batch) break;
+    if (rows.length >= batch || attempts >= batch * 2) break;
+    attempts += 1;
     const row = await conn.transaction((trx) => retireOneDraft(trx, pair))
       .catch((err) => { if (err instanceof KeepDraft || BUSY_ROW_CODES.has(err?.code)) return null; throw err; });
     if (!row) continue;
