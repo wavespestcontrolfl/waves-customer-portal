@@ -167,7 +167,7 @@ async function retireOneDraft(trx, pair) {
   await trx.raw("SET LOCAL lock_timeout = '1500ms'");
   const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().select('id');
   const sent = await trx.raw(`
-    SELECT id, status, archived_at FROM estimates s
+    SELECT id, status, archived_at, estimate_data #> '{deliveryState,sentChannels}' AS sent_channels FROM estimates s
      WHERE s.id = ?
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
@@ -239,7 +239,12 @@ async function retireOneDraft(trx, pair) {
     if (replaySend && !sentOwned) {
       const link = require('./lead-estimate-link');
       const replay = { estimateId: pair.sent_id, performedBy: RETIRE_CLOSER, database: trx, originatingNotAfter: pair.sent_at };
-      await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at });
+      // Only the channels the delivery record proves count for the
+      // contact-wide answered stamp; with no record, none (an empty list
+      // stamps nothing) rather than assuming both.
+      const recorded = sent.rows[0].sent_channels;
+      const sentChannels = Array.isArray(recorded) ? recorded.filter((ch) => ch === 'sms' || ch === 'email') : [];
+      await link.markLinkedLeadEstimateSent({ ...replay, sendMethod: 'backfill', respondedAt: pair.sent_at, sentChannels });
       if (sentStatus === 'viewed') await link.markLinkedLeadEstimateViewed(replay);
     }
   }
