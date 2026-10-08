@@ -1,8 +1,10 @@
 /**
- * POST /api/admin/triage/:id/save-contact-note files the people a
- * secondary_contact_captured card names as dated lines in the customer's
- * internal_notes and resolves the card. It is a pure internal note: no
- * service-contact slot, phone/email or consent column is written.
+ * POST /api/admin/triage/:id/save-contact-note files the ONE person a
+ * secondary_contact_captured card names as a dated line in the customer's
+ * crm_notes (the notes Customer 360 shows) and resolves the card. It is a
+ * pure internal note: no service-contact slot, phone/email or consent column
+ * is written, and a card that names a message recipient or more than one
+ * person is refused.
  * Drives the REAL route against an in-memory fake db (same harness as
  * admin-triage-confirm-email.test.js). Fixtures are synthetic.
  */
@@ -166,15 +168,15 @@ const CARD_ID = '22222222-2222-4222-8222-222222222222';
 const CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
 const CALL_CREATED_AT = '2026-10-07T15:30:00.000Z';
 
-const CONTACT_PAYLOAD = {
-  flag: 'secondary_contact_captured',
-  secondary_contact: {
-    name_full: 'Pat Sample', phone_e164: '+19415550123', email: 'pat.sample@example.com',
-    role: 'property_owner', notes: 'Do not call him.', wants_notifications: false,
-  },
+const OTHER_CUSTOMER_ID = '55555555-5555-4555-8555-555555555555';
+const CONTACT = {
+  name_full: 'Pat Sample', phone_e164: '+19415550123', email: 'pat.sample@example.com',
+  role: 'property_owner', notes: 'Do not call him.', wants_notifications: false,
 };
+const CONTACT_PAYLOAD = { flag: 'secondary_contact_captured', secondary_contact: CONTACT };
+const PAYLOAD_VERSION = CALL_CREATED_AT;
 
-function fixture({ payload = CONTACT_PAYLOAD, reason = 'secondary_contact_captured', callCustomer = CUSTOMER_ID, internalNotes = null } = {}) {
+function fixture({ payload = CONTACT_PAYLOAD, reason = 'secondary_contact_captured', callCustomer = CUSTOMER_ID, crmNotes = null } = {}) {
   return makeFakeDb({
     triage_items: [{
       id: CARD_ID, call_log_id: CALL_ID, reason_code: reason, status: 'open',
@@ -183,13 +185,46 @@ function fixture({ payload = CONTACT_PAYLOAD, reason = 'secondary_contact_captur
     }],
     call_log: [{ id: CALL_ID, review_status: 'open', customer_id: callCustomer, created_at: CALL_CREATED_AT }],
     customers: [{
-      id: CUSTOMER_ID, internal_notes: internalNotes, phone: '+19415550100', email: 'owner@example.com',
+      id: CUSTOMER_ID, crm_notes: crmNotes, internal_notes: null, phone: '+19415550100', email: 'owner@example.com',
       service_contact_phone: null, service_contact_email: null, secondary_phone: null,
     }],
   });
 }
 
 const EXPECTED_LINE = 'Contact named on call (not a message recipient): Pat Sample (property owner) · +19415550123 · pat.sample@example.com. Do not call him.';
+const save = (baseUrl, body = { expected_updated_at: PAYLOAD_VERSION }, headers = {}) => post(baseUrl, `/${CARD_ID}/save-contact-note`, body, headers);
+
+// Wraps the fake so a test can watch customer writes and lock calls, and
+// simulate a relink that commits between the route's two reads of the call.
+function tracked(fake, { relinkAfterFirstCallRead = false } = {}) {
+  const events = [];
+  let relinked = false;
+  const t = (table) => {
+    const name = String(table).split(' ')[0];
+    const api = fake.conn(table);
+    const forUpdate = api.forUpdate;
+    if (name === 'customers' || name === 'call_log') {
+      api.forUpdate = (...a) => { events.push(`lock:${name}`); return forUpdate.apply(api, a); };
+    }
+    if (name === 'customers') {
+      const update = api.update;
+      api.update = async (patch, ...rest) => { events.push({ customerUpdate: Object.keys(patch).sort() }); return update(patch, ...rest); };
+    }
+    if (name === 'call_log' && relinkAfterFirstCallRead) {
+      const first = api.first;
+      api.first = async (...a) => {
+        const row = await first(...a);
+        if (!relinked) { relinked = true; fake.tables.call_log[0].customer_id = OTHER_CUSTOMER_ID; }
+        return row;
+      };
+    }
+    return api;
+  };
+  t.transaction = async (fn) => fn(t);
+  t.raw = fake.conn.raw;
+  t.schema = fake.conn.schema;
+  return { conn: t, events };
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -197,65 +232,78 @@ beforeEach(() => {
 });
 
 describe('POST /admin/triage/:id/save-contact-note', () => {
+  it('writes one dated line to crm_notes only, resolves the card, and locks customer before call row', async () => {
+    const fake = fixture();
+    const { conn, events } = tracked(fake);
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await save(baseUrl);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, id: CARD_ID, status: 'resolved' });
+    });
+    const customer = fake.tables.customers[0];
+    expect(customer.crm_notes).toBe(`[call 2026-10-07] ${EXPECTED_LINE}`);
+    // crm_notes (and the touch stamp) is the only column written: no slot, phone, email or consent column.
+    expect(events.filter((e) => e.customerUpdate)).toEqual([{ customerUpdate: ['crm_notes', 'updated_at'] }]);
+    expect(customer).toMatchObject({
+      internal_notes: null, phone: '+19415550100', email: 'owner@example.com',
+      service_contact_phone: null, service_contact_email: null, secondary_phone: null,
+    });
+    expect(fake.tables.triage_items[0]).toMatchObject({
+      status: 'resolved', resolution_source: 'human', resolution_note: 'contact saved to customer notes', assigned_to: 'tech-1',
+    });
+    expect(fake.tables.call_log[0].review_status).toBe('resolved');
+    expect(events.filter((e) => typeof e === 'string')).toEqual(['lock:customers', 'lock:call_log']);
+  });
+
   it('tags the note with the call\'s Eastern day, not the UTC day', async () => {
     // 9:30 PM Eastern on October 7 is already October 8 in UTC.
     const fake = fixture();
     fake.tables.call_log[0].created_at = '2026-10-08T01:30:00.000Z';
     wireDb(db, fake);
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, `/${CARD_ID}/save-contact-note`);
-      expect(res.status).toBe(200);
+      expect((await save(baseUrl)).status).toBe(200);
     });
-    expect(fake.tables.customers[0].internal_notes).toBe(`[call 2026-10-07] ${EXPECTED_LINE}`);
+    expect(fake.tables.customers[0].crm_notes).toBe(`[call 2026-10-07] ${EXPECTED_LINE}`);
   });
 
-  it('appends one dated line, resolves the card, and writes only internal_notes', async () => {
-    const fake = fixture();
-    // Record every customers update the route (and its transaction) issues.
-    const updates = [];
-    const tracked = (table) => {
-      const api = fake.conn(table);
-      if (String(table).split(' ')[0] === 'customers') {
-        const u = api.update;
-        api.update = async (patch, ...rest) => { updates.push(patch); return u(patch, ...rest); };
-      }
-      return api;
-    };
-    tracked.transaction = async (fn) => fn(tracked);
-    tracked.raw = fake.conn.raw;
-    tracked.schema = fake.conn.schema;
-    wireDb(db, { conn: tracked });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, `/${CARD_ID}/save-contact-note`);
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ ok: true, saved: 1, already_present: 0 });
-    });
-    const customer = fake.tables.customers[0];
-    expect(customer.internal_notes).toBe(`[call 2026-10-07] ${EXPECTED_LINE}`);
-    // Nothing but the notes (and the touch stamp) is in the customer update.
-    expect(updates).toHaveLength(1);
-    expect(Object.keys(updates[0]).sort()).toEqual(['internal_notes', 'updated_at']);
-    expect(customer).toMatchObject({
-      phone: '+19415550100', email: 'owner@example.com',
-      service_contact_phone: null, service_contact_email: null, secondary_phone: null,
-    });
-    const card = fake.tables.triage_items[0];
-    expect(card).toMatchObject({ status: 'resolved', resolution_source: 'human', resolution_note: 'contact saved to customer notes', assigned_to: 'tech-1' });
-    expect(fake.tables.call_log[0].review_status).toBe('resolved');
-  });
-
-  it('keeps existing notes and does not add the line twice on a second click', async () => {
-    const fake = fixture({ internalNotes: 'Prefers mornings.' });
+  it('appends after existing crm_notes with a blank line and does not add the line twice on a second click', async () => {
+    const fake = fixture({ crmNotes: 'Prefers mornings.' });
     wireDb(db, fake);
     await withServer(async (baseUrl) => {
-      expect((await post(baseUrl, `/${CARD_ID}/save-contact-note`)).status).toBe(200);
-      // Reopen the card (a reprocess or a second tab) and click again.
+      expect((await save(baseUrl)).status).toBe(200);
+      // Reopen the card (a second tab, a reprocess) and click again at its new version.
       Object.assign(fake.tables.triage_items[0], { status: 'open', resolved_at: null });
-      const again = await post(baseUrl, `/${CARD_ID}/save-contact-note`);
-      expect(again.status).toBe(200);
-      expect(await again.json()).toMatchObject({ saved: 0, already_present: 1 });
+      const version = new Date(fake.tables.triage_items[0].updated_at).toISOString();
+      expect((await save(baseUrl, { expected_updated_at: version })).status).toBe(200);
     });
-    expect(fake.tables.customers[0].internal_notes).toBe(`Prefers mornings.\n[call 2026-10-07] ${EXPECTED_LINE}`);
+    expect(fake.tables.customers[0].crm_notes).toBe(`Prefers mornings.\n\n[call 2026-10-07] ${EXPECTED_LINE}`);
+  });
+
+  it('409s a stale or missing card version and writes nothing', async () => {
+    const fake = fixture();
+    wireDb(db, fake);
+    await withServer(async (baseUrl) => {
+      const stale = await save(baseUrl, { expected_updated_at: '2026-10-07T15:31:00.000Z' });
+      expect(stale.status).toBe(409);
+      expect((await stale.json()).code).toBe('STALE_CARD_VERSION');
+      expect((await save(baseUrl, {})).status).toBe(409);
+    });
+    expect(fake.tables.customers[0].crm_notes).toBeNull();
+    expect(fake.tables.triage_items[0].status).toBe('open');
+  });
+
+  it('409s and writes nothing when the call is relinked between reading it and locking its row', async () => {
+    const fake = fixture();
+    const { conn } = tracked(fake, { relinkAfterFirstCallRead: true });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await save(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/relinked/);
+    });
+    expect(fake.tables.customers[0].crm_notes).toBeNull();
+    expect(fake.tables.triage_items[0].status).toBe('open');
   });
 
   it('409s a card that is already resolved', async () => {
@@ -263,16 +311,16 @@ describe('POST /admin/triage/:id/save-contact-note', () => {
     fake.tables.triage_items[0].status = 'resolved';
     wireDb(db, fake);
     await withServer(async (baseUrl) => {
-      expect((await post(baseUrl, `/${CARD_ID}/save-contact-note`)).status).toBe(409);
+      expect((await save(baseUrl)).status).toBe(409);
     });
-    expect(fake.tables.customers[0].internal_notes).toBeNull();
+    expect(fake.tables.customers[0].crm_notes).toBeNull();
   });
 
   it('404s a missing card and 403s a non-admin', async () => {
     wireDb(db, fixture());
     await withServer(async (baseUrl) => {
       expect((await post(baseUrl, '/44444444-4444-4444-8444-444444444444/save-contact-note')).status).toBe(404);
-      expect((await post(baseUrl, `/${CARD_ID}/save-contact-note`, {}, { 'x-test-role': 'technician' })).status).toBe(403);
+      expect((await save(baseUrl, undefined, { 'x-test-role': 'technician' })).status).toBe(403);
     });
   });
 
@@ -280,26 +328,59 @@ describe('POST /admin/triage/:id/save-contact-note', () => {
     const fake = fixture({ reason: 'missing_last_name' });
     wireDb(db, fake);
     await withServer(async (baseUrl) => {
-      expect((await post(baseUrl, `/${CARD_ID}/save-contact-note`)).status).toBe(400);
+      expect((await save(baseUrl)).status).toBe(400);
     });
-    expect(fake.tables.customers[0].internal_notes).toBeNull();
+    expect(fake.tables.customers[0].crm_notes).toBeNull();
     expect(fake.tables.triage_items[0].status).toBe('open');
   });
 
-  it('400s a second-contact card whose contact has a name but no phone or email', async () => {
-    const fake = fixture({ payload: { flag: 'secondary_contact_captured', secondary_contact: { name_full: 'Pat Sample', role: 'unknown' } } });
+  it.each([
+    ['the caller asked for notifications', { ...CONTACT, wants_notifications: true }, {}],
+    ['the person wants appointment texts', { ...CONTACT, wants_appointment_texts: true }, {}],
+    ['the person is on site', { ...CONTACT, on_site: true }, {}],
+    ['other parties were mentioned', CONTACT, { other_parties_mentioned: true }],
+    ['a second person is listed after the mirror', CONTACT, {
+      secondary_contacts: [CONTACT, { name_full: 'Robin Example', email: 'robin@example.com' }],
+    }],
+    ['the contact has a name but no phone or email', { name_full: 'Pat Sample', role: 'unknown' }, {}],
+  ])('400s and leaves the card open when %s', async (_why, contact, extra) => {
+    const fake = fixture({ payload: { flag: 'secondary_contact_captured', secondary_contact: contact, ...extra } });
     wireDb(db, fake);
     await withServer(async (baseUrl) => {
-      expect((await post(baseUrl, `/${CARD_ID}/save-contact-note`)).status).toBe(400);
+      expect((await save(baseUrl)).status).toBe(400);
     });
-    expect(fake.tables.customers[0].internal_notes).toBeNull();
+    expect(fake.tables.customers[0].crm_notes).toBeNull();
+    expect(fake.tables.triage_items[0].status).toBe('open');
+  });
+
+  it('never writes the raw V2 mirror (secondary_contacts[0]): a card whose array only mirrors the singleton saves one line', async () => {
+    const mirror = { name_full: 'Pat Sample', phone_e164: '+19415550123', email: 'pat.sample@example.com', wants_notifications: true };
+    const fake = fixture({ payload: { flag: 'secondary_contact_captured', secondary_contact: CONTACT, secondary_contacts: [mirror] } });
+    wireDb(db, fake);
+    await withServer(async (baseUrl) => {
+      expect((await save(baseUrl)).status).toBe(200);
+    });
+    expect(fake.tables.customers[0].crm_notes).toBe(`[call 2026-10-07] ${EXPECTED_LINE}`);
+  });
+
+  it('omits an unknown role, collapses whitespace, and caps the line at 500 chars', async () => {
+    const fake = fixture({ payload: { flag: 'secondary_contact_captured', secondary_contact: {
+      first_name: 'Pat', last_name: 'Sample', phone: '9415550123', role: 'unknown', notes: `Line one\nline two ${'x'.repeat(600)}`,
+    } } });
+    wireDb(db, fake);
+    await withServer(async (baseUrl) => {
+      expect((await save(baseUrl)).status).toBe(200);
+    });
+    const line = fake.tables.customers[0].crm_notes.replace('[call 2026-10-07] ', '');
+    expect(line).toMatch(/^Contact named on call \(not a message recipient\): Pat Sample · 9415550123\. Line one line two x+$/);
+    expect(line).toHaveLength(500);
   });
 
   it('409s when the call has no linked customer and leaves the card open', async () => {
     const fake = fixture({ callCustomer: null });
     wireDb(db, fake);
     await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, `/${CARD_ID}/save-contact-note`);
+      const res = await save(baseUrl);
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/no linked customer/);
     });
@@ -311,39 +392,16 @@ describe('POST /admin/triage/:id/save-contact-note', () => {
     fake.tables.customers[0].deleted_at = '2026-10-01T00:00:00.000Z';
     wireDb(db, fake);
     await withServer(async (baseUrl) => {
-      expect((await post(baseUrl, `/${CARD_ID}/save-contact-note`)).status).toBe(409);
+      expect((await save(baseUrl)).status).toBe(409);
     });
     expect(fake.tables.triage_items[0].status).toBe('open');
-  });
-
-  it('writes one line per distinct contact, drops the mirrored duplicate, omits an unknown role, and caps each line at 500 chars', async () => {
-    const singleton = { first_name: 'Pat', last_name: 'Sample', phone: '9415550123', email: null, role: 'unknown' };
-    const fake = fixture({
-      payload: {
-        flag: 'secondary_contact_captured',
-        secondary_contact: singleton,
-        secondary_contacts: [
-          { name_full: 'Pat Sample', phone_e164: '+19415550123', role: 'unknown' },
-          { name_full: 'Robin Example', email: 'robin@example.com', role: 'tenant', notes: `Line one\nline two ${'x'.repeat(600)}` },
-        ],
-      },
-    });
-    wireDb(db, fake);
-    await withServer(async (baseUrl) => {
-      expect(await (await post(baseUrl, `/${CARD_ID}/save-contact-note`)).json()).toMatchObject({ saved: 2 });
-    });
-    const lines = fake.tables.customers[0].internal_notes.split('\n');
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toBe('[call 2026-10-07] Contact named on call (not a message recipient): Pat Sample · 9415550123.');
-    expect(lines[1]).toMatch(/^\[call 2026-10-07\] Contact named on call \(not a message recipient\): Robin Example \(tenant\) · robin@example.com\. Line one line two x+$/);
-    expect(lines[1].replace('[call 2026-10-07] ', '').length).toBe(500);
   });
 
   it('does not log the contact\'s name, phone or email', async () => {
     const logger = require('../services/logger');
     wireDb(db, fixture());
     await withServer(async (baseUrl) => {
-      await post(baseUrl, `/${CARD_ID}/save-contact-note`);
+      await save(baseUrl);
     });
     const logged = JSON.stringify([...logger.info.mock.calls, ...logger.error.mock.calls]);
     expect(logged).not.toMatch(/Pat Sample|555|example\.com/);

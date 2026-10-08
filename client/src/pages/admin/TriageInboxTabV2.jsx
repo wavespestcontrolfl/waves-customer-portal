@@ -97,14 +97,6 @@ function parsePayload(payload) {
   try { return JSON.parse(payload); } catch { return null; }
 }
 
-// A second-contact card can be filed to the customer's notes when it names a
-// person with a phone or an email (the server re-checks).
-function hasNamedContact(payload) {
-  const p = parsePayload(payload);
-  return [p?.secondary_contact, ...(Array.isArray(p?.secondary_contacts) ? p.secondary_contacts : [])].some((c) => c && typeof c === "object"
-    && (c.name_full || c.first_name || c.last_name) && (c.phone || c.phone_e164 || c.email));
-}
-
 // A card's visit link must stay inside the admin app (navigation only — not an API call).
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -362,8 +354,35 @@ export function FamilyEvidence({ payload, openCustomerIds = null }) {
   );
 }
 
+// A second-contact card can be filed as a customer note only when it names exactly one person who is not
+// a message recipient. Mirrors secondContactNote in server/routes/admin-triage.js (the server re-checks);
+// the entries are the ones ConfirmEvidence shows: the singleton, then secondary_contacts after its first.
+function canSaveContactNote(payload) {
+  const p = parsePayload(payload);
+  const c = p?.secondary_contact;
+  if (!c || typeof c !== "object" || p.other_parties_mentioned === true) return false;
+  if ((Array.isArray(p.secondary_contacts) ? p.secondary_contacts.slice(1) : []).some(Boolean)) return false;
+  if (c.wants_notifications === true || c.wants_appointment_texts === true || c.on_site === true) return false;
+  return !!(c.name_full || c.first_name || c.last_name) && !!(c.phone || c.phone_e164 || c.email);
+}
+
+// The shared evidence panel plus the one-tap "Save to notes" (admin, open cards only).
+function SecondContactEvidence({ payload, reasonCode, isOpenView, isAdmin, busy, onSave }) {
+  return (
+    <>
+      <ConfirmEvidence payload={payload} reasonCode={reasonCode} />
+      {isOpenView && isAdmin && canSaveContactNote(payload) && (
+        <Button size="sm" variant="secondary" className="mt-2" disabled={busy} onClick={onSave}
+          title="Adds this person to the customer's notes. They do not get messages.">
+          {busy ? "Saving…" : "Save to notes"}
+        </Button>
+      )}
+    </>
+  );
+}
+
 // Reason -> evidence component for the cards that do not use the shared ConfirmEvidence panel.
-const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence };
+const EVIDENCE_BY_REASON = { family_account_candidates: FamilyEvidence, secondary_contact_captured: SecondContactEvidence };
 
 // Cards settled by their own Resolve / Dismiss, never by an Accept / Deny call verdict (the server 400s
 // /verdict on each). The verdict badge is not shown on them.
@@ -863,18 +882,24 @@ export default function TriageInboxTabV2({ isAdmin }) {
       });
   };
 
-  // Files the second person named on the call in the customer's notes (no
-  // slot, no message recipient) and resolves the card server-side.
+  // Files the one person a second-contact card names in the customer's notes
+  // (not a message recipient) and resolves the card server-side. Version-bound
+  // like the other card actions: a card refreshed since it was displayed is a 409.
   const saveContactNote = (item) => {
     setActioning(item.id);
-    adminFetch(`/admin/triage/${item.id}/save-contact-note`, { method: "POST", body: JSON.stringify({}) })
+    adminFetch(`/admin/triage/${item.id}/save-contact-note`, {
+      method: "POST",
+      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+    })
       .then(() => { setActioning(null); load(mode, status); })
       .catch((err) => {
         setActioning(null);
-        if (err?.status === 409) load(mode, status);
-        setError(err?.status === 409
-          ? (err?.message || "This card changed or has no linked customer — check it and try again.")
-          : isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Save failed — try again.");
+        if (err?.status === 409) {
+          load(mode, status);
+          setError(err.message || "This card changed since it loaded — review it and try again.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : err?.status === 400 ? err.message : "Save failed — try again.");
       });
   };
 
@@ -1200,16 +1225,6 @@ export default function TriageInboxTabV2({ isAdmin }) {
                             </Button>
                           ) : (
                             <>
-                              {isOpenView && isAdmin && item.reason_code === "secondary_contact_captured" && hasNamedContact(item.payload) && (
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  disabled={actioning === busyKey}
-                                  onClick={() => saveContactNote(item)}
-                                >
-                                  {actioning === busyKey ? "Saving…" : "Save to notes"}
-                                </Button>
-                              )}
                               <Button
                                 size="sm"
                                 variant="secondary"
@@ -1234,7 +1249,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
-                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids })}
+                    {isTriage && React.createElement(EVIDENCE_BY_REASON[item.reason_code] || ConfirmEvidence, { payload: item.payload, reasonCode: item.reason_code, openCustomerIds: item.owed_customer_open_ids, isOpenView, isAdmin, busy: actioning === busyKey, onSave: () => saveContactNote(item) })}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">

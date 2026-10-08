@@ -48,12 +48,12 @@ function petDetailsFrom(pets) {
   return raw ? String(raw).slice(0, 1000) : null;
 }
 
-function appendWithProvenance(existing, addition, callDate) {
+function appendWithProvenance(existing, addition, callDate, separator = '\n') {
   const tag = `[call ${String(callDate).slice(0, 10)}]`;
   const line = `${tag} ${addition}`.trim();
   if (!existing || !String(existing).trim()) return line;
   if (String(existing).includes(addition)) return existing; // idempotent reprocess
-  return `${existing}\n${line}`;
+  return `${existing}${separator}${line}`;
 }
 
 /**

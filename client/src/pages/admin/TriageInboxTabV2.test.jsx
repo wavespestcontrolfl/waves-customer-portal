@@ -731,25 +731,36 @@ describe('street-level address hold: office confirm', () => {
 
 describe('Save to notes on second-contact cards', () => {
   const contact = { name_full: 'Pat Sample', phone_e164: '+19415550123', email: 'pat.sample@example.com', role: 'property_owner' };
-  const secondCard = { ...ordinary, id: 'second', first_name: 'Second', last_name: 'Contact', reason_code: 'secondary_contact_captured',
-    feedback_verdict: null, payload: { flag: 'secondary_contact_captured', secondary_contact: contact } };
-  const nameOnlyCard = { ...secondCard, id: 'name-only', first_name: 'Name', last_name: 'Only',
-    payload: { flag: 'secondary_contact_captured', secondary_contact: { name_full: 'Pat Sample' } } };
+  const card = (id, name, payload) => ({ ...ordinary, id, first_name: name, last_name: 'Contact', reason_code: 'secondary_contact_captured',
+    feedback_verdict: null, payload: { flag: 'secondary_contact_captured', ...payload } });
+  const secondCard = card('second', 'Second', { secondary_contact: contact });
+  const refused = [
+    card('name-only', 'NameOnly', { secondary_contact: { name_full: 'Pat Sample' } }),
+    card('wants', 'Wants', { secondary_contact: { ...contact, wants_notifications: true } }),
+    card('texts', 'Texts', { secondary_contact: { ...contact, wants_appointment_texts: true } }),
+    card('onsite', 'OnSite', { secondary_contact: { ...contact, on_site: true } }),
+    card('others', 'Others', { secondary_contact: contact, other_parties_mentioned: true }),
+    card('two', 'Two', { secondary_contact: contact, secondary_contacts: [contact, { name_full: 'Robin Example', email: 'robin@example.com' }] }),
+  ];
+  // The array's first entry mirrors the singleton: a card with only the mirror still names one person.
+  const mirrorOnly = card('mirror', 'Mirror', { secondary_contact: contact, secondary_contacts: [contact] });
   let listItems;
 
   beforeEach(() => {
-    listItems = [secondCard, nameOnlyCard, ordinary];
+    listItems = [secondCard, mirrorOnly, ...refused, ordinary];
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
       ? { items: listItems, counts: { open: listItems.length, resolved: 0, dismissed: 0 } }
       : { ok: true }));
   });
 
-  it('shows the button only on a second-contact card that names a reachable person', async () => {
+  it('shows the button only on a card that names exactly one non-recipient person', async () => {
     render(<TriageInboxTabV2 isAdmin />);
-    const card = (await screen.findByText('Second Contact')).closest('.py-4');
-    expect(within(card).getByRole('button', { name: 'Save to notes' })).toBeInTheDocument();
-    expect(within(screen.getByText('Name Only').closest('.py-4')).queryByRole('button', { name: 'Save to notes' })).not.toBeInTheDocument();
-    expect(within(screen.getByText('Ordinary Card').closest('.py-4')).queryByRole('button', { name: 'Save to notes' })).not.toBeInTheDocument();
+    await screen.findByText('Second Contact');
+    const buttons = (name) => within(screen.getByText(name).closest('.py-4')).queryAllByRole('button', { name: 'Save to notes' });
+    expect(buttons('Second Contact')).toHaveLength(1);
+    expect(buttons('Mirror Contact')).toHaveLength(1);
+    for (const c of refused) expect(buttons(`${c.first_name} Contact`)).toHaveLength(0);
+    expect(buttons('Ordinary Card')).toHaveLength(0);
   });
 
   it('hides the button from a non-admin', async () => {
@@ -758,28 +769,31 @@ describe('Save to notes on second-contact cards', () => {
     expect(screen.queryByRole('button', { name: 'Save to notes' })).not.toBeInTheDocument();
   });
 
-  it('posts to the save-contact-note route and reloads the list', async () => {
+  it('posts the displayed card version to the save-contact-note route and reloads the list', async () => {
     render(<TriageInboxTabV2 isAdmin />);
-    const card = (await screen.findByText('Second Contact')).closest('.py-4');
-    listItems = [nameOnlyCard, ordinary];
-    fireEvent.click(within(card).getByRole('button', { name: 'Save to notes' }));
+    const el = (await screen.findByText('Second Contact')).closest('.py-4');
+    listItems = listItems.filter((i) => i.id !== 'second');
+    fireEvent.click(within(el).getByRole('button', { name: 'Save to notes' }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
       '/admin/triage/second/save-contact-note',
-      { method: 'POST', body: JSON.stringify({}) },
+      { method: 'POST', body: JSON.stringify({ expected_updated_at: secondCard.updated_at }) },
     ));
     await waitFor(() => expect(screen.queryByText('Second Contact')).not.toBeInTheDocument());
   });
 
-  it('shows the server message when the call has no linked customer', async () => {
+  it('reloads and shows the server message on a stale card or a call with no linked customer', async () => {
     render(<TriageInboxTabV2 isAdmin />);
-    const card = (await screen.findByText('Second Contact')).closest('.py-4');
-    const err = Object.assign(new Error('This call has no linked customer — link the call to a customer first'), { status: 409 });
+    const el = (await screen.findByText('Second Contact')).closest('.py-4');
+    const err = Object.assign(new Error('Card changed since it was displayed — reload and review the latest'), { status: 409 });
     adminFetch.mockImplementation(async (url) => {
       if (url.includes('/save-contact-note')) throw err;
       return { items: listItems, counts: { open: listItems.length, resolved: 0, dismissed: 0 } };
     });
-    fireEvent.click(within(card).getByRole('button', { name: 'Save to notes' }));
-    expect(await screen.findByText(/no linked customer/)).toBeInTheDocument();
+    const listCalls = () => adminFetch.mock.calls.filter(([url]) => url.startsWith('/admin/triage?')).length;
+    const before = listCalls();
+    fireEvent.click(within(el).getByRole('button', { name: 'Save to notes' }));
+    expect(await screen.findByText(/Card changed since it was displayed/)).toBeInTheDocument();
+    expect(listCalls()).toBe(before + 1);
     expect(screen.getByText('Second Contact')).toBeInTheDocument();
   });
 });

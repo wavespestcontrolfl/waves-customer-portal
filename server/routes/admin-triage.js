@@ -1530,44 +1530,55 @@ router.post('/:id/apply-property-roles', async (req, res) => {
   }
 });
 
-// The contacts a secondary_contact_captured card names, as one-line notes.
-// A contact needs a name plus a phone or an email; the singleton and the
-// multi-party array overlap (the array's first entry mirrors it), so entries
-// are de-duplicated on name + phone + email. A phone no NANP line can have is
-// dropped, like the slot writer does. Values are collapsed to one line: the
-// notes column is newline-delimited provenance entries.
-function secondaryContactNoteLines(payload) {
+// What a secondary_contact_captured card lets the office file as a note: a card
+// that names exactly ONE person, who is not a message recipient. The entry list
+// is the one the card shows: the singleton plus secondary_contacts after its
+// first entry (entry 0 is the raw V2 mirror of the singleton, never written).
+// Anything more, a contact the slot writer owns (wants_notifications, an
+// on-site opt-in candidate) or a missing name/phone/email is refused whole, so
+// a card is never closed over a party that was not filed. The client mirrors
+// this rule (canSaveContactNote in TriageInboxTabV2.jsx).
+function secondContactNote(payload) {
   const { isImpossibleNanpPhone } = require('../utils/phone');
   const oneLine = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
-  const seen = new Set();
-  const lines = [];
-  const entries = [payload?.secondary_contact, ...(Array.isArray(payload?.secondary_contacts) ? payload.secondary_contacts : [])];
-  for (const c of entries) {
-    if (!c || typeof c !== 'object') continue;
-    const name = oneLine(c.name_full || [c.first_name, c.last_name].filter(Boolean).join(' '));
-    const rawPhone = oneLine(c.phone || c.phone_e164);
-    const phone = rawPhone && !isImpossibleNanpPhone(rawPhone) ? rawPhone : '';
-    const email = oneLine(c.email);
-    if (!name || (!phone && !email)) continue;
-    const key = [name.toLowerCase(), phone.replace(/\D/g, '').slice(-10), email.toLowerCase()].join('|');
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const role = oneLine(c.role).replace(/_/g, ' ');
-    const who = role && role.toLowerCase() !== 'unknown' ? `${name} (${role})` : name;
-    const notes = oneLine(c.notes);
-    lines.push(`Contact named on call (not a message recipient): ${[who, phone, email].filter(Boolean).join(' · ')}.${notes ? ` ${notes}` : ''}`.slice(0, 500));
+  const c = payload?.secondary_contact;
+  const more = Array.isArray(payload?.secondary_contacts) ? payload.secondary_contacts.slice(1).filter(Boolean) : [];
+  if (!c || typeof c !== 'object') return { refusal: 'Card names no contact' };
+  if (more.length || payload.other_parties_mentioned === true) {
+    return { refusal: 'Card names more than one person — add them to the customer by hand' };
   }
-  return lines;
+  if (['wants_notifications', 'wants_appointment_texts', 'on_site'].some((flag) => c[flag] === true)) {
+    return { refusal: 'This person gets messages or is on site — they are not a plain note' };
+  }
+  const name = oneLine(c.name_full || [c.first_name, c.last_name].filter(Boolean).join(' '));
+  const rawPhone = oneLine(c.phone || c.phone_e164);
+  // A phone no NANP line can have is dropped, like the slot writer does.
+  const phone = rawPhone && !isImpossibleNanpPhone(rawPhone) ? rawPhone : '';
+  const email = oneLine(c.email);
+  if (!name || (!phone && !email)) return { refusal: 'Card names no contact with a name and a phone or email' };
+  const role = oneLine(c.role).toLowerCase().replace(/_/g, ' ');
+  const who = ['', 'unknown'].includes(role) ? name : `${name} (${role})`;
+  const notes = oneLine(c.notes);
+  return { line: `Contact named on call (not a message recipient): ${[who, phone, email].filter(Boolean).join(' · ')}.${notes ? ` ${notes}` : ''}`.slice(0, 500) };
 }
 
-// POST /api/admin/triage/:id/save-contact-note   {}
-// One tap on a secondary_contact_captured card: files each named contact as a
-// dated line in the linked customer's internal_notes and resolves the card.
-// A PURE internal note — it never touches the service-contact slots, the
-// customer's own phone/email or any consent column, and sends nothing; the
-// pipeline's slot write (persistCallSecondaryContact) stays the only path
-// that makes a named person a message recipient. Idempotent: a line already
-// in the notes is not added twice.
+// POST /api/admin/triage/:id/save-contact-note   { expected_updated_at }
+// One tap on a secondary_contact_captured card: files the one person it names
+// as a dated line in the linked customer's crm_notes (the notes Customer 360
+// shows and edits) and resolves the card. A PURE internal note — it never
+// touches the service-contact slots, the customer's own phone/email or any
+// consent column, and sends nothing; the pipeline's slot write
+// (persistCallSecondaryContact) stays the only path that makes a named person
+// a message recipient. Idempotent: a line already in the notes is not added
+// twice. Settled through transitionCore with requireVersion, so a card a
+// reprocess refreshed since it was displayed is a 409.
+//
+// LOCK ORDER as apply-property-roles / the Customer 360 PATCH: customers row
+// FIRST, then (inside transitionCore) the call advisory lock, then the
+// call_log row. The call_log row lock is the relink fence: the relink
+// (admin-call-recordings PUT /calls/:id/customer) updates call_log without the
+// call advisory lock, but it must wait on this row, and a relink that
+// committed before it is seen as a changed customer_id and 409s.
 router.post('/:id/save-contact-note', async (req, res) => {
   try {
     // Customer notes are admin-territory, like the property-role apply.
@@ -1584,101 +1595,47 @@ router.post('/:id/save-contact-note', async (req, res) => {
       return res.status(400).json({ error: 'Not a second-contact card' });
     }
     if (!item.call_log_id) return res.status(409).json({ error: 'This card has no call to take a customer from' });
-    const parsePayloadRaw = (p) => (typeof p === 'string' ? (() => { try { return JSON.parse(p); } catch { return null; } })() : (p || {}));
-    if (!secondaryContactNoteLines(parsePayloadRaw(item.payload)).length) {
-      return res.status(400).json({ error: 'Card names no contact with a name and a phone or email' });
-    }
+    const parsed = (row) => (typeof row.payload === 'string' ? (() => { try { return JSON.parse(row.payload); } catch { return null; } })() : row.payload);
+    const early = secondContactNote(parsed(item));
+    if (early.refusal) return res.status(400).json({ error: early.refusal });
 
-    let outcome;
+    let result;
     await db.transaction(async (trx) => {
-      // Lock ORDER as apply-property-roles: customers row FIRST, then the
-      // call advisory lock (the Customer 360 PATCH holds the row lock while
-      // its fanout takes the call locks). The call's customer is read
-      // unlocked, locked, then verified again below.
       const call = await trx('call_log').where({ id: item.call_log_id }).first('customer_id', 'created_at');
-      const customerId = call?.customer_id || null;
-      if (!customerId) {
-        const none = new Error('This call has no linked customer — link the call to a customer first');
-        none.noCustomer = true;
-        throw none;
-      }
-      const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id', 'internal_notes');
+      const customer = call?.customer_id
+        ? await trx('customers').where({ id: call.customer_id }).whereNull('deleted_at').forUpdate().first('id', 'crm_notes')
+        : null;
       if (!customer) {
-        const none = new Error('The call\'s customer is no longer active — relink the call first');
-        none.noCustomer = true;
-        throw none;
+        throw Object.assign(new Error('This call has no linked customer — link the call to a customer first'), { noCustomer: true });
       }
-      await lockTriageCall(trx, item.call_log_id);
-      // Re-read the card and the call link UNDER the locks: a reprocess can
-      // refresh the payload, and a relink or merge can move the call.
-      const live = await trx('triage_items').where({ id: item.id }).first();
-      if (!live || !OPEN_STATES.includes(live.status)) {
-        const lost = new Error('card resolved concurrently');
-        lost.conflict = true;
-        throw lost;
-      }
-      const liveCall = await trx('call_log').where({ id: item.call_log_id }).first('customer_id');
-      if (!liveCall || String(liveCall.customer_id) !== String(customerId)) {
-        const lost = new Error('the call was relinked to another customer — reload and retry');
-        lost.conflict = true;
-        throw lost;
-      }
-      const lines = secondaryContactNoteLines(parsePayloadRaw(live.payload));
-      if (!lines.length) {
-        const empty = new Error('no contact to save');
-        empty.noContact = true;
-        throw empty;
-      }
-      const { appendWithProvenance } = require('../services/call-profile-enrichment');
-      // appendWithProvenance tags the call's date and skips a line the notes
-      // already hold. The tag is the call's EASTERN day: an evening call is
-      // already the next day in UTC.
-      const callDate = require('../utils/datetime-et').etDateString(new Date(call.created_at));
-      let notes = customer.internal_notes;
-      let added = 0;
-      for (const line of lines) {
-        const next = appendWithProvenance(notes, line, callDate);
-        if (next !== notes) { notes = next; added += 1; }
-      }
-      if (notes !== customer.internal_notes) {
-        // internal_notes only — no slot, phone/email or consent column.
-        await trx('customers').where({ id: customerId }).update({ internal_notes: notes, updated_at: new Date() });
-      }
-      const updated = await trx('triage_items')
-        .where({ id: item.id })
-        .whereIn('status', OPEN_STATES)
-        .update({
-          status: 'resolved',
-          resolution_note: 'contact saved to customer notes',
-          resolution_source: 'human',
-          assigned_to: req.technicianId,
-          resolved_at: new Date(),
-          updated_at: new Date(),
-        });
-      if (updated === 0) {
-        const lost = new Error('card resolved concurrently');
-        lost.conflict = true;
-        throw lost;
-      }
-      // Same call_log.review_status bookkeeping as transitionCore.
-      const stillOpen = await trx('triage_items')
-        .where({ call_log_id: item.call_log_id })
-        .whereIn('status', OPEN_STATES)
-        .count('* as n')
-        .first();
-      const remaining = parseInt(stillOpen?.n || 0, 10);
-      await trx('call_log')
-        .where({ id: item.call_log_id })
-        .update({ review_status: remaining > 0 ? 'open' : 'resolved', updated_at: new Date() });
-      outcome = { saved: added, already_present: lines.length - added };
-      // Ids and counts only: the contact's name, phone and email stay out of logs.
-      logger.info(`[admin-triage] save-contact-note card=${item.id} customer=${customerId} saved=${outcome.saved} present=${outcome.already_present}`);
+      result = await transitionCore({
+        id: item.id, nextStatus: 'resolved', note: 'contact saved to customer notes', assignedTo: req.technicianId,
+        expectedUpdatedAt: req.body?.expected_updated_at || null, conn: trx, requireVersion: true,
+        beforeTransition: async (t) => {
+          const live = await t('call_log').where({ id: item.call_log_id }).forUpdate().first('customer_id');
+          if (!live || String(live.customer_id) !== String(customer.id)) {
+            throw Object.assign(new Error('the call was relinked to another customer — reload and retry'), { conflict: true });
+          }
+        },
+        afterTransition: async (t) => {
+          // The LIVE payload, under the locks: transitionCore already proved it is the version displayed.
+          const livePayload = parsed(await t('triage_items').where({ id: item.id }).first('payload'));
+          const { line, refusal } = secondContactNote(livePayload);
+          if (refusal) throw Object.assign(new Error(refusal), { refused: true });
+          // The call's Eastern day: an evening call is already the next day in UTC.
+          const callDay = require('../utils/datetime-et').etDateString(new Date(call.created_at));
+          const notes = require('../services/call-profile-enrichment').appendWithProvenance(customer.crm_notes, line, callDay, '\n\n');
+          // crm_notes only — no slot, phone/email or consent column.
+          if (notes !== customer.crm_notes) await t('customers').where({ id: customer.id }).update({ crm_notes: notes, updated_at: new Date() });
+          // Ids only: the contact's name, phone and email stay out of logs.
+          logger.info(`[admin-triage] save-contact-note card=${item.id} customer=${customer.id}`);
+        },
+      });
     });
-    return res.json({ ok: true, ...outcome });
+    return sendTransitionResult(res, result, item.id, 'resolved');
   } catch (err) {
-    if (err.noCustomer) return res.status(409).json({ error: err.message });
-    if (err.conflict) return res.status(409).json({ error: err.message || 'Item changed concurrently' });
-    if (err.noContact) return res.status(400).json({ error: 'Card names no contact with a name and a phone or email' });
+    if (err.noCustomer || err.conflict) return res.status(409).json({ error: err.message });
+    if (err.refused) return res.status(400).json({ error: err.message });
     // Code/name only: a knex message embeds the bound note text.
     logger.error(`[admin-triage] save-contact-note failed: ${err.code || err.name || 'error'}`);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to save contact note' });
