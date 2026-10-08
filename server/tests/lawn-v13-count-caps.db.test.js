@@ -24,7 +24,9 @@ const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROP
 describe('the recipe text (no database)', () => {
   test('every track states the Arena, Celsius + Certainty and Blindside counts', () => {
     for (const track of Object.values(v13Recipe)) {
-      expect(track.notes.join('\n')).toContain('Arena: up to 2 applications per lawn per year (app-enforced); never treat the same area twice (tech rule; label 0.4 lb clothianidin per acre per year)');
+      expect(track.notes.join('\n')).toContain('Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label\'s turf range; about 1.4 level teaspoons), up to 2 applications per lawn per year at least 8 weeks (56 days) apart (app-enforced). Two applications reach the label\'s yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre); after that, use bifenthrin, which is not a neonicotinoid.');
+      expect(JSON.stringify(track)).not.toMatch(/2\(ee\)/);
+      expect(track.notes.join('\n')).not.toContain('never treat the same area twice');
       const safety = track.safety_rules.join('\n');
       expect(safety).toContain('Celsius, Certainty and Blindside: up to 2 applications per lawn per year each');
       expect(safety).not.toMatch(/per spot/);
@@ -1176,6 +1178,14 @@ describeDb('v13 count caps through PostgreSQL', () => {
       expect(await check(visitB, name)).toEqual([]);
     });
 
+    test('Arena closeout: a second application 55 days after the first is flagged as too soon (min 56), 56 days is not', async () => {
+      const soon = await setup(ARENA, ['2026-03-18']);
+      expect(await check(soon.visitA, ARENA)).toEqual([expect.objectContaining({ code: 'application_limit_exceeded', productName: ARENA, limitType: 'min_interval_days', current: 55, max: 56 })]);
+      expect(await check(soon.visitB, ARENA)).toEqual([]);
+      const ok = await setup(ARENA, ['2026-03-17']);
+      expect(await check(ok.visitA, ARENA)).toEqual([]);
+    });
+
     test('an unreadable history (a SQL error inside a transaction) is an unavailable finding, never a throw; the savepoint keeps the transaction usable', async () => {
       const { visitA } = await setup(CELSIUS, ['2026-02-02']);
       const limitsModule = require('../services/application-limits');
@@ -1271,6 +1281,75 @@ describeDb('v13 count caps through PostgreSQL', () => {
       } finally {
         if (saved.length) await knex('product_limits').insert(saved);
       }
+    });
+
+    // Arena at the Florida half rate (0.147 oz, owner 2026-10-08): two passes fit the label's yearly limit only
+    // with 8 weeks between them. The visit is 2026-05-12, so 2026-03-18 is 55 days before it and 2026-03-17 is 56.
+    describe('Arena minimum interval of 56 days (v13 only, by product id)', () => {
+      const intervalBlocks = (result) => limitBlocks(result).filter((b) => /days since last app/.test(b.message));
+
+      test('a second application 55 days after the first is blocked, 56 days is allowed; another property is not held', async () => {
+        const tooSoon = await twoProperties(ARENA, ['2026-03-18']);
+        const blocked = intervalBlocks(await plan(tooSoon.visitA, ARENA));
+        expect(blocked).toHaveLength(1);
+        expect(blocked[0].message).toMatch(/only 55 days since last app \(min 56\)/);
+        expect(limitBlocks(await plan(tooSoon.visitB, ARENA))).toEqual([]);
+        const ok = await twoProperties(ARENA, ['2026-03-17']);
+        expect(limitBlocks(await plan(ok.visitA, ARENA))).toEqual([]);
+      });
+
+      test('a third in the year is blocked by the count even when the gap is long enough', async () => {
+        const { visitA } = await twoProperties(ARENA, ['2026-01-05', '2026-03-17']);
+        const blocks = limitBlocks(await plan(visitA, ARENA));
+        expect(blocks).toHaveLength(1);
+        expect(blocks[0].message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+      });
+
+      test('the gap spans the new year: an application on 2025-12-30 holds a 2026-01-20 application (21 days), though the yearly count starts over', async () => {
+        const applicationLimits = require('../services/application-limits');
+        const f = await fixture(knex);
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: catalog[ARENA].id, application_date: '2025-12-30', application_rate: 0.147, rate_unit: 'oz' });
+        process.env.GATE_LAWN_V13 = 'true';
+        const result = await applicationLimits.checkLimits(f.customerId, catalog[ARENA].id, new Date('2026-01-20T16:00:00Z'), knex, {});
+        expect(result.allowed).toBe(false);
+        expect(result.blocks.map((b) => b.type)).toEqual(['min_interval_days']);
+        expect(result.blocks[0].message).toMatch(/only 21 days since last app \(min 56\)/);
+      });
+
+      test('gate off: no interval, no count, nothing is blocked', async () => {
+        const { visitA } = await twoProperties(ARENA, ['2026-05-10']);
+        process.env.GATE_LAWN_V13 = 'true';
+        expect(intervalBlocks(await plan(visitA, ARENA))).toHaveLength(1);
+        delete process.env.GATE_LAWN_V13;
+        const off = await buildPlanForService(visitA.id, { db: knex, selectedConditionalProductNames: [ARENA] });
+        expect(limitBlocks(off)).toEqual([]);
+      });
+
+      test('a stored product-level interval row is raised to 56 and made hard under the gate, never lowered; the gate-off reader sees it as stored', async () => {
+        const applicationLimits = require('../services/application-limits');
+        const { customerId } = await fixture(knex);
+        const row = { product_id: catalog[ARENA].id, match_type: 'product', limit_type: 'min_interval_days', limit_unit: 'days' };
+        for (const [stored, severity, expected] of [[30, 'warning', 56], [90, 'warning', 90], [56, 'hard_block', 56]]) {
+          await knex('product_limits').where({ product_id: catalog[ARENA].id, limit_type: 'min_interval_days' }).del();
+          const [made] = await knex('product_limits').insert({ ...row, limit_value: stored, severity }).returning('*');
+          process.env.GATE_LAWN_V13 = 'true';
+          const on = await applicationLimits.checkLimits(customerId, catalog[ARENA].id, new Date('2026-05-12T16:00:00Z'), knex, {});
+          expect(on.allowed).toBe(true); // no history: nothing violated, the row is only read
+          const { applyV13CountCaps } = require('../config/lawn-v13-count-caps');
+          const limits = await applyV13CountCaps(knex, { id: catalog[ARENA].id, name: ARENA }, [made], catalog[ARENA].id);
+          const interval = limits.filter((l) => l.limit_type === 'min_interval_days');
+          expect(interval).toHaveLength(1);
+          expect([Number(interval[0].limit_value), interval[0].severity]).toEqual([expected, 'hard_block']);
+          delete process.env.GATE_LAWN_V13;
+          expect(await applyV13CountCaps(knex, { id: catalog[ARENA].id, name: ARENA }, [made], catalog[ARENA].id)).toEqual([made]);
+        }
+        await knex('product_limits').where({ product_id: catalog[ARENA].id, limit_type: 'min_interval_days' }).del();
+      });
+
+      test('only Arena carries an interval: Celsius, Certainty and Blindside get none', async () => {
+        const { V13_COUNT_CAPS } = require('../config/lawn-v13-count-caps');
+        expect(V13_COUNT_CAPS.filter((entry) => entry.minIntervalDays).map((entry) => [entry.name, entry.minIntervalDays])).toEqual([[ARENA, 56]]);
+      });
     });
 
     test('the second application in the year is still allowed', async () => {

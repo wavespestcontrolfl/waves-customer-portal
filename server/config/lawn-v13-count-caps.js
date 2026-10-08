@@ -6,9 +6,15 @@
  *   Celsius WG                2   stored row is the legacy 3 (compliance seed 20260401000020); the
  *                                 cap LOWERS it while the gate is on.
  *   Arena 50 WDG              2   new cap, no legacy value: while the gate is on a synthetic
- *                                 hard_block annual_max_apps limit is ADDED (label 0.4 lb
- *                                 clothianidin per acre per year = one pass; "never treat the same
- *                                 area twice" is the tech's rule, not enforced by the app).
+ *                                 hard_block annual_max_apps limit is ADDED. The v13 chinch rate is
+ *                                 0.147 oz per 1,000 sq ft (6.4 oz per acre), the low end of the label's
+ *                                 turf range (6.4 to 12.8 oz per acre; "multiple applications can be made
+ *                                 but do not exceed 12.8 oz per acre per year", 0.4 lb clothianidin per
+ *                                 acre), so two passes reach the yearly limit. The 56 days (8 weeks)
+ *                                 between passes is the company's own rule, not a label interval (it follows
+ *                                 the manufacturer's former Florida recommendation): an entry's
+ *                                 minIntervalDays adds a synthetic hard_block min_interval_days limit the
+ *                                 same way (a stored product-level row is raised to it, never lowered).
  *   Certainty Turf Herbicide  2   new cap: synthetic limit.
  *   Blindside Herbicide       2   new cap: synthetic limit.
  *
@@ -25,7 +31,13 @@ const LABEL = 'owner 2026-10-06';
 
 const V13_COUNT_CAPS = Object.freeze([
   { name: 'Celsius WG', cap: 2, description: `Celsius WG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
-  { name: 'Arena 50 WDG', cap: 2, description: `Arena 50 WDG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}; label 0.4 lb clothianidin per acre per year). Never treat the same area twice (tech rule, not enforced by the app).` },
+  {
+    name: 'Arena 50 WDG',
+    cap: 2,
+    description: `Arena 50 WDG: max 2 applications per lawn per year under the v13 lawn program (${LABEL}), at 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label's turf range): two applications reach the label's yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre).`,
+    minIntervalDays: 56,
+    intervalDescription: `Arena 50 WDG: at least 56 days (8 weeks) between applications on a lawn under the v13 lawn program (${LABEL}; the company's own spacing, not a label interval).`,
+  },
   { name: 'Certainty Turf Herbicide', cap: 2, description: `Certainty Turf Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
   { name: 'Blindside Herbicide', cap: 2, description: `Blindside Herbicide: max 2 applications per lawn per year under the v13 lawn program (${LABEL}).` },
 ]);
@@ -113,11 +125,43 @@ function syntheticCountLimit(entry, productId = null) {
 function withEntryCaps(entry, limits, productId = null) {
   const rows = limits || [];
   if (!entry) return rows;
-  if (!rows.some(isProductCount)) return [...rows, syntheticCountLimit(entry, productId)];
+  const counted = !rows.some(isProductCount)
+    ? [...rows, syntheticCountLimit(entry, productId)]
+    : rows.map((limit) => {
+      if (!isProductCount(limit)) return limit;
+      const stored = Number(limit.limit_value);
+      const value = Number.isFinite(stored) ? Math.min(stored, entry.cap) : entry.cap;
+      return { ...limit, limit_value: value, severity: 'hard_block' };
+    });
+  return withEntryInterval(entry, counted, productId);
+}
+
+const isProductInterval = (limit) => limit.limit_type === 'min_interval_days' && (limit.match_type || 'product') === 'product';
+
+function syntheticIntervalLimit(entry, productId = null) {
+  return {
+    id: null,
+    product_id: productId,
+    match_type: 'product',
+    match_value: null,
+    limit_type: 'min_interval_days',
+    limit_value: entry.minIntervalDays,
+    limit_unit: 'days',
+    severity: 'hard_block',
+    description: entry.intervalDescription,
+    synthetic: true,
+  };
+}
+
+// An entry with a minimum interval: a stored product-level min_interval_days row is raised to it and made
+// hard_block (in memory), never lowered; with none stored, a synthetic hard_block row is added.
+function withEntryInterval(entry, rows, productId = null) {
+  if (!entry.minIntervalDays) return rows;
+  if (!rows.some(isProductInterval)) return [...rows, syntheticIntervalLimit(entry, productId)];
   return rows.map((limit) => {
-    if (!isProductCount(limit)) return limit;
+    if (!isProductInterval(limit)) return limit;
     const stored = Number(limit.limit_value);
-    const value = Number.isFinite(stored) ? Math.min(stored, entry.cap) : entry.cap;
+    const value = Number.isFinite(stored) ? Math.max(stored, entry.minIntervalDays) : entry.minIntervalDays;
     return { ...limit, limit_value: value, severity: 'hard_block' };
   });
 }
@@ -126,6 +170,9 @@ function withEntryCaps(entry, limits, productId = null) {
 async function applyV13CountCaps(database, product, limits, productId = product?.id) {
   return withEntryCaps(await v13CapEntryFor(database, productId, product?.name), limits, productId);
 }
+
+// A stale row cannot advertise a shorter wait than the app enforces.
+const staleInterval = (entry, gates) => !!(entry.minIntervalDays && gates && typeof gates.minIntervalDays === 'number' && gates.minIntervalDays < entry.minIntervalDays);
 
 // The cap figures a staged protocol row advertises (gates.annualMaxApps, annual_counter.maxApplications),
 // clamped to the entry's cap: min(row figure, cap), never raised, never added. A stale row cannot show
@@ -139,10 +186,11 @@ function withEntryCapMetadata(entry, product) {
   const counterValue = counter ? clamp(counter.maxApplications) : undefined;
   const gateChanged = gates && gateValue !== gates.annualMaxApps;
   const counterChanged = counter && counterValue !== counter.maxApplications;
-  if (!gateChanged && !counterChanged) return product;
+  const intervalChanged = staleInterval(entry, gates);
+  if (!gateChanged && !counterChanged && !intervalChanged) return product;
   return {
     ...product,
-    ...(gateChanged ? { gates: { ...gates, annualMaxApps: gateValue } } : {}),
+    ...(gateChanged || intervalChanged ? { gates: { ...gates, ...(gateChanged ? { annualMaxApps: gateValue } : {}), ...(intervalChanged ? { minIntervalDays: entry.minIntervalDays } : {}) } } : {}),
     ...(counterChanged ? { annual_counter: { ...counter, maxApplications: counterValue } } : {}),
   };
 }
@@ -157,5 +205,6 @@ const celsiusYtdCap = () => (gateLive() ? CELSIUS_YTD_CAP : CELSIUS_YTD_CAP_LEGA
 module.exports = {
   CELSIUS_YTD_CAP, CELSIUS_YTD_CAP_LEGACY, celsiusYtdCap,
   withEntryCapMetadata,
+  syntheticIntervalLimit,
   V13_COUNT_CAPS, v13CountCapFor, v13CapEntryFor, capIdMap, resetV13CapIdentity, withEntryCaps, applyV13CountCaps, syntheticCountLimit,
 };

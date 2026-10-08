@@ -1675,8 +1675,10 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // outage — its plan is known not to apply — so the add-on line governs.
   const protocolLine = planned || lawnPlan?.error ? null : addonLine;
   const plan = protocolLine ? null : lawnPlan;
-  const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
-  const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
+  // A v13 spot row has no quantity, but it states the program's rate (Arena 0.147 oz, not the catalog's 0.29 oz).
+  const plannedRate = planned?.mix?.ratePer1000 != null ? planned.mix : planned?.spot?.ratePer1000 != null ? planned.spot : null;
+  const ratePer1000 = plannedRate ? plannedRate.ratePer1000 : product.default_rate_per_1000;
+  const rateUnit = plannedRate?.rateUnit || product.rate_unit;
   // Pest / tree products whose label rate is per gallon of finished spray
   // (default_rate "X" or "X-Y" + default_unit "<unit>/gal") dilute straight
   // into the tank — no carrier calibration involved.

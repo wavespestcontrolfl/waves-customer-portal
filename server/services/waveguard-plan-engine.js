@@ -1818,7 +1818,14 @@ function v13ItemFields(line, gateContext, product) {
     gateNotes: row ? v13GateNotes(row.gates, gateContext) : [],
     // A row with no calculated quantity: selectable, label rate as reference, never an amount.
     spot: line?.state === 'spot'
-      ? { note: 'Spot: enter the area treated and the amount used.', reference: v13SpotReference(row, product) }
+      ? {
+        note: 'Spot: enter the area treated and the amount used.',
+        reference: v13SpotReference(row, product),
+        // The row's own stated rate, for a reader that sizes a tank dose (the job card's product search): the program's
+        // rate, never the catalog default (Arena: 0.147 oz here, the main label's 0.29 oz in the catalog).
+        ratePer1000: Number(row?.ratePer1000) > 0 ? Number(row.ratePer1000) : null,
+        rateUnit: Number(row?.ratePer1000) > 0 ? row.rateUnit || null : null,
+      }
       : null,
     // A line the plan cannot size at all: say why; the tech enters the actual work.
     unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state], ...(line.state === 'held' ? { kind: CITY_HOLD_KIND } : {}) } : null,

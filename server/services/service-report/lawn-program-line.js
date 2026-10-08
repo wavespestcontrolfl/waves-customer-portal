@@ -257,10 +257,10 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The fall feeding goes down now, with a weed barrier where it fits the property, so the barrier is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
   }),
   11: Object.freeze({
-    whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, mapped large patch areas are treated, and we treat sedge where it shows up.',
+    whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, and mapped large patch areas are treated.',
   }),
   12: Object.freeze({
-    whyNow: 'December brings cooler spells. A light feeding keeps the color up, and we treat any large patch and weed spots.',
+    whyNow: 'December brings cooler spells. A feeding with extra potassium helps the lawn handle cold and dry weather, and we treat any large patch and weed spots.',
   }),
 });
 
