@@ -2602,3 +2602,22 @@ test('one masked value does not exempt an access sentence (pre-push audit)', () 
   const facts = buildReportAskFacts({ data: lawnData({ customerConcern: 'Use lockbox 42 and tell the guard blue moon. Weeds by the fence.', reportV2: { aftercare: {} } }) });
   expect(facts.customer_concern).toBe('[access details removed] Weeds by the fence.');
 });
+
+describe('answer screen, Codex round 75', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }], findings: [{ title: 'Ant trail', detail: 'Along the lanai.' }] });
+  const question = 'What was applied?';
+  const facts = buildReportAskFacts({ question, data });
+  const ask = (answer) => screenAskAnswer(answer, { question, data, facts });
+
+  test.each(['The report does not mention any findings.', 'The report does not list any activity.'])('recorded findings may not be called missing: %s', (answer) => {
+    expect(ask(answer)).toBe('denies_findings');
+  });
+
+  test.each(['The report does not show what product was applied.', 'The product name is not listed on this report.'])('a recorded product may not be called missing: %s', (answer) => {
+    expect(ask(answer)).toBe('denies_application');
+  });
+
+  test('saying there is no second product passes', () => {
+    expect(ask('The report does not list a second product.')).toBeNull();
+  });
+});

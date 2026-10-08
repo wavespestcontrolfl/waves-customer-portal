@@ -1946,6 +1946,12 @@ const NO_PRODUCT_RE = /\b(?:no|nothing|none)\b[^.?!]*\b(?:applied|used|sprayed|p
 function deniesRecordedApplication(text, facts) {
   const products = asArray(facts?.products);
   if (!products.length) return false;
+  // "The report does not show what product was applied", "The product name
+  // is not listed" (Codex P1 #5964 r75).
+  if (splitSentences(matchForm(text)).some((sentence) => SAYS_MISSING.test(sentence)
+    && /\b(?:products?(?:\s+names?)?|what\s+(?:was|were)\s+(?:applied|used|sprayed)|treatments?\s+(?:applied|used)|applications?)\b/i.test(sentence)
+    // "Does not list a second product" is true of a one-product report.
+    && !/\b(?:second|another|other|additional|more|else|third)\b/i.test(sentence))) return true;
   return clausesOf(text).some((clause) => {
     if (!NO_PRODUCT_RE.test(clause)) return false;
     const named = products.filter((product) => mentions(clause, product));
@@ -2056,6 +2062,8 @@ function deniesRecordedFindings(text, facts) {
   return clausesOf(text).some((clause) => {
     const lower = normalizeKey(clause);
     if (NO_FINDINGS_RE.test(clause) && !UNCERTAIN_RE.test(clause) && !SAYS_INSIDE.test(clause) && !SAYS_OUTSIDE.test(clause)) return true;
+    // "The report does not mention any findings" (Codex P1 #5964 r75).
+    if (SAYS_MISSING.test(clause) && /\b(?:any\s+)?(?:findings?|activity|issues?|problems?|observations?|anything\s+(?:found|noted|seen))\b/i.test(clause)) return true;
     const denies = UNCERTAIN_RE.test(clause) || NOT_CONFIRMED_RE.test(clause) || NEGATION_RE.test(clause);
     return denies && titles.some((words) => words.every((word) => lower.includes(word.replace(/e?s$/, ''))));
   });
