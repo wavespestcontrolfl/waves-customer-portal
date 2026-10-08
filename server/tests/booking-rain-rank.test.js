@@ -10,7 +10,8 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { rainFitFor, isWetWindow, rainTier } = require('../services/scheduling/rain-fit');
+const { rainFitFor, isWetWindow, rainTier, rainClassOf, withCatalogKeys } = require('../services/scheduling/rain-fit');
+const { _test: traceRules } = require('../services/service-report/trace-eligibility');
 const { buildBestRows } = require('../services/scheduling/find-time-hints');
 
 const TODAY = '2026-10-07';
@@ -53,6 +54,113 @@ describe('rainFitFor', () => {
     [[''], 'neutral'],
   ])('%j → %s', (types, fit) => {
     expect(rainFitFor(types)).toBe(fit);
+  });
+});
+
+describe('catalog identity beats the words in a name', () => {
+  const svc = (serviceKey, findingsType = null, name = 'Any label') => ({ name, serviceKey, findingsType });
+
+  test.each([
+    // [catalog key, findings type, class]
+    ['pest_general_quarterly', null, 'outdoor'],
+    ['lawn_care_monthly', null, 'outdoor'],
+    ['mosquito_monthly', null, 'outdoor'],
+    ['termite_liquid', null, 'outdoor'],
+    ['bee_wasp_removal', null, 'outdoor'],
+    ['dethatching', null, 'outdoor'],
+    ['palm_treatment', null, 'outdoor'],
+    ['termite_installation_setup', null, 'outdoor'],
+    ['some_new_admin_key', null, 'outdoor'],
+    [null, 'rodent_exclusion', 'outdoor'],
+    [null, 'termite_bait_station', 'outdoor'],
+    [null, 'cockroach', 'outdoor'],
+    ['wdo_inspection', null, 'ok'],
+    ['lawn_inspection', null, 'ok'],
+    ['bed_bug_treatment', null, 'ok'],
+    ['german_roach', null, 'ok'],
+    [null, 'termite_inspection', 'ok'],
+    [null, 'pest_inspection', 'ok'],
+    [null, 'rodent_inspection', 'ok'],
+    [null, 'rodent_trapping', 'ok'],
+    [null, 'rodent_sanitation', 'ok'],
+    [null, 'rodent_bait_station', 'ok'],
+    [null, 'bed_bug', 'ok'],
+    [null, 'german_roach_knockdown', 'ok'],
+    ['general_appointment', null, 'skip'],
+    ['waveguard_membership', null, 'skip'],
+  ])('key %s / type %s → %s', (key, type, cls) => {
+    expect(rainClassOf(svc(key, type))).toBe(cls);
+  });
+
+  test('the identity decides even when the label says otherwise', () => {
+    expect(rainClassOf(svc('pest_general_quarterly', null, 'Interior Inspection'))).toBe('outdoor');
+    expect(rainClassOf(svc('wdo_inspection', null, 'Exterior Spray Treatment'))).toBe('ok');
+  });
+
+  test('a booking: riders are left out; one outdoor service makes it outdoor', () => {
+    expect(rainFitFor([svc('wdo_inspection'), svc('waveguard_membership')])).toBe('prefer');
+    expect(rainFitFor([svc('wdo_inspection'), svc('pest_general_quarterly')])).toBe('avoid');
+    expect(rainFitFor([svc('general_appointment')])).toBe('neutral');
+    // No identity: the word rules still answer.
+    expect(rainFitFor([{ name: 'Waves Assessment', serviceKey: null, findingsType: null }])).toBe('prefer');
+  });
+
+  // The complete rain-OK list. A new registry identity lands as outdoor (or
+  // skipped) until someone adds it here on purpose.
+  test('exactly these registry identities are rain-OK', () => {
+    const ok = (rules, field) => Object.keys(rules)
+      .filter((id) => rainClassOf({ name: 'x', [field]: id }) === 'ok').sort();
+    expect({
+      serviceKeys: ok(traceRules.SERVICE_KEY_RULES, 'serviceKey'),
+      findingsTypes: ok(traceRules.FINDINGS_TYPE_RULES, 'findingsType'),
+    }).toMatchSnapshot();
+  });
+});
+
+describe('withCatalogKeys', () => {
+  afterEach(() => { delete process.env.GATE_BOOKING_RAIN_RANK; jest.dontMock('../services/service-completion-profiles'); jest.resetModules(); });
+
+  function load(resolver) {
+    jest.resetModules();
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/service-completion-profiles', () => ({ resolveCompletionProfileForScheduledService: resolver }));
+    return require('../services/scheduling/rain-fit').withCatalogKeys;
+  }
+
+  test('gate off: names pass through, nothing is read', async () => {
+    const resolver = jest.fn();
+    expect(await load(resolver)(['Bed Bug Treatment'], {})).toEqual(['Bed Bug Treatment']);
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  test('gate on: each name gets the identity its visit would have', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const resolver = jest.fn(async ({ service_type: name }) => (name === 'Rodent Trapping Service'
+      ? { serviceKey: 'rodent_trapping_svc', findingsType: 'rodent_trapping' }
+      : { serviceKey: null, findingsType: null, synthesized: true }));
+    const db = {};
+    expect(await load(resolver)(['Rodent Trapping Service', 'Waves Assessment'], db)).toEqual([
+      { name: 'Rodent Trapping Service', serviceKey: 'rodent_trapping_svc', findingsType: 'rodent_trapping' },
+      { name: 'Waves Assessment', serviceKey: null, findingsType: null },
+    ]);
+    expect(resolver).toHaveBeenCalledWith({ service_type: 'Rodent Trapping Service' }, db);
+  });
+
+  test('bookingServices: only a best-rows request reads; primary + the rest, blanks dropped', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const resolver = jest.fn(async () => ({ serviceKey: 'k', findingsType: null }));
+    load(resolver);
+    const { bookingServices } = require('../services/scheduling/rain-fit');
+    expect(await bookingServices({ bestRows: false, serviceType: 'Lawn Care' }, {})).toEqual([]);
+    expect(resolver).not.toHaveBeenCalled();
+    const out = await bookingServices({ bestRows: true, serviceType: 'Lawn Care', serviceTypes: ['Lawn Care', ' ', 7, 'WDO Inspection'] }, {});
+    expect(out.map((s) => s.name)).toEqual(['Lawn Care', 'Lawn Care', 'WDO Inspection']);
+  });
+
+  test('gate on, lookup fails: that name stays bare (word rules)', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const resolver = jest.fn(async () => { throw new Error('db down'); });
+    expect(await load(resolver)(['Lawn Care'], {})).toEqual(['Lawn Care']);
   });
 });
 

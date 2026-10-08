@@ -12,14 +12,22 @@
  * time to dry). Only the next RAIN_DAYS dates count: Florida hourly
  * forecasts past ~3 days are too weak to move a booking.
  *
- * Pure rules; bookingRainFit reads the gate.
+ * Which services are outdoor: a service with a catalog key takes the
+ * spray-trace registry's verdict (service-report/trace-eligibility.js, the
+ * one registry of "does this service put product down outside", which a
+ * contract test keeps complete for every active catalog key). The word
+ * rules below are only the fallback for a service with no catalog key
+ * (owner 2026-10-08: ten Codex rounds on #6102 each found another name the
+ * words sorted wrong).
+ *
+ * bookingRainFit reads the gate; withCatalogKeys reads the catalog.
  */
+const logger = require('../logger');
 const RAIN_PCT = 60;
 const RAIN_AFTER_HOURS = 2;
 const RAIN_DAYS = 3;
 
-// A booking is rain-OK only when EVERY service in it is: one outdoor
-// service in the booking means work happens outside.
+// ── Word rules: the fallback for a service with no catalog key ──────────
 const RAIN_OK = /assess|estimate|inspect|\bwdo\b|wood[- ]?destroy|interior/i;
 // Rodent work is rain-OK only as a check: trap checks, monitoring, an
 // inspection. Exclusion and remediation (wire mesh, sealing) are outdoor
@@ -46,11 +54,74 @@ function rainOkService(name) {
   return RODENT.test(name) && RODENT_CHECK.test(name);
 }
 
+// Registry lanes where nothing is applied outside and the tech's work does
+// not depend on dry weather: inspections, interior-only treatment, trap
+// checks, attic sanitation.
+const RAIN_OK_REASONS = new Set(['inspection_lane', 'interior_only_lane', 'trap_lane', 'sanitation_lane']);
+// The bait-station lane mixes a rodent station check (rain-OK, owner's
+// "rodent checks") with in-ground termite station installs (outdoor work).
+const RAIN_OK_IDS = new Set(['rodent_bait_station']);
+// Not a visit's work at all: a billing rider, or a generic appointment
+// whose work is unknown. Left out of the booking's verdict.
+const SKIP_REASONS = new Set(['billing_rider', 'appointment_lane']);
+
+// 'ok' | 'outdoor' | 'skip' for one service: { name, serviceKey,
+// findingsType } or a bare name. Every other registry answer — a spray or
+// outline lane, exclusion, localized nest work, mechanical lawn work,
+// injection, pre-treatment, or an identity the registry does not know — is
+// outdoor: an unknown service keeps a dry hour.
+function rainClassOf(service) {
+  const name = String((service && service.name) ?? service ?? '').trim();
+  const serviceKey = (service && service.serviceKey) || null;
+  const findingsType = (service && service.findingsType) || null;
+  if (!serviceKey && !findingsType) return rainOkService(name) ? 'ok' : 'outdoor';
+  const { resolveTraceEligibility } = require('../service-report/trace-eligibility');
+  const verdict = resolveTraceEligibility({ serviceKey, findingsType });
+  if (verdict.eligible) return 'outdoor';
+  if (RAIN_OK_IDS.has(serviceKey) || RAIN_OK_IDS.has(findingsType) || RAIN_OK_REASONS.has(verdict.reason)) return 'ok';
+  return SKIP_REASONS.has(verdict.reason) ? 'skip' : 'outdoor';
+}
+
+// A booking is rain-OK only when EVERY service in it is: one outdoor
+// service in the booking means work happens outside.
 function rainFitFor(serviceTypes) {
-  const names = (Array.isArray(serviceTypes) ? serviceTypes : [serviceTypes])
-    .map((s) => String(s || '').trim()).filter(Boolean);
-  if (!names.length) return 'neutral';
-  return names.every(rainOkService) ? 'prefer' : 'avoid';
+  const classes = (Array.isArray(serviceTypes) ? serviceTypes : [serviceTypes])
+    .filter((s) => String((s && s.name) ?? s ?? '').trim())
+    .map(rainClassOf)
+    .filter((c) => c !== 'skip');
+  if (!classes.length) return 'neutral';
+  return classes.every((c) => c === 'ok') ? 'prefer' : 'avoid';
+}
+
+// The booking's service names with their stable identity, for rainFitFor:
+// the catalog key and findings type the completion-profile resolver gives a
+// visit of that name (the same identity the spray-trace registry is keyed
+// on). Only while the gate is on; a name it cannot resolve (or a failed
+// read) stays a bare name and takes the word rules.
+async function withCatalogKeys(names, db) {
+  const list = (Array.isArray(names) ? names : []).map((n) => String(n || '').trim()).filter(Boolean);
+  const { gateEnvValue } = require('../../config/feature-gates');
+  if (!list.length || !gateEnvValue('GATE_BOOKING_RAIN_RANK')) return list;
+  const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+  return Promise.all(list.map(async (name) => {
+    try {
+      const profile = await resolveCompletionProfileForScheduledService({ service_type: name }, db);
+      return { name, serviceKey: profile?.serviceKey || null, findingsType: profile?.findingsType || null };
+    } catch (err) {
+      logger.warn(`[rain-fit] service identity lookup failed (word rules used): ${err.message}`);
+      return name;
+    }
+  }));
+}
+
+// The find-time request's services for the ranking: every service in the
+// booking (the primary one and the rest), with identity. Empty unless the
+// request asks for the best-times rows, the only reader.
+function bookingServices({ bestRows, serviceType, serviceTypes }, db) {
+  if (bestRows !== true) return [];
+  const names = [serviceType].concat(Array.isArray(serviceTypes) ? serviceTypes : [])
+    .filter((t) => typeof t === 'string' && t.trim());
+  return withCatalogKeys(names, db);
 }
 
 // The booking's fit with the gate applied: 'neutral' (drive-only) while
@@ -121,4 +192,4 @@ function rainTierOf(fit, hourly, today) {
   return (chip) => rainTier(fit, isWetWindow(hourly, chip, today));
 }
 
-module.exports = { rainFitFor, bookingRainFit, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
