@@ -1473,6 +1473,79 @@ describeDb('v13 count caps through PostgreSQL', () => {
         expect(celsius.filter((r) => r.match_type === V13_AMOUNT)).toEqual([]);
       });
 
+      // A reader with no treated property (the compliance page, the legacy check-limits route, a closeout of a visit with no property)
+      // judges the BUSIEST lawn of the customer, never the sum across the customer's properties.
+      describe('a customer-wide reader is per lawn', () => {
+        const applicationLimits = require('../services/application-limits');
+        async function customer(placements) {
+          const f = await fixture(knex);
+          const [propertyB] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+          const properties = [f.property.id, propertyB.id];
+          for (const { at, rate, frozen = false, date = '2026-03-13' } of placements) {
+            let recordId = null;
+            if (at !== null) {
+              const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: properties[at], scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+              [{ id: recordId }] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('id');
+            }
+            await knex('property_application_history').insert({
+              customer_id: f.customerId, product_id: catalog[ARENA].id, application_date: date, application_rate: rate, rate_unit: 'oz', service_record_id: recordId,
+              ...(frozen && at !== null ? { property_id: properties[at] } : {}),
+            });
+          }
+          return f.customerId;
+        }
+        const amount = async (customerId, opts = {}) => {
+          process.env.GATE_LAWN_V13 = 'true';
+          const result = await applicationLimits.checkLimits(customerId, catalog[ARENA].id, new Date('2026-05-12T16:00:00Z'), knex, opts);
+          return result.blocks.filter((b) => b.type === 'annual_max_rate');
+        };
+        const audit = async (customerId, opts = {}) => {
+          process.env.GATE_LAWN_V13 = 'true';
+          return (await applicationLimits.auditHardCountLimits(customerId, catalog[ARENA].id, '2026-05-12', knex, opts)).filter((v) => v.type === 'annual_max_rate');
+        };
+
+        test.each([[false, 'legacy rows placed by their visit'], [true, 'rows with the property frozen on the ledger']])('0.147 at each of two properties is no limit for the customer (%s: %s), 0.147 twice at one is', async (frozen) => {
+          const spread = await customer([{ at: 0, rate: 0.147, frozen }, { at: 1, rate: 0.147, frozen }]);
+          expect(await amount(spread)).toEqual([]);
+          expect(await audit(spread)).toEqual([]);
+          const stacked = await customer([{ at: 0, rate: 0.147, frozen }, { at: 0, rate: 0.147, frozen }]);
+          expect(await amount(stacked)).toHaveLength(1);
+          expect(await audit(stacked)).toHaveLength(1);
+        });
+
+        test('the busiest lawn decides: 0.29 at one property and 0.147 at the other reads 98.6%, not 148.6%', async () => {
+          const id = await customer([{ at: 0, rate: 0.29 }, { at: 1, rate: 0.147 }]);
+          expect(await amount(id)).toEqual([]);
+          const [block] = await amount(id, { proposed: { ratePer1000: 0.147, unit: 'oz' } });
+          expect(block.message).toMatch(/total 98\.6%.*148\.6%/);
+        });
+
+        test('an application that cannot be placed at a property counts at every property', async () => {
+          const id = await customer([{ at: 0, rate: 0.147 }, { at: 1, rate: 0.147 }, { at: null, rate: 0.147 }]);
+          expect(await amount(id)).toHaveLength(1);
+        });
+
+        test('with a treated property only that lawn counts, as before', async () => {
+          const id = await customer([{ at: 0, rate: 0.147 }, { at: 1, rate: 0.29 }]);
+          const [propertyA] = await knex('customer_properties').where({ customer_id: id, is_primary: true });
+          expect(await amount(id, { propertyId: propertyA.id })).toEqual([]);
+        });
+
+        test('the closeout of a visit with no property: this visit\'s rows count where they were done, other lawns do not add', async () => {
+          const ownVisitAtB = async (id) => {
+            const [visit] = await knex('scheduled_services').insert({ customer_id: id, property_id: (await knex('customer_properties').where({ customer_id: id, is_primary: false }).first()).id, scheduled_date: '2026-05-12', service_type: 'Lawn fixture' }).returning('*');
+            const [record] = await knex('service_records').insert({ customer_id: id, scheduled_service_id: visit.id, service_date: '2026-05-12', service_type: 'Lawn fixture' }).returning('*');
+            await knex('property_application_history').insert({ customer_id: id, product_id: catalog[ARENA].id, application_date: '2026-05-12', application_rate: 0.147, rate_unit: 'oz', service_record_id: record.id });
+            return visit;
+          };
+          // Property B: 0.147 + this visit's 0.147 = 0.294 (at the cap, not over); property A: 0.147. The sum across both would read 0.441.
+          const fits = await customer([{ at: 0, rate: 0.147 }, { at: 1, rate: 0.147 }]);
+          expect(await audit(fits, { excludeScheduledServiceId: (await ownVisitAtB(fits)).id })).toEqual([]);
+          const over = await customer([{ at: 0, rate: 0.147 }, { at: 1, rate: 0.147 }, { at: 1, rate: 0.147, date: '2026-04-01' }]);
+          expect(await audit(over, { excludeScheduledServiceId: (await ownVisitAtB(over)).id })).toHaveLength(1);
+        });
+      });
+
       test('the amount is the lawn\'s: the same history at another property does not count', async () => {
         const { visitB } = await twoProperties(ARENA, ['2026-03-13'], [0.29]);
         expect(limitBlocks(await plan(visitB, ARENA))).toEqual([]);

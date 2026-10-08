@@ -169,6 +169,44 @@ function isNitrogenApplication(app = {}) {
   return applicationLimits.isNitrogenFertilizer({ category, product_name: app.product_name });
 }
 
+// The latest application date, by product id, before this year, for the products with a product-level
+// minimum-interval row and no application yet this year.
+async function lastApplicationBeforeYear(customerId, yearStart, limits, apps) {
+  const thisYear = new Set(apps.map((app) => String(app.product_id)));
+  const ids = [...new Set(limits.filter(isIntervalRow).map((limit) => String(limit.product_id)))].filter((id) => !thisYear.has(id));
+  if (!ids.length) return new Map();
+  const rows = await db('property_application_history')
+    .where({ customer_id: customerId }).whereIn('product_id', ids).where('application_date', '<', yearStart).whereNull('retracted_at')
+    .groupBy('product_id').select('product_id').max('application_date as last_date');
+  return new Map(rows.map((row) => [String(row.product_id), row.last_date]));
+}
+
+const isIntervalRow = (limit) => limit.limit_type === 'min_interval_days' && (limit.match_type || 'product') === 'product' && limit.product_id;
+const isAmountRow = (limit) => limit.limit_type === 'annual_max_rate' && limit.match_type === V13_AMOUNT && limit.product_id;
+
+// One limit's status and usage as the compliance page shows it. A yearly count and a blackout read as
+// limitStatus does. The v13 minimum interval and yearly amount reuse application-limits' own evaluators (the
+// ones the plan and the closeout run), judged per lawn the way they are:
+//   interval  current = days since the customer's latest application of the product (the worst lawn is the
+//             one treated most recently), exceeded inside the minimum, ok at it;
+//   amount    current = oz per 1,000 sq ft already used this year on the busiest lawn, exceeded at the cap,
+//             warning from 75% of it.
+async function limitStatusFor(limit, matchingApps, { today, customerCounty, customerId, yearStart, lastBefore }) {
+  const product = { id: limit.product_id, name: limit.product_name };
+  if (isIntervalRow(limit)) {
+    const latest = matchingApps.map((app) => etCalendarDayOf(app.application_date)).sort().pop()
+      || (lastBefore.get(String(limit.product_id)) ? etCalendarDayOf(lastBefore.get(String(limit.product_id))) : null);
+    if (!latest) return { status: 'ok', current: null };
+    const check = await applicationLimits.evaluateLimit(limit, [], [], `${today}T12:00:00Z`, product, db, { lastApplication: { application_date: latest } });
+    return { status: check.violated ? 'exceeded' : 'ok', current: check.current ?? null };
+  }
+  if (isAmountRow(limit)) {
+    const check = await applicationLimits.evaluateV13AmountCap(limit, product, { customerId, yearStart, proposedDate: `${today}T12:00:00Z` }, db);
+    return { status: check.violated ? 'exceeded' : (check.approaching ? 'warning' : 'ok'), current: check.amountUsed };
+  }
+  return limitStatus(limit, matchingApps, { today, customerCounty });
+}
+
 const ComplianceService = {
 
   /**
@@ -499,9 +537,13 @@ const ComplianceService = {
     // Get all product limits, the v13 caps applied while the gate is on.
     const limits = await limitRowsWithV13Caps();
 
+    // A product's minimum interval looks back past New Year (a December application holds a February one), so
+    // the latest earlier application of the products with an interval row and none this year is read in one query.
+    const lastBefore = await lastApplicationBeforeYear(customerId, yearStart, limits, apps);
+
     const results = [];
     for (const limit of limits) {
-      const { status, current } = limitStatus(limit, matchingApplications(limit, apps), { today, customerCounty });
+      const { status, current } = await limitStatusFor(limit, matchingApplications(limit, apps), { today, customerCounty, customerId, yearStart, lastBefore });
 
       results.push({
         limitId: limit.id,

@@ -11,6 +11,9 @@
  *        - rate empty, unit already 'lb': the rate;
  *        - unit empty, rate already 4.5: 'lb';
  *        - anything else (a rate in another unit, a different rate): left as it is and logged.
+ *      A blank unit (NULL, '' or whitespace only) counts as empty. Each write is guarded on the exact value read
+ *      (so '' is matched as '', not as NULL), the audit row records that value as `before`, and down() puts back
+ *      exactly that value (NULL stays NULL, a blank string comes back as the blank string).
  *      A row the first migration inserted already carries both; nothing is written for it.
  *   2. Rollback guard for the inserted row. 20261008130000's down() deletes the row it inserted when every field in the
  *      audit snapshot's `inserted` object still reads as written and nothing references it. That object holds only
@@ -52,6 +55,8 @@ function asObject(value) {
   return value && typeof value === 'object' ? value : {};
 }
 
+// Empty means NULL, '' or whitespace only (a text field an admin cleared by hand).
+const isBlank = (value) => value == null || String(value).trim() === '';
 const sameRate = (a, b) => Number.isFinite(Number(a)) && Number.isFinite(Number(b)) && Number(a) === Number(b);
 
 // The product ids the staged December rows of the v13 protocols link to the 10-0-22 by.
@@ -68,7 +73,7 @@ async function linkedProductIds(knex) {
 // The columns to write on a row, by the coherence rule in the header (empty list: nothing).
 function rateFill(row) {
   const rateEmpty = row.default_rate_per_1000 == null;
-  const unitEmpty = row.rate_unit == null || String(row.rate_unit).trim() === '';
+  const unitEmpty = isBlank(row.rate_unit);
   if (rateEmpty && unitEmpty) return [{ column: 'default_rate_per_1000', after: RATE }, { column: 'rate_unit', after: UNIT }];
   if (rateEmpty && String(row.rate_unit).trim().toLowerCase() === UNIT) return [{ column: 'default_rate_per_1000', after: RATE }];
   if (unitEmpty && sameRate(row.default_rate_per_1000, RATE)) return [{ column: 'rate_unit', after: UNIT }];
@@ -84,17 +89,19 @@ async function fillRates(knex) {
     if (!row) continue;
     const fill = rateFill(row);
     if (!fill.length) {
-      if (!(sameRate(row.default_rate_per_1000, RATE) && row.rate_unit === UNIT)) {
+      if (!(sameRate(row.default_rate_per_1000, RATE) && String(row.rate_unit).trim() === UNIT)) {
         console.log(`[lawn-v13-december-potash-followup] ${row.name}: rate ${row.default_rate_per_1000} ${row.rate_unit} left as it is`);
       }
       continue;
     }
     const update = { updated_at: knex.fn.now() };
     for (const { column, after } of fill) update[column] = after;
-    // Guarded on the fields still being empty, so a concurrent edit is never overwritten.
+    // Guarded on the exact value read (NULL, '' or whitespace), so a concurrent edit is never overwritten.
     const query = knex('products_catalog').where({ id: productId });
-    for (const { column } of fill) query.whereNull(column);
-    if (await query.update(update)) for (const { column, after } of fill) written.push({ productId, column, after });
+    for (const { column } of fill) {
+      if (row[column] == null) query.whereNull(column); else query.where(column, row[column]);
+    }
+    if (await query.update(update)) for (const { column, after } of fill) written.push({ productId, column, before: row[column] ?? null, after });
   }
   return written;
 }
@@ -149,10 +156,11 @@ exports.down = async function down(knex) {
     return;
   }
   for (const log of logs) {
-    for (const { productId, column, after } of asObject(log.after_snapshot).filled || []) {
+    for (const { productId, column, before = null, after } of asObject(log.after_snapshot).filled || []) {
       const row = await knex('products_catalog').where({ id: productId }).first('id', column);
+      // Back to what it was (NULL, or the blank string an admin left), only while it still holds the written value.
       if (row && (typeof after === 'number' ? sameRate(row[column], after) : row[column] === after)) {
-        await knex('products_catalog').where({ id: productId }).update({ [column]: null, updated_at: knex.fn.now() });
+        await knex('products_catalog').where({ id: productId }).update({ [column]: before, updated_at: knex.fn.now() });
       }
     }
     await knex('lawn_protocol_audit_log').where({ id: log.id }).del();

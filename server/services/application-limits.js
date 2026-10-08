@@ -2,7 +2,7 @@ const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 const { convertInventoryQuantity } = require('./inventory-units');
 const { applyV13CountCaps, V13_AMOUNT } = require('../config/lawn-v13-count-caps');
-const { worstPropertyCount } = require('../utils/property-counts');
+const { worstPropertyCount, worstPropertyTotal } = require('../utils/property-counts');
 
 // annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
 // active ingredient shared by every product that carries it (prodiamine: 65 WDG,
@@ -335,17 +335,11 @@ class ApplicationLimitChecker {
       .where('pah.application_date', '<=', etCalendarDayOf(ctx.proposedDate))
       .whereNull('pah.retracted_at')
       .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
-        'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+        'pah.property_id', 'pah.service_record_id', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
     scopeHistoryToTreatment(query, database, { propertyId: ctx.propertyId, excludeScheduledServiceId: ctx.excludeScheduledServiceId }, 'pah');
-    const history = await query;
-    let used = 0;
-    let estimated = 0;
-    for (const row of history) {
-      const sized = v13AmountShare(row, limit);
-      used += sized.share;
-      if (sized.estimated) estimated += 1;
-    }
+    const { share: used, estimated } = await this.lawnAmountShare(database, await query, limit, { propertyId: ctx.propertyId });
     const cap = Number(limit.limit_value);
+    const amountUsed = Math.round(used * cap * 10000) / 10000;
     const sizedProposal = ctx.proposed ? rateInUnit(ctx.proposed.ratePer1000, ctx.proposed.unit, capUnitOf(limit.limit_unit)) : null;
     // A planned application that cannot be sized counts at the fallback rate: fail closed.
     const adds = !ctx.proposed ? 0 : (sizedProposal > 0 ? sizedProposal : Number(limit.fallback_rate)) / cap;
@@ -354,10 +348,10 @@ class ApplicationLimitChecker {
     const label = `${product.name}: this year's applications on the lawn total ${pct(used)}% of the yearly label amount (${limit.limit_value} ${capUnitOf(limit.limit_unit)} per 1,000 sq ft)`;
     const withThis = adds ? `; this application brings it to ${pct(total)}%` : '';
     if (used >= 1 - 1e-9 || total > 1 + 1e-9) {
-      return { violated: true, message: `${label}${withThis} — ${used >= 1 - 1e-9 ? 'LIMIT REACHED' : 'THIS APPLICATION WOULD EXCEED IT'}${detail}.`, current: pct(used), max: 100 };
+      return { violated: true, message: `${label}${withThis} — ${used >= 1 - 1e-9 ? 'LIMIT REACHED' : 'THIS APPLICATION WOULD EXCEED IT'}${detail}.`, current: pct(used), max: 100, amountUsed };
     }
-    if (total >= AI_CAP_APPROACHING) return { approaching: true, message: `${label}${withThis}${detail}.`, current: pct(used), max: 100 };
-    return { violated: false, current: pct(used), max: 100 };
+    if (total >= AI_CAP_APPROACHING) return { approaching: true, message: `${label}${withThis}${detail}.`, current: pct(used), max: 100, amountUsed };
+    return { violated: false, current: pct(used), max: 100, amountUsed };
   }
 
   async getPropertyComplianceStatus(customerId) {
@@ -433,7 +427,12 @@ class ApplicationLimitChecker {
   // The per-lawn yearly count of already-loaded history rows (see checkLimits).
   async annualCountFor(database, history, opts = {}) {
     if (opts.propertyId || history.length < 2) return history.length;
-    // The frozen ledger property first; a legacy row without one falls back to its visit's property.
+    return worstPropertyCount(await this.placeOnProperty(database, history));
+  }
+
+  // The rows with `treated_property_id`: the property frozen on the ledger row; a legacy row without one
+  // falls back to its visit's property; null = it cannot be placed (counted at every property).
+  async placeOnProperty(database, history) {
     const legacyRecordIds = [...new Set(history.filter((row) => !row.property_id).map((row) => row.service_record_id).filter(Boolean))];
     const placed = legacyRecordIds.length
       ? await database('service_records as sr_prop')
@@ -441,9 +440,22 @@ class ApplicationLimitChecker {
         .whereIn('sr_prop.id', legacyRecordIds).select('sr_prop.id as record_id', 'ss_prop.property_id')
       : [];
     const propertyOf = new Map((placed || []).map((row) => [String(row.record_id), row.property_id]));
-    return worstPropertyCount(history.map((row) => ({
+    return history.map((row) => ({
+      ...row,
       treated_property_id: row.property_id || (row.service_record_id ? propertyOf.get(String(row.service_record_id)) || null : null),
-    })));
+    }));
+  }
+
+  // The v13 yearly amount of already-loaded history rows, as a share of the cap, per lawn: with a treated
+  // property the rows are already that property's (summed); a caller with none (the compliance page, the
+  // legacy check-limits route) is judged on the busiest property of the customer, never the sum across
+  // properties. Rows that cannot be sized count at the cap row's fallback rate.
+  async lawnAmountShare(database, rows, limit, { propertyId } = {}) {
+    const sized = rows.map((row) => v13AmountShare(row, limit));
+    const estimated = sized.filter((entry) => entry.estimated).length;
+    if (propertyId || rows.length < 2) return { share: sized.reduce((sum, entry) => sum + entry.share, 0), estimated };
+    const placed = await this.placeOnProperty(database, rows);
+    return { share: worstPropertyTotal(placed.map((row, index) => ({ treated_property_id: row.treated_property_id, share: sized[index].share })), (entry) => entry.share), estimated };
   }
 
   // The closeout audit of one recorded application, whatever order the visits were recorded in
@@ -491,15 +503,17 @@ class ApplicationLimitChecker {
     const year = day.slice(0, 4);
     const yearRows = (query) => query.where({ 'pah.customer_id': customerId, 'pah.product_id': product.id }).whereNull('pah.retracted_at')
       .where('pah.application_date', '>=', `${year}-01-01`).where('pah.application_date', '<=', `${year}-12-31`)
-      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft', 'pah.property_id', 'pah.service_record_id',
+        'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
     const base = () => database('property_application_history as pah').leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id');
     const others = await scopeHistoryToTreatment(yearRows(base()), database, opts, 'pah');
     const own = opts.excludeScheduledServiceId
       ? await scopeHistoryToTreatment(yearRows(base()), database, { propertyId: opts.propertyId }, 'pah')
         .whereIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: opts.excludeScheduledServiceId }).select('id'))
       : [];
-    const used = others.reduce((sum, row) => sum + v13AmountShare(row, limit).share, 0);
-    const total = used + own.reduce((sum, row) => sum + v13AmountShare(row, limit).share, 0);
+    // Per lawn: with no treated property the busiest property of the customer is judged (this visit's rows count where it was done).
+    const { share: used } = await this.lawnAmountShare(database, others, limit, { propertyId: opts.propertyId });
+    const { share: total } = await this.lawnAmountShare(database, [...others, ...own], limit, { propertyId: opts.propertyId });
     if (total <= 1 + 1e-9 && used < 1 - 1e-9) return null;
     return { type: 'annual_max_rate', message: `${product.name}: ${pct(total)}% of the yearly label amount in ${year} — LIMIT EXCEEDED.`, current: pct(total), max: 100 };
   }

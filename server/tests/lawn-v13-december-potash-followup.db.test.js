@@ -123,6 +123,25 @@ describeDb('v13 December follow-up migration through PostgreSQL', () => {
       }
     });
 
+    test.each([
+      ['an empty string unit and no rate', { rate_unit: '' }, [4.5, 'lb'], [null, '']],
+      ['a whitespace unit and no rate', { rate_unit: '  ' }, [4.5, 'lb'], [null, '  ']],
+      ['an empty string unit beside the 4.5 rate', { default_rate_per_1000: 4.5, rate_unit: '' }, [4.5, 'lb'], [4.5, '']],
+      ['a whitespace unit beside the 4.5 rate', { default_rate_per_1000: 4.5, rate_unit: '   ' }, [4.5, 'lb'], [4.5, '   ']],
+      ['a whitespace unit beside another rate (left alone)', { default_rate_per_1000: 3, rate_unit: '  ' }, [3, '  '], [3, '  ']],
+      ['a padded lb unit and no rate (the rate only)', { rate_unit: ' LB ' }, [4.5, ' LB '], [null, ' LB ']],
+    ])('a blank unit counts as empty and the write matches the value read, through the real migration: %s', async (_name, existing, expected, original) => {
+      await reset(existing);
+      await bothUp();
+      const read = async () => { const row = await newRow(); return [row.default_rate_per_1000 == null ? null : Number(row.default_rate_per_1000), row.rate_unit]; };
+      expect(await read()).toEqual(expected);
+      // down puts back exactly what was there: NULL stays NULL, a blank string comes back as the blank string.
+      await followup.down(knex);
+      expect(await read()).toEqual(original);
+      await followup.up(knex);
+      expect(await read()).toEqual(expected);
+    });
+
     test('a row the frozen migration inserted already has its rate: nothing is filled', async () => {
       await reset(null);
       await bothUp();
