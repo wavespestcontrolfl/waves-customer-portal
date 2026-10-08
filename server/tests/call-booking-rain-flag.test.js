@@ -24,12 +24,14 @@ const visit = (extra = {}) => ({ id: 'visit-1', customer_id: 'cust-1', service_t
 const pest = { service_key: 'pest_general_quarterly' };
 
 function run(extra = {}, depExtra = {}) {
-  const notifyAdmin = jest.fn(async () => {});
+  // Stands in for raiseAdminAlert: (category, spec, opts).
+  const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+  const customerName = jest.fn(async () => 'Test Person');
   const hourlyRain = jest.fn(async () => HOURLY);
   const customerPoint = jest.fn(async () => ({ lat: 27.4, lng: -82.4 }));
   const result = flagCallBookingRain({
     visit: visit(), scheduledDate: D1, windowStart: '14:00', windowEnd: '15:00', catalogRow: pest, callSid: 'CA-test', db: {},
-    deps: { notifyAdmin, hourlyRain, customerPoint, ...depExtra }, ...extra,
+    deps: { raiseAdminAlert: notifyAdmin, customerName, hourlyRain, customerPoint, ...depExtra }, ...extra,
   });
   return { result, notifyAdmin, hourlyRain, customerPoint };
 }
@@ -45,16 +47,36 @@ describe('flagCallBookingRain', () => {
     expect(customerPoint).not.toHaveBeenCalled();
   });
 
-  test('outdoor work in a rain window: one notice on the schedule channel, with the peak chance', async () => {
+  test('outdoor work in a rain window: one notice on the schedule channel, by the admin-alert rule', async () => {
     process.env.GATE_CALL_BOOKING_RAIN_FLAG = 'true';
     const { result, notifyAdmin } = run();
     expect(await result).toEqual({ flagged: true, reason: 'wet', peak: 88 });
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
-    const [category, title, body, opts] = notifyAdmin.mock.calls[0];
+    const [category, spec, opts] = notifyAdmin.mock.calls[0];
     expect(category).toBe('schedule');
-    expect(title).toBe('Call booking in a rain window');
-    expect(body).toBe(`Phone-booked Quarterly Pest Control Service on ${D1} at 14:00 has a 88% chance of rain — review it on the dispatch board.`);
-    expect(opts).toMatchObject({ link: '/admin/dispatch', dedupeKey: 'call-booking-rain:visit-1', metadata: { scheduledServiceId: 'visit-1', callSid: 'CA-test', rain_chance_pct: 88 } });
+    // The spec passes the real composer: 60-char headline, one-sentence why
+    // under 110 chars, no ISO date, a link that opens the visit.
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    const composed = composeAdminAlert(spec);
+    expect(composed.headline).toBe("Schedule — check Test Person's visit for rain");
+    expect(composed.why).toMatch(/^Phone-booked Quarterly Pest Control Service on \w{3} \w{3} \d{1,2} at 2:00 PM has a rain chance of 88%\.$/);
+    expect(composed.link).toBe(`/admin/dispatch?tab=schedule&date=${D1}&appointment=visit-1`);
+    expect(composed.metadata).toMatchObject({ area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'visit-1' }, doneWhen: 'visit_moved_or_done', who: 'person' });
+    expect(opts).toMatchObject({ dedupeKey: 'call-booking-rain:visit-1', metadata: { scheduledServiceId: 'visit-1', callSid: 'CA-test', rain_chance_pct: 88 } });
+    expect(opts.detail).toContain(`${D1} 14:00-15:00`);
+    expect(opts.detail).toContain('Nothing was moved');
+  });
+
+  test('copy stays inside the rule with no customer name and a very long service name', async () => {
+    process.env.GATE_CALL_BOOKING_RAIN_FLAG = 'true';
+    const long = 'Quarterly Pest Control Service With Exterior Barrier Treatment And Granular Fire Ant Broadcast Application For The Whole Property';
+    const { result, notifyAdmin } = run({ visit: visit({ service_type: long }) }, { customerName: async () => '' });
+    expect((await result).flagged).toBe(true);
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    const composed = composeAdminAlert(notifyAdmin.mock.calls[0][1]);
+    expect(composed.headline).toBe('Schedule — check a phone-booked visit for rain');
+    expect(composed.why.length).toBeLessThanOrEqual(110);
+    expect(composed.why).toMatch(/has a rain chance of 88%\.$/);
   });
 
   test('rain within 2 h after the visit counts (drying time)', async () => {
@@ -127,7 +149,7 @@ describe('flagCallBookingRain', () => {
 
   test('never throws: a failing notify or lookup is "no flag"', async () => {
     process.env.GATE_CALL_BOOKING_RAIN_FLAG = 'true';
-    const failed = run({}, { notifyAdmin: async () => { throw new Error('bell down'); } });
+    const failed = run({}, { raiseAdminAlert: async () => { throw new Error('bell down'); } });
     expect(await failed.result).toEqual({ flagged: false, reason: 'error' });
     const lookup = run({}, { customerPoint: async () => { throw new Error('db down'); } });
     expect(await lookup.result).toEqual({ flagged: false, reason: 'error' });

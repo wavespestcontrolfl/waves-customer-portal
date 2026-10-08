@@ -9,7 +9,8 @@
  * the lever that reaches them: after the visit is written, when it is outdoor
  * work in a rain window, the office gets ONE admin notification on the
  * 'schedule' channel, the channel the existing "overlaps the schedule" /
- * "outside normal hours" notice for a phone booking already uses.
+ * "outside normal hours" notice for a phone booking already uses. It is
+ * raised through raiseAdminAlert (docs/admin-notifications.md).
  *
  * It only tells. Nothing is moved, no customer is texted, and no triage card
  * is created (an audit found 356 triage cards created and 0 reviewed). On the
@@ -25,7 +26,7 @@ const logger = require('./logger');
 const {
   rainFitFor, withCatalogKeys, isWetWindow, inRainHorizon, boundedHourlyRain, RAIN_PCT, RAIN_AFTER_HOURS,
 } = require('./scheduling/rain-fit');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, formatETTime } = require('../utils/datetime-et');
 
 const GATE = 'GATE_CALL_BOOKING_RAIN_FLAG';
 
@@ -114,16 +115,42 @@ async function wetPeak(visit, window, todayYmd, { db, deps }) {
   return wet ? { reason: 'wet', peak: peakChance(hourly, window) } : { reason: 'not_wet' };
 }
 
-function sendNotice(visit, window, peak, { callSid, deps }) {
-  const notify = deps.notifyAdmin || ((...args) => require('./notification-service').notifyAdmin(...args));
-  return notify(
+// The notice, raised through the shared composer (docs/admin-notifications.md):
+// the customer's name in the headline, a spoken day and time in the why (no
+// ISO date), a link that opens the visit, and the exact values in `detail`.
+// One-shot per visit: the dedupe key holds it to one row however many times
+// the call is reprocessed, and the relevance sweep is its backstop.
+async function sendNotice(visit, window, peak, { callSid, db, deps }) {
+  const { raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('./admin-alert-compose');
+  const { lookupCustomerName, fitAction } = require('./admin-alert-names');
+  const raise = deps.raiseAdminAlert || raiseAdminAlert;
+  const name = await (deps.customerName || lookupCustomerName)(db, visit.customer_id);
+  const at = parseETDateTime(`${window.date}T${window.start}`);
+  const spokenDay = at.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).replace(',', '');
+  const service = String(visit.service_type || 'visit').replace(/\s+/g, ' ').trim();
+  const chance = peak ?? RAIN_PCT;
+  const tail = ` on ${spokenDay} at ${formatETTime(at)} has a rain chance of ${chance}%.`;
+  return raise(
     'schedule',
-    'Call booking in a rain window',
-    `Phone-booked ${visit.service_type || 'visit'} on ${window.date} at ${window.start} has a ${peak ?? RAIN_PCT}% chance of rain — review it on the dispatch board.`,
     {
-      link: '/admin/dispatch',
+      area: 'Schedule',
+      action: name
+        ? fitAction('Schedule', name, [(who) => `check ${who}'s visit for rain`, (who) => `check ${who}'s visit`])
+        : 'check a phone-booked visit for rain',
+      // The service name gives up characters first; the day, time and chance stay.
+      why: `Phone-booked ${cutAtWord(service, MAX_WHY_CHARS - 'Phone-booked '.length - tail.length)}${tail}`,
+      severity: 'needs-you',
+      link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(window.date)}&appointment=${encodeURIComponent(visit.id)}`,
+      subject: { type: 'visit', id: String(visit.id) },
+      doneWhen: 'visit_moved_or_done',
+      who: 'person',
+    },
+    {
       // One notice per visit, however many times the call is reprocessed.
       dedupeKey: `call-booking-rain:${visit.id}`,
+      detail: `${name || 'A customer'}: ${service} booked from a phone call for ${window.date} ${window.start}-${window.end}. `
+        + `Hourly chance of rain reaches ${chance}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `
+        + 'Nothing was moved and the customer was not contacted.',
       metadata: { scheduledServiceId: visit.id, callSid, rain_chance_pct: peak, scheduled_date: window.date, window_start: window.start },
     },
   );
@@ -150,7 +177,7 @@ async function flagCallBookingRain({
     if (!(await isOutdoorVisit(visit, catalogRow, db))) return { flagged: false, reason: 'not_outdoor' };
     const { reason, peak } = await wetPeak(visit, window, todayYmd, { db, deps });
     if (reason !== 'wet') return { flagged: false, reason };
-    await sendNotice(visit, window, peak, { callSid, deps });
+    await sendNotice(visit, window, peak, { callSid, db, deps });
     return { flagged: true, reason, peak };
   } catch (err) {
     logger.warn(`[call-booking-rain-flag] skipped: ${err.message}`);
