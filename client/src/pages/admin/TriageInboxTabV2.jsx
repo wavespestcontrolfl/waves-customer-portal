@@ -362,7 +362,7 @@ function canSaveContactNote(payload) {
   const c = p?.secondary_contact;
   if (!c || typeof c !== "object" || p.other_parties_mentioned === true) return false;
   if ((Array.isArray(p.secondary_contacts) ? p.secondary_contacts.slice(1) : []).some(Boolean)) return false;
-  if (c.wants_notifications === true || c.wants_appointment_texts === true || c.on_site === true) return false;
+  if (['wants_notifications', 'wants_appointment_texts', 'on_site', 'is_billing_party'].some((flag) => c[flag] === true)) return false;
   return !!(c.name_full || c.first_name || c.last_name) && !!(c.phone || c.phone_e164 || c.email);
 }
 

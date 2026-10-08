@@ -338,6 +338,7 @@ describe('POST /admin/triage/:id/save-contact-note', () => {
     ['the caller asked for notifications', { ...CONTACT, wants_notifications: true }, {}],
     ['the person wants appointment texts', { ...CONTACT, wants_appointment_texts: true }, {}],
     ['the person is on site', { ...CONTACT, on_site: true }, {}],
+    ['the person pays the bill', { ...CONTACT, is_billing_party: true }, {}],
     ['other parties were mentioned', CONTACT, { other_parties_mentioned: true }],
     ['a second person is listed after the mirror', CONTACT, {
       secondary_contacts: [CONTACT, { name_full: 'Robin Example', email: 'robin@example.com' }],

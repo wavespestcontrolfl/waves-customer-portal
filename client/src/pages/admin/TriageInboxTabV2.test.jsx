@@ -739,6 +739,7 @@ describe('Save to notes on second-contact cards', () => {
     card('wants', 'Wants', { secondary_contact: { ...contact, wants_notifications: true } }),
     card('texts', 'Texts', { secondary_contact: { ...contact, wants_appointment_texts: true } }),
     card('onsite', 'OnSite', { secondary_contact: { ...contact, on_site: true } }),
+    card('payer', 'Payer', { secondary_contact: { ...contact, is_billing_party: true } }),
     card('others', 'Others', { secondary_contact: contact, other_parties_mentioned: true }),
     card('two', 'Two', { secondary_contact: contact, secondary_contacts: [contact, { name_full: 'Robin Example', email: 'robin@example.com' }] }),
   ];

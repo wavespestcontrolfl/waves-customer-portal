@@ -1547,8 +1547,8 @@ function secondContactNote(payload) {
   if (more.length || payload.other_parties_mentioned === true) {
     return { refusal: 'Card names more than one person — add them to the customer by hand' };
   }
-  if (['wants_notifications', 'wants_appointment_texts', 'on_site'].some((flag) => c[flag] === true)) {
-    return { refusal: 'This person gets messages or is on site — they are not a plain note' };
+  if (['wants_notifications', 'wants_appointment_texts', 'on_site', 'is_billing_party'].some((flag) => c[flag] === true)) {
+    return { refusal: 'This person gets messages, is on site or pays the bill — they are not a plain note' };
   }
   const name = oneLine(c.name_full || [c.first_name, c.last_name].filter(Boolean).join(' '));
   const rawPhone = oneLine(c.phone || c.phone_e164);
