@@ -24,6 +24,12 @@ const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candid
 // Cards only an admin sees and settles: property-role proposals embed the customer's other property
 // addresses, and a family-account suggestion lists customers and the caller's number for the office to
 // link. Hidden from the tech list and counts, and refused on every shared transition.
+// Cards whose transitions must carry the version (expected_updated_at) the operator saw: a reprocess
+// refreshes them in place (codex r22 / r27 / r30 P1, the owed-first-name list, the family suggestion).
+const VERSION_BOUND_REASONS = [
+  'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
+  'auto_booking_skipped_after_approval', 'missing_first_name', 'family_account_candidates',
+];
 const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];
 // Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
 // the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
@@ -553,19 +559,10 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
     // force-reprocess refreshes in place: "Follow-up booked" on the old
     // screen must not settle the newer obligation (pre-push audit P1 after
     // r27).
-    if (item.reason_code === 'property_role_confirm' || item.reason_code === 'reschedule_link_promise'
-      || item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'attached_booking_followup_unbooked'
-      // …and the recovery task a settlement refreshes in place (window,
-      // address, retained visit) — a stale click must not close the newer
-      // obligation (codex r30 P1).
-      || item.reason_code === 'auto_booking_skipped_after_approval'
-      // …and the owed-first-name card, whose customer list a reprocess appends to: a stale
-      // Resolve / Dismiss must not settle a customer the operator never saw.
-      || item.reason_code === 'missing_first_name'
-      // …and email review cards (codex round-3 P1): the client already
-      // sends expected_updated_at on every resolve/dismiss, so a stale view
-      // of a card whose evidence has since changed refuses instead of
-      // settling evidence the operator never saw.
+    // VERSION_BOUND_REASONS: property-role, reschedule-promise, house-number-conflict, attached-follow-up,
+    // recovery-task, owed-first-name and family-account cards, each of which a reprocess refreshes in
+    // place — a stale Resolve / Dismiss must not settle evidence the operator never saw.
+    if (VERSION_BOUND_REASONS.includes(item.reason_code)
       || emailReviewCard
       || requireVersion || live?.payload?.reschedule_proposal) {
       if (!live || !expectedUpdatedAt

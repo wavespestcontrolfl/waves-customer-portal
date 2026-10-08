@@ -29,7 +29,7 @@ const logger = require('./logger');
 const { whereLiveCustomer } = require('./customer-stages');
 const { sameHouseNumberStreet } = require('./call-triage-flags');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
-const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { canonicalV2Secondary, mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 
@@ -152,11 +152,26 @@ async function matchFamilyAccounts({
  */
 async function suggestFamilyAccounts({ phones = [], ...args }) {
   const match = await matchFamilyAccounts(args);
-  if (!match || args.call.customer_id) return null;
+  const own = createdCustomerId(args.call);
+  const linkedElsewhere = args.call.customer_id && String(args.call.customer_id) !== own;
+  if (!match || linkedElsewhere) return null;
+  // The customer THIS call created for the caller (an earlier pass) carries the caller's own number; it
+  // must not hide the suggestion on a reprocess of the same call.
+  const knownElsewhere = own ? (table) => (args.conn || db)(table).whereNot('id', own) : (args.conn || db);
   for (const phone of phones) {
-    if (await knownCallerPhoneExists(args.conn || db, phone)) return null;
+    if (await findKnownCallerCustomer(knownElsewhere, phone, ['id'])) return null;
   }
   return match;
+}
+
+// The customer a processing pass created from this very call (the call-creation provenance stamp).
+function createdCustomerId(call) {
+  try {
+    const raw = call && call.metadata;
+    return String(((typeof raw === 'string' ? JSON.parse(raw) : raw) || {}).created_customer_id || '');
+  } catch {
+    return '';
+  }
 }
 
 function cardPayload({ suggestion, extracted, call, phone }) {
@@ -172,13 +187,14 @@ function cardPayload({ suggestion, extracted, call, phone }) {
   };
 }
 
-// An operator already closed this call's card (resolved or dismissed by hand): a reprocess must not reopen
-// it. A card the sweep below retired is not an operator's decision.
+// An operator already closed this call's card (resolved or dismissed by hand: the triage transitions stamp
+// resolution_source 'human'): a reprocess must not reopen it. A card the sweep below retired ('auto'), or
+// one a recording swap closed (no source), is not an operator's decision, so the suggestion comes back.
 async function operatorClosedCard(trx, callLogId) {
   const row = await trx('triage_items')
     .where({ call_log_id: callLogId, reason_code: CARD_REASON_CODE })
     .whereIn('status', ['resolved', 'dismissed'])
-    .whereRaw("COALESCE(resolution_source, '') <> 'auto'")
+    .where({ resolution_source: 'human' })
     .first('id');
   return Boolean(row);
 }

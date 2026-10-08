@@ -107,7 +107,7 @@ describe('the card is advisory in the customer-field lane', () => {
 describe('suggest-only: nothing is written but the card', () => {
   test('the module writes only triage cards: no link, contact, opt-in, text or enrollment, and no gate', () => {
     const code = moduleSource.split('\n').filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('//') && !line.trim().startsWith('/*')).join('\n');
-    expect(code).not.toMatch(/persistCallSecondaryContact|recipient_optin|sendCustomerMessage|forShare|GATE_CALL_FAMILY_NAME_LINK|created_customer_id/);
+    expect(code).not.toMatch(/persistCallSecondaryContact|recipient_optin|sendCustomerMessage|forShare|GATE_CALL_FAMILY_NAME_LINK|jsonb_set/);
     // every write targets triage_items (plus the call-review aggregate helper); never customers or call_log
     expect(code).not.toMatch(/trx\('customers'\)\.(update|insert)|conn\('customers'\)\.(update|insert)|trx\('call_log'\)\.update|conn\('call_log'\)\.update/);
     expect(code).toContain("'triage_items'");
@@ -148,6 +148,12 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);');
     const branch = client.slice(client.indexOf(') : isAdminResolveCard ? ('));
     expect(branch.slice(0, 600)).toContain('isAdmin ? (');
+  });
+  test('Resolve / Dismiss bind to the version the operator saw (expected_updated_at), via the version-bound reason set', () => {
+    expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',\s*\];/);
+    expect(triage).toContain('if (VERSION_BOUND_REASONS.includes(item.reason_code)');
+    expect(triage).toContain('|| emailReviewCard');
+    expect(triage).toContain("return { outcome: 'stale_version' };");
   });
   test('a merged candidate opens its survivor: the list resolves customer_ids for this card too', () => {
     expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];");
@@ -326,7 +332,7 @@ const SKIP = !process.env.DATABASE_URL;
       await customer();
       const handled = await callWithToken();
       await fileFamilyAccountCard(withToken(handled));
-      await trx('triage_items').where({ call_log_id: handled }).update({ status: 'dismissed', resolution_source: 'operator' });
+      await trx('triage_items').where({ call_log_id: handled }).update({ status: 'dismissed', resolution_source: 'human' });
       await fileFamilyAccountCard(withToken(handled));
       expect(await trx('triage_items').where({ call_log_id: handled, status: 'open' })).toHaveLength(0);
       const swept = await callWithToken();
@@ -335,6 +341,37 @@ const SKIP = !process.env.DATABASE_URL;
       expect(await trx('triage_items').where({ call_log_id: swept, status: 'open' })).toHaveLength(0);
       await fileFamilyAccountCard(withToken(swept));
       expect(await trx('triage_items').where({ call_log_id: swept, status: 'open' })).toHaveLength(1);
+    });
+
+    test('a card closed by a recording swap (no resolution source) is re-filed; one an operator closed (human) is not', async () => {
+      await customer();
+      const swapped = await callWithToken();
+      await fileFamilyAccountCard(withToken(swapped));
+      await trx('triage_items').where({ call_log_id: swapped }).update({ status: 'resolved', resolution_source: null });
+      await fileFamilyAccountCard(withToken(swapped));
+      expect(await trx('triage_items').where({ call_log_id: swapped, status: 'open' })).toHaveLength(1);
+    });
+
+    test('the customer THIS call created for the caller does not hide the suggestion on a reprocess of the same call', async () => {
+      await customer();
+      const daughter = await customer({ first_name: 'Dana', last_name: 'Lee', phone: '+19415550101', address_line1: '9 Elsewhere Ct' });
+      const created = await callWithToken({ customer_id: daughter, metadata: { created_customer_id: String(daughter) } });
+      const out = await fileFamilyAccountCard(withToken(created, {
+        call: { id: created, from_phone: '+19415550101', customer_id: daughter, metadata: { created_customer_id: String(daughter) } },
+      }));
+      expect(out).not.toBeNull();
+      expect(await trx('triage_items').where({ call_log_id: created, status: 'open' })).toHaveLength(1);
+      // a customer someone ELSE linked (no created marker) still hides it
+      const linked = await callWithToken({ customer_id: daughter });
+      expect(await fileFamilyAccountCard(withToken(linked, { call: { id: linked, from_phone: '+19415550101', customer_id: daughter, metadata: {} } }))).toBeNull();
+      // and an unrelated known number still hides it even for a call that created a customer
+      const other = await customer({ first_name: 'Other', last_name: 'Person', phone: '+19415550150' });
+      const created2 = await callWithToken({ customer_id: daughter, metadata: { created_customer_id: String(daughter) } });
+      expect(await fileFamilyAccountCard(withToken(created2, {
+        phone: '+19415550150',
+        call: { id: created2, from_phone: '+19415550101', customer_id: daughter, metadata: { created_customer_id: String(daughter) } },
+      }))).toBeNull();
+      expect(other).toBeTruthy();
     });
 
     test('a pass that lost the processing claim writes nothing', async () => {
