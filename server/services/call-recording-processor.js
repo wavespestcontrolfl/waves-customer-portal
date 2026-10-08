@@ -6972,7 +6972,7 @@ function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = nu
   // building-level too.
   const property = v2Extraction?.property || {};
   if (!CARD_WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(property.property_type || '').toLowerCase())) return false;
-  if (property.whole_building_occupancy === false) return false;
+  if (property.whole_building_occupancy === false || property.whole_building_occupancy_final === false) return false;
   const secondary = Array.isArray(v2Extraction?.service_request?.secondary_categories) ? v2Extraction.service_request.secondary_categories : [];
   if (secondary.some((c) => !WHOLE_STRUCTURE_CATEGORIES.has(String(c)))) return false;
   const views = preAdoptionExtracted ? [preAdoptionExtracted, extracted] : [extracted];

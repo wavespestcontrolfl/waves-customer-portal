@@ -412,6 +412,7 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, { property: { property_type: 'unknown' } })).toBe(false);
     expect(run(slab, null)).toBe(false);
     expect(run(slab, { property: { property_type: 'commercial', whole_building_occupancy: false } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: false } })).toBe(false);
     expect(run(slab, { property: { property_type: 'commercial' }, service_request: { secondary_categories: ['pest_general'] } })).toBe(false);
     expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['termite'] } })).toBe(false);
     expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['wdo'] } })).toBe(true);
