@@ -620,13 +620,13 @@ function useProductRows(ctx, catalog) {
       if (!prev.some((row) => row.productId === product.id)) return [...prev, productRow(product, { added: true, planned, weedGroup })];
       // A weed-mix product the tech already added on its own joins the group, so it shares
       // the group's one area instead of keeping a control (and an area) of its own.
-      // It is rebuilt from its plan item (the program's rate and method), keeping an amount the tech typed.
+      // The row keeps everything the tech set on it (amount, unit, method); it only gains the
+      // group mark and its plan item's own facts (the program's rate, method and area).
       if (!weedGroup) return prev;
       return prev.map((row) => {
         if (row.productId !== product.id || row.weedGroup) return row;
-        const joined = productRow(product, { added: true, planned, weedGroup: true });
-        return row.totalAmount === '' || row.totalAmount == null ? joined
-          : { ...joined, totalAmount: row.totalAmount, amountUnit: row.amountUnit, dimension: row.dimension, fromPlan: row.fromPlan, rateChanged: true, unitPicked: row.unitPicked };
+        const { planned: isPlanned, fromProtocol, plannedRatePer1000, plannedRateUnit, plannedMethod, plannedSqft } = productRow(product, { added: true, planned, weedGroup: true });
+        return { ...row, weedGroup: true, planned: isPlanned, fromProtocol, plannedRatePer1000, plannedRateUnit, plannedMethod, plannedSqft };
       });
     });
   }, []);
