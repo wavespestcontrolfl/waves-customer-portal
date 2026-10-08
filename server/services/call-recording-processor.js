@@ -11005,6 +11005,12 @@ const CallRecordingProcessor = {
             note: `caller said this line cannot get texts — texts go to ${spokenText || '(no number given: ask for one)'}, calls to ${aniPhone || 'the line they called from'}; update the customer's phones. Resolve when the phones are updated — the calling line stays blocked for texts. Use Line can get texts if the line can get texts after all.`,
           },
         });
+        // A callback_number_needed card filed by an earlier pass (before this call was known to be a
+        // no-text line) keeps its old payload; mark it, or its Resolve could release the hold we arm now.
+        await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'callback_number_needed' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ payload: db.raw('COALESCE(payload, \'{}\'::jsonb) || \'{"no_text_hold": true}\'::jsonb') });
         if (refresh) {
           // Refresh the OPEN card only: a card staff already resolved or dismissed stays settled.
           await db('triage_items')

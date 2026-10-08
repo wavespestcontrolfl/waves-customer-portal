@@ -67,7 +67,12 @@ function makeFakeDb(seed = {}) {
       && whereNotInClauses.every(({ col, vals }) => !vals.includes(row[col]))
       && rawPredicates.every((fn) => fn(row))
       && (orPredicates.length === 0 || orPredicates.some((fn) => fn(row)));
-    const filtered = () => rows.filter(matches);
+    let order = null;
+    const filtered = () => {
+      const found = rows.filter(matches);
+      if (!order) return found;
+      return [...found].sort((x, y) => (String(x[order.col]) < String(y[order.col]) ? -1 : 1) * (order.dir === 'desc' ? -1 : 1));
+    };
     const api = {
       where(a, b) {
         if (typeof a === 'function') {
@@ -98,7 +103,7 @@ function makeFakeDb(seed = {}) {
       whereNotNull(col) { notNullCols.push(col); return api; },
       forUpdate() { return api; },
       forShare() { return api; },
-      orderBy() { return api; },
+      orderBy(col, dir) { order = { col, dir }; return api; },
       limit() { return api; },
       join() { return api; },
       leftJoin() { return api; },
@@ -595,6 +600,22 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
     expect(fx.tables.triage_items[0].status).toBe(status); // the card stays closed
     expect(numberHold(fx.tables).cleared_at).toBeInstanceOf(Date);
     expect(numberHold(fx.tables, 'hold-other').cleared_at).toBeNull();
+  });
+
+  test('a SUPERSEDED closed card cannot release: a reprocess filed a newer text_number_differs card (open or closed)', async () => {
+    for (const newerStatus of ['open', 'dismissed']) {
+      const fx = fixture({ triage_items: [
+        textCard({ status: 'resolved', created_at: '2030-01-07T10:00:00.000Z' }),
+        textCard({ id: 'card-newer', status: newerStatus, created_at: '2030-01-07T11:00:00.000Z' }),
+      ] });
+      wireDb(db, { conn: fx.conn });
+      await withServer(async (baseUrl) => {
+        const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true });
+        expect(res.status).toBe(409);
+        expect((await res.json()).code).toBe('STALE_CARD_VERSION');
+      });
+      expect(numberHold(fx.tables).cleared_at).toBeNull();
+    }
   });
 
   test('a closed card without line_can_get_texts, or any closed non-text card, is still refused as already actioned', async () => {

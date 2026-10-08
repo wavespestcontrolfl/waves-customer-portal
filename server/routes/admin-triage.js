@@ -201,6 +201,11 @@ async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo }) {
     if (!live || !expectedUpdatedAt || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
       return { outcome: 'stale_version' };
     }
+    // Only the NEWEST text_number_differs card of the call may release: a reprocess that re-armed the hold
+    // filed a newer card, and an older closed one must not clear what that card still asks the office to review.
+    const newest = await trx('triage_items').where({ call_log_id: item.call_log_id, reason_code: 'text_number_differs' })
+      .orderBy('created_at', 'desc').first('id');
+    if (!newest || String(newest.id) !== String(id)) return { outcome: 'stale_version' };
     const reply = await releaseNoTextHold(trx, item, 'resolved', assignedTo, null, true);
     return { outcome: 'ok', callbackNumber: reply, status: item.status };
   });

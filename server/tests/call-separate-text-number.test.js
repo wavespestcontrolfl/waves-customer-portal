@@ -218,6 +218,12 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(section).not.toContain('.merge(');
   });
 
+  test('arming the no-text hold also marks a callback_number_needed card an earlier pass left open (no stale unmarked card can release it)', () => {
+    const at = src.indexOf('const fileTextNumberCard = async');
+    const section = src.slice(at, at + 3600);
+    expect(section).toMatch(/reason_code: 'callback_number_needed'[^]*?\.whereIn\('status', \['open', 'in_progress'\]\)[^]*?no_text_hold/);
+  });
+
   test('a hard-vetoed no-text call gets neither the hold nor the card (the veto the pipeline applies)', () => {
     expect(src).toContain('const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);');
     expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');
