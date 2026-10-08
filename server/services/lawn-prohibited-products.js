@@ -11,10 +11,18 @@
 // Residential only: the label bars home lawns, not commercial turf (Ronstar G is registered for
 // commercial turf and landscapes). A customer whose property_type is commercial or business is not
 // blocked; residential, an unknown type and no type are (the safe side).
-// The one commercial classifier the pricing engine, the tax code and the intake use (commercial-helpers.js):
-// "commercial", "business", "office", "warehouse", "medical_office", "retail", "hoa_common_area", ... are
-// commercial. Blank, unknown and residential types are not, and fail closed.
-const isCommercialProperty = (propertyType) => require('./pricing-engine/commercial-helpers').isCommercialProperty({ propertyType });
+// Turf use, not pricing: the pricing classifier (commercial-helpers.js) calls HOA and multifamily common
+// areas and apartments "commercial", but people live on that turf and the label bars residential
+// properties. So a type is commercial here only when the pricing classifier says so AND the stored type
+// names nothing residential. "office", "warehouse", "medical_office", "retail", "commercial", "business"
+// pass; "hoa_common_area_residential", "multifamily_common_area_residential", "residential_hoa",
+// "residential_common_area", "apartment", blank and unknown types do not (the safe side).
+const RESIDENTIAL_TURF = /resident|hoa|multi[\s_-]?family|apartment|condo|town\s?home|townhouse|duplex|common[\s_-]?area|single[\s_-]?family|\bhome\b/i;
+const isCommercialProperty = (propertyType) => {
+  const type = String(propertyType || '');
+  if (!type.trim() || RESIDENTIAL_TURF.test(type)) return false;
+  return require('./pricing-engine/commercial-helpers').isCommercialProperty({ propertyType });
+};
 
 // The yearly count caps, intervals and blackouts live in product_limits (application-limits.js);
 // this module only answers "may this product be on a lawn visit at all".

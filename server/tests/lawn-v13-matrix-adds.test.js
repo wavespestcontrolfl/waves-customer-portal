@@ -329,8 +329,8 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
 
   test('residential lawns only: a commercial or business property is not blocked, residential and unknown are', () => {
     const ronstar = { name: 'Ronstar G' };
-    // The pricing engine's classifier decides what is commercial: office, warehouse, retail, medical office, HOA common area ...
-    for (const propertyType of ['commercial', 'business', 'Commercial', ' business ', 'office', 'Office', 'warehouse', 'medical_office', 'Medical Office', 'retail', 'restaurant', 'industrial', 'hoa_common_area']) {
+    // Commercial turf only: office, warehouse, retail, medical office ... HOA and multifamily common areas are residential turf (blocked).
+    for (const propertyType of ['commercial', 'business', 'Commercial', ' business ', 'office', 'Office', 'warehouse', 'medical_office', 'Medical Office', 'retail', 'restaurant', 'industrial']) {
       expect({ propertyType, block: prohibited.lawnProhibitedProductBlock(ronstar, { propertyType }) }).toEqual({ propertyType, block: null });
     }
     // Residential, unknown, blank and unrecognised types fail closed.
@@ -569,5 +569,19 @@ describe('8. November pre-emergent move: a 2027 note only; the 2026 visits do no
 
   test('the 2027 schedule keeps January\'s Stonewall hose visit', () => {
     expect(note).toMatch(/January Stonewall 4FL stays/);
+  });
+});
+
+describe('Ronstar home-lawn block: turf use, not the pricing class', () => {
+  const { lawnProhibitedProductBlock } = require('../services/lawn-prohibited-products');
+  const ronstar = { name: 'Ronstar G' };
+  test.each(['office', 'warehouse', 'medical_office', 'commercial', 'Retail'])('%s turf is commercial: allowed', (propertyType) => {
+    expect(lawnProhibitedProductBlock(ronstar, { propertyType })).toBeNull();
+  });
+  test.each([
+    'hoa_common_area_residential', 'multifamily_common_area_residential', 'residential_hoa',
+    'residential_common_area', 'apartment', 'residential', '', null, undefined,
+  ])('%s turf stays blocked', (propertyType) => {
+    expect(lawnProhibitedProductBlock(ronstar, { propertyType })).toEqual(expect.objectContaining({ code: 'lawn_product_not_for_home_lawns' }));
   });
 });
