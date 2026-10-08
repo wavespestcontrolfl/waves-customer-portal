@@ -18,7 +18,7 @@ const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixe
 const round3 = require('../models/migrations/20261005160000_lawn_v13_round3_gates_and_combo_class');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
-const decemberMigration = require('../models/migrations/20261008120000_lawn_v13_december_potash');
+const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
 
 const LAWN_V13_VERSION = migration.V13_VERSION;
@@ -303,7 +303,7 @@ describe('staged migration 20261005120000', () => {
       const [, windowKey] = migration.WINDOWS.find((w) => w[0] === month);
       const rowsForWindow = migration.PRODUCTS.filter(([key]) => key === windowKey).map(([, spec]) => spec);
       // The staged October row names Stonewall 15-0-15; 20261007120500 swaps it for Dimension 18-0-10.
-      // The staged December row names the 24-0-11; 20261008120000 swaps it for LESCO 10-0-22.
+      // The staged December row names the 24-0-11; 20261008130000 swaps it for LESCO 10-0-22.
       // 20261007180000 turns the April Artavia row into Headway and adds its own rows (Arena keeps its name: 20261007181000 undoes the rename).
       // (The July 0-0-50 row 180000 inserts is deleted by 20261007189000: the recipe has no July potash.)
       const matrixAdds = matrixMigration.INSERTS.filter((spec) => spec.windowKey === windowKey && spec.name !== matrixMigration.SOP);
@@ -314,7 +314,7 @@ describe('staged migration 20261005120000', () => {
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
       // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
       // Migration 20261007150000 retires the Dismiss rows and the recipe drops its lines (use up the jug, do not reorder).
-      // 20261008120000 retires February's Certainty and surfactant rows (Celsius alone in February); the recipe lines are gone.
+      // 20261008130000 retires February's Certainty and surfactant rows (Celsius alone in February); the recipe lines are gone.
       const retiredHere = new Set((decemberMigration.RETIRE.find(([key]) => key === windowKey) || [, []])[1]);
       expect(spots.filter((n) => n !== migration.NAMES.DIS && !retiredHere.has(n)).sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
@@ -358,7 +358,7 @@ describe('migration 20261005130000: catalog rows, links and unread gate keys', (
     for (const month of MONTHS) {
       for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
     }
-    // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008120000 inserts the 10-0-22.
+    // 20261007180000 inserts Headway, the 0-0-50 and Advion, and renames the Arena row; 20261008130000 inserts the 10-0-22.
     const specNames = [...fixMigration.PRODUCTS.map((p) => p.name), ...matrixMigration.CATALOG.map((p) => p.name), decemberMigration.NEW_NAME];
     for (const name of named) expect(specNames).toContain(name);
     expect(new Set(specNames).size).toBe(specNames.length);
@@ -555,7 +555,7 @@ describe('migration 20261005140000: rollback order, EPA numbers, Blindside rows'
       }
     }
     // The staged windows list Blindside beside every Celsius line; the recipe lists it for January, March and December only
-    // (owner 2026-10-08: November through March, February Celsius alone), and 20261008120000 retires the other staged rows.
+    // (owner 2026-10-08: November through March, February Celsius alone), and 20261008130000 retires the other staged rows.
     const recipeMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith(BLINDSIDE)));
     const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')));
     expect(recipeMonths).toEqual([1, 3, 12]);

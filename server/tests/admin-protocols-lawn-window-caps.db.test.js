@@ -53,7 +53,7 @@ describeDb('GET /lawn/window carries the v13 count caps', () => {
     expect(blindside.annualCounter.maxApplications).toBe(2);
   });
 
-  // Owner 2026-10-08 (20261008120000): February weed spots are Celsius alone; Blindside is a November-through-March product.
+  // Owner 2026-10-08 (20261008130000): February weed spots are Celsius alone; Blindside is a November-through-March product.
   test.each([['2026-02-10', ['Celsius WG']], ['2026-05-12', ['Celsius WG', 'Certainty Turf Herbicide', 'LESCO 90/10 Nonionic Surfactant']]])('%s: the weed products the window lists after the weed-season retirement', async (date, expected) => {
     process.env.GATE_LAWN_V13 = 'true';
     const res = await windowFor(date, 'st_augustine');

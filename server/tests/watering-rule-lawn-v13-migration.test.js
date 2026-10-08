@@ -48,13 +48,13 @@ describe('the v13 watering rules', () => {
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
     const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
     const bermuda = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
-    const december = require('../models/migrations/20261008120000_lawn_v13_december_potash');
+    const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
     const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name), ...matrix.WATERING.map((item) => item.name), ...matrix.FAIL_CLOSED.map((item) => item.name), ...require('../models/migrations/20261007181000_lawn_v13_matrix_adds_fixes').WATERING.map((item) => item.name), ...december.WATERING.map((item) => item.name)]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 
   test('the December LESCO 10-0-22 rule is the 24-0-11 rule (0.25 inch within 24 hours), valid and owner-sourced', () => {
-    const december = require('../models/migrations/20261008120000_lawn_v13_december_potash');
+    const december = require('../models/migrations/20261008130000_lawn_v13_december_potash');
     const f24 = ALL.find((item) => item.name === 'LESCO 24-0-11 with PolyPlus OPTI').rule;
     const checked = validateRule(december.WATERING_RULE);
     expect(checked.errors).toEqual([]);

@@ -1,4 +1,4 @@
-// Lawn protocol v13 December step: LESCO 10-0-22 at 4.5 lb per 1,000 sq ft (migration 20261008120000,
+// Lawn protocol v13 December step: LESCO 10-0-22 at 4.5 lb per 1,000 sq ft (migration 20261008130000,
 // owner 2026-10-08), through the real migration on PostgreSQL (cloned schema). Synthetic data only.
 //
 // Pinned: the catalog row is inserted once (fresh path) or only has its empty fields filled (existing
@@ -10,7 +10,7 @@ const { randomUUID } = require('crypto');
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const engine = require('../services/waveguard-plan-engine');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
-const migration = require('../models/migrations/20261008120000_lawn_v13_december_potash');
+const migration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 const staged = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
 const { approvedReportProductFacts } = require('../services/service-report/report-data');

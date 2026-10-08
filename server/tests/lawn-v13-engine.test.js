@@ -22,7 +22,7 @@ const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-l
 const protocolReader = require('../services/protocol-reader');
 const migration = require('../models/migrations/20261005120000_lawn_protocol_v13_staged');
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
-const decemberMigration = require('../models/migrations/20261008120000_lawn_v13_december_potash');
+const decemberMigration = require('../models/migrations/20261008130000_lawn_v13_december_potash');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
 // The v13 recipe has no bahia track (owner 2026-10-06); protocols.json (gate off) still does.
@@ -233,7 +233,7 @@ const BLINDSIDE = 'Blindside Herbicide';
 // the staged Stonewall 15-0-15 line).
 const DIMENSION_18 = octoberMigration.NEW_NAME;
 const matrixMigration = require('../models/migrations/20261007180000_lawn_v13_matrix_adds');
-// December's whole-lawn bag is the LESCO 10-0-22 row (20261008120000 swaps it in for the staged 24-0-11 line).
+// December's whole-lawn bag is the LESCO 10-0-22 row (20261008130000 swaps it in for the staged 24-0-11 line).
 const F10_22 = decemberMigration.NEW_NAME;
 const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE, DIMENSION_18, F10_22, matrixMigration.HEAD, matrixMigration.SOP, matrixMigration.ADVION];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
@@ -445,7 +445,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     const swapped = (spec) => (spec[0] === octoberMigration.OLD_NAME
       ? [DIMENSION_18, spec[1], spec[2], octoberMigration.OCT_RATE, spec[4], spec[5], spec[6], { ...spec[7], ...octoberMigration.NEW_GATES }]
       : spec);
-    // 20261008120000 swaps December's 24-0-11 row for the 10-0-22 (still a lb_n row; the target is 0.45 lb N).
+    // 20261008130000 swaps December's 24-0-11 row for the 10-0-22 (still a lb_n row; the target is 0.45 lb N).
     const decSwapped = (spec) => (spec[0] === decemberMigration.OLD_NAME && windowKey === decemberMigration.DECEMBER_WINDOW
       ? [F10_22, spec[1], spec[2], spec[3], spec[4], spec[5], spec[6], { ...spec[7], ...decemberMigration.NEW_GATES }]
       : spec);
@@ -832,7 +832,7 @@ describe('lb_n nutrition rows derive from the visit target (v13)', () => {
 
 describe('Blindside in the recipe', () => {
   // Owner 2026-10-08: Blindside is a November-through-March product, and February is Celsius alone
-  // (20261008120000 retires the staged rows): of the Celsius windows only January, March and December list it.
+  // (20261008130000 retires the staged rows): of the Celsius windows only January, March and December list it.
   const BLINDSIDE_MONTHS = [1, 3, 12];
 
   test('every Celsius spot window lists Blindside by its exact catalog name, after the Celsius lines, and the line stays a spot line; none in February or April through October', () => {
