@@ -320,7 +320,7 @@ describe('resolveChinch: Arena, then bifenthrin, from the staged rows', () => {
   const ROWS = () => [
     staged(P_ARENA, 'Arena 50 WDG', 'chinch_20_to_25_per_sqft', 5),
     staged(P_ARENA, 'Arena 50 WDG', 'chinch_20_to_25_per_sqft', 4),
-    staged(P_TALAK, 'Atticus Talak 7.9 F', 'chinch_second_product_or_caterpillars', 7),
+    staged(P_TALAK, 'Atticus Talak 7.9 F', 'chinch_second_product_caterpillars_or_mole_cricket_nymphs', 7),
   ];
   const run = (rows = ROWS(), structured = STRUCTURED) => resolveChinch({ svc, structured, knex: fakeKnex(rows) });
   const CAP = [{ type: 'annual_max_apps', message: 'Arena: 2/2 other applications — LIMIT REACHED.' }];

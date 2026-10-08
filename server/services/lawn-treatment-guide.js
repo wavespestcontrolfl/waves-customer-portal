@@ -38,7 +38,13 @@ const CHINCH_LAST_MONTH = 9;
 const FUNGICIDE_ROLE = 'fungicide_spot';
 const CATERPILLAR_TRIGGER = 'caterpillars';
 const DRY_SPOT_TRIGGER = 'dry_spots';
-const CHINCH_TRIGGERS = Object.freeze(['chinch_20_to_25_per_sqft', 'chinch_second_product_or_caterpillars']);
+// One entry per rung, in order. The second rung's staged row was renamed by 20261007180000 (it also
+// covers mole cricket nymphs now); a protocol version staged before that still holds the old value.
+const CHINCH_RUNGS = Object.freeze([
+  Object.freeze(['chinch_20_to_25_per_sqft']),
+  Object.freeze(['chinch_second_product_caterpillars_or_mole_cricket_nymphs', 'chinch_second_product_or_caterpillars']),
+]);
+const CHINCH_TRIGGERS = Object.freeze(CHINCH_RUNGS.flat());
 // application-limits' type for the yearly application count (checkLimits).
 const YEARLY_CAP = 'annual_max_apps';
 
@@ -233,14 +239,14 @@ async function stagedChinchRows({ svc, structured, knex }) {
   }
 }
 
-// One product per trigger, in the program's order, the earliest window's row first; a product the
+// One product per rung, in the program's order, the earliest window's row first; a product the
 // catalog no longer has or has retired cannot be recorded, so it is not offered.
 function chinchProducts(staged) {
   const usable = (Array.isArray(staged) ? staged : []).filter((row) => row.catalog_id && row.catalog_active !== false);
   const products = [];
-  for (const trigger of CHINCH_TRIGGERS) {
+  for (const rung of CHINCH_RUNGS) {
     const row = usable
-      .filter((candidate) => (parseJson(candidate.gates) || {}).trigger === trigger)
+      .filter((candidate) => rung.includes((parseJson(candidate.gates) || {}).trigger))
       .sort((a, b) => (Number(a.month) - Number(b.month)) || (Number(a.sort_order) - Number(b.sort_order)))[0];
     if (row && !products.some((product) => product.productId === idOf(row.product_id))) {
       products.push({ productId: idOf(row.product_id), name: row.catalog_name || row.product_name, stagedRow: row });
