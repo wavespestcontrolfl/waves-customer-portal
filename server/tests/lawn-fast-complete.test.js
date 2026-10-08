@@ -7,10 +7,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
 }));
-jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
+jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()) }));
+jest.mock('../services/property-coordinates', () => ({ resolvePropertyCoordinates: jest.fn() }));
+jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn() }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, v13VisitLimits } = require('../services/waveguard-plan-engine');
+const { resolvePropertyCoordinates } = require('../services/property-coordinates');
+const { getCurrent } = require('../services/fawn-weather');
 const { recapVisitIdentityChanged, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('../services/pest-recap');
 const {
   lawnFastIneligibleReason,
@@ -343,6 +347,78 @@ describe('buildLawnFastContext', () => {
       expect(ctx.visitType).toBe('recurring');
       expect(buildPlanForService).toHaveBeenCalledTimes(1);
       expect(ctx.plannedProducts).toEqual({ source: 'plan', items: [], addOns: [], month: 10 });
+    });
+  });
+
+  describe('weed spot rules (GATE_LAWN_SPOT_RULES)', () => {
+    const P_LEAD = uuid(21);
+    const P_SURF = uuid(22);
+    const P_BLIND = uuid(23);
+    const row = (id, name, gates, extra = {}) => ({ product: { id, name }, applicationMethod: 'spot_treatment', mix: {}, gates, ...extra });
+    const PLAN = () => ({
+      protocol: { structured: { products: [] } },
+      completionDefaults: {
+        items: [],
+        addOns: [
+          row(P_LEAD, 'Test Lead WG', { annualCounter: 'x' }),
+          row(P_SURF, 'Test Surfactant', { concentration: '0.25% v/v', tankMixWith: 'Test Lead WG' }),
+          row(P_BLIND, 'Test Blind Herbicide', { trigger: 'celsius_annual_cap_reached' }),
+        ],
+      },
+    });
+    const read = () => buildLawnFastContext(VISIT, { knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: null }, products_catalog: [herbicide] }) });
+    beforeEach(() => {
+      process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+      buildPlanForService.mockResolvedValue(PLAN());
+      v13VisitLimits.mockReset().mockResolvedValue({ capped: new Map(), warnings: [], blocks: [] });
+      resolvePropertyCoordinates.mockReset().mockResolvedValue({ latitude: 27.4, longitude: -82.5 });
+      getCurrent.mockReset().mockResolvedValue({ temp_f: 82, station: 'Test Station', timestamp: new Date().toISOString() });
+    });
+    afterEach(() => { delete process.env.GATE_LAWN_SPOT_RULES; });
+
+    test('gate off: the payload carries neither weedMix nor spotRules, and nothing is read', async () => {
+      const ctx = await read();
+      expect('weedMix' in ctx.plannedProducts).toBe(false);
+      expect('spotRules' in ctx).toBe(false);
+      expect(ctx.plannedProducts.addOns.map((a) => a.productId)).toEqual([P_LEAD, P_SURF, P_BLIND]);
+      expect(v13VisitLimits).not.toHaveBeenCalled();
+      expect(getCurrent).not.toHaveBeenCalled();
+    });
+
+    test('gate on: weedMix in plannedProducts and spotRules on the context; the add-ons list is unchanged', async () => {
+      process.env.GATE_LAWN_SPOT_RULES = 'true';
+      const ctx = await read();
+      expect(ctx.spotRules).toBe(true);
+      expect(ctx.plannedProducts.weedMix).toMatchObject({
+        mode: 'lead', productIds: [P_LEAD, P_SURF], groupProductIds: [P_LEAD, P_SURF, P_BLIND], replacementProductId: P_BLIND,
+        surfactant: { productId: P_SURF, included: true, note: null }, noAreaProductIds: [P_SURF], tempF: 82,
+      });
+      expect(ctx.plannedProducts.addOns.map((a) => a.productId)).toEqual([P_LEAD, P_SURF, P_BLIND]);
+    });
+
+    test('gate on, lead at its cap: the replacement mode, no weather read', async () => {
+      process.env.GATE_LAWN_SPOT_RULES = 'true';
+      v13VisitLimits.mockResolvedValue({ capped: new Map([[P_LEAD, [{ message: 'limit' }]]]), warnings: [], blocks: [] });
+      const ctx = await read();
+      expect(ctx.plannedProducts.weedMix).toMatchObject({ mode: 'replacement', productIds: [P_BLIND] });
+      expect(getCurrent).not.toHaveBeenCalled();
+    });
+
+    test('gate on, a visit with no plan (one-time): spotRules only, no weedMix', async () => {
+      process.env.GATE_LAWN_SPOT_RULES = 'true';
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
+      const ctx = await read();
+      expect(ctx.spotRules).toBe(true);
+      expect('weedMix' in ctx.plannedProducts).toBe(false);
+    });
+
+    test('gate on, no weed group in the window: no weedMix', async () => {
+      process.env.GATE_LAWN_SPOT_RULES = 'true';
+      buildPlanForService.mockResolvedValue({ protocol: { structured: {} }, completionDefaults: { items: [], addOns: [row(P_BLIND, 'Test Blind Herbicide', { trigger: 'celsius_annual_cap_reached' })] } });
+      const ctx = await read();
+      expect('weedMix' in ctx.plannedProducts).toBe(false);
+      expect(ctx.spotRules).toBe(true);
     });
   });
 

@@ -481,6 +481,21 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
 
 // ── planned products ────────────────────────────────────────────────────────
 
+// GATE_LAWN_SPOT_RULES: the weed add-ons as one cap-aware entry (see lawn-weed-mix.js), as
+// `{ weedMix }` to spread into plannedProducts, or `{}` (gate off, or no weed group). Its
+// limit read is caught inside (mode 'unavailable'); only a defect lands in the catch here.
+async function loadWeedMix({ addOns, svc, plan, knex, readFailures }) {
+  if (!featureGates.lawnSpotRulesLive()) return {};
+  try {
+    const weedMix = await require('./lawn-weed-mix').buildWeedMix({ addOns, svc, structured: plan?.protocol?.structured, knex });
+    return weedMix ? { weedMix } : {};
+  } catch (err) {
+    logger.warn(`[lawn-fast] weed mix unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    readFailures.add('weed_mix');
+    return {};
+  }
+}
+
 /**
  * The visit's planned products with each one's watering rule: `{ source, items,
  * unavailable }`. Only a recurring program appointment has a plan: with the
@@ -543,6 +558,7 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
         substituteFor: item.substitution?.originalProductName || null,
         gateNotes: (Array.isArray(item.gateNotes) ? item.gateNotes : []).map((note) => note?.text).filter((text) => typeof text === 'string' && text),
       })),
+      ...(await loadWeedMix({ addOns, svc, plan, knex, readFailures })),
     };
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
@@ -661,6 +677,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // never renders (mirrors /complete's turfHeightApplicable).
     turfHeightCapture,
     plannedProducts,
+    // GATE_LAWN_SPOT_RULES: the sheet asks for a spot row's area (and holds Complete without
+    // one). The key exists only while the gate is live, so gate off is byte-identical.
+    ...(featureGates.lawnSpotRulesLive() ? { spotRules: true } : {}),
     // Why the planned list is empty when it is empty because a read failed
     // (null otherwise), so the sheet can say defaults could not be loaded.
     plannedProductsUnavailable: plannedProductsUnavailable || null,

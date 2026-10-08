@@ -35,6 +35,14 @@
 //     every lawn visit treats the whole lawn, so a sprayed or spread product
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
+//     With the context's `spotRules` (GATE_LAWN_SPOT_RULES, owner 2026-10-08) a
+//     spot-treatment row takes its area from the tech instead: quick sizes
+//     (100 / 250 / 500 / 1,000 sq ft) or a typed number, which figures the
+//     amount the same way, goes to /complete as areaValue (sqft), and is
+//     required (or a typed amount) before Complete. The weed products the
+//     protocol ties together are ONE "Weed spots" entry (the context's
+//     `plannedProducts.weedMix`, decided on the server: the yearly cap, the
+//     surfactant by temperature) whose rows share one area control.
 //  4. Customer home (the pest sheet's three choices, preset to not home, full
 //     access), then Tips from your tech (optional, one tip);
 //  5. Blog post for the customer (optional, GATE_REPORT_BLOG_POST);
@@ -99,7 +107,7 @@ import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
 import CallBridgeLink from '../admin/CallBridgeLink';
 import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
-import { Button, ActionFeedback } from '../ui';
+import { Button, ActionFeedback, Input } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Mowing height the server accepts (turf_height_invalid outside it).
@@ -196,7 +204,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined,
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -209,6 +217,11 @@ function blockedReasonFor(data, service) {
 
 const plannedItemsOf = (data) => (Array.isArray(data?.plannedProducts?.items) ? data.plannedProducts.items.filter((item) => item?.productId) : []);
 const addOnsOf = (data) => (Array.isArray(data?.plannedProducts?.addOns) ? data.plannedProducts.addOns.filter((item) => item?.productId) : []);
+// The server's weed-spot decision (GATE_LAWN_SPOT_RULES), or null: an older or dark server sends none.
+const weedMixOf = (data) => {
+  const mix = data?.spotRules === true ? data?.plannedProducts?.weedMix : null;
+  return mix && Array.isArray(mix.productIds) && Array.isArray(mix.groupProductIds) ? mix : null;
+};
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
@@ -241,6 +254,9 @@ const findingsTypeUndecidable = (data) => !('findingsType' in data)
 const optionalContextFields = (data) => ({
   findingsType: data.findingsType ?? null,
   stockAdvisory: typeof data?.stockAdvisory === 'boolean' ? data.stockAdvisory : undefined,
+  // Spot-area rules: only while the server says so, so an older server renders as before.
+  spotRules: data?.spotRules === true,
+  weedMix: weedMixOf(data),
 });
 
 const sameText = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -332,7 +348,7 @@ function plannedRate(planned) {
 // A row for a catalog product. `planned` carries the plan's amount, unit and
 // method (a planned row's, or a tapped protocol add-on's plan item); an added
 // product has none and starts on its own default method.
-function productRow(product, { planned = null, added = false }) {
+function productRow(product, { planned = null, added = false, weedGroup = false }) {
   const rawMethod = planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
@@ -346,6 +362,8 @@ function productRow(product, { planned = null, added = false }) {
     // A protocol add-on the tech tapped: seeded from its plan item like a
     // planned row, labelled for where it came from.
     fromProtocol: added && !!planned,
+    // One of the Weed spots entry's rows: they share one area (weedArea).
+    weedGroup,
     method,
     dimension: seeded.dimension,
     totalAmount: seeded.amount,
@@ -481,10 +499,15 @@ function figuringRate(row) {
 // planned spot row's own plan area while it is on the plan's method; else
 // none, so a planned row moved to spot treatment figures nothing from the old
 // plan area.
-const figuringArea = (row, lawnSqft) => (requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null));
+// A spot row under the spot rules is figured on the area the tech set for it (spotArea).
+const figuringArea = (row, lawnSqft) => {
+  if (row.spotRule && row.spotArea > 0) return row.spotArea;
+  return requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null);
+};
 
 function derivedAmount(row, lawnSqft) {
-  if (row.amountPicked || row.fromPlan) return null;
+  // spotExempt: a rate that is not per area (the surfactant's percent of the tank) figures nothing.
+  if (row.amountPicked || row.fromPlan || row.spotExempt) return null;
   const area = figuringArea(row, lawnSqft);
   const figured = figuringRate(row);
   if (!(area > 0) || !figured) return null;
@@ -511,6 +534,28 @@ function derivedAmount(row, lawnSqft) {
     // The rate on the record, in its base unit (the plan's own shape).
     rate: rateUnitForRecord(base) ? { rate, unit: rateUnitForRecord(base) } : null,
     note: `${rate} ${unitLabel(base)} per 1,000 sq ft × ${area.toLocaleString('en-US')} sq ft`,
+  };
+}
+
+// Spot-area quick sizes (sq ft) offered beside the typed box.
+export const SPOT_AREA_SIZES = [100, 250, 500, 1000];
+
+const sameId = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
+const positiveNumber = (value) => (Number(value) > 0 ? Number(value) : null);
+
+// The spot rules for one row (the context's `spotRules`, owner 2026-10-08): a row whose
+// method is spot treatment carries the area the tech set for it (a weed-mix row, the one
+// shared `weedArea`; any other, its own `spotSqft`), else the plan's own area on the
+// plan's method. `spotExempt` marks a weed-mix member whose rate is not per area, which
+// needs no area. Any other row, and every row without the rules, passes through untouched.
+function withSpotArea(row, { spotRules, weedMix, weedArea }) {
+  if (!spotRules || normalizeApplicationMethod(row.method) !== 'spot_treatment') return row;
+  const typed = positiveNumber(row.weedGroup ? weedArea : row.spotSqft);
+  return {
+    ...row,
+    spotRule: true,
+    spotArea: typed || (onPlannedMethod(row) ? row.plannedSqft : null) || null,
+    spotExempt: !!weedMix?.noAreaProductIds?.some((id) => sameId(id, row.productId)),
   };
 }
 
@@ -562,10 +607,10 @@ function useProductRows(ctx, catalog) {
       };
     }));
   }, []);
-  const addProduct = useCallback((product, { planned = null } = {}) => {
+  const addProduct = useCallback((product, { planned = null, weedGroup = false } = {}) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { added: true, planned }),
+      productRow(product, { added: true, planned, weedGroup }),
     ]));
   }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
@@ -624,6 +669,7 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
 function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
+  const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -637,6 +683,8 @@ function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, pho
     [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
       ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
       : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
+    // A spot row needs the area treated or a typed amount (spot rules).
+    [missingSpot, missingSpot && `Enter the area treated for ${missingSpot.name}.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [typed && !form.condition, 'Pick the lawn condition.'],
@@ -675,6 +723,8 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
         // A plan product goes on the plan's default areas, as the full form sends it.
         ...(row.planned ? { applicationArea: LAWN_DEFAULT_AREAS.join(', ') } : {}),
         ...(requirement ? { areaValue: areaOf(row, lawnSqft), areaUnit: requirement.unit } : {}),
+        // A spot row's area, as the full form sends the plan's treatedSqft (spot rules).
+        ...(row.spotRule && row.spotArea > 0 ? { areaValue: row.spotArea, areaUnit: 'sqft' } : {}),
         targets: [],
       };
     }),
@@ -929,7 +979,12 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const lawnSqft = propertyAreas.wholeLawn;
   // Every reader of the rows (Complete's checks, the stock hold, the body, the
   // cards) sees the figured amounts; only the tech's entries live in state.
-  const rows = useMemo(() => products.rows.map((row) => withDerivedAmount(row, lawnSqft)), [products.rows, lawnSqft]);
+  // The weed mix's one shared area (spot rules): typed or picked once, it applies to every row of the entry.
+  const [weedArea, setWeedArea] = useState('');
+  const rows = useMemo(
+    () => products.rows.map((row) => withDerivedAmount(withSpotArea(row, { spotRules: ctx.spotRules, weedMix: ctx.weedMix, weedArea }), lawnSqft)),
+    [products.rows, lawnSqft, ctx.spotRules, ctx.weedMix, weedArea],
+  );
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).
@@ -1037,7 +1092,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1107,8 +1162,11 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, rows, products, catalog, lawnSqft, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, rows, products, catalog, lawnSqft, weedArea, onWeedArea, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
+  // The weed mix's one area control sits under its first row.
+  const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
+  const surfactantNote = ctx.weedMix?.surfactant;
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
@@ -1118,9 +1176,20 @@ function ProductsSection({ ctx, rows, products, catalog, lawnSqft, locked, other
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>
       )}
       {rows.map((row) => (
-        <ProductEditor key={row.productId} row={row} methods={ctx.methods} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+        <React.Fragment key={row.productId}>
+          <ProductEditor
+            row={row}
+            methods={ctx.methods}
+            lawnSqft={lawnSqft}
+            locked={locked}
+            note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : null}
+            onChange={(patch) => updateRow(row.productId, patch)}
+            onRemove={() => removeRow(row.productId)}
+          />
+          {row === areaHost && <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea} />}
+        </React.Fragment>
       ))}
-      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={ctx.weedMix} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
@@ -1133,13 +1202,28 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'Ju
 // ("in place of" the original), the protocol line, the gate notes, the method
 // and the rate. A product the sheet's catalog does not list cannot be built
 // into a row and is left out; one already on the sheet reads as such.
-function ProtocolAddOns({ addOns, month, rows, catalog, locked, onAdd }) {
-  const titleId = useId();
+// The add-ons the sheet's catalog can build into rows, split into the ones listed on their
+// own and the Weed spots entry's (the products the server grouped are listed only as that
+// entry; an entry whose products the catalog cannot all build is left out, like any add-on).
+function splitAddOns(addOns, weedMix, catalog) {
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
-  const items = (addOns || [])
+  const withProduct = (addOns || [])
     .map((item) => ({ ...item, product: byId.get(String(item.productId).toLowerCase()) || null }))
     .filter((item) => item.product);
-  if (!items.length) return null;
+  const grouped = new Set((weedMix?.groupProductIds || []).map((id) => String(id).toLowerCase()));
+  const weedItems = (weedMix?.productIds || []).map((id) => withProduct.find((item) => sameId(item.productId, id)));
+  return {
+    items: withProduct.filter((item) => !grouped.has(String(item.productId).toLowerCase())),
+    weedEntry: weedMix && weedItems.every(Boolean) ? weedItems : null,
+  };
+}
+
+function ProtocolAddOns({ addOns, month, weedMix = null, rows, catalog, locked, onAdd }) {
+  const titleId = useId();
+  const { items, weedEntry } = splitAddOns(addOns, weedMix, catalog);
+  // Nothing to add (the limit is reached) is still said, as a line.
+  const showWeed = !!weedMix && (weedEntry?.length > 0 || (!weedMix.productIds.length && !!weedMix.note));
+  if (!items.length && !showWeed) return null;
   const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
   const monthName = month ? MONTH_NAMES[month - 1] : null;
   return (
@@ -1148,6 +1232,9 @@ function ProtocolAddOns({ addOns, month, rows, catalog, locked, onAdd }) {
         <h4 id={titleId} className="tech-protocol-addons-title">{monthName ? `Also in ${monthName}’s protocol` : 'Also in this month’s protocol'}</h4>
         <p className="tech-visit-muted">Tap what you applied.</p>
       </div>
+      {showWeed && (
+        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} onAdd={onAdd} />
+      )}
       {items.map((item) => {
         const onSheet = on.has(String(item.productId).toLowerCase());
         const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
@@ -1181,9 +1268,64 @@ function ProtocolAddOns({ addOns, month, rows, catalog, locked, onAdd }) {
   );
 }
 
+// "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
+// opens the rows it names (each seeded from its own plan item, as a single add-on is) and
+// they share one area. With nothing to add (the yearly limit is reached) it is a line only.
+function WeedSpotsEntry({ weedMix, items, on, locked, onAdd }) {
+  const allOn = items.length > 0 && items.every((item) => on.has(String(item.productId).toLowerCase()));
+  const names = items.map((item) => item.product.name).join(', ');
+  return (
+    <div className="tech-protocol-addon">
+      <span className="tech-protocol-addon-text">
+        <span className="tech-protocol-addon-name">Weed spots</span>
+        <span className="tech-visit-muted">{allOn ? 'On the sheet' : [names, weedMix.note].filter(Boolean).join(' · ')}</span>
+      </span>
+      {items.length > 0 && (
+        <Button
+          type="button"
+          variant="secondary"
+          className="tech-visit-action tech-protocol-addon-add"
+          aria-label={allOn ? 'Weed spots are on the sheet' : 'Add weed spots'}
+          disabled={locked || allOn}
+          onClick={() => items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true }))}
+        >
+          {allOn ? '✓' : 'Add'}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// The area a spot row went down on: quick sizes and a typed box (owner 2026-10-08).
+function SpotAreaControl({ title = null, value, locked, onChange }) {
+  const areaId = useId();
+  return (
+    <div role="group" aria-label={title || 'Area treated'} className={title ? 'tech-spot-area tech-product-editor' : 'tech-spot-area'}>
+      {title && <p className="tech-product-editor-label">{title}</p>}
+      <label htmlFor={areaId} className="tech-product-editor-label">Area treated (sq ft)</label>
+      <div className="tech-visit-tile-grid">
+        {SPOT_AREA_SIZES.map((size) => (
+          <Chip disabled={locked} key={size} label={`${size.toLocaleString('en-US')} sq ft`} pressed={Number(value) === size} onClick={() => onChange(String(size))} />
+        ))}
+      </div>
+      <Input
+        id={areaId}
+        className="tech-visit-control tech-product-amount-input"
+        type="number"
+        inputMode="decimal"
+        min="0"
+        step="any"
+        disabled={locked}
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </div>
+  );
+}
+
 // A product: its name, how it goes down (the method chips, and the area it will
 // submit when the method needs one), the amount, and Remove.
-function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
+function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, onRemove }) {
   const nameId = useId();
   // The area this row will submit, named for what it is: "whole lawn" only when it
   // is the whole-lawn figure; a planned product's own smaller (or unchecked) area
@@ -1198,6 +1340,10 @@ function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
       </div>
       <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} layout="select" />
       {areaText && <p className="tech-visit-muted">{areaText}</p>}
+      {/* Spot rules: a weed-mix row reads the entry's shared area; any other spot row asks for its own. */}
+      {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value })} />}
+      {row.spotRule && row.spotArea > 0 && <p className="tech-visit-muted">{`Spot area, ${row.spotArea.toLocaleString('en-US')} sq ft`}</p>}
+      {note && <p className="tech-visit-muted" role="status">{note}</p>}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
       {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
       {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}

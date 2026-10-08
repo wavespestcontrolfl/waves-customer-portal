@@ -2050,3 +2050,185 @@ describe('"Also in this month\'s protocol": the plan\'s opt-in products', () => 
     expect(screen.queryByRole('group', { name: /protocol$/ })).toBeNull();
   });
 });
+
+// ── weed spots and the spot area (GATE_LAWN_SPOT_RULES, owner 2026-10-08) ──────────
+// The server decides the weed entry (the cap, the surfactant by temperature) and sends
+// `spotRules` and `plannedProducts.weedMix`; the sheet only renders and enforces what it
+// is given. With neither field it renders exactly as before.
+describe('weed spots and the spot area', () => {
+  const P_LEAD = 'bbbbbbbb-0000-4000-8000-000000000001';
+  const P_CERT = 'bbbbbbbb-0000-4000-8000-000000000002';
+  const P_SURF = 'bbbbbbbb-0000-4000-8000-000000000003';
+  const P_BLIND = 'bbbbbbbb-0000-4000-8000-000000000004';
+  const WEED_CATALOG = [
+    { id: P_LEAD, name: 'Lead WG', category: 'herbicide', formulation: 'WG', default_rate_per_1000: 2, default_unit: 'oz' },
+    { id: P_CERT, name: 'Cert Herbicide', category: 'herbicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
+    // The surfactant is a percent of the tank: the catalog may carry a rate, but it figures nothing.
+    { id: P_SURF, name: 'Tank Surfactant', category: 'adjuvant', formulation: 'SL', default_rate_per_1000: 1, default_unit: 'fl_oz' },
+    { id: P_BLIND, name: 'Blind Herbicide', category: 'herbicide', formulation: 'SC', default_rate_per_1000: 1, default_unit: 'fl_oz' },
+    ...CATALOG,
+  ];
+  const addOn = (productId, name) => ({ productId, name, applicationMethod: 'spot_treatment', amount: null, amountUnit: 'oz', line: null, substituteFor: null, gateNotes: [] });
+  const ADD_ONS = [addOn(P_LEAD, 'Lead WG'), addOn(P_CERT, 'Cert Herbicide'), addOn(P_SURF, 'Tank Surfactant'), addOn(P_BLIND, 'Blind Herbicide')];
+  const MIX = (overrides = {}) => ({
+    mode: 'lead',
+    productIds: [P_LEAD, P_CERT, P_SURF],
+    groupProductIds: [P_LEAD, P_CERT, P_SURF, P_BLIND],
+    replacementProductId: P_BLIND,
+    note: null,
+    surfactant: { productId: P_SURF, included: true, note: null },
+    noAreaProductIds: [P_SURF],
+    tempF: 82,
+    ...overrides,
+  });
+  const weedContext = (mix = MIX(), extra = {}) => context({
+    spotRules: true,
+    plannedProducts: { source: 'plan', items: [PLANNED[0]], addOns: ADD_ONS, month: 10, weedMix: mix },
+    ...extra,
+  });
+  const open = (ctx = weedContext()) => openSheet({ request: makeRequest({ ctx }), props: { catalog: WEED_CATALOG } });
+  const addons = () => screen.getByRole('group', { name: 'Also in October’s protocol' });
+  const addWeedSpots = () => fireEvent.click(within(addons()).getByRole('button', { name: 'Add weed spots' }));
+  const weedArea = () => screen.getByRole('group', { name: 'Weed spots' });
+  const sentProduct = (id) => completeCalls()[0].body.products.find((p) => p.productId === id);
+
+  test('one entry stands for the weed products, and one tap opens the lead and its members (not the replacement)', async () => {
+    await open();
+    const list = addons();
+    expect(within(list).getByText('Weed spots')).toBeTruthy();
+    expect(within(list).getByText('Lead WG, Cert Herbicide, Tank Surfactant')).toBeTruthy();
+    // None of the group is listed on its own.
+    for (const name of ['Lead WG', 'Cert Herbicide', 'Tank Surfactant', 'Blind Herbicide']) {
+      expect(within(list).queryByRole('button', { name: `Add ${name}` })).toBeNull();
+    }
+    addWeedSpots();
+    for (const name of ['Lead WG', 'Cert Herbicide', 'Tank Surfactant']) expect(within(editorFor(name)).getByText(/from the protocol/)).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Blind Herbicide' })).toBeNull();
+    expect(within(addons()).getByRole('button', { name: 'Weed spots are on the sheet' }).disabled).toBe(true);
+  });
+
+  test('the surfactant left out by heat is not added, and the entry says so', async () => {
+    await open(weedContext(MIX({
+      productIds: [P_LEAD, P_CERT], note: 'Surfactant left out: it is 90°F or hotter.',
+      surfactant: { productId: P_SURF, included: false, note: 'Surfactant left out: it is 90°F or hotter.' }, tempF: 93,
+    })));
+    expect(within(addons()).getByText('Lead WG, Cert Herbicide · Surfactant left out: it is 90°F or hotter.')).toBeTruthy();
+    addWeedSpots();
+    expect(screen.getByRole('group', { name: 'Lead WG' })).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Tank Surfactant' })).toBeNull();
+  });
+
+  test('an unknown temperature adds the surfactant with the reminder on its row', async () => {
+    const note = 'Leave the surfactant out if it is 90°F or hotter.';
+    await open(weedContext(MIX({ note, surfactant: { productId: P_SURF, included: true, note }, tempF: null })));
+    expect(within(addons()).getByText(`Lead WG, Cert Herbicide, Tank Surfactant · ${note}`)).toBeTruthy();
+    addWeedSpots();
+    expect(within(editorFor('Tank Surfactant')).getByText(note)).toBeTruthy();
+    expect(within(editorFor('Lead WG')).queryByText(note)).toBeNull();
+  });
+
+  test('lead at its yearly limit: the entry adds the replacement alone and says why', async () => {
+    await open(weedContext(MIX({
+      mode: 'replacement', productIds: [P_BLIND], surfactant: null, tempF: null, note: 'Celsius yearly limit reached; Blindside is used in its place.',
+    })));
+    expect(within(addons()).getByText('Blind Herbicide · Celsius yearly limit reached; Blindside is used in its place.')).toBeTruthy();
+    addWeedSpots();
+    expect(screen.getByRole('group', { name: 'Blind Herbicide' })).toBeTruthy();
+    for (const name of ['Lead WG', 'Cert Herbicide', 'Tank Surfactant']) expect(screen.queryByRole('group', { name })).toBeNull();
+  });
+
+  test('both at their yearly limit: no entry to tap, one line, and the products are not listed on their own', async () => {
+    await open(weedContext(MIX({ mode: 'none', productIds: [], surfactant: null, tempF: null, note: 'The yearly weed-spray limit is reached for this lawn.' })));
+    expect(within(addons()).getByText('The yearly weed-spray limit is reached for this lawn.')).toBeTruthy();
+    expect(within(addons()).queryByRole('button')).toBeNull();
+    expect(within(addons()).queryByText('Lead WG')).toBeNull();
+  });
+
+  test('quick sizes figure each row\'s amount from its rate; the surfactant figures nothing; one area control serves the whole entry', async () => {
+    await open();
+    addWeedSpots();
+    // One control for the three rows, not one each.
+    expect(screen.getAllByLabelText('Area treated (sq ft)')).toHaveLength(1);
+    fireEvent.click(within(weedArea()).getByRole('button', { name: '500 sq ft' }));
+    expect(within(weedArea()).getByRole('button', { name: '500 sq ft' }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('1');
+    expect(within(editorFor('Lead WG')).getByText('2 oz per 1,000 sq ft × 500 sq ft')).toBeTruthy();
+    // A small liquid dose reads in spoons, as every figured amount does: 0.25 fl oz is 1.5 tsp.
+    expect(within(editorFor('Cert Herbicide')).getByLabelText('Cert Herbicide').value).toBe('1.5');
+    expect(within(editorFor('Tank Surfactant')).getByLabelText('Tank Surfactant').value).toBe('');
+    // A typed number replaces the quick size for every row at once.
+    fireEvent.change(within(weedArea()).getByLabelText('Area treated (sq ft)'), { target: { value: '1000' } });
+    expect(within(editorFor('Lead WG')).getByLabelText('Lead WG').value).toBe('2');
+    expect(within(editorFor('Cert Herbicide')).getByLabelText('Cert Herbicide').value).toBe('3');
+  });
+
+  test('the quick sizes are 100, 250, 500 and 1,000 sq ft', async () => {
+    await open();
+    addWeedSpots();
+    expect(within(weedArea()).getAllByRole('button').map((b) => b.textContent)).toEqual(['100 sq ft', '250 sq ft', '500 sq ft', '1,000 sq ft']);
+  });
+
+  test('Complete waits for the area: the plain message names the product; the surfactant is exempt', async () => {
+    await open();
+    addWeedSpots();
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('Enter the area treated for Lead WG.'));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(within(weedArea()).getByRole('button', { name: '250 sq ft' }));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    // The area rides every row of the entry, in square feet; the figured amount and its rate ride the record.
+    expect(sentProduct(P_LEAD)).toMatchObject({ applicationMethod: 'spot_treatment', areaValue: 250, areaUnit: 'sqft', totalAmount: 0.5, amountUnit: 'oz', rate: 2, rateUnit: 'oz' });
+    expect(sentProduct(P_CERT)).toMatchObject({ areaValue: 250, areaUnit: 'sqft' });
+    expect(sentProduct(P_SURF)).toMatchObject({ areaValue: 250, areaUnit: 'sqft' });
+    expect(sentProduct(P_SURF).totalAmount).toBeUndefined();
+  });
+
+  test('a typed amount stands in for the area on a spot row', async () => {
+    await open(weedContext(MIX({ mode: 'none', productIds: [], note: null, surfactant: null }), { plannedProducts: { source: 'plan', items: [{ ...PLANNED[1], amount: null }], addOns: [], month: 10 } }));
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('Enter the area treated for Iron Plus.'));
+    // Its own control, since it is not a weed-mix row.
+    fireEvent.change(within(editorFor('Iron Plus')).getByLabelText('Iron Plus'), { target: { value: '3' } });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sentProduct(P_IRON)).toMatchObject({ applicationMethod: 'spot_treatment', totalAmount: 3 });
+    expect(sentProduct(P_IRON).areaValue).toBeUndefined();
+  });
+
+  test('a spot row that is not in the weed entry has its own area control, which figures only that row', async () => {
+    await open(weedContext(MIX({ mode: 'none', productIds: [], note: null, surfactant: null }), { plannedProducts: { source: 'plan', items: [{ ...PLANNED[1], amount: null }], addOns: [], month: 10 } }));
+    const iron = editorFor('Iron Plus');
+    fireEvent.click(within(iron).getByRole('button', { name: '100 sq ft' }));
+    expect(within(iron).getByText('Spot area, 100 sq ft')).toBeTruthy();
+    await analyze();
+    await submit();
+    expect(sentProduct(P_IRON)).toMatchObject({ areaValue: 100, areaUnit: 'sqft' });
+  });
+
+  test('a whole-lawn row has no area box and is unchanged', async () => {
+    await open(weedContext(MIX({ mode: 'none', productIds: [], note: null, surfactant: null })));
+    const talak = editorFor('Talak 7.9%');
+    expect(within(talak).queryByLabelText('Area treated (sq ft)')).toBeNull();
+    await analyze();
+    await submit();
+    expect(sentProduct(P_TALAK)).toMatchObject({ applicationMethod: 'broadcast_spray', areaValue: 6000, areaUnit: 'sqft' });
+  });
+
+  test('with no new context fields the sheet is exactly as before: a spot row asks for no area and does not hold Complete', async () => {
+    await openSheet();
+    expect(screen.queryByLabelText('Area treated (sq ft)')).toBeNull();
+    expect(screen.queryByRole('group', { name: 'Weed spots' })).toBeNull();
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sentProduct(P_IRON).areaValue).toBeUndefined();
+    expect(sentProduct(P_IRON).areaUnit).toBeUndefined();
+  });
+
+  test('a weed mix without the spotRules flag is ignored: the add-ons list as before', async () => {
+    await open(weedContext(MIX(), { spotRules: false }));
+    expect(within(addons()).queryByText('Weed spots')).toBeNull();
+    expect(within(addons()).getByRole('button', { name: 'Add Lead WG' })).toBeTruthy();
+  });
+});
