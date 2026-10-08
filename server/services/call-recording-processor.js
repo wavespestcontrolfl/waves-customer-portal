@@ -6981,7 +6981,12 @@ function callIsPreConstructionPretreat({ extracted = {}, preAdoptionExtracted = 
     // slab has no unit. The view's own service words may name only the
     // termite family and no localized termite work (spot, foam, bait, drill,
     // station) — anything else heard on the call may target one unit.
-    const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary].filter(Boolean).join('. ');
+    // pain_points is the extractor's own list of what the caller wants fixed.
+    // The raw transcript is NOT family-scanned: on the audited slab calls a
+    // transcript-wide scan read stray words as another service family. It is
+    // scanned in full for unit/suite wording below.
+    const painPoints = Array.isArray(view.pain_points) ? view.pain_points.join('. ') : view.pain_points;
+    const serviceWords = [view.requested_service, view.matched_service, view.specific_service_name, view.call_summary, painPoints].filter(Boolean).join('. ');
     const onlyTermite = familiesIn(serviceWords).every((f) => f.key === 'termite') && !LOCALIZED_TERMITE_WORK_RE.test(serviceWords);
     return onlyTermite && PRE_CONSTRUCTION_SERVICE_KEYS.has(String(row?.service_key || ''))
       && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);

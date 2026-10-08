@@ -438,6 +438,9 @@ describe('callIsPreConstructionPretreat (unit card skip)', () => {
     const v1Mixed = { ...slab, requested_service: 'slab pre-treat and interior roach treatment' };
     expect(callIsPreConstructionPretreat({ extracted: slab, preAdoptionExtracted: v1Mixed, v2Extraction: commercial, services: CATALOG })).toBe(false);
     expect(run({ ...slab, call_summary: 'Wants the slab pre-treat and also has ants in the model home' }, commercial)).toBe(false);
+    // Other work recorded only in pain_points.
+    expect(run({ ...slab, pain_points: 'Needs the slab pre-treat; also roaches inside the sales office' }, commercial)).toBe(false);
+    expect(run({ ...slab, pain_points: 'Needs a termite pre-treat for the slab pour' }, commercial)).toBe(true);
     // Localized termite work may target one unit.
     expect(run({ ...slab, requested_service: 'slab pre-treat plus a termite foam spot treatment next door' }, commercial)).toBe(false);
   });
