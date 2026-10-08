@@ -357,6 +357,24 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(linkedOtherDoor)).archived_at).not.toBeNull();
   });
 
+  test('an estimate accepted after the pair read still keeps a lead-linked draft', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(200) });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(150), sentAt: minutesAgo(140) });
+    const laterSent = await estimate(c, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
+    await mockPg('leads').insert({ id: randomUUID(), estimate_id: draft, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+    // The acceptance lands right after the pair read.
+    const realRaw = mockPg.raw;
+    mockPg.raw = async (...args) => {
+      const out = await realRaw.apply(mockPg, args);
+      mockPg.raw = realRaw;
+      await mockPg('estimates').where({ id: laterSent }).update({ status: 'accepted' });
+      return out;
+    };
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
+    expect((await row(draft)).archived_at).toBeNull();
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();

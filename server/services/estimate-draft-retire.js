@@ -186,8 +186,20 @@ async function retireOneDraft(trx, pair) {
   // points here yet) and the archive is picked up now, under the draft's row
   // lock. For an accepted replacement the whole retirement is undone.
   const lateLeads = await trx('leads').where({ estimate_id: row.id }).whereNotIn('id', leads.map((l) => l.id)).forUpdate().select('id');
-  if (lateLeads.length && sentStatus === 'accepted') throw new KeepDraft();
   leads.push(...lateLeads);
+  // With any lead on the draft (found at the first lock or just now), the
+  // accepted-at-this-door hold is judged again on current rows: the first
+  // read may predate the link or the acceptance. A hit undoes the archive.
+  if (leads.length) {
+    const acceptedNow = (await trx.raw(`
+      SELECT a.property_id, a.address
+        FROM estimates d
+        JOIN estimates a ON a.customer_id = d.customer_id AND a.id <> d.id
+                        AND a.status = 'accepted' AND a.created_at > d.created_at
+       WHERE d.id = ?
+    `, [row.id]))?.rows || [];
+    if (acceptedNow.some((a) => sameProperty({ ...pair, sent_property_id: a.property_id, sent_address: a.address }))) throw new KeepDraft();
+  }
   // Unlink, never re-point: the sent estimate may already belong to another
   // lead (by FK or by its estimate_data mirror), and staff can link it.
   if (leads.length) {
