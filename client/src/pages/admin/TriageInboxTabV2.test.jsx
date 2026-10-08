@@ -316,6 +316,25 @@ describe('no-text line card (text_number_differs)', () => {
     }));
   });
 
+  it('a CLOSED card keeps "Line can get texts" (the hold outlives the card); confirming releases and reloads, the card is not re-closed', async () => {
+    const closed = { ...card, status: 'resolved' };
+    let loads = 0;
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) { loads += 1; return { items: [closed], counts: { open: 0, resolved: 1, dismissed: 0 } }; }
+      return { ok: true };
+    });
+    render(<TriageInboxTabV2 />);
+    fireEvent.click(await screen.findByRole('button', { name: /resolved/i }));
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /phones are updated/i })).toBeNull();
+    fireEvent.click(within(el).getByRole('button', { name: /line can get texts/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /texts will resume/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at, line_can_get_texts: true }),
+    }));
+    await waitFor(() => expect(loads).toBeGreaterThanOrEqual(3));
+  });
+
   it('Resolve ("Phones are updated") sends no line_can_get_texts, so the hold stays', async () => {
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
       ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));

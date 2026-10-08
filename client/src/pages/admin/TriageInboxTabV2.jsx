@@ -101,6 +101,8 @@ function parsePayload(payload) {
 const ADMIN_LINK_PATTERN = /^\/admin\//;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const isOpenState = (s) => s === "open" || s === "in_progress";
+
 const RESOLVE_ONLY_LABELS = {
   attached_booking_followup_unbooked: "Follow-up booked",
   text_number_differs: "Phones are updated",
@@ -519,7 +521,19 @@ function ResolveOnlyActions({ item, busy, onResolve, onLineCanText }) {
   );
 }
 
-function LineCanTextDialog({ item, busy, onClose, onConfirm }) {
+// On a card that is already closed (Resolve and Dismiss leave the hold in place), the same explicit
+// release stays available so a line that turns out to get texts is never stranded.
+function ClosedNoTextAction({ item, onLineCanText }) {
+  if (item.reason_code !== "text_number_differs" || !["resolved", "dismissed"].includes(item.status)) return null;
+  return (
+    <div className="mt-2">
+      <Button size="sm" variant="secondary" onClick={onLineCanText}>Line can get texts</Button>
+    </div>
+  );
+}
+
+function LineCanTextDialog({ item, actioning, onClose, onConfirm }) {
+  const busy = !!item && actioning === item.id;
   const line = item ? parsePayload(item.payload)?.ani_phone : null;
   return (
     <Dialog open={!!item} onClose={onClose} size="sm">
@@ -832,6 +846,23 @@ export default function TriageInboxTabV2({ isAdmin }) {
           setError("This card changed since it loaded — review the refreshed card before marking it handled.");
           return;
         }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
+      });
+  };
+
+  // "Line can get texts": on an open card it resolves the card and releases the hold; on a card that
+  // is already closed it only releases the hold (then reloads the list).
+  const lineCanGetTexts = (item) => {
+    if (isOpenState(item.status)) { resolveItem(item, { line_can_get_texts: true }); return; }
+    setActioning(item.id);
+    adminFetch(`/admin/triage/${item.id}/resolve`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_updated_at: item.updated_at, line_can_get_texts: true }),
+    })
+      .then(() => { setActioning(null); load(mode, status, autoOnly); })
+      .catch((err) => {
+        setActioning(null);
+        if (err?.status === 409) { load(mode, status, autoOnly); setError("This card changed since it loaded — review the refreshed card first."); return; }
         setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
       });
   };
@@ -1217,6 +1248,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
                     {isTriage && <ConfirmEvidence payload={item.payload} reasonCode={item.reason_code} openCustomerIds={item.owed_customer_open_ids} livePhone={item.customer_phone} />}
+                    {isTriage && <ClosedNoTextAction item={item} onLineCanText={() => setLineCanTextFor(item)} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
                     {isEmailDisagreementCard && isOpenView && !isAdmin && (
                       <div className="mt-2 text-12 text-ink-tertiary">
@@ -1314,9 +1346,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
       {/* Street-level address hold: read the address back, then confirm the visit */}
       <LineCanTextDialog
         item={lineCanTextFor}
-        busy={!!lineCanTextFor && actioning === lineCanTextFor.id}
+        actioning={actioning}
         onClose={() => setLineCanTextFor(null)}
-        onConfirm={(item) => { setLineCanTextFor(null); resolveItem(item, { line_can_get_texts: true }); }}
+        onConfirm={(item) => { setLineCanTextFor(null); lineCanGetTexts(item); }}
       />
 
       <HoldConfirmDialog

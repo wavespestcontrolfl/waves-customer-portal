@@ -579,6 +579,44 @@ describe('text_number_differs card: Resolve keeps the no-text hold, only "Line c
     });
   });
 
+  test.each(['resolved', 'dismissed'])('"Line can get texts" still works on a card already %s (Resolve/Dismiss leave the hold in place): version-checked release', async (status) => {
+    const fx = fixture({ triage_items: [textCard({ status })] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      const stale = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: '2030-01-01T00:00:00.000Z', line_can_get_texts: true });
+      expect(stale.status).toBe(409);
+      expect(numberHold(fx.tables).cleared_at).toBeNull();
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.status).toBe(status);
+      expect(body.callback_number).toMatchObject({ disclaimed_number_hold: 'cleared', number_holds_cleared: 1 });
+    });
+    expect(fx.tables.triage_items[0].status).toBe(status); // the card stays closed
+    expect(numberHold(fx.tables).cleared_at).toBeInstanceOf(Date);
+    expect(numberHold(fx.tables, 'hold-other').cleared_at).toBeNull();
+  });
+
+  test('a closed card without line_can_get_texts, or any closed non-text card, is still refused as already actioned', async () => {
+    const fx = fixture({ triage_items: [textCard({ status: 'resolved' }), cbCard({ status: 'resolved' })] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at })).status).toBe(409);
+      expect((await put(baseUrl, '/card-cb/resolve', { line_can_get_texts: true })).status).toBe(409);
+      expect((await put(baseUrl, `/${CARD_ID}/dismiss`, { expected_updated_at: base.updated_at, line_can_get_texts: true })).status).toBe(409);
+    });
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
+  });
+
+  test('closed-card release still defers to a plain disclaimed callback card that is open', async () => {
+    const fx = fixture({ triage_items: [textCard({ status: 'dismissed' }), cbCard({ payload: {} })] });
+    wireDb(db, { conn: fx.conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, `/${CARD_ID}/resolve`, { expected_updated_at: base.updated_at, line_can_get_texts: true })).status).toBe(200);
+    });
+    expect(numberHold(fx.tables).cleared_at).toBeNull();
+  });
+
   test('the card is version-bound: a stale expected_updated_at is refused and nothing changes', async () => {
     const fx = fixture({ triage_items: [textCard()] });
     wireDb(db, { conn: fx.conn });

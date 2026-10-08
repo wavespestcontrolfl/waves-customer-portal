@@ -189,6 +189,23 @@ async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior, lineC
   return callbackNumberReply(cleared.numberVerdict, cleared.numbers);
 }
 
+// "Line can get texts" on a card that is ALREADY closed (Resolve and Dismiss both close it and leave the
+// hold in place): the same explicit, version-checked release, so staff who learn later that the line can
+// get texts are not stranded. Returns null when the card is not a closed text_number_differs card.
+async function releaseClosedNoTextHold({ id, expectedUpdatedAt, assignedTo }) {
+  const item = await db('triage_items').where({ id }).first();
+  if (!item || item.reason_code !== 'text_number_differs' || !item.call_log_id || OPEN_STATES.includes(item.status)) return null;
+  return db.transaction(async (trx) => {
+    await lockTriageCall(trx, item.call_log_id);
+    const live = await trx('triage_items').where({ id }).first('updated_at');
+    if (!live || !expectedUpdatedAt || new Date(expectedUpdatedAt).getTime() !== new Date(live.updated_at).getTime()) {
+      return { outcome: 'stale_version' };
+    }
+    const reply = await releaseNoTextHold(trx, item, 'resolved', assignedTo, null, true);
+    return { outcome: 'ok', callbackNumber: reply, status: item.status };
+  });
+}
+
 const NOT_A_VERDICT_MESSAGES = {
   missing_first_name: 'This card is an owed first-name capture, not a call verdict — enter the first name on the customer record, then use Resolve or Dismiss.',
   text_number_differs: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones, then use Resolve (or Line can get texts).',
@@ -820,6 +837,10 @@ async function transition(req, res, nextStatus) {
     if (guarded && guarded.reason_code === 'missing_first_name' && nextStatus === 'resolved') {
       return res.status(403).json({ error: 'Admin access required' });
     }
+  }
+  if (nextStatus === 'resolved' && req.body?.line_can_get_texts === true) {
+    const closed = await releaseClosedNoTextHold({ id, expectedUpdatedAt: req.body?.expected_updated_at || null, assignedTo: req.technicianId });
+    if (closed) return sendTransitionResult(res, closed, id, closed.status);
   }
   const result = await transitionCore({
     id, nextStatus, note, assignedTo: req.technicianId,

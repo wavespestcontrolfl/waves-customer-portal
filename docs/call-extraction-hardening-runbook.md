@@ -95,7 +95,7 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
   number-keyed SMS hold on the calling line and lifts only the visits' clearance; DISMISS just closes
   the card (nothing changes). Exactly ONE action releases the hold: the card's own "Line can get texts"
   button (confirm copy "Texts to <number> will resume"; `PUT /:id/resolve` with `line_can_get_texts: true`),
-  so a line wrongly marked no-text is never held forever. Both cards of a no-text hold carry
+  so a line wrongly marked no-text is never held forever (the button stays on a card already closed by Resolve or Dismiss: version-checked, the card stays closed). Both cards of a no-text hold carry
   `payload.no_text_hold` (stamped in `call-routing-gates.js`): closing `callback_number_needed` on a
   marked card never releases it, in either close order and whatever the text card's state; the
   explicit action also defers to a plain disclaimed `callback_number_needed` card that is still open.
