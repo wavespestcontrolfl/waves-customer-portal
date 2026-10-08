@@ -162,6 +162,8 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Tenacity Herbicide', null],
   ['Certainty Turf Herbicide', null],
   ['Blindside Herbicide', null],
+  // Fire ant bait (optional add-on the office prices): no result timing the owner has approved.
+  ['Advion Fire Ant Bait', null],
 ];
 
 function normalizeProductName(name) {
