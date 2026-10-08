@@ -472,7 +472,7 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
       } catch (err) {
         logger.error(`[aio-sweep] could not store result ${row.id}: ${err.message}`);
         try {
-          await storeResult(run.id, row.id, { status: 'request_error', error: 'result could not be stored', captured_at: db.fn.now() }, cost);
+          await storeResult(run.id, row.id, { status: 'request_error', error: 'result could not be stored', cost_usd: cost, captured_at: db.fn.now() }, cost);
         } catch (err2) {
           // The paid call is not booked and the row is still pending: stop the
           // chunk so no more calls run on a ledger that cannot be written.

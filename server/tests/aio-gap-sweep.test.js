@@ -518,7 +518,7 @@ describe('processSweepChunk', () => {
     mockState.failResultUpdates = 1;
     dataforseo.request.mockResolvedValue(serp([]));
     await sweep.processSweepChunk();
-    expect(rowOf('q')).toMatchObject({ status: 'request_error', error: 'result could not be stored' });
+    expect(rowOf('q')).toMatchObject({ status: 'request_error', error: 'result could not be stored', cost_usd: 0.004 });
     expect(mockState.runs[0]).toMatchObject({ attempted: 1, cost_usd: 0.004 });
   });
 

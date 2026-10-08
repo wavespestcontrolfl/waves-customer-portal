@@ -27,9 +27,16 @@ const ORGANIC_TOP_N = 10;
 // radius 199..199999 (docs example 200); dataforseo.serpLocation's default 20
 // is below that, so these calls set the radius themselves. Mobile os is "ios".
 const SERP_RADIUS = 200;
+const SERP_RADIUS_MIN = 199;
+const SERP_RADIUS_MAX = 199999;
 function serpPoint(location) {
-  const m = String(location || '').trim().match(/^(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:,\s*\d+(?:\.\d+)?)?$/);
-  return m ? { location_coordinate: `${m[1]},${m[2]},${SERP_RADIUS}` } : { location_name: location };
+  const m = String(location || '').trim().match(/^(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)(?:,\s*(\d+(?:\.\d+)?))?$/);
+  if (!m) return { location_name: location };
+  // A stored radius inside the accepted range is kept; a missing or
+  // out-of-range one gets the default.
+  const r = Number(m[3]);
+  const radius = r >= SERP_RADIUS_MIN && r <= SERP_RADIUS_MAX ? m[3] : SERP_RADIUS;
+  return { location_coordinate: `${m[1]},${m[2]},${radius}` };
 }
 const osFor = (device) => (device === 'desktop' ? 'macos' : 'ios');
 

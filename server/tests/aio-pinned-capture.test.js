@@ -67,6 +67,8 @@ test('a coordinate always goes out with a radius DataForSEO accepts (199..199999
   const { serpPoint } = require('../services/seo/aio-pinned-capture');
   expect(serpPoint('27.3364,-82.5307,10')).toEqual({ location_coordinate: '27.3364,-82.5307,200' });
   expect(serpPoint('27.3364,-82.5307')).toEqual({ location_coordinate: '27.3364,-82.5307,200' });
+  expect(serpPoint('27.5870,-82.4248,20000')).toEqual({ location_coordinate: '27.5870,-82.4248,20000' });
+  expect(serpPoint('27.5870,-82.4248,500000')).toEqual({ location_coordinate: '27.5870,-82.4248,200' });
   expect(serpPoint('Sarasota,Florida,United States')).toEqual({ location_name: 'Sarasota,Florida,United States' });
 });
 
