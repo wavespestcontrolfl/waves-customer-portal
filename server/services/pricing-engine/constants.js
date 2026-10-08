@@ -1519,6 +1519,99 @@ const ONE_TIME = {
 };
 
 // ============================================================
+// AREA ADD-ON TREATMENTS (owner rulings 2026-10-08)
+// ============================================================
+// One-time treatments sold on top of (or next to) a base program, mainly to
+// pest-only customers: priceAreaAddOn in service-pricing.js prices every row
+// with one cost-plus formula —
+//   cost  = material at the tier's top area + labor + drive (own visit only)
+//           + adminPerJob
+//   price = cost / (1 - targetMargin), rounded UP to a price ending in 9
+// Pricing at the tier's top edge makes targetMargin the LOWEST margin in the
+// tier. Own visit is the default (most asks arrive between pest visits); a
+// same-trip add-on drops the drive cost. No recurring-customer perk applies
+// (the same-trip price is already the lower one).
+//
+// materialPer1000 = product cost at the rate used, $ per 1,000 sq ft
+// (SiteOne catalog prices, 2026-10-08). Labor minutes are ESTIMATES, not
+// measured times — recalibrate against completed jobs before re-pricing.
+// maxPerYear is the most applications a property may be sold in 12 months
+// (label ceiling or owner ruling); it caps the quote, it does not track
+// what was applied.
+const AREA_ADDONS = {
+  targetMargin: 0.60,
+  adminPerJob: 8,             // booking + invoicing per one-time job
+  items: {
+    // Snapshot 2.5TG at 3.45 lb/1,000 ($2.99/lb). Owner ruling: offer 2 a
+    // year to pest customers (label: 600 lb/acre per 12 months, 60 days apart).
+    bed_pre_emergent: {
+      name: 'Bed Pre-Emergent Weed Control',
+      areaLabel: 'bed',
+      materialPer1000: 10.32,
+      setupMin: 6,
+      minPer1000: 8,
+      tiers: [1000, 2000, 3500],
+      maxPerYear: 2,
+    },
+    // Arena 50 WDG at 0.29 oz/1,000 ($9.87/oz). Area is the TREATED area
+    // (damage plus the green edge), not the dead patch. One full-rate
+    // application reaches the clothianidin yearly label limit on that area.
+    lawn_insect_spot: {
+      name: 'Lawn Insect Spot Treatment',
+      areaLabel: 'treated lawn',
+      materialPer1000: 2.86,
+      setupMin: 8,
+      minPer1000: 6,
+      tiers: [1000, 2000, 3500],
+      maxPerYear: 1,
+    },
+    // Topchoice at 2 lb/1,000 ($1.83/lb), broadcast once a year.
+    fire_ant_yard: {
+      name: 'Fire Ant Yard Treatment',
+      areaLabel: 'lawn',
+      materialPer1000: 3.66,
+      setupMin: 6,
+      minPer1000: 2.5,
+      tiers: [3000, 5000, 8000],
+      maxPerYear: 1,
+    },
+    // Acelepryn at 0.184 fl oz/1,000 ($14.14/fl oz), once a year (April).
+    lawn_insect_preventive: {
+      name: 'Yearly Lawn Insect Preventive',
+      areaLabel: 'lawn',
+      materialPer1000: 2.60,
+      setupMin: 8,
+      minPer1000: 2.5,
+      tiers: [3000, 5000, 8000],
+      maxPerYear: 1,
+    },
+    // Non-selective weed kill on shell, rock beds, pavers and fence lines.
+    // Material is the catalog rate for Roundup QuikPro (16 fl oz/1,000) — a
+    // conservative ceiling until the spot rate is confirmed on the label.
+    hardscape_weed: {
+      name: 'Shell, Rock & Paver Weed Control',
+      areaLabel: 'treated',
+      materialPer1000: 18.48,
+      setupMin: 8,
+      minPer1000: 6,
+      tiers: [1000, 2000, 3500],
+      maxPerYear: 4,
+    },
+    // Web sweep of pool cage, lanai and eaves between visits: labor only,
+    // one flat job (no area tiers).
+    web_sweep: {
+      name: 'Web Sweep',
+      areaLabel: null,
+      materialPer1000: 0,
+      setupMin: 25,
+      minPer1000: 0,
+      tiers: null,
+      maxPerYear: 12,
+    },
+  },
+};
+
+// ============================================================
 // SPECIALTY SERVICES
 // ============================================================
 //
@@ -2387,7 +2480,7 @@ module.exports = {
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
-  ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
+  ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
   DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,

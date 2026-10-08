@@ -146,6 +146,24 @@ The call pipeline (`estimator-engine/draft-builder.js`) puts a trusted lookup pa
 
 ---
 
+
+## 5a. Area Add-On Treatments
+
+`priceAreaAddOn(addOnKey, { areaSqFt, visitContext, applications })` — one-time treatments sold on top of a base program (owner rulings 2026-10-08). Not yet wired into `generateEstimate` or any estimator screen.
+
+**Formula:** `cost = material at the tier's top area + labor + drive (own visit only) + $8 admin`; `price = cost / (1 − 0.60)`, rounded up to a price ending in 9. The 60% target is therefore the lowest margin in each tier. `visitContext: 'sameTripAddOn'` drops the 20-minute drive. No recurring-customer perk and no WaveGuard percentage (`discountable: false`).
+
+| Key | Product basis | Area tiers (sq ft) | Own visit | Same trip | Max per year |
+|---|---|---|---|---|---|
+| `bed_pre_emergent` | Snapshot 2.5TG, 3.45 lb/1K | 1,000 / 2,000 / 3,500 | $99 / $139 / $199 | $69 / $109 / $169 | 2 |
+| `lawn_insect_spot` | Arena 50 WDG, 0.29 oz/1K (treated area) | 1,000 / 2,000 / 3,500 | $79 / $99 / $119 | $49 / $69 / $89 | 1 |
+| `fire_ant_yard` | Topchoice, 2 lb/1K | 3,000 / 5,000 / 8,000 | $99 / $129 / $169 | $69 / $99 / $139 | 1 |
+| `lawn_insect_preventive` | Acelepryn, 0.184 fl oz/1K | 3,000 / 5,000 / 8,000 | $99 / $119 / $149 | $69 / $89 / $119 | 1 |
+| `hardscape_weed` | Roundup QuikPro, catalog rate (conservative) | 1,000 / 2,000 / 3,500 | $119 / $179 / $259 | $89 / $149 / $229 | 4 |
+| `web_sweep` | labor only, flat | — | $89 | $59 | 12 |
+
+An area above the largest tier, or more applications than the yearly limit, returns an unpriced custom-quote line. Labor minutes in `AREA_ADDONS` are estimates, not measured times.
+
 ## 6. Palm Injection
 
 Palm injection pricing requires explicit `treatmentType` and positive integer `palmCount`; the service no longer silently defaults to combo or one palm.

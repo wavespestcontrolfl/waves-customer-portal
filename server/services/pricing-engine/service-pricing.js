@@ -7,7 +7,7 @@ const {
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
-  BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
+  BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, AREA_ADDONS, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
 const {
@@ -8437,6 +8437,101 @@ function priceDethatching(lawnSqFt, options = {}) {
 }
 
 // ============================================================
+// AREA ADD-ON TREATMENTS (cost-plus, tiered by treated area)
+// ============================================================
+const AREA_ADDON_VISIT_CONTEXTS = ['standalone', 'sameTripAddOn'];
+
+// Round UP to the next price ending in 9 ($95.40 -> $99, $99 stays $99).
+function roundUpToNine(value) {
+  return Math.ceil((value - 9) / 10) * 10 + 9;
+}
+
+// One-time add-on treatment priced from AREA_ADDONS (see constants.js for
+// the formula and the owner rulings). `areaSqFt` is the TREATED area; the
+// line prices at the top of the tier that holds it. An area above the
+// largest tier, or more applications than maxPerYear, returns an unpriced
+// custom-quote line instead of extrapolating.
+function priceAreaAddOn(addOnKey, options = {}) {
+  assertEnum(addOnKey, Object.keys(AREA_ADDONS.items), 'addOnKey');
+  const cfg = AREA_ADDONS.items[addOnKey];
+  const visitContext = options.visitContext ?? 'standalone';
+  assertEnum(visitContext, AREA_ADDON_VISIT_CONTEXTS, 'visitContext');
+  const applications = options.applications === undefined ? 1 : Number(options.applications);
+  if (!Number.isInteger(applications) || applications < 1) {
+    throw buildPricingError('applications must be a whole number of 1 or more', { field: 'applications', value: options.applications });
+  }
+
+  const base = {
+    service: 'area_addon',
+    addOnKey,
+    name: cfg.name,
+    visitContext,
+    applications,
+    maxPerYear: cfg.maxPerYear,
+    // No recurring-customer perk and no WaveGuard percentage on add-ons.
+    discountable: false,
+  };
+  const customQuote = (reason, extra = {}) => ({
+    ...base,
+    ...extra,
+    price: null,
+    requiresManualReview: true,
+    manualReviewReasons: [reason],
+    quoteRequired: true,
+    requiresCustomQuote: true,
+    customQuoteReason: reason,
+  });
+
+  let areaSqFt = null;
+  let tierSqFt = null;
+  if (cfg.tiers) {
+    areaSqFt = Number(options.areaSqFt);
+    if (!Number.isFinite(areaSqFt) || areaSqFt <= 0) {
+      throw buildPricingError(`areaSqFt is required for ${addOnKey} (the ${cfg.areaLabel} area in sq ft)`, { field: 'areaSqFt', value: options.areaSqFt });
+    }
+    tierSqFt = cfg.tiers.find((top) => areaSqFt <= top) ?? null;
+    if (tierSqFt === null) {
+      return customQuote('area_addon_area_above_largest_tier', { areaSqFt, tierSqFt: null });
+    }
+  }
+  if (applications > cfg.maxPerYear) {
+    return customQuote('area_addon_applications_above_yearly_limit', { areaSqFt, tierSqFt });
+  }
+
+  const tierK = (tierSqFt || 0) / 1000;
+  const materialCost = tierK * cfg.materialPer1000;
+  const onSiteMin = cfg.setupMin + cfg.minPer1000 * tierK;
+  const driveMin = visitContext === 'standalone' ? GLOBAL.DRIVE_TIME : 0;
+  const laborCost = (onSiteMin + driveMin) * GLOBAL.LABOR_RATE / 60;
+  const cost = materialCost + laborCost + AREA_ADDONS.adminPerJob;
+  const perApplication = roundUpToNine(cost / (1 - AREA_ADDONS.targetMargin));
+  const price = perApplication * applications;
+
+  const detailParts = [];
+  if (tierSqFt) detailParts.push(`Up to ${tierSqFt.toLocaleString()} sq ft ${cfg.areaLabel} area`);
+  detailParts.push(visitContext === 'sameTripAddOn' ? 'Same visit as a booked service' : 'Own visit');
+  if (applications > 1) detailParts.push(`${applications} applications`);
+
+  return {
+    ...base,
+    price,
+    perApplication,
+    areaSqFt,
+    tierSqFt,
+    detail: detailParts.join(' | '),
+    costs: {
+      material: roundMoney(materialCost),
+      labor: roundMoney(laborCost),
+      admin: AREA_ADDONS.adminPerJob,
+      onSiteMin: roundMoney(onSiteMin),
+      driveMin,
+      perApplication: roundMoney(cost),
+    },
+    margin: Math.round((perApplication - cost) / perApplication * 1000) / 1000,
+  };
+}
+
+// ============================================================
 // PLUGGING (sod plug install by spacing)
 // ============================================================
 // Urgency handling matches v2 applyOT (urgency multiplier only — rc discount
@@ -9389,6 +9484,7 @@ module.exports = {
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
+  priceAreaAddOn,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
