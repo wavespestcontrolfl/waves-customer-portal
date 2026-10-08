@@ -1554,8 +1554,9 @@ const AREA_ADDONS = {
       maxPerYear: 2,
     },
     // Arena 50 WDG at 0.29 oz/1,000 ($9.87/oz). Area is the TREATED area
-    // (damage plus the green edge), not the dead patch. One full-rate
-    // application reaches the clothianidin yearly label limit on that area.
+    // (damage plus the green edge), not the dead patch. 0.29 oz/1,000 is
+    // 12.8 oz/acre, the clothianidin limit per acre per season, so one
+    // application at this rate is the yearly maximum on that area.
     lawn_insect_spot: {
       name: 'Lawn Insect Spot Treatment',
       areaLabel: 'treated lawn',
@@ -1585,9 +1586,10 @@ const AREA_ADDONS = {
       tiers: [3000, 5000, 8000],
       maxPerYear: 1,
     },
-    // Non-selective weed kill on shell, rock beds, pavers and fence lines.
-    // Material is the catalog rate for Roundup QuikPro (16 fl oz/1,000) — a
-    // conservative ceiling until the spot rate is confirmed on the label.
+    // Weed kill on shell, rock beds, pavers and fence lines. Roundup QuikPro
+    // SC Total at the label rate, 16 fl oz/1,000 ($1.155/fl oz). Label limit
+    // 32 fl oz/1,000 per 12 months = 2 applications. The product carries a
+    // 6-month soil residual (indaziflam): hard surfaces and bare ground only.
     hardscape_weed: {
       name: 'Shell, Rock & Paver Weed Control',
       areaLabel: 'treated',
@@ -1595,7 +1597,7 @@ const AREA_ADDONS = {
       setupMin: 8,
       minPer1000: 6,
       tiers: [1000, 2000, 3500],
-      maxPerYear: 4,
+      maxPerYear: 2,
     },
     // Web sweep of pool cage, lanai and eaves between visits: labor only,
     // one flat job (no area tiers).

@@ -27,6 +27,8 @@ const RECURRING_SERVICES = new Set([
 const ONE_TIME_SERVICES = new Set([
   'one_time_pest', 'one_time_lawn', 'one_time_mosquito',
   'top_dressing', 'dethatching', 'plugging', 'trenching',
+  // GATE_AREA_ADDONS: one row per add-on line (several can share an estimate).
+  'area_addon',
   // Legacy explicit German roach initial from older direct engine callers.
   'german_roach_initial',
   // Auto-fired by estimate-engine when recurring pest carries roachType !== 'none'.
@@ -193,7 +195,23 @@ function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
 // information-loss rule the pest_initial_roach comment below records.
 // Deliberately an allowlist: a blanket `li.name` fallback would rewrite
 // persisted labels for every other one-time service.
-const PLAN_LABELED_SERVICES = new Set(['trap_only_retainer']);
+// area_addon: one service key, several add-ons (bed pre-emergent, web sweep...),
+// so the row name must come from the line's own `name`.
+const PLAN_LABELED_SERVICES = new Set(['trap_only_retainer', 'area_addon']);
+
+// Identity of an area add-on row (which add-on, how many applications, which
+// tier) so a stored row can be told apart from its siblings. Empty otherwise.
+function areaAddOnFields(li = {}) {
+  if (li.service !== 'area_addon') return {};
+  return {
+    addOnKey: li.addOnKey,
+    applications: li.applications,
+    areaSqFt: li.areaSqFt ?? null,
+    tierSqFt: li.tierSqFt ?? null,
+    visitContext: li.visitContext,
+    discountable: false,
+  };
+}
 
 function planLabelFor(li = {}) {
   return PLAN_LABELED_SERVICES.has(li.service) && li.name ? li.name : null;
@@ -1067,6 +1085,7 @@ function mapV1ToLegacyShape(v1Result) {
           requiresCustomQuote: !!li.requiresCustomQuote,
           customQuoteReason: li.customQuoteReason || null,
           requiresMeasurement: !!li.requiresMeasurement,
+          ...areaAddOnFields(li),
           ...measurementMetadataFields(li),
           ...termiticideMetadataFields(li),
           ...commercialManualQuoteFields(li),
@@ -1081,6 +1100,7 @@ function mapV1ToLegacyShape(v1Result) {
         name,
         price,
         detail: mappedDetail,
+        ...areaAddOnFields(li),
         ...measurementMetadataFields(li),
         ...termiticideMetadataFields(li),
         // Commercial identity (isCommercial / commercialPricingMode / tax
@@ -1235,7 +1255,7 @@ function mapV1ToLegacyShape(v1Result) {
     .filter(li => li && (li.quoteRequired === true || li.requiresCustomQuote === true))
     .map(li => ({
       service: li.service,
-      name: li.display?.name || li.label || labelFor(li.service),
+      name: li.display?.name || li.label || planLabelFor(li) || labelFor(li.service),
       reason: li.reason || li.customQuoteReason || null,
       ...measurementMetadataFields(li),
       ...termiticideMetadataFields(li),
@@ -1432,6 +1452,7 @@ function mapV1ToLegacyShape(v1Result) {
             ? { priceAfterDiscount: Number(s.priceAfterDiscount) } : {}),
           warrantyExtendedSelected: s.warrantyExtendedSelected,
           warrantyExtendedPrice: s.warrantyExtendedPrice,
+          ...areaAddOnFields(s),
           ...measurementMetadataFields(s),
           ...termiticideMetadataFields(s),
         })),

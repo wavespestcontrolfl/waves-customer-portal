@@ -1,8 +1,21 @@
-const { priceAreaAddOn } = require('../services/pricing-engine');
+const { priceAreaAddOn, generateEstimate } = require('../services/pricing-engine');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { AREA_ADDONS, GLOBAL } = require('../services/pricing-engine/constants');
 
 // Owner rulings 2026-10-08: one cost-plus add-on pricer, 60% target at the
 // top of each area tier, own visit by default, no recurring-customer perk.
+// GATE_AREA_ADDONS is dark by default; every case below runs with it on unless
+// it turns it off itself.
+let savedGate;
+beforeEach(() => {
+  savedGate = process.env.GATE_AREA_ADDONS;
+  process.env.GATE_AREA_ADDONS = 'true';
+});
+afterEach(() => {
+  if (savedGate === undefined) delete process.env.GATE_AREA_ADDONS;
+  else process.env.GATE_AREA_ADDONS = savedGate;
+});
+
 describe('area add-on treatment pricing', () => {
   test.each([
     ['bed_pre_emergent', 1000, 99, 69],
@@ -57,6 +70,14 @@ describe('area add-on treatment pricing', () => {
     expect(priceAreaAddOn('web_sweep', { visitContext: 'sameTripAddOn' }).price).toBe(59);
   });
 
+  test('shell, rock and paver weed kill stops at the label limit of two a year', () => {
+    expect(priceAreaAddOn('hardscape_weed', { areaSqFt: 1000, applications: 2 }).price).toBe(238);
+    expect(priceAreaAddOn('hardscape_weed', { areaSqFt: 1000, applications: 3 })).toMatchObject({
+      price: null,
+      customQuoteReason: 'area_addon_applications_above_yearly_limit',
+    });
+  });
+
   test('two bed pre-emergent applications price at twice one application', () => {
     const line = priceAreaAddOn('bed_pre_emergent', { areaSqFt: 1000, applications: 2 });
     expect(line).toMatchObject({ price: 198, perApplication: 99, applications: 2 });
@@ -93,5 +114,175 @@ describe('area add-on treatment pricing', () => {
       .toThrow(/visitContext must be one of/);
     expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000, applications: 0 }))
       .toThrow(/applications must be a whole number/);
+    // Number(true) is 1 and Number([1200]) is 1200: neither is an area.
+    for (const areaSqFt of [true, [1200], {}, '', '  ', null]) {
+      expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt })).toThrow(/areaSqFt is required/);
+    }
+    for (const applications of [true, [1], '', null]) {
+      expect(() => priceAreaAddOn('fire_ant_yard', { areaSqFt: 3000, applications }))
+        .toThrow(/applications must be a whole number/);
+    }
+    expect(priceAreaAddOn('fire_ant_yard', { areaSqFt: '3000', applications: '1' }).price).toBe(99);
+  });
+});
+
+// Synthetic property only: no customer data.
+const HOME = { homeSqFt: 2000, lotSqFt: 7500 };
+const TWO_ADDONS = [
+  { key: 'bed_pre_emergent', areaSqFt: 1500, applications: 2 },
+  { key: 'web_sweep', visitContext: 'sameTripAddOn' },
+];
+const addOnLines = (estimate) => estimate.lineItems.filter((l) => l.service === 'area_addon');
+
+describe('area add-ons in the estimate engine (GATE_AREA_ADDONS)', () => {
+  test.each([undefined, '', 'false', '0', 'off'])('gate %p refuses with a fail-closed 400 from both entry points', (value) => {
+    if (value === undefined) delete process.env.GATE_AREA_ADDONS;
+    else process.env.GATE_AREA_ADDONS = value;
+    const expected = { statusCode: 400, code: 'AREA_ADDONS_GATED', failClosed: true };
+    expect(() => priceAreaAddOn('web_sweep')).toThrow(expect.objectContaining(expected));
+    expect(() => generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } }))
+      .toThrow(expect.objectContaining(expected));
+    // A commercial property must not turn the gate off into a manual-quote line.
+    expect(() => generateEstimate({ ...HOME, propertyType: 'commercial', services: { areaAddOns: TWO_ADDONS } }))
+      .toThrow(expect.objectContaining(expected));
+  });
+
+  test('an empty list or no list never needs the gate', () => {
+    delete process.env.GATE_AREA_ADDONS;
+    expect(addOnLines(generateEstimate({ ...HOME, services: { areaAddOns: [] } }))).toEqual([]);
+    expect(addOnLines(generateEstimate({ ...HOME, services: { pest: { frequency: 'quarterly' } } }))).toEqual([]);
+  });
+
+  test('two add-ons on one estimate are two line items and sum into the one-time total', () => {
+    const estimate = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
+    const lines = addOnLines(estimate);
+    expect(lines.map((l) => [l.addOnKey, l.price])).toEqual([['bed_pre_emergent', 278], ['web_sweep', 59]]);
+    expect(estimate.summary.oneTimeTotal).toBe(337);
+  });
+
+  test('a recurring customer gets no discount on an add-on, at any tier', () => {
+    const alone = addOnLines(generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } }));
+    const recurring = addOnLines(generateEstimate({
+      ...HOME,
+      recurringCustomer: true,
+      priorQualifyingServices: ['pest_control', 'lawn_care', 'mosquito'],
+      services: { areaAddOns: TWO_ADDONS },
+    }));
+    expect(recurring.map((l) => l.price)).toEqual(alone.map((l) => l.price));
+    for (const line of recurring) {
+      expect(line.priceAfterDiscount).toBe(line.price);
+      expect(line.discount).toMatchObject({ effectiveDiscount: 0, discountable: false });
+    }
+    // The price formula has no recurring-customer input at all.
+    expect(alone[0].discountable).toBe(false);
+  });
+
+  test('add-ons do not count toward the WaveGuard tier or change recurring money', () => {
+    const programs = { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', tier: 'enhanced' }, mosquito: { tier: 'silver' } };
+    const without = generateEstimate({ ...HOME, services: programs });
+    const withAddOns = generateEstimate({ ...HOME, services: { ...programs, areaAddOns: TWO_ADDONS } });
+    expect(without.waveGuard.tier).not.toBe('none');
+    expect(withAddOns.waveGuard.tier).toBe(without.waveGuard.tier);
+    expect(withAddOns.waveGuard.activeServices).toEqual(without.waveGuard.activeServices);
+    expect(withAddOns.summary.recurringAnnualAfterDiscount).toBe(without.summary.recurringAnnualAfterDiscount);
+    expect(withAddOns.summary.oneTimeTotal).toBe(without.summary.oneTimeTotal + 337);
+    // Add-ons alone are not a qualifying service.
+    const alone = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
+    expect(alone.waveGuard.activeServices).toEqual([]);
+  });
+
+  test('a manual estimate discount skips add-on lines', () => {
+    const estimate = generateEstimate({
+      ...HOME,
+      manualDiscount: { type: 'PERCENT', value: 10 },
+      services: { areaAddOns: TWO_ADDONS },
+    });
+    expect(addOnLines(estimate).map((l) => l.price)).toEqual([278, 59]);
+    expect(estimate.summary.oneTimeTotal).toBe(337);
+  });
+
+  test.each([
+    ['an object instead of a list', { key: 'web_sweep' }],
+    ['a string', 'web_sweep'],
+    ['null', null],
+    ['true', true],
+  ])('areaAddOns as %s fails closed', (_label, value) => {
+    expect(() => generateEstimate({ ...HOME, services: { areaAddOns: value } }))
+      .toThrow(expect.objectContaining({ name: 'PricingError', statusCode: 400, failClosed: true }));
+  });
+
+  test.each([
+    ['a string entry', ['web_sweep']],
+    ['a null entry', [null]],
+    ['a nested list', [['web_sweep']]],
+    ['an unknown key', [{ key: 'aeration', areaSqFt: 1000 }]],
+    ['a missing area', [{ key: 'fire_ant_yard' }]],
+  ])('%s fails closed, never skipped', (_label, entries) => {
+    expect(() => generateEstimate({ ...HOME, services: { areaAddOns: entries } }))
+      .toThrow(expect.objectContaining({ statusCode: 400, failClosed: true }));
+  });
+
+  test('a custom-quote add-on stays unpriced and hoists its review reason', () => {
+    const estimate = generateEstimate({
+      ...HOME,
+      services: { areaAddOns: [{ key: 'fire_ant_yard', areaSqFt: 9000 }, { key: 'web_sweep' }] },
+    });
+    const [custom, priced] = addOnLines(estimate);
+    expect(custom).toMatchObject({ price: null, requiresCustomQuote: true });
+    expect(priced.price).toBe(89);
+    expect(estimate.summary.oneTimeTotal).toBe(89);
+    expect(JSON.stringify(estimate)).toContain('area_addon_area_above_largest_tier');
+  });
+
+  test('a commercial property gets one manual-quote line per family, not a residential price', () => {
+    const estimate = generateEstimate({
+      ...HOME,
+      propertyType: 'commercial',
+      services: { areaAddOns: [...TWO_ADDONS, { key: 'hardscape_weed', areaSqFt: 1000 }] },
+    });
+    expect(addOnLines(estimate)).toEqual([]);
+    expect(estimate.lineItems.map((l) => [l.service, l.quoteRequired])).toEqual([
+      ['commercial_lawn', true],
+      ['commercial_pest', true],
+    ]);
+  });
+});
+
+describe('area add-ons through the legacy mapper', () => {
+  test('each add-on is its own named one-time row and the totals add up', () => {
+    const estimate = generateEstimate({ ...HOME, services: { areaAddOns: TWO_ADDONS } });
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.oneTime.items.map((i) => [i.service, i.name, i.price, i.addOnKey])).toEqual([
+      ['area_addon', 'Bed Pre-Emergent Weed Control', 278, 'bed_pre_emergent'],
+      ['area_addon', 'Web Sweep', 59, 'web_sweep'],
+    ]);
+    expect(mapped.oneTime.items[0]).toMatchObject({ applications: 2, tierSqFt: 2000, discountable: false });
+    expect(mapped.oneTime.specItems).toEqual([]);
+    expect(mapped.oneTime.total).toBe(337);
+    expect(mapped.oneTime.otSubtotal).toBe(337);
+    expect(mapped.hasOneTime).toBe(true);
+  });
+
+  test('a custom-quote add-on maps like other custom-quote one-time lines: unpriced spec row', () => {
+    const estimate = generateEstimate({
+      ...HOME,
+      services: { areaAddOns: [{ key: 'fire_ant_yard', areaSqFt: 9000 }, { key: 'web_sweep' }] },
+    });
+    const mapped = mapV1ToLegacyShape(estimate);
+    expect(mapped.oneTime.items.map((i) => i.name)).toEqual(['Web Sweep']);
+    expect(mapped.oneTime.specItems).toEqual([
+      expect.objectContaining({
+        service: 'area_addon',
+        name: 'Fire Ant Yard Treatment',
+        price: null,
+        quoteRequired: true,
+        requiresCustomQuote: true,
+        customQuoteReason: 'area_addon_area_above_largest_tier',
+        addOnKey: 'fire_ant_yard',
+      }),
+    ]);
+    expect(mapped.oneTime.total).toBe(89);
+    expect(mapped.quoteRequired).toBe(true);
+    expect(mapped.quoteRequiredItems).toEqual([expect.objectContaining({ service: 'area_addon', name: 'Fire Ant Yard Treatment' })]);
   });
 });

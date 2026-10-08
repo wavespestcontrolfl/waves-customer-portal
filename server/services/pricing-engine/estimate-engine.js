@@ -89,7 +89,7 @@ const {
   pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
-  priceTopDressing, priceDethatching,
+  priceTopDressing, priceDethatching, priceAreaAddOn, assertAreaAddOnsEnabled, buildPricingError,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
@@ -1665,6 +1665,33 @@ function generateEstimate(input) {
     // Exemption requires a POSITIVE explicit area — a negative or zero entry
     // is not an exact measurement (codex P1: negative was truthy-exempt).
     lineItems.push(stampTurfReview(result, !(Number(dethatchingOptions.lawnSqFt) > 0)));
+  }
+  // Area add-on treatments (GATE_AREA_ADDONS, enforced inside priceAreaAddOn):
+  // one-time lines sold next to a base program. Malformed input fails closed
+  // with a PricingError: a skipped entry would quote a customer less work than
+  // the operator selected. Add-ons are discountable:false and never reach
+  // activeServiceKeys, so they neither earn a discount nor count toward the
+  // WaveGuard tier. A commercial property gets the manual-quote line of the
+  // closest family (web sweep = pest control, the rest are lawn/bed/hardscape
+  // treatments = lawn care) because the tier tables are residential.
+  if (services.areaAddOns !== undefined) {
+    if (!Array.isArray(services.areaAddOns)) {
+      throw buildPricingError('services.areaAddOns must be an array of { key, areaSqFt, visitContext, applications }', { field: 'areaAddOns' });
+    }
+    if (services.areaAddOns.length > 0) assertAreaAddOnsEnabled();
+    services.areaAddOns.forEach((entry, index) => {
+      if (Object.prototype.toString.call(entry) !== '[object Object]') {
+        throw buildPricingError('Each services.areaAddOns entry must be an object', { field: 'areaAddOns', index });
+      }
+      if (useCommercialManualQuote(entry, entry.key === 'web_sweep' ? 'pest_control' : 'lawn_care')) return;
+      const result = priceAreaAddOn(entry.key, {
+        areaSqFt: entry.areaSqFt,
+        visitContext: entry.visitContext,
+        applications: entry.applications,
+      });
+      (result.manualReviewReasons || []).forEach(addManualReviewReason);
+      lineItems.push(result);
+    });
   }
   if (services.plugging && !useCommercialManualQuote(services.plugging, 'lawn_care')) {
     const result = pricePlugging(

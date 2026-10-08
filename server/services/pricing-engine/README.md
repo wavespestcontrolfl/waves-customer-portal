@@ -149,7 +149,9 @@ The call pipeline (`estimator-engine/draft-builder.js`) puts a trusted lookup pa
 
 ## 5a. Area Add-On Treatments
 
-`priceAreaAddOn(addOnKey, { areaSqFt, visitContext, applications })` — one-time treatments sold on top of a base program (owner rulings 2026-10-08). Not yet wired into `generateEstimate` or any estimator screen.
+`priceAreaAddOn(addOnKey, { areaSqFt, visitContext, applications })` — one-time treatments sold on top of a base program (owner rulings 2026-10-08).
+
+**Estimate input (dark, `GATE_AREA_ADDONS`):** `generateEstimate({ services: { areaAddOns: [{ key, areaSqFt, visitContext, applications }, ...] } })` prices one `area_addon` line per entry; several add-ons can share an estimate and each stays its own line. The gate is read at call time inside the pricer, so with it off `priceAreaAddOn` and any non-empty `areaAddOns` throw a 400 `AREA_ADDONS_GATED` (`failClosed`). A non-array `areaAddOns`, or an entry that is not an object, throws a 400 `PricingError`; nothing is skipped. Add-on lines never count toward the WaveGuard tier. `v1-legacy-mapper.js` emits each priced line as its own one-time row named from the line's `name`; an unpriced custom-quote line becomes an unpriced `oneTime.specItems` row. A commercial property gets the commercial manual-quote line (`commercial_pest` for `web_sweep`, `commercial_lawn` for the rest) instead of a price. No estimator screen, public estimate page, converter or scheduler reads the line yet.
 
 **Formula:** `cost = material at the tier's top area + labor + drive (own visit only) + $8 admin`; `price = cost / (1 − 0.60)`, rounded up to a price ending in 9. The 60% target is therefore the lowest margin in each tier. `visitContext: 'sameTripAddOn'` drops the 20-minute drive. No recurring-customer perk and no WaveGuard percentage (`discountable: false`).
 
@@ -159,7 +161,7 @@ The call pipeline (`estimator-engine/draft-builder.js`) puts a trusted lookup pa
 | `lawn_insect_spot` | Arena 50 WDG, 0.29 oz/1K (treated area) | 1,000 / 2,000 / 3,500 | $79 / $99 / $119 | $49 / $69 / $89 | 1 |
 | `fire_ant_yard` | Topchoice, 2 lb/1K | 3,000 / 5,000 / 8,000 | $99 / $129 / $169 | $69 / $99 / $139 | 1 |
 | `lawn_insect_preventive` | Acelepryn, 0.184 fl oz/1K | 3,000 / 5,000 / 8,000 | $99 / $119 / $149 | $69 / $89 / $119 | 1 |
-| `hardscape_weed` | Roundup QuikPro, catalog rate (conservative) | 1,000 / 2,000 / 3,500 | $119 / $179 / $259 | $89 / $149 / $229 | 4 |
+| `hardscape_weed` | Roundup QuikPro SC Total, 16 fl oz/1K (label rate; hard surfaces and bare ground only) | 1,000 / 2,000 / 3,500 | $119 / $179 / $259 | $89 / $149 / $229 | 2 |
 | `web_sweep` | labor only, flat | — | $89 | $59 | 12 |
 
 An area above the largest tier, or more applications than the yearly limit, returns an unpriced custom-quote line. Labor minutes in `AREA_ADDONS` are estimates, not measured times.

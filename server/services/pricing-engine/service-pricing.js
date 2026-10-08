@@ -8441,6 +8441,20 @@ function priceDethatching(lawnSqFt, options = {}) {
 // ============================================================
 const AREA_ADDON_VISIT_CONTEXTS = ['standalone', 'sameTripAddOn'];
 
+// Gate enforcement lives here, the deepest chokepoint, like
+// GATE_BERMUDA_SUPPRESSION in priceLawnCare: the estimate engine, persisted
+// engineInputs replays and direct callers all hit the same wall. Read at call
+// time so a gate flip takes effect without a restart. failClosed rides the
+// persistence rethrow rail, never CLIENT_FALLBACK.
+function assertAreaAddOnsEnabled() {
+  if (require('../../config/feature-gates').gateEnvValue('GATE_AREA_ADDONS')) return;
+  const err = new Error('Area add-on treatments are not enabled on this environment (GATE_AREA_ADDONS) - remove the add-on or flip the gate.');
+  err.statusCode = 400;
+  err.code = 'AREA_ADDONS_GATED';
+  err.failClosed = true;
+  throw err;
+}
+
 // Round UP to the next price ending in 9 ($95.40 -> $99, $99 stays $99).
 function roundUpToNine(value) {
   return Math.ceil((value - 9) / 10) * 10 + 9;
@@ -8452,11 +8466,17 @@ function roundUpToNine(value) {
 // largest tier, or more applications than maxPerYear, returns an unpriced
 // custom-quote line instead of extrapolating.
 function priceAreaAddOn(addOnKey, options = {}) {
+  assertAreaAddOnsEnabled();
   assertEnum(addOnKey, Object.keys(AREA_ADDONS.items), 'addOnKey');
   const cfg = AREA_ADDONS.items[addOnKey];
   const visitContext = options.visitContext ?? 'standalone';
   assertEnum(visitContext, AREA_ADDON_VISIT_CONTEXTS, 'visitContext');
-  const applications = options.applications === undefined ? 1 : Number(options.applications);
+  const rawApplications = options.applications;
+  const scalarApplications = typeof rawApplications === 'number'
+    || (typeof rawApplications === 'string' && rawApplications.trim() !== '');
+  const applications = rawApplications === undefined
+    ? 1
+    : (scalarApplications ? Number(rawApplications) : NaN);
   if (!Number.isInteger(applications) || applications < 1) {
     throw buildPricingError('applications must be a whole number of 1 or more', { field: 'applications', value: options.applications });
   }
@@ -8485,7 +8505,12 @@ function priceAreaAddOn(addOnKey, options = {}) {
   let areaSqFt = null;
   let tierSqFt = null;
   if (cfg.tiers) {
-    areaSqFt = Number(options.areaSqFt);
+    // Only a number or a numeric string is an area: Number(true) is 1 and
+    // Number([1200]) is 1200, which would quote malformed input.
+    const rawArea = options.areaSqFt;
+    const scalarArea = typeof rawArea === 'number'
+      || (typeof rawArea === 'string' && rawArea.trim() !== '');
+    areaSqFt = scalarArea ? Number(rawArea) : NaN;
     if (!Number.isFinite(areaSqFt) || areaSqFt <= 0) {
       throw buildPricingError(`areaSqFt is required for ${addOnKey} (the ${cfg.areaLabel} area in sq ft)`, { field: 'areaSqFt', value: options.areaSqFt });
     }
@@ -9485,6 +9510,8 @@ module.exports = {
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
   priceAreaAddOn,
+  assertAreaAddOnsEnabled,
+  buildPricingError,
   pricePlugging, priceFoamDrill, priceRecurringFoam, priceWasp, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee,
   // Spec functions (Apr 2026)
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
