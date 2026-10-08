@@ -90,6 +90,8 @@ describe('catalog identity beats the words in a name', () => {
     [null, 'bed_bug', 'ok'],
     [null, 'german_roach_knockdown', 'ok'],
     ['general_appointment', null, 'skip'],
+    // Same registry lane, but an onboarding visit with initial treatments.
+    ['waveguard_initial_setup', null, 'outdoor'],
     ['waveguard_membership', null, 'skip'],
   ])('key %s / type %s → %s', (key, type, cls) => {
     expect(rainClassOf(svc(key, type))).toBe(cls);

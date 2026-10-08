@@ -63,9 +63,12 @@ const RAIN_OK_REASONS = new Set(['inspection_lane', 'interior_only_lane', 'trap_
 // rodent_bait_setup, the one-time station placement that shares the check's
 // findings type (Codex #6120 r1). Only the check's own catalog key is OK.
 const RAIN_OK_KEYS = new Set(['rodent_bait_quarterly']);
-// Not a visit's work at all: a billing rider, or a generic appointment
-// whose work is unknown. Left out of the booking's verdict.
-const SKIP_REASONS = new Set(['billing_rider', 'appointment_lane']);
+// Not a visit's work at all: a billing rider, or the generic appointment
+// whose work is unknown. Left out of the booking's verdict. Only that one
+// key of the appointment lane: waveguard_initial_setup is in the same lane
+// and is an onboarding visit with initial treatments (Codex #6120 r2).
+const SKIP_REASONS = new Set(['billing_rider']);
+const SKIP_KEYS = new Set(['general_appointment']);
 
 // 'ok' | 'outdoor' | 'skip' for one service: { name, serviceKey,
 // findingsType } or a bare name. Every other registry answer — a spray or
@@ -81,7 +84,7 @@ function rainClassOf(service) {
   const verdict = resolveTraceEligibility({ serviceKey, findingsType });
   if (verdict.eligible) return 'outdoor';
   if (RAIN_OK_KEYS.has(serviceKey) || RAIN_OK_REASONS.has(verdict.reason)) return 'ok';
-  return SKIP_REASONS.has(verdict.reason) ? 'skip' : 'outdoor';
+  return SKIP_REASONS.has(verdict.reason) || SKIP_KEYS.has(serviceKey) ? 'skip' : 'outdoor';
 }
 
 // A booking is rain-OK only when EVERY service in it is: one outdoor
