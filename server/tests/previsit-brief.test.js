@@ -1054,6 +1054,21 @@ describe('lawn bounded product section', () => {
     expect(brief.product_guidance.products.map((p) => p.name)).toEqual(['Fe/Mn Micros']);
   });
 
+  test('a staged spot row\'s broadened trigger (20261007182000) reaches the brief whole, under the 120 character cut', async () => {
+    const round2 = require('../models/migrations/20261007182000_lawn_v13_matrix_adds_round2');
+    mockSummarize.mockReturnValue({
+      window: { key: 'oct_v13_spreader_fall', month: 10, title: 'October', visitType: 'granular', goal: 'Fall feeding' },
+      products: round2.TRIGGERS.map(([, product, , trigger]) => ({
+        productName: product, role: 'fungicide_spot', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', defaultInPlan: false, gates: { trigger },
+      })),
+    });
+    const state = useDb(baseResponses({ scheduled_services: [{ ...SVC, service_type: 'Lawn Care Service' }] }));
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const { brief } = storedBrief(state);
+    expect(brief.product_guidance.conditional_products.map((p) => p.trigger)).toEqual(round2.TRIGGERS.map(([, , , trigger]) => trigger));
+    expect(brief.product_guidance.conditional_products[0].trigger).toMatch(/fairy_ring_dollar_spot_rust_leaf_spot$/);
+  });
+
   test('conditional/gated products are split out, labeled, and never sent to the LLM as fixed', async () => {
     mockSummarize.mockReturnValue({
       window: { key: 'jun_blackout_stress', month: 6, title: 'Blackout stress', visitType: 'spray', goal: 'Survive blackout' },

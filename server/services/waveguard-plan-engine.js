@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
 const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoBahiaProgram, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProhibitedProductBlock, treatedPropertyType } = require('./lawn-prohibited-products');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey, recordedGrassNamesBahia } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -139,6 +140,51 @@ function parseProtocolLines(text, role, { exactName = false } = {}) {
     }));
 }
 
+// How a product's name relates to the line a v13 program spells.
+// A line that spells whole catalog names (the v13 lawn program, `exact_catalog_names`) matches ONLY a product whose
+// full name it spells: a missing product leaves the line unmatched, never a partial-name stand-in (Acelepryn for
+// Tetrino because both say "Insecticide"). A product whose configured alias IS the spelled name also matches (a row
+// the catalog holds under another name), but only when no row has the exact name (matchCatalogProduct ranks it last).
+function nameRelation(product, name, normalizedLine, spelledName) {
+  const nameMatch = normalizedLine.includes(name);
+  const aliasMatch = !nameMatch && Boolean(spelledName) && (product.aliases || []).map(normalizeText).includes(spelledName);
+  return { nameMatch, aliasMatch };
+}
+
+// The legacy fuzzy match: any alias of the product inside the line (direct), the line inside an alias (reverse), or
+// the product's first two words inside the line.
+function fuzzyNameMatch(product, name, normalizedLine) {
+  const aliases = productAliases(product);
+  const direct = aliases.some((alias) => normalizedLine.includes(alias));
+  const reverse = aliases.some((alias) => alias.includes(normalizedLine));
+  const firstTwo = name.split(' ').slice(0, 2).join(' ');
+  const tokenMatch = firstTwo.length > 5 && normalizedLine.includes(firstTwo);
+  return { direct, tokenMatch, matched: direct || reverse || tokenMatch };
+}
+
+// Ranking: a longer name, a direct alias hit, a priced product and a matching NPK analysis rank higher; a product
+// still needing pricing, or a different NPK analysis, ranks lower.
+function candidateScore(product, name, { direct, tokenMatch }, lineNpk) {
+  const productNpk = parseNpkFromText(product.name);
+  const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
+  const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
+  const npkScore = lineNpk && productNpk
+    ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
+    : 0;
+  return name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore;
+}
+
+// One product against one line: { product, aliasOnly, score }, or null when it is not a candidate.
+function scoreCatalogCandidate(product, { line, normalizedLine, lineNpk, spelledName }) {
+  const name = normalizeText(product.name);
+  if (!name) return null;
+  const { nameMatch, aliasMatch } = nameRelation(product, name, normalizedLine, spelledName);
+  if (line.exactName && !nameMatch && !aliasMatch) return null;
+  const fuzzy = fuzzyNameMatch(product, name, normalizedLine);
+  if (!fuzzy.matched) return null;
+  return { product, aliasOnly: aliasMatch, score: candidateScore(product, name, fuzzy, lineNpk) };
+}
+
 function matchCatalogProduct(line, products) {
   // De-branded pest lines keep brand names out of the display text and supply
   // them via catalogProductHints (from the visit's lineMeta) so the catalog
@@ -149,37 +195,19 @@ function matchCatalogProduct(line, products) {
   const normalizedLine = normalizeProtocolProductText(matchText);
   if (!normalizedLine) return null;
   const lineNpk = parseNpkFromText(matchText);
+  // The product name a v13 line spells: the text before " \u2014 " (the migrations resolve a recipe name the same
+  // way: the exact catalog name, else an exact alias).
+  const spelledName = normalizeProtocolProductText(String(matchText || '').split(' \u2014 ')[0]);
 
   const candidates = products
-    .map((product) => {
-      const name = normalizeText(product.name);
-      if (!name) return null;
-      // A line that spells whole catalog names (the v13 lawn program,
-      // `exact_catalog_names`) matches ONLY a product whose full name it spells:
-      // a missing product leaves the line unmatched, never a partial-name stand-in
-      // (Acelepryn for Tetrino because both say "Insecticide").
-      if (line.exactName && !normalizedLine.includes(name)) return null;
-      const productNpk = parseNpkFromText(product.name);
-      const aliases = productAliases(product);
-      const direct = aliases.some((alias) => normalizedLine.includes(alias));
-      const reverse = aliases.some((alias) => alias.includes(normalizedLine));
-      const firstTwo = name.split(' ').slice(0, 2).join(' ');
-      const tokenMatch = firstTwo.length > 5 && normalizedLine.includes(firstTwo);
-      if (!direct && !reverse && !tokenMatch) return null;
-      const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
-      const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
-      const npkScore = lineNpk && productNpk
-        ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
-        : 0;
-      return {
-        product,
-        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore,
-      };
-    })
+    .map((product) => scoreCatalogCandidate(product, { line, normalizedLine, lineNpk, spelledName }))
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
 
-  return enrichProductAnalysis(candidates[0]?.product || null);
+  // Exact name first, else alias: an alias-only row stands in only when no row spells the name.
+  const ranked = line.exactName && candidates.some((candidate) => !candidate.aliasOnly)
+    ? candidates.filter((candidate) => !candidate.aliasOnly) : candidates;
+  return enrichProductAnalysis(ranked[0]?.product || null);
 }
 
 function enrichProductAnalysis(product) {
@@ -492,6 +520,37 @@ function v13ProtocolRows(structuredProtocol) {
 // windows. Either way the plan withholds its calculated products and blocks
 // instead; the pin is read from the appointment itself, so this does not depend on
 // the completion-default gates. Returns the block, or null.
+// A v13 recipe line (exact catalog names) that matched no active product, because the catalog row that carries its
+// name (or an alias of it) is INACTIVE: getProducts leaves inactive rows out, so without this the line would just
+// vanish (a base application disappearing). A base line is a block, a conditional line a warning; both name
+// the product and say the office must activate it. A line with no inactive row is unmatched as before.
+async function lawnV13InactiveProductNotices(knex, items, { strict = false } = {}) {
+  const unmatched = (items || []).filter((item) => item.exactName === true && !item.product && String(item.raw || '').includes(' \u2014 '));
+  if (!unmatched.length) return { blocks: [], warnings: [] };
+  const inactive = await savepointRead(knex, (k) => k('products_catalog').where({ active: false }).select('id', 'name'))
+    .catch((err) => { if (strict) throw err; return []; });
+  if (!inactive.length) return { blocks: [], warnings: [] };
+  const aliasRows = await savepointRead(knex, (k) => k('product_aliases').whereIn('product_id', inactive.map((row) => row.id)).select('product_id', 'alias_name'))
+    .catch((err) => { if (strict) throw err; return []; });
+  const namesOf = (row) => [row.name, ...aliasRows.filter((alias) => String(alias.product_id) === String(row.id)).map((alias) => alias.alias_name)].map(normalizeText);
+  const blocks = [];
+  const warnings = [];
+  const seen = new Set();
+  for (const item of unmatched) {
+    const spelled = String(item.raw).split(' \u2014 ')[0].trim();
+    if (seen.has(`${item.role}:${spelled}`) || !inactive.some((row) => namesOf(row).includes(normalizeText(spelled)))) continue;
+    seen.add(`${item.role}:${spelled}`);
+    const notice = {
+      code: 'lawn_v13_product_inactive',
+      severity: item.role === 'base' ? 'block' : 'warning',
+      productName: spelled,
+      message: `${spelled} is inactive in the catalog; the office must activate it. This visit's plan cannot include it until then${item.role === 'base' ? ', so no amount is planned for the step' : ''}.`,
+    };
+    (item.role === 'base' ? blocks : warnings).push(notice);
+  }
+  return { blocks, warnings };
+}
+
 function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
   if (featureGates.lawnV13Live?.() === true) {
     if (!trackKey || structuredProtocol?.version === LAWN_V13_VERSION) return null;
@@ -1646,6 +1705,14 @@ function v13ProposedApplication(product, row, targets) {
 // being planned, so a yearly cap shared across formulations (prodiamine, dithiopyr)
 // counts it with the season's earlier applications; the
 // visit's own earlier ledger rows are left out so a re-plan never counts it twice.
+// The Ronstar rule is for residential lawns: the visit's linked property type, else the customer's (the plan's
+// own row carries it; the tank sheet's slimmer row does not, so it is read, and only for a product that matches).
+async function lawnProhibitedForVisit(knex, service, product) {
+  if (!lawnProhibitedProductBlock(product, {})) return null;
+  const propertyType = await treatedPropertyType(knex, { propertyId: service.property_id, customerId: service.customer_id, fallback: service.property_type });
+  return lawnProhibitedProductBlock(product, { propertyType });
+}
+
 async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map(), targets = {} } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
@@ -1655,6 +1722,12 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     const id = String(item.product.id);
     if (checked.has(id)) continue;
     checked.add(id);
+    // Not for home lawns (oxadiazon / Ronstar): a hard block like any other limit, so no amount is planned.
+    const prohibited = await lawnProhibitedForVisit(knex, service, item.product);
+    if (prohibited) {
+      capped.set(id, [{ ...prohibited }]);
+      continue;
+    }
     const row = rows.get(id);
     const proposed = v13ProposedApplication(item.product, row, targets);
     const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
@@ -1813,7 +1886,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .select(
       'ss.*',
       'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
-      'c.waveguard_tier', 'c.lawn_type',
+      'c.waveguard_tier', 'c.lawn_type', 'c.property_type',
       ...(billingModeColumnExists ? ['c.billing_mode'] : []),
       't.name as technician_name',
     )
@@ -1946,7 +2019,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
   const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows, targets: nutrientTargets }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
-  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, gateContext) : null);
+  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts, gateContext, item) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
   // blocks and withholds the selection's quantities (as the tank sheet does).
   const applyAloneBlocks = v13SelectionBlocks(candidateItems, (item) => v13LineOf(item)?.row, gateContext);
@@ -2016,6 +2089,9 @@ async function buildPlanForService(serviceId, options = {}) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
     blocks.push(...notices.blocks);
     warnings.push(...notices.warnings, ...v13Limit.warnings);
+    const inactiveNotices = await lawnV13InactiveProductNotices(knex, candidateItems, { strict });
+    blocks.push(...inactiveNotices.blocks);
+    warnings.push(...inactiveNotices.warnings);
   }
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
@@ -2131,7 +2207,7 @@ async function buildPlanForService(serviceId, options = {}) {
     customerId: service.customer_id,
     service,
     plan: {
-      protocol: { base: planItems.filter((item) => item.role === 'base'), conditional: planItems.filter((item) => item.role === 'conditional') },
+      protocol: { base: planItems.filter((item) => item.role === 'base'), conditional: planItems.filter((item) => item.role === 'conditional'), structured: structuredProtocol },
       mixCalculator: { items: plannedItems },
       propertyGate: { latestAssessment: latestAssessment ? { stressFlags } : null, trackKey, trackName: track?.name || null },
     },
@@ -2284,6 +2360,7 @@ module.exports = {
   v13SelectionBlocks,
   v13LineState,
   holdNorthPortProducts,
+  lawnV13InactiveProductNotices,
   v13NorthPortHold,
   loadVisitCity,
   v13NorthPortReferenceWarnings,

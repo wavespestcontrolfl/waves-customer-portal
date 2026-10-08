@@ -12456,6 +12456,14 @@ const CallRecordingProcessor = {
       && !!String(extracted.last_name || '').trim()
       && !addressRecovery?.recovered
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
+    // A family member who named the account holder by full name: ONE advisory card listing the live
+    // accounts with that name (suggest-only; the office links the call). Reads the state BEFORE this
+    // pass creates a customer for the caller, writes nothing else.
+    if (!customerLinkOverride) {
+      await require('./call-family-name-link').fileFamilyAccountCard({
+        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
+      });
+    }
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {

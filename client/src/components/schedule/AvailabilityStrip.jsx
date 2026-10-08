@@ -13,7 +13,7 @@
 // Owner 2026-10-06 (replaces rule 3): a chip shows BOTH numbers, the drive
 // here from the stop before ("19 min here") and what the stop adds to the
 // day's driving ("+34 min day"), plus the chance of rain at that hour. With
-// `bestRows` (New Appointment, Quick Move) the box shows two rows of four: the best
+// `bestRows` (every admin picker since 2026-10-08) the box shows two rows of four: the best
 // hours on the picked date and the best date + hours in the 7 days from
 // today, always, in place of the "closest" offers.
 // Warn-only like the hint it replaces: picking a chip only fills fields
@@ -309,7 +309,7 @@ function BestRow({ title, hours, withDay, empty, isCurrent, onPick }) {
   );
 }
 
-// The two best-times rows (New Appointment). While a re-check runs the rows
+// The two best-times rows. While a re-check runs the rows
 // are the previous answer's, so they are titled with its date (Codex #6045
 // r2). No week row when its search did not answer, rather than a false
 // "nothing fits".

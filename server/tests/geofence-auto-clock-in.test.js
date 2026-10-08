@@ -23,6 +23,10 @@ jest.mock('../services/time-tracking', () => ({
   clockOut: jest.fn(),
   startJob: jest.fn(),
 }));
+jest.mock('../services/staff-onboarding', () => ({
+  VEHICLE_AGREEMENT_KEY: 'staff.vehicle-use-commuting-agreement',
+  hasCompletedIssuedRecord: jest.fn(),
+}));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/track-transitions', () => ({
   markOnProperty: jest.fn().mockResolvedValue({ ok: true }),
@@ -37,6 +41,7 @@ const timeTracking = require('../services/time-tracking');
 const trackTransitions = require('../services/track-transitions');
 const { etDateString } = require('../utils/datetime-et');
 const geofenceHandler = require('../services/geofence-handler');
+const onboarding = require('../services/staff-onboarding');
 
 const GATE = 'GATE_GEOFENCE_AUTO_CLOCK_IN';
 let insertedNotifications;
@@ -74,6 +79,7 @@ beforeEach(() => {
   matcher.getMode.mockResolvedValue('automatic');
   matcher.getShiftStateToday.mockResolvedValue({ active: false, anyToday: false });
   matcher.findLiveVisitsOn.mockResolvedValue([{ id: 'job-1' }]);
+  onboarding.hasCompletedIssuedRecord.mockResolvedValue(true);
   timeTracking.startJob.mockResolvedValue({ id: 'job-entry-1' });
 });
 
@@ -99,6 +105,29 @@ describe('geofence auto clock-in (handler)', () => {
     expect(JSON.parse(insertedNotifications[0].payload)).toMatchObject({ clocked_in: true, shift_entry_id: 'shift-1', time_entry_id: 'job-entry-1' });
     expect(lastAction()).toBe('clocked_in_timer_started');
     expect(trackTransitions.markOnProperty).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on, vehicle agreement not signed: no auto clock-in, the plain geofence start runs (reminder path)', async () => {
+    onboarding.hasCompletedIssuedRecord.mockResolvedValue(false);
+    await geofenceHandler.handleArrival(baseArgs());
+
+    expect(onboarding.hasCompletedIssuedRecord).toHaveBeenCalledWith(db, 'tech-1', 'staff.vehicle-use-commuting-agreement');
+    expect(timeTracking.startJob).toHaveBeenCalledWith('tech-1', 'job-1', { lat: 27.1, lng: -82.4, geofenceArrival: true });
+    expect(startOpts()).not.toHaveProperty('autoClockIn');
+  });
+
+  test('gate on, vehicle agreement unreadable: fails closed, no auto clock-in', async () => {
+    onboarding.hasCompletedIssuedRecord.mockRejectedValue(new Error('db down'));
+    await geofenceHandler.handleArrival(baseArgs());
+
+    expect(startOpts()).not.toHaveProperty('autoClockIn');
+  });
+
+  test('a tech already clocked in costs no agreement query', async () => {
+    matcher.getShiftStateToday.mockResolvedValue({ active: true, anyToday: true });
+    await geofenceHandler.handleArrival(baseArgs());
+
+    expect(onboarding.hasCompletedIssuedRecord).not.toHaveBeenCalled();
   });
 
   test('gate off: exactly today (startJob gets only lat/lng, plain notice, timer_started)', async () => {
