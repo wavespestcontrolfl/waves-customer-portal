@@ -144,6 +144,39 @@ describe('fileNameSpellingCard', () => {
     });
   });
 
+  test('a human decision for customer A does not suppress the same discrepancy for customer B (or unlinked)', async () => {
+    const forA = { payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', customer_ids: ['cust-a'], also: [] } };
+    const rowOf = () => ({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+    expect(await file(makeConn({ ...rowOf(), settled: [forA] }), { customerId: 'cust-a' })).toBe(false);
+    expect(await file(makeConn({ ...rowOf(), settled: [forA] }), { customerId: 'cust-b' })).toBe(true);
+    // ...and an unlinked card is its own key.
+    const unlinkedSettled = { payload: { field: 'last_name', spelled_value: 'Serov', saved_value: 'Sirov', customer_ids: [] } };
+    expect(await file(makeConn({ settled: [unlinkedSettled] }))).toBe(false);
+    expect(await file(makeConn({ ...rowOf(), settled: [unlinkedSettled] }), { customerId: 'cust-b' })).toBe(true);
+    expect(await file(makeConn({ settled: [forA] }))).toBe(true);
+  });
+
+  test.each(['family_member', 'real_estate_agent', 'lender', 'tenant', 'property_manager', 'employee', 'home_buyer', 'other'])(
+    'a third-party caller (%s) is never compared with the linked account holder', async (relationship) => {
+      const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+      const v2Result = { extraction: { caller: { relationship_to_property: relationship }, meta: { call_summary: 'x' } } };
+      expect(await file(conn, { customerId: 'cust-1', v2Result })).toBe(false);
+      expect(conn.writes).toEqual([]);
+    },
+  );
+
+  test('a third party on an UNLINKED call still gets a card against the extracted caller name; owner-equivalent callers compare with the customer', async () => {
+    const v2Third = { extraction: { caller: { relationship_to_property: 'tenant' }, meta: { call_summary: 'x' } } };
+    const unlinked = makeConn();
+    expect(await file(unlinked, { v2Result: v2Third })).toBe(true);
+    expect(JSON.parse(unlinked.writes[0].row.payload).compared_against.source).toBe('extracted');
+    for (const rel of ['owner', 'spouse_partner', 'unknown', undefined]) {
+      const conn = makeConn({ customer: { first_name: 'Quentrell', last_name: 'Sirov' } });
+      const v2Result = { extraction: { caller: { relationship_to_property: rel }, meta: { call_summary: 'x' } } };
+      expect(await file(conn, { customerId: 'cust-1', v2Result })).toBe(true);
+    }
+  });
+
   test('equal letters (any case): no card', async () => {
     const conn = makeConn();
     expect(await file(conn, { extracted: { first_name: 'Quentrell', last_name: 'SEROV' } })).toBe(false);
@@ -215,10 +248,10 @@ describe('the card is wired like the other name_review cards', () => {
     expect(src).toMatch(/const VERSION_BOUND_REASONS = \[[^\]]*'name_spelling_differs'/s);
     expect(src).toMatch(/\.whereNotIn\('reason_code', \[[^\]]*'name_spelling_differs'/s);
     expect(src).toMatch(/const NOT_A_VERDICT_MESSAGES = \{[^}]*name_spelling_differs/s);
-    // Open to the office: not in the admin-only set.
+    // Admin-only like the owed first name: hidden from techs, refused on every shared transition.
     // The card's customer list resolves to merge survivors like the other owed-customer cards.
     expect(src).toMatch(/const OWED_CUSTOMER_LIST_REASONS = \[[^\]]*'name_spelling_differs'/);
-    expect(src).not.toMatch(/const ADMIN_ONLY_REASONS = \[[^\]]*name_spelling_differs/s);
+    expect(src).toMatch(/const ADMIN_ONLY_REASONS = \[[^\]]*'name_spelling_differs'/s);
   });
 
   test('the card does not survive a recording swap (it is evidence about the transcript)', () => {
@@ -226,11 +259,11 @@ describe('the card is wired like the other name_review cards', () => {
     expect(SUPERSEDE_KEPT_CARD_SQL).not.toMatch(/name_spelling_differs/);
   });
 
-  test('the inbox labels it, renders it through the evidence lookup, and gives it its own Resolve (no verdict)', () => {
+  test('the inbox labels it, renders it through the evidence lookup, and gives it its own admin-only Resolve (no verdict)', () => {
     const src = read('../../client/src/pages/admin/TriageInboxTabV2.jsx');
     expect(src).toMatch(/name_spelling_differs: "Caller spelled their name — check it"/);
     expect(src).toMatch(/const EVIDENCE_BY_REASON = \{[^}]*name_spelling_differs: NameSpellingEvidence/);
     expect(src).toMatch(/const NO_VERDICT_REASONS = new Set\(\[[^\]]*"name_spelling_differs"/s);
-    expect(src).not.toMatch(/const ADMIN_RESOLVE_REASONS = new Set\(\[[^\]]*name_spelling_differs/s);
+    expect(src).toMatch(/const ADMIN_RESOLVE_REASONS = new Set\(\[[^\]]*"name_spelling_differs"/s);
   });
 });

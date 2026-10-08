@@ -366,9 +366,17 @@ describe('name-spelling card', () => {
   const load = () => adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
     ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
 
-  it('has its own Resolve and Dismiss for the office (not admin-only), no Accept/Deny', async () => {
+  it('Resolve is admin-only: a non-admin sees Dismiss but no Resolve', async () => {
     load();
     render(<TriageInboxTabV2 isAdmin={false} />);
+    const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    expect(within(el).queryByRole('button', { name: /^resolve$/i })).toBeNull();
+  });
+
+  it('has its own Resolve and Dismiss for an admin, no Accept/Deny', async () => {
+    load();
+    render(<TriageInboxTabV2 isAdmin />);
     const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
     expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
     expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
@@ -378,7 +386,7 @@ describe('name-spelling card', () => {
 
   it('Resolve is PUT /resolve with its version, never a /verdict', async () => {
     load();
-    render(<TriageInboxTabV2 isAdmin={false} />);
+    render(<TriageInboxTabV2 isAdmin />);
     const el = (await screen.findByText('Quentrell Sirov')).closest('.py-4');
     fireEvent.click(within(el).getByRole('button', { name: /^resolve$/i }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/ns/resolve', {

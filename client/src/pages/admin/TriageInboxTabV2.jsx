@@ -400,11 +400,7 @@ const NO_VERDICT_REASONS = new Set([
   "auto_booking_skipped_after_approval", "name_spelling_differs",
 ]);
 // …of which these are an owed capture on the customer record or the office's link: Resolve is admin-only.
-const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);
-// Cards with their own Resolve button: the admin-only ones above, plus the name-spelling check, which the
-// office may Resolve (fix the name on the record if the spelling is theirs, then Resolve or Dismiss).
-const OWN_RESOLVE_REASONS = new Set([...ADMIN_RESOLVE_REASONS, "name_spelling_differs"]);
-const canResolveOwnCard = (reasonCode, isAdmin) => isAdmin || !ADMIN_RESOLVE_REASONS.has(reasonCode);
+const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);
 
 function reasonLabel(code) {
   if (!code) return "Needs review";
@@ -1070,7 +1066,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 // A missing first name is an owed capture, not a call verdict (the server
                 // 400s /verdict on it): enter the name on the customer record, then Resolve
                 // (or Dismiss). The sweep also closes it once the record carries a name.
-                const isAdminResolveCard = isTriage && OWN_RESOLVE_REASONS.has(item.reason_code);
+                const isAdminResolveCard = isTriage && ADMIN_RESOLVE_REASONS.has(item.reason_code);
                 // The cards above (and the conflict / recovery tasks) are not call verdicts: no verdict badge.
                 const isNoVerdictCard = isTriage && NO_VERDICT_REASONS.has(item.reason_code);
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
@@ -1193,7 +1189,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                             // Admin-only (the server hides the family card from techs and 403s a non-admin
                             // Resolve): the first name is entered on the customer record, which only an
                             // admin edits, and the family card is the office's link.
-                            canResolveOwnCard(item.reason_code, isAdmin) ? (
+                            isAdmin ? (
                               <Button
                                 size="sm"
                                 variant="primary"

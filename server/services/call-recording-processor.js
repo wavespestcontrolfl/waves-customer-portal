@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, isExplicitlyNonOwner } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -4043,6 +4043,10 @@ async function fileNameSpellingCard(conn, {
   try {
     if (isOutbound) return false;
     const extraction = v2Result?.extraction || { meta: { call_summary: extracted?.call_summary || null } };
+    // A third party (family member, agent, tenant, buyer ...) is not the account holder: their
+    // spelling is never compared with the linked customer's record. An unlinked call still compares
+    // against the extracted caller name.
+    if (customerId && isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return false;
     const customer = customerId ? await conn('customers').where({ id: customerId }).first('first_name', 'last_name') : null;
     const saved = Object.fromEntries(['first_name', 'last_name']
       .map((f) => [f, String(customer?.[f] || '').trim() || extracted?.[f] || null]));
@@ -4058,11 +4062,17 @@ async function fileNameSpellingCard(conn, {
       if (procToken && !(await trx('call_log').where({ id: callLogId, processing_token: procToken }).forUpdate().first('id'))) return false;
       const settled = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'name_spelling_differs', resolution_source: 'human' })
         .whereIn('status', ['resolved', 'dismissed']).select('payload');
-      // Each discrepancy (field, spelling, saved name) is judged on its own against every
-      // human-settled card's evidence (its main entry and its `also` list).
-      const key = (d) => `${d?.field}|${d?.spelled_value}|${d?.saved_value}`;
-      const seen = new Set(settled.flatMap((r) => { const o = asObject(r.payload); return [o, ...(Array.isArray(o.also) ? o.also : [])]; }).map(key));
-      const [top, ...others] = differences.filter((d) => !seen.has(key(d)));
+      // Each discrepancy (filing customer, field, spelling, saved name) is judged on its own against
+      // every human-settled card's evidence (its main entry and its `also` list): a decision for
+      // customer A does not suppress the same discrepancy for customer B after a relink.
+      const filingCustomer = customer && customerId ? String(customerId) : 'unlinked';
+      const key = (d, who) => `${who}|${d?.field}|${d?.spelled_value}|${d?.saved_value}`;
+      const seen = new Set(settled.flatMap((r) => {
+        const o = asObject(r.payload);
+        const who = (Array.isArray(o.customer_ids) && o.customer_ids[0]) || 'unlinked';
+        return [o, ...(Array.isArray(o.also) ? o.also : [])].map((d) => key(d, String(who)));
+      }));
+      const [top, ...others] = differences.filter((d) => !seen.has(key(d, filingCustomer)));
       if (!top) return false;
       await trx('triage_items')
         .insert(buildTriageItem({

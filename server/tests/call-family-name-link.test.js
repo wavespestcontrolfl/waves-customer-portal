@@ -140,14 +140,14 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(triage.slice(at, at + 700)).toContain("'family_account_candidates'");
   });
   test('techs: the card is hidden from the list and counts and refused on every transition (admin-only reasons)', () => {
-    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];");
+    expect(triage).toContain("const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs'];");
     expect(triage).toContain("q.whereNotIn('triage_items.reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain("q.whereNotIn('reason_code', ADMIN_ONLY_REASONS)");
     expect(triage).toContain('if (guarded && ADMIN_ONLY_REASONS.includes(guarded.reason_code)) {');
     const client = fs.readFileSync(require.resolve('../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
-    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates"]);');
+    expect(client).toContain('const ADMIN_RESOLVE_REASONS = new Set(["missing_first_name", "family_account_candidates", "name_spelling_differs"]);');
     const branch = client.slice(client.indexOf(') : isAdminResolveCard ? ('));
-    expect(branch.slice(0, 600)).toContain('canResolveOwnCard(item.reason_code, isAdmin) ? (');
+    expect(branch.slice(0, 600)).toContain('isAdmin ? (');
   });
   test('Resolve / Dismiss bind to the version the operator saw (expected_updated_at), via the version-bound reason set', () => {
     expect(triage).toMatch(/const VERSION_BOUND_REASONS = \[[\s\S]*?'family_account_candidates',(?:\s*'name_spelling_differs',)?\s*\];/);
@@ -156,7 +156,7 @@ describe('the suggestion has its own resolution (a verdict must not close it or 
     expect(triage).toContain("return { outcome: 'stale_version' };");
   });
   test('a merged candidate opens its survivor: the list resolves customer_ids for this card too', () => {
-    expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates'];");
+    expect(triage).toContain("const OWED_CUSTOMER_LIST_REASONS = ['missing_first_name', 'family_account_candidates', 'name_spelling_differs'];");
     expect(triage).toContain('items.filter((i) => OWED_CUSTOMER_LIST_REASONS.includes(i.reason_code))');
   });
   test('the inbox: no verdict badge or Accept / Deny, own evidence component, looked up by reason', () => {

@@ -30,7 +30,7 @@ const VERSION_BOUND_REASONS = [
   'property_role_confirm', 'reschedule_link_promise', 'on_file_house_number_conflict', 'attached_booking_followup_unbooked',
   'auto_booking_skipped_after_approval', 'missing_first_name', 'family_account_candidates', 'name_spelling_differs',
 ];
-const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates'];
+const ADMIN_ONLY_REASONS = ['property_role_confirm', 'family_account_candidates', 'name_spelling_differs'];
 // Cards settled by their own Resolve / Dismiss / Apply, never by a call verdict: /verdict answers 400 with
 // the instruction for the card instead (a verdict would close it, and the call's other cards, without doing
 // what the card asks).
