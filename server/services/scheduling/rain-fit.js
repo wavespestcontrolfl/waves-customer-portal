@@ -12,14 +12,20 @@
  * time to dry). Only the next RAIN_DAYS dates count: Florida hourly
  * forecasts past ~3 days are too weak to move a booking.
  *
- * Pure rules; bookingRainFit reads the gate.
+ * Which services are rain-OK: a service with a catalog identity is rain-OK
+ * only when its exact catalog key is on RAIN_OK_KEYS; any other identity is
+ * outdoor. The word rules below are only the fallback for a service with no
+ * catalog identity (owner 2026-10-08: ten Codex rounds on #6102 each found
+ * another name the words sorted wrong).
+ *
+ * bookingRainFit reads the gate; withCatalogKeys reads the catalog.
  */
+const logger = require('../logger');
 const RAIN_PCT = 60;
 const RAIN_AFTER_HOURS = 2;
 const RAIN_DAYS = 3;
 
-// A booking is rain-OK only when EVERY service in it is: one outdoor
-// service in the booking means work happens outside.
+// ── Word rules: the fallback for a service with no catalog key ──────────
 const RAIN_OK = /assess|estimate|inspect|\bwdo\b|wood[- ]?destroy|interior/i;
 // Rodent work is rain-OK only as a check: trap checks, monitoring, an
 // inspection. Exclusion and remediation (wire mesh, sealing) are outdoor
@@ -46,11 +52,120 @@ function rainOkService(name) {
   return RODENT.test(name) && RODENT_CHECK.test(name);
 }
 
+// The complete rain-OK list, by exact catalog key. A lane of the spray-trace
+// registry is too coarse for this: its trap lane holds trap checks AND the
+// first trap setup, its bait-station lane holds the station check AND the
+// install, and a catch-all rodent service reuses the inspection form (Codex
+// #6120 r1-r3). So a service is rain-OK only when its own key is here:
+// nothing is applied outside and the work does not need dry weather. A test
+// checks that none of these keys is a spray lane in the registry.
+const RAIN_OK_KEYS = new Set([
+  // assessments and inspections
+  'waves_assessment', 'waves_assessment_plus', 'new_customer_inspection',
+  'wdo_inspection', 'termite_inspection', 'pest_inspection', 'rodent_inspection', 'lawn_inspection',
+  // interior-only treatment
+  'bed_bug_treatment', 'german_roach', 'german_roach_initial',
+  // rodent checks and attic work (not trap setup, exclusion or station install)
+  'rodent_bait_quarterly', 'rodent_monitoring',
+  'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
+  'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_medium', 'rodent_sanitation_heavy',
+]);
+// Not a visit's work at all: a billing rider (the registry's lane), or the
+// generic appointment whose work is unknown. Left out of the booking's
+// verdict. waveguard_initial_setup shares the appointment lane and is an
+// onboarding visit with initial treatments, so only this one key is skipped
+// (Codex #6120 r2).
+const SKIP_KEYS = new Set(['general_appointment']);
+
+// 'ok' | 'outdoor' | 'skip' for one service: { name, serviceKey,
+// findingsType } or a bare name. A service with a catalog identity that is
+// not on the list is outdoor — every spray lane, setup, install, exclusion,
+// and any key added later: an unlisted service keeps a dry hour. Only a
+// service with no catalog identity at all takes the word rules.
+function rainClassOf(service) {
+  const name = String((service && service.name) ?? service ?? '').trim();
+  const serviceKey = (service && service.serviceKey) || null;
+  const findingsType = (service && service.findingsType) || null;
+  if (!serviceKey && !findingsType) return rainOkService(name) ? 'ok' : 'outdoor';
+  if (RAIN_OK_KEYS.has(serviceKey)) return 'ok';
+  if (SKIP_KEYS.has(serviceKey)) return 'skip';
+  const { resolveTraceEligibility } = require('../service-report/trace-eligibility');
+  return resolveTraceEligibility({ serviceKey, findingsType }).reason === 'billing_rider' ? 'skip' : 'outdoor';
+}
+
+// A booking is rain-OK only when EVERY service in it is: one outdoor
+// service in the booking means work happens outside.
 function rainFitFor(serviceTypes) {
-  const names = (Array.isArray(serviceTypes) ? serviceTypes : [serviceTypes])
-    .map((s) => String(s || '').trim()).filter(Boolean);
-  if (!names.length) return 'neutral';
-  return names.every(rainOkService) ? 'prefer' : 'avoid';
+  const classes = (Array.isArray(serviceTypes) ? serviceTypes : [serviceTypes])
+    .filter((s) => String((s && s.name) ?? s ?? '').trim())
+    .map(rainClassOf)
+    .filter((c) => c !== 'skip');
+  if (!classes.length) return 'neutral';
+  return classes.every((c) => c === 'ok') ? 'prefer' : 'avoid';
+}
+
+// A booking holds a handful of services; anything past this is not a
+// booking, and each entry costs catalog reads (Codex #6120 r1).
+const MAX_BOOKING_SERVICES = 12;
+const KEY_SHAPE = /^[a-z0-9_]{1,80}$/;
+// Stands for every service past the cap: an identity no list knows, so outdoor.
+const OVERFLOW_SERVICE = Object.freeze({ name: 'More services', serviceKey: 'booking_services_over_cap', findingsType: null });
+
+// The booking's services with their stable identity, for rainFitFor: the
+// catalog key and findings type the completion-profile resolver gives a
+// visit. `items` are names or { name, serviceKey }; a key the screen sent
+// (the selected catalog row) settles the identity ahead of the name, which
+// is not unique in the catalog. Only while the gate is on; read one at a
+// time; an entry that cannot be resolved (or a failed read) keeps its name
+// and takes the word rules.
+async function withCatalogKeys(items, db) {
+  const list = (Array.isArray(items) ? items : [])
+    .map((item) => ({ name: String((item && item.name) ?? item ?? '').trim(), serviceKey: (item && item.serviceKey) || null }))
+    .filter((item) => item.name);
+  const { gateEnvValue } = require('../../config/feature-gates');
+  if (!list.length || !gateEnvValue('GATE_BOOKING_RAIN_RANK')) return list.map((item) => item.name);
+  const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+  const out = [];
+  for (const { name, serviceKey } of list) {
+    try {
+      const profile = await resolveCompletionProfileForScheduledService(
+        { service_type: name, service_key_snapshot: serviceKey || undefined }, db,
+      );
+      out.push({ name, serviceKey: profile?.serviceKey || null, findingsType: profile?.findingsType || null });
+    } catch (err) {
+      logger.warn(`[rain-fit] service identity lookup failed (word rules used): ${err.message}`);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+// The find-time request's services for the ranking: the primary service and
+// the rest of the booking, each with the catalog key the screen sent
+// (`serviceKeys`, parallel to `serviceTypes`). Deduplicated and capped.
+// Empty unless the request asks for the best-times rows, the only reader.
+function bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys }, db) {
+  if (bestRows !== true) return [];
+  const names = Array.isArray(serviceTypes) ? serviceTypes : [];
+  const keys = Array.isArray(serviceKeys) && serviceKeys.length === names.length ? serviceKeys : [];
+  const seen = new Map();
+  let overflow = false;
+  const add = (name, key) => {
+    if (typeof name !== 'string' || !name.trim()) return;
+    const serviceKey = typeof key === 'string' && KEY_SHAPE.test(key) ? key : null;
+    const id = `${serviceKey || ''}|${name.trim().toLowerCase()}`;
+    if (seen.has(id)) return;
+    if (seen.size >= MAX_BOOKING_SERVICES) { overflow = true; return; }
+    seen.set(id, { name: name.trim(), serviceKey });
+  };
+  names.forEach((name, i) => add(name, keys[i]));
+  // The primary service, unless the list already names it (with its key).
+  const primary = typeof serviceType === 'string' ? serviceType.trim().toLowerCase() : '';
+  if (primary && ![...seen.values()].some((item) => item.name.toLowerCase() === primary)) add(serviceType, null);
+  // Services past the cap are not looked up, so they cannot be called
+  // rain-OK: one unclassified entry makes the whole booking outdoor rather
+  // than letting the classified ones speak for it (Codex #6120 r4).
+  return withCatalogKeys([...seen.values()], db).then((services) => (overflow ? [...services, OVERFLOW_SERVICE] : services));
 }
 
 // The booking's fit with the gate applied: 'neutral' (drive-only) while
@@ -94,14 +209,20 @@ function isWetWindow(hourly, { date, start_time: start, end_time: end }, today) 
   return missing ? null : false;
 }
 
-// Sort tier: 0 sorts first. Unknown rain sits between: an 'avoid' booking
-// prefers a known-dry hour over an unknown one, and a 'prefer' booking a
-// known-wet hour over an unknown one.
-function rainTier(fit, wet) {
+// Sort tier: 0 sorts first. Rain moves only what the forecast knows:
+//   avoid:  a wet hour 2; an hour inside the horizon the forecast cannot
+//           read 1 (not promoted to dry); a dry hour 0.
+//   prefer: a wet hour 0; every other hour 1.
+// A date past the horizon is tier 0 for 'avoid' and 1 for 'prefer', the
+// same as a dry hour: it competes on drive alone, as before rain ranking.
+// (Owner 2026-10-08: with "unknown" between dry and wet, every dry hour in
+// the next 3 days outranked all later dates for an outdoor booking, and a
+// rain-OK booking's dry near hours ranked behind dates a week out.)
+function rainTier(fit, wet, inHorizon = true) {
   if (fit === 'neutral') return 0;
-  if (wet == null) return 1;
-  if (fit === 'avoid') return wet ? 2 : 0;
-  return wet ? 0 : 2;
+  if (fit === 'prefer') return wet === true ? 0 : 1;
+  if (wet === true) return 2;
+  return wet == null && inHorizon ? 1 : 0;
 }
 
 // Whether ranking can use a forecast at all: a non-neutral booking with at
@@ -118,7 +239,7 @@ function rankingNeedsForecast(fit, days, today, pickedDate) {
 // when there is no forecast or the booking is neutral.
 function rainTierOf(fit, hourly, today) {
   if (fit === 'neutral' || !hourly) return null;
-  return (chip) => rainTier(fit, isWetWindow(hourly, chip, today));
+  return (chip) => rainTier(fit, isWetWindow(hourly, chip, today), inRainHorizon(chip.date, today));
 }
 
-module.exports = { rainFitFor, bookingRainFit, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
