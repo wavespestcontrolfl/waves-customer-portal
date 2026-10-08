@@ -415,27 +415,17 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, { property: { property_type: 'commercial', whole_building_occupancy: true, whole_building_occupancy_final: false } })).toBe(false);
     expect(run(slab, { property: { property_type: 'commercial' }, service_request: { secondary_categories: ['pest_general'] } })).toBe(false);
     expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['termite'] } })).toBe(false);
-    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['wdo'] } })).toBe(true);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: ['inspection_only'] } })).toBe(false);
+    expect(run(slab, { property: { property_type: 'vacant_lot' }, service_request: { secondary_categories: [] } })).toBe(true);
   });
 
-  test('only the caller\'s words count, and a plain denial is not unit evidence', () => {
+  test('any mention of a suite or unit keeps the card: either speaker, denials included', () => {
     const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
     const commercial = { property: { property_type: 'commercial' } };
-    expect(run(slab, commercial, 'Agent: Do you have a suite or unit number?\nCaller: No, it is the whole new building.')).toBe(true);
-    expect(run(slab, commercial, 'Agent: Which one?\nCaller: It is suite 4.')).toBe(false);
-    expect(run(slab, commercial, 'Caller: there is no unit number, it is a new lot')).toBe(true);
-    // A wrapped caller line and a "Customer:" label still count as the caller.
-    expect(run(slab, commercial, 'Caller: I need a slab pre-treat.\nIt is in suite 4.\nAgent: Okay.')).toBe(false);
-    expect(run(slab, commercial, 'Agent: Where?\nCustomer: Bay 3 in the plaza.')).toBe(false);
-    // Raw diarization (no identifiable caller) is judged whole.
-    expect(run(slab, commercial, 'Speaker 1: Do you have a suite?\nSpeaker 2: No.')).toBe(false);
-  });
-
-  test('an outbound call is judged on its whole transcript (labels can be swapped)', () => {
-    const slab = { specific_service_name: 'Slab Pre-Treat Termite Service' };
-    const swapped = 'Agent: It is suite 4 in the plaza.\nCaller: Got it, we will be there.';
-    expect(callIsWholeStructureService({ extracted: slab, v2Extraction: { property: { property_type: 'commercial' } }, transcription: swapped, services: CATALOG, outbound: true })).toBe(false);
-    expect(callIsWholeStructureService({ extracted: slab, v2Extraction: { property: { property_type: 'commercial' } }, transcription: swapped, services: CATALOG })).toBe(true);
+    expect(run(slab, commercial, 'Agent: Do you have a suite or unit number?\nCaller: No, it is the whole new building.')).toBe(false);
+    expect(run(slab, commercial, 'Caller: we do not have a unit number')).toBe(false);
+    expect(run(slab, commercial, 'Suite 4\nCaller: it is a new lot')).toBe(false);
+    expect(run(slab, commercial, 'Caller: new construction lot, slab pours Monday')).toBe(true);
   });
 
   test('a commercial suite, unit, bay or plaza keeps the unit card', () => {

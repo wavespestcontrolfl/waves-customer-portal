@@ -6936,26 +6936,7 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
 // unit card stays (same safeguard the business whole-building waiver keeps).
 const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|center|centre)|plaza|shopping (?:center|centre)|multi-tenant|tenant space|space\s*#?\s*\d+)\b|#\s*\d+/i;
 
-// Only the caller's own turns count as unit evidence: an agent asking "do you
-// have a suite or unit number?" proves nothing. An unlabeled transcript is
-// used whole (fails closed). A plain denial ("no suite", "it's not a unit")
-// is removed before the wording checks.
-const NEGATED_UNIT_RE = /\b(?:no|not\s+an?|isn'?t\s+an?|there'?s\s+no|without\s+an?)\s+(?:suite|unit|apartment|apt|condo|bay)s?(?:\s+numbers?)?\b/gi;
-function callerWordsForUnitCheck(transcription, { outbound = false } = {}) {
-  // Outbound diarization has swapped Agent/Caller labels (see the agent-commit
-  // notes), so an outbound call is judged on its whole transcript. So is any
-  // transcript with no labels, or with labels but no identifiable caller
-  // (raw "Speaker 1:" diarization) — uncertain attribution keeps every word.
-  const whole = String(transcription || '');
-  if (outbound) return whole;
-  const callerTurns = speakerTurns(whole).filter((t) => t.speaker === 'caller');
-  return callerTurns.length ? callerTurns.map((t) => t.text).join('\n') : whole;
-}
-
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);
-// 'termite' is NOT here: the coarse category also covers spot, foam and bait
-// work that can target one unit (WHOLE_STRUCTURE_SERVICE_KEYS keeps those held).
-const WHOLE_STRUCTURE_CATEGORIES = new Set(['wdo', 'inspection_only']);
 
 // Card-only companion to the waiver above (owner 2026-10-07): true when EVERY
 // view of the call's service resolves to a whole-structure catalog row (slab
@@ -6963,32 +6944,38 @@ const WHOLE_STRUCTURE_CATEGORIES = new Set(['wdo', 'inspection_only']);
 // or apartment, and nothing on the call says condo/apartment. Commercial jobs
 // count — a new-construction slab has no unit. Used only to skip the advisory
 // missing_unit_number card; it never changes an address hold.
-function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false, outbound = false } = {}) {
+// The PROPERTY half, positive evidence only (fails closed): a KNOWN
+// building-level property type (an unknown type cannot prove the work is not
+// unit-level), no partial occupancy on either occupancy field, and no second
+// requested service (a coarse category cannot prove that work is
+// building-level).
+function propertyIsWholeStructure(v2Extraction) {
+  const property = v2Extraction?.property || {};
+  const secondary = v2Extraction?.service_request?.secondary_categories;
+  return CARD_WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(property.property_type || '').toLowerCase())
+    && property.whole_building_occupancy !== false
+    && property.whole_building_occupancy_final !== false
+    && !(Array.isArray(secondary) && secondary.length);
+}
+
+function callIsWholeStructureService({ extracted = {}, preAdoptionExtracted = null, v2Extraction = null, transcription = '', services = [], unclearServiceAssessment = false } = {}) {
   // Same conservative views as wholeStructureUnitWaiverForCall: a call the
   // unclear-service rule may book as a Waves Assessment is not whole-structure,
   // and the V1 service as heard BEFORE V2-primary adoption must agree too.
   if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return false;
-  // Positive evidence only (fails closed): a KNOWN building-level property
-  // type (an unknown type cannot prove the work is not unit-level), no
-  // explicit partial occupancy, and every requested service category
-  // building-level too.
-  const property = v2Extraction?.property || {};
-  if (!CARD_WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(property.property_type || '').toLowerCase())) return false;
-  if (property.whole_building_occupancy === false || property.whole_building_occupancy_final === false) return false;
-  const secondary = Array.isArray(v2Extraction?.service_request?.secondary_categories) ? v2Extraction.service_request.secondary_categories : [];
-  if (secondary.some((c) => !WHOLE_STRUCTURE_CATEGORIES.has(String(c)))) return false;
-  const views = preAdoptionExtracted ? [preAdoptionExtracted, extracted] : [extracted];
-  const finalView = v2BookingServiceView(extracted, v2Extraction);
-  if (finalView) views.push(finalView);
+  if (!propertyIsWholeStructure(v2Extraction)) return false;
+  const views = [preAdoptionExtracted, extracted, v2BookingServiceView(extracted, v2Extraction)].filter(Boolean);
   return views.every((view) => {
     const coarse = resolveSchedulableCallService(view, { transcription });
     const row = resolveCallBookingCatalogService({
       extracted: view, transcription, services, coarseServiceLabel: coarse.ok ? coarse.service : null,
     });
-    if (!isWholeStructureService({ serviceKey: row?.service_key || null })) return false;
-    const text = [callerWordsForUnitCheck(transcription, { outbound }), view.requested_service, view.address_line1, view.address_line2]
-      .filter(Boolean).join(' ').replace(NEGATED_UNIT_RE, ' ');
-    return !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
+    // The WHOLE transcript, either speaker, denials included: any mention of
+    // a suite, unit, bay or condo keeps the card (speaker labels and
+    // negations are not reliable enough to suppress on).
+    const text = [transcription, view.requested_service, view.address_line1, view.address_line2].filter(Boolean).join(' ');
+    return isWholeStructureService({ serviceKey: row?.service_key || null })
+      && !UNIT_LEVEL_WORDING_RE.test(text) && !UNIT_DESIGNATOR_WORDING_RE.test(text);
   });
 }
 
@@ -11618,7 +11605,6 @@ const CallRecordingProcessor = {
               && callIsWholeStructureService({
                 extracted, preAdoptionExtracted, v2Extraction, transcription,
                 services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
-                outbound: isOutboundCall(call),
               }),
           }).dropped);
           if (unneededCards.size) {
@@ -12038,7 +12024,6 @@ const CallRecordingProcessor = {
         if (needsConfirmation.includes('missing_unit_number') && callIsWholeStructureService({
           extracted, preAdoptionExtracted, v2Extraction: v2Result?.status === 'valid' ? v2Ext : null, transcription,
           services: bookableCallServices, unclearServiceAssessment: unclearServiceAssessmentActive(),
-          outbound: isOutboundCall(call),
         })) {
           needsConfirmation.splice(needsConfirmation.indexOf('missing_unit_number'), 1);
         }
