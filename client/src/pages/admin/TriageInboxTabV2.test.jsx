@@ -281,6 +281,27 @@ describe('follow-up card Resolve path', () => {
   });
 });
 
+describe('no-text line card (text_number_differs)', () => {
+  const card = { ...ordinary, id: 'tn', first_name: 'Relay', last_name: 'Caller', feedback_verdict: null,
+    reason_code: 'text_number_differs',
+    payload: JSON.stringify({ flag: 'text_number_differs', ani_phone: '+19415550100', text_phone: '+19415559876', customer_phone: '+19415550100' }) };
+
+  it('has Resolve (single-card, which lifts the SMS hold) and Dismiss, never Accept/Deny (/verdict would leave the line blocked)', async () => {
+    adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
+      ? { items: [card], counts: { open: 1, resolved: 0, dismissed: 0 } } : { ok: true }));
+    render(<TriageInboxTabV2 />);
+    const el = (await screen.findByText('Relay Caller')).closest('.py-4');
+    expect(within(el).queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(within(el).queryByRole('button', { name: /deny/i })).toBeNull();
+    expect(within(el).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
+    fireEvent.click(within(el).getByRole('button', { name: /phones are right/i }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/triage/tn/resolve', {
+      method: 'PUT', body: JSON.stringify({ expected_updated_at: card.updated_at }),
+    }));
+    expect(adminFetch).not.toHaveBeenCalledWith('/admin/triage/tn/verdict', expect.anything());
+  });
+});
+
 describe('missing first-name card', () => {
   const card = { ...ordinary, id: 'fn', first_name: '', last_name: 'Murphy', feedback_verdict: null,
     reason_code: 'missing_first_name', payload: JSON.stringify({ flag: 'missing_first_name', heard_name_v1: { first_name: null, last_name: 'Murphy' } }) };

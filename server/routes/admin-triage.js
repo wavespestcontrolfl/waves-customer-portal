@@ -1885,6 +1885,11 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
+    // A no-text line (text_number_differs) is settled by its own Resolve/Dismiss, which also lifts
+    // the SMS hold; a verdict would close the card and leave the line blocked.
+    if (item.reason_code === 'text_number_differs') {
+      return res.status(400).json({ error: 'This card is a no-text line to fix on the customer, not a call verdict — update the phones and use Resolve instead.' });
+    }
     // A missing first name (GATE_CALL_FIRST_NAME_ADVISORY) is an owed capture on the
     // customer record, not a routing judgment — a verdict would close it without a name.
     if (item.reason_code === 'missing_first_name') {

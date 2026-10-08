@@ -530,6 +530,17 @@ describe('text_number_differs card releases the no-text hold', () => {
     expect(numberHold(tables).cleared_at).toBeNull();
   });
 
+  test('/verdict is refused on it (a verdict would close the card and leave the line blocked)', async () => {
+    const { conn, tables } = fixture({ triage_items: [textCard()] });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/verdict`, { verdict: 'accept' });
+      expect(res.status).toBe(400);
+    });
+    expect(tables.triage_items[0].status).toBe('open');
+    expect(numberHold(tables).cleared_at).toBeNull();
+  });
+
   test('technicians can resolve it exactly as they can the callback_number_needed card (no admin-only gate on either)', async () => {
     mockRole = 'technician';
     const cb = fixture();
