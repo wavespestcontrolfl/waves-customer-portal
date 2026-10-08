@@ -58,9 +58,11 @@ function rainOkService(name) {
 // not depend on dry weather: inspections, interior-only treatment, trap
 // checks, attic sanitation.
 const RAIN_OK_REASONS = new Set(['inspection_lane', 'interior_only_lane', 'trap_lane', 'sanitation_lane']);
-// The bait-station lane mixes a rodent station check (rain-OK, owner's
-// "rodent checks") with in-ground termite station installs (outdoor work).
-const RAIN_OK_IDS = new Set(['rodent_bait_station']);
+// The bait-station lane mixes the recurring rodent station check (rain-OK,
+// owner's "rodent checks") with installs: in-ground termite stations, and
+// rodent_bait_setup, the one-time station placement that shares the check's
+// findings type (Codex #6120 r1). Only the check's own catalog key is OK.
+const RAIN_OK_KEYS = new Set(['rodent_bait_quarterly']);
 // Not a visit's work at all: a billing rider, or a generic appointment
 // whose work is unknown. Left out of the booking's verdict.
 const SKIP_REASONS = new Set(['billing_rider', 'appointment_lane']);
@@ -78,7 +80,7 @@ function rainClassOf(service) {
   const { resolveTraceEligibility } = require('../service-report/trace-eligibility');
   const verdict = resolveTraceEligibility({ serviceKey, findingsType });
   if (verdict.eligible) return 'outdoor';
-  if (RAIN_OK_IDS.has(serviceKey) || RAIN_OK_IDS.has(findingsType) || RAIN_OK_REASONS.has(verdict.reason)) return 'ok';
+  if (RAIN_OK_KEYS.has(serviceKey) || RAIN_OK_REASONS.has(verdict.reason)) return 'ok';
   return SKIP_REASONS.has(verdict.reason) ? 'skip' : 'outdoor';
 }
 
@@ -93,35 +95,60 @@ function rainFitFor(serviceTypes) {
   return classes.every((c) => c === 'ok') ? 'prefer' : 'avoid';
 }
 
-// The booking's service names with their stable identity, for rainFitFor:
-// the catalog key and findings type the completion-profile resolver gives a
-// visit of that name (the same identity the spray-trace registry is keyed
-// on). Only while the gate is on; a name it cannot resolve (or a failed
-// read) stays a bare name and takes the word rules.
-async function withCatalogKeys(names, db) {
-  const list = (Array.isArray(names) ? names : []).map((n) => String(n || '').trim()).filter(Boolean);
+// A booking holds a handful of services; anything past this is not a
+// booking, and each entry costs catalog reads (Codex #6120 r1).
+const MAX_BOOKING_SERVICES = 12;
+const KEY_SHAPE = /^[a-z0-9_]{1,80}$/;
+
+// The booking's services with their stable identity, for rainFitFor: the
+// catalog key and findings type the completion-profile resolver gives a
+// visit. `items` are names or { name, serviceKey }; a key the screen sent
+// (the selected catalog row) settles the identity ahead of the name, which
+// is not unique in the catalog. Only while the gate is on; read one at a
+// time; an entry that cannot be resolved (or a failed read) keeps its name
+// and takes the word rules.
+async function withCatalogKeys(items, db) {
+  const list = (Array.isArray(items) ? items : [])
+    .map((item) => ({ name: String((item && item.name) ?? item ?? '').trim(), serviceKey: (item && item.serviceKey) || null }))
+    .filter((item) => item.name);
   const { gateEnvValue } = require('../../config/feature-gates');
-  if (!list.length || !gateEnvValue('GATE_BOOKING_RAIN_RANK')) return list;
+  if (!list.length || !gateEnvValue('GATE_BOOKING_RAIN_RANK')) return list.map((item) => item.name);
   const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
-  return Promise.all(list.map(async (name) => {
+  const out = [];
+  for (const { name, serviceKey } of list) {
     try {
-      const profile = await resolveCompletionProfileForScheduledService({ service_type: name }, db);
-      return { name, serviceKey: profile?.serviceKey || null, findingsType: profile?.findingsType || null };
+      const profile = await resolveCompletionProfileForScheduledService(
+        { service_type: name, service_key_snapshot: serviceKey || undefined }, db,
+      );
+      out.push({ name, serviceKey: profile?.serviceKey || null, findingsType: profile?.findingsType || null });
     } catch (err) {
       logger.warn(`[rain-fit] service identity lookup failed (word rules used): ${err.message}`);
-      return name;
+      out.push(name);
     }
-  }));
+  }
+  return out;
 }
 
-// The find-time request's services for the ranking: every service in the
-// booking (the primary one and the rest), with identity. Empty unless the
-// request asks for the best-times rows, the only reader.
-function bookingServices({ bestRows, serviceType, serviceTypes }, db) {
+// The find-time request's services for the ranking: the primary service and
+// the rest of the booking, each with the catalog key the screen sent
+// (`serviceKeys`, parallel to `serviceTypes`). Deduplicated and capped.
+// Empty unless the request asks for the best-times rows, the only reader.
+function bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys }, db) {
   if (bestRows !== true) return [];
-  const names = [serviceType].concat(Array.isArray(serviceTypes) ? serviceTypes : [])
-    .filter((t) => typeof t === 'string' && t.trim());
-  return withCatalogKeys(names, db);
+  const names = Array.isArray(serviceTypes) ? serviceTypes : [];
+  const keys = Array.isArray(serviceKeys) && serviceKeys.length === names.length ? serviceKeys : [];
+  const seen = new Map();
+  const add = (name, key) => {
+    if (typeof name !== 'string' || !name.trim() || seen.size >= MAX_BOOKING_SERVICES) return;
+    const serviceKey = typeof key === 'string' && KEY_SHAPE.test(key) ? key : null;
+    const id = `${serviceKey || ''}|${name.trim().toLowerCase()}`;
+    if (!seen.has(id)) seen.set(id, { name: name.trim(), serviceKey });
+  };
+  names.forEach((name, i) => add(name, keys[i]));
+  // The primary service, unless the list already names it (with its key).
+  const primary = typeof serviceType === 'string' ? serviceType.trim().toLowerCase() : '';
+  if (primary && ![...seen.values()].some((item) => item.name.toLowerCase() === primary)) add(serviceType, null);
+  return withCatalogKeys([...seen.values()], db);
 }
 
 // The booking's fit with the gate applied: 'neutral' (drive-only) while

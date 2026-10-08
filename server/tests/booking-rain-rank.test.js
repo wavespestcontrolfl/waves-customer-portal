@@ -83,7 +83,10 @@ describe('catalog identity beats the words in a name', () => {
     [null, 'rodent_inspection', 'ok'],
     [null, 'rodent_trapping', 'ok'],
     [null, 'rodent_sanitation', 'ok'],
-    [null, 'rodent_bait_station', 'ok'],
+    ['rodent_bait_quarterly', 'rodent_bait_station', 'ok'],
+    // The one-time station install shares the check's findings type: outdoor.
+    ['rodent_bait_setup', 'rodent_bait_station', 'outdoor'],
+    [null, 'rodent_bait_station', 'outdoor'],
     [null, 'bed_bug', 'ok'],
     [null, 'german_roach_knockdown', 'ok'],
     ['general_appointment', null, 'skip'],
@@ -143,18 +146,55 @@ describe('withCatalogKeys', () => {
       { name: 'Rodent Trapping Service', serviceKey: 'rodent_trapping_svc', findingsType: 'rodent_trapping' },
       { name: 'Waves Assessment', serviceKey: null, findingsType: null },
     ]);
-    expect(resolver).toHaveBeenCalledWith({ service_type: 'Rodent Trapping Service' }, db);
+    expect(resolver).toHaveBeenCalledWith({ service_type: 'Rodent Trapping Service', service_key_snapshot: undefined }, db);
   });
 
-  test('bookingServices: only a best-rows request reads; primary + the rest, blanks dropped', async () => {
+  test('gate on: a key the screen sent settles the identity ahead of the name', async () => {
     process.env.GATE_BOOKING_RAIN_RANK = 'true';
-    const resolver = jest.fn(async () => ({ serviceKey: 'k', findingsType: null }));
+    const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    const out = await load(resolver)([{ name: 'Shared Label', serviceKey: 'wdo_inspection' }], {});
+    expect(resolver).toHaveBeenCalledWith({ service_type: 'Shared Label', service_key_snapshot: 'wdo_inspection' }, {});
+    expect(out).toEqual([{ name: 'Shared Label', serviceKey: 'wdo_inspection', findingsType: null }]);
+  });
+
+  test('bookingServices: only a best-rows request reads; keys ride with names; duplicates dropped', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
     load(resolver);
     const { bookingServices } = require('../services/scheduling/rain-fit');
     expect(await bookingServices({ bestRows: false, serviceType: 'Lawn Care' }, {})).toEqual([]);
     expect(resolver).not.toHaveBeenCalled();
-    const out = await bookingServices({ bestRows: true, serviceType: 'Lawn Care', serviceTypes: ['Lawn Care', ' ', 7, 'WDO Inspection'] }, {});
-    expect(out.map((s) => s.name)).toEqual(['Lawn Care', 'Lawn Care', 'WDO Inspection']);
+    const out = await bookingServices({
+      bestRows: true,
+      serviceType: 'Lawn Care',
+      serviceTypes: ['Lawn Care', ' ', 7, 'WDO Inspection', 'Lawn Care'],
+      serviceKeys: ['lawn_care_monthly', '', '', 'wdo_inspection', 'lawn_care_monthly'],
+    }, {});
+    expect(out).toEqual([
+      { name: 'Lawn Care', serviceKey: 'lawn_care_monthly', findingsType: null },
+      { name: 'WDO Inspection', serviceKey: 'wdo_inspection', findingsType: null },
+    ]);
+    expect(resolver).toHaveBeenCalledTimes(2);
+  });
+
+  test('bookingServices: a malformed key or a keys list of the wrong length is ignored', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const resolver = jest.fn(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    load(resolver);
+    const { bookingServices } = require('../services/scheduling/rain-fit');
+    await bookingServices({ bestRows: true, serviceTypes: ['A'], serviceKeys: ["x'; drop"] }, {});
+    await bookingServices({ bestRows: true, serviceTypes: ['B', 'C'], serviceKeys: ['only_one'] }, {});
+    for (const call of resolver.mock.calls) expect(call[0].service_key_snapshot).toBeUndefined();
+  });
+
+  test('bookingServices: a huge list is capped at a booking-sized number of lookups', async () => {
+    process.env.GATE_BOOKING_RAIN_RANK = 'true';
+    const resolver = jest.fn(async () => ({ serviceKey: null, findingsType: null }));
+    load(resolver);
+    const { bookingServices } = require('../services/scheduling/rain-fit');
+    const out = await bookingServices({ bestRows: true, serviceTypes: Array.from({ length: 5000 }, (_, i) => `Service ${i}`) }, {});
+    expect(out).toHaveLength(12);
+    expect(resolver).toHaveBeenCalledTimes(12);
   });
 
   test('gate on, lookup fails: that name stays bare (word rules)', async () => {

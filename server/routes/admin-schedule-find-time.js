@@ -22,6 +22,8 @@
  *     compareTechs?,          // hint mode, all techs, gap mode: answer `pickedByTech` — the
  *                             // picked hour on every technician's route that fits it,
  *                             // least added drive first — instead of `picked`
+ *     serviceKeys?,           // bestRows: the catalog key of each serviceTypes entry
+ *                             // (same order, '' when none), for the rain ranking
  *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
  *                             // cannot perform one is left out of `pickedByTech`
  *   }
@@ -436,7 +438,7 @@ router.post('/', async (req, res) => {
       // Rain ranking (GATE_BOOKING_RAIN_RANK) reads what is being booked.
       // Each name carries its catalog key when the catalog holds it, so the
       // ranking reads the service's identity, not the words in its name.
-      serviceTypes: await bookingServices({ bestRows, serviceType, serviceTypes }, db),
+      serviceTypes: await bookingServices({ bestRows, serviceType, serviceTypes, serviceKeys: req.body?.serviceKeys }, db),
     });
     const pickedOut = built.picked;
 
