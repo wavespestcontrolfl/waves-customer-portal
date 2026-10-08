@@ -172,7 +172,10 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // price_is_final precedent) and the call pipeline requires exactly false
 // (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING), keeping its transcript screens as an extra
 // fail-closed layer. Older payloads, which lack it, still validate and never qualify.
-const SCHEMA_VERSION = '1.24.0';
+// 1.25.0: customer_history.competitor_name is NARROWED by its new description to a pest
+// control or lawn care provider (null for a home inspector, realtor, builder, HOA…). No
+// field added or removed; the version marks rows written under the narrower meaning.
+const SCHEMA_VERSION = '1.25.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

@@ -75,6 +75,7 @@ import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
 import { isFastCompleteReportEligible, isPestControlService } from '../../lib/pest-fast-complete';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
+import OnboardingCard from '../../components/staffDocuments/OnboardingCard';
 import { recordlessVisitNeedsCloseout, shortAddress } from './visitBrief';
 
 // In-place report editor for project-backed visits (WDO, pre-treat cert —
@@ -899,6 +900,7 @@ export default function TechHomePage({ section = 'today' }) {
           followThrough={<TechFollowThroughCards />}
           scheduleChanges={<TechScheduleChanges canOpenDispatch={techRole === 'admin'} onReady={setScheduleFeedReady} />}
           timeClock={<TechTimeTrackingCard variant="field" nextStop={fieldNextStop?.primary} />}
+          onboarding={<OnboardingCard available={documentsAvailable} base={base} visitSearch={visitSearch} />}
           timekeeping={<>
             <div className="tf-existing"><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>

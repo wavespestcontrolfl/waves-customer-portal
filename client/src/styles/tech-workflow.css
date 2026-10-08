@@ -404,6 +404,7 @@
 .tech-lawn-sheet .ui-action.tech-visit-action:hover:where(:not(:disabled)) { background: #f5f5f5; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-product-remove { color: #111111; }
 /* "Also in this month's protocol": the window's products as one hairline list. */
+.tech-spot-area { display: flex; flex-direction: column; gap: 8px; }
 .tech-lawn-sheet .tech-protocol-addons { border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; overflow: hidden; }
 .tech-lawn-sheet .tech-protocol-addons-head { padding: 12px 14px 10px; border-bottom: 1px solid #e5e5e5; }
 .tech-lawn-sheet .tech-protocol-addons-title { margin: 0; font-size: 14px; font-weight: 600; }

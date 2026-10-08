@@ -2297,6 +2297,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // How a shared stop moves (the choice box near the date and time). Declared
   // here because the availability search below answers for that move.
   const [comboMove, setComboMove] = useState("together");
+  const editServices = [
+    { name: form.serviceType, key: form.serviceKey },
+    ...serviceLines.map((line) => ({ name: line.serviceType, key: line.serviceKey })),
+  ].filter((item) => typeof item.name === "string" && item.name.trim());
   const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
     moveScope: comboMove,
@@ -2324,6 +2328,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // A re-picked Service address is where the save sends the visit —
     // score there, and re-score when the selection changes (Codex r7 P2).
     propertyId: selectedPropertyId || undefined,
+    // The same two best-times rows as New Appointment (owner 2026-10-08),
+    // ranked for what the save will book: the form's primary service (it can
+    // be re-picked here) and its add-on lines, in the same order as their
+    // catalog keys. The server adds a shared stop's other services when they
+    // move with it (moveScope).
+    serviceTypes: editServices.map((item) => item.name),
+    serviceKeys: editServices.map((item) => item.key || ""),
+    bestRows: true,
   });
   const stripCurrent = { currentDate: form.scheduledDate, currentStart: form.windowStart };
   // The form as it opened: a save that leaves the visit's slot alone (a
@@ -6205,6 +6217,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 style={{ marginTop: -2, marginBottom: 14 }}
               />{" "}
               <AvailabilityStrip
+                bestRows
                 availability={availability}
                 currentDate={form.scheduledDate}
                 currentStart={form.windowStart}
@@ -9507,6 +9520,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
     pickedStart: manualTime,
     rangeFrom: etDateString(),
+    // The same two best-times rows as New Appointment (owner 2026-10-08).
+    // The server reads what the visit books from its own rows (serviceId).
+    bestRows: true,
   });
 
   // One POST path for the suggested and custom pickers. A 409

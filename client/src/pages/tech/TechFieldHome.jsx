@@ -40,7 +40,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   );
 }
 
-export default function TechFieldHome({ section, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null }) {
+export default function TechFieldHome({ section, stops, nextStop, loading, refreshing = false, error, notice, rainChance, onRetry, onOpen, busy, tools, timekeeping, visit, followThrough, scheduleChanges = null, timeClock = null, onboarding }) {
   if (section === 'tools') return (
     <div className="tf-page">
       <div className="tf-page-heading"><div><h1>Tools</h1><p className="tf-muted">Field references and reporting</p></div><Wrench aria-hidden="true" /></div>
@@ -77,6 +77,7 @@ export default function TechFieldHome({ section, stops, nextStop, loading, refre
         </div>
         <button type="button" className="tf-button" aria-label="Refresh route" onClick={onRetry} disabled={loading || refreshing}><RefreshCw aria-hidden="true" /></button>
       </div>
+      {onboarding}
       {rainChance >= 40 && <div className="tf-alert"><CloudRain size={18} aria-hidden="true" /> {rainChance}% rain today</div>}
       {error && <div role="alert" className="tf-alert tf-error">{error}<div><button type="button" className="tf-button" onClick={onRetry}>Retry route</button></div></div>}
       {savedNotice}

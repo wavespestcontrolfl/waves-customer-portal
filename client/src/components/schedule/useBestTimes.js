@@ -274,8 +274,9 @@ export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
   pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt, serviceTypes, serviceKeys,
-  // New Appointment's two best-times rows: asked for only by the consumer
-  // that shows them (the server skips the rain and road-time work otherwise).
+  // The two best-times rows (New Appointment, Quick Move, Edit and the
+  // reschedule dialogs): asked for only by a consumer that shows them (the
+  // server skips the rain and road-time work otherwise).
   bestRows = false,
   // Edit appointment's choice on a shared stop ('together' | 'separate'):
   // the route check answers for the move the save will make.

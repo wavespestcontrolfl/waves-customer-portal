@@ -557,8 +557,8 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     sameDayFloorMin: minTodayStartMin,
     // The same two best-times rows as New Appointment (owner 2026-10-08):
     // road-priced chips with the chance of rain for each hour, ranked by
-    // rain fit for this visit's service (GATE_BOOKING_RAIN_RANK).
-    serviceTypes: [service.serviceType || service.service_type].filter(Boolean),
+    // rain fit (GATE_BOOKING_RAIN_RANK). The server reads what the visit
+    // books from its own rows (serviceId), add-ons and a shared stop included.
     bestRows: true,
   });
 
