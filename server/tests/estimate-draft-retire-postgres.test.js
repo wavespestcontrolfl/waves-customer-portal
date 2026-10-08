@@ -408,6 +408,24 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBeNull();
   });
 
+  test('an established customer lead detaches and attaches straight to the unowned replacement; a closed lead is no hold', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(200) });
+    const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
+    const leadId = randomUUID();
+    // customer-linked lead with no phone/email: only the direct attach can reach it
+    await mockPg('leads').insert({ id: leadId, estimate_id: draft, customer_id: c, status: 'contacted', first_name: 'Fixture', last_name: 'Retire' });
+    const c2 = await customer();
+    const draft2 = await estimate(c2, { createdAt: minutesAgo(200) });
+    await estimate(c2, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
+    await mockPg('leads').insert({ id: randomUUID(), estimate_id: draft2, status: 'won', first_name: 'Fixture', last_name: 'Retire' });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
+    const lead = await mockPg('leads').where({ id: leadId }).first();
+    expect(lead.estimate_id).toBe(sent);
+    expect(lead.status).toBe('estimate_sent');
+    expect((await row(draft2)).archived_at).not.toBeNull();
+  });
+
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
     const { autoDraft } = await sentAfterTwoDrafts();
     await retireDraftsReplacedBySentEstimate();

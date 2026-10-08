@@ -22,6 +22,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_EXCEPTION_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const RETIRE_BATCH_LIMIT = 200;
@@ -150,8 +151,10 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND (COALESCE(${alias}.source, '') NOT IN ('service_report_cta', 'plan_restart')
        OR COALESCE(${alias}.estimate_data #>> '{deliveryState,firstDeliveredAt}', '') <> '')`;
 
-// Unlink, never re-point: the sent estimate may already belong to another
-// lead (by FK or by its estimate_data mirror), and staff can link it. Then
+const isOpenLead = (lead) => !lead.deleted_at && OPEN_LEAD_STATUSES.includes(lead.status);
+
+// Unlink every lead from the retired draft. The sent estimate may already
+// belong to another lead (by FK or by its estimate_data mirror). Then
 // replay the send for the now-unlinked lead the way the send backfill does
 // (scripts/backfill-estimate-sent-lead-status.js): the canonical resolver
 // links and advances it only when it is the sent estimate's single
@@ -166,6 +169,17 @@ async function detachLeads(trx, { pair, draftId, leads, sentRow }) {
   if (sentRow.archived_at || !['sent', 'viewed'].includes(sentRow.status)) return;
   if (await trx('leads').where({ estimate_id: pair.sent_id }).first('id')) return;
   const link = require('./lead-estimate-link');
+  // The detached lead is KNOWN, so when it is the draft's one open lead and
+  // the unowned replacement names no other lead, it is attached directly
+  // through the canonical attach (its own closed-lead and contact-match
+  // checks). The resolver's fuzzy fallback would miss an established
+  // customer's add-on lead. A refusal leaves the lead unlinked.
+  const open = leads.filter(isOpenLead);
+  const mirrorLeadId = sentRow.mirror_lead_id || null;
+  if (open.length === 1 && (!mirrorLeadId || String(mirrorLeadId) === String(open[0].id))) {
+    await link.attachLeadToEstimate({ database: trx, leadId: open[0].id, estimateId: pair.sent_id })
+      .catch((err) => { if (!err?.statusCode) throw err; });
+  }
   const replay = { estimateId: pair.sent_id, performedBy: RETIRE_CLOSER, database: trx, originatingNotAfter: pair.sent_at };
   // The send is real (SENT_EVIDENCE_SQL), so the rescued lead qualifies. Only
   // the channels the delivery record proves count for the contact-wide
@@ -197,12 +211,14 @@ async function retireOneDraft(trx, pair) {
   // estimate save: lead then draft; acceptance: estimate then lead).
   const held = await trx.raw('SELECT id FROM estimates WHERE id = ? FOR UPDATE NOWAIT', [pair.draft_id]);
   if (!held?.rows?.length) return null;
-  const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().noWait().select('id', 'deleted_at');
-  // A soft-deleted lead keeps its estimate_id; it is unlinked like the rest
-  // but is not a live opportunity for the accepted-estimate hold.
-  const hasLiveLead = () => leads.some((l) => !l.deleted_at);
+  const leads = await trx('leads').where({ estimate_id: pair.draft_id }).forUpdate().noWait().select('id', 'deleted_at', 'status');
+  // A soft-deleted or closed lead keeps its estimate_id; it is unlinked like
+  // the rest but is not open work for the accepted-estimate hold.
+  const hasLiveLead = () => leads.some(isOpenLead);
   const sent = await trx.raw(`
-    SELECT id, status, archived_at, estimate_data #> '{deliveryState,sentChannels}' AS sent_channels FROM estimates s
+    SELECT id, status, archived_at, estimate_data #> '{deliveryState,sentChannels}' AS sent_channels,
+           estimate_data ->> 'lead_id' AS mirror_lead_id
+      FROM estimates s
      WHERE s.id = ?
        AND s.property_id IS NOT DISTINCT FROM ?
        AND s.address IS NOT DISTINCT FROM ?
@@ -239,7 +255,7 @@ async function retireOneDraft(trx, pair) {
   // A lead linked between the first lock (which locks nothing when no lead
   // points here yet) and the archive is picked up now, under the draft's row
   // lock. For an accepted replacement the whole retirement is undone.
-  const lateLeads = await trx('leads').where({ estimate_id: row.id }).whereNotIn('id', leads.map((l) => l.id)).forUpdate().noWait().select('id', 'deleted_at');
+  const lateLeads = await trx('leads').where({ estimate_id: row.id }).whereNotIn('id', leads.map((l) => l.id)).forUpdate().noWait().select('id', 'deleted_at', 'status');
   leads.push(...lateLeads);
   // With any lead on the draft (found at the first lock or just now), the
   // accepted-at-this-door hold is judged again on current rows: the first
@@ -290,7 +306,8 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   const pairs = (await conn.raw(`
     SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
            s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address,
-           CASE WHEN EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id AND l.deleted_at IS NULL) THEN (
+           CASE WHEN EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id AND l.deleted_at IS NULL
+                               AND l.status IN (${OPEN_LEAD_STATUSES.map((st) => `'${st}'`).join(', ')})) THEN (
              SELECT json_agg(json_build_object('property_id', a.property_id, 'address', a.address))
                FROM estimates a
               WHERE a.customer_id = d.customer_id AND a.id <> d.id
