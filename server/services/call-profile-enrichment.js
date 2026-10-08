@@ -56,25 +56,18 @@ function appendWithProvenance(existing, addition, callDate) {
   return `${existing}\n${line}`;
 }
 
-// A reprocess can change what this call says about a provider: the label
-// ("Switching from" → "Other provider named"), or nothing at all (the name was a
-// home inspector). The earlier pass's generated bit sits on this call's own
-// dated line; relabel or drop it there, so the notes never hold two
-// statements about one provider from one call. Only a bit naming exactly
-// `name` on a line with this call's tag is touched; staff text is not.
+// The provider bit stays append-only, like every other line here. A reprocess
+// under a changed label ("Switching from" → "Other provider named") must not
+// add a second, contradicting statement, so a provider this day's line already
+// names is not named again. The date tag is not unique to one call, so nothing
+// already written is rewritten or removed: the earlier line stands.
 const PROVIDER_NOTE_LABELS = ['Switching from', 'Other provider named'];
-function reconcileProviderNote(existing, callDate, name, bit) {
-  if (!existing || !name) return existing;
-  const tag = `[call ${String(callDate).slice(0, 10)}]`;
-  const stale = PROVIDER_NOTE_LABELS.map((label) => `${label}: ${name}`).filter((text) => text !== bit);
-  const lines = String(existing).split('\n').map((line) => {
-    if (!line.startsWith(`${tag} `)) return line;
-    const parts = line.slice(tag.length + 1).split(' | ');
-    if (!parts.some((part) => stale.includes(part))) return line;
-    const kept = [...new Set(parts.map((part) => (stale.includes(part) ? bit : part)).filter(Boolean))];
-    return kept.length ? `${tag} ${kept.join(' | ')}` : null;
-  });
-  return lines.filter((line) => line !== null).join('\n');
+function providerAlreadyNoted(existing, callDate, name) {
+  if (!existing || !name) return false;
+  const tag = `[call ${String(callDate).slice(0, 10)}] `;
+  const bits = PROVIDER_NOTE_LABELS.map((label) => `${label}: ${name}`);
+  return String(existing).split('\n').some((line) => line.startsWith(tag)
+    && line.slice(tag.length).split(' | ').some((part) => bits.includes(part)));
 }
 
 /**
@@ -150,17 +143,13 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
     const providerBit = compName
       ? `${history?.status === 'switching_from_competitor' ? 'Switching from' : 'Other provider named'}: ${compName}`
       : null;
-    if (providerBit) colorBits.push(providerBit);
-    // The name an earlier pass of this call may have written: this pass's
-    // provider, or the legacy value V2 has now ruled out.
-    const earlierName = compName || (history ? legacy?.competitor_name : null);
-    if (colorBits.length || earlierName) {
+    if (colorBits.length || providerBit) {
       const cust = await db('customers').where({ id: customerId }).first('internal_notes');
       if (cust) {
-        const reconciled = reconcileProviderNote(cust.internal_notes, callCreatedAt, earlierName, providerBit);
+        if (providerBit && !providerAlreadyNoted(cust.internal_notes, callCreatedAt, compName)) colorBits.push(providerBit);
         const appended = colorBits.length
-          ? appendWithProvenance(reconciled, colorBits.join(' | ').slice(0, 500), callCreatedAt)
-          : (reconciled || null);
+          ? appendWithProvenance(cust.internal_notes, colorBits.join(' | ').slice(0, 500), callCreatedAt)
+          : cust.internal_notes;
         if (appended !== cust.internal_notes) {
           await db('customers').where({ id: customerId }).update({ internal_notes: appended, updated_at: new Date() });
           applied.push('internal_notes');
@@ -173,4 +162,4 @@ async function enrichFromCall({ customerId, extraction, legacy = null, callCreat
   return { applied };
 }
 
-module.exports = { enrichFromCall, _test: { extractCodes, appendWithProvenance, reconcileProviderNote } };
+module.exports = { enrichFromCall, _test: { extractCodes, appendWithProvenance, providerAlreadyNoted } };

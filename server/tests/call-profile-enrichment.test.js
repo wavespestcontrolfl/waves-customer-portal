@@ -124,37 +124,44 @@ describe('provider note on internal_notes', () => {
     return write ? write.u.internal_notes : existing;
   }
 
-  describe('a reprocess reconciles the bit an earlier pass of the same call wrote', () => {
-    test('relabels "Switching from" on this call\'s line; staff text and other calls stay', async () => {
+  describe('append-only: a provider this day\'s line already names is not named again', () => {
+    test('a reprocess under the new label adds no second statement and rewrites nothing', async () => {
+      const existing = 'Staff: gate sticks\n[call 2026-10-08] Referred by: a neighbor | Switching from: Acme Pest';
       const note = await noteFor({
-        existing: 'Staff: gate sticks\n[call 2026-09-01] Switching from: Acme Pest\n[call 2026-10-08] Referred by: a neighbor | Switching from: Acme Pest',
+        existing,
         extraction: { customer_history: { status: 'former_lapsed', competitor_name: 'Acme Pest' } },
         legacy: { referred_by: 'a neighbor' },
       });
-      expect(note).toBe('Staff: gate sticks\n[call 2026-09-01] Switching from: Acme Pest\n[call 2026-10-08] Referred by: a neighbor | Other provider named: Acme Pest');
+      expect(note).toBe(existing);
     });
 
-    test('drops the bit when V2 now rules the name out; an emptied line goes', async () => {
+    test('two calls on one day naming one provider: the first call\'s line stands', async () => {
+      const existing = '[call 2026-10-08] Switching from: Acme Pest';
+      const note = await noteFor({ existing, extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } } });
+      expect(note).toBe(existing);
+    });
+
+    test('a V2 null removes nothing an earlier pass wrote', async () => {
+      const existing = '[call 2026-10-08] Switching from: Sample Home Inspections';
       const note = await noteFor({
-        existing: 'Staff: gate sticks\n[call 2026-10-08] Switching from: Sample Home Inspections',
+        existing,
         extraction: { customer_history: { status: 'new_customer', competitor_name: null } },
         legacy: { competitor_name: 'Sample Home Inspections' },
       });
-      expect(note).toBe('Staff: gate sticks');
+      expect(note).toBe(existing);
     });
 
-    test('a different provider on the same day is not touched', async () => {
-      const note = await noteFor({
+    test('a different provider the same day, or the same provider another day, is added', async () => {
+      const sameDay = await noteFor({
         existing: '[call 2026-10-08] Switching from: Beta Lawn',
         extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } },
       });
-      expect(note).toBe('[call 2026-10-08] Switching from: Beta Lawn\n[call 2026-10-08] Other provider named: Acme Pest');
-    });
-
-    test('same label again changes nothing', async () => {
-      const existing = '[call 2026-10-08] Switching from: Acme Pest';
-      const note = await noteFor({ existing, extraction: { customer_history: { status: 'switching_from_competitor', competitor_name: 'Acme Pest' } } });
-      expect(note).toBe(existing);
+      expect(sameDay).toBe('[call 2026-10-08] Switching from: Beta Lawn\n[call 2026-10-08] Other provider named: Acme Pest');
+      const otherDay = await noteFor({
+        existing: '[call 2026-09-01] Switching from: Acme Pest',
+        extraction: { customer_history: { status: 'new_customer', competitor_name: 'Acme Pest' } },
+      });
+      expect(otherDay).toBe('[call 2026-09-01] Switching from: Acme Pest\n[call 2026-10-08] Other provider named: Acme Pest');
     });
   });
 
