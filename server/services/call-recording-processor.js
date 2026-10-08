@@ -6943,11 +6943,13 @@ const UNIT_DESIGNATOR_WORDING_RE = /\b(?:suites?|ste|units?|bays?|strip (?:mall|
 const NEGATED_UNIT_RE = /\b(?:no|not\s+an?|isn'?t\s+an?|there'?s\s+no|without\s+an?)\s+(?:suite|unit|apartment|apt|condo|bay)s?(?:\s+numbers?)?\b/gi;
 function callerWordsForUnitCheck(transcription, { outbound = false } = {}) {
   // Outbound diarization has swapped Agent/Caller labels (see the agent-commit
-  // notes), so an outbound call is judged on its whole transcript.
-  if (outbound) return String(transcription || '');
-  const lines = String(transcription || '').split('\n');
-  if (!lines.some((l) => /^\s*(?:Agent|Caller)\s*:/i.test(l))) return String(transcription || '');
-  return lines.filter((l) => /^\s*Caller\s*:/i.test(l)).join('\n');
+  // notes), so an outbound call is judged on its whole transcript. So is any
+  // transcript with no labels, or with labels but no identifiable caller
+  // (raw "Speaker 1:" diarization) — uncertain attribution keeps every word.
+  const whole = String(transcription || '');
+  if (outbound) return whole;
+  const callerTurns = speakerTurns(whole).filter((t) => t.speaker === 'caller');
+  return callerTurns.length ? callerTurns.map((t) => t.text).join('\n') : whole;
 }
 
 const CARD_WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home', 'commercial', 'vacant_lot']);

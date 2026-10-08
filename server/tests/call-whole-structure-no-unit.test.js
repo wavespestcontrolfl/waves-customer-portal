@@ -424,6 +424,11 @@ describe('callIsWholeStructureService (unit card skip)', () => {
     expect(run(slab, commercial, 'Agent: Do you have a suite or unit number?\nCaller: No, it is the whole new building.')).toBe(true);
     expect(run(slab, commercial, 'Agent: Which one?\nCaller: It is suite 4.')).toBe(false);
     expect(run(slab, commercial, 'Caller: there is no unit number, it is a new lot')).toBe(true);
+    // A wrapped caller line and a "Customer:" label still count as the caller.
+    expect(run(slab, commercial, 'Caller: I need a slab pre-treat.\nIt is in suite 4.\nAgent: Okay.')).toBe(false);
+    expect(run(slab, commercial, 'Agent: Where?\nCustomer: Bay 3 in the plaza.')).toBe(false);
+    // Raw diarization (no identifiable caller) is judged whole.
+    expect(run(slab, commercial, 'Speaker 1: Do you have a suite?\nSpeaker 2: No.')).toBe(false);
   });
 
   test('an outbound call is judged on its whole transcript (labels can be swapped)', () => {
