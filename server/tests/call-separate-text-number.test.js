@@ -74,6 +74,34 @@ describe('hold: texts to a no-text line ride the callback_number_needed hold', (
   });
 });
 
+describe('only a valid V2 payload speaks for the no-text fields', () => {
+  const { noTextSafeExtraction } = require('../services/call-triage-flags');
+  const raw = v2({ ani_cannot_text: true, text_phone_e164: TEXT });
+
+  test.each(['schema_failed', 'normalization_failed', 'not_run', undefined])('a %s payload loses both fields: no flag, no hold', (status) => {
+    const safe = noTextSafeExtraction({ status, extraction: raw });
+    expect(safe.caller.ani_cannot_text).toBeNull();
+    expect(safe.caller.text_phone_e164).toBeNull();
+    expect(aniCannotText(safe.caller)).toBe(false);
+    expect(computeDeterministicTriageFlags(safe, { contactPhone: ANI })).not.toContain('callback_number_needed');
+    // the raw payload is not mutated (it is still stored for audit)
+    expect(raw.caller.ani_cannot_text).toBe(true);
+  });
+
+  test('a valid payload is returned untouched; a payload without the fields is not cloned; null passes through', () => {
+    expect(noTextSafeExtraction({ status: 'valid', extraction: raw })).toBe(raw);
+    const plain = v2();
+    expect(noTextSafeExtraction({ status: 'schema_failed', extraction: plain })).toBe(plain);
+    expect(noTextSafeExtraction({ status: 'schema_failed', extraction: null })).toBeNull();
+  });
+
+  test('the shadow bridge reads the extraction through the helper, and so does Step 3', () => {
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('const v2Ext = noTextSafeExtraction(v2Result) || null;');
+    expect(src).toContain('aniCannotText(noTextSafeExtraction(v2Result, v2CanonicalExtraction)?.caller)');
+  });
+});
+
 describe('hard veto', () => {
   test('a no-text-only call with a canonical-write veto flag is vetoed; one that also disclaimed the number is not', () => {
     const { aniCannotTextOnly, hasCanonicalWriteBlock } = require('../services/call-triage-flags');

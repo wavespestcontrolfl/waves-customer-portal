@@ -106,11 +106,29 @@ const CALLBACK_CARD_VERDICT = Object.freeze({
   VERIFIED_SAME_NUMBER: 'verified_same_number',
   REPLACEMENT_NUMBER: 'replacement_number',
 });
-async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict } = {}) {
-  if (!Object.values(CALLBACK_CARD_VERDICT).includes(numberVerdict)) {
+// Who owns the number-keyed hold on a call's line: the callback_number_needed card (the caller
+// disclaimed it) and the text_number_differs card (the caller said it cannot get texts) each speak for
+// it while OPEN. Closing one of them must not release the hold while the OTHER is still open and
+// still says the line is bad. A closed card from an earlier pass owns nothing.
+async function holdOwnedByOtherOpenCard(trx, callLogId, closingReason) {
+  const other = closingReason === 'text_number_differs' ? 'callback_number_needed' : 'text_number_differs';
+  const open = await trx('triage_items')
+    .where({ call_log_id: callLogId, reason_code: other })
+    .whereIn('status', OPEN_STATES)
+    .first('id');
+  return !!open;
+}
+
+async function clearCallbackNumberHold(trx, callLogId, { clearedBy = null, numberVerdict: requestedVerdict, closingReason = null } = {}) {
+  if (!Object.values(CALLBACK_CARD_VERDICT).includes(requestedVerdict)) {
     // Explicit by construction: a new caller must say which meaning it is.
-    throw new Error(`clearCallbackNumberHold: unknown numberVerdict ${numberVerdict}`);
+    throw new Error(`clearCallbackNumberHold: unknown numberVerdict ${requestedVerdict}`);
   }
+  // A verified-same-number close is downgraded to the replacement meaning (visits clear, the number
+  // stays held) while the other card on this call still owns the hold.
+  const numberVerdict = requestedVerdict === CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER && closingReason
+    && await holdOwnedByOtherOpenCard(trx, callLogId, closingReason)
+    ? CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER : requestedVerdict;
   const { CLEARABLE_SCHEDULED_SERVICE_STATUSES } = require('../services/scheduled-service-statuses');
   const visits = await trx('scheduled_services')
     .where({ source_call_log_id: callLogId })
@@ -145,7 +163,7 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
     verdict: numberVerdict,
     disclaimed_number_hold: 'kept',
     number_holds_cleared: 0,
-    message: 'Card closed with the replacement number on file. The number the caller disclaimed stays blocked for texts — only the replacement was verified.',
+    message: 'Card closed. The number stays blocked for texts: only a replacement number was verified, or another open card on this call still says the line cannot get texts.',
   };
 }
 
@@ -158,11 +176,7 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 async function releaseNoTextHold(trx, item, nextStatus, assignedTo, prior) {
   if (item.reason_code !== 'text_number_differs' || !item.call_log_id) return prior;
   if (!['resolved', 'dismissed'].includes(nextStatus)) return prior;
-  const callbackCardOpen = await trx('triage_items')
-    .where({ call_log_id: item.call_log_id, reason_code: 'callback_number_needed' })
-    .whereIn('status', OPEN_STATES)
-    .first('id');
-  if (callbackCardOpen) return prior;
+  if (await holdOwnedByOtherOpenCard(trx, item.call_log_id, 'text_number_differs')) return prior;
   const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
     clearedBy: assignedTo,
     numberVerdict: nextStatus === 'dismissed' ? CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER : CALLBACK_CARD_VERDICT.REPLACEMENT_NUMBER,
@@ -653,7 +667,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // Round 7 P1: this is the VERIFIED_SAME_NUMBER meaning — the one
       // action that lifts the number-keyed row too (see the helper).
       const cleared = await clearCallbackNumberHold(trx, item.call_log_id, {
-        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER,
+        clearedBy: assignedTo, numberVerdict: CALLBACK_CARD_VERDICT.VERIFIED_SAME_NUMBER, closingReason: 'callback_number_needed',
       });
       callbackNumber = callbackNumberReply(cleared.numberVerdict, cleared.numbers);
     }

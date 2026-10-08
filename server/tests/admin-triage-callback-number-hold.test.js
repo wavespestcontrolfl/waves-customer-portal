@@ -543,6 +543,39 @@ describe('text_number_differs card releases the no-text hold', () => {
     expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
   });
 
+  test('closing callback_number_needed while an OPEN text_number_differs card says the line cannot get texts: visits clear, the number stays held', async () => {
+    const { conn, tables } = fixture({
+      triage_items: [
+        { id: 'card-cb', call_log_id: CALL_ID, reason_code: 'callback_number_needed', status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory', payload: {} },
+        textCard({ id: 'card-text' }),
+      ],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, '/card-cb/resolve');
+      expect(res.status).toBe(200);
+      expect((await res.json()).callback_number).toMatchObject({ disclaimed_number_hold: 'kept', number_holds_cleared: 0 });
+    });
+    expect(numberHold(tables).cleared_at).toBeNull();
+    expect(tables.scheduled_services.find((s) => s.id === HELD_VISIT_ID).call_sms_cleared_at).toEqual({ __raw: 'GREATEST(callback_number_hold_at, now())', bindings: undefined });
+  });
+
+  test.each(['dismissed', 'resolved', 'in_progress'])('closing callback_number_needed with a %s text_number_differs card: only an open one owns the hold', async (status) => {
+    const { conn, tables } = fixture({
+      triage_items: [
+        { id: 'card-cb', call_log_id: CALL_ID, reason_code: 'callback_number_needed', status: 'open', updated_at: '2030-01-07T12:00:00.000Z', category: 'customer_followup', severity: 'advisory', payload: {} },
+        textCard({ id: 'card-text', status }),
+      ],
+    });
+    wireDb(db, { conn });
+    await withServer(async (baseUrl) => {
+      expect((await put(baseUrl, '/card-cb/resolve')).status).toBe(200);
+    });
+    // in_progress counts as open; dismissed / resolved do not
+    if (status === 'in_progress') expect(numberHold(tables).cleared_at).toBeNull();
+    else expect(numberHold(tables).cleared_at).toBeInstanceOf(Date);
+  });
+
   test('a call verdict on a sibling card does not sweep it or touch the hold', async () => {
     const { conn, tables } = fixture({
       triage_items: [

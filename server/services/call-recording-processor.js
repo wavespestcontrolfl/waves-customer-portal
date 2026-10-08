@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, isDialablePhone } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, aniCannotText, aniCannotTextOnly, noTextSafeExtraction, isDialablePhone } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -11967,7 +11967,8 @@ const CallRecordingProcessor = {
 
     if (CALL_EXTRACTION_V2_ENABLED && !CALL_EXTRACTION_V2_DRIVES_ROUTING) {
       try {
-        const v2Ext = v2Result?.extraction || null;
+        // Only a valid V2 payload may speak for ani_cannot_text (an invalid one would arm a number-wide hold).
+        const v2Ext = noTextSafeExtraction(v2Result) || null;
         // Merge deterministic caller-authorization flags so `caller_not_authorized`
         // (caller.on_site_authorization === false + non-owner) is caught even when
         // the model omits the redundant triage_flag — matching the enforce gate.
@@ -12428,7 +12429,7 @@ const CallRecordingProcessor = {
     // for texts — no customer phone write, no send; texts to the ANI hold through
     // callback_number_needed, and the text_number_differs card asks the office to fix the
     // phones. Not caller_id_disclaimed: the caller owns the line for calls.
-    const callAniCannotText = aniCannotText(v2CanonicalExtraction?.caller);
+    const callAniCannotText = aniCannotText(noTextSafeExtraction(v2Result, v2CanonicalExtraction)?.caller);
     const callAdditionalProps = resolveCallAdditionalProperties(extracted, v2CanonicalExtraction);
     const { quoteRequested: callQuoteRequested, quotePromised: callQuotePromised } =
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);

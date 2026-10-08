@@ -85,6 +85,16 @@ function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
   return !(caller.phone_source === 'spoken' || caller.phone_source === 'both');
 }
 
+// The extraction to read ani_cannot_text / text_phone_e164 from: only a VALID V2 payload speaks for
+// them. A schema_failed / normalization_failed payload is stored raw for audit but must never arm the
+// number-wide SMS hold, file the card or raise the flag, in shadow or enforce mode.
+function noTextSafeExtraction(v2Result, extraction = v2Result?.extraction) {
+  if (!extraction || v2Result?.status === 'valid') return extraction;
+  const caller = extraction.caller;
+  if (!caller || (caller.ani_cannot_text == null && caller.text_phone_e164 == null)) return extraction;
+  return { ...extraction, caller: { ...caller, ani_cannot_text: null, text_phone_e164: null } };
+}
+
 // True only for an explicit ani_cannot_text (schema 1.25.0). One reader for the hold, the
 // card dedupe and the booking-link skip.
 function aniCannotText(caller) {
@@ -100,6 +110,20 @@ function aniCannotTextOnly(extraction) {
   // Any caller_id_disclaimed keeps the callback card: its hold rests on the ANI comparison, and its
   // Resolve is the only release for it.
   return aniCannotText(caller) && caller.caller_id_disclaimed !== true;
+}
+
+// The callback_number_needed flag: the caller disclaimed the number, or said the line cannot get texts.
+function callbackNumberNeeded(caller, opts) {
+  return callerIdDisclaimedNeedsCallback(caller, opts) || aniCannotText(caller);
+}
+
+// Cards this extraction does not need (see aniCannotTextOnly), and whether the bridge files the
+// callback_number_needed card for the flags it was handed.
+function noTextDroppedCards(extraction) {
+  return aniCannotTextOnly(extraction) ? ['callback_number_needed'] : [];
+}
+function callbackCardWanted(flags, extraction) {
+  return flags.includes('callback_number_needed') && !aniCannotTextOnly(extraction);
 }
 
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
@@ -531,7 +555,7 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // dictated, so the call's texts to the ANI hold through this same flag; the
   // text_number_differs card (not a callback_number_needed card) asks the office to fix the
   // phones. Not caller_id_disclaimed: the caller still owns the line for calls.
-  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone }) || aniCannotText(caller)) {
+  if (callbackNumberNeeded(caller, { ani: opts.contactPhone })) {
     flags.push('callback_number_needed');
   }
 
@@ -777,7 +801,7 @@ function callMakesNoServiceAsk(extraction) {
 
 function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
   const list = Array.isArray(flags) ? flags : [];
-  const dropped = new Set();
+  const dropped = new Set(noTextDroppedCards(extraction));
   const has = (f) => list.includes(f);
   if (has('cancellation_request')) {
     dropped.add('reschedule_or_cancel');
@@ -785,7 +809,6 @@ function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {
   } else if (has('reschedule_or_cancel')) {
     dropped.add('existing_appointment_coordination');
   }
-  if (aniCannotTextOnly(extraction)) dropped.add('callback_number_needed');
   const status = String(extraction?.scheduling?.status || 'none');
   if (status === 'none') dropped.add('existing_appointment_coordination');
   // The merged canonical record counts too: adoptV2PrimaryFields keeps a
@@ -2739,7 +2762,7 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // so a disclaimed ANI kept getting texted while V2 is in shadow. Same
   // ADVISORY posture as every other flag here — this never holds the
   // booking, only the confirmation/reminder SMS leg (see SMS_ONLY_FLAGS).
-  if (flags.includes('callback_number_needed') && !aniCannotTextOnly(v2Extraction)) needsConfirmation.push('callback_number_needed');
+  if (callbackCardWanted(flags, v2Extraction)) needsConfirmation.push('callback_number_needed');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.
@@ -3294,6 +3317,7 @@ module.exports = {
   callbackNumberNeededBlocksSms,
   callerIdDisclaimedNeedsCallback,
   aniCannotText,
+  noTextSafeExtraction,
   aniCannotTextOnly,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
