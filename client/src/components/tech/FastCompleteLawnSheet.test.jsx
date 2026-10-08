@@ -119,6 +119,7 @@ let customerAnswer;
 let catalogAnswer;
 let assessAnswer;
 let confirmAnswer;
+let guideAnswer;
 
 // A stub of the whole admin API the sheet talks to.
 function makeRequest({ ctx = context(), contextError = null } = {}) {
@@ -137,6 +138,10 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
     if (/^\/admin\/customers\/[^/]+$/.test(path)) return customerAnswer;
     if (path.endsWith('/tech-tips')) { if (tips instanceof Error) throw tips; return tips; }
     if (path.includes('/blog-posts')) { if (blogAnswer instanceof Error) throw blogAnswer; return typeof blogAnswer === 'function' ? blogAnswer(path) : blogAnswer; }
+    if (path.includes('/lawn-fast/treatment-guide')) {
+      if (guideAnswer instanceof Error) throw guideAnswer;
+      return guideAnswer ?? {};
+    }
     if (path === '/admin/dispatch/products/catalog') return catalogAnswer;
     if (path.includes('/lawn-assessment/service/')) {
       if (lookup instanceof Error) throw lookup;
@@ -174,6 +179,7 @@ class FixtureImage {
 beforeEach(() => {
   requests = [];
   completeErrors = [];
+  guideAnswer = null;
   lookup = { shotListEnabled: true, assessment: null };
   propertyAreasAnswer = areasAnswer({ lawn: { sqft: 5000, source: 'recorded', reviewedAt: null } });
   tips = { available: false, groups: [] };
@@ -2290,5 +2296,308 @@ describe('weed spots and the spot area', () => {
     await open(weedContext(MIX(), { spotRules: false }));
     expect(within(addons()).queryByText('Weed spots')).toBeNull();
     expect(within(addons()).getByRole('button', { name: 'Add Lead WG' })).toBeTruthy();
+  });
+});
+
+
+// ── Suggested from this lawn (GATE_LAWN_TREATMENT_GUIDE, owner 2026-10-08) ──────────────
+// The server decides every card (rules, products, caps); the sheet asks once the assessment is
+// confirmed, renders the cards between the plan's rows and the protocol add-ons, performs their
+// taps and reports what the tech did on /complete. With no `treatmentGuide` flag it is exactly as before.
+describe('suggested from this lawn', () => {
+  const P_LEAD = 'cccccccc-0000-4000-8000-000000000001';
+  const P_CERT = 'cccccccc-0000-4000-8000-000000000002';
+  const P_ART = 'cccccccc-0000-4000-8000-000000000003';
+  const P_VEL = 'cccccccc-0000-4000-8000-000000000004';
+  const P_ARENA = 'cccccccc-0000-4000-8000-000000000005';
+  const P_BIF = 'cccccccc-0000-4000-8000-000000000006';
+  const P_ACE = 'cccccccc-0000-4000-8000-000000000007';
+  const P_DISP = 'cccccccc-0000-4000-8000-000000000008';
+  const GUIDE_CATALOG = [
+    { id: P_LEAD, name: 'Lead WG', category: 'herbicide', formulation: 'WG', default_rate_per_1000: 2, default_unit: 'oz' },
+    { id: P_CERT, name: 'Cert Herbicide', category: 'herbicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
+    { id: P_ART, name: 'Art Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
+    { id: P_VEL, name: 'Vel Fungicide', category: 'fungicide', formulation: 'SC', default_rate_per_1000: 0.5, default_unit: 'fl_oz' },
+    { id: P_ACE, name: 'Ace Insecticide', category: 'insecticide', formulation: 'SC', default_rate_per_1000: 0.07, default_unit: 'fl_oz' },
+    { id: P_DISP, name: 'Disp Wetting Agent', category: 'adjuvant', formulation: 'SL', default_rate_per_1000: 1, default_unit: 'fl_oz' },
+    ...CATALOG,
+  ];
+  const addOn = (productId, name, line = null) => ({ productId, name, applicationMethod: 'spot_treatment', amount: null, amountUnit: 'oz', line, substituteFor: null, gateNotes: [] });
+  const ADD_ONS = [
+    addOn(P_LEAD, 'Lead WG'), addOn(P_CERT, 'Cert Herbicide'), addOn(P_ART, 'Art Fungicide', 'Art Fungicide — mapped large patch'),
+    addOn(P_VEL, 'Vel Fungicide', 'Vel Fungicide — large patch, next application'), addOn(P_ACE, 'Ace Insecticide', 'Ace Insecticide — caterpillars'), addOn(P_DISP, 'Disp Wetting Agent'),
+  ];
+  const WEED_MIX = { mode: 'lead', productIds: [P_LEAD, P_CERT], groupProductIds: [P_LEAD, P_CERT], replacementProductId: null, note: null, surfactant: null, noAreaProductIds: [], tempF: 82 };
+  // Arena is not in the month's add-ons: the server builds its item from the program's staged row.
+  const ARENA_ITEM = { productId: P_ARENA, name: 'Arena 50 WDG', applicationMethod: 'spot_treatment', amount: null, amountUnit: null, treatedSqft: null, areaUnit: null, ratePer1000: null, rateUnit: null, line: null, substituteFor: null, gateNotes: [] };
+  const BIF_ITEM = { ...ARENA_ITEM, productId: P_BIF, name: 'Atticus Talak 7.9 F' };
+  const card = (kind, extra = {}) => ({
+    kind, title: kind, finding: `Finding for ${kind}.`, check: null, detail: null, note: null, productIds: [], items: [], actionLabel: 'Add it', dismissLabel: null, ...extra,
+  });
+  const CARDS = {
+    weeds: () => card('weeds', { title: 'Weed spots', finding: 'Photos show weeds on about 18% of the lawn.', detail: 'Lead WG, Cert Herbicide', productIds: [P_LEAD, P_CERT], actionLabel: 'Add weed spots' }),
+    fungus: () => card('fungus', {
+      title: 'Fungus', finding: 'Photos show minor fungus activity.', check: 'Check first: look at the blades and the edge of the patch.',
+      detail: 'Art Fungicide — mapped large patch', productIds: [P_ART], items: [ADD_ONS[2]], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
+    }),
+    chinch: (item = ARENA_ITEM, note = null) => card('chinch', {
+      title: 'Insects: check for chinch bugs', finding: 'Photos show moderate insect damage.', check: 'Check first: part the grass at the sunny edge of the damaged patch. Do a float test only if you are unsure.',
+      detail: `Chinch bugs at the edge of the damage: ${item.name}, spot treatment.`, note, productIds: [item.productId], items: [item], actionLabel: 'Found at the edge. Add it', dismissLabel: 'Nothing found',
+    }),
+    takeAll: () => card('fungus', {
+      title: 'Fungus', finding: 'Photos show moderate fungus activity.', check: 'Check first: look at the blades and the edge of the patch.',
+      note: 'Take-all is treated on known trouble areas only. None is on file for this lawn.', actionLabel: null,
+    }),
+    caterpillars: () => card('caterpillars', {
+      title: 'Insects: check for caterpillars', finding: 'Photos show moderate insect damage.', check: 'Check first: soap flush to bring them to the surface.',
+      detail: 'Ace Insecticide — caterpillars', productIds: [P_ACE], items: [ADD_ONS[4]], actionLabel: 'Found them. Add it', dismissLabel: 'Nothing found',
+    }),
+    dry_spots: () => card('dry_spots', { title: 'Dry spots', finding: 'Photos show minor drought stress.', productIds: [P_DISP], items: [ADD_ONS[5]], actionLabel: 'Add Disp Wetting Agent' }),
+  };
+  const guideContext = (extra = {}, chinch = { item: ARENA_ITEM, note: null }) => context({
+    spotRules: true,
+    treatmentGuide: true,
+    plannedProducts: { source: 'plan', items: [PLANNED[0]], addOns: ADD_ONS, month: 7, weedMix: WEED_MIX, ...(chinch ? { chinch } : {}) },
+    ...extra,
+  });
+  const answer = (cards) => { guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards }; };
+  const open = (ctx = guideContext()) => openSheet({ request: makeRequest({ ctx }), props: { catalog: GUIDE_CATALOG } });
+  const guideCalls = () => requests.filter((r) => r.path.includes('/lawn-fast/treatment-guide'));
+  const suggested = () => screen.findByRole('group', { name: 'Suggested from this lawn' });
+  const addons = () => screen.getByRole('group', { name: 'Also in July’s protocol' });
+  const cardGroup = (title) => screen.getByRole('group', { name: `${title} suggestion` });
+  const sentProduct = (id) => completeCalls()[0].body.products.find((p) => p.productId === id);
+  const sentGuide = () => completeCalls()[0].body.lawnFast.treatmentGuide;
+
+  test('no treatmentGuide flag: nothing is asked, nothing shows, and the submit carries no record', async () => {
+    answer([CARDS.fungus()]);
+    await open(guideContext({ treatmentGuide: false }, null));
+    await analyzeAndComplete();
+    expect(guideCalls()).toHaveLength(0);
+    expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull();
+    expect(completeCalls()[0].body.lawnFast).toEqual({ visitType: 'recurring' });
+  });
+
+  test('nothing is asked until the assessment is confirmed; then the cards sit between the plan rows and the add-ons', async () => {
+    answer([CARDS.fungus(), CARDS.caterpillars()]);
+    await open();
+    expect(guideCalls()).toHaveLength(0);
+    await analyzeOnly();
+    expect(guideCalls()).toHaveLength(0);
+    expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull();
+    await confirm();
+    const group = await suggested();
+    expect(guideCalls()).toHaveLength(1);
+    expect(guideCalls()[0].path).toBe('/admin/dispatch/svc-lawn/lawn-fast/treatment-guide?assessmentId=assessment-1');
+    expect(within(group).getByText('Photos show minor fungus activity.')).toBeTruthy();
+    expect(within(group).getByText('Check first: look at the blades and the edge of the patch.')).toBeTruthy();
+    expect(within(group).getByText('Art Fungicide — mapped large patch')).toBeTruthy();
+    expect(within(group).getByText('Check first: soap flush to bring them to the surface.')).toBeTruthy();
+    // Document order: the plan's rows, then the guide, then the protocol add-ons.
+    const plannedRow = screen.getByRole('group', { name: 'Talak 7.9%' });
+    expect(plannedRow.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(group.compareDocumentPosition(addons()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  test('a confirmed lawn with no findings says so in one line', async () => {
+    answer([]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    expect(within(group).getByText('Nothing extra suggested from the photos.')).toBeTruthy();
+    expect(within(group).queryByRole('button')).toBeNull();
+  });
+
+  test('a guide that cannot be read leaves the sheet as it was', async () => {
+    guideAnswer = refusal(500, 'boom', 'Internal error');
+    await open();
+    await analyze();
+    await waitFor(() => expect(guideCalls()).toHaveLength(1));
+    expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls()[0].body.lawnFast).toEqual({ visitType: 'recurring' });
+  });
+
+  test('the weed card taps the Weed spots entry; the add-ons list does not show it a second time', async () => {
+    answer([CARDS.weeds()]);
+    await open();
+    // Before confirm the add-ons list carries the entry, as before.
+    expect(within(addons()).getByText('Weed spots')).toBeTruthy();
+    await analyze();
+    const group = await suggested();
+    expect(within(addons()).queryByText('Weed spots')).toBeNull();
+    expect(within(addons()).queryByRole('button', { name: 'Add weed spots' })).toBeNull();
+    fireEvent.click(within(group).getByRole('button', { name: 'Add weed spots' }));
+    for (const name of ['Lead WG', 'Cert Herbicide']) expect(within(editorFor(name)).getByText(/from the protocol/)).toBeTruthy();
+    expect(within(group).getByText('On the sheet')).toBeTruthy();
+    // The shared area control comes with the rows, as from the entry.
+    expect(screen.getByRole('group', { name: 'Weed spots' })).toBeTruthy();
+  });
+
+  test('the fungus card: "I checked. Add it" opens the first fungicide as a spot row; the other fungicide stays in the list', async () => {
+    answer([CARDS.fungus()]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    fireEvent.click(within(group).getByRole('button', { name: 'I checked. Add it' }));
+    expect(within(editorFor('Art Fungicide')).getByText(/from the protocol/)).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Vel Fungicide' })).toBeNull();
+    expect(within(addons()).getByRole('button', { name: 'Add Vel Fungicide' })).toBeTruthy();
+    expect(within(cardGroup('Fungus')).getByRole('button', { name: 'Fungus: on the sheet' }).disabled).toBe(true);
+    expect(within(cardGroup('Fungus')).queryByRole('button', { name: 'Nothing found' })).toBeNull();
+  });
+
+  test('a take-all fungus card is the check only: no product, no add button, recorded as shown and not taken', async () => {
+    answer([CARDS.takeAll()]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    const fungus = cardGroup('Fungus');
+    expect(within(fungus).getByText('Check first: look at the blades and the edge of the patch.')).toBeTruthy();
+    expect(within(fungus).getByText('Take-all is treated on known trouble areas only. None is on file for this lawn.')).toBeTruthy();
+    expect(within(group).queryByRole('button')).toBeNull();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sentGuide().cards).toEqual([{ kind: 'fungus', shown: true, checked: null, taken: false, productIds: [] }]);
+  });
+
+  test('the chinch card adds Arena even though the month\'s plan does not hold it', async () => {
+    answer([CARDS.chinch()]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    expect(within(group).getByText('Chinch bugs at the edge of the damage: Arena 50 WDG, spot treatment.')).toBeTruthy();
+    fireEvent.click(within(group).getByRole('button', { name: 'Found at the edge. Add it' }));
+    const arena = editorFor('Arena 50 WDG');
+    expect(within(arena).getByText(/from the protocol/)).toBeTruthy();
+    expect(pressedMethod(arena)).toBe('Spot treatment');
+  });
+
+  test('the chinch fallback names why the bifenthrin product is offered, and adds that product', async () => {
+    const note = 'Arena yearly limit reached; Atticus is used in its place.';
+    answer([CARDS.chinch(BIF_ITEM, note)]);
+    await open(guideContext({}, { item: BIF_ITEM, note }));
+    await analyze();
+    const group = await suggested();
+    expect(within(group).getByText(note)).toBeTruthy();
+    fireEvent.click(within(group).getByRole('button', { name: 'Found at the edge. Add it' }));
+    expect(screen.getByRole('group', { name: 'Atticus Talak 7.9 F' })).toBeTruthy();
+    expect(screen.queryByRole('group', { name: 'Arena 50 WDG' })).toBeNull();
+  });
+
+  test('"Nothing found" dismisses the card; the standing chinch entry stays available', async () => {
+    answer([CARDS.caterpillars(), CARDS.chinch()]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    // While the chinch card shows, the standing entry is not listed a second time.
+    expect(within(addons()).queryByText('Chinch bugs found at the edge of damage')).toBeNull();
+    fireEvent.click(within(cardGroup('Insects: check for chinch bugs')).getByRole('button', { name: 'Nothing found' }));
+    expect(screen.queryByRole('group', { name: 'Insects: check for chinch bugs suggestion' })).toBeNull();
+    expect(within(group).getByText('Check first: soap flush to bring them to the surface.')).toBeTruthy();
+    expect(within(addons()).getByText('Chinch bugs found at the edge of damage')).toBeTruthy();
+    // Dismissing every card hides the group.
+    fireEvent.click(within(cardGroup('Insects: check for caterpillars')).getByRole('button', { name: 'Nothing found' }));
+    expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull();
+  });
+
+  test('"Chinch bugs found" is in the optional list with no cards at all, in every month, and adds Arena', async () => {
+    await open();
+    const entry = within(addons()).getByText('Chinch bugs found at the edge of damage');
+    expect(entry).toBeTruthy();
+    expect(within(addons()).getByText('Arena 50 WDG, spot treatment')).toBeTruthy();
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add chinch bug treatment' }));
+    expect(within(editorFor('Arena 50 WDG')).getByText(/from the protocol/)).toBeTruthy();
+    expect(within(addons()).getByRole('button', { name: 'Chinch bug treatment is on the sheet' }).disabled).toBe(true);
+  });
+
+  test('the standing entry with both chinch products at their limit is a line only', async () => {
+    const note = 'The yearly limit is reached for the chinch bug products on this lawn.';
+    await open(guideContext({}, { item: null, note }));
+    expect(within(addons()).getByText(note)).toBeTruthy();
+    expect(within(addons()).queryByRole('button', { name: /chinch bug treatment/i })).toBeNull();
+  });
+
+  test('without the flag a chinch offer in the payload is ignored', async () => {
+    await open(guideContext({ treatmentGuide: false }));
+    expect(within(addons()).queryByText('Chinch bugs found at the edge of damage')).toBeNull();
+  });
+
+  test('the dry-spot card adds the wetting agent with one tap; no check, no dismiss', async () => {
+    answer([CARDS.dry_spots()]);
+    await open();
+    await analyze();
+    const dry = cardGroup('Dry spots');
+    expect(within(dry).queryByRole('button', { name: 'Nothing found' })).toBeNull();
+    fireEvent.click(within(dry).getByRole('button', { name: 'Add Disp Wetting Agent' }));
+    expect(within(editorFor('Disp Wetting Agent')).getByText(/from the protocol/)).toBeTruthy();
+  });
+
+  test('the completion carries which cards showed and what the tech did', async () => {
+    answer([CARDS.weeds(), CARDS.fungus(), CARDS.chinch(), CARDS.caterpillars()]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    // Weeds taken, fungus checked and taken, chinch dismissed, caterpillars left alone.
+    fireEvent.click(within(group).getByRole('button', { name: 'Add weed spots' }));
+    fireEvent.click(within(group).getByRole('button', { name: 'I checked. Add it' }));
+    fireEvent.click(within(cardGroup('Insects: check for chinch bugs')).getByRole('button', { name: 'Nothing found' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Weed spots' })).getByRole('button', { name: '250 sq ft' }));
+    // A spot row takes the area from the tech, as every spot row does under the spot rules.
+    fireEvent.click(within(editorFor('Art Fungicide')).getByRole('button', { name: '100 sq ft' }));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls()[0].body.lawnFast).toEqual({
+      visitType: 'recurring',
+      treatmentGuide: {
+        v: 1,
+        cards: [
+          { kind: 'weeds', shown: true, checked: null, taken: true, productIds: [P_LEAD, P_CERT] },
+          { kind: 'fungus', shown: true, checked: 'found', taken: true, productIds: [P_ART] },
+          { kind: 'chinch', shown: true, checked: 'none', taken: false, productIds: [P_ARENA] },
+          { kind: 'caterpillars', shown: true, checked: null, taken: false, productIds: [P_ACE] },
+        ],
+      },
+    });
+    expect(sentProduct(P_ART)).toMatchObject({ applicationMethod: 'spot_treatment' });
+  });
+
+  test('a card whose product the tech removed again is recorded as not taken', async () => {
+    answer([CARDS.fungus()]);
+    await open();
+    await analyze();
+    const group = await suggested();
+    fireEvent.click(within(group).getByRole('button', { name: 'I checked. Add it' }));
+    fireEvent.click(within(editorFor('Art Fungicide')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sentGuide().cards).toEqual([{ kind: 'fungus', shown: true, checked: 'found', taken: false, productIds: [P_ART] }]);
+  });
+
+  test('a guide with no cards is recorded as shown empty', async () => {
+    answer([]);
+    await open();
+    await analyzeAndComplete();
+    expect(sentGuide()).toEqual({ v: 1, cards: [] });
+  });
+
+  test('a weed card whose products the catalog cannot build is not shown, and not recorded', async () => {
+    answer([CARDS.weeds(), CARDS.dry_spots()]);
+    await openSheet({ request: makeRequest({ ctx: guideContext() }), props: { catalog: GUIDE_CATALOG.filter((p) => p.id !== P_CERT) } });
+    await analyze();
+    await suggested();
+    expect(screen.queryByRole('group', { name: 'Weed spots suggestion' })).toBeNull();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(sentGuide().cards.map((c) => c.kind)).toEqual(['dry_spots']);
+  });
+
+  test('malformed cards in the answer are ignored', async () => {
+    guideAnswer = { enabled: true, v: 1, cards: [null, { kind: 'mystery', title: 'x', productIds: [], items: [] }, { kind: 'fungus' }, CARDS.dry_spots()] };
+    await open();
+    await analyze();
+    const group = await suggested();
+    expect(within(group).getAllByRole('button')).toHaveLength(1);
   });
 });

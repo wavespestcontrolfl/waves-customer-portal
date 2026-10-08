@@ -415,6 +415,11 @@
 .tech-lawn-sheet .tech-protocol-addon-name { font-size: 14px; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add { flex-shrink: 0; min-height: 40px; padding: 0 16px; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add:disabled { border-color: #e5e5e5; opacity: 1; }
+.tech-lawn-sheet .tech-guide-card { display: flex; flex-direction: column; gap: 6px; padding: 10px 14px; }
+.tech-lawn-sheet .tech-guide-card + .tech-guide-card { border-top: 1px solid #e5e5e5; }
+.tech-lawn-sheet .tech-guide-check { margin: 0; padding: 6px 8px; border-radius: 8px; background: #fbefd9; color: #7a4800; font-size: 14px; }
+.tech-lawn-sheet .tech-guide-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tech-lawn-sheet .tech-guide-empty { margin: 0; padding: 10px 14px; }
 /* Catalog search results stay a plain list inside one hairline card: the pill
    rule above would otherwise give each row its own ink pill and uppercase it. */
 .tech-lawn-sheet .tech-product-list { border: 1px solid #e5e5e5; border-radius: 12px; }

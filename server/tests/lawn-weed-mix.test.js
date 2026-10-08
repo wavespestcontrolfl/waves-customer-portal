@@ -27,7 +27,8 @@ const addOns = () => [
   item(OTHER, 'Echo Fungicide', { trigger: 'gray_leaf_spot' }),
 ];
 const svc = { id: 'visit-1', customer_id: 'cust-1', property_id: 'prop-1', scheduled_date: '2026-10-05' };
-const run = (items = addOns()) => buildWeedMix({ addOns: items, svc, structured: { products: [] }, knex: {} });
+const run = (items = addOns(), visit = svc) => buildWeedMix({ addOns: items, svc: visit, structured: { products: [] }, knex: {} });
+const inMonth = (date) => ({ ...svc, scheduled_date: date });
 const capped = (...ids) => engine.v13VisitLimits.mockResolvedValue({ capped: new Map(ids.map((id) => [id, [{ type: 'annual_max_apps', message: 'limit' }]])), warnings: [], blocks: [] });
 const weather = (temp, extra = {}) => getCurrent.mockResolvedValue({ temp_f: temp, station: 'Test Station', timestamp: new Date().toISOString(), observation_time: new Date().toISOString(), ...extra });
 
@@ -78,9 +79,9 @@ describe('buildWeedMix', () => {
     expect(asked.map((i) => [i.product.id, i.selected])).toEqual([[LEAD, true], [CERT, true], [SURF, true], [REPL, true]]);
   });
 
-  test('lead at its cap: the replacement alone, with the why line; lead and members are not offered', async () => {
+  test('lead at its cap in November through March: the replacement alone, with the why line; lead and members are not offered', async () => {
     capped(LEAD);
-    const mix = await run();
+    const mix = await run(addOns(), inMonth('2026-11-05'));
     expect(mix).toMatchObject({
       mode: 'replacement', productIds: [REPL], surfactant: null, tempF: null,
       note: 'Alpha yearly limit reached; Delta is used in its place.',
@@ -88,9 +89,46 @@ describe('buildWeedMix', () => {
     expect(getCurrent).not.toHaveBeenCalled();
   });
 
+  test.each(['2026-11-01', '2026-12-15', '2027-01-10', '2027-02-10', '2027-03-31'])('the replacement is offered on %s', async (date) => {
+    capped(LEAD);
+    expect(await run(addOns(), inMonth(date))).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+  });
+
+  // owner 2026-10-08: restricted until the full Blindside label is read (heat injury on St. Augustine).
+  test.each(['2026-04-01', '2026-06-15', '2026-09-30', '2026-10-05'])('lead at its cap on %s (April through October): the replacement is not offered', async (date) => {
+    capped(LEAD);
+    expect(await run(addOns(), inMonth(date))).toMatchObject({
+      mode: 'none', productIds: [], replacementProductId: REPL, note: 'Alpha yearly limit reached. Delta is used November through March only.',
+    });
+  });
+
+  test('a visit with no date cannot be told to be in season: the replacement is not offered', async () => {
+    capped(LEAD);
+    expect(await run(addOns(), { ...svc, scheduled_date: null })).toMatchObject({ mode: 'none', productIds: [] });
+  });
+
+  test('the season rule does not touch the lead: under its cap it is offered in any month', async () => {
+    for (const date of ['2026-04-01', '2026-07-01', '2026-10-05']) expect(await run(addOns(), inMonth(date))).toMatchObject({ mode: 'lead', productIds: [LEAD, CERT, SURF] });
+  });
+
+  test('February: the lead alone, no member and no surfactant, no temperature read, and the note says why', async () => {
+    const mix = await run(addOns(), inMonth('2027-02-10'));
+    expect(mix).toMatchObject({
+      mode: 'lead', productIds: [LEAD], surfactant: null, tempF: null, noAreaProductIds: [SURF],
+      groupProductIds: [LEAD, CERT, SURF, REPL], note: 'February: Alpha only while the lawn greens up.',
+    });
+    expect(getCurrent).not.toHaveBeenCalled();
+    expect(resolvePropertyCoordinates).not.toHaveBeenCalled();
+  });
+
+  test('February with the lead at its cap still hands the tap to the replacement (it is in season)', async () => {
+    capped(LEAD);
+    expect(await run(addOns(), inMonth('2027-02-10'))).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+  });
+
   test('lead and replacement at the cap: nothing to add, one line', async () => {
     capped(LEAD, REPL);
-    expect(await run()).toMatchObject({ mode: 'none', productIds: [], note: 'The yearly weed-spray limit is reached for this lawn.' });
+    expect(await run(addOns(), inMonth('2026-12-05'))).toMatchObject({ mode: 'none', productIds: [], note: 'The yearly weed-spray limit is reached for this lawn.' });
   });
 
   test('lead at the cap and no replacement row: the same line', async () => {
