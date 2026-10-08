@@ -4037,6 +4037,15 @@ async function missingFirstNameCardStillOpen(conn, callLogId) {
   return !!card;
 }
 
+// Is this call's card for `reasonCode` still open? Finalization judges an early-filed card's review
+// reason on this, so staff settling it first never reopens call_log.review_status.
+async function callCardStillOpen(conn, callLogId, reasonCode) {
+  const card = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: reasonCode })
+    .whereIn('status', ['open', 'in_progress']).first('id');
+  return !!card;
+}
+
 async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
@@ -22179,9 +22188,13 @@ const CallRecordingProcessor = {
       // closed card's reason must not reopen review. Judged under the lock just taken.
       const firstNameStillOwed = !bridgeNeedsConfirmation.includes('missing_first_name')
         || await missingFirstNameCardStillOpen(trx, call.id);
+      // …and the no-text line card, filed early at the hold decision (staff may have settled it since).
+      const textCardStillOpen = !bridgeNeedsConfirmation.includes('text_number_differs')
+        || await callCardStillOpen(trx, call.id, 'text_number_differs');
       const reviewReasonCount = bridgeNeedsConfirmation
         .filter((r) => (r !== 'street_level_address_review' || streetLevelStillHeld)
-          && (r !== 'missing_first_name' || firstNameStillOwed)).length;
+          && (r !== 'missing_first_name' || firstNameStillOwed)
+          && (r !== 'text_number_differs' || textCardStillOpen)).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');

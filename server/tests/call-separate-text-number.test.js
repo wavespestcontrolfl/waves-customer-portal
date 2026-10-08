@@ -245,6 +245,13 @@ describe('processor wiring (source pins; nothing automatic uses the dictated num
     expect(holds).toMatch(/if \(noTextHold\) \{[^]*?reason_code: 'text_number_differs'[^]*?\.update\(\{ updated_at: new Date\(\) \}\)/);
   });
 
+  test('finalization judges the early-filed text card by its CURRENT state, so a settled card never reopens review_status', () => {
+    expect(src).toContain("const textCardStillOpen = !bridgeNeedsConfirmation.includes('text_number_differs')\n        || await callCardStillOpen(trx, call.id, 'text_number_differs');");
+    expect(src).toContain("&& (r !== 'text_number_differs' || textCardStillOpen)).length;");
+    // judged after the per-call lock taken for the final write
+    expect(src.indexOf('await lockTriageCall(trx, call.id);\n      // A street-level hold')).toBeLessThan(src.indexOf('const textCardStillOpen'));
+  });
+
   test('a hard-vetoed no-text call gets neither the hold nor the card (the veto the pipeline applies)', () => {
     expect(src).toContain('const noTextVetoed = aniCannotTextOnly(v2Extraction) && hasCanonicalWriteBlock(finalFlags);');
     expect(src).toContain('if (callbackNumberNeededBlocksSms(finalFlags) && !noTextVetoed) {');
