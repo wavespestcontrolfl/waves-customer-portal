@@ -62,7 +62,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
   async function sentAfterTwoDrafts() {
     const c = await customer();
     const autoDraft = await estimate(c, { createdAt: minutesAgo(400), source: 'lead_webhook' });
-    const staffDraft = await estimate(c, { createdAt: minutesAgo(30), source: 'manual' });
+    const staffDraft = await estimate(c, { createdAt: minutesAgo(45), source: 'manual' });
     const sent = await estimate(c, { status: 'viewed', createdAt: minutesAgo(10), updatedAt: minutesAgo(9), sentAt: minutesAgo(9) });
     return { c, autoDraft, staffDraft, sent };
   }
@@ -334,6 +334,20 @@ postgres('estimate draft retire (PostgreSQL)', () => {
       await database('estimates').whereIn('id', [draft, sent]).del();
       await database('customers').where({ id: c }).del();
     }
+  });
+
+  test('a draft younger than the settle window is kept; an accepted estimate keeps a lead-linked draft from an older send', async () => {
+    const c = await customer();
+    const fresh = await estimate(c, { createdAt: minutesAgo(12), updatedAt: minutesAgo(12) });
+    await estimate(c, { status: 'sent', createdAt: minutesAgo(8), sentAt: minutesAgo(5) });
+    const c2 = await customer();
+    const linked = await estimate(c2, { createdAt: minutesAgo(200) });
+    await estimate(c2, { status: 'sent', createdAt: minutesAgo(150), sentAt: minutesAgo(140) });
+    await estimate(c2, { status: 'accepted', createdAt: minutesAgo(100), sentAt: minutesAgo(90) });
+    await mockPg('leads').insert({ id: randomUUID(), estimate_id: linked, status: 'new', first_name: 'Fixture', last_name: 'Retire' });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
+    expect((await row(fresh)).archived_at).toBeNull();
+    expect((await row(linked)).archived_at).toBeNull();
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {

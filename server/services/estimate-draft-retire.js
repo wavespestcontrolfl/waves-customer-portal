@@ -26,6 +26,11 @@ const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_E
 
 const RETIRE_BATCH_LIMIT = 200;
 const RETIRE_CLOSER = 'estimate-draft-retire';
+// A draft younger than this is still being finished by its creator: the
+// estimator engine posts its "draft ready" bell and parks clarifications
+// after the insert, and the lead webhook's background triage rewrites the
+// row. None of them hold the estimate lock, so the sweep waits them out.
+const DRAFT_SETTLE_MINUTES = 30;
 // Thrown inside the per-draft transaction to roll an archive back.
 class KeepDraft extends Error {}
 // lock_not_available (NOWAIT / lock_timeout) and deadlock_detected: another
@@ -84,6 +89,7 @@ const DRAFT_ELIGIBLE_SQL = `
   AND estimate_group_id IS NULL
   AND scheduled_at IS NULL
   AND price_locked_at IS NULL
+  AND created_at < NOW() - INTERVAL '${DRAFT_SETTLE_MINUTES} minutes'
   AND COALESCE(source, '') NOT IN ('one_tap_purchase', 'quote_wizard')
   AND ${NO_LIVE_DEPENDENTS_SQL}
   AND ${NO_UNCERTAIN_SEND_SQL}
@@ -243,12 +249,20 @@ async function retireDrafts({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
            AND ${SENT_EVIDENCE_SQL('s')}
            AND s.created_at > d.created_at
            AND d.updated_at <= s.sent_at
-           AND NOT (s.status = 'accepted' AND EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id))
          ORDER BY COALESCE(s.property_id = d.property_id, false) DESC,
                   COALESCE(LOWER(TRIM(s.address)) = LOWER(TRIM(d.address)), false) DESC,
                   s.sent_at DESC
          LIMIT ${SENDS_PER_DRAFT}
       ) s
+     -- A lead-linked draft with ANY later accepted estimate is kept whole:
+     -- that lead belongs to the acceptance flow, so an older sent estimate
+     -- must not retire the draft and take the lead instead.
+     WHERE NOT (
+       EXISTS (SELECT 1 FROM leads l WHERE l.estimate_id = d.id)
+       AND EXISTS (SELECT 1 FROM estimates a
+                    WHERE a.customer_id = d.customer_id AND a.id <> d.id
+                      AND a.status = 'accepted' AND a.created_at > d.created_at)
+     )
   `))?.rows || [];
 
   // First matching send per draft (the lateral lists same-door sends first).
