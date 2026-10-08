@@ -115,6 +115,31 @@ describe('slotRainTierOf', () => {
     spy.mockRestore();
   });
 
+  test('capacity gate off: the ranking looks the catalog row up itself for a row with no key', async () => {
+    process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
+    const profiles = require('../services/service-completion-profiles');
+    const spy = jest.spyOn(profiles, 'resolveCompletionProfileForScheduledService')
+      .mockImplementation(async ({ service_key_snapshot: key }) => ({ serviceKey: key || null, findingsType: null }));
+    const row = { label: 'Rodent Bait Stations', service: 'rodent_bait' };
+    const profile = { serviceMode: 'recurring', services: [row] };
+    const catalogLinkForProfile = jest.fn(async () => ({ service_key: 'rodent_bait_quarterly' }));
+    const tierOf = await slotRainTierOf([slot(D1, '14:00')], { profile, ...IN_AREA, deps: { hourlyRain: async () => HOURLY, catalogLinkForProfile } });
+    // The label alone reads as outdoor; the looked-up key is rain-OK.
+    expect(tierOf(slot(D1, '14:00'))).toBe(0);
+    expect(catalogLinkForProfile).toHaveBeenCalledWith(undefined, { ...profile, services: [row] });
+    // A failed lookup leaves the label (word rules): outdoor, tier 2.
+    const failing = await slotRainTierOf([slot(D1, '14:00')], { profile, ...IN_AREA, deps: { hourlyRain: async () => HOURLY, catalogLinkForProfile: async () => { throw new Error('down'); } } });
+    expect(failing(slot(D1, '14:00'))).toBe(2);
+    spy.mockRestore();
+  });
+
+  test('gate off: no catalog lookup either', async () => {
+    const catalogLinkForProfile = jest.fn();
+    const profile = { services: [{ label: 'Rodent Bait Stations', service: 'rodent_bait' }] };
+    expect(await slotRainTierOf([slot(D1, '14:00')], { profile, ...IN_AREA, deps: { catalogLinkForProfile } })).toBeNull();
+    expect(catalogLinkForProfile).not.toHaveBeenCalled();
+  });
+
   test('gate on, no slot inside the 3 dates: null, nothing read', async () => {
     process.env.GATE_CUSTOMER_RAIN_RANK = 'true';
     const hourlyRain = jest.fn(async () => HOURLY);

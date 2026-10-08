@@ -2204,7 +2204,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // above has no detour data, so its ordering is unchanged either way.
   // Rain fit (GATE_CUSTOMER_RAIN_RANK, dark): null — today's order — with
   // the gate off, no slot inside the next 3 dates, or any failure.
-  const rainTierOf = await slotRainTierOf(funneledBookable, { services: serviceProfile.services, point: coords, db });
+  const rainTierOf = await slotRainTierOf(funneledBookable, { profile: serviceProfile, point: coords, db });
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
     routeFirst: isEnabled('geoSlotRanking'),
     rainTierOf,

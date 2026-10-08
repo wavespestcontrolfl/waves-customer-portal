@@ -102,20 +102,47 @@ function startCustomerRainRank({ today, lat, lng, ...rest } = {}) {
  * horizon. `services` = the estimate's service profile rows or labels;
  * `point` = its coordinates ({ lat, lng }), null when it has none.
  */
-async function slotRainTierOf(slots, { services = [], point = null, today, db, deps } = {}) {
+async function slotRainTierOf(slots, { services = [], profile = null, point = null, today, db, deps = {} } = {}) {
   const todayYmd = etDateString(today || new Date());
   const list = Array.isArray(slots) ? slots : [];
   if (!list.some((slot) => inRainHorizon(slot?.date, todayYmd))) return null;
-  // An estimate's services are profile rows or names. A row keeps its
-  // catalog key — the verified one frozen on the line (catalogServiceKey),
-  // else the row resolveCatalogSlotProfile resolved (resolvedServiceKey):
-  // its display label can differ from the catalog name, and the key settles
-  // the identity ahead of it.
-  const serviceLabels = (Array.isArray(services) ? services : []).map((service) => (typeof service === 'string'
-    ? service
-    : { name: service?.label || service?.service, serviceKey: service?.catalogServiceKey || service?.resolvedServiceKey || null }));
+  const { gateEnvValue } = require('../../config/feature-gates');
+  if (!gateEnvValue(GATE)) return null;
+  const rows = profile && Array.isArray(profile.services) ? profile.services : services;
+  const serviceLabels = await estimateServiceIdentities(rows, { profile, db, deps });
   const tierOf = await customerRainTierOf({ serviceLabels, lat: point?.lat, lng: point?.lng, today, db, deps });
   return tierOf ? (slot) => tierOf({ date: slot.date, start_time: slot.windowStart, end_time: slot.windowEnd }) : null;
+}
+
+// An estimate's services as { name, serviceKey } for the classifier. A row's
+// display label can differ from the catalog name, so its catalog key settles
+// the identity ahead of it. In order: the verified key frozen on the line
+// (catalogServiceKey); the row resolveCatalogSlotProfile resolved under the
+// capacity gate (resolvedServiceKey); else the same catalog lookup made here
+// for that one row, so the ranking does not depend on the capacity gate
+// (Codex #6127 r2). A lookup that fails or finds nothing leaves the label.
+const MAX_ESTIMATE_SERVICES = 12;
+async function estimateServiceIdentities(rows, { profile, db, deps = {} }) {
+  const out = [];
+  for (const service of (Array.isArray(rows) ? rows : []).slice(0, MAX_ESTIMATE_SERVICES)) {
+    if (typeof service === 'string') { out.push(service); continue; }
+    const name = service?.label || service?.service;
+    let serviceKey = service?.catalogServiceKey || service?.resolvedServiceKey || null;
+    if (!serviceKey && profile) serviceKey = await catalogKeyForRow(profile, service, { db, deps });
+    out.push({ name, serviceKey });
+  }
+  return out;
+}
+
+async function catalogKeyForRow(profile, service, { db, deps = {} }) {
+  try {
+    const lookup = deps.catalogLinkForProfile || require('../slot-reservation').catalogLinkForProfile;
+    const link = await lookup(db, { ...profile, services: [service] });
+    return (link && link.service_key) || null;
+  } catch (err) {
+    logger.warn(`[customer-rain-rank] estimate catalog lookup failed (label used): ${err.message}`);
+    return null;
+  }
 }
 
 // Stable reorder by rain tier that keeps the first `pinned` items exactly
