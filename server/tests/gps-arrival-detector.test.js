@@ -619,7 +619,7 @@ describe('gps-arrival-detector late-delivered samples (GATE_GPS_ARRIVAL_LATE_SAM
 
   function lateRun({ candidates, point = {}, techStatus = {}, service = null } = {}) {
     const query = installServiceLookup(service, {
-      candidates: candidates || [baseService({ en_route_at: LATE_EN_ROUTE })],
+      candidates: candidates || [baseService({ en_route_at: LATE_EN_ROUTE, scheduled_date: '2026-10-08' })],
     });
     return detector.maybeMarkArrivedFromGps({
       techStatus: baseTechStatus(techStatus),
@@ -638,6 +638,9 @@ describe('gps-arrival-detector late-delivered samples (GATE_GPS_ARRIVAL_LATE_SAM
     expect(options).toEqual({
       actingTechId: 'tech-1',
       expectTechnicianId: 'tech-1',
+      // the validated attempt, fenced inside markOnProperty
+      expectEnRouteAt: LATE_EN_ROUTE,
+      expectScheduledDate: '2026-10-08',
       arrivedAt: new Date(LATE_AT),
       suppressArrivalSms: true,
     });
@@ -752,6 +755,18 @@ describe('gps-arrival-detector late-delivered samples (GATE_GPS_ARRIVAL_LATE_SAM
     expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed' });
     expect(notMarkedWrites()).toEqual([expect.objectContaining({
       metadata: expect.objectContaining({ reason: 'mark_on_property_failed', detail: 'concurrent_update' }),
+    })]);
+  });
+
+  test('a visit rescheduled or restarted since the lookup is refused and recorded, not stamped', async () => {
+    trackTransitions.markOnProperty.mockResolvedValue({ ok: false, reason: 'attempt_changed' });
+
+    const { result } = await lateRun();
+
+    expect(result).toMatchObject({ ok: false, reason: 'late_sample_attempt_changed' });
+    expect(notMarkedWrites()).toEqual([expect.objectContaining({
+      resource_id: 'svc-1',
+      metadata: expect.objectContaining({ reason: 'late_sample_attempt_changed', detail: 'attempt_changed' }),
     })]);
   });
 

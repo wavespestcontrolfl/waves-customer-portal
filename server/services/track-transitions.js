@@ -1011,23 +1011,36 @@ function backdatedArrivalGuard(opts, now) {
 }
 
 // Tech board row for the arriving tech. A backdated arrival must not repoint a
-// technician who has moved on: the row flips to on_site only while this visit
-// is still their current job.
+// technician who has moved on: it is ONE conditional update that lands only
+// while this visit is still the tech's current job (and broadcasts only then),
+// so a next-job start or a completion racing it cannot be undone.
 async function syncTechOnSite(row, opts, label) {
   if (!row.technician_id) return;
   try {
-    if (backdatedArrivalAt(opts)) {
-      const board = await db('tech_status').where({ tech_id: row.technician_id }).first('current_job_id');
-      if (!board || String(board.current_job_id || '') !== String(row.id)) return;
-    }
     await setTechJobStatus({
       tech_id: row.technician_id,
       status: 'on_site',
       current_job_id: row.id,
+      ...(backdatedArrivalAt(opts) ? { ifCurrentJobId: row.id } : {}),
     });
   } catch (err) {
     logger.error(`[track-transitions] tech_status on_site ${label} failed: ${err.message}`);
   }
+}
+
+// Late-sample fence: the GPS detector validated ONE visit attempt (schedule
+// day + en_route_at, with the technician carried by expectTechnicianId). If
+// the visit was rescheduled or restarted since, the freshly loaded row is a
+// different attempt and the sample's old timestamp must not land on it. Checked
+// on every load (including the stale-heal re-entries); the flip's CAS then
+// pins the row to exactly this loaded snapshot.
+function attemptFenceBroken(svc, opts) {
+  if (!opts.expectEnRouteAt) return false;
+  const expected = finiteDate(opts.expectEnRouteAt);
+  const actual = finiteDate(svc.en_route_at);
+  return !expected || !actual
+    || expected.getTime() !== actual.getTime()
+    || String(scheduledDayOf(svc) || '') !== String(scheduledDayOf({ scheduled_date: opts.expectScheduledDate }) || '');
 }
 
 /**
@@ -1038,7 +1051,10 @@ async function syncTechOnSite(row, opts, label) {
  * the property. arrived_at / actual_start_time / check_in_time take it, the
  * arrival guard is stamped handled so no "has arrived" text ever follows, and
  * the tech board flips to on_site only while this is still the tech's current
- * job. The caller also passes suppressArrivalSms (no text, no visit fan-out).
+ * job (one conditional update). The caller also passes suppressArrivalSms (no
+ * text, no visit fan-out), expectTechnicianId, and expectEnRouteAt +
+ * expectScheduledDate: the attempt it validated. A visit that no longer matches
+ * (rescheduled or restarted) is refused with reason 'attempt_changed'.
  */
 async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
@@ -1056,6 +1072,7 @@ async function markOnProperty(serviceId, opts = {}) {
   }
 
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
+  if (attemptFenceBroken(svc, opts)) return { ok: false, reason: 'attempt_changed' };
   // A technician's own start passes expectTechnicianId: a reassignment that
   // committed after their timer insert must not let the former technician
   // advance the visit or text the customer an arrival naming them (codex

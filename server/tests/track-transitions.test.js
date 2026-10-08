@@ -314,7 +314,8 @@ describe('track-transitions lifecycle side effects', () => {
 
   describe('markOnProperty backdated arrival (GPS sample delivered late)', () => {
     const arrivedAt = new Date(Date.now() - 40 * 60 * 1000);
-    const lateSvc = (id) => ({
+    const enRouteAt = new Date(Date.now() - 60 * 60 * 1000);
+    const lateSvc = (id, overrides = {}) => ({
       id,
       customer_id: 'cust-bd',
       technician_id: 'tech-bd',
@@ -322,15 +323,16 @@ describe('track-transitions lifecycle side effects', () => {
       track_state: 'en_route',
       cancelled_at: null,
       arrival_sms_sent_at: null,
-      en_route_at: new Date(Date.now() - 60 * 60 * 1000),
+      scheduled_date: '2026-10-01',
+      en_route_at: enRouteAt,
+      ...overrides,
     });
 
     test('stamps the sample time, marks the arrival handled and sends no text', async () => {
       const update = query(1);
       db
         .mockReturnValueOnce(query(lateSvc('job-bd')))
-        .mockReturnValueOnce(update)
-        .mockReturnValueOnce(query({ current_job_id: 'job-bd' })); // tech_status row
+        .mockReturnValueOnce(update);
 
       const result = await trackTransitions.markOnProperty('job-bd', { arrivedAt, suppressArrivalSms: true });
 
@@ -345,22 +347,39 @@ describe('track-transitions lifecycle side effects', () => {
         arrival_sms_sent_at: expect.any(Date),
       });
       expect(sendTechArrived).not.toHaveBeenCalled();
-      expect(setTechJobStatus).toHaveBeenCalledWith({ tech_id: 'tech-bd', status: 'on_site', current_job_id: 'job-bd' });
     });
 
-    test('does not repoint a tech who has moved on to another job', async () => {
+    test('flips the tech board with ONE conditional update bound to this visit', async () => {
+      db
+        .mockReturnValueOnce(query(lateSvc('job-bd1')))
+        .mockReturnValueOnce(query(1));
+
+      await trackTransitions.markOnProperty('job-bd1', { arrivedAt, suppressArrivalSms: true });
+
+      // No separate read of tech_status: the check and the write are one statement.
+      expect(db).toHaveBeenCalledTimes(2);
+      expect(setTechJobStatus).toHaveBeenCalledWith({
+        tech_id: 'tech-bd',
+        status: 'on_site',
+        current_job_id: 'job-bd1',
+        ifCurrentJobId: 'job-bd1',
+      });
+    });
+
+    test('a tech who moved on is left alone: the conditional write changes nothing', async () => {
+      setTechJobStatus.mockResolvedValueOnce(null);
       db
         .mockReturnValueOnce(query(lateSvc('job-bd2')))
-        .mockReturnValueOnce(query(1))
-        .mockReturnValueOnce(query({ current_job_id: 'job-next' }));
+        .mockReturnValueOnce(query(1));
 
       const result = await trackTransitions.markOnProperty('job-bd2', { arrivedAt, suppressArrivalSms: true });
 
       expect(result.ok).toBe(true);
-      expect(setTechJobStatus).not.toHaveBeenCalled();
+      expect(setTechJobStatus).toHaveBeenCalledTimes(1);
+      expect(setTechJobStatus.mock.calls[0][0]).toHaveProperty('ifCurrentJobId', 'job-bd2');
     });
 
-    test('a live arrival keeps stamping now and leaves the arrival guard to the sender', async () => {
+    test('a live arrival keeps stamping now, the unconditional board write, and leaves the guard to the sender', async () => {
       const update = query(1);
       db
         .mockReturnValueOnce(query(lateSvc('job-live')))
@@ -371,6 +390,7 @@ describe('track-transitions lifecycle side effects', () => {
       const payload = update.update.mock.calls[0][0];
       expect(payload).not.toHaveProperty('arrival_sms_sent_at');
       expect(payload.arrived_at.getTime()).toBeGreaterThan(arrivedAt.getTime());
+      expect(setTechJobStatus).toHaveBeenCalledWith({ tech_id: 'tech-bd', status: 'on_site', current_job_id: 'job-live' });
     });
 
     test('a future arrivedAt is ignored: the arrival is stamped now', async () => {
@@ -384,6 +404,65 @@ describe('track-transitions lifecycle side effects', () => {
       const payload = update.update.mock.calls[0][0];
       expect(payload).not.toHaveProperty('arrival_sms_sent_at');
       expect(payload.arrived_at.getTime()).toBeLessThanOrEqual(Date.now());
+    });
+
+    describe('attempt fence (expectEnRouteAt + expectScheduledDate)', () => {
+      const fence = { arrivedAt, suppressArrivalSms: true, expectEnRouteAt: enRouteAt, expectScheduledDate: '2026-10-01' };
+
+      test('lands on the exact attempt the detector validated', async () => {
+        const update = query(1);
+        db
+          .mockReturnValueOnce(query(lateSvc('job-f1')))
+          .mockReturnValueOnce(update);
+
+        const result = await trackTransitions.markOnProperty('job-f1', fence);
+
+        expect(result).toMatchObject({ ok: true, state: 'on_property' });
+        expect(update.update).toHaveBeenCalledTimes(1);
+        // the flip is pinned to the validated en_route_at by the lifecycle CAS
+        expect(update.whereRaw).toHaveBeenCalledWith(
+          expect.stringContaining('date_trunc'),
+          ['en_route_at', enRouteAt],
+        );
+      });
+
+      test('refuses a visit restarted since the lookup (new en_route_at): no flip, no board write', async () => {
+        db.mockReturnValueOnce(query(lateSvc('job-f2', { en_route_at: new Date(Date.now() - 5 * 60 * 1000) })));
+
+        const result = await trackTransitions.markOnProperty('job-f2', fence);
+
+        expect(result).toEqual({ ok: false, reason: 'attempt_changed' });
+        expect(db).toHaveBeenCalledTimes(1);
+        expect(setTechJobStatus).not.toHaveBeenCalled();
+        expect(transitionJobStatus).not.toHaveBeenCalled();
+      });
+
+      test('refuses a visit rescheduled to another day since the lookup', async () => {
+        db.mockReturnValueOnce(query(lateSvc('job-f3', { scheduled_date: '2026-10-02' })));
+
+        const result = await trackTransitions.markOnProperty('job-f3', fence);
+
+        expect(result).toEqual({ ok: false, reason: 'attempt_changed' });
+        expect(db).toHaveBeenCalledTimes(1);
+      });
+
+      test('refuses a visit whose en_route_at was cleared (rewound to scheduled)', async () => {
+        db.mockReturnValueOnce(query(lateSvc('job-f4', { en_route_at: null, track_state: 'scheduled' })));
+
+        const result = await trackTransitions.markOnProperty('job-f4', fence);
+
+        expect(result).toEqual({ ok: false, reason: 'attempt_changed' });
+      });
+
+      test('without the fence options an ordinary arrival is not fenced', async () => {
+        db
+          .mockReturnValueOnce(query(lateSvc('job-f5', { en_route_at: null })))
+          .mockReturnValueOnce(query(1));
+
+        const result = await trackTransitions.markOnProperty('job-f5', { suppressArrivalSms: true });
+
+        expect(result.ok).toBe(true);
+      });
     });
   });
 

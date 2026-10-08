@@ -44,6 +44,7 @@ const SERVICE_COLUMNS = [
   's.completed_at',
   's.arrived_at',
   's.en_route_at',
+  's.scheduled_date',
   's.lat as service_lat',
   's.lng as service_lng',
   's.service_address_line1 as service_address_line1',
@@ -443,20 +444,27 @@ function isOpenWithoutArrival(service) {
     && !['completed', 'cancelled', 'skipped', 'no_show'].includes(service.status);
 }
 
+// The reason a failed mark is reported under. A late sample whose visit
+// attempt changed under it gets its own name.
+function markFailureReason(result, late) {
+  return late && result?.reason === 'attempt_changed' ? 'late_sample_attempt_changed' : 'mark_on_property_failed';
+}
+
 async function markAndAudit({ service, techStatus, destination, distance, point, decision, config, markOptions, late = null }) {
   let result = null;
   try {
     result = await trackTransitions.markOnProperty(service.id, markOptions);
     await auditArrival({ service, techStatus, destination, distance, point, decision, result, late });
+    const failure = markFailureReason(result, late);
     if (!result?.ok) {
       await recordNotMarked({
         service, techStatus, point, config, destination, distance,
-        reason: 'mark_on_property_failed', detail: result?.reason || null,
+        reason: failure, detail: result?.reason || null,
       });
     }
     return {
       ok: result?.ok === true,
-      reason: result?.ok ? 'marked_on_property' : 'mark_on_property_failed',
+      reason: result?.ok ? 'marked_on_property' : failure,
       state: result?.state || null,
       distanceMeters: distance,
       result,
@@ -556,7 +564,18 @@ async function maybeMarkArrivedFromLateSample({ techStatus, point, config }) {
     point,
     config,
     late: true,
-    markOptions: { actingTechId: techId, expectTechnicianId: techId, arrivedAt, suppressArrivalSms: true },
+    // The attempt validated above (technician, schedule day, en_route_at) is
+    // fenced inside markOnProperty's own read and CAS, so a visit rescheduled
+    // or restarted since the lookup refuses ('attempt_changed') instead of
+    // taking this sample's old timestamp.
+    markOptions: {
+      actingTechId: techId,
+      expectTechnicianId: techId,
+      expectEnRouteAt: entry.service.en_route_at,
+      expectScheduledDate: entry.service.scheduled_date,
+      arrivedAt,
+      suppressArrivalSms: true,
+    },
   });
 }
 
