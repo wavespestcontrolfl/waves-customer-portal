@@ -95,7 +95,7 @@ next-steps (care-permission questions included), re-entry and watering,
 which keep the fixed-rule answer word for word, and photo, lawn-size and
 lawn/tree product-location questions. The same intent guard (`fixedAnswerTopic`)
 also picks the fixed answer itself, gate on or off: a question it reads as
-re-entry, next visit, next steps or results gets that topic's own rule answer
+re-entry, next visit or next steps gets that topic's own rule answer
 (`routeServiceReportQuestion` with `forceTopic`) and that topic in the
 recorded event, even when the rule router alone would have left it unrouted. Termite, rodent,
 mosquito and specialty reports, any report a typed snapshot drives

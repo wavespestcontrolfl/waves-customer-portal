@@ -823,7 +823,9 @@ function answerForTopic(topic, { data, nextAppointment }) {
     reentry: () => answerReentry({ data, required }),
     next_visit: () => answerNextAppointment({ nextAppointment }),
     next_steps: () => answerNextSteps({ data, nextAppointment, required }),
-    results: () => answerTrend({ data }),
+    // No `results` builder: answerTrend only reads lawn scores and pest
+    // pressure, so a weather or plant-health question keeps the answer the
+    // rules below choose (pre-push audit, #5964).
   };
   if (!builders[topic]) return null;
   return { topic, answer: builders[topic](), requiredLines: required };

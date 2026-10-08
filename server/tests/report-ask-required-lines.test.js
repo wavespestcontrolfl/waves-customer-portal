@@ -2753,3 +2753,12 @@ describe('answer screen, Codex round 82', () => {
     expect(medicalExposureAnswer('John swallowed his pride.')).toBeNull();
   });
 });
+
+test('a weather question keeps the rule router\'s own answer, never the lawn-score answer (pre-push audit)', () => {
+  const data = lawnData({ conditions: { conditions: 'Cloudy', rain_24h_in: 0 } });
+  const q = 'Did it rain during the visit?';
+  const first = routeServiceReportQuestion({ question: q, data });
+  const forced = routeServiceReportQuestion({ question: q, data, forceTopic: 'results' });
+  expect(forced).toEqual(first);
+  expect(forced.answer).not.toMatch(/lawn health/i);
+});
