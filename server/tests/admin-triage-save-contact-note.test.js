@@ -197,6 +197,18 @@ beforeEach(() => {
 });
 
 describe('POST /admin/triage/:id/save-contact-note', () => {
+  it('tags the note with the call\'s Eastern day, not the UTC day', async () => {
+    // 9:30 PM Eastern on October 7 is already October 8 in UTC.
+    const fake = fixture();
+    fake.tables.call_log[0].created_at = '2026-10-08T01:30:00.000Z';
+    wireDb(db, fake);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, `/${CARD_ID}/save-contact-note`);
+      expect(res.status).toBe(200);
+    });
+    expect(fake.tables.customers[0].internal_notes).toBe(`[call 2026-10-07] ${EXPECTED_LINE}`);
+  });
+
   it('appends one dated line, resolves the card, and writes only internal_notes', async () => {
     const fake = fixture();
     // Record every customers update the route (and its transaction) issues.

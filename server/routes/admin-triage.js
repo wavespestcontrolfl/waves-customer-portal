@@ -1630,8 +1630,10 @@ router.post('/:id/save-contact-note', async (req, res) => {
         throw empty;
       }
       const { appendWithProvenance } = require('../services/call-profile-enrichment');
-      // appendWithProvenance tags the call's date and skips a line the notes already hold.
-      const callDate = new Date(call.created_at).toISOString();
+      // appendWithProvenance tags the call's date and skips a line the notes
+      // already hold. The tag is the call's EASTERN day: an evening call is
+      // already the next day in UTC.
+      const callDate = require('../utils/datetime-et').etDateString(new Date(call.created_at));
       let notes = customer.internal_notes;
       let added = 0;
       for (const line of lines) {
