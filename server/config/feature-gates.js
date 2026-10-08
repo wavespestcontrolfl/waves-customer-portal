@@ -1984,12 +1984,6 @@ const gates = {
   // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus only —
   // the canonical CALL-TIME reader is callFirstNameAdvisoryLive() below.
   callFirstNameAdvisory: process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true',
-  // A family member calling for a parent/relative by full name from a number no account
-  // carries links the call to that person's account when exactly one live customer has that
-  // first and last name (owner ruling 2026-10-07). Ships DARK: off unless exactly 'true'.
-  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
-  // callFamilyNameLinkLive() below. Links a call to an account — owner-flip only.
-  callFamilyNameLink: process.env.GATE_CALL_FAMILY_NAME_LINK === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -5450,17 +5444,6 @@ function callFirstNameAdvisoryLive() {
   return process.env.GATE_CALL_FIRST_NAME_ADVISORY === 'true';
 }
 
-// GATE_CALL_FAMILY_NAME_LINK read at CALL time — strict `=== 'true'`, dark by default
-// (owner ruling 2026-10-07, option A). The canonical reader for
-// server/services/call-family-name-link.js, called from call-recording-processor.js Step 3:
-// a caller the extraction marks family_member who names the account holder by first and last
-// name, from a number no account carries, links the call to the ONE live customer with that
-// name (more or fewer: no link, an advisory card lists the candidates). Off, byte-identical
-// to before. The `callFamilyNameLink` gates-map entry above is for logGateStatus only.
-function callFamilyNameLinkLive() {
-  return process.env.GATE_CALL_FAMILY_NAME_LINK === 'true';
-}
-
 // GATE_SIGNUP_SINGLE_EMAIL read at CALL time — strict `=== 'true'`, dark by
 // default in every environment (owner-approved 2026-09-29; the owner flips it
 // after previewing the template). The canonical reader for the one-signup-email
@@ -5822,7 +5805,6 @@ module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callCommercialDictatedBookingLive = callCommercialDictatedBookingLive;
 module.exports.callCommercialAssessmentBookingLive = callCommercialAssessmentBookingLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
-module.exports.callFamilyNameLinkLive = callFamilyNameLinkLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;

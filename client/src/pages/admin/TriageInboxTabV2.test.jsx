@@ -375,6 +375,34 @@ describe('ConfirmEvidence — missing first name', () => {
   });
 });
 
+describe('ConfirmEvidence — family account suggestions', () => {
+  const A = '11111111-2222-4333-8444-555555555555';
+  const B = '66666666-7777-4888-8999-000000000000';
+  const payload = {
+    flag: 'family_account_candidates',
+    caller_name: 'Dana Lee',
+    caller_phone: '+19415550101',
+    account_holder_name: 'Angelina Testerson',
+    holder_candidates: [
+      { id: A, name: 'Angelina Testerson', city: 'Sarasota', address_matches: true },
+      { id: B, name: 'Angelina Testerson', city: 'Bradenton', address_matches: false },
+    ],
+    customer_ids: [A, B],
+    reason: 'Confirm, then link the call to this account.',
+  };
+  it('shows the caller, the named holder, each account with the address mark, and an Open customer link per account', () => {
+    render(<ConfirmEvidence reasonCode="family_account_candidates" payload={payload} />);
+    expect(screen.getByText(/Dana Lee · \+19415550101/)).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Sarasota · address matches')).toBeInTheDocument();
+    expect(screen.getByText('Angelina Testerson · Bradenton')).toBeInTheDocument();
+    expect(screen.getByText(/Confirm, then link the call to this account/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open customer 1' })).toHaveAttribute('href', `/admin/customers?customerId=${A}`);
+    expect(screen.getByRole('link', { name: 'Open customer 2' })).toHaveAttribute('href', `/admin/customers?customerId=${B}`);
+    expect(screen.queryByText(/Add first name on/)).not.toBeInTheDocument();
+  });
+});
+
 describe('ConfirmEvidence — dispute recovery task', () => {
   it('names the promised follow-up the hold kept from booking', () => {
     render(<ConfirmEvidence payload={{

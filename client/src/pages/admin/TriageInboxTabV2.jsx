@@ -108,7 +108,7 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
   // not send the office to edit some other account.
   // The server resolves each listed customer to the record to open (a merged-away one opens
   // its survivor); older responses fall back to the ids on the card.
-  const firstNameCustomerIds = reasonCode === "missing_first_name"
+  const firstNameCustomerIds = reasonCode === "missing_first_name" || reasonCode === "family_account_candidates"
     ? [...new Set((Array.isArray(openCustomerIds) ? openCustomerIds
       : Array.isArray(p.customer_ids) ? p.customer_ids : [p.customer_id])
       .map((id) => String(id || "")).filter((id) => UUID_PATTERN.test(id)))]
@@ -134,7 +134,17 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
     ? p.secondary_contacts.slice(1).filter((c) => c && typeof c === "object")
     : [];
   const rows = [
-    firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
+    // family_account_candidates (suggest-only): who called, who they named, and each live account with
+    // that name. The "Open customer" links below use the same customer_ids shape; staff confirm, then
+    // link the call with the existing relink action.
+    reasonCode === "family_account_candidates" && p.caller_name && { label: "Caller", value: [p.caller_name, p.caller_phone || p.caller_callback_phone].filter(Boolean).join(" · ") },
+    reasonCode === "family_account_candidates" && p.account_holder_name && { label: "Named", value: p.account_holder_name },
+    ...(reasonCode === "family_account_candidates" && Array.isArray(p.holder_candidates) ? p.holder_candidates : []).map((c, i) => ({
+      label: i === 0 ? "Account" : `Account (${i + 1})`,
+      value: [c.name, c.city, c.address_matches === true ? "address matches" : null].filter(Boolean).join(" · "),
+    })),
+    reasonCode === "family_account_candidates" && p.reason && { label: "Next", value: p.reason },
+    reasonCode !== "family_account_candidates" && firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
     // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured

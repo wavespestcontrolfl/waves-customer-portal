@@ -7208,12 +7208,8 @@ async function backfillLinkedCustomerFromExtraction({ customerId, existing, extr
   return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
 }
 
-async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extractedIn = {}, callerPhoneIn = null, { suppressPhone = false, suppressCallerIdentity = false } = {}) {
+async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
   if (!customerId) return customer;
-  // suppressCallerIdentity (a family-linked call, GATE_CALL_FAMILY_NAME_LINK): the caller is
-  // not the account holder, so the caller's name, number and email never fill the record.
-  const extracted = suppressCallerIdentity ? { ...extractedIn, first_name: null, last_name: null, phone: null, email: null } : extractedIn;
-  const callerPhone = suppressCallerIdentity ? null : callerPhoneIn;
   const updates = {};
   if (!customer.first_name && extracted.first_name) updates.first_name = capitalizeName(extracted.first_name);
   if (!customer.last_name && extracted.last_name) updates.last_name = capitalizeName(extracted.last_name);
@@ -12460,31 +12456,16 @@ const CallRecordingProcessor = {
       && !!String(extracted.last_name || '').trim()
       && !addressRecovery?.recovered
       && firstNameAdvisoryAddressOk(effectiveAddressValidation, extracted, v2CanonicalExtraction ? v2StatedServiceAddressRaw : null);
-    // GATE_CALL_FAMILY_NAME_LINK (owner ruling 2026-10-07): a family member who calls for a parent
-    // by full name links to that person's account. The decisions live in call-family-name-link.js.
-    // `familyNameLink` (the holder's name key) is read by the steps below so the caller's identity
-    // never fills the holder's record and the holder is never filed as a contact on their own account.
-    let familyNameLink = null;
-    const adoptFamilyNameLink = (context) => {
-      familyNameLink = context;
-      // The caller's consent is not the holder's: this call sends the holder no confirmation or
-      // card-request text, and the caller (who has no account here) gets none either.
-      v2SmsBlocked = true;
-      v2SmsClearedByImpliedConsent = false;
-      v2SmsConsentExplicit = false;
-    };
-    const tryFamilyNameLink = async () => {
-      const out = await require('./call-family-name-link').linkFamilyCall({
-        call, procToken, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw,
-        phone, v2Primary: callExtractionV2PrimaryEnabled(), isOutbound: isOutboundCall(call),
+    // A family member who named the account holder by full name: ONE advisory card listing the live
+    // accounts with that name (suggest-only; the office links the call). Reads the state BEFORE this
+    // pass creates a customer for the caller, writes nothing else.
+    if (!customerLinkOverride) {
+      await require('./call-family-name-link').fileFamilyAccountCard({
+        call, extracted, v2CanonicalExtraction, statedAddress: v2StatedServiceAddressRaw, phone, isOutbound: isOutboundCall(call),
       });
-      if (!out) return null;
-      adoptFamilyNameLink(out.context);
-      return out.customer;
-    };
+    }
     const sharedPhoneAmbiguity = {};
     let phoneMatchedThisPass = false;
-    let familyLinked = null;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -12535,10 +12516,6 @@ const CallRecordingProcessor = {
           .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
           .ignore()
           .catch((triageErr) => logger.warn(`[call-proc] shared-phone triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
-      } else if (!isOutboundCall(call) && (familyLinked = await tryFamilyNameLink())) {
-        // Linked to the named family member's account (GATE_CALL_FAMILY_NAME_LINK): no new
-        // customer, no caller fields written onto the account holder's record.
-        customerId = familyLinked.id;
       } else if ((extracted.first_name || firstNameAdvisoryCreate) && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
         // Create new customer. NEVER from a voicemail — a one-sided message
         // transcription is too lossy to mint a customer record from (the Josh
@@ -12759,13 +12736,6 @@ const CallRecordingProcessor = {
       }
     }
 
-    // A call this feature linked on an earlier pass keeps its protections on a reprocess (from the
-    // persisted marker), whatever the gate says now.
-    if (!familyNameLink && customerId && !explicitUnlink) {
-      const restored = require('./call-family-name-link').familyLinkContextFromCall(call, customerId);
-      if (restored) adoptFamilyNameLink(restored);
-    }
-
     // Pre-linked calls (call.customer_id set at ring time by the inbound
     // webhook, an operator link, or the transcript-name reconciliation
     // above) skipped the phone-match branch entirely, so a capture on a
@@ -12854,8 +12824,7 @@ const CallRecordingProcessor = {
     // contact info, but the office should confirm it before relying on it —
     // and when the persistence gate below is off, this triage item is the ONLY
     // surface carrying the second contact besides the lead's extracted_data.
-    if (callSecondaryContact && !(familyNameLink?.holderKey && require('./call-family-name-link').fullNameKey(callSecondaryContact) === familyNameLink.holderKey)
-        && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
+    if (callSecondaryContact && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
       bridgeNeedsConfirmation.push('secondary_contact_captured');
       try {
         const secondaryTriageItem = buildTriageItem({
@@ -14236,9 +14205,7 @@ const CallRecordingProcessor = {
       && callSecondaryContacts.some(onSiteOptinAskTrigger))
       ? await require('./recipient-optin').isOptinRailLive()
       : false;
-    // A family-linked call saves nobody on the holder's account (the caller, a copy of the caller,
-    // or the holder): the FYI card carries the caller and the office adds contacts by hand.
-    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length && !familyNameLink) {
+    if (process.env.GATE_CALL_SECONDARY_CONTACT === 'true' && customerId && callSecondaryContacts.length) {
       // Every extracted party (up to 3), in notification-centrality order —
       // each entry passes the SAME per-contact gates (wants_notifications,
       // dedup, cross-customer, empty slot). A full set of slots does not end
@@ -14473,16 +14440,11 @@ const CallRecordingProcessor = {
       && String(customerId || call.customer_id) === String(call.customer_id))
       ? contactCasBaselineAtClaim
       : null;
-    // A family-linked call is the caller's: their name, number and email are never staged as
-    // field candidates on the holder's record.
-    const stagingInput = familyNameLink
-      ? require('./call-family-name-link').scrubCallerIdentity(extracted, v2ExtractionForAudit)
-      : { extracted, v2Extraction: v2ExtractionForAudit };
     const candidateStaging = await stageCustomerFieldCandidates({
       callId: call.id,
       customerId: customerId || call.customer_id || null,
-      extraction: stagingInput.extracted,
-      v2Extraction: stagingInput.v2Extraction,
+      extraction: extracted,
+      v2Extraction: v2ExtractionForAudit,
       // Token-fences the value-keyed dedupe's relink of pending rows: a
       // stale pass that lost its claim must not rewrite a candidate's
       // linkage after the owning pass relinked it (codex #3413 r18).
@@ -17318,9 +17280,7 @@ const CallRecordingProcessor = {
       try {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
-          // A family-linked call is the CALLER's, on the account holder's record: the caller's
-          // name, number and email never become the holder's (the caller is a service contact).
-          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified, suppressCallerIdentity: !!familyNameLink });
+          customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           // Email advisory (owner ruling 2026-07-31): file the "collect the
           // email" card whenever the email is missing — INDEPENDENT of the
@@ -21350,15 +21310,7 @@ const CallRecordingProcessor = {
     // the only thing the release paths read.
     let dripHoldRecorded = null;
     let newsletterHoldRecorded = null;
-    if (familyNameLink) {
-      // A family-linked call is the CALLER's, on the holder's account (GATE_CALL_FAMILY_NAME_LINK):
-      // the caller's email and name are not the holder's and the caller gave no consent for them, so
-      // no first-touch drip, no hold row and no newsletter DOI for the holder from this call. The
-      // marker restores this on a reprocess.
-      logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: family-linked call`);
-      beehiivResult = { skipped: 'family_link' };
-      newsletterCandidate = null;
-    } else if (customerId && extracted.email && v2EmailBlocked) {
+    if (customerId && extracted.email && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
     } else if (customerId && extracted.email
