@@ -465,7 +465,26 @@ export function LawnProgramLine({ snapshot = null }) {
     <Card>
       <CardTitle>This time of year</CardTitle>
       <p style={{ margin: 0, fontSize: 14.5, color: BODY, lineHeight: 1.55 }}>{text}</p>
+      {snapshot.seasonalDetail ? <ProgramDetail detail={snapshot.seasonalDetail} /> : null}
     </Card>
+  );
+}
+
+// GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06): the month's "Why now", under
+// the program line. The server
+// sends snapshot.seasonalDetail only while the gate is live.
+function ProgramDetail({ detail }) {
+  const paragraph = (text) => <p style={{ margin: 0, fontSize: 16, color: BODY, lineHeight: 1.55 }}>{text}</p>;
+  const section = (label, body) => (
+    <div style={{ marginTop: 14 }}>
+      <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>{label}</div>
+      {body}
+    </div>
+  );
+  return (
+    <>
+      {detail.whyNow ? section('Why now', paragraph(detail.whyNow)) : null}
+    </>
   );
 }
 

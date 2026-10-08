@@ -1,0 +1,104 @@
+// get_protocol (protocol-reader) under GATE_LAWN_V13: bahia has no program, so the reader says so
+// and no longer tells callers to ask for it. Gate off, the old note and the bahia track are unchanged.
+const protocolsJson = require('../config/protocols.json');
+const { getProtocol, normalizeLawnTrack, LAWN_TRACK_ALIASES } = require('../services/protocol-reader');
+
+afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+describe('gate on', () => {
+  beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+
+  test.each(['bahia', 'D', 'd_bahia', 'D_Bahia'])('lawn_track %s: no program, no protocol, and the note says why', (lawn_track) => {
+    const result = getProtocol({ service_type: 'lawn', lawn_track });
+    expect(result.protocol).toBeUndefined();
+    expect(result.no_program).toBe(true);
+    expect(result.available_tracks).toEqual(['st_augustine', 'bermuda', 'zoysia']);
+    expect(result.note).toMatch(/Bahiagrass has no lawn program under v13/);
+    expect(result.note).toMatch(/Celsius/);
+    expect(result.note).not.toMatch(/Specify/);
+  });
+
+  test('an unknown track lists only the tracks that exist and never offers bahia', () => {
+    const result = getProtocol({ service_type: 'lawn', lawn_track: 'nope' });
+    expect(result.available_tracks).toEqual(['st_augustine', 'bermuda', 'zoysia']);
+    expect(result.note).toContain('st_augustine, bermuda, zoysia');
+    expect(result.note).not.toMatch(/D = Bahia/);
+    expect(result.no_program).toBeUndefined();
+  });
+
+  test('the other tracks still resolve', () => {
+    for (const lawn_track of ['st_augustine', 'bermuda', 'zoysia', 'C1']) expect(getProtocol({ service_type: 'lawn', lawn_track }).protocol).toBeDefined();
+  });
+
+  test('the aliases stay in the table for the old program', () => {
+    expect(LAWN_TRACK_ALIASES).toMatchObject({ d: 'bahia', d_bahia: 'bahia' });
+  });
+});
+
+describe('gate off', () => {
+  test('bahia and its aliases resolve to the old bahia track, and the note is the old text', () => {
+    expect(normalizeLawnTrack('D')).toBe('bahia');
+    expect(getProtocol({ service_type: 'lawn', lawn_track: 'bahia' }).protocol).toBe(protocolsJson.lawn.bahia);
+    const unknown = getProtocol({ service_type: 'lawn', lawn_track: 'nope' });
+    expect(unknown.available_tracks).toEqual(Object.keys(protocolsJson.lawn));
+    expect(unknown.note).toBe('Specify st_augustine, bermuda, zoysia, or bahia (legacy A/B = St. Augustine, C1 = Bermuda, C2 = Zoysia, D = Bahia).');
+  });
+});
+
+// loadCustomerGrassContext / resolveTrackKey feed the pre-visit brief, the live assessment and the
+// service report context: bahia in ANY recorded field, either direction, leaves no track under v13.
+describe('resolveTrackKey and loadCustomerGrassContext', () => {
+  const { resolveTrackKey, loadCustomerGrassContext } = require('../services/lawn-grass-context');
+  const fakeKnex = (profile, customer = {}) => (table) => {
+    const rows = table === 'customer_turf_profiles' ? [profile].filter(Boolean) : [customer];
+    const b = { where: () => b, first: () => Promise.resolve(rows[0] || null), catch: () => b };
+    b.then = (resolve) => Promise.resolve(rows[0] || null).then(resolve);
+    return b;
+  };
+  const CONFLICTS = [
+    ['bahia', 'st_augustine'], ['st_augustine', 'bahia'], ['bahia', 'zoysia'], ['bermuda', 'bahia'], ['bahia', null], [null, 'bahia'], ['bahia', 'bahia'],
+  ];
+
+  // Track identity (historical and report readers) does not follow the gate; `noProgram` (planning) does.
+  test.each(CONFLICTS)('gate on: grass_type %s with track_key %s keeps its identity and is a no-program lawn', async (grass_type, track_key) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const identity = resolveTrackKey(track_key, grass_type);
+    const gateOff = (() => { delete process.env.GATE_LAWN_V13; const v = resolveTrackKey(track_key, grass_type); process.env.GATE_LAWN_V13 = 'true'; return v; })();
+    expect(identity).toBe(gateOff);
+    const ctx = await loadCustomerGrassContext('cust-1', fakeKnex({ grass_type, track_key, active: true }));
+    expect(ctx.trackKey).toBe(identity);
+    expect(ctx.noProgram).toBe(true);
+  });
+
+  test('gate on: other grass is unaffected, and a mixed lawn still has no track of its own', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    expect(resolveTrackKey('zoysia', 'zoysia')).toBe('zoysia');
+    expect(resolveTrackKey(null, 'st_augustine')).toBe('st_augustine');
+    expect(resolveTrackKey(null, 'mixed')).toBeNull();
+  });
+
+  test('gate off: the old resolution (the explicit track key wins, bahia is a track)', () => {
+    expect(resolveTrackKey('st_augustine', 'bahia')).toBe('st_augustine');
+    expect(resolveTrackKey(null, 'bahia')).toBe('bahia');
+  });
+
+  // The customer's grass context tells planning readers a bahia lawn has no program (the plan engine's rule).
+  test.each([
+    [{ grass_type: 'bahia', track_key: 'st_augustine' }, null, true],
+    [{ grass_type: 'st_augustine', track_key: 'bahia' }, null, true],
+    [{ grass_type: 'bahia', track_key: null }, null, true],
+    [{ grass_type: 'zoysia', track_key: 'zoysia' }, null, false],
+    [null, 'Argentine Bahia', true],
+    // a profile that records a grass/track outranks the legacy lawn text
+    [{ grass_type: 'zoysia', track_key: 'zoysia' }, 'Bahia', false],
+  ])('gate on: profile %j with legacy text %s -> noProgram %s', async (profile, legacy, expected) => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const ctx = await loadCustomerGrassContext('cust-1', fakeKnex(profile && { ...profile, active: true }, { lawn_type: legacy }));
+    expect(ctx.noProgram).toBe(expected);
+  });
+
+  test('gate off: noProgram is never set', async () => {
+    const ctx = await loadCustomerGrassContext('cust-1', fakeKnex({ grass_type: 'bahia', active: true }));
+    expect(ctx.noProgram).toBe(false);
+  });
+});

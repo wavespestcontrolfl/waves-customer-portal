@@ -29,7 +29,12 @@ const SERVICE = {
 // the same equality filters the resolver builds.
 function makeKnex(rows) {
   return (table) => {
-    expect(['lawn_assessments', 'property_preferences']).toContain(table);
+    expect(['lawn_assessments', 'property_preferences', 'service_records']).toContain(table);
+    // The Visit Summary key component reads the record's notes for a partial row (none frozen here).
+    if (table === 'service_records') {
+      const recordChain = { where: () => recordChain, async first() { return { structured_notes: null }; } };
+      return recordChain;
+    }
     if (table === 'property_preferences') {
       const prefsChain = { where: () => prefsChain, orderBy: () => prefsChain, async first() { return null; } };
       return prefsChain;

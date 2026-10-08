@@ -78,10 +78,10 @@ describeDb('the v13 plan through PostgreSQL', () => {
     for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
   });
 
-  async function plannedVisit(changes = {}) {
+  async function plannedVisit(changes = {}, turf = { grass_type: 'bermuda', track_key: 'bermuda' }) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
-    await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: 'bermuda', track_key: 'bermuda', lawn_sqft: 10000 });
+    await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, ...turf, lawn_sqft: 10000 });
     return f.visit(0, { scheduled_date: '2026-05-12', ...changes });
   }
   const plan = (visit) => buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true });
@@ -137,6 +137,50 @@ describeDb('the v13 plan through PostgreSQL', () => {
     }
   });
 
+  // Celsius and Blindside are not labeled for bahiagrass, so v13 has no bahia track (owner 2026-10-06):
+  // an explicit bahia lawn plans nothing and never borrows the St. Augustine program.
+  describe.each(PREREQ)('an explicit bahia lawn: completion defaults %s, property history %s', (completion, history) => {
+    test.each([
+      ['grass_type', { grass_type: 'bahia', track_key: null }], ['track_key', { grass_type: null, track_key: 'bahia' }],
+      ['grass_type bahia over track_key st_augustine', { grass_type: 'bahia', track_key: 'st_augustine' }],
+      ['track_key bahia over grass_type st_augustine', { grass_type: 'st_augustine', track_key: 'bahia' }],
+    ])('recorded by %s: the bahia block, no products, no amounts', async (_name, turf) => {
+      setGates({ v13: 'on', completion, history });
+      const result = await plan(await plannedVisit({}, turf));
+      expect(codes(result)).toContain('lawn_v13_bahia_no_program');
+      expect(result.status).toBe('blocked');
+      expect(result.mixCalculator.items).toEqual([]);
+      expect(result.protocol.base).toEqual([]);
+      expect(result.protocol.conditional).toEqual([]);
+      expect(JSON.stringify(result.mixCalculator.items) + JSON.stringify(result.protocol)).not.toMatch(/"amount":\s*[1-9]/);
+    });
+
+    test('a bahia lawn pinned to a protocol assignment reads no protocol window and no products', async () => {
+      setGates({ v13: 'on', completion, history });
+      const pinned = { lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'may_v13' };
+      const result = await plan(await plannedVisit(pinned, { grass_type: 'bahia', track_key: 'st_augustine' }));
+      expect(codes(result)).toContain('lawn_v13_bahia_no_program');
+      expect(result.protocol.structured ?? null).toBeNull();
+      expect(result.mixCalculator.items).toEqual([]);
+      expect(result.protocol.base).toEqual([]);
+      // The same assignment on a lawn that has a program is read as before.
+      const fine = await plan(await plannedVisit(pinned));
+      expect(fine.protocol.structured.version).toBe(LAWN_V13_VERSION);
+    });
+
+    test('a mixed lawn still plans from the one program (the any-grass fallback), with no bahia block', async () => {
+      setGates({ v13: 'on', completion, history });
+      const result = await plan(await plannedVisit({}, { grass_type: 'mixed', track_key: null }));
+      expect(codes(result)).not.toContain('lawn_v13_bahia_no_program');
+    });
+  });
+
+  test('gate off: an explicit bahia lawn carries no bahia block', async () => {
+    setGates({ v13: 'off' });
+    const result = await plan(await plannedVisit({}, { grass_type: 'bahia', track_key: null }));
+    expect(codes(result)).not.toContain('lawn_v13_bahia_no_program');
+  });
+
   test('gate off: a visit pinned to the older version plans exactly as before, with no v13 block', async () => {
     setGates({ v13: 'off' });
     const result = await plan(await plannedVisit({ lawn_protocol_key: KEY, lawn_protocol_version: OLD_VERSION, lawn_protocol_window_key: 'fixture_5' }));
@@ -167,6 +211,30 @@ describeDb('the v13 plan through PostgreSQL', () => {
     expect(context.window.key).toBe('fixture_5');
     // The planner, asked the same question for the same visit, reads the staged v13 protocol.
     expect((await plan(visit)).protocol.structured.version).toBe(LAWN_V13_VERSION);
+  });
+
+  // Track IDENTITY is separate from live availability: a historical report for an unassigned bahia lawn
+  // keeps its bahia guidance (the old active bahia protocol) across the gate flip, while planning refuses.
+  test('an unassigned bahia report keeps its bahia protocol context with the gate on or off; planning refuses', async () => {
+    const [bahiaProtocol] = await knex('lawn_protocols').insert({ protocol_key: 'fixture_bahia_old', version: OLD_VERSION, name: 'Fixture old bahia', status: 'active', grass_track: 'bahia', region: 'swfl' }).returning('*');
+    await knex('lawn_protocol_windows').insert({ lawn_protocol_id: bahiaProtocol.id, month: 5, window_key: 'bahia_5', title: 'bahia_5', visit_type: 'fixture' });
+    try {
+      for (const v13 of ['on', 'off']) {
+        setGates({ v13 });
+        const visit = await plannedVisit({}, { grass_type: 'bahia', track_key: null });
+        const record = { id: visit.id, customer_id: visit.customer_id, service_date: '2026-05-12', scheduled_service_id: visit.id };
+        const context = await buildLawnProtocolReportContext(record, knex, new Date('2026-05-12T16:00:00Z'));
+        expect({ v13, key: context?.window?.key, track: context?.grassTrack }).toEqual({ v13, key: 'bahia_5', track: 'bahia' });
+      }
+      // Planning, gate on: no program for this lawn.
+      setGates({ v13: 'on' });
+      const result = await plan(await plannedVisit({}, { grass_type: 'bahia', track_key: null }));
+      expect(codes(result)).toContain('lawn_v13_bahia_no_program');
+      expect(result.mixCalculator.items).toEqual([]);
+    } finally {
+      await knex('lawn_protocol_windows').where({ lawn_protocol_id: bahiaProtocol.id }).del();
+      await knex('lawn_protocols').where({ id: bahiaProtocol.id }).del();
+    }
   });
 
   test('a service report for a record whose ledger row names v13 still shows v13 (its own record)', async () => {

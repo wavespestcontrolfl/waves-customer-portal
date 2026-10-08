@@ -68,18 +68,22 @@ const FALL_FEED = 'the fall feeding';
 const SPOT_DISEASE = 'spot treatment for disease and weeds where needed';
 const V13_BARRIER = 'a pre-emergent weed-barrier application where it fits the property';
 const V13_FALL_BARRIER = 'a pre-emergent weed barrier where it fits the property';
+// June, August and September micronutrient passes are skipped where a city bars all turf fertilizing
+// (North Port, until the city confirms), so the claim carries the same qualifier as the barrier.
+const V13_SUMMER_MICROS = 'a micronutrient feeding where it fits the property';
+const V13_JUNE_MICROS_BARRIER = 'a micronutrient feeding and a pre-emergent weed-barrier application where it fits the property';
 const PROGRAM_LINES_V13 = {
   1: L(`In January the program focuses on ${V13_BARRIER} and a micronutrient feeding, plus ${SPOT_DISEASE}.`, { pre_emergent: V13_BARRIER, micros: 'a micronutrient feeding', fungicide: SPOT_DISEASE, broadleaf: SPOT_DISEASE }),
   2: L('In February the program focuses on a feeding as the lawn greens up, plus spot weed control where needed.', { feed: 'a feeding as the lawn greens up', broadleaf: 'spot weed control where needed' }),
   3: L(`In March the program focuses on ${V13_BARRIER} and a micronutrient feeding, plus spot treatment for root disease and weeds where needed.`, { pre_emergent: V13_BARRIER, micros: 'a micronutrient feeding', fungicide: 'spot treatment for root disease and weeds where needed', broadleaf: 'spot treatment for root disease and weeds where needed' }),
   4: L('In April the program focuses on a light feeding, plus spot treatment for root disease and chinch bugs where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for root disease and chinch bugs where needed', insect_spot: 'spot treatment for root disease and chinch bugs where needed' }),
   5: L('In May the program focuses on an insect treatment where it fits the property, plus spot treatment for chinch bugs, weeds and dry spots where needed.', { insect_treatment: 'an insect treatment where it fits the property', insect_spot: 'spot treatment for chinch bugs, weeds and dry spots where needed', broadleaf: 'spot treatment for chinch bugs, weeds and dry spots where needed', dry_spots: 'spot treatment for chinch bugs, weeds and dry spots where needed' }),
-  6: L(`In June the program focuses on a micronutrient feeding and ${V13_BARRIER}, plus spot treatment for disease and chinch bugs where needed.`, { micros: 'a micronutrient feeding', pre_emergent: V13_BARRIER, fungicide: 'spot treatment for disease and chinch bugs where needed', insect_spot: 'spot treatment for disease and chinch bugs where needed' }),
+  6: L(`In June the program focuses on ${V13_JUNE_MICROS_BARRIER}, plus spot treatment for disease and chinch bugs where needed.`, { micros: V13_JUNE_MICROS_BARRIER, pre_emergent: V13_JUNE_MICROS_BARRIER, fungicide: 'spot treatment for disease and chinch bugs where needed', insect_spot: 'spot treatment for disease and chinch bugs where needed' }),
   7: L('In July the program focuses on an inspection of the whole lawn, plus spot treatment for caterpillars, leaf spot disease and chinch bugs where needed.', { scouting_visit: 'an inspection of the whole lawn', insect_spot: 'spot treatment for caterpillars, leaf spot disease and chinch bugs where needed', fungicide: 'spot treatment for caterpillars, leaf spot disease and chinch bugs where needed' }),
-  8: L('In August the program focuses on a micronutrient feeding, plus spot treatment for leaf spot disease and caterpillars where needed.', { micros: 'a micronutrient feeding', fungicide: 'spot treatment for leaf spot disease and caterpillars where needed', insect_spot: 'spot treatment for leaf spot disease and caterpillars where needed' }),
-  9: L('In September the program focuses on a micronutrient feeding, plus spot treatment for root disease and caterpillars where needed.', { micros: 'a micronutrient feeding', fungicide: 'spot treatment for root disease and caterpillars where needed', insect_spot: 'spot treatment for root disease and caterpillars where needed' }),
+  8: L(`In August the program focuses on ${V13_SUMMER_MICROS}, plus spot treatment for leaf spot disease and caterpillars where needed.`, { micros: V13_SUMMER_MICROS, fungicide: 'spot treatment for leaf spot disease and caterpillars where needed', insect_spot: 'spot treatment for leaf spot disease and caterpillars where needed' }),
+  9: L(`In September the program focuses on ${V13_SUMMER_MICROS}, plus spot treatment for root disease and caterpillars where needed.`, { micros: V13_SUMMER_MICROS, fungicide: 'spot treatment for root disease and caterpillars where needed', insect_spot: 'spot treatment for root disease and caterpillars where needed' }),
   10: L(`In October the program focuses on ${FALL_FEED} with ${V13_FALL_BARRIER}, plus spot treatment for large patch, grubs and weeds where needed.`, { feed: FALL_FEED, pre_emergent: V13_FALL_BARRIER, fungicide: 'spot treatment for large patch, grubs and weeds where needed', insect_spot: 'spot treatment for large patch, grubs and weeds where needed', broadleaf: 'spot treatment for large patch, grubs and weeds where needed' }),
-  11: L('In November the program focuses on a feeding, plus spot treatment for large patch and sedge where needed.', { feed: 'a feeding', fungicide: 'spot treatment for large patch and sedge where needed', broadleaf: 'spot treatment for large patch and sedge where needed' }),
+  11: L('In November the program focuses on a feeding, plus spot treatment for large patch where needed.', { feed: 'a feeding', fungicide: 'spot treatment for large patch where needed' }),
   12: L('In December the program focuses on a light feeding, plus spot treatment for large patch and weeds where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for large patch and weeds where needed', broadleaf: 'spot treatment for large patch and weeds where needed' }),
 };
 
@@ -214,8 +218,66 @@ function buildProgramLine({ month = null, applications = [], nitrogenApplied = n
   return PROGRAM_LINES_V13[m].line;
 }
 
+
+// GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06: "add more detail here ... use the
+// labels, seasonality"): under the v13 month sentence, why this month's step
+// fits the season. Each line restates the v13
+// month step (server/config/lawn-protocol-v13.json) by category, never a
+// product name or rate, plus Southwest Florida seasons: dry season Nov-May,
+// rainy season Jun-Sep, summer nitrogen limits Jun-Sep.
+const PROGRAM_DETAIL_V13 = Object.freeze({
+  1: Object.freeze({
+    whyNow: 'January brings the coolest weather. Winter weeds are sprouting while the grass grows slowly, so a weed barrier goes down where it fits the property and a micronutrient feeding supports color without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
+  }),
+  2: Object.freeze({
+    whyNow: 'In February the lawn starts to green up as daylight increases. A feeding supports that green-up, and we spot treat weeds while they are small.',
+  }),
+  3: Object.freeze({
+    whyNow: 'In March the soil warms and summer weeds such as crabgrass start to sprout. The spring weed barrier goes down now where it fits the property, ahead of them, with a feeding. Spring is also when the root disease take-all can show, so mapped trouble areas get a treatment.',
+  }),
+  4: Object.freeze({
+    whyNow: 'April warms quickly and the grass is growing hard, so it gets a light feeding where local fertilizer rules allow. Chinch bugs start to wake up in hot, sunny spots, and we check for them and treat where we find them.',
+  }),
+  5: Object.freeze({
+    whyNow: 'May, before the rains, is peak season for chinch bugs and other lawn insects in hot, sunny turf. The sunny turf gets an insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
+  }),
+  6: Object.freeze({
+    whyNow: 'The rainy season starts in June, and local summer fertilizer rules limit nitrogen through September. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds where it fits the property. Heat and rain bring gray leaf spot and chinch bugs, which we spot treat.',
+  }),
+  7: Object.freeze({
+    whyNow: 'July is a scouting visit. Summer fertilizer limits mean no whole-lawn feeding, so we inspect the whole lawn and treat problem spots only, such as caterpillars, leaf spot or chinch bugs.',
+  }),
+  8: Object.freeze({
+    whyNow: 'Late summer heat and rain continue. A micronutrient feeding keeps the color up, and we treat leaf spot or caterpillar spots where we find them.',
+  }),
+  9: Object.freeze({
+    whyNow: 'September is the end of the rainy season. A micronutrient feeding keeps the color up, mapped take-all areas get a fall treatment, and we watch for caterpillars.',
+  }),
+  10: Object.freeze({
+    whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The fall feeding goes down now, with a weed barrier where it fits the property, so the barrier is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
+  }),
+  11: Object.freeze({
+    whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, mapped large patch areas are treated, and we treat sedge where it shows up.',
+  }),
+  12: Object.freeze({
+    whyNow: 'December brings cooler spells. A light feeding keeps the color up, and we treat any large patch and weed spots.',
+  }),
+});
+
+// The month's detail, only beside a v13 program line (same visits, same month)
+// and only while GATE_LAWN_PROGRAM_DETAIL is live. Watering advice is not part
+// of it: every lawn report already carries the Water This Week card and the
+// visit's label aftercare, which own the watering direction (codex #6091 r5).
+function buildProgramDetail({ month, programLine } = {}) {
+  if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return undefined;
+  const detail = PROGRAM_DETAIL_V13[Number(month)];
+  return detail ? { whyNow: detail.whyNow } : undefined;
+}
+
 module.exports = {
   buildProgramLine,
+  buildProgramDetail,
+  PROGRAM_DETAIL_V13,
   PROGRAM_LINES_V13,
   QUALIFIERS,
   NO_NITROGEN_MONTHS,

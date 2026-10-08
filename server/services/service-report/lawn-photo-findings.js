@@ -103,6 +103,8 @@ function selectPhotoFindings(run, assessment) {
       label: row.label,
       severity: Object.prototype.hasOwnProperty.call(SEVERITY_ORDER, row.severity) ? row.severity : null,
       canDetermine: row.can_determine === false ? false : true,
+      // The read's own confidence, so a caller that dedupes by label judges each row.
+      confidence: row.confidence,
       refs: [...new Set(parseList(row.photo_refs).filter((ref) => Number.isInteger(ref) && ref >= 1 && ref <= 64))],
     }))
     .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3) || a.index - b.index);
