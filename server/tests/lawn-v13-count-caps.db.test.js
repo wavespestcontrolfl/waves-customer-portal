@@ -25,7 +25,7 @@ describe('the recipe text (no database)', () => {
   test('every track states the Arena, Celsius + Certainty and Blindside counts', () => {
     for (const track of Object.values(v13Recipe)) {
       expect(track.notes.join('\n')).toContain('Arena: 0.147 oz per 1,000 sq ft (6.4 oz per acre, the low end of the label\'s turf range; about 1.4 level teaspoons), up to 2 applications per lawn per year at least 8 weeks (56 days) apart (app-enforced). Two applications reach the label\'s yearly limit of 12.8 oz per acre (0.4 lb clothianidin per acre); after that, use bifenthrin, which is not a neonicotinoid.');
-      expect(JSON.stringify(track)).not.toMatch(/2\(ee\)/);
+      expect(track.notes.join('\n')).toContain('Florida 2(ee) recommendation for southern chinch bug (EPA Reg. No. 59639-152; expires December 31, 2028)');
       expect(track.notes.join('\n')).not.toContain('never treat the same area twice');
       const safety = track.safety_rules.join('\n');
       expect(safety).toContain('Celsius, Certainty and Blindside: up to 2 applications per lawn per year each');
