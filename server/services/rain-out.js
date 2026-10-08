@@ -1377,11 +1377,32 @@ async function getOptions(serviceId, { caller = null } = {}) {
 
   // Rain badges — best effort, never blocking. Customer coords first,
   // falling back to nothing (options render without percentages).
+  // Each option shows the chance for ITS hour (the same hourly forecast and
+  // window rule as New Appointment's chips, find-time-hints rainForWindow);
+  // the whole-day number is only the fallback when the hourly feed has no
+  // reading for that hour, and the header's "today" line.
   let outlook = null;
+  let hourly = null;
   try {
-    outlook = await getDailyRainOutlook(service.customer_latitude, service.customer_longitude);
+    [outlook, hourly] = await Promise.all([
+      getDailyRainOutlook(service.customer_latitude, service.customer_longitude),
+      getHourlyRainOutlook(service.customer_latitude, service.customer_longitude).catch(() => null),
+    ]);
   } catch (err) {
     logger.info(`[rain-out] outlook lookup failed for ${serviceId}: ${err.message}`);
+  }
+  // Required here, not at the top: find-time-hints loads this module.
+  const { rainForWindow } = require('./scheduling/find-time-hints');
+  const optionRain = (date, window) => {
+    const hourChance = rainForWindow(hourly, date, window.start, window.end);
+    if (hourChance != null) return { rainChance: hourChance, rainScope: 'hour' };
+    const dayChance = outlook?.[date]?.rainChance ?? null;
+    return { rainChance: dayChance, rainScope: dayChance == null ? null : 'day' };
+  };
+  // "Later today" has the header's whole-day number already: hourly or nothing.
+  for (const opt of sameDay) {
+    const rain = optionRain(opt.date, opt.window);
+    opt.rainChance = rain.rainScope === 'hour' ? rain.rainChance : null;
   }
 
   const days = (dayOptionsRaw || []).slice(0, 3).map((opt) => {
@@ -1394,7 +1415,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
       date: opt.date,
       window,
       display: `${opt.displayDate}, ${displayWindow(window)}`,
-      rainChance: outlook?.[opt.date]?.rainChance ?? null,
+      ...optionRain(opt.date, window),
       shortForecast: outlook?.[opt.date]?.shortForecast ?? null,
     };
   });

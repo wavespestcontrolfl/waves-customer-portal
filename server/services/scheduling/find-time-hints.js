@@ -680,7 +680,7 @@ async function buildHintSummary(plan, everyStart, {
 }) {
   if (!plan.summary) return { summary: undefined, picked };
   const days = summarizeHintDays(everyStart || [], { from: plan.from, to: plan.to, rejectionsByDate, closedDates, offDates });
-  // Only New Appointment shows the best-times rows; other strips skip the
+  // New Appointment and Quick Move show the best-times rows; other strips skip the
   // rain and road-time work (Codex #6045 r2).
   const best = bestRows ? await buildBestRows(days, {
     pickedDate: pickedDate || plan.verdictDate, today, lat: target?.lat, lng: target?.lng, picked, spanMin, pickedEnd, serviceTypes,
