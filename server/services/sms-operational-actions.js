@@ -1006,17 +1006,22 @@ function matchedSlice(rawQuote, description) {
   const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(rawQuote);
   return found ? found[0] : null;
 }
+// Is the matched text one plain phrase? Judged on the ORIGINAL words, before
+// redaction rewrites them. Only two periods are allowed: inside an email
+// address (lowercase domain, so "a@b.com.Then" still ends a sentence) and
+// between two digits (2.5). Every other period, including a bare domain
+// (example.com is a URL the alert rules mean to keep out), and any ! ? or
+// CJK sentence ender, is a break.
+const EMAIL_TOKEN = /[\p{L}\p{N}._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gu;
+function isPlainPhrase(raw) {
+  const rest = raw.replace(/[.!?。！？]+$/u, '').replace(EMAIL_TOKEN, '').replace(/(?<=\p{N})\.(?=\p{N})/gu, '');
+  return !/[.!?。！？]/u.test(rest);
+}
 function headlineWords(quote, rawQuote, description, redact) {
   const compose = require('./admin-alert-compose');
   const raw = matchedSlice(rawQuote, description);
-  const slice = raw && redact(raw).replace(/\s+/g, ' ').trim();
-  // Sentence punctuation means the slice is not one plain phrase. Only a
-  // period INSIDE a word is allowed (between a letter or digit and a lowercase
-  // letter or digit: an email address, 2.5); every other period, and any
-  // ! ? or CJK sentence ender, is a break. A URL still falls back: the alert
-  // rules forbid paths in alert text.
-  const inWordPeriod = /(?<=[\p{L}\p{N}])\.(?=[\p{Ll}\p{N}])/gu;
-  if (slice && !/[.!?。！？]/u.test(slice.replace(inWordPeriod, '')) && !compose.breaksAlertRules(slice)) return slice;
+  const slice = raw && isPlainPhrase(raw) && redact(raw).replace(/\s+/g, ' ').trim().replace(/[.!?。！？]+$/u, '');
+  if (slice && !compose.breaksAlertRules(slice)) return slice;
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }
 
