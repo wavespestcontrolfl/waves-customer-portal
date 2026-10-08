@@ -90,7 +90,14 @@ describeDb('v13 matrix adds round 3 (20261007183000)', () => {
     expect(row.frac_group).toBe('3 + 11');
     expect([Number(row.default_rate_per_1000), row.rate_unit]).toEqual([1.5, 'fl_oz']);
     // The rotation reader sees groups 3 and 11 for this row.
-    expect(productGroups(row)).toEqual([['frac', '3'], ['frac', '11']]);
+    // (The composite reading is the v13 program's: GATE_LAWN_V13 on, read at call time.)
+    const saved = process.env.GATE_LAWN_V13;
+    process.env.GATE_LAWN_V13 = 'true';
+    try {
+      expect(productGroups(row)).toEqual([['frac', '3'], ['frac', '11']]);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = saved;
+    }
   });
 
   test('a second up changes nothing', async () => {

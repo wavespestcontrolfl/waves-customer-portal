@@ -35,13 +35,24 @@ function collectProductIds(sections) {
   return ids;
 }
 
+// GATE_LAWN_V13, read at call time (a suite that mocks feature-gates without the reader reads as off). The composite
+// rotation handling below, the Artavia-then-Headway pair, the protocol-row evidence and the property-scoped pair
+// lookup belong to the v13 lawn program: with the gate off the engine and the job card note behave as they did
+// before it (one group string compared as a whole, the Artavia-twice pair on recorded targets only).
+const v13Rotation = () => require('../config/feature-gates').lawnV13Live?.() === true;
+
 // A group field can name several groups: "3 + 11", "3/11", "11, 3", "28+3A" (a mixed product such as
-// Headway: FRAC 3 and 11). Every comparison is by set intersection, so a group is in the set or not.
+// Headway: FRAC 3 and 11). With the gate on every comparison is by set intersection, so a group is in the set or not;
+// off, the field is one string.
 const GROUP_SPLIT = /\s*(?:[+/,;&]|\band\b)\s*/i;
 function groupSet(value) {
+  if (!v13Rotation()) return [String(value ?? '')].filter(Boolean);
   return String(value ?? '').split(GROUP_SPLIT).map((part) => part.trim()).filter(Boolean);
 }
-const groupInValue = (value, group) => groupSet(value).some((member) => member.toLowerCase() === String(group).toLowerCase());
+// Gate off: the exact string comparison the engine always made.
+const groupInValue = (value, group) => (v13Rotation()
+  ? groupSet(value).some((member) => member.toLowerCase() === String(group).toLowerCase())
+  : String(value || '') === String(group));
 const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function productGroups(product) {
@@ -66,6 +77,18 @@ function productGroups(product) {
 // closeout and plan engine keep their lenient default).
 // scopeToProperty: judge only the applications at `propertyId` (null = visits with no property); the default reads
 // the customer's whole history, which is what the repeat rule itself uses.
+// Scoped by the property FROZEN on the application's ledger row (property_application_history.property_id, written at
+// completion: a later address correction on the visit must not move it); a legacy row with no frozen property falls
+// back to its visit's property (the same rule application-limits.js scopeHistoryToTreatment applies). The query
+// needs `sp` and `sr`; `joinVisit` adds the visit when the query has not joined it.
+function scopeToTreatedProperty(query, propertyId, { joinVisit = false } = {}) {
+  if (joinVisit) query.leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id');
+  query.leftJoin('property_application_history as pah_scope', 'pah_scope.service_product_id', 'sp.id');
+  if (propertyId) query.whereRaw('COALESCE(pah_scope.property_id, ss.property_id) = ?', [propertyId]);
+  else query.whereRaw('COALESCE(pah_scope.property_id, ss.property_id) IS NULL');
+  return query;
+}
+
 async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false, scopeToProperty = false, propertyId = null } = {}) {
   const groupColumn = `${groupType}_group`;
   const tokens = groupSet(groupValue);
@@ -75,11 +98,7 @@ async function latestComparableGroupApplication(knex, customerId, product, group
     .leftJoin('products_catalog as pc', function () {
       this.on('sp.product_name', '=', 'pc.name');
     })
-    .modify((query) => {
-      if (!scopeToProperty) return;
-      query.leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id');
-      if (propertyId) query.where('ss.property_id', propertyId); else query.whereNull('ss.property_id');
-    })
+    .modify((query) => { if (scopeToProperty) scopeToTreatedProperty(query, propertyId, { joinVisit: true }); })
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
@@ -89,7 +108,7 @@ async function latestComparableGroupApplication(knex, customerId, product, group
       for (const token of tokens) {
         this.orWhere(`pc.${groupColumn}`, token);
         // A mixed product's field holds several groups ("3 + 11"): the group is one token of the value.
-        this.orWhereRaw('?? ~* ?', [`pc.${groupColumn}`, `(^|[^0-9a-z])${escapeRegex(token)}($|[^0-9a-z])`]);
+        if (v13Rotation()) this.orWhereRaw('?? ~* ?', [`pc.${groupColumn}`, `(^|[^0-9a-z])${escapeRegex(token)}($|[^0-9a-z])`]);
         if (groupType === 'hrac') this.orWhere('pc.hrac_group_secondary', token);
         if (groupType === 'moa') this.orWhere('sp.moa_group', token);
       }
@@ -201,11 +220,11 @@ function productIsPreEmergent(product, plan) {
 // reads as none, so no exemption.
 // Scoped to the visit's property: a spray at another of the customer's properties is not this
 // property's pair. A visit with no property counts only history that also names none.
-async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate, { strict = false, propertyId = null } = {}) {
+async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate, { strict = false, propertyId = null, v13 = true } = {}) {
   const rows = await savepointRead(knex, (k) => k('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
-    .modify((query) => (propertyId ? query.where('ss.property_id', propertyId) : query.whereNull('ss.property_id')))
+    .modify((query) => scopeToTreatedProperty(query, propertyId))
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
     .where('sr.service_date', '<', serviceDate)
@@ -217,12 +236,30 @@ async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate
   const inSeason = rows.filter((row) => today - dayNumber(row.service_date) <= TAKE_ALL_SEASON_DAYS);
   const found = [];
   for (const row of inSeason) {
-    if (await takeAllEvidence(knex, { targets: row.targets, serviceProductId: row.service_product_id, strict })) found.push(row);
+    // Gate off: recorded targets only (the evidence fallback to the applied protocol row is the v13 program's).
+    const evidence = v13 ? await takeAllEvidence(knex, { targets: row.targets, serviceProductId: row.service_product_id, strict }) : hasTakeAllTarget(row.targets);
+    if (evidence) found.push(row);
   }
   return found;
 }
 
-async function isTakeAllPair(knex, { customerId, propertyId, product, plan, groupType, groupValue, input, serviceDate, strict }) {
+// The pair exemption as it was before the v13 program: Artavia after the same Artavia, both applications with a
+// recorded take-all target, 28 to 45 days apart, the second application of the pair only.
+async function isLegacyTakeAllPair(knex, { customerId, propertyId, product, last, input, serviceDate, strict }) {
+  if (!/\bartavia\b/.test(normalizeText(product.name)) || normalizeText(last.product_name) !== normalizeText(product.name)) return false;
+  if (!hasTakeAllTarget(input.targets) || !hasTakeAllTarget(last.targets)) return false;
+  const history = await takeAllArtaviaHistory(knex, customerId, [product.name], serviceDate, { strict, propertyId, v13: false });
+  if (history.length !== 1) return false;
+  const apart = dayNumber(serviceDate) - dayNumber(history[0].service_date);
+  return apart >= TAKE_ALL_PAIR_MIN_DAYS && apart <= TAKE_ALL_PAIR_MAX_DAYS
+    && dayNumber(history[0].service_date) === dayNumber(last.service_date);
+}
+
+async function isTakeAllPair(knex, ctx) {
+  return v13Rotation() ? isV13TakeAllPair(knex, ctx) : isLegacyTakeAllPair(knex, ctx);
+}
+
+async function isV13TakeAllPair(knex, { customerId, propertyId, product, plan, groupType, groupValue, input, serviceDate, strict }) {
   // The pair is judged at this property: the customer-wide latest application of the group may be another
   // property's, which must not break a valid pair here (the repeat finding itself stays customer-wide).
   const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict, scopeToProperty: true, propertyId });

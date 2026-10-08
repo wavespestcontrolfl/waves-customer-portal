@@ -8,7 +8,8 @@ const jobCard = require('../services/job-card');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const TABLES = ['products_catalog', 'customers', 'scheduled_services', 'service_records', 'service_products',
-  'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'lawn_protocol_products', 'lawn_protocol_windows', 'lawn_protocols'];
+  'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'lawn_protocol_products', 'lawn_protocol_windows', 'lawn_protocols',
+  'property_application_history'];
 const ARTAVIA = 'Artavia 2 SC (Azoxy)';
 const HEADWAY = 'Headway Fungicide';
 
@@ -21,6 +22,10 @@ describeDb('rotation reads on composite groups and take-all evidence from the pr
   let headway;
   let completion;
   let window;
+  const savedGate = process.env.GATE_LAWN_V13;
+  const gate = (on) => { if (on) process.env.GATE_LAWN_V13 = 'true'; else delete process.env.GATE_LAWN_V13; };
+  afterAll(() => { if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate; });
+  beforeEach(() => gate(true));
 
   beforeAll(async () => {
     schema = `matrix_round8_${randomUUID().replace(/-/g, '')}`;
@@ -38,10 +43,14 @@ describeDb('rotation reads on composite groups and take-all evidence from the pr
   afterAll(async () => { if (knex) { await knex.raw('DROP SCHEMA ?? CASCADE', [schema]); await knex.destroy(); } });
 
   // A completed visit that applied `name`, ledgered under a staged row with `gates` (or none), with `targets`.
-  async function priorApplication({ name, date, product, targets = [], gates = null, role = 'fungicide_spot', property = propertyId }) {
+  // `frozen`: the property written on the ledger row at completion (undefined = no ledger row, a legacy visit).
+  async function priorApplication({ name, date, product, targets = [], gates = null, role = 'fungicide_spot', property = propertyId, frozen }) {
     const [visit] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: property, scheduled_date: date, service_type: 'Lawn Care' }).returning('*');
     const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn Care', status: 'completed' }).returning('*');
     const [sp] = await knex('service_products').insert({ service_record_id: record.id, product_name: name, product_category: 'fungicide', targets }).returning('*');
+    if (frozen !== undefined) {
+      await knex('property_application_history').insert({ customer_id: customerId, service_product_id: sp.id, service_record_id: record.id, product_id: product.id, application_date: date, property_id: frozen });
+    }
     if (gates) {
       const [row] = await knex('lawn_protocol_products').insert({
         lawn_protocol_window_id: window.id, product_id: product.id, product_name: name, role, application_mode: 'spot', gates: JSON.stringify(gates),
@@ -51,7 +60,7 @@ describeDb('rotation reads on composite groups and take-all evidence from the pr
     return sp;
   }
   const reset = async () => {
-    for (const table of ['lawn_protocol_product_actuals', 'service_products', 'service_records', 'scheduled_services']) await knex(table).del();
+    for (const table of ['property_application_history', 'lawn_protocol_product_actuals', 'service_products', 'service_records', 'scheduled_services']) await knex(table).del();
     await knex('lawn_protocol_products').del();
   };
   // The planned/applied row for the current application, as the closeout's plan carries it.
@@ -153,6 +162,46 @@ describeDb('rotation reads on composite groups and take-all evidence from the pr
       await reset();
       await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, targets: ['Take-all root rot'] });
       expect(repeats(await check(headway, { plan: planWith(headway, null), targets: ['take-all'], date: '2026-04-13' }))).toEqual([]);
+    });
+
+    test('the pair is scoped by the property FROZEN on the ledger row: a visit moved to another property after completion does not move the pair evidence', async () => {
+      const other = randomUUID();
+      const moveVisit = (sp, to) => knex('scheduled_services').whereIn('id', knex('service_records').where({ id: sp.service_record_id }).select('scheduled_service_id')).update({ property_id: to });
+      // The Artavia was applied here (frozen), then its visit was edited onto another property: still this property's pair.
+      await reset();
+      const here = await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH, frozen: propertyId });
+      await moveVisit(here, other);
+      expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' }))).toEqual([]);
+      // The Artavia was applied elsewhere (frozen), then its visit was edited onto this property: not this property's pair.
+      await reset();
+      const there = await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH, property: other, frozen: other });
+      await moveVisit(there, propertyId);
+      expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' }))).toEqual(['fungicide_frac_rotation_approval']);
+      // A legacy ledger row (no frozen property) falls back to its visit: here counts, elsewhere does not; a visit with no ledger row likewise.
+      for (const frozen of [null, undefined]) {
+        await reset();
+        await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH, frozen });
+        expect({ frozen, codes: repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' })) }).toEqual({ frozen, codes: [] });
+        await reset();
+        await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH, property: other, frozen });
+        expect({ frozen, codes: repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' })) }).toEqual({ frozen, codes: ['fungicide_frac_rotation_approval'] });
+      }
+    });
+
+    test('GATE_LAWN_V13 off: the job card gains no FRAC note for Headway and the engine records no new advisory; Artavia twice needs recorded targets', async () => {
+      gate(false);
+      await reset();
+      await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH });
+      expect(await jobCard._test.rotationNote(knex, { customerId, scheduledDate: '2026-04-13' }, headway)).toBeNull();
+      expect(await latestComparableGroupApplication(knex, customerId, headway, 'frac', '3 + 11', '2026-04-13', { strict: true })).toBeNull();
+      expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' }))).toEqual([]);
+      // Artavia twice, recorded targets on both: exempt as before. Fast Complete (none recorded): a review, row or no row.
+      await reset();
+      await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, targets: ['Take-all'], gates: TAKE_ALL_MARCH, frozen: propertyId });
+      expect(repeats(await check(artavia, { plan: planWith(artavia, TAKE_ALL_APRIL), targets: ['Take-all'], date: '2026-04-13' }))).toEqual([]);
+      expect(repeats(await check(artavia, { plan: planWith(artavia, TAKE_ALL_APRIL), targets: [], date: '2026-04-13' }))).toEqual(['fungicide_frac_rotation_approval']);
+      gate(true);
+      expect(repeats(await check(artavia, { plan: planWith(artavia, TAKE_ALL_APRIL), targets: [], date: '2026-04-13' }))).toEqual([]);
     });
 
     test('the rest of the exemption is unchanged: 28 to 45 days only, the second application only, the same property', async () => {

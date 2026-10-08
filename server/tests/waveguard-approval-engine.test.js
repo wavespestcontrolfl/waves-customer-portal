@@ -51,6 +51,13 @@ class FakeQuery {
     return this;
   }
 
+  // The frozen-property scope: COALESCE(pah_scope.property_id, ss.property_id) = ? / IS NULL. A fake row carries the
+  // visit's property_id and, for a ledgered row, the property frozen at completion (frozen_property_id).
+  whereRaw(sql, bindings) {
+    this.filters.push({ column: '__treated_property', op: /IS NULL/i.test(sql) ? 'null' : '=', value: Array.isArray(bindings) ? bindings[0] : undefined });
+    return this;
+  }
+
   whereNull(column) {
     this.filters.push({ column, op: 'null' });
     return this;
@@ -120,6 +127,7 @@ class FakeQuery {
 }
 
 function valueForColumn(row, column) {
+  if (column === '__treated_property') return row.frozen_property_id ?? row.property_id;
   const key = String(column).replace(/^(pc|sp|sr|ss)\./, '');
   const aliases = {
     customer_id: row.customer_id,
@@ -256,7 +264,44 @@ describe('waveguard approval engine', () => {
       .toContain('Older Celsius WG');
   });
 
+  describe('GATE_LAWN_V13 off: composite groups, the Headway pair and protocol-row evidence are not in play (the engine as before)', () => {
+    const savedGate = process.env.GATE_LAWN_V13;
+    beforeEach(() => { delete process.env.GATE_LAWN_V13; });
+    afterEach(() => { if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate; });
+    const run = (productsCatalog, priorApplications, input, plan = basePlan()) => evaluateWaveGuardManagerApprovals(fakeKnex({ productsCatalog, priorApplications }), {
+      customerId: 'customer-1', service: { service_type: 'Lawn Care' }, plan, serviceDate: input.serviceDate || '2026-06-10', products: [input],
+    });
+    const prior = (changes) => ({ customer_id: 'customer-1', status: 'completed', product_category: 'fungicide', catalog_group: '11', frac_group: '11', ...changes });
+    const repeats = (result) => result.blocks.filter((block) => /^repeat_|rotation_approval$/.test(block.code)).map((block) => block.code);
+    const ARTAVIA = { id: 'base', name: 'Artavia 2 SC (Azoxy)', category: 'fungicide', frac_group: '11' };
+    const HEADWAY = { id: 'base', name: 'Headway Fungicide', category: 'fungicide', frac_group: '3 + 11' };
+    const artavia = (date, extra = {}) => prior({ service_date: date, product_name: 'Artavia 2 SC (Azoxy)', ...extra });
+
+    test('a composite group is one string: Headway (3 + 11) after Artavia (11) is not read as a group 11 repeat, and the group list is the single field', () => {
+      const { productGroups } = require('../services/waveguard-approval-engine');
+      expect(productGroups(HEADWAY)).toEqual([['frac', '3 + 11']]);
+    });
+
+    test('Artavia then Headway raises no composite finding with the gate off, however the take-all evidence reads', async () => {
+      expect(repeats(await run([HEADWAY], [artavia('2026-05-11', { targets: ['Take-all'] })], { productId: 'base', targets: ['Take-all'] }))).toEqual([]);
+    });
+
+    test('Artavia twice keeps the recorded-target rule only: exempt on recorded take-all targets 28 days apart, a review when Fast Complete records none even on a take-all row', async () => {
+      const now = { productId: 'base', serviceDate: '2026-06-10', targets: ['Take-all'] };
+      expect(repeats(await run([ARTAVIA], [artavia('2026-05-13', { targets: ['Take-all'] })], now))).toEqual([]);
+      // The protocol-row evidence fallback is the v13 program's: no recorded targets, no exemption.
+      const row = { protocol: { structured: { products: [{ productId: 'base', role: 'fungicide_spot', gates: { trigger: 'mapped_take_all_spring_2' } }] } } };
+      expect(repeats(await run([ARTAVIA], [artavia('2026-05-13', { targets: ['Take-all'] })], { productId: 'base', targets: [] }, row))).toEqual(['fungicide_frac_rotation_approval']);
+      expect(repeats(await run([ARTAVIA], [artavia('2026-05-13')], now))).toEqual(['fungicide_frac_rotation_approval']);
+    });
+  });
+
   describe('the repeat-group rule keeps two named exemptions: Group 3 pre-emergents and the take-all Artavia pair (owner 2026-10-06)', () => {
+    // The composite groups, the Artavia-then-Headway pair and the property scoping are the v13 program's: gate on.
+    const savedGate = process.env.GATE_LAWN_V13;
+    beforeEach(() => { process.env.GATE_LAWN_V13 = 'true'; });
+    afterEach(() => { if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate; });
+
     const run = (productsCatalog, priorApplications, input, plan = basePlan(), service = { service_type: 'Lawn Care' }) => evaluateWaveGuardManagerApprovals(fakeKnex({ productsCatalog, priorApplications }), {
       customerId: 'customer-1', service, plan, serviceDate: input.serviceDate || '2026-06-10', products: [input],
     });
