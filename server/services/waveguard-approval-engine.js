@@ -64,7 +64,9 @@ function productGroups(product) {
 // strict: a failed read throws instead of reading as "no prior application"
 // (the job card's mix helper withholds a dose on missing safety data; the
 // closeout and plan engine keep their lenient default).
-async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false } = {}) {
+// scopeToProperty: judge only the applications at `propertyId` (null = visits with no property); the default reads
+// the customer's whole history, which is what the repeat rule itself uses.
+async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false, scopeToProperty = false, propertyId = null } = {}) {
   const groupColumn = `${groupType}_group`;
   const tokens = groupSet(groupValue);
   if (!tokens.length) return null;
@@ -72,6 +74,11 @@ async function latestComparableGroupApplication(knex, customerId, product, group
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
     .leftJoin('products_catalog as pc', function () {
       this.on('sp.product_name', '=', 'pc.name');
+    })
+    .modify((query) => {
+      if (!scopeToProperty) return;
+      query.leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id');
+      if (propertyId) query.where('ss.property_id', propertyId); else query.whereNull('ss.property_id');
     })
     .where('sr.customer_id', customerId)
     .where('sr.status', 'completed')
@@ -131,10 +138,22 @@ function targetList(value) {
 
 const hasTakeAllTarget = (value) => targetList(value).some((target) => TAKE_ALL_TARGET.test(target));
 
-// Does an applied protocol row (its trigger or its role) name take-all? ("mapped_take_all_spring_2" reads as take all.)
+// Words a take-all trigger may carry besides "take all" itself ("mapped_take_all_spring_2", "active_take_all").
+const TAKE_ALL_TRIGGER_FILLER = new Set(['mapped', 'active', 'take', 'all', 'spring', 'fall', 'first', 'second', 'application']);
+
+// Is this trigger or role text EXCLUSIVELY take-all? A row that serves other uses too (a compound trigger such as
+// "mapped_take_all_fall_1_pythium_root_rot", "..._large_patch_...") cannot prove that an application under it
+// was for take-all, so it is no evidence. Only the take-all phrase plus filler words and numbers qualify.
+function textIsExclusivelyTakeAll(text) {
+  const normalized = normalizeText(text);
+  if (!TAKE_ALL_TARGET.test(normalized)) return false;
+  return normalized.split(' ').every((word) => !word || TAKE_ALL_TRIGGER_FILLER.has(word) || /^\d+$/.test(word));
+}
+
+// Does an applied protocol row (its trigger or its role) name take-all, and only take-all?
 function rowNamesTakeAll(row) {
   const gates = typeof row?.gates === 'string' ? (() => { try { return JSON.parse(row.gates) || {}; } catch { return {}; } })() : (row?.gates || {});
-  return [gates.trigger, row?.role].some((text) => TAKE_ALL_TARGET.test(normalizeText(text)));
+  return [gates.trigger, row?.role].some(textIsExclusivelyTakeAll);
 }
 
 // The staged protocol row a PRIOR application was applied under: the ledger actual of its service_products row
@@ -203,7 +222,11 @@ async function takeAllArtaviaHistory(knex, customerId, productNames, serviceDate
   return found;
 }
 
-async function isTakeAllPair(knex, { customerId, propertyId, product, plan, last, input, serviceDate, strict }) {
+async function isTakeAllPair(knex, { customerId, propertyId, product, plan, groupType, groupValue, input, serviceDate, strict }) {
+  // The pair is judged at this property: the customer-wide latest application of the group may be another
+  // property's, which must not break a valid pair here (the repeat finding itself stays customer-wide).
+  const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict, scopeToProperty: true, propertyId });
+  if (!last) return false;
   // Artavia after Artavia, or Headway after Artavia; the first of the pair is always Artavia.
   if (!TAKE_ALL_SECOND.test(normalizeText(product.name)) || !TAKE_ALL_FIRST.test(normalizeText(last.product_name))) return false;
   if (TAKE_ALL_FIRST.test(normalizeText(product.name)) && normalizeText(last.product_name) !== normalizeText(product.name)) return false;
@@ -219,7 +242,7 @@ async function isTakeAllPair(knex, { customerId, propertyId, product, plan, last
 
 async function rotationExemption(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) {
   if (groupType === 'hrac' && String(groupValue) === '3' && productIsPreEmergent(product, plan)) return 'pre_emergent_group_3';
-  return await isTakeAllPair(knex, { customerId, propertyId, product, plan, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
+  return await isTakeAllPair(knex, { customerId, propertyId, product, plan, groupType, groupValue, last, input, serviceDate, strict }) ? 'take_all_artavia_pair' : null;
 }
 
 function latestAssessmentStressed(plan) {

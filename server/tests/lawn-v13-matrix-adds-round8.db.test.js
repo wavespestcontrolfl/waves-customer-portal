@@ -38,8 +38,8 @@ describeDb('rotation reads on composite groups and take-all evidence from the pr
   afterAll(async () => { if (knex) { await knex.raw('DROP SCHEMA ?? CASCADE', [schema]); await knex.destroy(); } });
 
   // A completed visit that applied `name`, ledgered under a staged row with `gates` (or none), with `targets`.
-  async function priorApplication({ name, date, product, targets = [], gates = null, role = 'fungicide_spot' }) {
-    const [visit] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: propertyId, scheduled_date: date, service_type: 'Lawn Care' }).returning('*');
+  async function priorApplication({ name, date, product, targets = [], gates = null, role = 'fungicide_spot', property = propertyId }) {
+    const [visit] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: property, scheduled_date: date, service_type: 'Lawn Care' }).returning('*');
     const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn Care', status: 'completed' }).returning('*');
     const [sp] = await knex('service_products').insert({ service_record_id: record.id, product_name: name, product_category: 'fungicide', targets }).returning('*');
     if (gates) {
@@ -110,6 +110,40 @@ describeDb('rotation reads on composite groups and take-all evidence from the pr
       await reset();
       await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia });
       expect(repeats(await check(headway, { plan: planWith(headway, null), date: '2026-04-13' }))).toEqual(['fungicide_frac_rotation_approval']);
+    });
+
+    test('a multi-use row proves nothing: Artavia on a Pythium or large-patch compound row, or Headway on one, is a normal review; an exclusive take-all row is exempt', async () => {
+      const COMPOUND = [{ trigger: 'mapped_take_all_fall_1_pythium_root_rot' }, { trigger: 'gray_leaf_spot_pythium_root_rot' }, { trigger: 'mapped_large_patch_with_velista_and_take_all_fall_2' }];
+      for (const gates of COMPOUND) {
+        await reset();
+        await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates });
+        expect({ gates, codes: repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' })) }).toEqual({ gates, codes: ['fungicide_frac_rotation_approval'] });
+        await reset();
+        await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH });
+        expect({ gates, codes: repeats(await check(headway, { plan: planWith(headway, gates), date: '2026-04-13' })) }).toEqual({ gates, codes: ['fungicide_frac_rotation_approval'] });
+      }
+      // The exclusive September row (188000) works on both sides; filler words and numbers are allowed.
+      for (const trigger of ['mapped_take_all_fall_1', 'mapped_take_all_fall_2', 'active_take_all']) {
+        await reset();
+        await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: { trigger } });
+        expect({ trigger, codes: repeats(await check(headway, { plan: planWith(headway, { trigger }), date: '2026-04-13' })) }).toEqual({ trigger, codes: [] });
+      }
+      // A recorded take-all target still proves it on a compound row.
+      await reset();
+      await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: COMPOUND[0], targets: ['Take-all root rot'] });
+      expect(repeats(await check(headway, { plan: planWith(headway, COMPOUND[0]), targets: ['take-all'], date: '2026-04-13' }))).toEqual([]);
+    });
+
+    test('another property\'s later group 11 application does not break a valid pair here (the pair is judged at this property)', async () => {
+      await reset();
+      await priorApplication({ name: ARTAVIA, date: '2026-03-14', product: artavia, gates: TAKE_ALL_MARCH });
+      // The customer's other property sprayed Artavia more recently (any use).
+      await priorApplication({ name: ARTAVIA, date: '2026-04-05', product: artavia, gates: { trigger: 'active_large_patch' }, property: randomUUID() });
+      expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' }))).toEqual([]);
+      // Still a repeat finding at the other property's own pair (no take-all evidence there): normal review.
+      await reset();
+      await priorApplication({ name: ARTAVIA, date: '2026-04-05', product: artavia, gates: { trigger: 'active_large_patch' }, property: randomUUID() });
+      expect(repeats(await check(headway, { plan: planWith(headway, TAKE_ALL_APRIL), date: '2026-04-13' }))).toEqual(['fungicide_frac_rotation_approval']);
     });
 
     test('recorded targets still decide: a non-take-all target beats a take-all row; a take-all target works without a row', async () => {

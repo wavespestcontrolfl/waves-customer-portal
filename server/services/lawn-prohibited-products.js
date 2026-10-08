@@ -11,8 +11,10 @@
 // Residential only: the label bars home lawns, not commercial turf (Ronstar G is registered for
 // commercial turf and landscapes). A customer whose property_type is commercial or business is not
 // blocked; residential, an unknown type and no type are (the safe side).
-const COMMERCIAL_PROPERTY = /^(commercial|business)$/i;
-const isCommercialProperty = (propertyType) => COMMERCIAL_PROPERTY.test(String(propertyType || '').trim());
+// The one commercial classifier the pricing engine, the tax code and the intake use (commercial-helpers.js):
+// "commercial", "business", "office", "warehouse", "medical_office", "retail", "hoa_common_area", ... are
+// commercial. Blank, unknown and residential types are not, and fail closed.
+const isCommercialProperty = (propertyType) => require('./pricing-engine/commercial-helpers').isCommercialProperty({ propertyType });
 
 // The yearly count caps, intervals and blackouts live in product_limits (application-limits.js);
 // this module only answers "may this product be on a lawn visit at all".

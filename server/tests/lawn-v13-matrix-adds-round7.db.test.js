@@ -17,10 +17,11 @@ const round4 = require('../models/migrations/20261007184000_lawn_v13_matrix_adds
 const round5 = require('../models/migrations/20261007185000_lawn_v13_matrix_adds_round5');
 const round6 = require('../models/migrations/20261007186000_lawn_v13_matrix_adds_round6');
 const round7 = require('../models/migrations/20261007187000_lawn_v13_matrix_adds_round7');
+const round11 = require('../models/migrations/20261007188000_lawn_v13_matrix_adds_round11');
 const guard = require('../services/lawn-v13-rollback-guard');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
-const UPS = [matrix, fixes, round2, round3, round4, round5, round6, round7];
+const UPS = [matrix, fixes, round2, round3, round4, round5, round6, round7, round11];
 const DOWNS = [...UPS].reverse();
 const LIVE_KEY = 'swfl_zoysia_10_10';
 const TABLES = [
@@ -98,14 +99,23 @@ describeDb('v13 matrix rollback on a live and an idle protocol (20261007187000)'
   describe('a v13 protocol is referenced by a scheduled visit', () => {
     let upFacts;
     let upRows;
+    let upAllRows;
     beforeAll(async () => {
       await build();
       for (const migration of UPS) await migration.up(knex);
       await knex('scheduled_services').insert({ lawn_protocol_key: LIVE_KEY, lawn_protocol_version: staged.V13_VERSION, service_type: 'Lawn fixture', scheduled_date: '2026-10-07' });
       upFacts = await facts();
       upRows = await protocolRows(LIVE_KEY);
+      upAllRows = Object.fromEntries(await Promise.all(staged.TRACKS.map(async (turf) => [turf.key, await protocolRows(turf.key)])));
     }, 90000);
     afterAll(drop);
+
+    test('the September take-all Artavia row is exclusive again (188000), on every track', async () => {
+      for (const turf of staged.TRACKS) {
+        const row = (await protocolRows(turf.key)).find((made) => made.window_key === 'sep_v13_hose_blackout' && made.product_name === 'Artavia 2 SC (Azoxy)');
+        expect(row.gates.trigger).toBe(round11.NEW_TRIGGER);
+      }
+    });
 
     test('the live check sees the visit', async () => {
       expect(await guard.anyV13ProtocolReferenced(knex)).toBe(true);
@@ -127,9 +137,32 @@ describeDb('v13 matrix rollback on a live and an idle protocol (20261007187000)'
       // The referenced protocol's rows: Advion 0.0344, Talak 1.0 fl oz without the gate, the July 0-0-50 row with its conditions.
       const rows = await protocolRows(LIVE_KEY);
       expect(rows).toEqual(upRows);
+      // The idle tracks stay synchronized with the live one and the catalog: nothing of theirs is reverted either.
+      for (const turf of staged.TRACKS) expect({ key: turf.key, rows: await protocolRows(turf.key) }).toEqual({ key: turf.key, rows: upAllRows[turf.key] });
       expect(Number(sub(rows, 'apr_v13_spreader_feeding', matrix.ADVION).rate_per_1000)).toBe(0.0344);
       expect([sub(rows, 'aug_v13_hose_blackout', 'Atticus Talak 7.9 F').rate_per_1000, sub(rows, 'aug_v13_hose_blackout', 'Atticus Talak 7.9 F').rate_unit]).toEqual([1, 'fl oz']);
       expect(sub(rows, 'jul_v13_inspect_spot', matrix.SOP).gates).toMatchObject({ planVisitsPerYear: 12, fertilizerSafety: true });
+    });
+  });
+
+  describe('one track is referenced and the others are idle', () => {
+    let upAllRows;
+    beforeAll(async () => {
+      await build();
+      for (const migration of UPS) await migration.up(knex);
+      await knex('scheduled_services').insert({ lawn_protocol_key: LIVE_KEY, lawn_protocol_version: staged.V13_VERSION, service_type: 'Lawn fixture', scheduled_date: '2026-10-07' });
+      upAllRows = Object.fromEntries(await Promise.all(staged.TRACKS.map(async (turf) => [turf.key, await protocolRows(turf.key)])));
+    }, 90000);
+    afterAll(drop);
+
+    test('the full down, 188000 to 180000, changes no track (referenced or idle), no config row and no catalog row', async () => {
+      const upFacts = await facts();
+      for (const migration of [...UPS].reverse()) await migration.down(knex);
+      for (const turf of staged.TRACKS) expect({ key: turf.key, rows: await protocolRows(turf.key) }).toEqual({ key: turf.key, rows: upAllRows[turf.key] });
+      expect(await facts()).toEqual(upFacts);
+      // The idle tracks still have the rows 180000 inserted (it deleted them from an idle track before).
+      const idle = await protocolRows('swfl_st_augustine_10_10');
+      expect(idle.map((row) => row.product_name)).toEqual(expect.arrayContaining([matrix.SOP, matrix.ADVION, matrix.HEAD]));
     });
   });
 

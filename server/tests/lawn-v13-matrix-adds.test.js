@@ -136,9 +136,9 @@ describe('2. take-all: the second pass of each Artavia pair is Headway', () => {
 
 describe('3. spot disease lines from the kit', () => {
   const month = (m, name) => lineFor(m, name).join('\n');
-  test('Pythium root rot: Artavia, July to September plus June, 10 to 14 days, two in a row at most', () => {
-    for (const m of [6, 7, 8, 9]) expect(month(m, N.ART)).toMatch(/Pythium root rot on saturated areas, 0\.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most/);
-    for (const m of [1, 2, 3, 4, 5, 10, 11, 12]) expect(month(m, N.ART)).not.toMatch(/Pythium/);
+  test('Pythium root rot: Artavia in June, July and August, 10 to 14 days, two in a row at most; September\'s Artavia is the take-all pass only', () => {
+    for (const m of [6, 7, 8]) expect(month(m, N.ART)).toMatch(/Pythium root rot on saturated areas, 0\.77 fl oz per 1,000 sq ft every 10 to 14 days, two applications in a row at most/);
+    for (const m of [1, 2, 3, 4, 5, 9, 10, 11, 12]) expect(month(m, N.ART)).not.toMatch(/Pythium/);
   });
   test('fairy ring: Velista April to October with a wetting agent', () => {
     for (const m of [4, 5, 6, 7, 8, 9, 10]) expect(month(m, N.VEL)).toMatch(/fairy ring, 0\.5 to 0\.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent/);
@@ -329,8 +329,16 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
 
   test('residential lawns only: a commercial or business property is not blocked, residential and unknown are', () => {
     const ronstar = { name: 'Ronstar G' };
-    for (const propertyType of ['commercial', 'business', 'Commercial', ' business ']) expect(prohibited.lawnProhibitedProductBlock(ronstar, { propertyType })).toBeNull();
-    for (const propertyType of ['residential', 'home', '', null, undefined]) expect(prohibited.lawnProhibitedProductBlock(ronstar, { propertyType })).toMatchObject({ code: 'lawn_product_not_for_home_lawns' });
+    // The pricing engine's classifier decides what is commercial: office, warehouse, retail, medical office, HOA common area ...
+    for (const propertyType of ['commercial', 'business', 'Commercial', ' business ', 'office', 'Office', 'warehouse', 'medical_office', 'Medical Office', 'retail', 'restaurant', 'industrial', 'hoa_common_area']) {
+      expect({ propertyType, block: prohibited.lawnProhibitedProductBlock(ronstar, { propertyType }) }).toEqual({ propertyType, block: null });
+    }
+    // Residential, unknown, blank and unrecognised types fail closed.
+    for (const propertyType of ['residential', 'home', 'single_family', 'Single Family', 'townhome', 'duplex', 'condo', 'mystery type', '', '  ', null, undefined]) {
+      expect({ propertyType, code: prohibited.lawnProhibitedProductBlock(ronstar, { propertyType })?.code }).toEqual({ propertyType, code: 'lawn_product_not_for_home_lawns' });
+    }
+    expect(prohibited.isCommercialProperty('office')).toBe(true);
+    expect(prohibited.isCommercialProperty('')).toBe(false);
   });
 
   test('the closeout check skips a commercial property without reading the catalog', async () => {
