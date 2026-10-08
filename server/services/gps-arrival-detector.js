@@ -279,6 +279,7 @@ async function loadCurrentService(currentJobId) {
       's.completed_at',
       's.arrived_at',
       's.en_route_at',
+      's.scheduled_date',
       's.lat as service_lat',
       's.lng as service_lng',
       's.service_address_line1 as service_address_line1',
@@ -310,10 +311,22 @@ function auditAction({ notMarked, result }) {
   return result?.ok ? 'gps_arrival.mark_on_property' : 'gps_arrival.mark_on_property_failed';
 }
 
-function auditMetadata({ techStatus, destination, distance, point, decision, result, error, notMarked }) {
+// Which attempt of the visit a not_marked row belongs to. A rescheduled or
+// restarted visit reuses its row, so the schedule day + en_route_at tell the
+// attempts apart. NULL-safe: a missing part reads 'none', never NULL.
+function attemptKey(service) {
+  const day = String(
+    service?.scheduled_date instanceof Date ? service.scheduled_date.toISOString() : service?.scheduled_date || ''
+  ).slice(0, 10);
+  const enRouteMs = timestampMs(service?.en_route_at);
+  return `${/^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none'}|${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
+}
+
+function auditMetadata({ service, techStatus, destination, distance, point, decision, result, error, notMarked }) {
   if (notMarked) {
     return {
       reason: notMarked.reason,
+      attempt: attemptKey(service),
       detail: notMarked.detail || null,
       tech_id: techStatus?.tech_id || null,
       destination_source: destination.source,
@@ -354,15 +367,17 @@ async function auditArrival({ trx = null, critical = false, ...args }) {
   });
 }
 
-// At most one not_marked row per visit + reason, across restarts and
+// At most one not_marked row per visit attempt + reason, across restarts and
 // instances. The existence check and the insert run in ONE transaction that
-// holds an advisory lock on (visit, reason), so two instances cannot both
-// insert. The in-memory key is taken before the first await (two samples
-// racing in one process cannot both pass) and spares a parked truck any query
-// after the first sample; it is RELEASED when the lookup or the write fails,
-// so a later sample can record the row.
+// holds an advisory lock on (visit, reason, attempt), so two instances cannot
+// both insert. A rescheduled or restarted visit is a new attempt and records
+// again. The in-memory key is taken before the first await (two samples racing
+// in one process cannot both pass) and spares a parked truck any query after
+// the first sample; it is RELEASED when the lookup or the write fails, so a
+// later sample can record the row.
 async function writeNotMarkedOnce(serviceId, reason, row) {
-  const key = `${serviceId}:${reason}`;
+  const attempt = attemptKey(row.service);
+  const key = `${serviceId}:${reason}:${attempt}`;
   if (notMarkedRecorded.has(key)) return;
   if (notMarkedRecorded.size >= NOT_MARKED_MEMO_MAX) notMarkedRecorded.clear();
   notMarkedRecorded.add(key);
@@ -374,7 +389,7 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
       );
       const existing = await trx('audit_log')
         .where({ resource_type: 'scheduled_service', resource_id: serviceId, action: NOT_MARKED_ACTION })
-        .whereRaw("metadata->>'reason' = ?", [reason])
+        .whereRaw("metadata->>'reason' = ? AND metadata->>'attempt' = ?", [reason, attempt])
         .first('id');
       if (!existing) await auditArrival({ ...row, trx, critical: true });
     });
@@ -386,10 +401,12 @@ async function writeNotMarkedOnce(serviceId, reason, row) {
 
 // Diagnostics only; the caller's result never changes. Records ONLY when the
 // sample is inside the arrival radius of the visit (a far-away sample is
-// normal driving). Never throws.
+// normal driving). The destination is the STORED one (visit, then customer
+// coordinates): a refusal never triggers a geocode (an outbound call plus a
+// customer row write); with none stored, nothing is recorded. Never throws.
 async function recordNotMarked({ service, techStatus, point, config, reason, detail = null, destination = null, distance = null }) {
   try {
-    const dest = destination || await resolveDestination(service);
+    const dest = destination || extractDestination(service);
     const dist = distance ?? (dest ? distanceMeters(point?.lat, point?.lng, dest.lat, dest.lng) : null);
     if (dist == null || dist > config.radiusMeters) return;
     await writeNotMarkedOnce(service.id, reason, {
@@ -422,11 +439,13 @@ function serviceRejection({ service, techStatus, point }) {
   return timing.ok ? null : timing.reason;
 }
 
-// An open visit with no arrival yet. A visit that already arrived, or closed,
-// and keeps pinging from its own driveway is not a missed arrival.
+// An open visit with no arrival yet. A visit that already arrived (by its
+// lifecycle state, whether or not arrived_at is stamped) or closed, and keeps
+// pinging from its own driveway, is not a missed arrival.
 function isOpenWithoutArrival(service) {
   return !service.arrived_at && !service.completed_at && !service.cancelled_at
-    && !['completed', 'cancelled', 'skipped', 'no_show'].includes(service.status);
+    && !['on_property', 'complete', 'cancelled'].includes(service.track_state)
+    && !['on_site', 'completed', 'cancelled', 'skipped', 'no_show'].includes(service.status);
 }
 
 async function markAndAudit({ service, techStatus, destination, distance, point, decision, config }) {
@@ -436,7 +455,10 @@ async function markAndAudit({ service, techStatus, destination, distance, point,
     // already rejected a tech/assignment mismatch, so it's the one arriving.
     result = await trackTransitions.markOnProperty(service.id, { actingTechId: techStatus.tech_id });
     await auditArrival({ service, techStatus, destination, distance, point, decision, result });
-    if (!result?.ok) {
+    // A grouped stop can land the primary on property and still answer
+    // visit_fanout_incomplete (ok false): the arrival happened, so it is not a
+    // miss. Judge by the returned state, not result.ok alone.
+    if (!result?.ok && result?.state !== 'on_property') {
       await recordNotMarked({
         service, techStatus, point, config, destination, distance,
         reason: 'mark_on_property_failed', detail: result?.reason || null,

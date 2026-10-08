@@ -577,7 +577,10 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     const [lockSql, lockBindings] = query.trx.raw.mock.calls[0];
     expect(lockSql).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
-    expect(lockBindings).toEqual(['gps_arrival_not_marked', 'svc-1:inside_radius_moving_too_fast']);
+    expect(lockBindings).toEqual([
+      'gps_arrival_not_marked',
+      `svc-1:inside_radius_moving_too_fast:none|${new Date(EN_ROUTE_TIME).toISOString()}`,
+    ]);
     // lookup and insert both ride the locked transaction; the insert reports failure
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'gps_arrival.not_marked',
@@ -617,6 +620,84 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
       metadata: expect.objectContaining({ reason: 'stale_location_sample', distance_m: expect.any(Number) }),
     })]);
     expect(notMarkedWrites()[0].metadata.sample_age_s).toBeGreaterThanOrEqual(2399);
+  });
+
+  test.each([
+    ['track_state on_property, arrived_at not stamped', { track_state: 'on_property', status: 'confirmed' }],
+    ['status on_site, arrived_at not stamped', { track_state: 'en_route', status: 'on_site' }],
+    ['both on property / on site', { track_state: 'on_property', status: 'on_site' }],
+  ])('does not record a visit already on property by state (%s)', async (_label, serviceOverrides) => {
+    const result = await run(baseService({ ...serviceOverrides, arrived_at: null }));
+
+    expect(result).toEqual({ ok: false, reason: 'service_not_en_route' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a grouped stop that landed on property but answered visit_fanout_incomplete is not a miss', async () => {
+    trackTransitions.markOnProperty.mockResolvedValue({
+      ok: false, reason: 'visit_fanout_incomplete', state: 'on_property',
+    });
+
+    const result = await run(baseService());
+
+    expect(result).toMatchObject({ ok: false, reason: 'mark_on_property_failed', state: 'on_property' });
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a rescheduled or restarted visit is a new attempt and records again', async () => {
+    const fast = { point: basePoint({ speed_mph: 32, ignition: true }) };
+    const attemptOne = baseService({ scheduled_date: '2026-10-08', en_route_at: EN_ROUTE_TIME });
+    await run(attemptOne, fast);
+    await run(attemptOne, fast);
+    expect(notMarkedWrites()).toHaveLength(1);
+
+    // same row, rescheduled to a new day and restarted
+    const query = installServiceLookup(baseService({ scheduled_date: '2026-10-15', en_route_at: minutesAgo(2) }));
+    await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(), point: fast.point, configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    const writes = notMarkedWrites();
+    expect(writes).toHaveLength(2);
+    expect(writes[0].metadata.attempt).toBe(`2026-10-08|${new Date(EN_ROUTE_TIME).toISOString()}`);
+    expect(writes[1].metadata.attempt).toMatch(/^2026-10-15\|/);
+    // the lock key and the existence lookup both carry the attempt
+    expect(query.trx.raw.mock.calls[0][1][1]).toContain(':2026-10-15|');
+    expect(query.audit.whereRaw).toHaveBeenCalledWith(
+      "metadata->>'reason' = ? AND metadata->>'attempt' = ?",
+      ['inside_radius_moving_too_fast', writes[1].metadata.attempt],
+    );
+  });
+
+  test('a visit with no schedule day or en_route_at still gets a NULL-safe attempt', async () => {
+    await run(baseService({ scheduled_date: null, en_route_at: null, track_state: 'scheduled', status: 'confirmed' }));
+
+    expect(notMarkedWrites()).toEqual([expect.objectContaining({
+      metadata: expect.objectContaining({ reason: 'service_not_en_route', attempt: 'none|none' }),
+    })]);
+  });
+
+  test('a refusal never geocodes: with no stored coordinates nothing is recorded', async () => {
+    ensureCustomerGeocoded.mockResolvedValue({ lat: 27.4386, lng: -82.3719 });
+
+    const result = await run(
+      baseService({ service_lat: null, service_lng: null, customer_latitude: null, customer_longitude: null, technician_id: 'tech-2' }),
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'technician_mismatch' });
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(notMarkedWrites()).toHaveLength(0);
+  });
+
+  test('a refusal uses the stored customer coordinates when the visit has none', async () => {
+    await run(baseService({
+      service_lat: null, service_lng: null, customer_latitude: 27.4386, customer_longitude: -82.3719,
+    }), { point: basePoint({ speed_mph: 32 }) });
+
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(notMarkedWrites()).toEqual([expect.objectContaining({
+      metadata: expect.objectContaining({ destination_source: 'customer' }),
+    })]);
   });
 
   test('a diagnostic failure never changes the detector result', async () => {
