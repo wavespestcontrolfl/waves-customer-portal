@@ -10,7 +10,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { rainFitFor, isWetWindow, rainTier, rainClassOf, withCatalogKeys } = require('../services/scheduling/rain-fit');
+const { rainFitFor, isWetWindow, rainTier, rainClassOf, withCatalogKeys, RAIN_OK_KEYS } = require('../services/scheduling/rain-fit');
 const { _test: traceRules } = require('../services/service-report/trace-eligibility');
 const { buildBestRows } = require('../services/scheduling/find-time-hints');
 
@@ -71,27 +71,30 @@ describe('catalog identity beats the words in a name', () => {
     ['palm_treatment', null, 'outdoor'],
     ['termite_installation_setup', null, 'outdoor'],
     ['some_new_admin_key', null, 'outdoor'],
-    [null, 'rodent_exclusion', 'outdoor'],
-    [null, 'termite_bait_station', 'outdoor'],
-    [null, 'cockroach', 'outdoor'],
-    ['wdo_inspection', null, 'ok'],
-    ['lawn_inspection', null, 'ok'],
-    ['bed_bug_treatment', null, 'ok'],
-    ['german_roach', null, 'ok'],
-    [null, 'termite_inspection', 'ok'],
-    [null, 'pest_inspection', 'ok'],
-    [null, 'rodent_inspection', 'ok'],
-    [null, 'rodent_trapping', 'ok'],
-    [null, 'rodent_sanitation', 'ok'],
-    ['rodent_bait_quarterly', 'rodent_bait_station', 'ok'],
-    // The one-time station install shares the check's findings type: outdoor.
+    ['rodent_exclusion', 'rodent_exclusion', 'outdoor'],
+    // Lanes are too coarse: the same findings type covers setup and check.
+    ['rodent_trapping', 'rodent_trapping', 'outdoor'],
+    ['wildlife_trapping', 'wildlife_trapping', 'outdoor'],
+    ['rodent_trapping_exclusion', 'rodent_trapping', 'outdoor'],
     ['rodent_bait_setup', 'rodent_bait_station', 'outdoor'],
-    [null, 'rodent_bait_station', 'outdoor'],
-    [null, 'bed_bug', 'ok'],
-    [null, 'german_roach_knockdown', 'ok'],
-    ['general_appointment', null, 'skip'],
-    // Same registry lane, but an onboarding visit with initial treatments.
+    ['rodent_general_one_time', 'rodent_inspection', 'outdoor'],
     ['waveguard_initial_setup', null, 'outdoor'],
+    // A findings type with no catalog key is not enough.
+    [null, 'rodent_trapping', 'outdoor'],
+    [null, 'termite_inspection', 'outdoor'],
+    ['wdo_inspection', null, 'ok'],
+    ['termite_inspection', 'termite_inspection', 'ok'],
+    ['pest_inspection', 'pest_inspection', 'ok'],
+    ['rodent_inspection', 'rodent_inspection', 'ok'],
+    ['lawn_inspection', null, 'ok'],
+    ['waves_assessment', null, 'ok'],
+    ['bed_bug_treatment', 'bed_bug', 'ok'],
+    ['german_roach', null, 'ok'],
+    ['rodent_bait_quarterly', 'rodent_bait_station', 'ok'],
+    ['rodent_trapping_followup', 'rodent_trapping', 'ok'],
+    ['rodent_trap_check_additional', 'rodent_trapping', 'ok'],
+    ['rodent_sanitation_standard', 'rodent_sanitation', 'ok'],
+    ['general_appointment', null, 'skip'],
     ['waveguard_membership', null, 'skip'],
   ])('key %s / type %s → %s', (key, type, cls) => {
     expect(rainClassOf(svc(key, type))).toBe(cls);
@@ -110,15 +113,17 @@ describe('catalog identity beats the words in a name', () => {
     expect(rainFitFor([{ name: 'Waves Assessment', serviceKey: null, findingsType: null }])).toBe('prefer');
   });
 
-  // The complete rain-OK list. A new registry identity lands as outdoor (or
-  // skipped) until someone adds it here on purpose.
-  test('exactly these registry identities are rain-OK', () => {
-    const ok = (rules, field) => Object.keys(rules)
-      .filter((id) => rainClassOf({ name: 'x', [field]: id }) === 'ok').sort();
-    expect({
-      serviceKeys: ok(traceRules.SERVICE_KEY_RULES, 'serviceKey'),
-      findingsTypes: ok(traceRules.FINDINGS_TYPE_RULES, 'findingsType'),
-    }).toMatchSnapshot();
+  // The complete rain-OK list, pinned: a change to it is a deliberate edit.
+  test('exactly these catalog keys are rain-OK', () => {
+    expect([...RAIN_OK_KEYS].sort()).toMatchSnapshot();
+  });
+
+  // None of them may be a spray / outline lane in the trace registry: that
+  // registry says product goes down outside.
+  test('no rain-OK key is a spray lane in the trace registry', () => {
+    const sprayed = [...RAIN_OK_KEYS].filter((key) => traceRules.SERVICE_KEY_RULES[key]?.eligible === true
+      || traceRules.FINDINGS_TYPE_RULES[key]?.eligible === true);
+    expect(sprayed).toEqual([]);
   });
 });
 

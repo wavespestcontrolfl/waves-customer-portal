@@ -12,13 +12,11 @@
  * time to dry). Only the next RAIN_DAYS dates count: Florida hourly
  * forecasts past ~3 days are too weak to move a booking.
  *
- * Which services are outdoor: a service with a catalog key takes the
- * spray-trace registry's verdict (service-report/trace-eligibility.js, the
- * one registry of "does this service put product down outside", which a
- * contract test keeps complete for every active catalog key). The word
- * rules below are only the fallback for a service with no catalog key
- * (owner 2026-10-08: ten Codex rounds on #6102 each found another name the
- * words sorted wrong).
+ * Which services are rain-OK: a service with a catalog identity is rain-OK
+ * only when its exact catalog key is on RAIN_OK_KEYS; any other identity is
+ * outdoor. The word rules below are only the fallback for a service with no
+ * catalog identity (owner 2026-10-08: ten Codex rounds on #6102 each found
+ * another name the words sorted wrong).
  *
  * bookingRainFit reads the gate; withCatalogKeys reads the catalog.
  */
@@ -54,37 +52,45 @@ function rainOkService(name) {
   return RODENT.test(name) && RODENT_CHECK.test(name);
 }
 
-// Registry lanes where nothing is applied outside and the tech's work does
-// not depend on dry weather: inspections, interior-only treatment, trap
-// checks, attic sanitation.
-const RAIN_OK_REASONS = new Set(['inspection_lane', 'interior_only_lane', 'trap_lane', 'sanitation_lane']);
-// The bait-station lane mixes the recurring rodent station check (rain-OK,
-// owner's "rodent checks") with installs: in-ground termite stations, and
-// rodent_bait_setup, the one-time station placement that shares the check's
-// findings type (Codex #6120 r1). Only the check's own catalog key is OK.
-const RAIN_OK_KEYS = new Set(['rodent_bait_quarterly']);
-// Not a visit's work at all: a billing rider, or the generic appointment
-// whose work is unknown. Left out of the booking's verdict. Only that one
-// key of the appointment lane: waveguard_initial_setup is in the same lane
-// and is an onboarding visit with initial treatments (Codex #6120 r2).
-const SKIP_REASONS = new Set(['billing_rider']);
+// The complete rain-OK list, by exact catalog key. A lane of the spray-trace
+// registry is too coarse for this: its trap lane holds trap checks AND the
+// first trap setup, its bait-station lane holds the station check AND the
+// install, and a catch-all rodent service reuses the inspection form (Codex
+// #6120 r1-r3). So a service is rain-OK only when its own key is here:
+// nothing is applied outside and the work does not need dry weather. A test
+// checks that none of these keys is a spray lane in the registry.
+const RAIN_OK_KEYS = new Set([
+  // assessments and inspections
+  'waves_assessment', 'waves_assessment_plus', 'new_customer_inspection',
+  'wdo_inspection', 'termite_inspection', 'pest_inspection', 'rodent_inspection', 'lawn_inspection',
+  // interior-only treatment
+  'bed_bug_treatment', 'german_roach', 'german_roach_initial',
+  // rodent checks and attic work (not trap setup, exclusion or station install)
+  'rodent_bait_quarterly', 'rodent_monitoring',
+  'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'rodent_trap_check_additional',
+  'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_medium', 'rodent_sanitation_heavy',
+]);
+// Not a visit's work at all: a billing rider (the registry's lane), or the
+// generic appointment whose work is unknown. Left out of the booking's
+// verdict. waveguard_initial_setup shares the appointment lane and is an
+// onboarding visit with initial treatments, so only this one key is skipped
+// (Codex #6120 r2).
 const SKIP_KEYS = new Set(['general_appointment']);
 
 // 'ok' | 'outdoor' | 'skip' for one service: { name, serviceKey,
-// findingsType } or a bare name. Every other registry answer — a spray or
-// outline lane, exclusion, localized nest work, mechanical lawn work,
-// injection, pre-treatment, or an identity the registry does not know — is
-// outdoor: an unknown service keeps a dry hour.
+// findingsType } or a bare name. A service with a catalog identity that is
+// not on the list is outdoor — every spray lane, setup, install, exclusion,
+// and any key added later: an unlisted service keeps a dry hour. Only a
+// service with no catalog identity at all takes the word rules.
 function rainClassOf(service) {
   const name = String((service && service.name) ?? service ?? '').trim();
   const serviceKey = (service && service.serviceKey) || null;
   const findingsType = (service && service.findingsType) || null;
   if (!serviceKey && !findingsType) return rainOkService(name) ? 'ok' : 'outdoor';
+  if (RAIN_OK_KEYS.has(serviceKey)) return 'ok';
+  if (SKIP_KEYS.has(serviceKey)) return 'skip';
   const { resolveTraceEligibility } = require('../service-report/trace-eligibility');
-  const verdict = resolveTraceEligibility({ serviceKey, findingsType });
-  if (verdict.eligible) return 'outdoor';
-  if (RAIN_OK_KEYS.has(serviceKey) || RAIN_OK_REASONS.has(verdict.reason)) return 'ok';
-  return SKIP_REASONS.has(verdict.reason) || SKIP_KEYS.has(serviceKey) ? 'skip' : 'outdoor';
+  return resolveTraceEligibility({ serviceKey, findingsType }).reason === 'billing_rider' ? 'skip' : 'outdoor';
 }
 
 // A booking is rain-OK only when EVERY service in it is: one outdoor
@@ -222,4 +228,4 @@ function rainTierOf(fit, hourly, today) {
   return (chip) => rainTier(fit, isWetWindow(hourly, chip, today));
 }
 
-module.exports = { rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
+module.exports = { RAIN_OK_KEYS, rainFitFor, bookingRainFit, withCatalogKeys, bookingServices, rainClassOf, rainTierOf, rankingNeedsForecast, inRainHorizon, isWetWindow, rainTier, RAIN_PCT, RAIN_AFTER_HOURS, RAIN_DAYS };
