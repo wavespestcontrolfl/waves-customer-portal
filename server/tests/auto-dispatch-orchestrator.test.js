@@ -817,6 +817,19 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     }
   });
 
+  test('dry run names the visit apply would move: the cheaper fix of a pair, whatever the load order (Codex r6 P2)', async () => {
+    servicesResult = [svc({ id: 'daymove' }), svc({ id: 'sameday' })];
+    const SAME_DAY = { ...CAND_SMALL, date: CURRENT.date, start_time: '14:00' };
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: [service.id === 'sameday' ? 'daymove' : 'sameday'] } },
+      candidates: [service.id === 'sameday' ? SAME_DAY : CAND_BIG],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('recommended').service.id).toBe('sameday');
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_PARTNER_MOVES' });
+  });
+
   test('pass 2: of two visits in conflict, a same-day fix goes before a day move', async () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';

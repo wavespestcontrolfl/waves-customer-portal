@@ -115,13 +115,32 @@ async function overlappingStopIds(service, ctx, excludeIds, dateStr) {
   });
   const spans = occupiedRows(rows).filter((r) => r.startMin != null && Number.isFinite(r.endMin));
   const own = spans.filter((r) => excludeIds.has(String(r.id)));
-  const unitStart = Math.min(start, ...own.map((r) => r.startMin));
-  const unitEnd = Math.max(end, ...own.map((r) => r.endMin));
-  const overlapping = spans
-    .filter((r) => !excludeIds.has(String(r.id)) && isOtherStop(r, service))
-    .filter((r) => windowsOverlap(unitStart, unitEnd, r.startMin, r.endMin));
-  const samePlace = await samePlaceIds(ctx.db, service, overlapping);
-  return overlapping.map((r) => String(r.id)).filter((id) => !samePlace.has(id));
+  const others = spans.filter((r) => !excludeIds.has(String(r.id)) && isOtherStop(r, service));
+  // The same customer's rows at the same place are one stop with the visit:
+  // one read decides which, then the stop's span grows over each of them
+  // that touches it, so a later stop that overlaps only that extra work is
+  // still seen (Codex #6207 r6 P1). Ungrouped co-located rows take the
+  // UNION of their windows (route-reorder-window-fit.js isCoVisitPair counts
+  // an ungrouped pair as MAX, not SUM).
+  const samePlace = await samePlaceIds(ctx.db, service, others);
+  const stop = stopSpan({ startMin: Math.min(start, ...own.map((r) => r.startMin)), endMin: Math.max(end, ...own.map((r) => r.endMin)) },
+    others.filter((r) => samePlace.has(String(r.id))));
+  return others
+    .filter((r) => !samePlace.has(String(r.id)) && windowsOverlap(stop.startMin, stop.endMin, r.startMin, r.endMin))
+    .map((r) => String(r.id));
+}
+
+// Grow `span` over every co-located row that overlaps it, until none is left.
+function stopSpan(span, coLocated) {
+  let { startMin, endMin } = span;
+  let left = coLocated;
+  for (;;) {
+    const touching = left.filter((r) => windowsOverlap(startMin, endMin, r.startMin, r.endMin));
+    if (!touching.length) return { startMin, endMin };
+    startMin = Math.min(startMin, ...touching.map((r) => r.startMin));
+    endMin = Math.max(endMin, ...touching.map((r) => r.endMin));
+    left = left.filter((r) => !touching.includes(r));
+  }
 }
 
 /**
@@ -139,4 +158,4 @@ async function currentConflict(service, ctx, excludeIds) {
   return ids.length ? { kind: 'overlap', date: dateStr, with: ids } : null;
 }
 
-module.exports = { currentConflict, _internals: { isOtherStop, samePlace, samePlaceIds, overlappingStopIds } };
+module.exports = { currentConflict, _internals: { isOtherStop, samePlace, samePlaceIds, stopSpan, overlappingStopIds } };

@@ -288,18 +288,33 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   };
 }
 
-// Dry run only: one recommendation per overlapping pair. Apply mode needs no
-// such rule: pass 2 re-evaluates each visit against the live schedule, so
-// once one visit of a pair has moved the other is no longer in conflict. In
-// a dry run nothing moves, so without this both rows would be counted. The
-// visit evaluated first (earliest date, the load order) is the one named.
-function partnerAlreadyMoves(run, service, evalResult) {
+function overlapOf(evalResult) {
   const conflict = evalResult.current && evalResult.current.conflict;
-  if (!conflict || conflict.kind !== 'overlap') return false;
-  const partners = (conflict.with || []).map(String);
-  if (partners.length && partners.every((id) => run.conflictMovers.has(id))) return true;
-  run.conflictMovers.add(String(service.id));
-  return false;
+  return conflict && conflict.kind === 'overlap' ? conflict : null;
+}
+
+function logDryRunRecommendation(run, service, evalResult) {
+  run.totals.recommended++;
+  return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: wouldMoveDescription(evalResult), ...evalResult.audit, appliedBy: 'auto_dispatch' });
+}
+
+// Dry run only: one recommendation per overlapping pair, in the order apply
+// mode uses (byDueThenImprovement: the cheaper fix first). In apply mode
+// pass 2 re-evaluates each visit against the live schedule, so once one
+// visit of a pair has moved the other is no longer in conflict; a dry run
+// moves nothing, so a visit whose every overlapping partner is already
+// recommended is logged as staying (Codex #6207 r6 P2).
+async function recommendOverlapFixes(run) {
+  const movers = new Set();
+  for (const pm of run.dryRunOverlaps.sort(byDueThenImprovement)) {
+    const partners = (overlapOf(pm.result).with || []).map(String);
+    if (partners.length && partners.every((id) => movers.has(id))) {
+      await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });
+    } else {
+      movers.add(String(pm.service.id));
+      await logDryRunRecommendation(run, pm.service, pm.result);
+    }
+  }
 }
 
 function signed(n) { return n >= 0 ? `+${n}` : String(n); }
@@ -684,11 +699,13 @@ async function evaluateServiceForRun(service, run) {
   // so the per-run change cap spends its budget on the highest-value
   // moves rather than whichever happened to come first by scheduled_date.
   if (config.mode === 'dry_run') {
-    if (partnerAlreadyMoves(run, service, evalResult)) {
-      return audit.logDecision(run.runId, { action: 'no_change', service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...evalResult.audit });
+    // An overlap is recommended at the end of the pass, in apply's own order
+    // (recommendOverlapFixes), so the dry run names the visit apply would move.
+    if (overlapOf(evalResult)) {
+      run.dryRunOverlaps.push({ service, result: evalResult });
+      return undefined;
     }
-    totals.recommended++;
-    return audit.logDecision(run.runId, { action: 'recommended', service, reason_code: 'DRY_RUN_RECOMMENDATION', reason_description: wouldMoveDescription(evalResult), ...evalResult.audit, appliedBy: 'auto_dispatch' });
+    return logDryRunRecommendation(run, service, evalResult);
   }
   run.plannedMoves.push({ service, prefs, ctx, result: evalResult });
   return undefined;
@@ -919,7 +936,7 @@ async function runAutoDispatch(opts = {}) {
     // Apply-mode only: qualifying moves found in the pass-1 sweep, applied
     // best-improvement-first in pass 2 so the change cap funds the largest gains.
     plannedMoves: [],
-    conflictMovers: new Set(),
+    dryRunOverlaps: [],
     quarantinedIds: new Set(),
     guardReadDegraded: false, // a failed guard read must not report a green run
   };
@@ -948,7 +965,8 @@ async function runAutoDispatch(opts = {}) {
       }
     }
 
-    if (config.mode !== 'dry_run') await runPassTwo(run);
+    if (config.mode === 'dry_run') await recommendOverlapFixes(run);
+    else await runPassTwo(run);
 
     if (totals.failed > 0 || run.guardReadDegraded) runStatus = 'completed_with_errors';
   } catch (fatal) {

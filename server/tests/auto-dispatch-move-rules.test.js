@@ -154,6 +154,13 @@ describe('conflict moves: least added drive, with a ceiling (replay 2026-10-09)'
     expect(r.ranked.map((c) => c.start_time)).toEqual(['12:00', '14:00', '09:00']);
   });
 
+  test('the legacy grouped shape has no detour to compare, so the ceiling does not apply (Codex r6 P1)', () => {
+    const { withinConflictCeiling } = require('../services/auto-dispatch/move-rules');
+    const cand = { date: '2026-12-09', detour_minutes: 20 };
+    expect(withinConflictCeiling({ current: { ...cur, detour_minutes: 0, detour_group_blind: true }, cand, config: cfg })).toBe(true);
+    expect(withinConflictCeiling({ current: { ...cur, detour_minutes: 0 }, cand, config: cfg })).toBe(false);
+  });
+
   test('a slot that adds more than the ceiling is never taken; none left means the visit stays', () => {
     const far = { date: '2026-12-09', start_time: '15:00', detour_minutes: 52, total: 30 };
     const near = { date: '2026-12-10', start_time: '09:00', detour_minutes: 29, total: 20 };

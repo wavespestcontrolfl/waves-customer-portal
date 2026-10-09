@@ -66,7 +66,9 @@ function meetsDriveFloor({ current, cand, config }) {
 // A conflict move may not add more than the ceiling to the visit's detour.
 function withinConflictCeiling({ current, cand, config }) {
   const ceiling = config.conflictMaxAddedDriveMinutes;
-  return !Number.isFinite(ceiling) || -driveSavingMinutes(current, cand) <= ceiling;
+  // The legacy grouped shape has no usable current detour (see the floor).
+  if (!Number.isFinite(ceiling) || current.detour_group_blind) return true;
+  return -driveSavingMinutes(current, cand) <= ceiling;
 }
 
 // A visit that must leave its slot whatever the score says.
