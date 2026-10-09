@@ -76,6 +76,24 @@ describeDb('compliance page: the yearly count window', () => {
     expect(await countRow(other, calendarProduct.id)).toMatchObject({ currentUsage: 0, status: 'ok' });
   });
 
+  test('a December Celsius pass viewed in January: the count row shows it (rolling), the annual-rate row does not (calendar year), the interval row is unaffected', async () => {
+    const rowsOf = async (customerId) => {
+      const { limits } = await ComplianceService.getProductLimits(customerId);
+      return Object.fromEntries(limits.filter((limit) => limit.productId === celsius.id && limit.matchType === 'product').map((limit) => [limit.limitType, limit]));
+    };
+    const december = await lawnWith(celsius, ['2025-12-20']);
+    const rows = await rowsOf(december);
+    expect(rows.annual_max_apps).toMatchObject({ currentUsage: 1 }); // rolling 365 days
+    expect(rows.annual_max_rate).toMatchObject({ currentUsage: 0, status: 'ok' }); // calendar year: nothing in 2026
+    expect(rows.min_interval_days).toMatchObject({ currentUsage: 23, status: 'exceeded' }); // 20 December to 12 January, from the ledger
+    // The same rows with an application in the new year: the rate row sees it (calendar), the interval row counts from it.
+    const january = await lawnWith(celsius, ['2025-12-20', '2026-01-05']);
+    const after = await rowsOf(january);
+    expect(after.annual_max_apps).toMatchObject({ currentUsage: 2 });
+    expect(after.annual_max_rate).toMatchObject({ currentUsage: 1 });
+    expect(after.min_interval_days).toMatchObject({ currentUsage: 7 });
+  });
+
   test('an application 365 days back is out of the window', async () => {
     const customerId = await lawnWith(celsius, ['2025-01-12', '2025-12-20']);
     expect(await countRow(customerId, celsius.id)).toMatchObject({ currentUsage: 1, status: 'warning' });

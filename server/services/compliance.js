@@ -87,6 +87,8 @@ async function limitRowsWithV13Caps({ hardOnly = false } = {}) {
   return hardOnly ? withCaps.filter((limit) => limit.severity === 'hard_block') : withCaps;
 }
 
+const isCountRow = (limit) => limit.limit_type === 'annual_max_apps' && (limit.match_type || 'product') === 'product';
+
 async function applyV13ToRows(rows) {
   if (require('../config/feature-gates').lawnV13Live?.() !== true) return rows;
   const capIds = await capIdMap(db);
@@ -95,7 +97,9 @@ async function applyV13ToRows(rows) {
   const result = rows.filter((limit) => !capIds.has(String(limit.product_id)));
   for (const [id, entry] of capIds) {
     const stored = rows.filter((limit) => String(limit.product_id) === id);
-    result.push(...withEntryCaps(entry, stored, id).map((limit) => ({ product_name: entry.name, year_window: entry.yearWindow || null, ...limit })));
+    // `year_window` marks the product-level COUNT row only: the rolling window is a count rule. The stored yearly-rate row, the minimum
+    // interval and the blackouts are judged by their own enforcement (the calendar year, the ledger back to the last application).
+    result.push(...withEntryCaps(entry, stored, id).map((limit) => ({ product_name: entry.name, ...(isCountRow(limit) ? { year_window: entry.yearWindow || null } : {}), ...limit })));
   }
   return result;
 }
