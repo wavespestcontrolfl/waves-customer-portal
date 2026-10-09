@@ -89,15 +89,14 @@ The owner merges; this lane stops before merge.
 
 ## Open content inputs
 
-Exact labels for 13-0-13, Sequestar and the kit copper (palm bud drench use); KPHITE method/container
-match; Mainspring program-range choice; and the later
+Exact labels for 13-0-13, Sequestar and the kit copper (palm bud drench use); Mainspring program-range choice; and the later
 March/May/October/November program decisions remain unresolved. Their
 holds are visible. Talus (residential use prohibited) and Headway (turf-only
 label) were removed from the program on 2026-10-05, with no replacement product. Both LESCO bag prices remain pending, never zero.
 
 Label summaries and source URLs live together in
-`server/config/tree-shrub-field-guide.json`. The 8-0-12 bag and KPHITE T&O
-manufacturer PDFs were rechecked for this build; the other summaries retain
+`server/config/tree-shrub-field-guide.json`. The 8-0-12 bag manufacturer PDF
+was rechecked for this build; the other summaries retain
 the source versions reviewed for the approved mockup. The company palm chart
 is explicitly distinguished from the fertilizer bag directions.
 
@@ -131,3 +130,29 @@ only. The freeze policy (a loose spear is a photo, a note and an office call: no
 notes. The palm chart divisor stays 105: one application stays under the 1 lb
 nitrogen per 1,000 sq ft limit in the Sarasota County fertilizer codes. The
 sold tiers are 6 and 9 visits a year.
+
+## Product changes (2026-10-09, owner "yes")
+
+Technician-facing text only; no gate, migration, catalog or price change.
+
+- **Caterpillars: Acelepryn Insecticide** (the plain product, not Acelepryn
+  Xtra). Six cards (Mar to Aug) carry a conditional
+  Acelepryn line for leaf-feeding caterpillars, live finds only (EPA 100-1489,
+  section 7.2.1: 2 to 16 fl oz per 100 gal, 7 days between sprays, 38.3 fl oz
+  per acre per year). The label has no whitefly use, so Mainspring stays the
+  whitefly product and no card names Mainspring for caterpillars. DiPel and
+  Conserve lines are unchanged.
+- **Phosphite: Reliant in place of KPHITE 7LP.** Same three cards (Mar, Jun,
+  Oct), still a conditional line for root-rot history or replacement plantings.
+  Label EPA 83416-1, residential ornamental table: foliar 2 to 4 tsp per gallon
+  at 14 to 21 days. The residential soil drench is a 0.5 to 1% mix at 25 gal per
+  100 sq ft (16 to 32 fl oz of product per 100 sq ft), so the program has no
+  drench: the guide names it as a limit only. Reliant has no catalog row yet, so a visit cannot record it until
+  the product is bought and added.
+- **Distance IGR: whitefly only; scale use on hold.** The current label
+  (accepted 2023-11-08) prints the scale yearly limit two ways: 12 fl oz per
+  acre, and 0.176 lb ai per acre (26 fl oz per acre at the label's 0.86 lb ai
+  per gallon). Until Valent confirms which applies, all seven Distance lines
+  and the guide give the whitefly rate and limits only, and say to call the
+  office before a scale spray. Oil on crawlers and a Zylam drench stay the
+  scale tools that need no call. The sheet does not enforce this.
