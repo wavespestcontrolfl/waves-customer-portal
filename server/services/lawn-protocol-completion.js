@@ -221,7 +221,7 @@ async function loadProtocolRows(trx, { structured, window, attributed, bermudaSt
   const stepProducts = bermudaStep && windowRow?.id
     ? await loadBermudaStepRows(trx, protocolRow.id, windowRow.id, bermudaStepMonth)
     : [];
-  return { protocolRow, windowRow, protocolProducts: [...windowProducts, ...stepProducts] };
+  return { protocolRow, windowRow, protocolProducts: require('./lawn-bermuda-removal').withStepProducts(windowProducts, stepProducts) };
 }
 
 // The completion screen no longer submits a protocol checklist (read-only

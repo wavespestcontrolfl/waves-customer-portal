@@ -111,6 +111,43 @@ function stepMonthOf(visit, trackKey) {
   return bermudaRemovalVisit({ trackKey, month }) ? month : null;
 }
 
+// The protocol rows an appointment reads, and which row a line reads. A staged row tagged
+// gates.bermudaRemoval belongs to the STEP; an untagged row to the window's ordinary recipe, and the two
+// may name one catalog product (the May weed mix and the June step both use LESCO 90/10), so a line
+// reads the row of its own kind and the two never stand in for each other:
+//   - an ordinary line reads the untagged row (a product that only a step row names still reads that);
+//   - a step line reads only a tagged row, never the ordinary one: with no tagged row it has no row
+//     and the step is withheld.
+const isStepRow = (row) => row?.gates?.bermudaRemoval === true;
+// The key a step row is stored under in a rows Map (rows by catalog id), beside the plain id key.
+const stepRowKey = (id) => `bermuda:${id}`;
+// The rows Map (by catalog id) of a window's product rows, built by waveguard-plan-engine
+// v13ProtocolRows: the plain id holds the ordinary row (else the step row), and every step row is also
+// held under its stepRowKey.
+function rowsByProduct(products) {
+  const rows = new Map();
+  for (const row of products.filter(isStepRow)) rows.set(String(row.productId), row);
+  for (const row of products) rows.set(isStepRow(row) ? stepRowKey(row.productId) : String(row.productId), row);
+  return rows;
+}
+// The row a line reads out of a rows Map; `step`: the line is one of the step's three.
+function rowFor(rows, id, step = false) {
+  if (!step) return rows.get(String(id)) || null;
+  const own = rows.get(stepRowKey(id)) || rows.get(String(id));
+  return isStepRow(own) ? own : null;
+}
+// The same choice over a list of product rows (the structured protocol's, the completion ledger's).
+function productRowFor(products, id, step = false) {
+  const named = products.filter((row) => String(row.productId ?? row.product_id) === String(id));
+  return named.find((row) => isStepRow(row) === !!step) || (step ? null : named[0]) || null;
+}
+// The ONE definition of the product rows an appointment reads: the assigned window's own rows, and
+// when the visit's step month is another month's, the step rows of THAT month's window in place of
+// the assigned window's own step rows (those belong to another month). `stepProducts` null = the
+// window's own rows stand.
+const withStepProducts = (windowProducts, stepProducts) => (stepProducts
+  ? [...windowProducts.filter((row) => !isStepRow(row)), ...stepProducts] : windowProducts);
+
 // The track the ACTIVE turf profile's grass says (St. Augustine or Zoysia), or null. The
 // request's own track never decides eligibility: a caller's track that differs from the
 // profile's opens nothing.
@@ -690,7 +727,7 @@ const stepProgramConsistent = (ids, bound) => ids.tagged
 
 // The three step lines can be applied only when each has an active catalog product LINKED to a
 // staged row of the serving window. One rule, for the projection and for stepOffered.
-const stepLinesAvailable = (members, rows) => members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
+const stepLinesAvailable = (members, rows) => members.every((m) => m.product && m.product.active !== false && rowFor(rows, m.product.id, true));
 
 // The ONE decision about whether the step stands, for the plan, the tank sheet and the
 // completion actions alike. `items` carry the three marked step lines among the visit's
@@ -761,7 +798,7 @@ function withRowGateNotes(items, rows) {
   // `gateNotes: []`, and binding it to the staged row's linked (alias-named) product must bring
   // that row's conditions with it.
   return items.map((item) => (isStepLine(item) && !item.gateNotes?.length && item.product
-    ? { ...item, ...optionNotes({ gateNotes: v13GateNotes(rows.get(String(item.product.id))?.gates) }) } : item));
+    ? { ...item, ...optionNotes({ gateNotes: v13GateNotes(rowFor(rows, item.product.id, true)?.gates) }) } : item));
 }
 
 // The spray conditions the tech must see before choosing the step, in the order they are
@@ -802,17 +839,17 @@ const once = (load) => {
   return () => { pending = pending || load(); return pending; };
 };
 
-// The bermuda removal rows of the serving window for `month` (not the assigned window's), keyed by
-// product id. A missing staged v13 protocol reads as no rows (the step is then withheld with its
+// The bermuda removal rows of the serving window for `month` (not the assigned window's), as a list
+// of product rows. A missing staged v13 protocol reads as no rows (the step is then withheld with its
 // warning); any other read error is thrown for a strict caller and reads as no rows otherwise.
 async function loadStepRows(knex, trackKey, month, strict) {
   const { loadV13RowsForMonth } = require('./waveguard-plan-engine');
   try {
     const rows = await loadV13RowsForMonth(knex, trackKey, month, { includeBermudaRemoval: true });
-    return new Map([...rows].filter(([, row]) => row?.gates?.bermudaRemoval === true));
+    return [...new Set(rows.values())].filter(isStepRow);
   } catch (err) {
     if (strict && err.code !== 'lawn_v13_protocol_missing') throw err;
-    return new Map();
+    return [];
   }
 }
 
@@ -825,7 +862,8 @@ async function loadStepRows(knex, trackKey, month, strict) {
 //   .resolve(...)            once the serving window is known: is the step active for THIS
 //                            appointment (v13 resolved, the appointment's own step month, the
 //                            cultivar policy); async, returns the stage below.
-//   stage.rows(windowRows)   the window's staged rows plus the appointment month's step rows.
+//   stage.protocol(assigned) the structured protocol the plan reads: the assigned window's products with
+//                            the appointment month's step rows (the same object when the months agree).
 //   stage.lines              the three marked recipe lines to add to the visit's conditional lines.
 //   stage.select(items)      the one atomic selection of the three lines.
 //   stage.project(items,..)  the shared projection: usable or not, the limits, the warnings and blocks
@@ -871,13 +909,11 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
       ];
       return {
         lines: active ? markStepLines(parseLines(addOn.secondary)) : [],
-        // The window's staged rows, with the appointment month's step rows in place of the assigned
-        // window's own step rows: those belong to another month (April's carry no June morning
-        // limit), so they are removed first. A missing or partial load then leaves the step
-        // unavailable, never offered on the other month's conditions.
-        rows: (windowRows) => (stepRows
-          ? new Map([...[...windowRows].filter(([, row]) => row?.gates?.bermudaRemoval !== true), ...stepRows])
-          : windowRows),
+        // The structured protocol the plan reads for this appointment: the assigned window's products with
+        // the appointment month's step rows in place of its own (withStepProducts), so the plan's rows and
+        // the completion defaults read one list. A missing or partial load leaves the step unavailable,
+        // never offered on the other month's conditions.
+        protocol: (assigned) => (stepRows ? { ...assigned, products: withStepProducts(assigned.products || [], stepRows) } : assigned),
         select: (items) => (active ? selectStepAtomically(items) : items),
         async project(items, { enabled: v13Active, rows, probeLimits, productOf }) {
           const projected = active && v13Active
@@ -958,7 +994,7 @@ module.exports = {
   openPlanStep,
   withoutBermudaRemovalRows,
   refuseStepSprayOnRecap,
-  visitMonthOf, stepMonthOf,
+  visitMonthOf, stepMonthOf, isStepRow, rowsByProduct, rowFor, productRowFor, withStepProducts,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
