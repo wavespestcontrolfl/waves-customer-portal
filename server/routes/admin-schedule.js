@@ -9,6 +9,7 @@ const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = r
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const areaAddOnRows = require('../services/area-addon-visit-rows');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive, tsFastCompleteLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive, fastCompleteVoiceFillLive } = require('../config/feature-gates');
@@ -57,7 +58,7 @@ const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
 });
 async function areaAddOnVisitIdsForFeed(serviceIds) {
   try {
-    return await require('../services/area-addon-visit-rows').areaAddOnKeysByVisit(db, serviceIds);
+    return await areaAddOnRows.areaAddOnKeysByVisit(db, serviceIds);
   } catch (e) {
     logger.warn(`[schedule] area add-on row lookup failed: ${e.message}`);
     return new Map();
@@ -15121,6 +15122,7 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
           ? await trx('scheduled_services').where({ id: req.params.id, source_action: 'package_followup_auto' })
             .first('customer_id', 'scheduled_date')
           : null;
+        await areaAddOnRows.clearOwnAreaAddOnScopeOnServiceChange(trx, req.params.id, updates);
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
           await trx('reschedule_log').insert({
@@ -15269,8 +15271,12 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
       // set (add / edit / remove handled uniformly by delete + re-insert).
       if (addonsReplaced) {
         const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));
+        // What an area add-on row was sold for lives only on the stored row: read it before the
+        // delete and put it back on the row of the same service (area-addon-visit-rows.js).
+        const carriedAreaScopes = await areaAddOnRows.readAreaAddOnScopesToCarry(trx, req.params.id);
         await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).del();
         await insertScheduledServiceAddons(trx, req.params.id, replaceAddons, addonCols, canonicalRestackedAddonDollars);
+        await areaAddOnRows.restoreCarriedAreaAddOnScopes(trx, req.params.id, carriedAreaScopes);
       }
       if (clearAddonDiscountsOnPriceEdit) {
         const addonCols = await trx('scheduled_service_addons').columnInfo().catch(() => ({}));

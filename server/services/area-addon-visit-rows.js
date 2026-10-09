@@ -106,6 +106,83 @@ async function stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile,
   await trx('scheduled_services').where({ id: scheduledServiceId }).update({ area_addon_scope: JSON.stringify(soldScope(own)) });
 }
 
+// ---------------------------------------------------------------------------
+// Keeping the sold scope when rows are replaced (Codex round 7 P1)
+//
+// The schedule's Update Details save deletes every scheduled_service_addons row of the visit and
+// inserts the submitted set. The posted lines carry no `area_addon_scope` and must not: a client
+// cannot forge or widen what the estimate sold. So the SERVER reads the stored scopes before the
+// delete and puts each one back on the new row of the same catalog service afterwards. A scope is
+// bound to its own catalog key: a row for another service never takes it, a removed add-on takes
+// its scope with it, and a new row (an add-on the office adds by hand) has none.
+// ---------------------------------------------------------------------------
+function parseScope(value) {
+  if (value && typeof value === 'object') return value;
+  try { return typeof value === 'string' ? JSON.parse(value) : null; } catch { return null; }
+}
+
+async function hasScopeColumn(trx, table) {
+  try { return !!(await trx.schema.hasColumn(table, 'area_addon_scope')); } catch { return false; }
+}
+
+// The stored scopes of a visit's add-on rows, in row order. [] before the migration or when none.
+async function readAreaAddOnScopesToCarry(trx, visitId) {
+  if (!visitId || !(await hasScopeColumn(trx, 'scheduled_service_addons'))) return [];
+  const rows = await trx('scheduled_service_addons')
+    .where({ scheduled_service_id: visitId })
+    .whereNotNull('area_addon_scope')
+    .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
+    .select('id', 'service_id', 'area_addon_scope');
+  return rows.map((row) => ({ serviceId: row.service_id || null, scope: parseScope(row.area_addon_scope) })).filter((entry) => entry.scope);
+}
+
+// Puts the carried scopes back on the freshly inserted rows of the same catalog service.
+// Returns the number restored.
+async function restoreCarriedAreaAddOnScopes(trx, visitId, carried = []) {
+  if (!visitId || !Array.isArray(carried) || carried.length === 0) return 0;
+  const cols = await trx('scheduled_service_addons').columnInfo();
+  if (!cols.area_addon_scope) return 0;
+  const fresh = await trx('scheduled_service_addons')
+    .where({ scheduled_service_id: visitId })
+    .whereNull('area_addon_scope')
+    .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
+    .select('id', 'service_id', ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []));
+  const taken = new Set();
+  let restored = 0;
+  for (const { serviceId, scope } of carried) {
+    const key = scope.catalogServiceKey || null;
+    const row = fresh.find((candidate) => !taken.has(String(candidate.id))
+      && (key ? candidate.service_key_snapshot === key : serviceId && String(candidate.service_id) === String(serviceId)));
+    if (!row) continue;
+    taken.add(String(row.id));
+    await trx('scheduled_service_addons').where({ id: row.id }).update({ area_addon_scope: JSON.stringify(scope) });
+    restored += 1;
+  }
+  return restored;
+}
+
+// The add-on that IS the visit keeps `scheduled_services.area_addon_scope`. When an edit moves the
+// visit to another service, the sold scope no longer describes it: clear it. Called with the
+// planned update of the visit, before it is written; no query unless the update names a service.
+async function clearOwnAreaAddOnScopeOnServiceChange(trx, visitId, updates = {}) {
+  if (!visitId || (updates.service_id === undefined && updates.service_key_snapshot === undefined)) return false;
+  if (!(await hasScopeColumn(trx, 'scheduled_services'))) return false;
+  const cols = await trx('scheduled_services').columnInfo();
+  const row = await trx('scheduled_services').where({ id: visitId })
+    .first('area_addon_scope', 'service_id', ...(cols.service_key_snapshot ? ['service_key_snapshot'] : []));
+  const scope = parseScope(row?.area_addon_scope);
+  if (!scope) return false;
+  const sameKey = updates.service_key_snapshot !== undefined
+    ? (updates.service_key_snapshot || null) === (scope.catalogServiceKey || null)
+    : (row.service_key_snapshot || scope.catalogServiceKey || null) === (scope.catalogServiceKey || null);
+  const sameId = updates.service_id === undefined || String(updates.service_id ?? '') === String(row.service_id ?? '');
+  if (sameKey && sameId) return false;
+  await trx('scheduled_services').where({ id: visitId }).update({ area_addon_scope: null });
+  return true;
+}
+
 /**
  * Write one add-on row per sold area add-on that the appointment does not
  * already carry. `trx` is the booking transaction. Returns the number written.
@@ -223,4 +300,7 @@ module.exports = {
   areaAddOnProfileRows,
   secondaryAreaAddOns,
   writeAreaAddOnVisitRows,
+  readAreaAddOnScopesToCarry,
+  restoreCarriedAreaAddOnScopes,
+  clearOwnAreaAddOnScopeOnServiceChange,
 };
