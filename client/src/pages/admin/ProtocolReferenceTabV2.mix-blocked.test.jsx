@@ -57,3 +57,21 @@ it("an unavailable line says why beside the product, with no quantity", () => {
   renderCard(plan({ items: [unlinked], selectedItems: [unlinked] }));
   expect(screen.getAllByText(/No protocol row is linked to this product/).length).toBeGreaterThan(0);
 });
+
+it("a bermuda backpack mix order shows as its own block beside the base order, only when present", () => {
+  const bermudaMixingOrder = [
+    { step: 1, productId: null, productName: "Water", instruction: "Fill the backpack sprayer about half full with clean water." },
+    { step: 2, productId: "rec", productName: "Recognition", instruction: "Add the Recognition." },
+    { step: 3, productId: "fus", productName: "Fusilade II", instruction: "Add the Fusilade II." },
+    { step: 4, productId: "nis", productName: "Surfactant", instruction: "Add the surfactant last." },
+  ];
+  const mixingOrder = [{ step: 1, productId: "pot", productName: "Fixture potassium", instruction: "Add the potassium." }];
+  const { unmount } = renderCard(plan({ mixingOrder, bermudaMixingOrder }));
+  expect(screen.getByText("Bermuda backpack mix")).toBeInTheDocument();
+  for (const { productName } of bermudaMixingOrder) expect(screen.getByText(productName)).toBeInTheDocument();
+  expect(screen.getByText("Mixing order")).toBeInTheDocument();
+  expect(screen.getByText("Fixture potassium")).toBeInTheDocument();
+  unmount();
+  renderCard(plan({ mixingOrder }));
+  expect(screen.queryByText("Bermuda backpack mix")).not.toBeInTheDocument();
+});
