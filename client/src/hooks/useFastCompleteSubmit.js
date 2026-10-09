@@ -42,6 +42,11 @@
 // packet that carries the body, so a prepared body is never written as a
 // saved completion attempt, never held for a retry and never offered as one.
 // Submitting again after an edit builds a new body and replaces the last.
+// Contract with the container (PR 2): onPrepared(serviceId, body) means "this part is ready, here is its body";
+// onPrepared(serviceId, null) means "this part is NOT ready any more": an input behind the body changed after the
+// handoff (the sheet calls revokeIfChanged on every render with the builder it would submit with; a different
+// body, key aside, revokes). The container must drop that part's body and block "Complete stop" until the part is
+// prepared again; the footer goes back to "Save for this stop". A handoff that throws leaves the part unprepared.
 // Without onPrepared the hook is exactly as above.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { shouldResetCompletionIdempotencyKey } from '../lib/completion-idempotency';
@@ -116,6 +121,12 @@ export function genIdempotencyKey() {
   return `fastcomplete_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
+// A body as text without its idempotency key (the key is the hook's, not an input).
+function bodySignature(body) {
+  const { idempotencyKey: _key, ...rest } = body;
+  return JSON.stringify(rest);
+}
+
 function scopeOf(serviceId, operatorId, epoch) {
   return { serviceId: String(serviceId || ''), operatorId: String(operatorId || ''), epoch };
 }
@@ -135,6 +146,8 @@ export default function useFastCompleteSubmit({
   const preparing = typeof onPrepared === 'function';
   // The body last handed to onPrepared (null until the first, and on a scope change).
   const [prepared, setPrepared] = useState(null);
+  // The body handed over, key aside, as text: what a later render's body is compared with.
+  const preparedSignatureRef = useRef('');
   // The visit's invoice fields (lib/completion-invoice-fields.js), the same
   // ones the full form posts. Read when a NEW body is built; a held, retried
   // or restored body keeps the fields it was prepared with.
@@ -187,6 +200,7 @@ export default function useFastCompleteSubmit({
     setPrompt(null);
     setStorageWarning('');
     setPrepared(null);
+    preparedSignatureRef.current = '';
 
     if (!scope.serviceId || !scope.operatorId || typeof onPreparedRef.current === 'function') {
       // Existing callers opt into durable recovery by supplying both IDs.
@@ -433,6 +447,7 @@ export default function useFastCompleteSubmit({
     setError('');
     try {
       await onPreparedRef.current(scope.serviceId, body);
+      preparedSignatureRef.current = bodySignature(body);
       if (sameScope(scopeRef.current, scope)) setPrepared(body);
     } catch (err) {
       if (sameScope(scopeRef.current, scope)) setError(err?.message || 'Could not save this part of the stop.');
@@ -443,6 +458,19 @@ export default function useFastCompleteSubmit({
       }
     }
   }, [recovering]);
+
+  // Prepare mode: has anything behind the prepared body changed? Builds the body the sheet would submit now and
+  // compares it with the one handed over (structurally, whatever field moved); a change, or a body that can no
+  // longer be built, revokes the prepared state and tells the container (onPrepared(serviceId, null)).
+  const revokeIfChanged = useCallback((buildBody) => {
+    if (!preparedSignatureRef.current || inFlight.current) return;
+    let now = null;
+    try { now = bodySignature({ ...buildBody(), ...(invoiceFieldsRef.current || {}) }); } catch { now = null; }
+    if (now === preparedSignatureRef.current) return;
+    preparedSignatureRef.current = '';
+    setPrepared(null);
+    Promise.resolve(onPreparedRef.current(scopeRef.current.serviceId, null)).catch(() => {});
+  }, []);
 
   const retry = useCallback(() => {
     if (!pendingBodyRef.current) return;
@@ -505,7 +533,7 @@ export default function useFastCompleteSubmit({
 
   return {
     recovering, restored, submitting, error, errorCode, failure, done, prompt, storageWarning,
-    preparing, prepared,
+    preparing, prepared, revokeIfChanged,
     submit: preparing ? prepare : submit, retry, confirm, discard, dismissPrompt: discard,
     recheck: () => setReadTick((tick) => tick + 1),
     pendingSummary: pendingSummaryRef.current,

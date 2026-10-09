@@ -92,4 +92,46 @@ describe('prepare mode', () => {
     expect(sent.result.current.done).not.toBeNull();
     expect(sent.result.current.prepared).toBeNull();
   });
+
+  test('a change behind the prepared body revokes it and tells the container; no change keeps it', async () => {
+    const onPrepared = vi.fn();
+    const prepared = mount({ onPrepared });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'one', products: [1] }), 's'); });
+    onPrepared.mockClear();
+    // The same inputs (a fresh builder, equal result): stays prepared, nobody is told.
+    act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'one', products: [1] })));
+    expect(prepared.result.current.prepared).not.toBeNull();
+    expect(onPrepared).not.toHaveBeenCalled();
+    // A changed input: revoked, container told with null.
+    act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'one', products: [1, 2] })));
+    await waitFor(() => expect(prepared.result.current.prepared).toBeNull());
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null);
+    // Revoked once: a later change does not tell the container again.
+    act(() => prepared.result.current.revokeIfChanged(() => ({ technicianNotes: 'three' })));
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    // Preparing again hands over the new body.
+    await act(async () => { await prepared.result.current.submit(() => ({ technicianNotes: 'three' }), 's'); });
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-a', expect.objectContaining({ technicianNotes: 'three' }));
+    expect(prepared.result.current.prepared.technicianNotes).toBe('three');
+  });
+
+  test('a body that can no longer be built revokes the prepared state', async () => {
+    const onPrepared = vi.fn();
+    const prepared = mount({ onPrepared });
+    await waitFor(() => expect(prepared.result.current.recovering).toBe(false));
+    await act(async () => { await prepared.result.current.submit(() => ({ a: 1 }), 's'); });
+    onPrepared.mockClear();
+    act(() => prepared.result.current.revokeIfChanged(() => { throw new Error('no draft'); }));
+    await waitFor(() => expect(prepared.result.current.prepared).toBeNull());
+    expect(onPrepared).toHaveBeenCalledWith('svc-a', null);
+  });
+
+  test('outside prepare mode revokeIfChanged does nothing', async () => {
+    const sent = mount();
+    await waitFor(() => expect(sent.result.current.recovering).toBe(false));
+    act(() => sent.result.current.revokeIfChanged(() => ({ a: 1 })));
+    expect(sent.result.current.prepared).toBeNull();
+  });
 });

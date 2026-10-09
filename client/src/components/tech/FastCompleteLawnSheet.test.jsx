@@ -3807,9 +3807,10 @@ describe('prepare mode (a part of a grouped stop)', () => {
     fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Second words' } });
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     fireEvent.click(completeButton());
-    await waitFor(() => expect(onPrepared).toHaveBeenCalledTimes(2));
-    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe('First words');
-    expect(onPrepared.mock.calls[1][1].technicianNotes).toBe('Second words');
+    await waitFor(() => expect(onPrepared.mock.calls.filter(([, body]) => body).length).toBe(2));
+    const bodies = onPrepared.mock.calls.map(([, body]) => body).filter(Boolean);
+    expect(bodies[0].technicianNotes).toBe('First words');
+    expect(bodies[1].technicianNotes).toBe('Second words');
     expect(completeCalls()).toHaveLength(0);
   });
 
@@ -3840,6 +3841,22 @@ describe('prepare mode (a part of a grouped stop)', () => {
     requests.length = 0;
     await openSheet();
     expect(requests.some((r) => r.options.headers?.['X-Combo-Stop'])).toBe(false);
+  });
+
+  test('a change after the handoff revokes it and tells the container; preparing again hands over the new body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Changed words' } });
+    await waitFor(() => expect(screen.queryByText('Saved for this stop')).toBeNull());
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-lawn', null);
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared.mock.calls.at(-1)[1].technicianNotes).toBe('Changed words');
   });
 
   test('a refused hand-over shows its message and leaves the sheet editable', async () => {

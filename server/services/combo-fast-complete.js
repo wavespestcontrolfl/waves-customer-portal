@@ -4,27 +4,63 @@
  * GATE_COMBO_FAST_COMPLETE (owner 2026-10-09): the pest and lawn Fast Complete sheets used as PARTS
  * of one grouped stop. The lawn Fast Complete routes refuse any grouped member (`grouped_visit`);
  * this is the one server rule that lifts that refusal, and only for a stop the server itself reads
- * as a combined stop. A client can ask (header X-Combo-Stop: 1); only this decides.
+ * as a combined stop: exactly one pest member the pest report flow admits and exactly one lawn
+ * member the lawn Fast Complete rule admits. A client can ask (header X-Combo-Stop: 1); only this decides.
  */
 
 const { comboFastCompleteLive } = require('../config/feature-gates');
 
 const COMBO_STOP_HEADER = 'x-combo-stop';
 // A combined stop is exactly two open services (one pest, one lawn): the container sheet is built for no more.
-const COMBO_STOP_OPEN_MEMBERS = 2;
+const COMBO_STOP_MEMBERS = 2;
+const LAWN_REASONS_SET_ASIDE = [null, 'grouped_visit'];
 
 // Did the request say it is part of a combined stop? Intent only; never an authority.
 function comboStopRequested(req) {
   return String(req?.get?.(COMBO_STOP_HEADER) ?? req?.headers?.[COMBO_STOP_HEADER] ?? '') === '1';
 }
 
+// The ONE lawn-fast grouped ask of a request: spread into the options of any lawn-fast eligibility read, so a
+// route cannot forget the header. Empty for a request that did not ask.
+function lawnFastGroupedAsk(req) {
+  return comboStopRequested(req) ? { allowGrouped: { stop: true } } : {};
+}
+
+// The profile shape the pest report flow needs, gate aside: an untyped visit with no companion form. The schedule
+// payload's `fastCompleteReportEnabled` is this plus the report-flow gate.
+function reportFlowShape(profile) {
+  return !(profile?.companions || []).length && !profile?.findingsType;
+}
+
+// A pest visit the plain pest report flow admits (gate aside): pest control, reportFlowShape, not completed through a
+// project, and not a lane visit (the lane voice fill's own reader, visit-lane-facts voiceLaneFor).
+function pestReportFlowAdmits(profile, serviceType) {
+  return profile?.category === 'pest_control' && reportFlowShape(profile)
+    && !profile.projectBacked && !profile.requiresProject
+    && require('./visit-lane-facts').voiceLaneFor({ profile, serviceType }) == null;
+}
+
+// Exactly one pest member and one lawn member, each judged by the canonical server rule: the pest report flow
+// above, and resolveLawnFastEligibility (the grouped reason set aside; no recursion: it is called without a
+// grouped ask). Two reads, one per member.
+async function pairAdmitted(knex, memberIds, allowStatuses) {
+  if (memberIds.length !== COMBO_STOP_MEMBERS) return false;
+  const { resolveLawnFastEligibility } = require('./lawn-fast-complete');
+  const verdicts = await Promise.all(memberIds.map((id) => resolveLawnFastEligibility(id, knex, { withVisitType: false, allowStatuses })));
+  if (verdicts.some((verdict) => !verdict.ok)) return false;
+  const lawn = verdicts.filter((verdict) => verdict.profile?.category === 'lawn_care' && LAWN_REASONS_SET_ASIDE.includes(verdict.reason));
+  const pest = verdicts.filter((verdict) => pestReportFlowAdmits(verdict.profile, verdict.svc?.service_type));
+  return lawn.length === 1 && pest.length === 1;
+}
+
 /**
- * May this grouped member use the lawn Fast Complete routes? The gate is live, and `ask` says which tie:
+ * May this grouped member use the lawn Fast Complete routes? The gate is live, `ask` says which tie, and the
+ * stop's two members are a pest/lawn pair the server's own rules admit:
  *   - { packetContext } (the /complete preflight; the packet's context object, or null/undefined for a plain
- *     /complete): its packetId must be named; the stop is `closing` and that packet row belongs to this stop. A /complete that names
- *     no packet is never allowed.
- *   - { stop: true } (the sheet's reads, before a packet exists): the stop is `open` and has exactly two
- *     open members, this service one of them.
+ *     /complete): its packetId must be named; the stop is `closing`, that packet row belongs to this stop, and the
+ *     packet's frozen items are the pair.
+ *   - { stop: true } (the sheet's reads, before a packet exists): the stop is `open` and its two open members, this
+ *     service one of them, are the pair.
  * `knex` is the caller's connection (the packet's transaction inside /complete).
  */
 async function groupedStopAllowed(knex, svc, ask) {
@@ -34,11 +70,15 @@ async function groupedStopAllowed(knex, svc, ask) {
   if ('packetContext' in ask) {
     const packetId = ask.packetContext?.packetId;
     if (!packetId || String(visit.status || '') !== 'closing') return false;
-    return !!(await knex('visit_completion_packets').where({ id: packetId, visit_id: visit.id }).first('id'));
+    const packet = await knex('visit_completion_packets').where({ id: packetId, visit_id: visit.id }).first('id', 'payload');
+    const payload = typeof packet?.payload === 'string' ? JSON.parse(packet.payload) : packet?.payload;
+    const ids = (payload?.items || []).map((item) => String(item.serviceId));
+    // Earlier items of this packet are already completed inside it.
+    return ids.includes(String(svc.id)) && pairAdmitted(knex, ids, ['completed']);
   }
   if (String(visit.status || '') !== 'open') return false;
-  const open = await require('./visit-groups').openMembers(knex, visit.id);
-  return open.length === COMBO_STOP_OPEN_MEMBERS && open.some((member) => String(member.id) === String(svc.id));
+  const open = (await require('./visit-groups').openMembers(knex, visit.id)).map((member) => String(member.id));
+  return open.includes(String(svc.id)) && pairAdmitted(knex, open);
 }
 
 // The schedule row's `comboFastCompleteEnabled` (admin-schedule.js): the gate is live and the row belongs to a grouped stop.
@@ -46,4 +86,4 @@ function comboRowFlag(row) {
   return comboFastCompleteLive() && !!row?.visit_id;
 }
 
-module.exports = { COMBO_STOP_HEADER, comboStopRequested, groupedStopAllowed, comboRowFlag };
+module.exports = { COMBO_STOP_HEADER, comboStopRequested, lawnFastGroupedAsk, reportFlowShape, pestReportFlowAdmits, groupedStopAllowed, comboRowFlag };

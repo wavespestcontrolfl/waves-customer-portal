@@ -1557,14 +1557,14 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
   const missingReason = missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
+  const buildBody = () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
-    submission.submit(
-      () => completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap }),
-      [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
-    );
+    submission.submit(buildBody, [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '));
   };
+  // A part of a stop (prepare mode): a change behind the handed-over body revokes it.
+  useEffect(() => { submission.revokeIfChanged(buildBody); });
   // The tracer opens over the sheet, as the pest sheet's does.
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal

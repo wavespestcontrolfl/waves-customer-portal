@@ -117,6 +117,23 @@ describe('prepare mode (a part of a grouped stop)', () => {
     expect(request.bodies('/complete')).toHaveLength(0);
   });
 
+  test('a change after the handoff revokes it and tells the container; the footer asks to save again', async () => {
+    const onPrepared = vi.fn();
+    await openSheet(makeRequest(), { onPrepared, sharedNote: NOTE });
+    await generate({ type: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Save for this stop' }));
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    // Going back to the visit and returning changes nothing: still prepared, container not told.
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    await screen.findByLabelText('Pest activity', { selector: 'div' }).catch(() => null);
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    // The customer-home tap changes the body: revoked, container told.
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
+    await waitFor(() => expect(onPrepared).toHaveBeenCalledTimes(2));
+    expect(onPrepared).toHaveBeenLastCalledWith('svc-1', null);
+  });
+
   test('a visit that is not the plain pest report flow refuses to prepare and never posts', async () => {
     const onPrepared = vi.fn();
     const request = makeRequest({ service: { ...REGULAR, serviceType: 'Pest Control Re-Service', serviceKey: 'pest_re_service' } });

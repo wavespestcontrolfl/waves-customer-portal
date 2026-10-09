@@ -638,3 +638,35 @@ describe('X-Combo-Stop on the lawn-fast reads and the trouble-area clear', () =>
     expect(resolveLawnFastEligibility).toHaveBeenLastCalledWith(VISIT, expect.anything(), { withVisitType: false });
   });
 });
+
+// Every route under /lawn-fast/ forwards the grouped ask through the ONE helper (lawnFastGroupedAsk), or is
+// listed here as one that reads no lawn-fast eligibility (so it cannot refuse a grouped stop). A new lawn-fast
+// route that does neither fails this test.
+describe('every lawn-fast route handles a grouped stop through the one helper', () => {
+  const NO_ELIGIBILITY_READ = new Set(['/:lawnFastServiceId/lawn-fast/watering-preview']);
+  const routes = router.stack.filter((l) => l.route && l.route.path.includes('/lawn-fast/'));
+
+  test('the list is the five known routes', () => {
+    expect(routes.map((l) => `${Object.keys(l.route.methods)[0]} ${l.route.path}`).sort()).toEqual([
+      'get /:lawnFastServiceId/lawn-fast/context',
+      'get /:lawnFastServiceId/lawn-fast/treatment-guide',
+      'post /:lawnFastServiceId/lawn-fast/sod-rooted',
+      'post /:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear',
+      'post /:lawnFastServiceId/lawn-fast/watering-preview',
+    ]);
+  });
+
+  test.each(routes.map((l) => [l.route.path, l]))('%s', (path, layer) => {
+    const source = layer.route.stack.map((s) => s.handle.toString()).join('\n');
+    if (NO_ELIGIBILITY_READ.has(path)) {
+      expect(source).not.toMatch(/resolveLawnFastEligibility|buildLawnFastContext|buildLawnTreatmentGuide/);
+    } else {
+      expect(source).toMatch(/lawnFastGroupedAsk\(req\)/);
+    }
+  });
+
+  test('no lawn-fast route reads the header itself', () => {
+    const routerSource = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+    expect(routerSource).not.toMatch(/comboStopRequested/);
+  });
+});

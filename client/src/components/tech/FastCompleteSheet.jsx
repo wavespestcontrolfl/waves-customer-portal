@@ -1906,18 +1906,18 @@ function ReportFlowForm({
     const areas = where ? where() : (draft?.facts?.areas || []);
     return [active.map((row) => row.name).join(', '), areas.join(', ')].filter(Boolean).join(' · ');
   };
+  const buildBody = () => reportCompletionBody({
+    form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
+    recordFields: recordState.inputs(record, draft?.facts),
+    traceOnReport: ctx.traceOnReport,
+    photos: visitPhotos.photos,
+  });
   const submit = () => {
     if (completeMissing.reason && !submission.hasPendingBody()) return;
-    submission.submit(
-      () => reportCompletionBody({
-        form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
-        recordFields: recordState.inputs(record, draft?.facts),
-        traceOnReport: ctx.traceOnReport,
-        photos: visitPhotos.photos,
-      }),
-      summary(),
-    );
+    submission.submit(buildBody, summary());
   };
+  // A part of a stop (prepare mode): a change behind the handed-over body revokes it.
+  useEffect(() => { submission.revokeIfChanged(buildBody); });
   // The tracer opens over the sheet, the way the photo manager does.
   const openTracer = () => onOverlay(
     <TechTreatmentZoneModal
