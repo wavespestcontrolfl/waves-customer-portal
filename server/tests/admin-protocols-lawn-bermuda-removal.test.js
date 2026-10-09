@@ -209,6 +209,19 @@ describe('step members come from the staged rows\' product links, not the name m
     expect(actions.map((a) => a.product?.name).sort()).toEqual([ALIAS, FUS, NIS].sort());
   });
 
+  test('the alias-linked line carries its staged row\'s spray conditions, the same keys as the name-matched lines (codex r49 P1)', async () => {
+    const keysOf = (items, name) => (items.find((item) => item.product?.name === name)?.gateNotes || []).map((n) => n.key);
+    const plain = (await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'fus' })).items.filter((item) => item.bermudaStep);
+    const expected = keysOf(plain, REC);
+    expect(expected.length).toBeGreaterThan(0);
+    rename();
+    const sheet = (await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'fus' })).items.filter((item) => item.bermudaStep);
+    expect(keysOf(sheet, ALIAS)).toEqual(expected);
+    const actions = (await actionsFor()).actions.filter((a) => a.group);
+    expect(keysOf(actions, ALIAS).length).toBeGreaterThan(0);
+    expect(keysOf(actions, ALIAS)).toEqual(keysOf(actions, FUS));
+  });
+
   test('tagged limit ids that differ from the window\'s linked herbicides: the step is withheld (sheet and actions)', async () => {
     rename();
     // The limits judge other ids than the staged rows link.

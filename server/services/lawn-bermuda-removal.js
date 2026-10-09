@@ -685,7 +685,10 @@ async function projectBermudaStep(items, { knex, rows, probeLimits, productOf = 
 // projection says the same.
 function withRowGateNotes(items, rows) {
   const { v13GateNotes } = require('./waveguard-plan-engine');
-  return items.map((item) => (isStepLine(item) && !item.gateNotes && item.product
+  // An EMPTY list is missing too: a line the exact-name matcher did not resolve was built with
+  // `gateNotes: []`, and binding it to the staged row's linked (alias-named) product must bring
+  // that row's conditions with it.
+  return items.map((item) => (isStepLine(item) && !item.gateNotes?.length && item.product
     ? { ...item, ...optionNotes({ gateNotes: v13GateNotes(rows.get(String(item.product.id))?.gates) }) } : item));
 }
 
