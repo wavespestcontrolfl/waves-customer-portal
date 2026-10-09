@@ -999,7 +999,7 @@ const CADENCE_REKEY = Object.freeze({
 // than at today's list: the retired pest curve (services.pest.version),
 // frozen floors/minimums, legacy rodent posture, termite knob snapshots.
 const REPLAY_PIN_KEYS = ['manualDiscount', 'serviceSpecificDiscounts', 'serviceSpecificCredits', 'pestProgramFloorArmed', 'pestProgramFloorPerVisit',
-  'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'lawnCostPlusList', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs'];
+  'lawnProgramMinimumMonthly', 'useLawnCostFloor', 'lawnCostPlusList', 'lawnCostPlusListKnobs', 'commercialFloorsArmedServices', 'rodentWaveguardPostureReplay', 'termitePricingKnobs'];
 const REPLAY_PIN_SERVICE_KEYS = Object.freeze({ pest: ['version', 'pricingVersion'], lawn: ['programMinimumMonthly', 'useLawnCostFloor', 'costPlusList'] });
 
 // `activeFamilies`: the customer's plan lines TODAY, as

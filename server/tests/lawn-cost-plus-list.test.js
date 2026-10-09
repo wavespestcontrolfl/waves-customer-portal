@@ -10,6 +10,9 @@ const {
 const constants = require('../services/pricing-engine/constants');
 const { savedFloorReplaySignals } = require('../services/estimate-floor-signal-replay');
 const { nonPestTierBaseMap } = require('../routes/estimate-public');
+const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
+const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
 
 const { LAWN_PRICING_V2 } = constants;
 const GATE = 'GATE_LAWN_COST_PLUS_LIST';
@@ -331,6 +334,162 @@ describe('saved estimates replay as they were priced', () => {
     const enhanced = Object.values(map.lawn_care).find((t) => t.v === 9);
     expect(enhanced.ann).toBe(693);
     expect(enhanced.floorMonthly).toBe(Math.ceil((584.71 / 12) * 100) / 100);
+  });
+});
+
+describe('replay at the knobs a quote was priced with', () => {
+  let liveKnobs;
+  beforeEach(() => { liveKnobs = JSON.parse(JSON.stringify(LAWN_PRICING_V2.costPlusList)); });
+  afterEach(() => { LAWN_PRICING_V2.costPlusList = liveKnobs; });
+
+  test('an admin knob edit moves a fresh quote, not a saved one', () => {
+    process.env[GATE] = 'true';
+    const input = estimateInput({ lawn: lawnService() });
+    const saved = generateEstimate(input);
+    expect(saved.pricingMetadata.lawnCostPlusListKnobs).toEqual(liveKnobs);
+    LAWN_PRICING_V2.costPlusList.listMargin = 0.5;
+    const signals = savedFloorReplaySignals({ result: saved });
+    expect(signals.lawnCostPlusListKnobs.listMargin).toBe(0.45);
+    expect(lawnLine(generateEstimate({ ...input, ...signals })).annual).toBe(693);
+    const fresh = lawnLine(generateEstimate(input)).annual;
+    expect(fresh).toBeGreaterThan(693);
+  });
+
+  test('an ON stamp with no snapshot falls back to the live knobs; a bad snapshot fails closed', () => {
+    const input = estimateInput({ lawn: lawnService() });
+    expect(lawnLine(generateEstimate({ ...input, lawnCostPlusList: true })).annual).toBe(693);
+    expect(() => generateEstimate({ ...input, lawnCostPlusList: true, lawnCostPlusListKnobs: { listMargin: 5 } }))
+      .toThrow(/cost-plus list pricing knobs are invalid/);
+  });
+
+  test('knobs are not stamped when the mode is off', () => {
+    const off = generateEstimate(estimateInput({ lawn: lawnService() }));
+    expect(off.pricingMetadata).not.toHaveProperty('lawnCostPlusListKnobs');
+  });
+});
+
+describe('a posted value never beats the gate', () => {
+  const posted = (flag) => sanitizeClientIdentityFields({
+    ...estimateInput({ lawn: lawnService({ costPlusList: flag }) }),
+    lawnCostPlusList: flag,
+    lawnCostPlusListKnobs: { listMargin: 0.5 },
+  });
+
+  test('gate off + posted true prices market; gate on + posted false prices cost-plus', () => {
+    expect(lawnLine(generateEstimate(posted(true))).annual).toBe(576);
+    process.env[GATE] = 'true';
+    expect(lawnLine(generateEstimate(posted(false))).annual).toBe(693);
+  });
+
+  test('the sanitizer strips the top-level and per-service copies without mutating the caller', () => {
+    const lawn = { track: 'st_augustine', costPlusList: true };
+    const input = { services: { lawn }, lawnCostPlusList: true, lawnCostPlusListKnobs: {} };
+    const out = sanitizeClientIdentityFields({ ...input });
+    expect(out).toEqual({ services: { lawn: { track: 'st_augustine' } } });
+    expect(lawn.costPlusList).toBe(true);
+  });
+
+  test('the authoritative recompute drops posted values before replaying', async () => {
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const seen = [];
+    await serverRecomputeFromEstimateData({
+      engineInputs: {
+        lawnCostPlusList: true,
+        services: { lawn: { track: 'st_augustine', costPlusList: true } },
+      },
+      engineRequest: { options: { lawnCostPlusList: true } },
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: false } },
+    }, {
+      replaySavedPricingKnobs: true,
+      needsSync: () => false,
+      syncConstantsFromDB: async () => {},
+      generateEstimate: (input) => { seen.push(input); return { lineItems: [] }; },
+      mapV1ToLegacyShape: () => ({ recurring: { services: [] } }),
+      translateV2CallToV1Input: null,
+    });
+    expect(seen[0].lawnCostPlusList).toBe(false);
+    expect(seen[0].services.lawn.costPlusList).toBeUndefined();
+  });
+});
+
+describe('a lawn added later follows the live gate', () => {
+  const replay = (input, saved) => generateEstimate({ ...input, ...savedFloorReplaySignals({ result: saved }) });
+  const pestOnly = () => generateEstimate(estimateInput({ pest: { frequency: 'quarterly' } }));
+  const withLawn = () => estimateInput({ pest: { frequency: 'quarterly' }, lawn: lawnService() });
+
+  test('saved pest-only estimate (no stamp), gate on, lawn added: cost-plus', () => {
+    const saved = pestOnly();
+    delete saved.pricingMetadata.lawnCostPlusList;
+    process.env[GATE] = 'true';
+    expect(lawnLine(replay(withLawn(), saved)).annual).toBe(693);
+  });
+
+  test('saved pest-only estimate stamped OFF, gate on, lawn added: cost-plus', () => {
+    const saved = pestOnly();
+    expect(saved.pricingMetadata.lawnCostPlusList).toBe(false);
+    process.env[GATE] = 'true';
+    expect(lawnLine(replay(withLawn(), saved)).annual).toBe(693);
+  });
+
+  test('saved market-priced lawn with no stamp stays market with the gate on', () => {
+    const saved = generateEstimate(withLawn());
+    delete saved.pricingMetadata.lawnCostPlusList;
+    process.env[GATE] = 'true';
+    expect(lawnLine(replay(withLawn(), saved)).annual).toBe(576);
+  });
+
+  test('the add-service draft pins the saved lawn mode', () => {
+    const { savedLawnCostPlusSignal } = require('../services/estimate-floor-signal-replay');
+    const saved = generateEstimate(withLawn());
+    process.env[GATE] = 'true';
+    const draft = generateEstimate({ ...withLawn(), ...savedLawnCostPlusSignal({ result: saved }) });
+    expect(lawnLine(draft).annual).toBe(576);
+  });
+});
+
+describe('admin write boundary validates costPlusList on its own', () => {
+  const good = () => JSON.parse(JSON.stringify(constants.LAWN_COST_PLUS_LIST_DEFAULTS));
+  const check = (data) => validatePricingConfigData('lawn_pricing_v2', data, {});
+
+  test('accepts the defaults, alone or beside bermudaSuppression', () => {
+    expect(check({ costPlusList: good() }).ok).toBe(true);
+    expect(check({ costPlusList: good(), bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 } }).ok).toBe(true);
+    expect(check({ targetCollectedMarginFloor: 0.35 }).ok).toBe(true);
+  });
+
+  const bad = {
+    'not an object': () => 'nope',
+    'an array': () => [],
+    'listMargin 0.95': (c) => { c.listMargin = 0.95; return c; },
+    'listMargin a string': (c) => { c.listMargin = '0.45'; return c; },
+    'minimumPerVisit negative': (c) => { c.minimumPerVisit = -5; return c; },
+    'spotMinutesPerVisit NaN-ish': (c) => { c.spotMinutesPerVisit = null; return c; },
+    'a cadence missing': (c) => { delete c.materialPer1000SqftPerYear[12]; return c; },
+    'a cadence zero': (c) => { c.materialPer1000SqftPerYear[9] = 0; return c; },
+    'an unknown cadence': (c) => { c.materialPer1000SqftPerYear[4] = 10; return c; },
+    'an unknown key': (c) => { c.extra = 1; return c; },
+  };
+  for (const [name, mutate] of Object.entries(bad)) {
+    test(`rejects ${name}, even beside a valid bermudaSuppression`, () => {
+      const costPlusList = mutate(good());
+      for (const siblings of [{}, { bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 } }]) {
+        const verdict = check({ ...siblings, costPlusList });
+        expect(verdict.ok).toBe(false);
+        expect(verdict.error).toMatch(/costPlusList/);
+      }
+    });
+  }
+});
+
+describe('public ranges rebuild when the gate flips', () => {
+  test('the cached lawn range follows GATE_LAWN_COST_PLUS_LIST', () => {
+    const lawnRow = (payload) => JSON.stringify(payload.services.find((row) => row.key === 'lawn_care_program'));
+    const off = lawnRow(computePublicPricingRanges());
+    process.env[GATE] = 'true';
+    const on = lawnRow(computePublicPricingRanges());
+    expect(on).not.toBe(off);
+    delete process.env[GATE];
+    expect(lawnRow(computePublicPricingRanges())).toBe(off);
   });
 });
 

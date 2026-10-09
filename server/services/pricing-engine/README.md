@@ -119,8 +119,9 @@ residential recurring lawn care only. Off, everything above is unchanged. On:
   `minimumCollectedAnnualPrice` = `annualCost / 0.65` (a 35% margin).
 - Tier rows read `pricingSource` `COST_PLUS_LIST` or `MINIMUM_PER_VISIT` (else the usual
   labels) and carry `costPlusListApplied`, `listMargin` and `costPlusListAnnual`.
-- Resolution: `services.lawn.costPlusList ?? input.lawnCostPlusList ?? gate`, stamped as
-  `pricingMetadata.lawnCostPlusList`. A saved estimate replays as stamped; no stamp means OFF.
+- Resolution: `services.lawn.costPlusList ?? input.lawnCostPlusList ?? gate` (server-set only), stamped as
+  `pricingMetadata.lawnCostPlusList` plus the knob snapshot. A saved estimate replays as stamped at those
+  knobs; a priced lawn with no stamp means OFF; no priced lawn pins nothing. Posted values are stripped.
   The one-time lawn anchor stays on the market table; commercial lawn is untouched.
 - Invalid `costPlusList` knobs fail the calculation closed (400 `LAWN_COST_PLUS_LIST_KNOBS_INVALID`).
 

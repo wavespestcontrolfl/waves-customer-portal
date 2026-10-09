@@ -6,6 +6,7 @@
 const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2, TERMITE } = require('./constants');
 const { termiteAnnualPlanSelectionEnabled } = require('../../config/feature-gates');
 const { gateEnvValue } = require('../../config/feature-gates');
+const { costPlusListKnobError } = require('./lawn-cost-plus-knobs');
 
 // Optional logger — the engine must stay requireable from CLI/test harnesses
 // that don't carry the server logger, so binding events log best-effort.
@@ -507,6 +508,14 @@ function generateEstimate(input) {
     services.lawn?.costPlusList ?? input.lawnCostPlusList
       ?? gateEnvValue('GATE_LAWN_COST_PLUS_LIST')
   );
+  // The knobs this run prices with, stamped beside the mode so a saved quote
+  // replays at the knobs it was priced with (input.lawnCostPlusListKnobs is
+  // the server-only replay snapshot). Only a usable snapshot is stamped; an
+  // unusable one fails closed in priceLawnCare when a lawn line is priced.
+  const lawnCostPlusListKnobsLive = input.lawnCostPlusListKnobs ?? LAWN_PRICING_V2.costPlusList;
+  const lawnCostPlusListKnobsStamp = lawnCostPlusListArmed && !costPlusListKnobError(lawnCostPlusListKnobsLive)
+    ? JSON.parse(JSON.stringify(lawnCostPlusListKnobsLive))
+    : null;
   const lawnCostFloorArmed = lawnCostPlusListArmed || !!(
     services.lawn?.useLawnCostFloor ?? input.useLawnCostFloor
       ?? LAWN_PRICING_V2.useLawnCostFloor ?? false
@@ -675,6 +684,7 @@ function generateEstimate(input) {
     // Same replay rule for the cost-plus list mode: an estimate priced ON
     // replays ON after the gate goes off, and one priced OFF stays OFF.
     lawnCostPlusList: lawnCostPlusListArmed,
+    ...(lawnCostPlusListKnobsStamp ? { lawnCostPlusListKnobs: lawnCostPlusListKnobsStamp } : {}),
     // Resolved program minimum + pest floor state for THIS run — same
     // replay rule as the arm state: a later global re-arm/disarm must never
     // re-price a sent quote (estimate-public reads the stamps first and
@@ -896,6 +906,7 @@ function generateEstimate(input) {
         // floors") — callers can still opt in explicitly for previews.
         useLawnCostFloor: lawnCostFloorArmed,
         costPlusList: lawnCostPlusListArmed,
+        costPlusListKnobs: input.lawnCostPlusListKnobs,
         programMinimumMonthly: lawnProgramMinimumMonthlyResolved,
         targetLawnGrossMargin: services.lawn.targetLawnGrossMargin ?? input.targetLawnGrossMargin,
         routeDriveMinutes: services.lawn.routeDriveMinutes ?? input.routeDriveMinutes,

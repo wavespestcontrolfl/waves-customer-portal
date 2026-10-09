@@ -5448,7 +5448,6 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         ? { bermudaSuppression: requireBermudaSuppressionGate() }
         : {}),
       useLawnCostFloor: o.useLawnCostFloor != null ? !!o.useLawnCostFloor : undefined,
-      costPlusList: o.lawnCostPlusList != null ? !!o.lawnCostPlusList : undefined,
       targetLawnGrossMargin: o.targetLawnGrossMargin,
       routeDriveMinutes: o.routeDriveMinutes,
       lawnMaterialCostPerK: o.lawnMaterialCostPerK,

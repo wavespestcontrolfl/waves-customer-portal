@@ -77,33 +77,22 @@ function estimateLawnFloorArmed(estData = {}) {
   return null;
 }
 
-// Lawn cost-plus list mode (GATE_LAWN_COST_PLUS_LIST). Unlike the floor arm
-// state, an ABSENT stamp on a priced estimate means OFF, never "follow the
-// gate": every estimate saved before the mode existed was priced on the
-// market table and must replay there after the gate goes on. The engine
-// stamps its resolved state into pricingMetadata on every run. null only for
-// an object that carries no priced evidence at all (inject nothing).
-function estimateLawnCostPlusList(estData = {}) {
-  const stamped = estData?.result?.pricingMetadata?.lawnCostPlusList
-    ?? estData?.engineResult?.pricingMetadata?.lawnCostPlusList
-    ?? estData?.pricingMetadata?.lawnCostPlusList
-    ?? estData?.result?.routingMetadata?.lawnCostPlusList;
-  if (typeof stamped === 'boolean') return stamped;
-  const reqOptions = estData?.engineRequest?.options;
-  if (reqOptions && typeof reqOptions === 'object' && reqOptions.lawnCostPlusList != null) {
-    return !!reqOptions.lawnCostPlusList;
-  }
-  const engineInputs = rawEngineInputs(estData);
-  const stored = engineInputs?.services?.lawn?.costPlusList ?? engineInputs?.lawnCostPlusList;
-  if (stored != null) return !!stored;
-  const priced = engineInputs
-    || estData?.engineRequest
-    || estData?.result?.pricingMetadata
-    || estData?.engineResult?.pricingMetadata
-    || estData?.pricingMetadata
-    || (Array.isArray(estData?.result?.lineItems) && estData.result.lineItems.length)
-    || (Array.isArray(estData?.engineResult?.lineItems) && estData.engineResult.lineItems.length);
-  return priced ? false : null;
+// Lawn cost-plus list mode (GATE_LAWN_COST_PLUS_LIST). Server-written evidence
+// only: the engine's own pricingMetadata stamp (the mode plus the knob snapshot
+// it priced with). A browser-posted option or stored input is never evidence.
+// An estimate that priced a lawn line (or had one opted out) and carries no
+// stamp was priced before the mode existed: it pins OFF. An estimate that
+// never priced a lawn pins nothing, so a lawn added later follows the live gate.
+function savedLawnCostPlusSignal(estData) {
+  const roots = [estData?.result, estData?.engineResult, estData].filter(Boolean);
+  const pricedLawn = roots.some((r) => [].concat(r.lineItems || []).some((li) => li?.service === 'lawn_care')
+    || [].concat(r.results?.lawn || []).length > 0)
+    || [].concat(estData?.serviceOptOut?.events || []).some((e) => e?.serviceKey === 'lawn_care');
+  if (!pricedLawn) return {};
+  const stamp = roots.flatMap((r) => [r.pricingMetadata, r.routingMetadata])
+    .find((m) => typeof m?.lawnCostPlusList === 'boolean');
+  const on = stamp?.lawnCostPlusList === true;
+  return { lawnCostPlusList: on, ...(on && stamp.lawnCostPlusListKnobs ? { lawnCostPlusListKnobs: stamp.lawnCostPlusListKnobs } : {}) };
 }
 
 // Legacy pre-disarm estimates (engine armed the cost floor by default, so
@@ -209,8 +198,7 @@ function savedFloorReplaySignals(estData) {
   const signals = { palmAnnualRounding: palm || palmRemoval ? (palmMode === 'cents' ? 'cents' : 'whole') : undefined };
   const lawnArm = estimateLawnFloorArmed(estData);
   if (typeof lawnArm === 'boolean') signals.useLawnCostFloor = lawnArm;
-  const costPlusList = estimateLawnCostPlusList(estData);
-  if (typeof costPlusList === 'boolean') signals.lawnCostPlusList = costPlusList;
+  Object.assign(signals, savedLawnCostPlusSignal(estData));
   const minSignal = require('./estimate-converter').estimateLawnProgramMinimumSignal(estData);
   if (minSignal != null) signals.lawnProgramMinimumMonthly = minSignal;
   const pest = estimatePestFloorSignal(estData);
@@ -222,7 +210,7 @@ function savedFloorReplaySignals(estData) {
 module.exports = {
   rawEngineInputs,
   estimateLawnFloorArmed,
-  estimateLawnCostPlusList,
+  savedLawnCostPlusSignal,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedFloorReplaySignals,

@@ -28,6 +28,11 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   // (addedServiceKeys). Only the server replay branches set them.
   'savedEstimateReplay',
   'addedServiceKeys',
+  // GATE_LAWN_COST_PLUS_LIST rollout state and its knob snapshot: written by the
+  // engine's pricingMetadata stamp and injected by the saved-estimate replay.
+  // A posted copy (here or as services.lawn.costPlusList) must never beat the gate.
+  'lawnCostPlusList',
+  'lawnCostPlusListKnobs',
 ]);
 
 // Deletes every server-owned field from `obj` IN PLACE (plain objects only;
@@ -35,6 +40,10 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
+  if (obj.services?.lawn && typeof obj.services.lawn === 'object' && 'costPlusList' in obj.services.lawn) {
+    const { costPlusList: _posted, ...lawn } = obj.services.lawn;
+    obj.services = { ...obj.services, lawn };
+  }
   return obj;
 }
 

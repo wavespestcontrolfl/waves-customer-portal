@@ -10,6 +10,7 @@ const {
   BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
   WAVEGUARD,
 } = require('./constants');
+const { costPlusListKnobError } = require('./lawn-cost-plus-knobs');
 const {
   resolveMosquitoTreatableArea,
   resolveMosquitoLotCategory,
@@ -2111,37 +2112,23 @@ function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options
   return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPrice;
 }
 
-// Validated cost-plus list knobs (lawn_pricing_v2.costPlusList). A malformed
-// admin edit under an ON mode fails the calculation instead of silently
-// pricing off the market table (same posture as the Bermuda knob error);
-// persistence rethrows failClosed errors rather than CLIENT_FALLBACK.
+// Validated cost-plus list knobs. options.costPlusListKnobs is the server-only
+// snapshot a saved estimate was priced with; without it the live
+// lawn_pricing_v2.costPlusList row applies. A malformed object under an ON mode
+// fails the calculation instead of silently pricing off the market table (same
+// posture as the Bermuda knob error); persistence rethrows failClosed errors
+// rather than CLIENT_FALLBACK.
 function lawnCostPlusListKnobs(options = {}) {
-  const cfg = LAWN_PRICING_V2.costPlusList || {};
-  const num = (v) => (v === null || v === undefined || v === '' || typeof v === 'boolean' ? NaN : Number(v));
-  const listMargin = num(cfg.listMargin);
-  const minimumPerVisit = num(cfg.minimumPerVisit);
-  const spotMinutesPerVisit = num(cfg.spotMinutesPerVisit);
-  const materialTable = cfg.materialPer1000SqftPerYear && typeof cfg.materialPer1000SqftPerYear === 'object'
-    ? cfg.materialPer1000SqftPerYear
-    : {};
-  const materialPerK = {};
-  let valid = Number.isFinite(listMargin) && listMargin > 0 && listMargin < 0.9
-    && Number.isFinite(minimumPerVisit) && minimumPerVisit >= 0
-    && Number.isFinite(spotMinutesPerVisit) && spotMinutesPerVisit >= 0;
-  if (!Number.isFinite(Number(options.lawnMaterialCostPerK))) {
-    for (const { freq } of Object.values(LAWN_TIERS)) {
-      materialPerK[freq] = num(materialTable[freq]);
-      if (!(Number.isFinite(materialPerK[freq]) && materialPerK[freq] > 0)) valid = false;
-    }
-  }
-  if (!valid) {
-    const err = new Error('Lawn cost-plus list pricing knobs are invalid (lawn_pricing_v2.costPlusList) — fix listMargin (0 to 0.9), minimumPerVisit, spotMinutesPerVisit and materialPer1000SqftPerYear; the mode never silently prices off the market table.');
+  const cfg = options.costPlusListKnobs ?? LAWN_PRICING_V2.costPlusList;
+  const problem = costPlusListKnobError(cfg);
+  if (problem) {
+    const err = new Error(`Lawn cost-plus list pricing knobs are invalid (lawn_pricing_v2.costPlusList): ${problem}. The mode never silently prices off the market table.`);
     err.statusCode = 400;
     err.code = 'LAWN_COST_PLUS_LIST_KNOBS_INVALID';
     err.failClosed = true;
     throw err;
   }
-  return { listMargin, minimumPerVisit, spotMinutesPerVisit, materialPerK };
+  return { ...cfg, materialPerK: cfg.materialPer1000SqftPerYear };
 }
 
 function priceLawnCare(property, options = {}) {

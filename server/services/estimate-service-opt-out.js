@@ -351,9 +351,9 @@ function serviceOptOutRestoreBlockedKeys(parsedData = {}) {
  * Deliberately does NOT touch options.*: translateV2CallToV1Input only builds
  * services.<key> when the selectedServices token is present, so leftover
  * per-service options are inert once the token is gone — and leaving them is
- * both the smaller change and what makes a restore exact. Three option keys are
+ * both the smaller change and what makes a restore exact. Two option keys are
  * estimate-WIDE and would be actively wrong to clear on a service removal
- * (options.useLawnCostFloor, options.lawnCostPlusList, options.commercialInteriorService); not clearing
+ * (options.useLawnCostFloor, options.commercialInteriorService); not clearing
  * anything keeps that guarantee structural rather than a maintained exception.
  */
 function applyServiceOptOutToEstimateData(parsedData = {}, {

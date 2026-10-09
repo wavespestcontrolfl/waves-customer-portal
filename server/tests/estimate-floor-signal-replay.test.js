@@ -15,7 +15,7 @@
 const {
   rawEngineInputs,
   estimateLawnFloorArmed,
-  estimateLawnCostPlusList,
+  savedLawnCostPlusSignal,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedFloorReplaySignals,
@@ -27,8 +27,6 @@ describe('savedFloorReplaySignals — tri-state', () => {
       result: { pricingMetadata: { lawnCostFloorArmed: true, pestProgramFloorArmed: true, pestProgramFloorPerVisit: 62.5 } },
     })).toEqual({
       useLawnCostFloor: true,
-      // A priced estimate with no cost-plus stamp replays the market table.
-      lawnCostPlusList: false,
       pestProgramFloorArmed: true,
       pestProgramFloorPerVisit: 62.5,
     });
@@ -62,21 +60,41 @@ describe('savedFloorReplaySignals — tri-state', () => {
     })).toEqual({ lawnCostPlusList: false });
   });
 
-  it('cost-plus list: a stamp replays as stamped, an unstamped priced estimate replays OFF', () => {
+  it('cost-plus list: a stamp on a priced lawn replays as stamped, with its knob snapshot', () => {
+    const knobs = { listMargin: 0.5 };
     expect(savedFloorReplaySignals({
-      result: { pricingMetadata: { lawnCostPlusList: true, lawnCostFloorArmed: true } },
-    }).lawnCostPlusList).toBe(true);
-    expect(savedFloorReplaySignals({
-      result: { pricingMetadata: { lawnCostPlusList: false } },
-    }).lawnCostPlusList).toBe(false);
-    // Saved before the mode existed: no stamp is OFF, never "follow the gate".
-    expect(savedFloorReplaySignals({
-      engineInputs: { services: { lawn: { track: 'st_augustine' } } },
-      result: { pricingMetadata: { lawnCostFloorArmed: false } },
-    }).lawnCostPlusList).toBe(false);
-    expect(estimateLawnCostPlusList({ engineRequest: { options: { lawnCostPlusList: true } } })).toBe(true);
-    // Nothing priced at all injects nothing.
-    expect(estimateLawnCostPlusList({ result: {} })).toBeNull();
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: true, lawnCostPlusListKnobs: knobs } },
+    })).toMatchObject({ lawnCostPlusList: true, lawnCostPlusListKnobs: knobs });
+    const off = savedFloorReplaySignals({
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: false, lawnCostPlusListKnobs: knobs } },
+    });
+    expect(off.lawnCostPlusList).toBe(false);
+    expect('lawnCostPlusListKnobs' in off).toBe(false);
+  });
+
+  it('cost-plus list: priced lawn with no stamp pins OFF; no lawn line pins nothing', () => {
+    // Saved before the mode existed.
+    expect(savedLawnCostPlusSignal({ result: { lineItems: [{ service: 'lawn_care' }] } })).toEqual({ lawnCostPlusList: false });
+    expect(savedLawnCostPlusSignal({ result: { results: { lawn: [{ v: 9 }] } } })).toEqual({ lawnCostPlusList: false });
+    // A pest-only estimate (stamped or not) never priced a lawn: a lawn added later follows the live gate.
+    expect(savedLawnCostPlusSignal({ result: { lineItems: [{ service: 'pest_control' }] } })).toEqual({});
+    expect(savedLawnCostPlusSignal({
+      result: { lineItems: [{ service: 'pest_control' }], pricingMetadata: { lawnCostPlusList: false } },
+    })).toEqual({});
+    expect(savedLawnCostPlusSignal({ result: {} })).toEqual({});
+    // A lawn the customer opted out of keeps its quote-time mode for the restore.
+    expect(savedLawnCostPlusSignal({
+      result: { pricingMetadata: { lawnCostPlusList: true } },
+      serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false }] },
+    })).toEqual({ lawnCostPlusList: true });
+  });
+
+  it('cost-plus list: posted options and stored inputs are not evidence', () => {
+    expect(savedLawnCostPlusSignal({
+      engineRequest: { options: { lawnCostPlusList: true } },
+      engineInputs: { lawnCostPlusList: true, services: { lawn: { costPlusList: true } } },
+      result: { lineItems: [{ service: 'lawn_care' }] },
+    })).toEqual({ lawnCostPlusList: false });
   });
 
   it('prefers the engineRequest option over stored inputs, and the stamp over both', () => {
