@@ -1839,6 +1839,33 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  test('a bermuda removal Recognition spray that brings the year past its label-rate warning still completes: the response carries the warning in completionAdvisories, never a block', async () => {
+    const recognition = await mockPg('products_catalog').where({ name: 'Recognition Post Emergent Herbicide' }).first('id');
+    expect(recognition).toBeTruthy(); // the migrations seed it (20261006190400)
+    const priorDate = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+    await mockPg('property_application_history').insert({ customer_id: fixture.customerId, product_id: recognition.id, application_date: priorDate, application_rate: 0.12, rate_unit: 'oz' });
+    const childId = randomUUID();
+    const savedGate = process.env.GATE_LAWN_BERMUDA_REMOVAL;
+    process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+    try {
+      await mockPg('scheduled_services').insert({ id: childId, customer_id: fixture.customerId, technician_id: fixture.techId,
+        service_id: fixture.catalogId, service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+        window_start: '14:00', window_end: '15:00', status: 'on_site', estimated_price: 60, estimated_duration_minutes: 60 });
+      const body = { ...submission().items[0].body, sendCompletionSms: false, requestReview: false,
+        products: [{ productId: recognition.id, rate: 0.03, rateUnit: 'oz', totalAmount: 0.3, amountUnit: 'oz',
+          applicationMethod: 'spot_treatment', areaValue: 10000, areaUnit: 'sqft' }] };
+      const result = await completeScheduledService({ serviceId: childId, idempotencyKey: randomUUID(), actor: submission().actor, body });
+      expect(result.status).toBe(200);
+      expect(result.body.completionAdvisories).toEqual([expect.stringMatching(/Recognition Post Emergent Herbicide: cumulative 0\.150 oz\/1000sf\/year.*approaching\/exceeding max 0\.1437/)]);
+      expect(await mockPg('scheduled_services').where({ id: childId }).first('status')).toMatchObject({ status: 'completed' });
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = savedGate;
+      await mockPg('service_records').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('invoices').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('scheduled_services').where({ id: childId }).del().catch(() => {});
+    }
+  });
+
   // One prodiamine product with a 1 oz/1000 sq ft yearly cap and a standalone visit.
   async function capVisit() {
     await mockPg('products_catalog').where({ id: fixture.productId }).update({ active_ingredient: 'Prodiamine', rate_unit: 'oz', default_rate_per_1000: 0.5 });
@@ -2009,7 +2036,12 @@ postgres('visit completion packet records on PostgreSQL', () => {
     ]);
     // A competing claim can still hold the stop when the owner reaches its
     // invoice lock. NOWAIT releases that attempt for the existing retry path.
-    expect(attempts.every((result) => ['prepaid', 'payment_pending'].includes(result.state))).toBe(true);
+    // The attempt that lost the claim reports payment_pending, or payment_needed
+    // when it read the owner's claim as taken (visit-completion-payment.js); under
+    // load either can win the race, so both are the same "retry" outcome here, and
+    // the retry below must still settle the invoice as prepaid.
+    expect(attempts.every((result) => ['prepaid', 'payment_pending', 'payment_needed'].includes(result.state))).toBe(true);
+    expect(attempts.some((result) => ['prepaid', 'payment_pending'].includes(result.state))).toBe(true);
     if (attempts.every((result) => result.state === 'payment_pending')) {
       expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
         .toMatchObject({ status: 'failed', last_error: 'payment_pending' });

@@ -775,6 +775,14 @@ With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
 use whole-route feasibility, technician eligibility, existing arrival promises,
 blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
 on the shared customer grid (09:00–17:00 ET, `scheduling/customer-windows.js`;
+09:00–16:00 while `GATE_CUSTOMER_LAST_START_16` is set, owner 2026-10-09: the
+17:00 start is not offered, and a 17:00 offer signed before the gate was set
+is refused when taken. The assistant booking engine (`services/availability.js`
+`getAvailableSlots` and `confirmBooking`, used by the portal assistant and
+text open-time drafts) applies the same rule at offer and at commit. Two exceptions keep a time the customer already has:
+an existing estimate hold on 17:00 is returned by a repeat `/reserve` and
+committed at acceptance, and a `/api/booking/confirm` retry of a 17:00
+booking that already committed replays that booking;
 the customer-facing day closes at 18:00, and `booking_config.day_end` was
 migrated to 18:00 on 2026-09-23) are offered; estimate ASAP and booking
 open-day expansion cannot create additional starts. 12:00 is an ordinary
@@ -5443,6 +5451,8 @@ changes. `day_end` carries the stored `booking_config.day_end` (18:00 since
 the 2026-09-23 migration; the code fallback is 18:00 too), and the offered
 start grid is the shared 09:00–17:00 customer grid with 12:00 present unless
 `GATE_BOOKING_LUNCH_BLOCK` is set.
+`GATE_CUSTOMER_LAST_START_16` (dark) removes the 17:00 start; `day_end` is
+unchanged by it.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.
