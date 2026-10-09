@@ -283,8 +283,7 @@ async function loadCurrentService(currentJobId) {
       's.scheduled_date',
       's.visit_id',
       'sv.en_route_at as visit_en_route_at',
-      // A failed en-route fan-out can leave the stop unstamped while its
-      // members carry their own time: the earliest member is the fallback.
+      // The earliest en-route time among the stop's current members.
       db.raw('(select min(m.en_route_at) from scheduled_services m where m.visit_id = s.visit_id) as group_en_route_at'),
       's.lat as service_lat',
       's.lng as service_lng',
@@ -326,10 +325,12 @@ function attemptKey(service) {
   ).slice(0, 10);
   const dayPart = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : 'none';
   // A grouped stop is ONE physical visit: its members carry slightly different
-  // en_route_at values, so the attempt is the STOP's own en-route time
-  // (service_visits.en_route_at), which a same-day restart renews.
+  // en_route_at values, so the attempt is the EARLIEST current member time
+  // (the same value whichever member is the current job, and renewed when the
+  // members are rewound and restarted). The stop's own stamp can lag behind a
+  // restart, so it is only the fallback.
   const enRouteMs = timestampMs(service?.visit_id
-    ? (service.visit_en_route_at || service.group_en_route_at)
+    ? (service.group_en_route_at || service.visit_en_route_at)
     : service?.en_route_at);
   if (service?.visit_id) return `${dayPart}|visit:${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;
   return `${dayPart}|${enRouteMs == null ? 'none' : new Date(enRouteMs).toISOString()}`;

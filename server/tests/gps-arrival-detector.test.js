@@ -652,9 +652,9 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(query.locked.where).toHaveBeenCalledWith({ id: 'svc-1' });
   });
 
-  test('a grouped stop with no stop-level en-route stamp falls back to its earliest member time', async () => {
+  test('a grouped stop with no member en-route time falls back to the stop-level stamp', async () => {
     const memberAt = EN_ROUTE_TIME;
-    await run(baseService({ visit_id: 'visit-7', visit_en_route_at: null, group_en_route_at: memberAt, scheduled_date: '2026-10-08' }), {
+    await run(baseService({ visit_id: 'visit-7', visit_en_route_at: memberAt, group_en_route_at: null, scheduled_date: '2026-10-08' }), {
       point: basePoint({ speed_mph: 32, ignition: true }),
     });
 
@@ -747,9 +747,9 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
   test('a grouped stop records once for the stop, whichever member is the current job', async () => {
     const fast = { point: basePoint({ speed_mph: 32, ignition: true }) };
-    const pest = baseService({ id: 'svc-1', visit_id: 'visit-9', visit_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08', en_route_at: EN_ROUTE_TIME });
+    const pest = baseService({ id: 'svc-1', visit_id: 'visit-9', visit_en_route_at: EN_ROUTE_TIME, group_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08', en_route_at: EN_ROUTE_TIME });
     // the sibling went en route a moment later and is now the tech's current job
-    const lawn = baseService({ id: 'svc-2', visit_id: 'visit-9', visit_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08', en_route_at: new Date(new Date(EN_ROUTE_TIME).getTime() + 4000).toISOString() });
+    const lawn = baseService({ id: 'svc-2', visit_id: 'visit-9', visit_en_route_at: EN_ROUTE_TIME, group_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08', en_route_at: new Date(new Date(EN_ROUTE_TIME).getTime() + 4000).toISOString() });
 
     const query = await runWithQuery(pest, fast);
     await run(lawn, { ...fast, techStatus: baseTechStatus({ current_job_id: 'svc-2' }) });
@@ -762,7 +762,8 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
 
     // The stop is reset and sent en route again the same day: a new attempt.
     const restartedAt = new Date(new Date(EN_ROUTE_TIME).getTime() + 3600000).toISOString();
-    await run(baseService({ id: 'svc-1', visit_id: 'visit-9', visit_en_route_at: restartedAt, scheduled_date: '2026-10-08', en_route_at: restartedAt }), {
+    // the members were rewound and restarted; the stop's own stamp still holds the OLD attempt
+    await run(baseService({ id: 'svc-1', visit_id: 'visit-9', visit_en_route_at: EN_ROUTE_TIME, group_en_route_at: restartedAt, scheduled_date: '2026-10-08', en_route_at: restartedAt }), {
       point: basePoint({ speed_mph: 32, ignition: true, reported_at: new Date(new Date(restartedAt).getTime() + 60000).toISOString() }),
       techStatus: baseTechStatus({ location_updated_at: new Date(new Date(restartedAt).getTime() + 60000).toISOString() }),
     });
