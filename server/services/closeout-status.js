@@ -255,8 +255,8 @@ async function probe(label, unavailable, fn) {
   }
 }
 
-// The active and retracted application rows each chemical area add-on on the visit has, as { <key>: { active,
-// retracted } } (an add-on with no row is absent), or null when the read failed. undefined when the visit's
+// The active, recorded (active and carrying its rate, area and amount) and retracted application rows each chemical area add-on on the visit has, as { <key>: { active,
+// recorded, retracted } } (an add-on with no row is absent), or null when the read failed. undefined when the visit's
 // requirements name no chemical add-on: nothing per add-on is judged then, and no query runs. The tag is
 // service_products.area_addon_key, set at completion only for an add-on the visit really carries.
 async function addOnApplicationCounts(knex, recordIds, requirements, unavailable) {
@@ -269,8 +269,10 @@ async function addOnApplicationCounts(knex, recordIds, requirements, unavailable
     .groupBy('sp.area_addon_key')
     .select('sp.area_addon_key as key',
       knex.raw('COUNT(*) FILTER (WHERE h.retracted_at IS NULL) AS active'),
+      // A tagged row with no rate, treated area or amount (saved before the completion required them) is not the add-on's record.
+      knex.raw(`COUNT(*) FILTER (WHERE h.retracted_at IS NULL AND sp.application_rate > 0 AND sp.area_value > 0 AND sp.total_amount > 0) AS recorded`),
       knex.raw('COUNT(*) FILTER (WHERE h.retracted_at IS NOT NULL) AS retracted')));
-  return found.error ? null : Object.fromEntries(found.value.map((row) => [row.key, { active: toNumber(row.active), retracted: toNumber(row.retracted) }]));
+  return found.error ? null : Object.fromEntries(found.value.map((row) => [row.key, { active: toNumber(row.active), recorded: toNumber(row.recorded), retracted: toNumber(row.retracted) }]));
 }
 
 // ---------------------------------------------------------------------------
@@ -689,7 +691,7 @@ function areaAddOnApplicationFact(base, requirements, inputs) {
   if (base.state === 'pending' || base.state === 'failed') return { ...base, missingAddOns: keys };
   if (base.reason !== 'active_application_rows') return base;
   if (!counts) return fact('unknown', 'application_addon_lookup_failed', { activeCount: base.activeCount });
-  const missing = keys.filter((key) => !(counts[key]?.active > 0));
+  const missing = keys.filter((key) => !(counts[key]?.recorded > 0));
   const taggedActive = Object.values(counts).reduce((sum, row) => sum + row.active, 0);
   const missingHost = requirements.hostApplicationLog === true && base.activeCount - taggedActive <= 0;
   if (!missing.length && !missingHost) return { ...base, addOnsRecorded: keys };

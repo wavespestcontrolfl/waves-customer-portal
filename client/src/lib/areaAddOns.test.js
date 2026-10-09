@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  addOnActualsProblem,
   areaAddOnOption,
   areaAddOnRowLabel,
   buildAreaAddOnRequest,
   buildKnownAreas,
   isAreaAddOnOnly,
+  missingAddOnActuals,
   newAddOnEntry,
   pickedGrass,
   readAreaAddOnCatalog,
@@ -245,5 +247,43 @@ describe("the governed rate on an add-on's product row", () => {
     expect(areaAddOnRowServiceType(sweepVisit, "Web Sweep", { areaAddOnKey: "area_addon_lawn_insect_spot" })).toBe("Lawn Care");
     expect(areaAddOnRowServiceType(sweepVisit, "Web Sweep", {})).toBe("Web Sweep");
     expect(areaAddOnRowServiceType(ownVisit, "Lawn Insect Spot Treatment", {})).toBe("Lawn Care");
+  });
+});
+
+// Codex round 11 P2 on #6135: a row recorded for a chemical add-on is that add-on's application record, so the form asks
+// for its rate, unit, treated square feet and amount before the server would refuse the completion.
+describe("an add-on's application row needs its actuals", () => {
+  const complete = { name: "Arena 50 WDG", areaAddOnKey: "area_addon_lawn_insect_spot", rate: 0.147, rateUnit: "oz", areaValue: 2000, areaUnit: "sqft", totalAmount: 0.29 };
+  const host = { completionProfile: { serviceKey: "pest_general_quarterly" }, areaAddOns: [{ key: "area_addon_lawn_insect_spot", name: "Lawn Insect Spot Treatment" }] };
+  const ownVisit = { completionProfile: { serviceKey: "area_addon_lawn_insect_spot" } };
+
+  it("names what a row lacks, in the order the form shows it", () => {
+    expect(missingAddOnActuals(complete)).toEqual([]);
+    expect(missingAddOnActuals({ ...complete, rate: "" })).toEqual(["application rate"]);
+    expect(missingAddOnActuals({ ...complete, rate: 0 })).toEqual(["application rate"]);
+    expect(missingAddOnActuals({ ...complete, rateUnit: "" })).toEqual(["rate unit"]);
+    expect(missingAddOnActuals({ ...complete, areaValue: "", areaUnit: "" })).toEqual(["treated square feet"]);
+    expect(missingAddOnActuals({ ...complete, areaUnit: "linear_ft" })).toEqual(["treated square feet"]);
+    expect(missingAddOnActuals({ ...complete, rate: "", areaValue: "" })).toEqual(["application rate", "treated square feet"]);
+  });
+
+  it("the total is filled from the rate and area for a per-area unit, and typed for a per-gallon mix", () => {
+    expect(missingAddOnActuals({ ...complete, totalAmount: "" })).toEqual([]);
+    expect(missingAddOnActuals({ ...complete, rateUnit: "lb/1000sf", totalAmount: "" })).toEqual([]);
+    expect(missingAddOnActuals({ ...complete, rateUnit: "oz/gal", totalAmount: "" })).toEqual(["total amount"]);
+    expect(missingAddOnActuals({ ...complete, rateUnit: "oz/gal", totalAmount: 4 })).toEqual([]);
+  });
+
+  it("the sentence names the add-on, the product and the fields, for a tagged row and for the visit's own add-on row", () => {
+    expect(addOnActualsProblem(host, [{ ...complete, rate: "" }])).toBe("Lawn Insect Spot Treatment add-on: enter the application rate for Arena 50 WDG, then complete the visit.");
+    expect(addOnActualsProblem(ownVisit, [{ name: "Arena 50 WDG", rate: "", areaValue: "", areaUnit: "" }])).toBe("Area add-on: enter the application rate and treated square feet for Arena 50 WDG, then complete the visit.");
+    expect(addOnActualsProblem(host, [complete])).toBeNull();
+  });
+
+  it("the host's own rows and a web sweep are never checked", () => {
+    expect(addOnActualsProblem(host, [{ name: "Host product", rate: "", areaValue: "", areaUnit: "" }])).toBeNull();
+    expect(addOnActualsProblem(host, [{ name: "Sweep", areaAddOnKey: "area_addon_web_sweep", rate: "" }])).toBeNull();
+    expect(addOnActualsProblem({ completionProfile: { serviceKey: "area_addon_web_sweep" } }, [{ name: "x", rate: "" }])).toBeNull();
+    expect(addOnActualsProblem(host, undefined)).toBeNull();
   });
 });

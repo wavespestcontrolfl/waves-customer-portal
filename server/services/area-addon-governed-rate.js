@@ -24,11 +24,16 @@ const protocols = require('../config/protocols.json');
 const { MATCH_RULES } = require('./protocol-matcher');
 const { areaAddOnKeysByVisit } = require('./area-addon-visit-rows');
 const { rateUnitsMatch } = require('./waveguard-approval-engine');
+const { describeInventoryConversion, unitDefinition } = require('./inventory-units');
 
 const AREA_ADDON_KEY_PREFIX = 'area_addon_';
 const LIMIT_TYPE = 'area_addon_governed_rate';
 // A tagged row recorded with a product other than the one the add-on is governed to.
 const WRONG_PRODUCT_LIMIT_TYPE = 'area_addon_wrong_product';
+// A tagged row that cannot be held to the governed rate: it has no usable rate, or its unit cannot be safely
+// converted to the governed unit. The finding's `reason` says which.
+const UNCHECKED_RATE_LIMIT_TYPE = 'area_addon_rate_unchecked';
+const SQFT_PER_ACRE = 43560;
 const GRASS_NAMES = { st_augustine: 'St. Augustine' };
 
 const lower = (value) => String(value || '').trim().toLowerCase();
@@ -159,9 +164,76 @@ function addOnProductColumns(serviceProductCols, tags, product) {
   return serviceProductCols.area_addon_key && tag ? { area_addon_key: tag } : {};
 }
 
-// One finding for each tagged row that breaks its add-on's governing: recorded above the governed rate, or
-// recorded with a product other than the governed one. A row is compared with the rate only when it is the governed
-// product in the governed unit: any other unit has no governed rate to hold it to.
+// The base unit and the area a recorded rate is per: "oz" and "oz/1000sf" are per 1,000 sq ft, "oz/acre" is per acre,
+// anything else ("oz/gal", a mix concentration) has no area to compare. null for a blank unit.
+function splitRateUnit(rateUnit) {
+  const raw = String(rateUnit || '').trim().toLowerCase();
+  if (!raw) return null;
+  const slash = raw.indexOf('/');
+  const base = slash > 0 ? raw.slice(0, slash) : raw;
+  const basis = slash > 0 ? raw.slice(slash + 1) : '';
+  const sqft = (basis === '' || basis === '1000sf') ? 1000 : basis === 'acre' ? SQFT_PER_ACRE : null;
+  return { base, sqft };
+}
+
+// An amount converted between two units only when the conversion is safe: the same unit, or one dimension (weight to
+// weight, volume to volume). A bare "oz" is ambiguous (weight or fluid) and converts only against a weight unit, so
+// oz to lb is safe and oz to fl_oz is not. Returns null when there is no safe conversion.
+function safeConvert(amount, fromUnit, toUnit) {
+  if (rateUnitsMatch(fromUnit, toUnit)) return Number(amount);
+  const conversion = describeInventoryConversion(amount, fromUnit, toUnit);
+  if (!conversion.convertible) return null;
+  if (conversion.confidence === 'converted_ambiguous_oz') {
+    const from = unitDefinition(fromUnit);
+    const other = from.dimension === 'ambiguous' ? unitDefinition(toUnit) : from;
+    if (other.dimension !== 'weight') return null;
+  }
+  return conversion.amount;
+}
+
+// The recorded rate expressed per 1,000 sq ft in the governed unit, or null when it cannot be compared.
+function rateInGovernedUnit(rate, rateUnit, governedUnit) {
+  const parts = splitRateUnit(rateUnit);
+  if (!parts || !parts.sqft) return null;
+  return safeConvert(rate * (1000 / parts.sqft), parts.base, governedUnit);
+}
+
+const unitWords = (unit) => String(unit || '').trim().replace(/_/g, ' ');
+const governedText = (governed) => `${governed.ratePer1000} ${unitWords(governed.rateUnit)}`;
+
+// The sentence for a tagged row that could not be held to the governed rate (the completion advisory and the office alert).
+function uncheckedRateSentence(name, finding) {
+  if (finding.reason === 'rate_missing') {
+    return `${name} was recorded for an add-on with no application rate, so it could not be held to the governed rate of ${finding.max}.`;
+  }
+  const recorded = finding.current ? `in ${finding.current}` : 'with no unit';
+  return `${name} was recorded ${recorded}, and the governed add-on rate is in ${unitWords(finding.governedUnit)}.`;
+}
+
+function uncheckedRateFinding(row, governed, reason) {
+  const finding = {
+    code: 'application_limit_exceeded',
+    productId: row.product_id || null,
+    productName: row.product_name,
+    limitType: UNCHECKED_RATE_LIMIT_TYPE,
+    reason,
+    current: reason === 'rate_missing' ? null : unitWords(row.rate_unit) || null,
+    max: governedText(governed),
+    governedUnit: governed.rateUnit,
+  };
+  return { ...finding, message: `Recorded. The office will review: ${uncheckedRateSentence(row.product_name, finding)}` };
+}
+
+// "0.29 oz per 1,000 sq ft", or "6.4 oz per acre" for a per-acre unit.
+function recordedRateText(rate, rateUnit) {
+  const parts = splitRateUnit(rateUnit);
+  return `${rate} ${unitWords(parts.base)} per ${parts.sqft === SQFT_PER_ACRE ? 'acre' : '1,000 sq ft'}`;
+}
+
+// One finding for each tagged row that breaks its add-on's governing: recorded with a product other than the
+// governed one; recorded with no usable rate, or in a unit that has no safe conversion to the governed unit (it
+// could not be checked, and is never a silent pass); or recorded above the governed rate once converted to the
+// governed unit.
 function rateFindings(rows, expectedProductIds = new Map()) {
   const findings = [];
   for (const row of rows) {
@@ -184,18 +256,97 @@ function rateFindings(rows, expectedProductIds = new Map()) {
       });
       continue;
     }
-    if (!(rateUnitsMatch(row.rate_unit, governed.rateUnit) && rate > governed.ratePer1000 + 1e-9)) continue;
+    if (!(rate > 0)) {
+      findings.push(uncheckedRateFinding(row, governed, 'rate_missing'));
+      continue;
+    }
+    const comparable = rateInGovernedUnit(rate, row.rate_unit, governed.rateUnit);
+    if (comparable === null) {
+      findings.push(uncheckedRateFinding(row, governed, 'unit_not_comparable'));
+      continue;
+    }
+    if (!(comparable > governed.ratePer1000 + 1e-9)) continue;
+    const converted = !rateUnitsMatch(row.rate_unit, governed.rateUnit);
+    const shown = Math.round(comparable * 10000) / 10000;
     findings.push({
       code: 'application_limit_exceeded',
       productId: row.product_id || null,
       productName: row.product_name,
       limitType: LIMIT_TYPE,
-      current: rate,
+      current: shown,
       max: governed.ratePer1000,
-      message: `Recorded. The office will review: ${row.product_name} was recorded at ${rate} ${governed.rateUnit.replace('_', ' ')} per 1,000 sq ft, above the governed add-on rate of ${governed.ratePer1000}.`,
+      message: `Recorded. The office will review: ${row.product_name} was recorded at ${recordedRateText(rate, row.rate_unit)}${converted ? ` (${shown} ${unitWords(governed.rateUnit)} per 1,000 sq ft)` : ''}, above the governed add-on rate of ${governed.ratePer1000}.`,
     });
   }
   return findings;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The actuals a tagged row must carry (Codex round 11 on #6135). A row recorded for a chemical add-on is that add-on's
+// application record: the closeout counts it, the FDACS ledger holds its dose and the inventory deduction reads its
+// amount. A row with no rate, no treated area or no amount would count as the record while holding nothing, so a fresh
+// completion refuses it (a 400, the way an invalid unit is refused) and fills the total amount from the rate and the
+// area when the client sends none. An incomplete visit is exempt, as it is for the lawn square-feet rule.
+// ---------------------------------------------------------------------------------------------------------------
+const ACTUALS_CODE = 'area_addon_actuals_required';
+const positive = (value) => value != null && value !== '' && Number(value) > 0 && Number.isFinite(Number(value));
+const humanize = (key) => String(key || '').replace(AREA_ADDON_KEY_PREFIX, '').split('_').filter(Boolean)
+  .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+
+// The fields a row lacks, in the order the form shows them.
+function missingActuals(p) {
+  const missing = [];
+  if (!positive(p.rate)) missing.push('application rate');
+  else if (!String(p.rateUnit || '').trim()) missing.push('rate unit');
+  if (!(positive(p.areaValue) && p.areaUnit === 'sqft')) missing.push('treated square feet');
+  return missing;
+}
+
+// The total amount a row implies: its rate over its treated area, in the rate's own unit. null when the unit has
+// no area to multiply by (a mix concentration such as oz/gal).
+function impliedTotal(p) {
+  const parts = splitRateUnit(p.rateUnit);
+  if (!parts || !parts.sqft) return null;
+  return { amount: Math.round(Number(p.rate) * (Number(p.areaValue) / parts.sqft) * 10000) / 10000, unit: parts.base };
+}
+
+async function addOnDisplayNames(knex, keys) {
+  const names = new Map(keys.map((key) => [key, humanize(key)]));
+  try {
+    const rows = await knex('services').whereIn('service_key', keys).select('service_key', 'name');
+    for (const row of rows || []) if (row.name) names.set(row.service_key, row.name);
+  } catch { /* the humanized key still names the add-on */ }
+  return names;
+}
+
+/**
+ * Checks the tagged rows of a fresh completion and fills each one's total amount. Returns null when every tagged row
+ * carries its actuals, else `{ error, code }` for the 400 naming the first add-on and the fields it lacks. `tags` is
+ * resolveApplicationAddOnTags' map. Mutates the submitted row (`totalAmount`, `amountUnit`) only when the client sent
+ * no total, so the inventory check, the N budget and the deduction all read the same amount. No tag, no check, no query.
+ */
+async function requireAddOnActuals(knex, products, tags) {
+  if (!tags?.size || !Array.isArray(products)) return null;
+  const problems = [];
+  for (const p of products) {
+    const tag = p && p.productId ? tags.get(productRowKey(p)) : null;
+    if (!tag) continue;
+    const missing = missingActuals(p);
+    const total = missing.length ? null : impliedTotal(p);
+    if (!missing.length && !positive(p.totalAmount) && !total) missing.push('total amount');
+    if (missing.length) problems.push({ tag, p, missing });
+    else if (!positive(p.totalAmount)) { p.totalAmount = total.amount; p.amountUnit = total.unit; }
+  }
+  if (!problems.length) return null;
+  const { tag, p, missing } = problems[0];
+  const names = await addOnDisplayNames(knex, [tag]);
+  const product = p.name || 'the product';
+  return {
+    error: `${names.get(tag)} add-on: enter the ${missing.join(' and ')} for ${product}, then complete the visit.`,
+    code: ACTUALS_CODE,
+    addOnKey: tag,
+    missing,
+  };
 }
 
 /**
@@ -232,6 +383,10 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
 module.exports = {
   LIMIT_TYPE,
   WRONG_PRODUCT_LIMIT_TYPE,
+  UNCHECKED_RATE_LIMIT_TYPE,
+  ACTUALS_CODE,
+  uncheckedRateSentence,
+  requireAddOnActuals,
   productRowKey,
   productRowIdentity,
   isGoverned,

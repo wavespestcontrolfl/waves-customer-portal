@@ -33,7 +33,7 @@ export default function AreaAddOnFields({ service, selectedProducts, products, o
             {chemical && addOn.governed?.withheld && <div style={{ color: colors.muted }}>Rate not filled in. {addOn.governed.withheld} Enter the rate from the label.</div>}
             {!chemical && <div style={{ color: colors.muted }}>No product to record for this add-on.</div>}
             {chemical && recorded.length > 0 && (
-              <div>Recorded: {recorded.map((row) => row.displayName || row.name).join(", ")}. Enter the treated square feet in its product row below.</div>
+              <div>Recorded: {recorded.map((row) => row.displayName || row.name).join(", ")}. The rate and the treated square feet are required: enter them in its product row below.</div>
             )}
             {chemical && recorded.length === 0 && (
               <>

@@ -1943,7 +1943,7 @@ const HARD_COUNT_LIMIT_LABELS = {
 };
 // What the office notification calls each kind of finding: the hard count limits, plus an area add-on row
 // recorded above the add-on's governed rate (area-addon-governed-rate.js).
-const FINDING_LIMIT_LABELS = { ...HARD_COUNT_LIMIT_LABELS, [areaAddOnGovernedRate.LIMIT_TYPE]: 'governed add-on rate', [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: 'governed add-on product' };
+const FINDING_LIMIT_LABELS = { ...HARD_COUNT_LIMIT_LABELS, [areaAddOnGovernedRate.LIMIT_TYPE]: 'governed add-on rate', [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: 'governed add-on product', [areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: 'governed add-on rate check' };
 const MAX_RAW_SUBMITTED_PRODUCTS = 200;
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -2078,6 +2078,7 @@ const limitFigure = (finding) => {
 const FINDING_WHY = {
   [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: (name, f) => `${name} was recorded for an add-on that uses ${require('../services/ops-digest').truncateAtWord(f.max, 24)}.`,
   [areaAddOnGovernedRate.LIMIT_TYPE]: (name, f) => `${name} was recorded at ${f.current} per 1,000 sq ft, above the governed rate ${f.max}.`,
+  [areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: areaAddOnGovernedRate.uncheckedRateSentence,
   min_interval_days: (name, f) => `${name}: only ${f.current} days since another application, minimum ${f.max}.`,
   annual_max_rate: (name, f) => `${name} is over its yearly amount limit: ${f.current}% used.`,
   annual_max_apps: (name, f) => `${name} is over its yearly limit: ${f.current} of ${f.max} already used.`,
@@ -2085,6 +2086,7 @@ const FINDING_WHY = {
 // The long form (the "Show full text" detail) of the same.
 const FINDING_DETAIL = {
   [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: (fullName, f, svc) => `${fullName} was recorded for an area add-on on a ${svc.service_type || 'lawn'} visit, but the add-on uses ${f.max}. Review it and report it if needed.`,
+  [areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: (fullName, f, svc) => `On a ${svc.service_type || 'lawn'} visit, ${areaAddOnGovernedRate.uncheckedRateSentence(fullName, f)} Check the rate on the application record and report it if needed.`,
 };
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
@@ -4720,6 +4722,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
       if (prohibited.length) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(prohibited[0].code), db);
         return ({ status: 400, body: lawnProhibitedProductsBlockPayload(prohibited) });
+      }
+    }
+
+    // A row tagged to a chemical area add-on is that add-on's application record, so a fresh closeout must carry its
+    // rate, treated area and amount (the total is filled from the rate and area when the client sent none). An
+    // incomplete visit is exempt, as it is for the lawn square-feet rule. A replay or resume of a committed completion is left alone.
+    if (claim.action === 'proceed' && !isIncompleteVisit) {
+      const actualsBlock = await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags);
+      if (actualsBlock) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(actualsBlock.code), db);
+        return ({ status: 400, body: actualsBlock });
       }
     }
 

@@ -169,6 +169,13 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
     expect(within(blockText()).getByLabelText("Product used for Bed Pre-Emergent Weed Control")).toBeInTheDocument();
   });
 
+  it("the completion asks for an add-on row's rate, unit and treated square feet before it submits, except on an incomplete visit", () => {
+    const check = pageSource.indexOf("addOnActualsProblem(service, selectedProducts)");
+    expect(check).toBeGreaterThan(pageSource.indexOf("alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);"));
+    expect(check).toBeLessThan(pageSource.indexOf("setSubmitting(true);", check));
+    expect(pageSource.slice(check - 40, check)).toContain("isIncompleteVisit ? null :");
+  });
+
   it("the completion body sends both rows: the host's untagged, the add-on's tagged (one row each, never merged)", () => {
     expect(pageSource).toContain("areaAddOnKey: p.areaAddOnKey,");
     expect(pageSource).toContain("setSelectedProducts((prev) => [...prev.filter((p) => productRowId(p) !== productRowId(row)), row]);");

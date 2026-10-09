@@ -126,6 +126,41 @@ export function withGovernedAddOnRate(service, product, row) {
   };
 }
 
+// Does a product row record a chemical add-on (the server tags it and the closeout counts it)? A row tagged with a
+// chemical add-on does; so does an untagged row on a visit whose own service is a chemical add-on.
+export function isAddOnRecordRow(service, row) {
+  return row?.areaAddOnKey ? isChemicalAreaAddOnKey(row.areaAddOnKey) : isChemicalAreaAddOnVisit(service);
+}
+
+// A per-gallon mix concentration ("oz/gal") has no treated area to multiply by, so its total amount is typed.
+const hasAreaBasis = (unit) => !String(unit || "").includes("/") || /\/(1000sf|acre)$/i.test(String(unit));
+
+// The fields an add-on's application row still lacks. The server refuses the completion without them (the row is that
+// add-on's application record), so the form asks first: a positive rate with its unit, the treated square feet, and
+// a total amount (filled from the rate and area unless the unit is a per-gallon mix).
+export function missingAddOnActuals(row) {
+  const positive = (value) => value !== "" && value != null && Number(value) > 0;
+  const missing = [];
+  if (!positive(row?.rate)) missing.push("application rate");
+  else if (!String(row?.rateUnit || "").trim()) missing.push("rate unit");
+  if (!(positive(row?.areaValue) && row?.areaUnit === "sqft")) missing.push("treated square feet");
+  if (!missing.length && !positive(row?.totalAmount) && !hasAreaBasis(row?.rateUnit)) missing.push("total amount");
+  return missing;
+}
+
+// The first add-on row that cannot be saved yet, as the sentence to show, or null.
+export function addOnActualsProblem(service, rows) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!isAddOnRecordRow(service, row)) continue;
+    const missing = missingAddOnActuals(row);
+    if (!missing.length) continue;
+    const key = row.areaAddOnKey || addOnForRow(service, row)?.key;
+    const name = hostAreaAddOns(service).find((addOn) => addOn.key === key)?.name || "Area";
+    return `${name} add-on: enter the ${missing.join(" and ")} for ${row.name || "the product"}, then complete the visit.`;
+  }
+  return null;
+}
+
 // What the estimate sold for an attached add-on, in plain words, or null (the web
 // sweep has no area): "Sold: up to 2,000 sq ft of bed area".
 export function soldAreaText(addOn) {

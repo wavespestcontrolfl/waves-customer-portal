@@ -167,6 +167,86 @@ describe('which add-on each application row belongs to', () => {
   });
 });
 
+// Codex round 11 P2 on #6135: a technician could POST the right productId and a valid areaAddOnKey with no rate, amount or
+// treated area; the tag was saved, closeout counted the row, and the FDACS ledger held a null dose. A tagged row now
+// carries its actuals or the completion is a 400, and the total is filled from the rate and the area.
+describe('a row tagged to a chemical add-on must carry its application actuals', () => {
+  const tagOf = (p, key = ARENA) => new Map([[governed.productRowKey(p), key]]);
+  const names = fakeKnex({ services: [{ service_key: ARENA, name: 'Lawn Insect Spot Treatment' }] });
+  const full = (over = {}) => ({ productId: 'p-arena', name: 'Arena 50 WDG', areaAddOnKey: ARENA, rate: '0.147', rateUnit: 'oz', areaValue: '2000', areaUnit: 'sqft', ...over });
+  const check = (p, key) => governed.requireAddOnActuals(names, [p], tagOf(p, key));
+
+  test('a row with every actual passes, and a missing total is filled from the rate and the area', async () => {
+    const p = full();
+    expect(await check(p)).toBeNull();
+    expect(p).toMatchObject({ totalAmount: 0.294, amountUnit: 'oz' });
+    // A total the client sent is kept, whatever the rate and area say.
+    const sent = full({ totalAmount: '0.3', amountUnit: 'oz' });
+    expect(await check(sent)).toBeNull();
+    expect(sent).toMatchObject({ totalAmount: '0.3', amountUnit: 'oz' });
+    // A per-acre rate: 160 lb per acre over 43,560 sq ft is 160 lb; a per-1,000-sq-ft unit written out is the same as a bare one.
+    const acre = full({ rate: 160, rateUnit: 'lb/acre', areaValue: 43560 });
+    expect(await check(acre)).toBeNull();
+    expect(acre).toMatchObject({ totalAmount: 160, amountUnit: 'lb' });
+    const written = full({ rate: 3.45, rateUnit: 'lb/1000sf', areaValue: 1000 });
+    expect(await check(written)).toBeNull();
+    expect(written).toMatchObject({ totalAmount: 3.45, amountUnit: 'lb' });
+  });
+
+  test.each([
+    ['no rate', { rate: '' }, 'application rate'],
+    ['a zero rate', { rate: 0 }, 'application rate'],
+    ['a negative rate', { rate: '-1' }, 'application rate'],
+    ['a rate with no unit', { rateUnit: '' }, 'rate unit'],
+    ['no treated area', { areaValue: '' }, 'treated square feet'],
+    ['a zero area', { areaValue: 0 }, 'treated square feet'],
+    ['an area in the wrong unit', { areaUnit: 'linear_ft' }, 'treated square feet'],
+    ['an area with no unit', { areaUnit: undefined }, 'treated square feet'],
+  ])('%s is a 400 naming the add-on and the field', async (_label, over, field) => {
+    const out = await check(full(over));
+    expect(out).toMatchObject({ code: 'area_addon_actuals_required', addOnKey: ARENA });
+    expect(out.error).toBe(`Lawn Insect Spot Treatment add-on: enter the ${field} for Arena 50 WDG, then complete the visit.`);
+  });
+
+  test('every missing field is named, and a mix-concentration rate with no total asks for the total', async () => {
+    expect((await check(full({ rate: '', areaValue: '' }))).error).toBe('Lawn Insect Spot Treatment add-on: enter the application rate and treated square feet for Arena 50 WDG, then complete the visit.');
+    // oz/gal has no area to multiply by: the total must come from the technician.
+    expect((await check(full({ rateUnit: 'oz/gal' }))).error).toBe('Lawn Insect Spot Treatment add-on: enter the total amount for Arena 50 WDG, then complete the visit.');
+    expect(await check(full({ rateUnit: 'oz/gal', totalAmount: 4 }))).toBeNull();
+  });
+
+  test('an untagged row, a row the visit does not carry, and an ordinary completion are not checked and run no query', async () => {
+    const never = () => { throw new Error('must not query'); };
+    const bare = { productId: 'p', rate: '', areaValue: '' };
+    expect(await governed.requireAddOnActuals(never, [bare], new Map())).toBeNull();
+    expect(await governed.requireAddOnActuals(never, [bare], tagOf({ productId: 'other' }))).toBeNull();
+    expect(await governed.requireAddOnActuals(never, undefined, tagOf(bare))).toBeNull();
+    expect(await governed.requireAddOnActuals(never, [full()], new Map())).toBeNull();
+  });
+
+  test('the host\'s untagged row of the same product is not an add-on row', async () => {
+    const host = { productId: 'p-snap', rate: '', areaValue: '' };
+    const addOn = { productId: 'p-snap', areaAddOnKey: SNAP, name: 'Snapshot 2.5TG', rate: 3.45, rateUnit: 'lb', areaValue: 1000, areaUnit: 'sqft' };
+    expect(await governed.requireAddOnActuals(names, [host, addOn], tagOf(addOn, SNAP))).toBeNull();
+    expect(host.totalAmount).toBeUndefined();
+    expect(addOn.totalAmount).toBe(3.45);
+  });
+
+  test('a failed name lookup still names the add-on', async () => {
+    const out = await governed.requireAddOnActuals(fakeKnex({ services: new Error('offline') }), [full({ rate: '' })], tagOf(full()));
+    expect(out.error).toBe('Lawn Insect Spot add-on: enter the application rate for Arena 50 WDG, then complete the visit.');
+  });
+
+  test('the completion refuses a fresh closeout before any write, skips an incomplete visit, and the office alert reads the new finding', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
+    const refuse = src.indexOf('await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags)');
+    expect(refuse).toBeGreaterThan(src.indexOf('areaAddOnGovernedRate.resolveApplicationAddOnTags(db, svc, products)'));
+    expect(refuse).toBeLessThan(src.indexOf('const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);'));
+    expect(src.slice(refuse - 120, refuse)).toContain("claim.action === 'proceed' && !isIncompleteVisit");
+    expect(src).toContain('[areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: areaAddOnGovernedRate.uncheckedRateSentence');
+  });
+});
+
 describe('a row recorded above the governed rate is flagged, never blocked', () => {
   const row = (over) => ({ product_id: 'p', product_name: 'Arena 50 WDG', application_rate: 0.29, rate_unit: 'oz', area_addon_key: ARENA, ...over });
 
@@ -180,11 +260,66 @@ describe('a row recorded above the governed rate is flagged, never blocked', () 
   });
 
   test('the governed rate itself, and below it, are not flagged', () => {
-    expect(governed.rateFindings([row({ application_rate: 0.147 }), row({ application_rate: 0.1 }), row({ application_rate: null })])).toEqual([]);
+    expect(governed.rateFindings([row({ application_rate: 0.147 }), row({ application_rate: 0.1 })])).toEqual([]);
   });
 
-  test('only the governed product in the governed unit is compared with the rate: another unit is not judged', () => {
-    expect(governed.rateFindings([row({ rate_unit: 'lb' }), row({ rate_unit: null })])).toEqual([]);
+  // Codex round 11 P1: Number(null) is 0 and a different valid unit fell through the comparison: no finding, no office alert.
+  test('a blank, zero or negative rate on the governed product is a finding, never a silent pass', () => {
+    for (const rate of [null, undefined, '', 0, '0', -0.2]) {
+      expect(governed.rateFindings([row({ application_rate: rate })])).toEqual([expect.objectContaining({
+        code: 'application_limit_exceeded', limitType: 'area_addon_rate_unchecked', reason: 'rate_missing', productName: 'Arena 50 WDG', max: '0.147 oz',
+        message: 'Recorded. The office will review: Arena 50 WDG was recorded for an add-on with no application rate, so it could not be held to the governed rate of 0.147 oz.',
+      })]);
+    }
+  });
+
+  test('a rate in a convertible unit is compared in the governed unit (lb to oz, g to oz, gal to fl oz, per acre)', () => {
+    // Arena is governed in oz: 0.01 lb = 0.16 oz is over 0.147; 0.009 lb = 0.144 oz is under.
+    expect(governed.rateFindings([row({ application_rate: 0.01, rate_unit: 'lb' })])).toEqual([expect.objectContaining({
+      limitType: 'area_addon_governed_rate', current: 0.16, max: 0.147,
+      message: 'Recorded. The office will review: Arena 50 WDG was recorded at 0.01 lb per 1,000 sq ft (0.16 oz per 1,000 sq ft), above the governed add-on rate of 0.147.',
+    })]);
+    expect(governed.rateFindings([row({ application_rate: 0.009, rate_unit: 'lb' })])).toEqual([]);
+    // 5 g = 0.1764 oz is over; 4 g = 0.1411 oz is under.
+    expect(governed.rateFindings([row({ application_rate: 5, rate_unit: 'g' })])).toHaveLength(1);
+    expect(governed.rateFindings([row({ application_rate: 4, rate_unit: 'g' })])).toEqual([]);
+    // Acelepryn is governed in fl oz: 0.002 gal = 0.256 fl oz is over; 0.001 gal = 0.128 fl oz is under.
+    const acel = { product_name: 'Acelepryn Insecticide', area_addon_key: ACEL };
+    expect(governed.rateFindings([row({ ...acel, application_rate: 0.002, rate_unit: 'gal' })])).toEqual([expect.objectContaining({ limitType: 'area_addon_governed_rate' })]);
+    expect(governed.rateFindings([row({ ...acel, application_rate: 0.001, rate_unit: 'gal' })])).toEqual([]);
+    // Snapshot is governed in lb: 60 oz = 3.75 lb is over 3.45, 50 oz = 3.125 lb is under.
+    const snap = { product_name: 'Snapshot 2.5TG', area_addon_key: SNAP };
+    expect(governed.rateFindings([row({ ...snap, application_rate: 60, rate_unit: 'oz' })])).toHaveLength(1);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 50, rate_unit: 'oz' })])).toEqual([]);
+    // The same rate written per 1,000 sq ft ('lb/1000sf') or per acre ('lb/acre': 160 lb per acre = 3.67 lb per 1,000 sq ft, over).
+    expect(governed.rateFindings([row({ ...snap, application_rate: 3.5, rate_unit: 'lb/1000sf' })])).toHaveLength(1);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 3.4, rate_unit: 'lb/1000sf' })])).toEqual([]);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 160, rate_unit: 'lb/acre' })])).toEqual([expect.objectContaining({
+      limitType: 'area_addon_governed_rate',
+      message: expect.stringContaining('was recorded at 160 lb per acre (3.6731 lb per 1,000 sq ft)'),
+    })]);
+    expect(governed.rateFindings([row({ ...snap, application_rate: 140, rate_unit: 'lb/acre' })])).toEqual([]);
+  });
+
+  test('a unit with no safe conversion is a finding naming both units, never a silent pass', () => {
+    const unchecked = (over) => governed.rateFindings([row(over)]);
+    // oz is weight or fluid: against fl oz it is not safe. Arena (oz) recorded in fl oz, Acelepryn (fl oz) recorded in oz.
+    expect(unchecked({ rate_unit: 'fl_oz' })).toEqual([expect.objectContaining({
+      limitType: 'area_addon_rate_unchecked', reason: 'unit_not_comparable', current: 'fl oz',
+      message: 'Recorded. The office will review: Arena 50 WDG was recorded in fl oz, and the governed add-on rate is in oz.',
+    })]);
+    expect(governed.rateFindings([row({ product_name: 'Acelepryn Insecticide', area_addon_key: ACEL, rate_unit: 'oz', application_rate: 0.1 })])).toEqual([
+      expect.objectContaining({ reason: 'unit_not_comparable', message: expect.stringContaining('recorded in oz, and the governed add-on rate is in fl oz') }),
+    ]);
+    // A mix concentration, a count, or no unit at all.
+    expect(unchecked({ rate_unit: 'oz/gal' })[0]).toMatchObject({ reason: 'unit_not_comparable', current: 'oz/gal' });
+    expect(unchecked({ rate_unit: 'each' })[0]).toMatchObject({ reason: 'unit_not_comparable' });
+    expect(unchecked({ rate_unit: null })).toEqual([expect.objectContaining({
+      reason: 'unit_not_comparable', current: null,
+      message: 'Recorded. The office will review: Arena 50 WDG was recorded with no unit, and the governed add-on rate is in oz.',
+    })]);
+    // Weight against volume is not a conversion either (a gallon of Snapshot is not a pound).
+    expect(governed.rateFindings([row({ product_name: 'Snapshot 2.5TG', area_addon_key: SNAP, rate_unit: 'gal' })])[0]).toMatchObject({ reason: 'unit_not_comparable' });
     // An untagged row, or a tag with no governed rate (the sweep), is not an add-on row at all.
     expect(governed.rateFindings([row({ area_addon_key: SWEEP }), row({ area_addon_key: 'pest_general_quarterly' })])).toEqual([]);
   });

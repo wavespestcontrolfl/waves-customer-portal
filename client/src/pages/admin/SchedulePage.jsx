@@ -91,7 +91,7 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
-import { areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
+import { addOnActualsProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
@@ -18546,6 +18546,13 @@ export function CompletionPanel({
           typeFor(missingRequiredAreaProduct),
         );
       alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
+      return;
+    }
+    // A row recorded for a chemical area add-on is that add-on's application record: the server refuses it without
+    // its rate, treated square feet and amount, so ask here first (the same on the desktop and the mobile form).
+    const addOnActualsMessage = isIncompleteVisit ? null : addOnActualsProblem(service, selectedProducts);
+    if (addOnActualsMessage) {
+      alert(addOnActualsMessage);
       return;
     }
     setSubmitting(true);
