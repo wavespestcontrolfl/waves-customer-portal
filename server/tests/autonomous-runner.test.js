@@ -4827,6 +4827,7 @@ describe('_countPublishedSince counts publishes IN FLIGHT (audit regression — 
         captured.whereNotNull.push(col);
         return q;
       }),
+      whereRaw: jest.fn(function (sql, bindings) { captured.whereRaw = [sql, bindings]; return q; }),
       count: jest.fn(() => q),
       // first query: the runs; second: queue rows the terminal writer settled
       first: jest.fn().mockResolvedValueOnce({ count: 4 }).mockResolvedValueOnce({ count: 1 }),
@@ -4840,6 +4841,8 @@ describe('_countPublishedSince counts publishes IN FLIGHT (audit regression — 
     // 4 runs + 1 post the terminal writer published: both writers spend one budget.
     expect(n).toBe(5);
     expect(captured.where).toEqual(expect.arrayContaining([['skip_reason', 'terminal_writer_merged']]));
+    // by the queue's effective action, the same rule peek and claimNext use
+    expect(captured.whereRaw).toEqual([`${require('../services/content/opportunity-action-sql')} = ?`, ['new_supporting_blog']]);
     // The blog lane never produces completed_published directly — a parked
     // open PR must consume the cap at PR-open time or one batch can open
     // batchLimit PRs the same day and auto-merge them all.

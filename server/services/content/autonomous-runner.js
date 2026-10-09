@@ -3619,7 +3619,8 @@ class AutonomousRunner {
     const settled = await db('opportunity_queue')
       .where('status', 'done')
       .where('skip_reason', require('./terminal-writer').SETTLED_REASON)
-      .where('action_type', actionType)
+      // the queue's effective action: the one the terminal was handed
+      .whereRaw(`${require('./opportunity-action-sql')} = ?`, [actionType])
       .where('completed_at', '>=', since)
       .count('id as count')
       .first();
