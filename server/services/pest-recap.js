@@ -1494,6 +1494,22 @@ async function submitRecap({
       // on an edit — gets its compliance row with the recap's
       // technician-confirmed rate.
       if (productRows.length) {
+        // GATE_LAWN_BERMUDA_REMOVAL: a Recognition spray recorded here counts toward the bermuda
+        // removal caps like one recorded at /complete, so the same in-transaction check (customer
+        // lock, 2 a year, 42 days apart; this visit's own rows left out) runs before the ledger
+        // write. Gate off or no step product: nothing.
+        const recapProducts = await trx('service_products').where({ service_record_id: recordId })
+          .whereNotNull('product_id').select('product_id', 'application_rate', 'rate_unit');
+        try {
+          await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx,
+            recapProducts.map((row) => ({ productId: row.product_id, rate: row.application_rate, rateUnit: row.rate_unit })), { serviceId });
+        } catch (err) {
+          if (err && (err.code === 'lawn_bermuda_limit_reached' || err.code === 'lawn_bermuda_pair_required')) {
+            err.isOperational = true;
+            err.statusCode = 400;
+          }
+          throw err;
+        }
         const ComplianceService = require('./compliance');
         await ComplianceService.createComplianceRecords(recordId, { trx });
       }
