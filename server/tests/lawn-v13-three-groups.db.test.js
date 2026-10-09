@@ -8,6 +8,7 @@
 const { createLawnHistoryDb } = require('./helpers/lawn-history-db');
 const migration = require('../models/migrations/20261009176000_lawn_v13_three_chemical_groups');
 const liquid = require('../models/migrations/20261009177000_lawn_v13_dylox_liquid_irac_group');
+const artavia = require('../models/migrations/20261009178000_lawn_v13_artavia_frac_group');
 
 const GRAVEX = 'Gravex 20 EW';
 const DYLOX = 'Dylox 6.2 G Granular Insecticide';
@@ -163,6 +164,36 @@ describeDb('v13 three chemical groups migration through PostgreSQL', () => {
       await liquid.up(knex);
       expect(await read(SL, 'irac_group')).toBe('1A');
       expect(await liquidAudit()).toHaveLength(0);
+    });
+  });
+
+  // Migration 20261009178000 (Codex round 2 on #6238): Artavia as 20261005130000 seeds it (no group) gets frac_group 11.
+  describe('the Artavia group (20261009178000)', () => {
+    const ARTAVIA = 'Artavia 2 SC (Azoxy)';
+    const artaviaAudit = () => knex('lawn_protocol_audit_log').where({ action: artavia.ACTION });
+    const seed = async (row = {}) => { await reset(); await knex('products_catalog').insert({ active: true, name: ARTAVIA, category: 'fungicide', ...row }); };
+
+    test('frac_group 11 is filled where empty; a second up changes nothing; down keeps the value', async () => {
+      await seed();
+      await artavia.up(knex);
+      expect(await knex('products_catalog').where({ name: ARTAVIA }).first('frac_group', 'moa_group')).toEqual({ frac_group: '11', moa_group: null });
+      expect(await artaviaAudit()).toHaveLength(1);
+      const state = await snapshot();
+      await artavia.up(knex);
+      expect(await snapshot()).toBe(state);
+      await artavia.down(knex);
+      expect(await read(ARTAVIA, 'frac_group')).toBe('11');
+      expect(await artaviaAudit()).toHaveLength(0);
+    });
+
+    test('the production shape (moa_group only) keeps moa_group; a value somebody wrote stays', async () => {
+      await seed({ moa_group: 'Group 11' });
+      await artavia.up(knex);
+      expect(await knex('products_catalog').where({ name: ARTAVIA }).first('frac_group', 'moa_group')).toEqual({ frac_group: '11', moa_group: 'Group 11' });
+      await seed({ frac_group: '11 + 3' });
+      await artavia.up(knex);
+      expect(await read(ARTAVIA, 'frac_group')).toBe('11 + 3');
+      expect(await artaviaAudit()).toHaveLength(0);
     });
   });
 });

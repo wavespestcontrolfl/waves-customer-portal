@@ -472,3 +472,32 @@ describe('waveguard approval engine', () => {
     expect(summary.approvedAt).toEqual(expect.any(String));
   });
 });
+
+// Codex round 2 on #6238: a row that holds one group in the free-text column and in the typed column is one repeat.
+describe('one group held twice on a catalog row (moa_group "Group 1B" and irac_group "1B")', () => {
+  const savedGate = process.env.GATE_LAWN_V13;
+  afterEach(() => { if (savedGate === undefined) delete process.env.GATE_LAWN_V13; else process.env.GATE_LAWN_V13 = savedGate; });
+  const LIQUID = { id: 'base', name: 'Dylox 420 SL T&O Insecticide', category: 'insecticide', moa_group: 'Group 1B', irac_group: '1B' };
+  const prior = (changes) => ({ customer_id: 'customer-1', status: 'completed', product_category: 'insecticide', service_date: '2026-05-11', ...changes });
+  const run = (productsCatalog, priorApplications) => evaluateWaveGuardManagerApprovals(fakeKnex({ productsCatalog, priorApplications }), {
+    customerId: 'customer-1', service: { service_type: 'Lawn Care' }, plan: basePlan(), serviceDate: '2026-06-10', products: [{ productId: 'base', targets: [] }],
+  });
+  const repeats = (result) => result.blocks.filter((block) => /^repeat_/.test(block.code)).map((block) => block.code);
+  const liquidBefore = prior({ product_name: LIQUID.name, moa_group: 'Group 1B', irac_group: '1B', catalog_group: '1B' });
+
+  test('v13 on: liquid Dylox after liquid Dylox is ONE finding, the typed one', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    expect(repeats(await run([LIQUID], [liquidBefore]))).toEqual(['repeat_irac_group']);
+  });
+
+  test('v13 on: the free-text finding stays when no typed finding names the same earlier application', async () => {
+    process.env.GATE_LAWN_V13 = 'true';
+    const moaOnly = { ...LIQUID, irac_group: null };
+    expect(repeats(await run([moaOnly], [prior({ product_name: 'Older organophosphate', moa_group: 'Group 1B' })]))).toEqual(['repeat_moa_group']);
+  });
+
+  test('v13 off: both findings, as before', async () => {
+    delete process.env.GATE_LAWN_V13;
+    expect(repeats(await run([LIQUID], [liquidBefore]))).toEqual(['repeat_moa_group', 'repeat_irac_group']);
+  });
+});

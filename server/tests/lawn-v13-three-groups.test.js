@@ -3,9 +3,10 @@
 const v13 = require('../config/lawn-protocol-v13.json');
 const migration = require('../models/migrations/20261009176000_lawn_v13_three_chemical_groups');
 const liquid = require('../models/migrations/20261009177000_lawn_v13_dylox_liquid_irac_group');
+const artavia = require('../models/migrations/20261009178000_lawn_v13_artavia_frac_group');
 const { productGroups } = require('../services/waveguard-approval-engine');
 
-const PYTHIUM = 'The app warns on the second Artavia application for Pythium; the label allows two in a row, and nothing else in the program controls Pythium, so do not make a third: fix the watering or drainage.';
+const PYTHIUM = 'The app warns on the second Artavia application for Pythium; the label allows two in a row. Headway is not a rotation for it (Headway has the same Group 11 ingredient). Do not make a third Group 11 application in a row: fix the watering or drainage.';
 const TRACKS = Object.keys(v13);
 const spotDiseaseLines = (track) => v13[track].notes.filter((line) => line.startsWith('Other spot diseases (secondary lines): Pythium root rot with Artavia'));
 
@@ -48,5 +49,11 @@ describe('the three chemical groups', () => {
     const liquidRow = productGroups({ name: liquid.GROUP.name, moa_group: 'Group 1B', [liquid.GROUP.column]: liquid.GROUP.value });
     const granularRow = productGroups({ name: granular.name, [granular.column]: granular.value });
     expect(liquidRow).toEqual(expect.arrayContaining(granularRow));
+  });
+
+  // Codex round 2 on #6238: the recipe promises a warning on the second Artavia application, so the row needs its group.
+  test('Artavia gets frac_group 11, the group Headway (3 + 11) shares', () => {
+    expect([artavia.GROUP.name, artavia.GROUP.column, artavia.GROUP.value]).toEqual(['Artavia 2 SC (Azoxy)', 'frac_group', '11']);
+    expect(productGroups({ name: artavia.GROUP.name, frac_group: artavia.GROUP.value })).toEqual([['frac', '11']]);
   });
 });
