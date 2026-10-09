@@ -49,13 +49,10 @@ function lawnFastCompleteOffered(completionProfile) {
 // the rows (resolveEligibility fails closed) and is the authority, so a failed read
 // here is logged and leaves the flags as they were.
 const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
-  reserviceFastCompleteEnabled: false,
-  treeShrubFastCompleteEnabled: false,
-  lawnReserviceFastCompleteEnabled: false,
-  lawnFastCompleteEnabled: false,
-  fastCompleteRecapEnabled: false,
-  fastCompleteReportEnabled: false,
-  typedReportFlowEnabled: false,
+  ...Object.fromEntries([
+    'reserviceFastCompleteEnabled', 'treeShrubFastCompleteEnabled', 'lawnReserviceFastCompleteEnabled', 'lawnFastCompleteEnabled',
+    'fastCompleteRecapEnabled', 'fastCompleteReportEnabled', 'typedReportFlowEnabled',
+  ].map((flag) => [flag, false])),
   areaAddOnRowsAttached: true,
 });
 async function areaAddOnVisitIdsForFeed(serviceIds) {
