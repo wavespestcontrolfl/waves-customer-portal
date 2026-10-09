@@ -707,6 +707,11 @@ describe('FastCompleteSheet', () => {
     expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
   });
 
+  test('no Details while the live visit is still loading (its schedule row is not yet verified)', () => {
+    render(<FastCompleteSheet service={SERVICE} request={() => new Promise(() => {})} onClose={() => {}} onViewDetails={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'Details' })).toBeNull();
+  });
+
   test('a blocked visit (changed since the schedule loaded) offers no Details on its stale row', async () => {
     const request = makeRequest({ service: { ...CONTEXT_SERVICE, serviceKey: 'general_pest_control' } });
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onViewDetails={vi.fn()} />);
