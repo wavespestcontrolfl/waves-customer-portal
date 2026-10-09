@@ -331,3 +331,52 @@ describe('gratitude qualification pins the company facts source', () => {
     expect(pinnedSourceFiles()).toContain('server/constants/business.js'); // the address/brand constants the facts render
   });
 });
+
+// Codex #6197 r1 P0: a block drafted before a facts change keeps its OLD company render.
+// The readers of stored blocks must still recognize it; the sealed contract must not.
+describe('earlier COMPANY FACTS renders in stored facts blocks', () => {
+  const facts = require('../services/sms-company-facts');
+  const { LABEL_FACTS_NONE_SECTION } = require('../services/sms-label-facts');
+  const { exactLabelFactsSection: labelSectionOf } = facts;
+  const oldRender = facts.knownCompanyFactsRenders()[1];
+  // per-customer head long enough that the company section would not fit a raw 6,000-char prefix
+  const head = `CUSTOMER: synthetic\n${Array.from({ length: 110 }, (_, n) => `SERVICE HISTORY ${n}: Quarterly Pest completed`).join('\n')}\n`;
+  const tail = 'BILLING:\n- balance: none\nRECENT PHONE CALLS:\n- 2026-10-01: caller was told the tech arrives Thursday\nRECENT SMS THREAD:\n[CUSTOMER] THREAD_SENTINEL';
+  const blockWith = (render) => `${head}${render}${LABEL_FACTS_NONE_SECTION}${tail}`;
+
+  test('every earlier render is the first N lines of today\'s list, pinned by its sha256', () => {
+    expect(facts.PRIOR_COMPANY_FACTS_RENDERS.length).toBeGreaterThan(0);
+    const renders = facts.knownCompanyFactsRenders();
+    expect(renders[0]).toBe(facts.renderCompanyFactsSection());
+    facts.PRIOR_COMPANY_FACTS_RENDERS.forEach((prior, i) => {
+      expect(prior.lines).toBeLessThan(COMPANY_FACTS.length);
+      expect(crypto.createHash('sha256').update(renders[i + 1]).digest('hex')).toBe(prior.sha256);
+    });
+    expect(oldRender.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(16);
+  });
+
+  test('the judge keeps the size exemption for a block with the earlier render: the thread survives', () => {
+    const oldBlock = blockWith(oldRender);
+    expect(oldBlock.length).toBeGreaterThan(6000);
+    const out = sanitizeFactsForJudge(oldBlock);
+    expect(out).toContain('THREAD_SENTINEL');
+    expect(out).toContain('- 2026-10-01: caller was told the tech arrives Thursday');
+    expect(out).toContain(oldRender.trim().split('\n').pop()); // the old section itself is still shown, whole
+    // today's render behaves the same
+    expect(sanitizeFactsForJudge(blockWith(facts.renderCompanyFactsSection()))).toContain('THREAD_SENTINEL');
+    // an UNKNOWN company section gets no exemption (the exact match is still the rule)
+    const unknown = blockWith(oldRender.replace('Arrival windows are two hours', 'Arrival windows are three hours'));
+    expect(sanitizeFactsForJudge(unknown)).not.toContain('THREAD_SENTINEL');
+  });
+
+  test('the label-facts reader finds the section behind an earlier render; the sealed contract does not accept it', () => {
+    const oldBlock = blockWith(oldRender);
+    expect(labelSectionOf(oldBlock)).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    expect(labelSectionOf(blockWith(facts.renderCompanyFactsSection()))).toBe(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''));
+    // contract: today's exact render only, so an old item never grades the new identity
+    expect(hasExactCompanyFacts(oldBlock)).toBe(false);
+    expect(facts.hasExactLabelFacts(oldBlock)).toBe(false);
+    expect(hasExactCompanyFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
+    expect(facts.hasExactLabelFacts(blockWith(facts.renderCompanyFactsSection()))).toBe(true);
+  });
+});

@@ -63,7 +63,7 @@ const COMPANY_FACTS_JUDGE_CAP = 3000;
 const LABEL_FACTS_JUDGE_CAP = 2000;
 function sanitizeFactsForJudge(block) {
   const { EXEMPLAR_INJECTION_RE } = require('./sms-shadow-drafter');
-  const { renderCompanyFactsSection } = require('./sms-company-facts');
+  const { knownCompanyFactsRenders } = require('./sms-company-facts');
   const {
     LABEL_FACTS_NONE_SECTION, LABEL_FACTS_FILLED_HEADER_RE, LABEL_LINE_MAX, LABEL_LINES_MAX,
   } = require('./sms-label-facts');
@@ -87,7 +87,11 @@ function sanitizeFactsForJudge(block) {
   // A header typed into a multi-line SMS sits in the thread, AFTER the real
   // BILLING: line and never in that spot, so it is ordinary text under the
   // cap. The label part is exempt only together with the company part.
-  const staticLines = renderCompanyFactsSection().replace(/\n$/, '').split('\n');
+  // Today's render or an earlier one: a stored block keeps the render it was
+  // drafted with, and it must keep the exemption after the facts change
+  // (Codex #6197 r1 P0). Longest first, so a shorter render never matches the
+  // tail of a longer one.
+  const knownStatic = knownCompanyFactsRenders().map((r) => r.replace(/\n$/, '').split('\n')).sort((x, y) => y.length - x.length);
   const noneLines = LABEL_FACTS_NONE_SECTION.replace(/\n$/, '').split('\n');
   const billing = lines.indexOf('BILLING:');
   let labelStart = billing;
@@ -101,8 +105,10 @@ function sanitizeFactsForJudge(block) {
       while (h > 0 && lines[h - 1].startsWith('- ') && lines[h - 1].length <= LABEL_LINE_MAX + 2 && billing - h < LABEL_LINES_MAX) h -= 1;
       if (h > 0 && h < billing && LABEL_FACTS_FILLED_HEADER_RE.test(lines[h - 1])) labelStart = h - 1;
     }
-    const s0 = labelStart - staticLines.length;
-    if (s0 >= 0 && staticLines.every((l, n) => lines[s0 + n] === l)) start = s0;
+    for (const staticLines of knownStatic) {
+      const s0 = labelStart - staticLines.length;
+      if (s0 >= 0 && staticLines.every((l, n) => lines[s0 + n] === l)) { start = s0; break; }
+    }
   }
   let section = '';
   let rest = lines;

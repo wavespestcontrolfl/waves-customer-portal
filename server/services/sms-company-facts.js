@@ -55,7 +55,32 @@ const COMPANY_FACTS = Object.freeze([
 // The static section: fixed owner-approved policy, identical on every draft
 // (the judge's sanitizer exempts exactly this text from its size budget).
 function renderCompanyFactsSection() {
-  return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.map((f) => `- ${f}`).join('\n')}\n`;
+  return renderCompanyFactsLines(COMPANY_FACTS.length);
+}
+function renderCompanyFactsLines(count) {
+  return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.slice(0, count).map((f) => `- ${f}`).join('\n')}\n`;
+}
+
+// ---- Earlier renders still stored in message_drafts.facts_block -----------
+//
+// Lines are only ever APPENDED to COMPANY_FACTS, so an earlier render is the
+// first N lines of today's list. A stored block keeps the render it was
+// drafted with, and the READERS of stored blocks (the nightly judge's size
+// exemption, the label-facts reader behind grounding and send-time rechecks)
+// must still recognize it (Codex #6197 r1 P0): otherwise a block drafted the
+// day before a facts change loses the exemption, the company section eats the
+// judge's prefix budget, and the calls/thread evidence falls off the end.
+// Each entry is pinned by the sha256 of its render (sms-company-facts.test.js),
+// so editing one of the first N lines fails CI instead of silently orphaning
+// stored blocks. The sealed-eval CONTRACT stays exact-current on purpose
+// (hasExactCompanyFacts): an old item must never grade the new identity.
+const PRIOR_COMPANY_FACTS_RENDERS = Object.freeze([
+  // 2026-10-03 service knowledge (#5723): identities 6_cflvp, 7_m, 8_m
+  { lines: 16, sha256: 'abed23421e2f7745d97d48a70e95a496f6636a411764cc02e43360d0d9a2e1e2' },
+]);
+// Today's render first, then each earlier one, newest first.
+function knownCompanyFactsRenders() {
+  return [renderCompanyFactsSection(), ...PRIOR_COMPANY_FACTS_RENDERS.map((r) => renderCompanyFactsLines(r.lines))];
 }
 
 // ---- Trusted presence check (sealed-eval compatibility) -----------------
@@ -77,9 +102,13 @@ function exactSectionSuffix() {
 // `label`: 'optional' (a pre-LABEL-FACTS block ends at the company section),
 // 'required' (a `_cfl` block), so each is an exact-structure test, never a
 // substring one (Codex: a header typed into an SMS proves nothing).
-function exactStructureRegexSource(label) {
+// `anyRender` (readers of STORED blocks only, never the sealed contract): the
+// company part matches today's render or any earlier one.
+function exactStructureRegexSource(label, { anyRender = false } = {}) {
   const { LABEL_SECTION_REGEX_SRC, escapeRegex } = require('./sms-label-facts');
-  const company = escapeRegex(exactSectionSuffix());
+  const company = anyRender
+    ? `(?:${knownCompanyFactsRenders().map((r) => escapeRegex(`\n${r.replace(/\n$/, '')}`)).join('|')})`
+    : escapeRegex(exactSectionSuffix());
   // 'capture' = 'required' with the label section as capture group 1 (JS only).
   const tail = label === 'capture' ? `\n(${LABEL_SECTION_REGEX_SRC})`
     : (label === 'required' ? `\n${LABEL_SECTION_REGEX_SRC}` : `(?:\n${LABEL_SECTION_REGEX_SRC})?`);
@@ -103,11 +132,14 @@ function hasExactCompanyFacts(factsBlock) {
 function exactLabelFactsSection(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
   if (before === null) return '';
-  const m = new RegExp(exactStructureRegexSource('capture')).exec(before);
+  // a stored block keeps the company render it was drafted with (anyRender)
+  const m = new RegExp(exactStructureRegexSource('capture', { anyRender: true })).exec(before);
   return m ? m[1] : '';
 }
+// The sealed CONTRACT's test: today's exact render only (see hasExactCompanyFacts).
 function hasExactLabelFacts(factsBlock) {
-  return exactLabelFactsSection(factsBlock) !== '';
+  const before = textBeforeFirstBilling(factsBlock);
+  return before !== null && new RegExp(exactStructureRegexSource('required')).test(before);
 }
 
 module.exports = {
@@ -120,4 +152,6 @@ module.exports = {
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
   renderCompanyFactsSection,
+  PRIOR_COMPANY_FACTS_RENDERS,
+  knownCompanyFactsRenders,
 };
