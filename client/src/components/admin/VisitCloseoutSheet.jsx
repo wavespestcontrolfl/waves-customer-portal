@@ -5,7 +5,7 @@ import { CompletionPanel } from '../../pages/admin/SchedulePage';
 import { adminFetch } from '../../utils/admin-fetch';
 import { putVisitCompletionDraft } from '../../lib/completion-resume-store';
 import {
-  clearTerminalDrafts, loadVisitCloseout, operatorScope, packetConfirm, packetErrorMessage, paymentLine, postVisitPacket, rediscoverCloseout,
+  clearTerminalDrafts, isFinishedState, isOfficeReviewState, loadVisitCloseout, operatorScope, packetAfterSend, packetDisplayState, paymentLine, postVisitPacket, resolveSendFailure,
 } from '../../lib/visit-closeout-packet';
 
 const OUTCOMES = {
@@ -14,7 +14,7 @@ const OUTCOMES = {
   follow_up_needed: 'Follow-up needed', customer_concern: 'Customer concern',
 };
 
-export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved }) {
+export default function VisitCloseoutSheet({ visitId, products, operatorId, onClose, onSaved }) {
   const [visit, setVisit] = useState(null);
   const [services, setServices] = useState([]);
   const [draft, setDraft] = useState(null);
@@ -24,7 +24,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
   const [result, setResult] = useState(null);
   const [reload, setReload] = useState(0);
   const submitting = useRef(false);
-  const scope = operatorScope();
+  const scope = operatorScope(operatorId);
 
   useEffect(() => {
     let live = true;
@@ -39,8 +39,9 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
   }, [visitId, reload, scope]);
 
   const packet = visit?.packet;
-  const finished = result ? ['done', 'office_required'].includes(result.state) : ['done', 'failed'].includes(packet?.status);
-  const officeReview = result ? result.state === 'office_required' : packet?.status === 'failed' || packet?.officeReview;
+  const display = packetDisplayState({ result, detail: visit });
+  const finished = isFinishedState(display);
+  const officeReview = isOfficeReviewState(display);
   const ready = services.length > 0 && services.every((service) => draft?.forms?.[service.id]?.body);
   const prepared = services.filter((service) => draft?.forms?.[service.id]?.body).length;
 
@@ -64,42 +65,36 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       const response = await postVisitPacket({ visitId, packet, draft: candidate, services, scope });
       setResult(response);
       setVisit((current) => ({ ...current, canRevokeSummary: response.canRevokeSummary === true,
-        packet: { id: response.packetId, status: response.state === 'done' || response.state === 'office_required' ? 'done' : 'processing' } }));
+        packet: packetAfterSend(response) }));
       if (['done', 'office_required'].includes(response.state)) {
         await clearTerminalDrafts(visitId, visit?.members || services, scope);
       }
       onSaved();
     } catch (err) {
-      // The confirm prompts (a changed report, the edit heads-up, a promise changed after the report): OK sends that
-      // member as is under the same key; Cancel on a promise puts its form back to be marked again.
-      const confirm = await packetConfirm({ err, candidate, packet, visitId, scope });
-      if (confirm?.resend) {
-        confirmedDraft = confirm.resend;
+      // The confirm prompts, a lost response and a changed member list: one rule for both closeout sheets.
+      const outcome = await resolveSendFailure({ err, candidate, packet, visitId, scope });
+      if (outcome.kind === 'resend') {
+        confirmedDraft = outcome.draft;
         setDraft(confirmedDraft);
-      } else if (confirm?.reopened) {
-        setDraft(confirm.reopened);
-        setError(confirm.message);
-      } else if (!confirm) {
-        setError(packetErrorMessage(err));
-        // An HTTP timeout does not mean the transaction failed. Discover the
-        // server-owned packet before offering another submit or editable form.
-        try {
-          const found = await rediscoverCloseout({ visitId, candidate, err, scope });
+      } else if (outcome.kind === 'reopened') {
+        setDraft(outcome.draft);
+        setError(outcome.message);
+      } else if (outcome.kind === 'error') {
+        setError(outcome.error);
+        // The server was asked what it has (an HTTP timeout does not mean the transaction failed): its answer replaces
+        // the earlier one, and a changed member list refreshes the forms.
+        if (outcome.found) {
           setResult(null);
-          if (found.finished) setError('');
-          if (found.refreshed) {
-            setServices(found.refreshed.rows);
-            setDraft(found.refreshed.draft);
+          if (outcome.found.refreshed) {
+            setServices(outcome.found.refreshed.rows);
+            setDraft(outcome.found.refreshed.draft);
             setEditing(null);
-            setError('The service list changed. Review the refreshed services before trying again.');
           }
-          setVisit(found.detail);
-          if (found.detail.packet) onSaved();
-        } catch {
-          // The same key/body remain durable for a later retry. A membership
-          // rejection must expose the reload control instead of a stale list.
-          if (err.code === 'visit_members_changed') setVisit(null);
+          setVisit(outcome.found.detail);
+          if (outcome.found.detail.packet) onSaved();
         }
+        // A membership rejection must expose the reload control instead of a stale list.
+        if (outcome.reload) setVisit(null);
       }
     } finally {
       submitting.current = false;

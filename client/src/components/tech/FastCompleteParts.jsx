@@ -7,7 +7,7 @@
 // /complete submit lives in hooks/useFastCompleteSubmit.js. The amount entry,
 // "+ Other product" picker wiring, stale-visit check and footer are shared
 // by every sheet that takes products.
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useFieldPortalClass } from './fieldPortal';
 import { createPortal } from 'react-dom';
 import { rankTechTips, techTipSubtext, techTipSentLabel, unsentTipsFirst } from '../../lib/tech-tips';
@@ -153,6 +153,17 @@ export function FastCompleteFrame({ isMobile, dialogRef, titleId, onDismiss, hid
     </>,
     document.body,
   );
+}
+
+// Work in flight inside a part of a stop (a voice clip, a report being written, an analysis, a save): the container
+// reads it so it never closes or unmounts a part mid-request. Outside a container the default context is a no-op.
+export const PartBusyContext = createContext(() => {});
+export function usePartBusy(source, busy) {
+  const report = useContext(PartBusyContext);
+  useEffect(() => {
+    report(source, busy);
+    return () => report(source, false);
+  }, [report, source, busy]);
 }
 
 // A sheet used as one PART of a stop (GATE_COMBO_FAST_COMPLETE; the sheets' `embedded` prop): no overlay, no portal, no

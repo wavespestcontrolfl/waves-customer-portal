@@ -102,7 +102,7 @@ import {
 import {
   AmountEntry, AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton,
   SavedView, SheetHeader, TipSection, TipSuggestion, VisitNote, customerNameOf, isSendableRateUnit, methodLabel, techTipsOf, toggleInSet, usePhotoManager,
-  useDictationSources, useProductPicker, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { pestSheetTipIds, pestsInNote } from '../../lib/tech-tips';
 
@@ -571,6 +571,7 @@ export default function FastCompleteSheet({ service, request, operatorId, onClos
   // so Full form and Close wait on it too).
   const [voiceBusy, setVoiceBusy] = useState(false);
   // The form's own word that this visit needs the full form (see the header).
+  usePartBusy('pest', [submitting, voiceBusy, dictationPending, photoBusy].some(Boolean));
   const [fullFormNeeded, setFullFormNeeded] = useState(false);
   const fullFormOffered = fullFormOfferedFor({ reportFlow, fullFormNeeded, ctx, stationsFlow: routedStationsOf(service) });
 
@@ -1769,6 +1770,7 @@ function ReportFlowForm({
   useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
+  usePartBusy('pest-report', !!writing);
   // After the note's read: the best tip for the pests the reader heard and the
   // words of the note. Offered only while the tech has no tip of their own
   // choosing (or has taken this one); never picked for them.

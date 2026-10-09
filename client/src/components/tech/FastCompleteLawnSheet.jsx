@@ -123,7 +123,7 @@ import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, EmbeddedPartFrame, FastCompleteFrame, MethodSection, OtherProductButton,
   RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
-  methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  methodLabel, techTipsOf, unitLabel, useDictationSources, useProductPicker, usePartBusy, useSharedNoteForm, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -1331,6 +1331,7 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const [dictationPending, setDictationPending] = useState(false);
   // The treatment zone tracer opens over the sheet, which is inert meanwhile.
   const [overlay, setOverlay] = useState(null);
+  usePartBusy('lawn', [submitting, dictationPending, overlay != null].some(Boolean));
 
   // The server says this visit does not use this sheet: the parent opens the
   // full form, once. (No button on the sheet leads there.) Not while a saved
@@ -1581,6 +1582,8 @@ function LawnFastForm({ operatorId, service, request, catalog, ctx, propertyArea
   // The photo step reports back: the confirmed assessment's id (null until
   // there is one), whether a lookup, analysis or confirm is in flight.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
+  // An assessment lookup, analysis or confirm in flight (the photo step reports ready = false meanwhile).
+  usePartBusy('lawn-assessment', assessmentReady === false);
   // A confirmed assessment the report would reject (made for the visit's
   // former property) does not count until the tech analyzes again.
   const unusable = !!assessmentId && !!ctx.assessment?.unusableReason && String(assessmentId) === String(ctx.assessment.id);

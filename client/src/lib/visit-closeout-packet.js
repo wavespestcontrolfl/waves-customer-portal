@@ -14,7 +14,11 @@ import { completionPromiseMarksPrompt, completionReconcilePrompt, completionRepo
 // The server classifies retained history from canonical service records.
 export const liveMembers = (detail) => detail.members.filter((member) => member.requiresForm === true);
 
-export function operatorScope() {
+// The operator a visit's saved forms belong to: the verified operator the page passes, and only without one the cached
+// profile. The ONE scope function: the long form, the one-screen container and the Fast Complete sheets' own drafts
+// key on the same id, so a shared device never shows one technician another's unsent forms.
+export function operatorScope(verifiedId) {
+  if (verifiedId) return String(verifiedId);
   const id = getAdminUser()?.id;
   return id ? String(id) : '';
 }
@@ -142,6 +146,52 @@ const PAYMENT_LABELS = {
   processing: 'Awaiting confirmation', office_required: 'Office review',
 };
 export const paymentLine = (result) => (result?.payment ? `Payment: ${PAYMENT_LABELS[result.payment.state] || 'Recorded'}.` : null);
+
+// What the stop is doing, from the last send's answer and the server's packet. One rule for the long form and the
+// one-screen container. Precedence: a send's own answer, else the packet the server reports (a rediscovered finished
+// packet clears the earlier answer, see resolveSendFailure's `found`); a finished packet is done, office review (a closed
+// stop held for billing or delivery review, `packet.officeReview`) or failed; otherwise busy, else a started packet is
+// pending its resume, else idle.
+export function packetDisplayState({ result, detail, busy = false }) {
+  const packet = detail?.packet;
+  if (result?.state === 'done') return 'done';
+  if (result?.state === 'office_required') return 'office_review';
+  if (!result && packet?.status === 'failed') return 'failed';
+  if (!result && packet?.status === 'done') return packet.officeReview ? 'office_review' : 'done';
+  if (busy) return 'busy';
+  return result || packet ? 'pending_resume' : 'idle';
+}
+export const isFinishedState = (state) => ['done', 'office_review', 'failed'].includes(state);
+export const isOfficeReviewState = (state) => ['office_review', 'failed'].includes(state);
+
+// The packet the stop holds after a send answered: the long form's own record of it.
+export const packetAfterSend = (response) => ({
+  id: response.packetId,
+  status: ['done', 'office_required'].includes(response.state) ? 'done' : 'processing',
+});
+
+/**
+ * Everything a refused or lost first send decides, for both sheets to apply the same way (the prompts, a lost response,
+ * a changed member list). Returns
+ *   { kind: 'resend', draft }              send again with the confirm flag (same key),
+ *   { kind: 'reopened', draft, message }   a declined promise: that member's form is put back,
+ *   { kind: 'declined' }                   a declined prompt: nothing changes,
+ *   { kind: 'error', error, found, reload } the words to show; `found` ({ detail, finished, refreshed }) when the server
+ *                                           was re-read (the earlier answer is then void: clear it); `reload` when the
+ *                                           member list changed and could not be re-read.
+ */
+export async function resolveSendFailure({ err, candidate, packet, visitId, scope }) {
+  const confirm = await packetConfirm({ err, candidate, packet, visitId, scope });
+  if (confirm?.resend) return { kind: 'resend', draft: confirm.resend };
+  if (confirm?.reopened) return { kind: 'reopened', draft: confirm.reopened, message: confirm.message };
+  if (confirm) return { kind: 'declined' };
+  let found = null;
+  try { found = await rediscoverCloseout({ visitId, candidate, err, scope }); } catch { /* the same key and bodies stay saved for a later retry */ }
+  let error = packetErrorMessage(err);
+  if (found?.finished) error = '';
+  if (found?.refreshed) error = 'The service list changed. Review the refreshed services before trying again.';
+  return { kind: 'error', error, found, reload: !found && err.code === 'visit_members_changed' };
+}
 
 // The tech-facing words for a failed send that is not a prompt.
 export function packetErrorMessage(err) {
