@@ -2752,11 +2752,23 @@ function areaAddOnCategoryForItem(item = {}) {
 // the key and tier survive normalize, render, choice and acceptance copies
 // (a copy that drops addOnKey loses the family and the catalog service).
 const AREA_ADDON_ROW_FIELDS = ['addOnKey', 'catalogServiceKey', 'addOnCategory', 'areaSqFt', 'tierSqFt', 'visitContext', 'carriesVisitDrive', 'onSiteMinutes'];
+// priceUnit is the billing-unit marker: an area add-on's price is one application, and every customer
+// estimate surface reads it as "$X per application". Set here for every re-shaping, so a row that
+// lost the mapper's marker still carries it.
 function areaAddOnRowFields(item = {}) {
   if (!isAreaAddOnItem(item)) return {};
-  return Object.fromEntries(AREA_ADDON_ROW_FIELDS
-    .filter((field) => item[field] !== undefined && item[field] !== null)
-    .map((field) => [field, item[field]]));
+  return {
+    ...Object.fromEntries(AREA_ADDON_ROW_FIELDS
+      .filter((field) => item[field] !== undefined && item[field] !== null)
+      .map((field) => [field, item[field]])),
+    priceUnit: require('../services/pricing-engine/v1-legacy-mapper').AREA_ADDON_PRICE_UNIT,
+  };
+}
+// " per application" after a one-time row's price when the row is priced per application.
+const ONE_TIME_PER_APPLICATION_SUFFIX = ' per application';
+function oneTimePriceUnitSuffix(item = {}) {
+  return item?.priceUnit === require('../services/pricing-engine/v1-legacy-mapper').AREA_ADDON_PRICE_UNIT
+    ? ONE_TIME_PER_APPLICATION_SUFFIX : '';
 }
 
 // The interior-spray / exterior-eave-sweep preference toggles describe the
@@ -6456,7 +6468,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const detail = copyAllowedInScope(rawDetail, rowScope)
       ? rawDetail
       : withoutClaimsOutsideScope(rawDetail, rowScope, preSlabSelectedWarrantyPart(it));
-    const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
+    const priceCell = includedByServiceCredit ? 'Included' : `${fmtMoney(price)}${oneTimePriceUnitSuffix(it)}`;
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
     const rowCopy = oneTimeRowCopies[rowIndex] || null;

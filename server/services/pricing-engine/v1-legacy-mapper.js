@@ -203,6 +203,7 @@ const PLAN_LABELED_SERVICES = new Set(['trap_only_retainer', 'area_addon']);
 // service) so a stored row can be told apart from its siblings and nothing
 // downstream guesses from the display name. One application per estimate, so
 // `price` is the whole charge. Empty for any other service.
+const AREA_ADDON_PRICE_UNIT = 'application';
 function areaAddOnFields(li = {}) {
   if (li.service !== 'area_addon') return {};
   return {
@@ -212,6 +213,9 @@ function areaAddOnFields(li = {}) {
     areaSqFt: li.areaSqFt ?? null,
     tierSqFt: li.tierSqFt ?? null,
     visitContext: li.visitContext,
+    // Billing-unit marker: the row's whole price is one application. Every customer
+    // estimate surface that shows this price reads "$X per application" (AGENTS.md).
+    priceUnit: AREA_ADDON_PRICE_UNIT,
     // True on the ONE line of an own visit that carries the visit's drive allowance.
     carriesVisitDrive: li.carriesVisitDrive === true,
     // Engine on-site minutes (no drive): the booked visit's duration floor.
@@ -1593,5 +1597,6 @@ module.exports = {
   AREA_ADDONS_GATED_CUSTOMER_MESSAGE,
   AREA_ADDONS_ONE_TIME_ONLY_CODE,
   AREA_ADDONS_ONE_TIME_ONLY_CUSTOMER_MESSAGE,
+  AREA_ADDON_PRICE_UNIT,
   treeShrubLegacyTierRows,
 };

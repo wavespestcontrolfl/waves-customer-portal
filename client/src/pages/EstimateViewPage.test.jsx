@@ -7,7 +7,7 @@ import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
 import TrustFooter from '../components/brand/TrustFooter';
-import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import EstimateViewPage, { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, SectionOneTimeBlock, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimeLawnGuideOffered, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.js';
 
 const { oneTimeOnlyIntelligenceCopy, resolveOneTimeServiceCopy } = oneTimeCopyModule;
@@ -915,6 +915,23 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.getByText('Interceptor traps under bed legs for post-treatment monitoring')).toBeInTheDocument();
     expect(screen.getByText('Pay on service day.')).toBeInTheDocument();
     expect(screen.queryByText(/30-day guarantee|No contract/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('an area add-on price reads "per application" (AGENTS.md price copy)', () => {
+  const addOn = { service: 'area_addon', addOnKey: 'web_sweep', addOnCategory: 'pest_control', priceUnit: 'application', label: 'Web Sweep', amount: 99, kind: 'charge' };
+  const plain = { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 150, kind: 'charge' };
+
+  it('the one-time breakdown row says "$99.00 per application"; a plain row keeps its bare amount', () => {
+    render(<OneTimeBreakdownCard breakdown={{ total: 249, items: [addOn, plain] }} />);
+    expect(screen.getByText('$99.00 per application')).toBeInTheDocument();
+    expect(screen.getByText('$150.00')).toBeInTheDocument();
+    expect(screen.queryByText(/per visit/i)).toBeNull();
+  });
+
+  it('the row embedded in a service section says it too', () => {
+    render(<SectionOneTimeBlock contribution={{ items: [addOn], subtotal: 99 }} />);
+    expect(screen.getByText('$99.00 per application')).toBeInTheDocument();
   });
 });
 

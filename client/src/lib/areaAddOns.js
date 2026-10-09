@@ -276,6 +276,11 @@ export function areaAddOnRowLabel(item, fallback) {
   return item.carriesVisitDrive === false ? "Own visit, with the other add-ons" : "Own visit";
 }
 
+// The staff preview reads the same unit the customer does: an add-on's price is one application.
+export function isAreaAddOnPricedPerApplication(item) {
+  return item?.service === "area_addon" || item?.priceUnit === "application";
+}
+
 // Add-ons carry no recurring-customer perk (the line says discountable: false).
 export function recurringDiscountApplies(item) {
   return !item?.noRecurringDiscount && item?.discountable !== false;

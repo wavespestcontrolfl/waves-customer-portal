@@ -2059,6 +2059,12 @@ function OneTimeRowCopy({ copy, item, noGuarantee = false, guaranteeScope: scope
   );
 }
 
+// A row priced per application (an area add-on carries priceUnit 'application')
+// reads "$X per application" wherever a customer sees its price (AGENTS.md).
+export function oneTimeAmountText(item, amountText) {
+  return item?.priceUnit === 'application' ? `${amountText} per application` : amountText;
+}
+
 // Stable identity for a one-time breakdown row — the exclusion handshake
 // between the embedded per-service rows and the standalone card below.
 // The identity is the FULL row (service + label + amount + quote state),
@@ -2172,7 +2178,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
                   whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
                 }}>
-                  {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
+                  {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : oneTimeAmountText(item, fmtMoney(Math.abs(amount)))))}
                   {showPrepayWaiverNote ? '*' : ''}
                 </div>
               )}
@@ -4930,7 +4936,7 @@ function customerOneTimeLabel(item = {}) {
   return label || 'One-time service';
 }
 
-function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee = false, guaranteeScope: scopeProp = null }) {
+export function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee = false, guaranteeScope: scopeProp = null }) {
   const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
   const items = Array.isArray(contribution?.items)
     ? contribution.items.filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
@@ -4980,7 +4986,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
                 <OneTimeRowCopy copy={item.copy} item={item} guaranteeScope={rowScope} />
               </div>
               <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                {amount}
+                {oneTimeAmountText(item, amount)}
               </div>
             </div>
           );

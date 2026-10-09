@@ -53,6 +53,7 @@ import {
   isAreaAddOnOnly,
   pickedGrass,
   areaAddOnRowLabel,
+  isAreaAddOnPricedPerApplication,
   buildKnownAreas,
   countAreaAddOns,
   readAreaAddOnCatalog,
@@ -8883,7 +8884,12 @@ export default function EstimateToolViewV2({
                                             : areaAddOnRowLabel(item, "Standalone"))
                                   }
                                   detail={item.detail}
-                                  price={fmtInt(item.price)}
+                                  price={isAreaAddOnPricedPerApplication(item) ? (
+                                    <>
+                                      {fmtInt(item.price)}
+                                      <span className="block text-14 font-normal text-ink-secondary">per application</span>
+                                    </>
+                                  ) : fmtInt(item.price)}
                                 />{" "}
                               </TierGridV2>{" "}
                               {item.service === "pest_initial_roach" &&

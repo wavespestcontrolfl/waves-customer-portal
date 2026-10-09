@@ -285,6 +285,28 @@ describe('the estimate page classifies an add-on row by its key, not its name', 
     });
   });
 
+  test('every add-on row carries the per-application unit marker, through the mapper, the normalizer and the render rows', () => {
+    expect(mapped.oneTime.items.filter((r) => r.service === 'area_addon').every((r) => r.priceUnit === 'application')).toBe(true);
+    expect(rows.every((r) => r.priceUnit === 'application')).toBe(true);
+    expect(publicRoute.oneTimeItemsForRender({}, estData).every((r) => r.priceUnit === 'application')).toBe(true);
+    // A row that lost the mapper's marker regains it when re-shaped; any other row never gets one.
+    const stripped = publicRoute.normalizeOneTimeBreakdown({ result: { oneTime: { items: mapped.oneTime.items.map(({ priceUnit, ...rest }) => rest) } } }).items;
+    expect(stripped.every((r) => r.priceUnit === 'application')).toBe(true);
+  });
+
+  test('the public estimate page reads "$X per application" on each add-on row (one-time-only page)', () => {
+    const html = publicRoute.renderPage('addon-token', {
+      id: 'estimate-addon-ssr', status: 'sent', customerName: 'Test Customer', address: '1 Test Way, Bradenton, FL 34203',
+      monthlyTotal: 0, annualTotal: 0, onetimeTotal: mapped.oneTime.total, quoteRequired: false,
+    }, estData);
+    const priced = rows.filter((r) => r.amount > 0);
+    expect(priced.length).toBeGreaterThan(0);
+    for (const row of priced) {
+      expect(html).toContain(`$${Number(row.amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per application`);
+    }
+    expect(html).not.toMatch(/per visit/i);
+  });
+
   test('the render rows and the acceptance list keep the add-on fields', () => {
     const rendered = publicRoute.oneTimeItemsForRender({}, estData);
     expect(rendered).toHaveLength(6);

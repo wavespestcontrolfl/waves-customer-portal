@@ -176,3 +176,13 @@ describe("server-only pricing", () => {
     expect(humanizeQuoteReason("area_addon_grass_not_covered_by_label_rate")).toMatch(/St\. Augustine lawns only/);
   });
 });
+
+describe("isAreaAddOnPricedPerApplication", () => {
+  it("is true for an add-on row (by service or by the unit marker) and false for any other row", async () => {
+    const { isAreaAddOnPricedPerApplication } = await import("./areaAddOns");
+    expect(isAreaAddOnPricedPerApplication({ service: "area_addon" })).toBe(true);
+    expect(isAreaAddOnPricedPerApplication({ priceUnit: "application" })).toBe(true);
+    expect(isAreaAddOnPricedPerApplication({ service: "one_time_pest" })).toBe(false);
+    expect(isAreaAddOnPricedPerApplication(null)).toBe(false);
+  });
+});
