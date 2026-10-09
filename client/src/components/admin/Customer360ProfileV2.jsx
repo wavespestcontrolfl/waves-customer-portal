@@ -7039,9 +7039,13 @@ function accessPrefsAdvanceBaseline(baseline, draft, dirtyKeys, failed) {
   const failedKeys = accessPrefsDirtyKeys({}, failed);
   // The server saves the sod record whole or not at all, and names one field.
   const sodFailed = failedKeys.some((k) => ACCESS_PREFS_SOD_KEYS.includes(k));
-  const saved = dirtyKeys.filter(
-    (k) => !failedKeys.includes(k) && !(sodFailed && ACCESS_PREFS_SOD_KEYS.includes(k)),
-  );
+  // An accepted sod write rebases all three: a clear sends the date alone, and
+  // the server clears Covers and Where with it.
+  const sodSaved = !sodFailed && dirtyKeys.some((k) => ACCESS_PREFS_SOD_KEYS.includes(k));
+  const saved = [
+    ...dirtyKeys.filter((k) => !failedKeys.includes(k) && !ACCESS_PREFS_SOD_KEYS.includes(k)),
+    ...(sodSaved ? ACCESS_PREFS_SOD_KEYS : []),
+  ];
   return {
     ...baseline,
     ...Object.fromEntries(saved.map((k) => [k, draft[k]])),

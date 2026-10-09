@@ -269,6 +269,35 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
       await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
       expect(putCalls(fetchMock)[0]).toEqual({ sodLaidOn: null, confirmedAsOf: MOVED_AT });
     });
+
+    it('after an accepted clear with another field rejected, the retry sends no sod field', async () => {
+      const prefs = saved({ sod_covers: 'part', sod_area: 'front yard', access_notes: 'old' });
+      const message = 'Access notes are too long.';
+      let puts = 0;
+      const fetchMock = stubFetch({
+        prefs,
+        onPut: () => {
+          puts += 1;
+          return puts === 1
+            ? response({ success: true, saved: true, rejected: [{ field: 'accessNotes', message }], preferences: BASE_PREFS })
+            : response({ success: true, saved: true, preferences: BASE_PREFS });
+        },
+      });
+      await openEditor();
+
+      const notes = () => screen.getByText('Access Notes').closest('label').querySelector('textarea');
+      fireEvent.change(notes(), { target: { value: 'too long' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Clear sod record' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+      await screen.findAllByText(message);
+
+      fireEvent.change(notes(), { target: { value: 'short' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
+      // Covers and Where were cleared by the first save: they are not sent again.
+      expect(putCalls(fetchMock)[1]).toEqual({ accessNotes: 'short' });
+    });
   });
 
   it('there is no Clear sod record action when no record exists', async () => {
