@@ -195,3 +195,134 @@ describe('buildWeedMix', () => {
     });
   });
 });
+
+// GATE_LAWN_TROUBLE_AREAS: the same decision at each place of the lawn. The plan's limit reader is asked once for the
+// lawn, then again for each place only when something is capped lawn-wide (a place can only be more open than the lawn).
+describe('buildWeedMix with places: one decision per place', () => {
+  const PLACES = ['front', 'back', 'left_side', 'right_side'];
+  const CAP = [{ type: 'annual_max_apps', message: 'limit' }];
+  const runPlaces = (items = addOns()) => buildWeedMix({ addOns: items, svc, structured: { products: [] }, knex: {}, places: PLACES });
+  // Capped lawn-wide, and at the places named.
+  const cappedAt = (...places) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+    capped: new Map(!options?.place || places.includes(options.place) ? [[LEAD, CAP]] : []), warnings: [], blocks: [],
+  }));
+
+  test('no places asked: the answer has no byPlace and the limit reader gets the five arguments it always did', async () => {
+    const mix = await run();
+    expect('byPlace' in mix).toBe(false);
+    expect(engine.v13VisitLimits.mock.calls.every((call) => call.length === 5)).toBe(true);
+  });
+
+  test('nothing capped: every place takes the lawn-wide mix and the reader is asked once', async () => {
+    const mix = await runPlaces();
+    expect(Object.keys(mix.byPlace)).toEqual(PLACES);
+    for (const place of PLACES) expect(mix.byPlace[place]).toMatchObject({ mode: 'lead', productIds: [LEAD, CERT, SURF] });
+    expect(mix).toMatchObject({ mode: 'lead', productIds: [LEAD, CERT, SURF] });
+    expect(engine.v13VisitLimits).toHaveBeenCalledTimes(1);
+  });
+
+  test('the lead capped at the front only: the front takes the replacement, the others the lead; the top level is the first place that can lead', async () => {
+    cappedAt('front');
+    const mix = await runPlaces();
+    expect(mix.byPlace.front).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+    expect(mix.byPlace.back).toMatchObject({ mode: 'lead', productIds: [LEAD, CERT, SURF] });
+    expect(mix).toMatchObject({ mode: 'lead', productIds: [LEAD, CERT, SURF] });
+    // The lawn once, then each place once with the place as the sixth argument.
+    expect(engine.v13VisitLimits.mock.calls.map((call) => call[5]?.place)).toEqual([undefined, 'front', 'back', 'left_side', 'right_side']);
+  });
+
+  test('a yearly AMOUNT limit at a place marks that place\'s decision amountBlocked (the sheet drops it when the dose changes); a count or an interval limit does not', async () => {
+    const at = (type) => engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(options?.place === 'front' || !options?.place ? [[LEAD, [{ type, matchType: type === 'annual_max_rate' ? 'v13_amount' : 'product', message: 'x' }]]] : []), warnings: [], blocks: [],
+    }));
+    at('annual_max_rate');
+    const amount = await runPlaces();
+    expect(amount.byPlace.front.amountBlocked).toBe(true);
+    expect('amountBlocked' in amount.byPlace.back).toBe(false);
+    at('annual_max_apps');
+    expect('amountBlocked' in (await runPlaces()).byPlace.front).toBe(false);
+    at('min_interval_days');
+    expect('amountBlocked' in (await runPlaces()).byPlace.front).toBe(false);
+  });
+
+  test('capped at every place: every place is none and so is the top level', async () => {
+    cappedAt(...PLACES);
+    const mix = await runPlaces();
+    for (const place of PLACES) expect(mix.byPlace[place]).toMatchObject({ mode: 'replacement' });
+    engine.v13VisitLimits.mockImplementation(async () => ({ capped: new Map([[LEAD, CAP], [REPL, CAP]]), warnings: [], blocks: [] }));
+    const none = await runPlaces();
+    for (const place of PLACES) expect(none.byPlace[place]).toMatchObject({ mode: 'none', productIds: [] });
+    expect(none).toMatchObject({ mode: 'none', productIds: [] });
+  });
+
+  test('the replacement leads when no place can take the lead', async () => {
+    cappedAt(...PLACES);
+    expect(await runPlaces()).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+  });
+
+  test('a place whose limit read throws is unavailable for that place only (fail closed, never "open")', async () => {
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      if (options?.place === 'back') throw new Error('db down');
+      return { capped: new Map([[LEAD, CAP]]), warnings: [], blocks: [] };
+    });
+    const mix = await runPlaces();
+    expect(mix.byPlace.back).toMatchObject({ mode: 'unavailable' });
+    expect(mix.byPlace.front).toMatchObject({ mode: 'replacement' });
+    expect(mix).toMatchObject({ mode: 'replacement' });
+  });
+
+  test('mixed reads: Front takes the replacement, Back\'s read fails: the group stays unreadable at the top level, each place keeps its own answer', async () => {
+    const TYPELESS = [{ message: 'application limits could not be read.' }];
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(options?.place === 'back' ? [[LEAD, TYPELESS]] : [[LEAD, CAP]]), warnings: [], blocks: [],
+    }));
+    const mix = await runPlaces();
+    expect(mix.byPlace.front).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+    expect(mix.byPlace.back).toMatchObject({ mode: 'unavailable' });
+    expect(mix).toMatchObject({ mode: 'replacement', productIds: [REPL] });
+    expect(mix.unreadableIds.sort()).toEqual([LEAD, CERT, SURF, REPL].sort());
+  });
+
+  test('mixed reads: a member read as forbidding at the failed place stays blocked there (not unreadable); a read that throws is the same unknown', async () => {
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => {
+      if (options?.place === 'back') throw new Error('db down');
+      if (options?.place === 'left_side') return { capped: new Map([[LEAD, [{ message: 'unreadable' }]], [CERT, CAP]]), warnings: [], blocks: [] };
+      return { capped: new Map([[LEAD, CAP], [REPL, CAP]]), warnings: [], blocks: [] };
+    });
+    const mix = await runPlaces();
+    expect(mix.byPlace.back.mode).toBe('unavailable');
+    expect(mix.byPlace.left_side).toMatchObject({ mode: 'unavailable', blockedIds: [CERT] });
+    expect(mix.unreadableIds).toEqual(expect.arrayContaining([LEAD, CERT, SURF, REPL]));
+    expect(mix.mode).toBe('none');
+  });
+
+  test('mixed reads at one place: the member read as capped stays blocked there, only the member whose read failed is unreadable', async () => {
+    const TYPELESS = [{ message: 'application limits could not be read.' }];
+    engine.v13VisitLimits.mockImplementation(async (knex, service, items, rows, targets, options) => ({
+      capped: new Map(!options?.place || options.place === 'front' ? [[LEAD, CAP], [CERT, TYPELESS]] : []), warnings: [], blocks: [],
+    }));
+    const mix = await runPlaces();
+    expect(mix.byPlace.front).toMatchObject({ mode: 'unavailable', blockedIds: [LEAD] });
+    // Only Certainty (and the members no read forbade) is the unknown at the front; the lead is not.
+    expect(mix.unreadableIds).toEqual(expect.arrayContaining([CERT, SURF, REPL]));
+    expect(mix.unreadableIds).not.toContain(LEAD);
+    // Another place is judged on its own.
+    expect(mix.byPlace.back).toMatchObject({ mode: 'lead' });
+  });
+
+  test('every read succeeded: no unreadableIds key', async () => {
+    cappedAt('front');
+    expect(await runPlaces()).not.toHaveProperty('unreadableIds');
+  });
+
+  test('the lawn-wide read throwing is unavailable, with no places', async () => {
+    engine.v13VisitLimits.mockRejectedValue(new Error('db down'));
+    expect(await runPlaces()).toMatchObject({ mode: 'unavailable', productIds: [] });
+  });
+
+  test('the air temperature is read once for all the places', async () => {
+    cappedAt('front');
+    await runPlaces();
+    expect(getCurrent).toHaveBeenCalledTimes(1);
+  });
+});
