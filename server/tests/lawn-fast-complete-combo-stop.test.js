@@ -1,0 +1,197 @@
+// GATE_COMBO_FAST_COMPLETE (PR 1): the lawn Fast Complete routes refuse a grouped member
+// (`grouped_visit`) unless the server confirms a combined stop: the gate is live AND either the
+// preflight runs inside the stop's own visit-closeout packet, or (the sheet's reads before a packet
+// exists) the stop is open with exactly two open members, this service one of them AND the request
+// asked for it. Gate off, or no tie: refused exactly as today. Synthetic data; a table-keyed fake knex.
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/service-completion-profiles', () => ({ resolveCompletionProfileForScheduledService: jest.fn() }));
+jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), v13VisitLimits: jest.fn(), v13ProtocolRows: jest.fn(() => new Map()), v13GateNotes: jest.fn(() => []) }));
+
+const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const {
+  resolveLawnFastEligibility, buildLawnFastContext, preflightLawnFastCompletion,
+} = require('../services/lawn-fast-complete');
+const { groupedStopAllowed, comboStopRequested, comboRowFlag } = require('../services/combo-fast-complete');
+
+const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const VISIT = uuid(1);
+const ASSESSMENT = uuid(2);
+const STOP = uuid(3);
+const OTHER = uuid(4);
+const PACKET = uuid(5);
+const PROFILE = { category: 'lawn_care', serviceKey: 'lawn_care_monthly', billingType: 'recurring', findingsType: null, projectBacked: false, requiresProject: false, companions: [] };
+const svcRow = (extra = {}) => ({
+  id: VISIT, customer_id: 'cust-1', property_id: 'prop-1', service_type: 'Lawn Care', service_id: 'cat-1',
+  scheduled_date: '2026-10-05', status: 'confirmed', visit_id: STOP,
+  cust_address_line1: '100 Example Court', cust_city: 'Bradenton', cust_state: 'FL', cust_zip: '34201', ...extra,
+});
+
+// scheduled_services answers .first() with the service and, once whereNotIn ran (visit-groups.openMembers),
+// its awaited list with `members`.
+function fakeKnex({ visit = { id: STOP, status: 'open' }, members = [{ id: VISIT }, { id: OTHER }], packet = null, svc = svcRow() } = {}) {
+  const queried = [];
+  const knex = jest.fn((table) => {
+    queried.push(table);
+    let list = false;
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereRaw', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'select']) chain[m] = () => chain;
+    chain.whereNotIn = () => { list = true; return chain; };
+    const tables = {
+      scheduled_services: svc,
+      service_visits: visit,
+      visit_completion_packets: packet,
+      customers: { billing_mode: null },
+      lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true },
+    };
+    chain.first = async () => tables[table];
+    chain.then = (resolve, reject) => Promise.resolve(list && table === 'scheduled_services' ? members : []).then(resolve, reject);
+    chain.catch = () => Promise.resolve([]);
+    return chain;
+  });
+  knex.queried = queried;
+  return knex;
+}
+
+const IDENTITY = {
+  propertyId: 'prop-1', customerId: 'cust-1', catalogServiceId: 'cat-1', serviceType: 'Lawn Care', scheduledDate: '2026-10-05', isCallback: false,
+  address: { line1: '100 Example Court', line2: null, city: 'Bradenton', state: 'FL', zip: '34201' }, technicianId: null,
+};
+const preflight = (knex, args = {}) => preflightLawnFastCompletion({
+  knex, svc: { id: VISIT, customer_id: 'cust-1', property_id: 'prop-1' }, lawnAssessmentId: ASSESSMENT, expectedVisit: IDENTITY, lawnFast: { visitType: 'recurring' }, ...args,
+});
+
+const GATES = ['GATE_COMBO_FAST_COMPLETE', 'GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
+const saved = {};
+beforeEach(() => {
+  for (const name of GATES) { saved[name] = process.env[name]; delete process.env[name]; }
+  process.env.GATE_LAWN_FAST_COMPLETE = 'true';
+  resolveCompletionProfileForScheduledService.mockReset().mockResolvedValue(PROFILE);
+  buildPlanForService.mockReset();
+});
+afterAll(() => {
+  for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+});
+const comboLive = () => { process.env.GATE_COMBO_FAST_COMPLETE = 'true'; };
+
+describe('groupedStopAllowed', () => {
+  test('gate off: never, and no read at all', async () => {
+    const knex = fakeKnex();
+    expect(await groupedStopAllowed(knex, svcRow(), { stop: true })).toBe(false);
+    expect(await groupedStopAllowed(knex, svcRow(), { packetId: PACKET })).toBe(false);
+    expect(knex).not.toHaveBeenCalled();
+  });
+
+  test('gate live: an open stop with exactly two open members, this service one of them', async () => {
+    comboLive();
+    expect(await groupedStopAllowed(fakeKnex(), svcRow(), { stop: true })).toBe(true);
+  });
+
+  test.each([
+    ['an ungrouped service', fakeKnex(), svcRow({ visit_id: null })],
+    ['a missing stop', fakeKnex({ visit: null }), svcRow()],
+    ['a stop that is closing (no packet named)', fakeKnex({ visit: { id: STOP, status: 'closing' } }), svcRow()],
+    ['a closed stop', fakeKnex({ visit: { id: STOP, status: 'closed' } }), svcRow()],
+    ['a dissolved stop', fakeKnex({ visit: { id: STOP, status: 'dissolved' } }), svcRow()],
+    ['one open member', fakeKnex({ members: [{ id: VISIT }] }), svcRow()],
+    ['three open members', fakeKnex({ members: [{ id: VISIT }, { id: OTHER }, { id: uuid(6) }] }), svcRow()],
+    ['two open members that are not this service', fakeKnex({ members: [{ id: OTHER }, { id: uuid(6) }] }), svcRow()],
+  ])('gate live: %s is refused', async (_label, knex, svc) => {
+    comboLive();
+    expect(await groupedStopAllowed(knex, svc, { stop: true })).toBe(false);
+  });
+
+  test('gate live: no ask is no tie, and a packet ask that names no packet is never allowed', async () => {
+    comboLive();
+    expect(await groupedStopAllowed(fakeKnex(), svcRow())).toBe(false);
+    expect(await groupedStopAllowed(fakeKnex({ visit: { id: STOP, status: 'closing' }, packet: { id: PACKET } }), svcRow(), { packetId: undefined })).toBe(false);
+    expect(await groupedStopAllowed(fakeKnex({ visit: { id: STOP, status: 'closing' }, packet: { id: PACKET } }), svcRow(), { packetId: null })).toBe(false);
+  });
+
+  test('gate live, with a packet: only a closing stop that owns that packet', async () => {
+    comboLive();
+    const closing = { id: STOP, status: 'closing' };
+    expect(await groupedStopAllowed(fakeKnex({ visit: closing, packet: { id: PACKET } }), svcRow(), { packetId: PACKET })).toBe(true);
+    expect(await groupedStopAllowed(fakeKnex({ visit: closing, packet: null }), svcRow(), { packetId: PACKET })).toBe(false);
+    expect(await groupedStopAllowed(fakeKnex({ visit: { id: STOP, status: 'open' }, packet: { id: PACKET } }), svcRow(), { packetId: PACKET })).toBe(false);
+  });
+});
+
+describe('comboStopRequested', () => {
+  test('is the header X-Combo-Stop: 1 and nothing else', () => {
+    const req = (value) => ({ get: (name) => (name.toLowerCase() === 'x-combo-stop' ? value : undefined) });
+    expect(comboStopRequested(req('1'))).toBe(true);
+    for (const value of ['0', 'true', '', undefined]) expect(comboStopRequested(req(value))).toBe(false);
+    expect(comboStopRequested({ headers: { 'x-combo-stop': '1' } })).toBe(true);
+    expect(comboStopRequested({})).toBe(false);
+  });
+});
+
+describe('the lawn context for a grouped member (the sheet\'s reads)', () => {
+  const ctx = (knex, ask) => buildLawnFastContext(VISIT, { knex, ...(ask ? { allowGrouped: { stop: true } } : {}) });
+
+  test('refused as today: gate off; gate on without the request; gate on and requested but not a combined stop', async () => {
+    expect(await ctx(fakeKnex(), true)).toMatchObject({ ok: true, eligible: false, reason: 'grouped_visit' });
+    comboLive();
+    expect(await ctx(fakeKnex(), false)).toMatchObject({ eligible: false, reason: 'grouped_visit' });
+    expect(await ctx(fakeKnex({ members: [{ id: VISIT }] }), true)).toMatchObject({ eligible: false, reason: 'grouped_visit' });
+    expect(await ctx(fakeKnex({ visit: { id: STOP, status: 'closing' } }), true)).toMatchObject({ eligible: false, reason: 'grouped_visit' });
+  });
+
+  test('accepted: gate on, requested, and the server reads an open two-member stop', async () => {
+    comboLive();
+    const verdict = await resolveLawnFastEligibility(VISIT, fakeKnex(), { allowGrouped: { stop: true }, withVisitType: false });
+    expect(verdict).toMatchObject({ ok: true, reason: null });
+    const built = await ctx(fakeKnex(), true);
+    expect(built).toMatchObject({ ok: true, eligible: true, reason: null });
+  });
+
+  test('gate off with the request: never accepted', async () => {
+    const knex = fakeKnex();
+    expect(await resolveLawnFastEligibility(VISIT, knex, { allowGrouped: { stop: true }, withVisitType: false })).toMatchObject({ reason: 'grouped_visit' });
+  });
+});
+
+describe('the /complete preflight for a grouped member', () => {
+  const closing = { visit: { id: STOP, status: 'closing' }, packet: { id: PACKET } };
+
+  test('gate off: lawn_fast_disabled (as today, whatever the packet)', async () => {
+    delete process.env.GATE_LAWN_FAST_COMPLETE;
+    expect(await preflight(fakeKnex(closing), { packetId: PACKET })).toMatchObject({ status: 409, payload: { code: 'lawn_fast_disabled' } });
+  });
+
+  test('combo gate off: a grouped member is refused 409 lawn_fast_not_eligible / grouped_visit, packet or not', async () => {
+    expect(await preflight(fakeKnex(closing))).toMatchObject({ status: 409, payload: { code: 'lawn_fast_not_eligible', reason: 'grouped_visit' } });
+    expect(await preflight(fakeKnex(closing), { packetId: PACKET })).toMatchObject({ status: 409, payload: { code: 'lawn_fast_not_eligible', reason: 'grouped_visit' } });
+  });
+
+  test('combo gate on but no packet (a bare /complete for a grouped member): refused as today', async () => {
+    comboLive();
+    expect(await preflight(fakeKnex({ visit: { id: STOP, status: 'open' } }))).toMatchObject({ status: 409, payload: { reason: 'grouped_visit' } });
+  });
+
+  test('combo gate on, packet named but not this stop\'s (no packet row) or the stop not closing: refused', async () => {
+    comboLive();
+    expect(await preflight(fakeKnex({ visit: { id: STOP, status: 'closing' }, packet: null }), { packetId: PACKET })).toMatchObject({ status: 409, payload: { reason: 'grouped_visit' } });
+    expect(await preflight(fakeKnex({ visit: { id: STOP, status: 'open' }, packet: { id: PACKET } }), { packetId: PACKET })).toMatchObject({ status: 409, payload: { reason: 'grouped_visit' } });
+  });
+
+  test('combo gate on, inside the stop\'s own packet: accepted (the rest of the preflight still runs)', async () => {
+    comboLive();
+    expect(await preflight(fakeKnex(closing), { packetId: PACKET })).toBeNull();
+    // ...including the confirmed-assessment check.
+    const noAssessment = fakeKnex(closing);
+    expect(await preflight(noAssessment, { packetId: PACKET, lawnAssessmentId: null })).toMatchObject({ status: 400, payload: { code: 'lawn_fast_assessment_required' } });
+  });
+});
+
+describe('comboRowFlag', () => {
+  test('gate live and a row on a stop; never otherwise', () => {
+    expect(comboRowFlag({ visit_id: STOP })).toBe(false);
+    comboLive();
+    expect(comboRowFlag({ visit_id: STOP })).toBe(true);
+    expect(comboRowFlag({ visit_id: null })).toBe(false);
+    expect(comboRowFlag({})).toBe(false);
+    expect(comboRowFlag(undefined)).toBe(false);
+  });
+});

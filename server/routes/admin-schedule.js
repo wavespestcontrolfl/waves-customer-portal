@@ -5203,6 +5203,9 @@ async function loadProjectCompletionContextByServiceId(services) {
       // combined visit. The client also needs the map known on
       // (pest-fast-complete.js isTypedReportEligible).
       stationFastCompleteEnabled: require('../services/visit-station-facts').stationFastCompleteEnabled(completionProfile),
+      // GATE_COMBO_FAST_COMPLETE: the pest and lawn Fast Complete sheets may be parts of one grouped stop.
+      // True only for a member of a grouped stop; the container (PR 2) and the server decide the rest.
+      comboFastCompleteEnabled: require('../services/combo-fast-complete').comboRowFlag(service),
       // GATE_LAWN_RESERVICE_FAST_COMPLETE: TechHomePage opens the one-screen
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
@@ -6402,6 +6405,7 @@ router.get('/', async (req, res, next) => {
         typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
         // GATE_STATION_FAST_COMPLETE — see loadProjectCompletionContextByServiceId.
         stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
+        comboFastCompleteEnabled: projectCompletionContext.comboFastCompleteEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -7041,6 +7045,7 @@ router.get('/week', async (req, res, next) => {
           typedVoiceFillEnabled: projectCompletionContext.typedVoiceFillEnabled === true,
           typedReportFlowEnabled: projectCompletionContext.typedReportFlowEnabled === true,
           stationFastCompleteEnabled: projectCompletionContext.stationFastCompleteEnabled === true,
+          comboFastCompleteEnabled: projectCompletionContext.comboFastCompleteEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,

@@ -34,6 +34,15 @@
 // request as an explicit retry; it never submits during hydration. A caller
 // opts in by passing both serviceId and operatorId; without them the hook
 // keeps the in-memory submit above.
+//
+// Prepare mode (GATE_COMBO_FAST_COMPLETE, a sheet used as one part of a grouped
+// stop): a caller that passes `onPrepared` gets the body this hook WOULD have
+// posted, built the same way, handed to onPrepared(serviceId, body) instead of
+// sent. Nothing is persisted or recovered here: the stop's container owns the
+// packet that carries the body, so a prepared body is never written as a
+// saved completion attempt, never held for a retry and never offered as one.
+// Submitting again after an edit builds a new body and replaces the last.
+// Without onPrepared the hook is exactly as above.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { shouldResetCompletionIdempotencyKey } from '../lib/completion-idempotency';
 import {
@@ -119,8 +128,13 @@ function sameScope(left, right) {
 }
 
 export default function useFastCompleteSubmit({
-  base, request, serviceId, operatorId, confirmable = false, sheet = '', invoiceFields = null,
+  base, request, serviceId, operatorId, confirmable = false, sheet = '', invoiceFields = null, onPrepared,
 }) {
+  const onPreparedRef = useRef(onPrepared);
+  onPreparedRef.current = onPrepared;
+  const preparing = typeof onPrepared === 'function';
+  // The body last handed to onPrepared (null until the first, and on a scope change).
+  const [prepared, setPrepared] = useState(null);
   // The visit's invoice fields (lib/completion-invoice-fields.js), the same
   // ones the full form posts. Read when a NEW body is built; a held, retried
   // or restored body keeps the fields it was prepared with.
@@ -172,8 +186,9 @@ export default function useFastCompleteSubmit({
     setDone(null);
     setPrompt(null);
     setStorageWarning('');
+    setPrepared(null);
 
-    if (!scope.serviceId || !scope.operatorId) {
+    if (!scope.serviceId || !scope.operatorId || typeof onPreparedRef.current === 'function') {
       // Existing callers opt into durable recovery by supplying both IDs.
       // Until their UI is migrated, retain the established in-memory submit.
       setRecovering(false);
@@ -407,6 +422,28 @@ export default function useFastCompleteSubmit({
     }
   }, [base, request, recovering, clearStored, clearSettled, persistPrepared, settleFailure]);
 
+  // Prepare mode (see the header): the body a send would post (key, built fields, invoice fields) goes to
+  // onPrepared instead. The same one-at-a-time rule as a send, and nothing is stored or held.
+  const prepare = useCallback(async (buildBody) => {
+    if (inFlight.current || recovering) return;
+    const scope = scopeRef.current;
+    const body = { idempotencyKey: keyRef.current, ...buildBody(), ...(invoiceFieldsRef.current || {}) };
+    inFlight.current = true;
+    setSubmitting(true);
+    setError('');
+    try {
+      await onPreparedRef.current(scope.serviceId, body);
+      if (sameScope(scopeRef.current, scope)) setPrepared(body);
+    } catch (err) {
+      if (sameScope(scopeRef.current, scope)) setError(err?.message || 'Could not save this part of the stop.');
+    } finally {
+      if (sameScope(scopeRef.current, scope)) {
+        setSubmitting(false);
+        inFlight.current = false;
+      }
+    }
+  }, [recovering]);
+
   const retry = useCallback(() => {
     if (!pendingBodyRef.current) return;
     return submit(() => ({}), pendingSummaryRef.current);
@@ -468,7 +505,8 @@ export default function useFastCompleteSubmit({
 
   return {
     recovering, restored, submitting, error, errorCode, failure, done, prompt, storageWarning,
-    submit, retry, confirm, discard, dismissPrompt: discard,
+    preparing, prepared,
+    submit: preparing ? prepare : submit, retry, confirm, discard, dismissPrompt: discard,
     recheck: () => setReadTick((tick) => tick + 1),
     pendingSummary: pendingSummaryRef.current,
     retryPending: failure === 'retry' || failure === 'storage',

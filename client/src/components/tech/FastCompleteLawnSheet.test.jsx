@@ -3765,3 +3765,90 @@ describe('a visit already invoiced from the payment flow', () => {
     expect(body).not.toHaveProperty('invoiceAlreadySent');
   });
 });
+
+// GATE_COMBO_FAST_COMPLETE (PR 1): the sheet as one part of a grouped stop.
+describe('prepare mode (a part of a grouped stop)', () => {
+  const withoutKey = ({ idempotencyKey: _key, ...rest }) => rest;
+  const NOTE = 'Synthetic stop note';
+
+  async function fill() {
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  }
+
+  test('hands over the exact body a normal completion posts, posts nothing and stores no saved completion', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', sharedNote: NOTE, onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(onPrepared.mock.calls[0][0]).toBe('svc-lawn');
+    expect(completeCalls()).toHaveLength(0);
+
+    cleanup();
+    requests.length = 0;
+    await openSheet({ props: { operatorId: 'op-1', sharedNote: NOTE } });
+    await fill();
+    await submit();
+    const posted = completeCalls()[0].body;
+    expect(withoutKey(onPrepared.mock.calls[0][1])).toEqual(withoutKey(posted));
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe(NOTE);
+    expect(onPrepared.mock.calls[0][1].lawnFast).toEqual({ visitType: 'recurring' });
+  });
+
+  test('preparing again after an edit hands over a new body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'First words' } });
+    fireEvent.click(completeButton());
+    await screen.findByText('Saved for this stop');
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: 'Second words' } });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(onPrepared).toHaveBeenCalledTimes(2));
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe('First words');
+    expect(onPrepared.mock.calls[1][1].technicianNotes).toBe('Second words');
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('a shared note replaces the sheet\'s own note box and reaches the body', async () => {
+    const onPrepared = vi.fn();
+    await openSheet({ props: { operatorId: 'op-1', onPrepared, sharedNote: NOTE } });
+    expect(screen.queryByLabelText('Tell me about the visit')).toBeNull();
+    await fill();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(onPrepared).toHaveBeenCalled());
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe(NOTE);
+  });
+
+  test('Analyze reads the stop\'s shared note, as it reads the sheet\'s own', async () => {
+    await openSheet({ props: { operatorId: 'op-1', onPrepared: vi.fn(), sharedNote: NOTE } });
+    await analyzeOnly();
+    const assess = requests.find((r) => r.path.endsWith('/lawn-assessment/assess'));
+    expect(JSON.stringify(assess.body)).toContain(NOTE);
+  });
+
+  test('every lawn-fast read says it is part of a combined stop; a normal sheet sends no such header', async () => {
+    await openSheet({ props: { operatorId: 'op-1', onPrepared: vi.fn() } });
+    const reads = requests.filter((r) => r.path.includes('/lawn-fast/'));
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((r) => r.options.headers?.['X-Combo-Stop'] === '1')).toBe(true);
+    expect(requests.filter((r) => !r.path.includes('/lawn-fast/')).every((r) => !r.options.headers?.['X-Combo-Stop'])).toBe(true);
+    cleanup();
+    requests.length = 0;
+    await openSheet();
+    expect(requests.some((r) => r.options.headers?.['X-Combo-Stop'])).toBe(false);
+  });
+
+  test('a refused hand-over shows its message and leaves the sheet editable', async () => {
+    const onPrepared = vi.fn(async () => { throw new Error('Could not save this on the device'); });
+    await openSheet({ props: { operatorId: 'op-1', onPrepared } });
+    await fill();
+    fireEvent.click(completeButton());
+    await screen.findByText('Could not save this on the device');
+    expect(screen.queryByText('Saved for this stop')).toBeNull();
+    expect(completeCalls()).toHaveLength(0);
+  });
+});

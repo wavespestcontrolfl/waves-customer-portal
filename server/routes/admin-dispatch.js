@@ -39,6 +39,7 @@ const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
+const { comboStopRequested } = require('../services/combo-fast-complete');
 const TermiteStations = require('../services/termite-stations');
 const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-drift');
 
@@ -4731,7 +4732,7 @@ router.get('/:lawnFastServiceId/lawn-fast/context', async (req, res, next) => {
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
-    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(productIds ? { productIds } : {}) });
+    const ctx = await require('../services/lawn-fast-complete').buildLawnFastContext(serviceId, { technicianId: req.technicianId, ...(comboStopRequested(req) ? { allowGrouped: { stop: true } } : {}), ...(productIds ? { productIds } : {}) });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason, code: ctx.reason });
     const { ok, ...body } = ctx;
     res.json({ enabled: true, ...body });
@@ -4773,7 +4774,7 @@ router.get('/:lawnFastServiceId/lawn-fast/treatment-guide', async (req, res, nex
     const serviceId = await lawnFastRequestId(req, res);
     if (!serviceId) return;
     const productIds = lawnFastProductIds(req);
-    const result = await require('../services/lawn-fast-complete').buildLawnTreatmentGuide({ serviceId, assessmentId: req.query.assessmentId, ...(productIds ? { productIds } : {}) });
+    const result = await require('../services/lawn-fast-complete').buildLawnTreatmentGuide({ serviceId, assessmentId: req.query.assessmentId, ...(comboStopRequested(req) ? { allowGrouped: { stop: true } } : {}), ...(productIds ? { productIds } : {}) });
     if (!result.ok) {
       const status = TREATMENT_GUIDE_STATUS[result.reason] || recapStatusForReason(result.reason);
       return res.status(status).json({ error: result.reason, code: result.reason });
@@ -4799,7 +4800,7 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
     // lawn visit with no re-service, assessment, project, companion or grouped-stop lane, and not closed) may clear a lawn's trouble area.
     const outcome = await db.transaction(async (trx) => {
       await lockOwnedLiveVisit(trx, req, serviceId, ['id']);
-      const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false });
+      const eligibility = await require('../services/lawn-fast-complete').resolveLawnFastEligibility(serviceId, trx, { withVisitType: false, ...(comboStopRequested(req) ? { allowGrouped: { stop: true } } : {}) });
       if (!eligibility.ok) return { status: recapStatusForReason(eligibility.reason), body: { error: eligibility.reason, code: eligibility.reason } };
       if (eligibility.reason) return { status: 409, body: { error: 'This visit cannot be completed on the quick sheet.', code: 'lawn_fast_not_eligible', reason: eligibility.reason } };
       const cleared = await require('../services/lawn-trouble-areas').clearArea(trx, {

@@ -4747,6 +4747,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           expectedVisit,
           lawnFast,
           products,
+          packetId: packetRecords ? packetContext.packetId : null,
         });
         if (lawnFastBlock) {
           await CompletionAttempts.markCompletionAttemptFailed(

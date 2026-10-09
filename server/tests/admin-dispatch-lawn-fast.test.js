@@ -48,7 +48,7 @@ function routeLayer(method, routePath) {
   return router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
 }
 
-function invoke(method, routePath, { params = {}, body, query = {}, actor = { techRole: 'admin', technicianId: 'admin-1' } } = {}) {
+function invoke(method, routePath, { params = {}, body, query = {}, headers = {}, actor = { techRole: 'admin', technicianId: 'admin-1' } } = {}) {
   const layer = routeLayer(method, routePath);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = {
@@ -58,7 +58,7 @@ function invoke(method, routePath, { params = {}, body, query = {}, actor = { te
     json(payload) { this.body = payload; return this; },
   };
   return new Promise((resolve, reject) => {
-    handler({ params, body, query, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
+    handler({ params, body, query, headers, ...actor }, res, (err) => (err ? reject(err) : resolve(res)))
       .then(() => resolve(res))
       .catch(reject);
   });
@@ -440,3 +440,50 @@ describe('the sheet names its spot products after a refused place', () => {
   });
 });
 
+
+// GATE_COMBO_FAST_COMPLETE (PR 1): a request that says it is part of a combined stop (X-Combo-Stop: 1) passes
+// allowGrouped to the service, which alone decides (the gate and the stop). A request without it is read as always.
+describe('X-Combo-Stop on the lawn-fast reads and the trouble-area clear', () => {
+  const GUIDE = '/:lawnFastServiceId/lawn-fast/treatment-guide';
+  const CLEAR = '/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear';
+  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_TREATMENT_GUIDE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'];
+  const savedEnv = {};
+  const STOP = { 'x-combo-stop': '1' };
+  const { buildLawnTreatmentGuide } = require('../services/lawn-fast-complete');
+  beforeEach(() => {
+    for (const name of GATES) { savedEnv[name] = process.env[name]; process.env[name] = 'true'; }
+    buildLawnFastContext.mockReset().mockResolvedValue({ ok: true, eligible: true });
+    buildLawnTreatmentGuide.mockReset().mockResolvedValue({ ok: true, cards: [] });
+    resolveLawnFastEligibility.mockReset().mockResolvedValue({ ok: true, reason: null, svc: { property_id: 'prop-1' } });
+    clearArea.mockReset().mockResolvedValue({ id: 'area-1', place: 'Front', type: 'dry' });
+    mockDbCurrent = dbWithVisit({ sequence: [{ id: 'visit-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'Lawn Care' }] });
+  });
+  afterEach(() => {
+    for (const name of GATES) { if (savedEnv[name] === undefined) delete process.env[name]; else process.env[name] = savedEnv[name]; }
+    mockDbCurrent = null;
+  });
+
+  test('the context passes allowGrouped only when the request says combined stop', async () => {
+    await invoke('get', CONTEXT, { params, headers: STOP });
+    expect(buildLawnFastContext).toHaveBeenLastCalledWith(VISIT, { technicianId: 'admin-1', allowGrouped: { stop: true } });
+    await invoke('get', CONTEXT, { params, headers: { 'x-combo-stop': '0' } });
+    expect(buildLawnFastContext).toHaveBeenLastCalledWith(VISIT, { technicianId: 'admin-1' });
+    await invoke('get', CONTEXT, { params });
+    expect(buildLawnFastContext).toHaveBeenLastCalledWith(VISIT, { technicianId: 'admin-1' });
+  });
+
+  test('the treatment guide does the same', async () => {
+    const assessmentId = '00000000-0000-4000-8000-000000000002';
+    await invoke('get', GUIDE, { params, query: { assessmentId }, headers: STOP });
+    expect(buildLawnTreatmentGuide).toHaveBeenLastCalledWith({ serviceId: VISIT, assessmentId, allowGrouped: { stop: true } });
+    await invoke('get', GUIDE, { params, query: { assessmentId } });
+    expect(buildLawnTreatmentGuide).toHaveBeenLastCalledWith({ serviceId: VISIT, assessmentId });
+  });
+
+  test('the trouble-area clear does the same', async () => {
+    await invoke('post', CLEAR, { params: { ...params, areaId: '00000000-0000-4000-8000-0000000000aa' }, headers: STOP });
+    expect(resolveLawnFastEligibility).toHaveBeenLastCalledWith(VISIT, expect.anything(), { withVisitType: false, allowGrouped: { stop: true } });
+    await invoke('post', CLEAR, { params: { ...params, areaId: '00000000-0000-4000-8000-0000000000aa' } });
+    expect(resolveLawnFastEligibility).toHaveBeenLastCalledWith(VISIT, expect.anything(), { withVisitType: false });
+  });
+});
