@@ -26,7 +26,7 @@
  */
 const logger = require('../logger');
 const {
-  rainFitFor, withCatalogKeys, inRainHorizon, boundedHourlyRain,
+  rainFitFor, rainClassOf, withCatalogKeys, inRainHorizon, boundedHourlyRain,
   RAIN_AFTER_HOURS, RAIN_DAYS,
 } = require('../scheduling/rain-fit');
 const { etParts, etDateString, addETDays, parseETDateTime, formatETTime, dateOnlyString } = require('../../utils/datetime-et');
@@ -108,11 +108,38 @@ async function loadStops(db, from, to) {
     .whereNotNull('window_start')
     .select(...VISIT_COLUMNS)
     .orderBy(['scheduled_date', 'window_start', 'id']);
-  const addOns = rows.length
-    ? await db('scheduled_service_addons').whereIn('scheduled_service_id', rows.map((row) => row.id))
+  const ids = rows.map((row) => row.id);
+  const addOns = ids.length
+    ? await db('scheduled_service_addons').whereIn('scheduled_service_id', ids)
       .select('scheduled_service_id', 'service_name', 'service_key_snapshot')
     : [];
-  return groupStops(rows, addOns);
+  const points = ids.length ? await loadPoints(db, ids) : new Map();
+  return groupStops(rows.map((row) => ({ ...row, point: points.get(String(row.id)) || null })), addOns);
+}
+
+// Where each visit's work happens, for the forecast: the point stamped on the
+// visit, else its linked property's own point, else the customer's primary
+// home when the visit's stamped address does not diverge from it (the guard
+// every route read uses, scheduling/day-stops.js guardedCoordSelects). Kept
+// apart from the rows' own lat / lng, which the route model reads as stamped.
+async function loadPoints(db, ids) {
+  const { guardedCoordSelects } = require('../scheduling/day-stops');
+  const rows = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .leftJoin('customer_properties', 'scheduled_services.property_id', 'customer_properties.id')
+    .whereIn('scheduled_services.id', ids)
+    .select('scheduled_services.id', 'scheduled_services.lat as stamped_lat', 'scheduled_services.lng as stamped_lng',
+      'customer_properties.latitude as property_lat', 'customer_properties.longitude as property_lng',
+      ...guardedCoordSelects(db));
+  const pair = (lat, lng) => (lat != null && lng != null ? { lat: Number(lat), lng: Number(lng) } : null);
+  return new Map(rows.map((row) => [String(row.id),
+    pair(row.stamped_lat, row.stamped_lng) || pair(row.property_lat, row.property_lng) || pair(row.lat, row.lng)]));
+}
+
+// A point inside the service area, or null.
+function areaPoint(point) {
+  if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return null;
+  return require('../service-area').isInServiceAreaCoarseBox(point.lat, point.lng) ? point : null;
 }
 
 // The day's rows as PHYSICAL stops, by the route model's own rule
@@ -169,10 +196,14 @@ async function judgeStop(visit, ctx) {
   if (!inRainHorizon(date, today)) return { wet: false, reason: 'past_horizon' };
   const services = await (deps.withCatalogKeys || withCatalogKeys)(visit.services, db, { gate: GATE });
   if (rainFitFor(services) !== 'avoid') return { wet: false, reason: 'not_outdoor' };
+  // The service the notice names: the one that needs dry weather, which on a
+  // shared stop or a visit with add-ons is not always the visit's own.
+  const outdoor = services.find((service) => rainClassOf(service) === 'outdoor');
+  const work = String((outdoor && outdoor.name) ?? outdoor ?? visit.service_type ?? 'visit');
   const { reach } = visit;
   const earliestMin = date === today ? nowMin + LEAD_MINUTES : 0;
   if (reach.ownStartMin < earliestMin) return { wet: false, reason: 'too_soon' };
-  const point = await deps.visitPoint(visit, { db, deps });
+  const point = areaPoint(visit.point);
   if (!point) return { wet: false, reason: 'no_point' };
   const hourly = await (deps.hourlyRain || boundedHourlyRain)(point.lat, point.lng, true);
   const { peak, complete } = spanRain(hourly, date, reach.startMin, reach.endMin);
@@ -181,7 +212,7 @@ async function judgeStop(visit, ctx) {
   if (peak < MOVE_PCT) return { wet: false, reason: 'not_wet', peak, dry: complete };
   const isFree = (startMin, endMin) => !occupancy.conflicts(visit, date, startMin, endMin);
   const proposal = dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin: day.startMin, dayEndMin: day.endMin });
-  return { wet: true, reason: 'wet', peak, proposal: proposal == null ? null : toHHMM(proposal) };
+  return { wet: true, reason: 'wet', peak, work, proposal: proposal == null ? null : toHHMM(proposal) };
 }
 
 // The technician's other stops, from Rain Out's own occupancy probe (the one
@@ -216,11 +247,10 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
   const today = etDateString(now);
   const last = etDateString(addETDays(parseETDateTime(`${today}T12:00`), RAIN_DAYS - 1));
   const parts = etParts(now);
-  const withDeps = { visitPoint: require('../call-booking-rain-flag').visitPoint, ...deps };
   const stops = await (deps.loadStops || loadStops)(db, today, last);
   const ctx = {
-    db, deps: withDeps, today, nowMin: parts.hour * 60 + parts.minute,
-    occupancy: await loadDayOccupancy(today, last, withDeps), day: serviceDay(withDeps),
+    db, deps: deps, today, nowMin: parts.hour * 60 + parts.minute,
+    occupancy: await loadDayOccupancy(today, last, deps), day: serviceDay(deps),
   };
   const rows = [];
   for (const visit of stops) {
@@ -261,7 +291,7 @@ async function sendNotice(row, { db, deps, reopen = null, now = new Date() }) {
   const name = await (deps.customerName || lookupCustomerName)(db, visit.customer_id);
   const at = parseETDateTime(`${date}T${start}`);
   const spokenDay = at.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).replace(',', '');
-  const service = String(visit.service_type || 'visit').replace(/\s+/g, ' ').trim();
+  const service = String(row.work || visit.service_type || 'visit').replace(/\s+/g, ' ').trim();
   const dry = proposal ? `; ${formatETTime(parseETDateTime(`${date}T${proposal}`))} is dry and open` : '; no dry open hour that day';
   const tail = ` ${spokenDay} ${formatETTime(at)} has ${peak}% rain${dry}.`;
   return (deps.raiseAdminAlert || raiseAdminAlert)(
