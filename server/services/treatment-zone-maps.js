@@ -149,9 +149,15 @@ function noReusableTraceError() {
 //    deletes its zone row (appointment-address.js), which ends the offer here.
 // The source rows are locked in the order that address correction takes them
 // (visit, then zone), so the two cannot deadlock.
-async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, source }) {
+async function recheckReuseUnderLock(conn, scheduledServiceId, { locationKey, source, targetDate }) {
   const here = await readVisitLocationRow(conn, scheduledServiceId);
   if (!here || visitLocationKey(here) !== locationKey) throw propertyChangedError();
+  // The target's own day (its row is locked by now): the source was chosen as
+  // an EARLIER visit, so a target rescheduled during the copy is another
+  // visit to judge (Codex P2 r10 on #6175).
+  const target = await conn('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
+  const lockedDate = dateOnlyOrNull(target?.scheduled_date);
+  if (!lockedDate || lockedDate !== targetDate || !(source.scheduledDate < lockedDate)) throw visitChangedError();
   const sourceVisit = await conn('scheduled_services').where({ id: source.serviceId }).forUpdate()
     .first('status', 'customer_id', 'scheduled_date', 'service_id', 'service_type');
   const zone = await conn('treatment_zone_maps').where({ id: source.zoneId }).forUpdate().first('id', 'scheduled_service_id', 'updated_at');
@@ -807,6 +813,7 @@ async function copyLastTreatmentZone({ visit, actor = null, technicianId = null,
     ...(actor ? { lockedScope: { actor, visit } } : {}),
     reuseGuard: {
       locationKey,
+      targetDate: dateOnlyOrNull(visit.scheduled_date),
       source: { zoneId: zone.id, serviceId: sourceServiceId, customerId: visit.customer_id, updatedAt: zone.updated_at, ...found.sourceFacts },
     },
     knex,

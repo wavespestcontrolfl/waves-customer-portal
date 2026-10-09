@@ -70,7 +70,7 @@ const SOURCE_ZONE = { id: 'zone-0', scheduled_service_id: 'svc-0', updated_at: '
 function makeKnex({
   candidates = [ZONE], own = null, record = { id: 'rec-0', structured_notes: null },
   locations = [PINNED], lock = { property_id: 'prop-1', status: 'confirmed' },
-  sourceVisit = SOURCE_VISIT, sourceZone = SOURCE_ZONE, lockedRecord = undefined,
+  sourceVisit = SOURCE_VISIT, sourceZone = SOURCE_ZONE, lockedRecord = undefined, targetRow = { scheduled_date: '2026-10-01' },
 } = {}) {
   const state = { inserted: null, wheres: [], columns: [], locationReads: 0, locks: [] };
   const knex = jest.fn((table) => {
@@ -102,6 +102,8 @@ function makeKnex({
         if (table === 'scheduled_services' && c._lock) {
           return Promise.resolve(JSON.stringify(c._where).includes('svc-0') ? sourceVisit : lock);
         }
+        // The write's look at the target's own day (its row is locked by then).
+        if (table === 'scheduled_services' && columns.length === 1 && columns[0] === 'scheduled_date') return Promise.resolve(targetRow);
         if (table === 'treatment_zone_maps' && c._lock) return Promise.resolve(sourceZone);
         // The write's own look at the source's record asks for its id alone.
         if (table === 'service_records') return Promise.resolve(columns.length === 1 && columns[0] === 'id' && lockedRecord !== undefined ? lockedRecord : record);
@@ -511,6 +513,18 @@ describe('reuseLastTreatmentZone: the locked recheck', () => {
     test('the same updated_at as a Date object and as text is the same trace', async () => {
       const knex = makeKnex({ candidates: [{ ...ZONE, updated_at: new Date('2026-07-02T10:00:00.000Z') }], lock: locked() });
       expect((await run(knex)).linear_ft).toBe(220);
+    });
+
+    // Codex P2 r10 on #6175: the target's own day is part of what was judged.
+    test.each([
+      ['moved to the source\'s day', { scheduled_date: '2026-07-01' }],
+      ['moved to before the source', { scheduled_date: '2026-06-15' }],
+      ['moved to another later day', { scheduled_date: '2026-10-20' }],
+      ['gone', null],
+    ])('a target visit %s during the copy is refused and nothing is saved', async (_label, targetRow) => {
+      const knex = makeKnex({ lock: locked(), targetRow });
+      await expect(run(knex)).rejects.toMatchObject({ code: 'visit_changed' });
+      expect(knex.state.inserted).toBeNull();
     });
 
     // Codex P1 r5 on #6175: a visit with no pin of its own rests on the
