@@ -6,8 +6,10 @@
 // what is recommended).
 //
 // It builds on the canonical rules and writes none of its own:
-//  - what an assessment is: isConsultationVisit (lib/consultationVisit.js, the
-//    client mirror of server/services/assessment-booking.js);
+//  - what an assessment is, and which statuses allow its outcome:
+//    canRecordConsultationOutcome (lib/consultationVisit.js, built on
+//    isConsultationVisit, the client mirror of
+//    server/services/assessment-booking.js);
 //  - whether the gate is on for this row: `assessmentFastCompleteEnabled`, which
 //    the schedule payload sets only while the gate is live AND the visit's
 //    completion profile is the assessment key (server/routes/admin-schedule.js);
@@ -22,11 +24,15 @@
 // with no `propertyId` key) live with the other sheets' in
 // dispatchCompletionRouting.js. The sheet's own "Full form" button covers the
 // incomplete and no-show outcomes, which the sheet does not record.
-import { isConsultationVisit } from './consultationVisit';
+import { canRecordConsultationOutcome } from './consultationVisit';
 import { completesOnOwnRecord } from './pest-fast-complete';
 
 export function isAssessmentFastCompleteEligible(service) {
-  return isConsultationVisit(service)
+  // An assessment whose outcome the server accepts: canRecordConsultationOutcome
+  // is isConsultationVisit minus the statuses recordOutcome refuses (no_show,
+  // cancelled, skipped, rescheduled: CONSULTATION_NOT_HELD). The sheet's first
+  // write is that outcome, so a visit it would always refuse keeps the full form.
+  return canRecordConsultationOutcome(service)
     && service?.assessmentFastCompleteEnabled === true
     && completesOnOwnRecord(service)
     && !(service.completionProfile?.companions || []).length

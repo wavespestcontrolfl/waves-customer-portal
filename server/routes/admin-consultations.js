@@ -60,7 +60,7 @@ router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmi
 
     const {
       outcome, lostReason, interests, quotedAmount, quotedCadence,
-      quoteNotes, followUpAt,
+      quoteNotes, followUpAt, expectedVisit,
     } = req.body || {};
 
     const saved = await recordOutcome({
@@ -72,6 +72,7 @@ router.post('/:scheduledServiceId/outcome', adminAuthenticate, requireTechOrAdmi
       quotedCadence,
       quoteNotes,
       followUpAt,
+      expectedVisit,
       recordedBy: req.technician?.name || req.technicianId || null,
       actingTechnicianId: req.technicianId || null,
       actingIsAdmin: req.techRole === 'admin',

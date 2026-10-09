@@ -18,7 +18,9 @@
 // Required before Complete: a note and an outcome pick. Nothing else blocks.
 //
 // Two writes, in this order, and why both are safe:
-//   1. POST /admin/consultations/:id/outcome, the outcome upsert. It is
+//   1. POST /admin/consultations/:id/outcome, the outcome upsert, carrying the
+//      same expectedVisit as step 2 (the server checks it under its visit lock
+//      before it writes). It is
 //      idempotent (an upsert keyed on the visit that only a "won" row refuses)
 //      and can be recorded again any number of times, and it sends nothing to
 //      anyone. A tech who fixes a mistake and completes again just records the
@@ -223,13 +225,20 @@ function AssessmentForm({ service, request, row, submission, locked, photos, rec
       return;
     }
     if (missingReason || recording) return;
+    const expectedVisit = assessmentVisitIdentity(service);
     if (!locksOutcome) {
       onRecording(true);
       setOutcomeError('');
       try {
         await request(`/admin/consultations/${encodeURIComponent(service.id)}/outcome`, {
           method: 'POST',
-          body: JSON.stringify(buildOutcomePayload(outcomeForm, { followUpTouched: false, loadedRow: row })),
+          // The same visit identity /complete carries: the server checks it under
+          // its visit lock before the upsert, so a read made on a visit that
+          // changed since the schedule loaded is never saved against it.
+          body: JSON.stringify({
+            ...buildOutcomePayload(outcomeForm, { followUpTouched: false, loadedRow: row }),
+            ...(Object.keys(expectedVisit).length ? { expectedVisit } : {}),
+          }),
         });
       } catch (err) {
         if (err?.code !== ALREADY_WON) {
@@ -244,7 +253,7 @@ function AssessmentForm({ service, request, row, submission, locked, photos, rec
       () => assessmentCompletionBody({
         note,
         offerCredit: creditShown ? offerCredit : null,
-        expectedVisit: assessmentVisitIdentity(service),
+        expectedVisit,
       }),
       `Assessment · ${locksOutcome ? 'won' : outcomeForm.outcome}`,
     );

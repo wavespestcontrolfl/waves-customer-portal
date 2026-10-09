@@ -887,6 +887,10 @@ const OUTCOME_INPUT_RULES = [
   },
   { fails: (p) => p.interests != null && !Array.isArray(p.interests), message: 'interests must be an array' },
   {
+    fails: (p) => p.expectedVisit != null && (typeof p.expectedVisit !== 'object' || Array.isArray(p.expectedVisit)),
+    message: 'expectedVisit must be an object',
+  },
+  {
     fails: (p) => !isValidFollowUpAt(p.followUpAt),
     message: 'followUpAt must be a valid date/time — a naive local time like "2026-09-25T09:00" is read as ET, or pass an ISO string with an explicit offset/Z',
   },
@@ -907,6 +911,11 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     scheduledServiceId, outcome, lostReason = null, interests = [],
     quotedAmount = null, quotedCadence = null, quoteNotes = null,
     followUpAt = null, recordedBy = null,
+    // The visit identity the client's form was built against (customer,
+    // property, service type, day) — OPTIONAL. Sent by the Waves Assessment
+    // Fast Complete sheet; a caller that omits it (ConsultationOutcomeSheet)
+    // is not checked, exactly as before. Re-checked on the locked row below.
+    expectedVisit = null,
     // The acting technician (route-supplied) — the ownership check re-runs
     // under the lock, atomic with the write (Codex #4710 P2). Admins skip it.
     actingTechnicianId = null, actingIsAdmin = false,
@@ -960,7 +969,7 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     const liveVisit = await locked('scheduled_services')
       .where({ id: scheduledServiceId })
       .forNoKeyUpdate()
-      .first('status', 'technician_id', 'customer_id', 'scheduled_date', 'window_start', 'service_type', 'service_id');
+      .first('status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'service_type', 'service_id');
     // A customer merge that repointed the visit between the first read and
     // this lock would otherwise write the retired customer_id (Codex #4710
     // r6 P2) — retried once from the top against the surviving customer.
@@ -976,6 +985,22 @@ async function recordOutcomeOnce(params = {}, { trx } = {}) {
     // check above, and an outcome must never attach to an ordinary service.
     if (liveVisit && !(await isAssessmentBooking(liveVisit, locked))) {
       throw makeError('That visit is not a Waves Assessment consultation', 409, 'NOT_CONSULTATION');
+    }
+
+    // The visit moved to another customer or property, was retyped or was
+    // rescheduled after the client's form loaded: refused BEFORE the write, so a
+    // stale read is never saved against the changed visit. The same comparison
+    // /complete runs under its lock (pest-recap.js); the address is not compared
+    // here (the sheet holds it only as one line of text).
+    if (expectedVisit && liveVisit) {
+      const { address: _address, ...compared } = expectedVisit;
+      if (require('./pest-recap').recapVisitIdentityChanged(compared, liveVisit, null)) {
+        throw makeError(
+          'This visit changed since it was opened. Close and reopen it to review the current visit before recording its outcome.',
+          409,
+          'visit_identity_changed',
+        );
+      }
     }
 
     // Codex #4710 r15 P2 :911: technician_id must come from the LOCKED

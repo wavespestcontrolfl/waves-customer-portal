@@ -110,10 +110,13 @@ describe('FastCompleteAssessmentSheet', () => {
     const writes = request.calls.filter((call) => call.method === 'POST').map((call) => call.path);
     expect(writes).toEqual(['/admin/consultations/svc-a/outcome', '/admin/dispatch/svc-a/complete']);
 
+    // The outcome POST carries the same visit identity as the complete body.
+    const identity = { customerId: 'cust-1', propertyId: 'prop-1', serviceType: 'Waves Assessment', scheduledDate: '2026-10-09' };
     expect(posts(request, '/outcome')[0].body).toEqual({
       outcome: 'warm', lostReason: null, interests: ['lawn', 'mosquito'], quotedAmount: null,
-      quotedCadence: null, quoteNotes: null, followUpAt: null,
+      quotedCadence: null, quoteNotes: null, followUpAt: null, expectedVisit: identity,
     });
+    expect(posts(request, '/complete')[0].body.expectedVisit).toEqual(posts(request, '/outcome')[0].body.expectedVisit);
     const body = posts(request, '/complete')[0].body;
     const { idempotencyKey, ...rest } = body;
     expect(typeof idempotencyKey).toBe('string');
@@ -171,6 +174,16 @@ describe('FastCompleteAssessmentSheet', () => {
     expect(posts(request, '/complete')).toHaveLength(0);
   });
 
+  test('a refusal for a changed visit stops before the completion and shows the server\'s words', async () => {
+    const request = makeRequest({ outcomeError: Object.assign(new Error('This visit changed since it was opened.'), { status: 409, code: 'visit_identity_changed' }) });
+    await openSheet(request);
+    fireEvent.change(note(), { target: { value: 'Looked fine.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.click(completeButton());
+    expect(await screen.findByText('This visit changed since it was opened.')).toBeTruthy();
+    expect(posts(request, '/complete')).toHaveLength(0);
+  });
+
   test('a recorded read starts the form, and its quote and follow-up date ride through unchanged', async () => {
     const row = {
       outcome: 'cold', lost_reason: null, interests: ['termite'], quoted_amount: '129.5', quoted_cadence: 'quarter',
@@ -187,6 +200,7 @@ describe('FastCompleteAssessmentSheet', () => {
     expect(posts(request, '/outcome')[0].body).toEqual({
       outcome: 'cold', lostReason: null, interests: ['termite'], quotedAmount: '129.5',
       quotedCadence: 'quarter', quoteNotes: 'Side yard ants', followUpAt: '2026-11-01T13:00:00.000Z',
+      expectedVisit: { customerId: 'cust-1', propertyId: 'prop-1', serviceType: 'Waves Assessment', scheduledDate: '2026-10-09' },
     });
   });
 

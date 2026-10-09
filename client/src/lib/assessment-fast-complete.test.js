@@ -42,6 +42,8 @@ describe("assessment Fast Complete routing (GATE_ASSESSMENT_FAST_COMPLETE)", () 
     ["a closed visit", { status: "completed" }],
     ["a cancelled visit", { status: "cancelled" }],
     ["a no-show visit", { status: "no_show" }],
+    ["a skipped visit", { status: "skipped" }],
+    ["a rescheduled visit (recordOutcome answers CONSULTATION_NOT_HELD)", { status: "rescheduled" }],
     ["a failed profile read", { completionProfileLookupFailed: true }],
     ["a failed linked-project read", { linkedProjectLookupFailed: true }],
     ["a visit that completes through a project", { linkedProject: { id: "proj-1" } }],
@@ -71,5 +73,20 @@ describe("assessment Fast Complete routing (GATE_ASSESSMENT_FAST_COMPLETE)", () 
   it("a missing service answers null", () => {
     expect(fastCompleteSheetFor(null)).toBeNull();
     expect(isAssessmentFastCompleteEligible(undefined)).toBe(false);
+  });
+
+  // The statuses server/services/consultation-outcomes.js recordOutcome refuses
+  // (DEAD_CONSULTATION_STATUSES): the sheet's first write is that outcome, so
+  // none of them may open it.
+  it.each(["no_show", "cancelled", "skipped", "rescheduled"])(
+    "a %s assessment never opens the sheet, so its first write cannot be refused",
+    (status) => {
+      expect(isAssessmentFastCompleteEligible(assessment({ status }))).toBe(false);
+      expect(fastCompleteSheetFor(assessment({ status }))).toBeNull();
+    },
+  );
+
+  it.each(["pending", "confirmed", "en_route", "on_site"])("an open %s assessment opens it", (status) => {
+    expect(fastCompleteSheetFor(assessment({ status }))).toBe("assessment");
   });
 });
