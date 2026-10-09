@@ -4112,16 +4112,18 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:30AM + 2:30PM — Auto-dispatch rain pass. The 4:10 run above
+  // HOURLY :30, 5AM-6PM — Auto-dispatch rain pass. The 4:10 run above
   // cannot see rain (it never moves a visit inside 72 hours; the hourly
   // forecast is good for 3 dates), so this reads the booked outdoor visits
   // on those dates and tells the office which sit in rain and which hour
-  // that day is dry and open. Notify-only: never moves a visit, never texts
-  // a customer. Dark behind GATE_AUTO_DISPATCH_RAIN_PASS, read inside the
+  // that day is dry and open. Each visit rings once; the hourly run keeps
+  // the notice's advice current and closes it when the visit is no longer
+  // wet at that time. Notify-only: never moves a visit, never texts a
+  // customer. Dark behind GATE_AUTO_DISPATCH_RAIN_PASS, read inside the
   // pass. runExclusive because overlapping deploy instances would read the
   // forecast twice.
   // =========================================================================
-  cron.schedule('30 4,14 * * *', async () => {
+  cron.schedule('30 5-18 * * *', async () => {
     try {
       await runExclusive('auto-dispatch-rain-pass', async () => {
         const { runRainPass } = require('./auto-dispatch/rain-pass');

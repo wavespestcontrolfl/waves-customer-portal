@@ -6,7 +6,7 @@
  * (route-tiers.js), and the hourly rain forecast is only good for the next
  * RAIN_DAYS dates (rain-fit.js). So the run cannot see rain, and nothing
  * looked at a visit that was already booked when rain entered its forecast.
- * This pass is that look: twice a day it reads every live visit on the next
+ * This pass is that look: every hour of the working day it reads every live visit on the next
  * RAIN_DAYS dates, keeps the outdoor ones (rain-fit's classification, by
  * catalog identity) whose hourly chance of rain reaches MOVE_PCT from the
  * start of the work through RAIN_AFTER_HOURS after its end, and looks for a
@@ -20,8 +20,8 @@
  * Noise limits: outdoor work only; MOVE_PCT is above the booking ranking's
  * RAIN_PCT (in the wet season most afternoons read 60%); one notice per
  * visit at a given date and start (dedupeKey), so a forecast that goes back
- * and forth never rings twice while the notice stands; a notice whose visit
- * reads dry again is closed; at most MAX_NOTICES_PER_DAY new notices a day; a visit that starts within LEAD_MINUTES is
+ * and forth never rings twice while the notice stands; every run closes the
+ * notices whose visit is no longer wet at that slot; at most MAX_NOTICES_PER_DAY new notices a day; a visit that starts within LEAD_MINUTES is
  * left to storm-watch.js, which nudges the technician. Never throws.
  */
 const logger = require('../logger');
@@ -247,7 +247,9 @@ async function noticesRaisedToday(db, now) {
   return Number(count) || 0;
 }
 
-const noticeKey = (row) => `${KEY_PREFIX}${row.visit.id}:${row.date}:${row.start}`;
+// One key per physical stop at a date and start: the durable visit_id for a
+// grouped stop (its members and their order can change), else the row's id.
+const noticeKey = (row) => `${KEY_PREFIX}${row.visit.visit_id || row.visit.id}:${row.date}:${row.start}`;
 
 // The notice, by the shared composer: the customer's name in the headline, a
 // spoken day and time in the why (no ISO date), a link that opens the visit.
@@ -283,42 +285,46 @@ async function sendNotice(row, { db, deps, reopen = null, now = new Date() }) {
       // hour that has since turned wet or been taken.
       dedupeKey: noticeKey(row),
       refreshOnDedupe: true,
-      // The one refresh that rings: a notice that was closed (by this pass
-      // when the forecast dried, or by the relevance sweep when the visit
-      // moved away) and whose visit sits in rain at this slot again.
-      // `reopen` (set only for a key with no standing notice) makes that
-      // refresh happen even when the chance and the dry hour read the same
-      // as before.
-      ringOnRefresh: (_existing, meta) => meta?.autoCleared === true || !!meta?.retired,
+      // The one refresh that rings: a notice this pass closed, and whose
+      // visit sits in rain at this slot again. `reopen` (set only for a key
+      // with no standing notice) makes that refresh happen even when the
+      // chance and the dry hour read the same as before.
+      ringOnRefresh: (_existing, meta) => meta?.autoCleared === true,
+      // Rings unless the owner turned the schedule category off (admin bell policy).
+      bellDefault: true,
       ...(reopen ? { dedupeVersion: reopen } : {}),
       detail: `${name || 'A customer'}: ${service} on ${date} at ${start}. `
         + `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `
         + (proposal ? `${proposal} that day reads below ${DRY_PCT}% and no other stop is in it. ` : `No hour that day is both below ${DRY_PCT}% and open. `)
         + 'Nothing was moved and the customer was not contacted. Move it with Quick Move.',
-      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false, retired: null,
+      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false,
+        // The central test-account suppression reads the customer from here.
+        customerId: visit.customer_id,
         // Only a call that can ring stamps the day; a quiet rewrite keeps the row's own.
         ...(reopen ? { rang_on: etDateString(now) } : {}) },
     },
   );
 }
 
-// Standing: not closed by this pass (autoCleared, which the read leaves out)
-// and not retired by the relevance sweep.
-async function standingKeys(rows, episodes, db) {
-  const open = rows.length ? await episodes.openAdminAlertMetadata(db, KEY_PREFIX) : [];
-  return new Set(open.filter((meta) => meta.dedupeKey && !meta.retired).map((meta) => meta.dedupeKey));
-}
+// A verdict that says nothing about the rain: the forecast or the visit's
+// point could not be read. Such a stop keeps the notice it has.
+const UNKNOWN = new Set(['no_forecast', 'no_point', 'error']);
 
-// A standing notice is closed when its visit now reads dry in every hour, or
-// is no longer outdoor work (a service edit): the office must not move a
-// visit for rain that no longer matters to it. An unread forecast or a
-// failed lookup closes nothing. Returns the keys closed.
+// The pass owns its notices from first ring to close (docs/admin-notifications.md
+// section 2): every standing notice whose stop is not wet now is closed. That
+// covers a forecast that dried, work that is no longer outdoor, and a visit
+// that is no longer on that slot at all (moved, parked, cancelled, under way,
+// done, date passed): such a visit is not in `rows`, or has another key. Only
+// an unknown verdict keeps a notice. Returns the keys closed.
 async function closeSettled(rows, standing, { episodes, db, now }) {
-  const dried = rows.filter((row) => row.dry === true || row.reason === 'not_outdoor').map(noticeKey).filter((key) => standing.has(key));
-  if (dried.length) {
-    await episodes.closeAdminAlertKeys(db, dried, 'no_longer_in_rain', { now, resolution: 'Cleared: this visit is no longer outdoor work in rain' });
+  // Under the threshold with an hour unread is not a dry reading either.
+  const unread = (row) => UNKNOWN.has(row.reason) || (row.reason === 'not_wet' && row.dry !== true);
+  const keep = new Set(rows.filter((row) => row.wet || unread(row)).map(noticeKey));
+  const settled = [...standing].filter((key) => !keep.has(key));
+  if (settled.length) {
+    await episodes.closeAdminAlertKeys(db, settled, 'no_longer_in_rain', { now, resolution: 'Cleared: this visit is no longer outdoor work in rain at that time' });
   }
-  return dried;
+  return settled;
 }
 
 // One notice per wet stop. A standing notice is only rewritten; a new one
@@ -351,7 +357,8 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
     const rows = await planRainPass({ now, db, deps });
     const wet = rows.filter((row) => row.wet);
     const episodes = deps.episodes || require('../admin-alert-episodes');
-    const standing = await standingKeys(rows, episodes, db);
+    // Standing: every notice of this pass that it has not closed.
+    const standing = new Set(await episodes.openAdminAlertKeys(db, KEY_PREFIX));
     const dried = await closeSettled(rows, standing, { episodes, db, now });
     const budget = Math.max(0, MAX_NOTICES_PER_DAY - (wet.length ? await (deps.noticesRaisedToday || noticesRaisedToday)(db, now) : 0));
     const { noticed, deferred } = await ringWet(wet, standing, budget, { db, deps, now });

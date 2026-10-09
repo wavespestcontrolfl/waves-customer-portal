@@ -3457,7 +3457,7 @@ const gates = {
   // Auto-dispatch rain pass (owner 2026-10-08): the 04:10 run never moves a
   // visit inside 72 hours and the hourly rain forecast is good for 3 dates,
   // so the run cannot see rain. This pass reads the booked visits on those 3
-  // dates twice a day; an outdoor visit whose hourly chance reaches 70% from
+  // dates every hour of the working day; an outdoor visit whose hourly chance reaches 70% from
   // its start through 2 h after its end gets one admin notification on the
   // 'schedule' channel, naming a dry open hour on the same date when there
   // is one. Nothing is moved and no customer is texted. OFF in every
