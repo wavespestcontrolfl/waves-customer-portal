@@ -1020,16 +1020,18 @@ function summarizeInventoryStatus(items = []) {
 
 // `cappedIds`: products an application limit holds (v13 capped lines): they get no amount
 // and no place in the mix.
+const MIX_ORDER = Object.freeze([
+  'water_conditioner',
+  'dry_wg_wdg_wp_df',
+  'liquid_flowable_sc',
+  'ec_ew',
+  'solution_sl',
+  'liquid_fertilizer',
+  'adjuvant_last',
+]);
+
 function buildMixOrder(items, cappedIds = new Set()) {
-  const order = [
-    'water_conditioner',
-    'dry_wg_wdg_wp_df',
-    'liquid_flowable_sc',
-    'ec_ew',
-    'solution_sl',
-    'liquid_fertilizer',
-    'adjuvant_last',
-  ];
+  const order = MIX_ORDER;
   const rank = new Map(order.map((key, index) => [key, index]));
   return items
     .filter((item) => item.product && !cappedIds.has(String(item.product.id)))
@@ -2437,6 +2439,7 @@ module.exports = {
   calculateNutrients,
   summarizeAnnualN,
   buildMixOrder,
+  MIX_ORDER,
   findNutrientProductsMissingRates,
   findNutrientProductsMissingConversions,
   isDateInWindow,

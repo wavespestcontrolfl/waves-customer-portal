@@ -113,6 +113,45 @@ function collectiveAnchorActive() {
   return process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true';
 }
 
+// Next-visit date beside Confirm (owner 2026-10-09: show every plan shift
+// before the customer confirms). Dark until GATE_RESCHEDULE_NEXT_VISIT_DATE
+// is set; kill = unset. Read at call time.
+function nextVisitDateActive() {
+  return process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE === 'true';
+}
+
+// { currentDate, byDate: { <offered date>: <next visit's new date> } } for a
+// series visit under collective anchoring, else null. Decoration only: any
+// failure returns null and the page keeps its general plan note.
+async function loadNextVisitShift(svc, availability) {
+  if (!nextVisitDateActive() || !isSeriesVisit(svc) || !collectiveAnchorActive()) return null;
+  const dates = (availability?.days || []).map((day) => day.date).filter(Boolean);
+  if (!dates.length) return null;
+  try {
+    const shift = await SmartRebooker.projectNextVisitDates(svc.id, dates);
+    return shift && Object.keys(shift.byDate).length ? shift : null;
+  } catch (err) {
+    logger.warn(`[reschedule-public] next-visit projection failed for ${svc.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// The next-visit line the page showed must match what the series move does
+// (GATE_RESCHEDULE_NEXT_VISIT_DATE). `nextVisit` is the mover's own verdict
+// from inside its locked transaction ({ currentDate, newDate } of the first
+// later movable visit; newDate null = kept in place), so this compares the
+// page to the write itself and reads nothing. True = mismatch.
+// Same conditions as loadNextVisitShift: outside them the page named nothing.
+function nextVisitDisclosureMismatch(svc, body, nextVisit) {
+  if (!nextVisitDateActive() || !isSeriesVisit(svc) || !collectiveAnchorActive()) return false;
+  const day = (value) => String(value || '').slice(0, 10) || null;
+  const moves = !!(nextVisit?.newDate && nextVisit.currentDate && nextVisit.newDate !== nextVisit.currentDate);
+  const expectedTo = moves ? nextVisit.newDate : null;
+  const expectedFrom = moves ? nextVisit.currentDate : null;
+  return day(body?.disclosed_next_visit_date) !== expectedTo
+    || day(body?.disclosed_next_visit_current_date) !== expectedFrom;
+}
+
 // True when committing `targetDateStr` for this visit re-anchors the series.
 function shouldReanchor(svc, targetDateStr) {
   if (!isSeriesVisit(svc)) return false;
@@ -598,10 +637,13 @@ router.get('/:token', async (req, res, next) => {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
     weatherMove = await weatherMovePromise;
+    const nextVisit = await loadNextVisitShift(svc, availability);
 
     return res.json({
       ...base,
       weatherMove,
+      // Gate off / not a series / nothing to name: key omitted.
+      ...(nextVisit ? { nextVisit } : {}),
       availability: availability
         ? {
           slots: availability.slots,
@@ -665,7 +707,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     }
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
+    // A search can offer a day the first load did not: name its date too.
+    const nextVisit = await loadNextVisitShift(svc, availability);
     return res.json({
+      ...(nextVisit ? { nextVisit } : {}),
       summary: summarizeWindow(when, { count: slotCount, nearby: availability.nearby }),
       understood: when.understood,
       window: { date_from: when.dateFrom, date_to: when.dateTo },
@@ -801,9 +846,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       } catch (err) {
         logger.warn(`[reschedule-public] refresh availability failed for ${svc.id}: ${err.message}`);
       }
+      const nextVisit = refreshed ? await loadNextVisitShift(svc, refreshed) : null;
       return res.status(409).json({
         error: 'That time is no longer open. Here are the latest available times.',
         code: 'SLOT_TAKEN',
+        ...(nextVisit ? { nextVisit } : {}),
         availability: refreshed
           ? { slots: refreshed.slots, days: refreshed.days, nearby: refreshed.nearby, rangeFrom: range.rangeFrom, rangeTo: range.rangeTo }
           : null,
@@ -871,6 +918,21 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // one while the expect fence still matches. The rebooker calls
     // moveGuard inside its transaction right before this row's own lock
     // and CAS, so the lock here holds the row steady until the write.
+    // Next-visit date pin (GATE_RESCHEDULE_NEXT_VISIT_DATE; Codex r2 P1, r3
+    // P1/P2): the page named the next plan visit's date today and its new
+    // date, or named none. The series mover decides under its locks whether
+    // that visit moves (it keeps a customer-confirmed, dispatch-locked,
+    // reminded, shared or frozen one in place, and every later visit when
+    // its reminder read fails). It hands that verdict to moveGuard before
+    // its first write; a page that said something else is refused with
+    // SCOPE_CHANGED and reloads. No-op while the gate is unset.
+    const nextVisitPin = async ({ nextVisit }) => {
+      if (nextVisitDisclosureMismatch(svc, req.body, nextVisit)) {
+        throw Object.assign(new Error('The scheduling details for your plan just updated — please review the latest options.'), {
+          statusCode: 409, isOperational: true, code: 'SCOPE_CHANGED',
+        });
+      }
+    };
     const officeApprovalRecheck = async ({ trx }) => {
       if (elig.missed) return;
       const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
@@ -906,7 +968,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
             beforeMove: noticeRecheck,
-            moveGuard: officeApprovalRecheck,
+            moveGuard: async (ctx) => {
+              await officeApprovalRecheck(ctx);
+              await nextVisitPin(ctx);
+            },
           }
         )
         : await SmartRebooker.reschedule(
@@ -1106,6 +1171,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 });
 
 router._test = {
+  nextVisitDisclosureMismatch,
   eligibility,
   eligibilityAsync,
   withSelfServeNotice,
@@ -1121,6 +1187,8 @@ router._test = {
   loadWeatherMove,
   WEATHER_MOVE_MAX_AGE_DAYS,
   collectiveAnchorActive,
+  nextVisitDateActive,
+  loadNextVisitShift,
   seriesScopeMismatch,
   buildAvailabilityForService,
 };
