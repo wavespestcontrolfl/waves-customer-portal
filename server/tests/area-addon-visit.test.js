@@ -153,6 +153,7 @@ function fakeTrx({ catalog = [], existing = [] } = {}) {
         columnInfo: async () => ({
           id: {}, scheduled_service_id: {}, service_id: {}, service_name: {}, estimated_price: {}, created_at: {},
           base_price: {}, service_key_snapshot: {}, service_category_snapshot: {}, estimated_duration_minutes: {}, recurring_pattern: {}, area_addon_scope: {},
+          discount_id: {}, discount_name: {}, discount_type: {}, discount_amount: {}, discount_dollars: {},
         }),
         insert: async (data) => { state.addons.push(data); },
       };
@@ -359,7 +360,7 @@ describe('adopting an existing appointment never squeezes the add-on visit into 
     const { estimate } = oneTimeEstimate(THREE);
     const profile = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
     const sold = rows.secondaryAreaAddOns(profile, KEYS[0]).find((row) => row.catalogServiceKey === KEYS[1]);
-    const stale = { scheduled_service_id: 'visit-1', service_key_snapshot: KEYS[1], estimated_price: 1, base_price: 1, estimated_duration_minutes: 1, area_addon_scope: JSON.stringify({ areaSqFt: 1 }) };
+    const stale = { scheduled_service_id: 'visit-1', service_key_snapshot: KEYS[1], estimated_price: 1, base_price: 1, estimated_duration_minutes: 1, area_addon_scope: JSON.stringify({ areaSqFt: 1 }), discount_id: 'd-1', discount_name: 'Ten off', discount_type: 'fixed', discount_amount: 10, discount_dollars: 10 };
     const trx = fakeTrx({ catalog: catalogFor(KEYS), existing: [stale] });
     await rows.writeAdoptedAreaAddOns(trx, { scheduledServiceId: 'visit-1', estimate, ownServiceKey: KEYS[0], adoptedRow: { estimated_duration_minutes: profile.durationMinutes } });
     expect(trx.state.addons.map((r) => r.service_key_snapshot).sort()).toEqual(KEYS.slice(1).sort());
@@ -367,6 +368,8 @@ describe('adopting an existing appointment never squeezes the add-on visit into 
     expect([refreshed.estimated_price, refreshed.base_price]).toEqual([sold.addOnPrice, sold.addOnPrice]);
     expect(JSON.parse(refreshed.area_addon_scope).areaSqFt).not.toBe(1);
     expect(refreshed.estimated_duration_minutes).toBe(Math.ceil(sold.durationMinutes));
+    // Codex round 27: a discount the original booking stamped on the row is cleared (the invoice must equal the accepted total).
+    expect([refreshed.discount_id, refreshed.discount_name, refreshed.discount_type, refreshed.discount_amount, refreshed.discount_dollars]).toEqual([null, null, null, null, null]);
   });
 
   // Codex round 23: the estimate was revised to REMOVE an add-on the booked visit carries.

@@ -646,11 +646,17 @@ async function movedVisitSubject(database, options) {
  */
 async function assertMovedVisitLimitsOpen(database, options = {}) {
   const subject = await movedVisitSubject(database, options);
-  if (!subject) return;
+  if (!subject) return null;
   const { row, day, property, keys } = subject;
   let history;
   try {
     history = await movedVisitHistory(database, { visit: row, visitId: options.visitId, property, keys });
+    // `alsoMoving` ({ limit key: [days] }): visits the SAME move takes to this place and has already judged. They are still at
+    // their old property in the tables, so the caller hands their days over and they count here.
+    for (const key of keys) {
+      const more = (options.alsoMoving && options.alsoMoving[key]) || [];
+      if (more.length) history.byKey[key] = { dates: [...((history.byKey[key] || {}).dates || []), ...more].sort() };
+    }
   } catch (err) {
     logger.warn(`[area-addon-limits] move recheck history unavailable for visit ${options.visitId}: ${err.code || err.name}: ${err.message}`);
     throw limitError(409, HISTORY_CODE, options.staff ? MOVE_HISTORY_STAFF_MESSAGE : MOVE_CUSTOMER_MESSAGE);
@@ -659,6 +665,8 @@ async function assertMovedVisitLimitsOpen(database, options = {}) {
     .map((key) => ({ key, verdict: areaAddOnLimitVerdict(key, history, { day }) }))
     .find(({ verdict }) => verdict && verdict.reason === LIMIT_REACHED_REASON);
   if (reached) throw limitError(409, LIMIT_CODE, options.staff ? reached.verdict.detail : MOVE_CUSTOMER_MESSAGE, { addOnKey: reached.key, limit: reached.verdict });
+  // What was judged and passed: the limited keys and the day (a batch mover feeds them to the next row as `alsoMoving`).
+  return { keys, day };
 }
 
 // The limit key (AREA_ADDONS.items key) of a catalog service key, or null when the add-on has no limit.

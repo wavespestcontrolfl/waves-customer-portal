@@ -57,7 +57,9 @@ const ledger = (day, extra = {}) => ({ customer_id: CUSTOMER, product_id: 'p-sna
 const otherBooking = (day, extra = {}) => ({
   's.service_key_snapshot': BED, 's.customer_id': CUSTOMER, 's.status': 'confirmed', 's.property_id': HOME, 's.source_estimate_id': null, 's.id': OTHER_VISIT, 's.scheduled_date': day, ...extra,
 });
-const move = (tables, args = {}, calls = []) => limits.assertMovedVisitLimitsOpen(fakeDb(tables, calls), { visitId: VISIT, ...args });
+// A pass resolves to what was judged ({ keys, day }) or null when there was nothing to ask; these tests only need "no refusal".
+const judge = (tables, args = {}, calls = []) => limits.assertMovedVisitLimitsOpen(fakeDb(tables, calls), { visitId: VISIT, ...args });
+const move = (tables, args, calls) => judge(tables, args, calls).then(() => undefined);
 const NEW_DAY = addDays(TODAY, 30);
 
 describe('a moved visit that carries a limited add-on is judged for the new day', () => {
@@ -110,6 +112,17 @@ describe('a moved visit that carries a limited add-on is judged for the new day'
   });
 });
 
+// Codex round 27: a batch mover hands the visits it already judged for the same destination.
+describe('visits moved in the same batch count at the destination', () => {
+  test('a pass returns what was judged; a sibling handed over as alsoMoving closes the day', async () => {
+    const tables = () => world({ property_application_history: [ledger(addDays(NEW_DAY, -70))] });
+    await expect(judge(tables(), { scheduledDate: NEW_DAY, staff: true })).resolves.toEqual({ keys: ['bed_pre_emergent'], day: NEW_DAY });
+    await expect(judge(tables(), { scheduledDate: NEW_DAY, staff: true, alsoMoving: { bed_pre_emergent: [NEW_DAY] } }))
+      .rejects.toMatchObject({ code: 'AREA_ADDON_YEARLY_LIMIT_REACHED' });
+    await expect(judge(tables(), { scheduledDate: NEW_DAY, staff: true, alsoMoving: { fire_ant_yard: [NEW_DAY] } })).resolves.toEqual({ keys: ['bed_pre_emergent'], day: NEW_DAY });
+  });
+});
+
 describe('what is not a move, and what costs nothing', () => {
   test('the same day and property with the row in hand: no query at all', async () => {
     const calls = [];
@@ -125,8 +138,8 @@ describe('what is not a move, and what costs nothing', () => {
   });
 
   test('an unknown visit passes (the mover owns the not-found answer)', async () => {
-    await expect(limits.assertMovedVisitLimitsOpen(fakeDb(world({ scheduled_services: [] })), { visitId: VISIT, scheduledDate: NEW_DAY })).resolves.toBeUndefined();
-    await expect(limits.assertMovedVisitLimitsOpen(fakeDb(world()), { visitId: 'not-a-uuid', scheduledDate: NEW_DAY })).resolves.toBeUndefined();
+    await expect(limits.assertMovedVisitLimitsOpen(fakeDb(world({ scheduled_services: [] })), { visitId: VISIT, scheduledDate: NEW_DAY })).resolves.toBeNull();
+    await expect(limits.assertMovedVisitLimitsOpen(fakeDb(world()), { visitId: 'not-a-uuid', scheduledDate: NEW_DAY })).resolves.toBeNull();
   });
 
   test('it never asks GATE_AREA_ADDONS (a visit booked gate-on is moved gate-off)', async () => {
@@ -210,7 +223,25 @@ describe('an address change rechecks every visit it moves, at the destination pr
       await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new');
       expect(keysByVisit).toHaveBeenCalledWith({ tag: 'trx' }, [A, B]);
       expect(moved).toHaveBeenCalledTimes(1);
-      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, { visitId: B, visit: rows[1], propertyId: 'new', serviceKeys: ['area_addon_fire_ant_yard'], staff: true });
+      expect(moved).toHaveBeenCalledWith({ tag: 'trx' }, { visitId: B, visit: rows[1], propertyId: 'new', serviceKeys: ['area_addon_fire_ant_yard'], staff: true, alsoMoving: {} });
+    } finally { keysByVisit.mockRestore(); moved.mockRestore(); }
+  });
+
+  // Codex round 27: two visits moved together are one batch; the second sees the first at the destination.
+  test('each row that passes is handed to the rows judged after it, by limit key and day', async () => {
+    const keysByVisit = jest.spyOn(rowsModule, 'areaAddOnKeysByVisit').mockResolvedValue(new Map());
+    const seen = [];
+    const moved = jest.spyOn(limitsModule, 'assertMovedVisitLimitsOpen').mockImplementation(async (_trx, options) => {
+      seen.push(JSON.parse(JSON.stringify(options.alsoMoving)));
+      return { keys: ['hardscape_weed'], day: options.visit.scheduled_date };
+    });
+    try {
+      const rows = [
+        { id: A, property_id: 'old', service_key_snapshot: 'area_addon_hardscape_weed', scheduled_date: '2026-11-02' },
+        { id: B, property_id: 'old', service_key_snapshot: 'area_addon_hardscape_weed', scheduled_date: '2026-11-02' },
+      ];
+      await address._test.assertAreaAddOnLimitsAtDestination({ tag: 'trx' }, rows, 'new');
+      expect(seen).toEqual([{}, { hardscape_weed: ['2026-11-02'] }]);
     } finally { keysByVisit.mockRestore(); moved.mockRestore(); }
   });
 

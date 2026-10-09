@@ -207,6 +207,7 @@ async function dropUnsoldAddOnRows(trx, scheduledServiceId, wanted) {
   return stale.length;
 }
 
+const CARRIED_ROW_DISCOUNT_COLUMNS = ['discount_id', 'discount_name', 'discount_type', 'discount_amount', 'discount_dollars'];
 async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
   if (!rows.length) return 0;
   const cols = await trx('scheduled_service_addons').columnInfo();
@@ -215,6 +216,9 @@ async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
     const price = Math.round(Number(row.addOnPrice) * 100) / 100;
     const data = { estimated_price: price };
     if (cols.base_price) data.base_price = price;
+    // A discount stamped on the row by the original booking does not belong to the accepted estimate (an add-on is never
+    // discounted): left in place, the invoice would bill less than the accepted total.
+    for (const column of CARRIED_ROW_DISCOUNT_COLUMNS) if (cols[column]) data[column] = null;
     if (cols.area_addon_scope) data.area_addon_scope = JSON.stringify(soldScope(row));
     if (cols.estimated_duration_minutes && Number(row.durationMinutes) > 0) data.estimated_duration_minutes = Math.ceil(Number(row.durationMinutes));
     refreshed += await trx('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId, service_key_snapshot: row.catalogServiceKey }).update(data);
@@ -334,14 +338,17 @@ async function writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId, estima
 
 // Update Details: the area add-on rows of a visit that carry no sold scope after the carried ones were restored (rows the edit
 // added) get the scope its source estimate sells. One row read for a visit with none; no estimate, nothing stamped.
+// The visit's OWN service too: an edit that moved the visit to an area add-on (its old scope was cleared by
+// clearOwnAreaAddOnScopeOnServiceChange) gets that add-on's sold scope on the visit.
 async function stampAddedAreaAddOnScopes(trx, visitId) {
-  if (!visitId || !(await hasScopeColumn(trx, 'scheduled_service_addons'))) return 0;
-  const bare = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).whereNull('area_addon_scope').select('service_key_snapshot');
-  if (!bare.some((row) => isAreaAddOnCatalogKey(row.service_key_snapshot))) return 0;
-  const visit = await trx('scheduled_services').where({ id: visitId }).first('source_estimate_id');
+  if (!visitId || !(await hasScopeColumn(trx, 'scheduled_service_addons')) || !(await hasScopeColumn(trx, 'scheduled_services'))) return 0;
+  const visit = await trx('scheduled_services').where({ id: visitId }).first('source_estimate_id', 'service_key_snapshot', 'area_addon_scope');
   if (!visit || !visit.source_estimate_id) return 0;
+  const ownKey = isAreaAddOnCatalogKey(visit.service_key_snapshot) && !parseScope(visit.area_addon_scope) ? visit.service_key_snapshot : null;
+  const bare = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).whereNull('area_addon_scope').select('service_key_snapshot');
+  if (!ownKey && !bare.some((row) => isAreaAddOnCatalogKey(row.service_key_snapshot))) return 0;
   const estimate = await trx('estimates').where({ id: visit.source_estimate_id }).first('id', 'estimate_data', 'pricing_authority', 'show_one_time_option');
-  return writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId: visitId, estimate, ownServiceKey: null });
+  return writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId: visitId, estimate, ownServiceKey: ownKey });
 }
 
 // ---------------------------------------------------------------------------

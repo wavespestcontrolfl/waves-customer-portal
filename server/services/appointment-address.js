@@ -69,10 +69,14 @@ async function assertAreaAddOnLimitsAtDestination(trx, lockedRows, propertyId) {
   if (!moving.length) return;
   const { areaAddOnKeysByVisit } = require('./area-addon-visit-rows');
   const rowKeys = await areaAddOnKeysByVisit(trx, moving.map((row) => row.id));
+  // The rows are judged as ONE batch: each row that passes counts, on its day, for the rows judged after it (in the tables it
+  // is still at its old property), so two visits moved together cannot each take the destination's last allowed application.
+  const alsoMoving = {};
   for (const row of moving) {
     const serviceKeys = [row.service_key_snapshot, ...(rowKeys.get(String(row.id)) || [])].filter((key) => String(key || '').startsWith('area_addon_'));
     if (!serviceKeys.length) continue;
-    await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: row.id, visit: row, propertyId, serviceKeys, staff: true });
+    const judged = await require('./area-addon-limits').assertMovedVisitLimitsOpen(trx, { visitId: row.id, visit: row, propertyId, serviceKeys, staff: true, alsoMoving });
+    for (const key of (judged && judged.keys) || []) alsoMoving[key] = [...(alsoMoving[key] || []), judged.day];
   }
 }
 

@@ -15405,8 +15405,11 @@ async function scheduleUpdateDetailsHandler(req, res, next) {
         await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id }).del();
         await insertScheduledServiceAddons(trx, req.params.id, replaceAddons, addonCols, canonicalRestackedAddonDollars);
         await areaAddOnRows.restoreCarriedAreaAddOnScopes(trx, req.params.id, carriedAreaScopes);
-        // A row the edit ADDED (the guard above proved the source estimate sells it) has no carried scope: stamp what the
-        // estimate sold. Only rows still without a scope are touched, and a posted line can never set one.
+      }
+      // An area add-on the edit ADDED (a row, or the visit's own service moved to one; the guard above proved the source
+      // estimate sells it) has no carried scope: stamp what the estimate sold. Only a scope still missing is written, and a
+      // posted line can never set one.
+      if (addonsReplaced || updates.service_key_snapshot !== undefined || updates.service_id !== undefined) {
         await areaAddOnRows.stampAddedAreaAddOnScopes(trx, req.params.id);
       }
       if (clearAddonDiscountsOnPriceEdit) {
