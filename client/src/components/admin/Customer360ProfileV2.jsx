@@ -6690,7 +6690,8 @@ function CustomerProfileServices({
 // Field list mirrors server/services/property-preferences-schema.js
 // (PREFS_FIELD_SCHEMAS / ALLOWED_FIELDS) plus the two staff-only fields
 // (chemicalSensitivities/chemicalSensitivityDetails) that route also
-// accepts. Keep ACCESS_PREFS_FIELDS in sync if a field is added there.
+// accepts, plus the staff-only new-sod record (sodLaidOn/sodCovers/sodArea).
+// Keep ACCESS_PREFS_FIELDS in sync if a field is added there.
 const ACCESS_PREFS_PREFERRED_DAY_OPTIONS = [
   ["no_preference", "No preference"],
   ["monday", "Monday"],
@@ -6809,6 +6810,9 @@ const ACCESS_PREFS_FIELDS = {
   chemicalSensitivities: "bool",
   chemicalSensitivityDetails: "text",
   specialInstructions: "text",
+  sodLaidOn: "date",
+  sodCovers: "optional",
+  sodArea: "text",
 };
 const accessPrefsColumn = (key) =>
   key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
@@ -6984,7 +6988,13 @@ const ACCESS_PREFS_COUPLED = {
   blackoutStart: ["blackoutEnd"],
   blackoutEnd: ["blackoutStart"],
   chemicalSensitivityDetails: ["chemicalSensitivities"],
+  // The sod record saves whole or not at all on the server, so its three
+  // fields always travel together.
+  sodLaidOn: ["sodCovers", "sodArea"],
+  sodCovers: ["sodLaidOn", "sodArea"],
+  sodArea: ["sodLaidOn", "sodCovers"],
 };
+const ACCESS_PREFS_SOD_KEYS = ["sodLaidOn", "sodCovers", "sodArea"];
 
 // Which draft keys actually changed since the form opened (codex P2): a
 // full-snapshot resubmit could clobber a newer customer portal autosave on
@@ -7028,7 +7038,7 @@ function accessPrefsAdvanceBaseline(baseline, draft, dirtyKeys, failed) {
   };
 }
 
-function AccessPrefsReadView({ p, isAdmin, onEdit }) {
+function AccessPrefsReadView({ p, isAdmin, onEdit, sodInfo }) {
   const code = (value) =>
     isAdmin || !value ? value : "Shown in the tech app on service day";
   const hasHoa = ACCESS_PREFS_HOA_ROWS.some(([, key]) => p[key]);
@@ -7105,6 +7115,18 @@ function AccessPrefsReadView({ p, isAdmin, onEdit }) {
       />
       <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
 
+      {p.sod_laid_on && (
+        <>
+          <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
+          <AccessPrefRow label="Sod Laid On" value={fmtDateOnly(p.sod_laid_on)} />
+          <AccessPrefRow
+            label="Covers"
+            value={p.sod_covers === "part" ? `Part of lawn${p.sod_area ? `: ${p.sod_area}` : ""}` : "Whole lawn"}
+          />
+          <AccessPrefsSodHoldLines lines={sodInfo?.holdLines} />
+        </>
+      )}
+
       {hasHoa && (
         <>
           <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
@@ -7171,7 +7193,73 @@ function AccessPrefsSwitchRow({ label, checked, onChange }) {
   );
 }
 
-function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets }) {
+// The hold lines and the pre-emergent facts come from GET /new-sod (computed on
+// the server from the sod rules); this component only shows them.
+function AccessPrefsSodHoldLines({ lines }) {
+  if (!Array.isArray(lines) || !lines.length) return null;
+  return (
+    <ul className="mt-1 space-y-0.5 text-ui-label text-ink-secondary" data-testid="sod-hold-lines">
+      {lines.map((line) => (
+        <li key={line.key}>{line.text}</li>
+      ))}
+    </ul>
+  );
+}
+
+function AccessPrefsNewSod({ d, set, setDraft, fieldErrors, sodInfo, hasSavedSod }) {
+  const clearRecord = () =>
+    setDraft((prev) => ({ ...prev, sodLaidOn: "", sodCovers: "", sodArea: "" }));
+  const part = d.sodCovers === "part";
+  const last = sodInfo?.lastPreEmergent;
+  return (
+    <div className="space-y-3">
+      <AccessPrefsSubheading>New sod</AccessPrefsSubheading>
+      <AccessPrefsTextInput d={d} set={set} fieldErrors={fieldErrors} label="Sod laid on" field="sodLaidOn" type="date" />
+      <AccessPrefsField group label="Covers" error={fieldErrors.sodCovers}>
+        <div className="flex flex-wrap gap-4">
+          {[["whole", "Whole lawn"], ["part", "Part of lawn"]].map(([value, label]) => (
+            <label key={value} className="flex items-center gap-1.5 text-ui-body text-zinc-900">
+              <input
+                type="radio"
+                name="sod-covers"
+                checked={value === "part" ? part : !part}
+                onChange={() => set("sodCovers")(value)}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </AccessPrefsField>
+      {part && (
+        <AccessPrefsTextInput d={d} set={set} fieldErrors={fieldErrors} label="Where" field="sodArea" maxLength={120} />
+      )}
+      {hasSavedSod && d.sodLaidOn && (
+        <button
+          type="button"
+          onClick={clearRecord}
+          className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+        >
+          Clear sod record
+        </button>
+      )}
+      <AccessPrefsSodHoldLines lines={hasSavedSod ? sodInfo?.holdLines : null} />
+      {sodInfo && (
+        <div className="text-ui-label text-ink-secondary" data-testid="sod-last-pre-emergent">
+          {last
+            ? `Last pre-emergent by Waves: ${last.dateText} (${last.product})`
+            : "No pre-emergent by Waves on record"}
+        </div>
+      )}
+      {sodInfo?.preEmergentWarning && (
+        <div role="status" className="text-ui-label font-medium text-zinc-900" data-testid="sod-pre-emergent-warning">
+          {sodInfo.preEmergentWarning}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets, isAdmin, sodInfo, hasSavedSod }) {
   const f = { d, set, fieldErrors };
   // Entering sensitivity details turns the flag on — techs only see the
   // warning when the flag is set.
@@ -7229,6 +7317,10 @@ function AccessPrefsEditForm({ d, set, setDraft, fieldErrors, hasStructuredPets 
       <AccessPrefsPills {...f} label="Mowing Days" field="mowingDays" options={DAY_KEYS} />
       <AccessPrefsSelect {...f} label="Mowing Time" field="mowingTimeOfDay" options={ACCESS_PREFS_MOWING_TIME_OPTIONS} />
       <AccessPrefsTextInput {...f} multiline label="Mowing Notes" field="mowingNotes" />
+
+      {isAdmin && (
+        <AccessPrefsNewSod {...f} setDraft={setDraft} sodInfo={sodInfo} hasSavedSod={hasSavedSod} />
+      )}
 
       <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
       <div className="grid grid-cols-2 gap-2">
@@ -7603,6 +7695,28 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   // The snapshot the form opened with — diffed against on Save so only
   // fields actually touched in THIS edit go in the PUT body.
   const initialDraftRef = useRef(null);
+  // The home stamp the form rendered from (irrigation_home_changed_at). A sod
+  // date set after the home changed is refused unless the save echoes it back.
+  const renderStampRef = useRef(null);
+  // Read-only sod lines from GET /new-sod: hold lines for the saved record, the
+  // last Waves pre-emergent, and the under-12-weeks warning for the date typed.
+  const [sodInfo, setSodInfo] = useState(null);
+  const editing = !!draft;
+  const typedSodDate = draft ? draft.sodLaidOn : null;
+  const sodSeq = useRef(0);
+
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    const mine = ++sodSeq.current;
+    const query = typedSodDate === null ? "" : `?sodLaidOn=${encodeURIComponent(typedSodDate)}`;
+    adminFetch(`/admin/customers/${customerId}/new-sod${query}`)
+      .then((data) => { if (mine === sodSeq.current) setSodInfo(data?.newSod || null); })
+      .catch(() => { if (mine === sodSeq.current) setSodInfo(null); });
+    return () => { sodSeq.current += 1; };
+  }, [
+    customerId, isAdmin, editing, typedSodDate,
+    prefs?.sod_laid_on, prefs?.sod_covers, prefs?.sod_area, prefs?.sod_rooted_on,
+  ]);
 
   const set = (key) => (value) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -7610,6 +7724,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const openEdit = () => {
     const snapshot = accessPrefsDraftFromRow(prefs);
     initialDraftRef.current = snapshot;
+    renderStampRef.current = prefs?.irrigation_home_changed_at ?? null;
     setDraft(snapshot);
     setFieldErrors({});
     setErr("");
@@ -7623,9 +7738,13 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
 
   // Resolves to the per-field rejections, or throws when the request failed.
   const submit = async (dirtyKeys) => {
+    const body = accessPrefsSavePayload(draft, dirtyKeys);
+    if (ACCESS_PREFS_SOD_KEYS.some((k) => dirtyKeys.includes(k))) {
+      body.confirmedAsOf = renderStampRef.current;
+    }
     const response = await adminFetch(
       `/admin/customers/${customerId}/property-preferences`,
-      { method: "PUT", body: JSON.stringify(accessPrefsSavePayload(draft, dirtyKeys)) },
+      { method: "PUT", body: JSON.stringify(body) },
     );
     return accessPrefsRejectedMap(response?.rejected);
   };
@@ -7673,7 +7792,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   if (!draft) {
     return (
       <>
-        <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />
+        <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} sodInfo={sodInfo} />
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
         {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>
@@ -7700,6 +7819,9 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           setDraft={setDraft}
           fieldErrors={fieldErrors}
           hasStructuredPets={Array.isArray(prefs?.pets_structured) && prefs.pets_structured.length > 0}
+          isAdmin={isAdmin}
+          sodInfo={sodInfo}
+          hasSavedSod={!!prefs?.sod_laid_on}
         />
       </fieldset>
       <div className="flex items-center justify-end gap-2 mt-3 pt-3 border-t border-hairline border-zinc-200">
