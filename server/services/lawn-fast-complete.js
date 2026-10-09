@@ -496,7 +496,7 @@ function programRateFor(item, programRows) {
 
 // GATE_LAWN_TROUBLE_AREAS: the places the yearly limits are judged at (lawn-trouble-areas.js), or null (gate off: every
 // decision is the lawn-wide one, as before).
-const limitPlaces = () => (featureGates.lawnTroubleAreasLive() ? require('./lawn-trouble-areas').PLACE_IDS : null);
+const limitPlaces = async (svc, knex) => (featureGates.lawnTroubleAreasLive() && await require('./lawn-trouble-areas').propertyOf(knex, svc) ? require('./lawn-trouble-areas').PLACE_IDS : null);
 
 // With the treatment guide live, a weed mix whose limit read failed carries the guide's one wording
 // (its products are released to the search, which the note names). The spot-rules note stands without it.
@@ -509,7 +509,7 @@ const unreadableWeedNote = (weedMix) => (featureGates.lawnTreatmentGuideLive() &
 async function loadWeedMix({ addOns, svc, plan, knex, readFailures }) {
   if (!featureGates.lawnSpotRulesLive()) return {};
   try {
-    const weedMix = await require('./lawn-weed-mix').buildWeedMix({ addOns, svc, structured: plan?.protocol?.structured, knex, places: limitPlaces() });
+    const weedMix = await require('./lawn-weed-mix').buildWeedMix({ addOns, svc, structured: plan?.protocol?.structured, knex, places: await limitPlaces(svc, knex) });
     return weedMix ? { weedMix: unreadableWeedNote(weedMix) } : {};
   } catch (err) {
     logger.warn(`[lawn-fast] weed mix unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
@@ -529,7 +529,7 @@ async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
   // profile does not match the property, the protocol is not the visit's) offers no chinch product.
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   try {
-    const chinch = await chinchOffer({ svc, structured: loaded.plan?.protocol?.structured, sheetAddOns: sheet.addOns, knex, places: limitPlaces() });
+    const chinch = await chinchOffer({ svc, structured: loaded.plan?.protocol?.structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) });
     return chinch ? { chinch } : {};
   } catch (err) {
     logger.warn(`[lawn-fast] chinch product unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
@@ -565,11 +565,11 @@ async function takeAllProductIdsFor(svc, knex = db) {
 }
 
 /**
- * What the completion confirms a trouble-type hint against, as `{ takeAll, chinch }` (Sets of lower-case product ids): the month's take-all
+ * What the completion confirms a trouble-type hint against, as `{ takeAll, chinch, chinchOnly }` (Sets of lower-case product ids): the month's take-all
  * fungicide rows (takeAllAddOns) and the chinch ladder's rungs (the staged-row rule resolveChinch uses). Empty for a visit with no plan.
  */
 async function troubleTypeIdsFor(svc, knex = db) {
-  const empty = { takeAll: new Set(), chinch: new Set() };
+  const empty = { takeAll: new Set(), chinch: new Set(), chinchOnly: new Set() };
   const loaded = await loadPlan(svc, knex);
   if (!loaded?.eligible) return empty;
   const guide = require('./lawn-treatment-guide');
@@ -578,9 +578,11 @@ async function troubleTypeIdsFor(svc, knex = db) {
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(structured);
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
   const lower = (id) => String(id).toLowerCase();
+  const ladder = await guide.chinchLadderSets({ structured, knex });
   return {
     takeAll: new Set(guide.takeAllAddOns(candidates, rows).map((candidate) => lower(candidate.item.productId))),
-    chinch: new Set((await guide.chinchLadderIds({ structured, knex })).map(lower)),
+    chinch: new Set(ladder.ladder.map(lower)),
+    chinchOnly: new Set(ladder.only.map(lower)),
   };
 }
 
@@ -944,7 +946,7 @@ async function takeAllAreasOn({ svc, knex, offers }) {
   try {
     const productId = offers?.fungus?.takeAll ? offers.fungus.item.productId : null;
     const closed = (offers?.placeBlocked || {})[productId] || {};
-    return (await require('./lawn-trouble-areas').loadActive(knex, svc.property_id)).filter((area) => area.type === 'take_all' && !closed[area.place]);
+    return (await require('./lawn-trouble-areas').loadActive(knex, await require('./lawn-trouble-areas').propertyOf(knex, svc))).filter((area) => area.type === 'take_all' && !closed[area.place]);
   } catch (err) {
     logger.warn(`[lawn-fast] take-all areas unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return [];
@@ -996,8 +998,8 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
   const [offers, chinch] = await Promise.all([
-    guide.addOnOffers({ candidates, rows, svc, knex, places: limitPlaces() }),
-    loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: limitPlaces() }) : null,
+    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex) }),
+    loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) }) : null,
   ]);
   // A read that throws fails the request (the sheet then follows the context's decisions); only a
   // missing run row, which a legacy assessment legitimately has, reads as no run.

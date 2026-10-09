@@ -1,7 +1,7 @@
 // The sheet's reading of the server's places and trouble areas (GATE_LAWN_TROUBLE_AREAS, owner 2026-10-09):
 // pure functions, synthetic data. The rules live on the server; these only read its answers.
 import { describe, expect, test } from 'vitest';
-import { defaultPlaceFor, knownPlacesOfType, placeProblems, troubleAreasOf, troubleTypeOfRow, withPlace } from './lawn-trouble-places';
+import { defaultPlaceFor, knownPlacesOfType, placeProblems, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from './lawn-trouble-places';
 
 const PLACES = [{ id: 'front', label: 'Front' }, { id: 'back', label: 'Back' }];
 const block = (extra = {}) => ({ v: 1, places: PLACES, known: [], knownUnavailable: false, blocked: {}, ...extra });
@@ -283,5 +283,44 @@ describe('a block of the yearly AMOUNT ends when the row\'s dose moved; a count 
     expect(placeProblems(chinchRow, { areas: withMoved({}, ['c1']), chinch: chinch({ amountBlocked: true }) }).front).toBeNull();
     expect(placeProblems(chinchRow, { areas: withMoved({}, []), chinch: chinch({ amountBlocked: true }) }).front).toBe('Arena is at its limit.');
     expect(placeProblems(chinchRow, { areas: withMoved({}, ['c1']), chinch: chinch({}) }).front).toBe('Arena is at its limit.');
+  });
+});
+
+describe('withClearedTakeAll: the take-all card follows the areas cleared on the sheet', () => {
+  const BACK = { id: 'a1', place: 'back', placeLabel: 'Back', type: 'take_all' };
+  const FRONT = { id: 'a2', place: 'front', placeLabel: 'Front', type: 'take_all' };
+  const card = (extra = {}) => ({ kind: 'fungus', title: 'Fungus', note: 'Take-all area on file: Back, Front.', productIds: ['p1'], items: [{ productId: 'p1' }], heldProductIds: [], allowedPlaces: ['back', 'front'], checkOnlyNote: 'None is on file.', actionLabel: 'Add', dismissLabel: 'No', ...extra });
+  const guide = (cards) => ({ assessmentId: 'x', cards });
+
+  test('nothing cleared, or nothing take-all cleared: the same guide object', () => {
+    const g = guide([card()]);
+    expect(withClearedTakeAll(g, { known: [BACK, FRONT], clearedIds: [], clearedPlaces: [] })).toBe(g);
+    expect(withClearedTakeAll(g, { known: [BACK, FRONT], clearedIds: ['zz'], clearedPlaces: [] })).toBe(g);
+    expect(withClearedTakeAll(null, { clearedPlaces: ['back'] })).toBeNull();
+  });
+
+  test('one of two places cleared: the card keeps the other and names it', () => {
+    const out = withClearedTakeAll(guide([card()]), { known: [BACK, FRONT], clearedIds: ['a1'], clearedPlaces: ['back'] });
+    expect(out.cards[0]).toMatchObject({ allowedPlaces: ['front'], note: 'Take-all area on file: Front.', productIds: ['p1'] });
+    expect(out.cards[0].items).toHaveLength(1);
+  });
+
+  test('another active take-all area at the same place keeps the place', () => {
+    const second = { id: 'a3', place: 'back', placeLabel: 'Back', type: 'take_all' };
+    const g = guide([card()]);
+    expect(withClearedTakeAll(g, { known: [BACK, second, FRONT], clearedIds: ['a1'], clearedPlaces: ['back'] })).toBe(g);
+  });
+
+  test('every place cleared: the check-only card (no product offered, the product held, no action)', () => {
+    const out = withClearedTakeAll(guide([card(), { kind: 'weeds', productIds: ['w'], items: [{ productId: 'w' }] }]), { known: [BACK, FRONT], clearedIds: ['a1', 'a2'], clearedPlaces: ['back', 'front'] });
+    expect(out.cards[0]).toMatchObject({ productIds: [], items: [], heldProductIds: ['p1'], note: 'None is on file.', actionLabel: null, dismissLabel: null });
+    expect('allowedPlaces' in out.cards[0]).toBe(false);
+    // The other card is untouched.
+    expect(out.cards[1].productIds).toEqual(['w']);
+  });
+
+  test('a cleared place after a fresh read (the area is no longer in known) still drops the place', () => {
+    const out = withClearedTakeAll(guide([card({ allowedPlaces: ['back'] })]), { known: [], clearedIds: ['a1'], clearedPlaces: ['back'] });
+    expect(out.cards[0].items).toEqual([]);
   });
 });

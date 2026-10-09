@@ -38,7 +38,7 @@ jest.mock('../services/lawn-fast-complete', () => ({
   buildLawnTreatmentGuide: jest.fn(),
   resolveLawnFastEligibility: jest.fn(),
 }));
-jest.mock('../services/lawn-trouble-areas', () => ({ clearArea: jest.fn() }));
+jest.mock('../services/lawn-trouble-areas', () => ({ clearArea: jest.fn(), propertyOf: jest.fn(async (_knex, visit) => visit.property_id || null) }));
 
 const router = require('../routes/admin-dispatch');
 const { buildLawnFastContext, buildLawnFastWateringPreview, resolveLawnFastEligibility } = require('../services/lawn-fast-complete');
@@ -253,7 +253,7 @@ describe('lawn-fast path id (named :lawnFastServiceId so router.param(\'serviceI
 describe('POST lawn-fast/trouble-areas/:areaId/clear', () => {
   const CLEAR = '/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear';
   const AREA = '00000000-0000-4000-8000-0000000000aa';
-  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'];
+  const GATES = ['GATE_LAWN_FAST_COMPLETE', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13', 'GATE_LAWN_TREATMENT_GUIDE'];
   const saved = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
   const callClear = (actor) => invoke('post', CLEAR, { params: { ...params, areaId: AREA }, actor });
   beforeEach(() => {
@@ -272,7 +272,7 @@ describe('POST lawn-fast/trouble-areas/:areaId/clear', () => {
     expect(router.stack.indexOf(routeLayer('post', CLEAR))).toBeGreaterThan(authIdx);
   });
 
-  test.each(['GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'])('without %s: 404 {enabled:false}, nothing read or written', async (name) => {
+  test.each(['GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13', 'GATE_LAWN_TREATMENT_GUIDE'])('without %s: 404 {enabled:false}, nothing read or written', async (name) => {
     delete process.env[name];
     const res = await callClear({ techRole: 'technician', technicianId: 'tech-1' });
     expect(res.statusCode).toBe(404);

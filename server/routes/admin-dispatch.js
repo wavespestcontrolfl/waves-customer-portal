@@ -4736,7 +4736,8 @@ router.post('/:lawnFastServiceId/lawn-fast/trouble-areas/:areaId/clear', async (
     const visit = eligibility.svc;
     const cleared = await require('../services/lawn-trouble-areas').clearArea(db, {
       areaId: req.params.areaId,
-      propertyId: visit.property_id,
+      // The same property the context listed the areas from (the visit's link, else the resolved one).
+      propertyId: await require('../services/lawn-trouble-areas').propertyOf(db, visit),
       technicianId: req.technicianId || null,
     });
     if (!cleared) return res.status(404).json({ error: 'That trouble area is not on this lawn.', code: 'trouble_area_not_found' });

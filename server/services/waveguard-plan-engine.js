@@ -1735,7 +1735,9 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     // October, a search-added product) has no stated dose here; the limit reader then counts the product's staged v13 dose.
     const row = rows.get(id);
     const proposed = v13ProposedApplication(item.product, row, targets);
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, proposal: true, excludeScheduledServiceId: service.id, propertyId: service.property_id || null, ...(place ? { place } : {}) }))
+    // GATE_LAWN_TROUBLE_AREAS: a per-place read judges the property the places work on (the visit's link, else the resolved one).
+    const propertyId = (place && await require('./lawn-trouble-areas').propertyOf(knex, service)) || service.property_id || null;
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, proposal: true, excludeScheduledServiceId: service.id, propertyId, ...(place ? { place } : {}) }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };

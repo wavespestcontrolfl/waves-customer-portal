@@ -251,6 +251,17 @@ const ComplianceService = {
       ? await k('scheduled_services').where({ id: sr.scheduled_service_id }).first('property_id')
       : null;
     const treatedPropertyId = visit?.property_id || null;
+    // GATE_LAWN_TROUBLE_AREAS: a PLACED application (the product record carries a treated_place) whose visit has no property link is frozen on
+    // the property the property-area flow resolves for the visit (lawn-trouble-areas propertyOf), read once; unresolved stays unplaced (NULL).
+    // Every other row keeps exactly the property it had.
+    let placedLookup = null;
+    const placedProperty = () => {
+      placedLookup = placedLookup || (async () => {
+        const row = sr.scheduled_service_id ? await k('scheduled_services').where({ id: sr.scheduled_service_id }).first() : null;
+        return row ? require('./lawn-trouble-areas').propertyOf(k, row) : null;
+      })();
+      return placedLookup;
+    };
 
     // Rows already ledgered for this record. New-style rows are identified
     // by service_product_id; legacy rows (NULL there) by catalog product.
@@ -298,7 +309,7 @@ const ComplianceService = {
         customer_id: sr.customer_id,
         service_record_id: serviceRecordId,
         service_product_id: sp.id,
-        property_id: treatedPropertyId,
+        property_id: sp.treated_place && !treatedPropertyId ? await placedProperty() : treatedPropertyId,
         product_id: productId,
         technician_id: sr.technician_id,
         application_date: sr.service_date || etDateString(),

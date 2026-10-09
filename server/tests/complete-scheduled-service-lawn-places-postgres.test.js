@@ -73,9 +73,9 @@ let mockPg;
 jest.setTimeout(90000);
 
 const LAWN_TYPE = 'Every 6 Weeks Lawn Care Service';
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TROUBLE_AREAS'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_TREATMENT_GUIDE'];
 
-async function seedLawnVisit({ daysAgo = 0 } = {}) {
+async function seedLawnVisit({ daysAgo = 0, unlinked = false, otherProperty = false } = {}) {
   const today = etDateString(new Date(Date.now() - daysAgo * 86400000));
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), serviceKey: `fixture_lawn_${randomUUID().slice(0, 8)}` };
   await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Places', phone: `+1305555${Math.floor(Math.random() * 9000 + 1000)}`,
@@ -84,9 +84,10 @@ async function seedLawnVisit({ daysAgo = 0 } = {}) {
   f.propertyId = property.id;
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `${LAWN_TYPE} ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
-  await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, property_id: property.id, technician_id: f.techId, service_id: f.catalogId,
+  await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, property_id: unlinked ? null : property.id, technician_id: f.techId, service_id: f.catalogId,
     service_type: LAWN_TYPE, scheduled_date: today, window_start: '09:00', window_end: '10:00', status: 'confirmed',
     estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false });
+  if (otherProperty) await mockPg('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Avenue', city: 'Fixture City', zip: '34202', is_primary: false });
   f.celsius = await mockPg('products_catalog').where({ name: 'Celsius WG' }).first();
   return f;
 }
@@ -211,17 +212,18 @@ postgres('closeout: the place of a spot treatment', () => {
   test.each([
     ['the server confirms it is a take-all row', (id) => new Set([id.toLowerCase()]), 'take_all'],
     ['the server does not (a claim on any other fungicide)', () => new Set(), 'fungus'],
-    ['the take-all lookup fails', null, 'fungus'],
+    ['the take-all lookup fails (nothing is stored for the row; the application is)', null, null],
   ])('a take_all claim on a placed spot row: %s', async (_label, resolve, type) => {
     const f = await seedLawnVisit();
     const [fungicide] = await mockPg('products_catalog').insert({ name: `Take-all fixture ${randomUUID().slice(0, 6)}`, category: 'fungicide', default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*');
     try {
       const lookup = jest.spyOn(require('../services/lawn-fast-complete'), 'troubleTypeIdsFor')
-        .mockImplementation(async () => { if (!resolve) throw new Error('plan unavailable'); return { takeAll: resolve(fungicide.id), chinch: new Set() }; });
+        .mockImplementation(async () => { if (!resolve) throw new Error('plan unavailable'); return { takeAll: resolve(fungicide.id), chinch: new Set(), chinchOnly: new Set() }; });
       const out = await complete(f, { products: [spot(f, { productId: fungicide.id, areaPlace: 'front', troubleType: 'take_all' })] });
       expect(out.status).toBe(200);
       expect(lookup).toHaveBeenCalledTimes(1);
-      expect((await areasOf(f)).map((a) => [a.place, a.type])).toEqual([['front', type]]);
+      expect((await areasOf(f)).map((a) => [a.place, a.type])).toEqual(type ? [['front', type]] : []);
+      expect(await mockPg('service_products').where({ service_record_id: (await recordOf(f)).id, treated_place: 'front' })).toHaveLength(1);
     } finally {
       await cleanup(f);
       await mockPg('products_catalog').where({ id: fungicide.id }).del().catch(() => {});
@@ -249,6 +251,150 @@ postgres('closeout: the place of a spot treatment', () => {
       await cleanup(f);
       await mockPg('products_catalog').where({ id: fungicide.id }).del().catch(() => {});
     }
+  });
+
+  // A visit whose nullable property_id is unset: the places work on the property the property-area flow resolves (the one shared resolver),
+  // and are off for the visit when it cannot be resolved.
+  describe('a visit with no property link', () => {
+    const otherProductsOf = async (f) => ({
+      products: await mockPg('service_products').where({ service_record_id: (await recordOf(f)).id }),
+      ledger: await mockPg('property_application_history').where({ customer_id: f.customerId }).orderBy('created_at'),
+    });
+
+    test('the sole property resolves: the area is stored on it, the limits are judged per place on it, and the ledger freezes it on the placed row only', async () => {
+      const f = await seedLawnVisit({ unlinked: true });
+      const granular = await mockPg('products_catalog').insert({ name: `Granular fixture ${randomUUID().slice(0, 6)}`, category: 'herbicide', default_rate_per_1000: 1, rate_unit: 'lb', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'lb', active: true }).returning('*').then(([row]) => row);
+      try {
+        await priorCelsius(f, 'front');
+        const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+        expect(svc.property_id).toBeNull();
+        const areas = require('../services/lawn-trouble-areas');
+        expect(await areas.propertyOf(mockPg, svc)).toBe(f.propertyId);
+        // The context block exists, and the closed place is judged on the resolved property (the front is at its count, the back is not).
+        const block = await areas.buildContextBlock({ knex: mockPg, svc, seed: { products: [{ id: f.celsius.id, name: 'Celsius WG' }], rows: new Map() }, readFailures: new Set() });
+        expect(Object.keys(block.troubleAreas.blocked[f.celsius.id])).toEqual(['front']);
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', place: 'front' } });
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'back' })] })).toBeNull();
+        const out = await complete(f, { products: [spot(f, { areaPlace: 'back' }), { productId: granular.id, rate: 1, rateUnit: 'lb', totalAmount: 1, amountUnit: 'lb', applicationMethod: 'granular_broadcast', areaValue: 500, areaUnit: 'sqft' }] });
+        expect(out.status).toBe(200);
+        expect((await areasOf(f)).map((a) => [a.property_id, a.place, a.type])).toEqual([[f.propertyId, 'back', 'weeds']]);
+        const { products, ledger } = await otherProductsOf(f);
+        expect(products.map((p) => p.treated_place).sort()).toEqual(['back', null]);
+        const recordId = (await recordOf(f)).id;
+        const current = ledger.filter((row) => row.service_record_id === recordId);
+        // The placed row is frozen on the resolved property; the whole-lawn row keeps what it always had on an unlinked visit (no property).
+        expect(current.find((row) => row.treated_place === 'back').property_id).toBe(f.propertyId);
+        expect(current.find((row) => !row.treated_place).property_id).toBeNull();
+      } finally { await cleanup(f); await mockPg('products_catalog').where({ id: granular.id }).del().catch(() => {}); }
+    });
+
+    test('the property cannot be resolved (two active properties, no link): the places are off for the visit, as with the gate off', async () => {
+      const f = await seedLawnVisit({ unlinked: true, otherProperty: true });
+      try {
+        const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+        const areas = require('../services/lawn-trouble-areas');
+        expect(await areas.propertyOf(mockPg, svc)).toBeNull();
+        expect(await areas.buildContextBlock({ knex: mockPg, svc, seed: { products: [], rows: new Map() }, readFailures: new Set() })).toEqual({});
+        // No place is asked for, and none is judged.
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f)] })).toBeNull();
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { areaPlace: 'front' })] })).toBeNull();
+        // A completion that names a place records none, stores no area, and freezes no property: exactly the gate-off completion.
+        const out = await complete(f, { products: [spot(f, { areaPlace: 'back' })] });
+        expect(out.status).toBe(200);
+        const { products, ledger } = await otherProductsOf(f);
+        expect(products.map((p) => p.treated_place)).toEqual([null]);
+        expect(ledger.map((row) => [row.treated_place, row.property_id])).toEqual([[null, null]]);
+        expect(await areasOf(f)).toEqual([]);
+      } finally { await cleanup(f); }
+    });
+  });
+
+  // The server's own staged sets classify the special products, whatever the sheet said (no hint at all, or a wrong one).
+  describe('the server classifies placed rows from its own staged sets', () => {
+    const insecticide = (name) => mockPg('products_catalog').insert({ name: `${name} ${randomUUID().slice(0, 6)}`, category: 'insecticide', default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*').then(([row]) => row);
+    const fungicide = () => mockPg('products_catalog').insert({ name: `Fungicide fixture ${randomUUID().slice(0, 6)}`, category: 'fungicide', default_rate_per_1000: 0.5, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*').then(([row]) => row);
+    const sets = (value) => jest.spyOn(require('../services/lawn-fast-complete'), 'troubleTypeIdsFor').mockImplementation(async () => { if (!value) throw new Error('plan unavailable'); return { takeAll: new Set(), chinch: new Set(), chinchOnly: new Set(), ...value }; });
+    const typesOf = async (f) => (await areasOf(f)).map((a) => [a.place, a.type]);
+
+    test('a take-all fungicide sent as plain fungus (no hint, or the generic one) is stored as take_all', async () => {
+      const f = await seedLawnVisit();
+      const product = await fungicide();
+      try {
+        const lookup = sets({ takeAll: new Set([product.id.toLowerCase()]) });
+        expect((await complete(f, { products: [spot(f, { productId: product.id, areaPlace: 'front' })] })).status).toBe(200);
+        expect(await typesOf(f)).toEqual([['front', 'take_all']]);
+        expect(lookup).toHaveBeenCalledTimes(1);
+        await mockPg('lawn_trouble_areas').where({ customer_id: f.customerId }).del();
+        await mockPg('service_completion_attempts').where('service_id', f.serviceId).del();
+      } finally { await cleanup(f); await mockPg('products_catalog').where({ id: product.id }).del().catch(() => {}); }
+    });
+
+    test('the chinch-only first rung is chinch with no hint; the shared rung is chinch only when the sheet says so', async () => {
+      const f = await seedLawnVisit();
+      const first = await insecticide('Chinch first rung');
+      const shared = await insecticide('Shared rung');
+      try {
+        sets({ chinch: new Set([first.id.toLowerCase(), shared.id.toLowerCase()]), chinchOnly: new Set([first.id.toLowerCase()]) });
+        const out = await complete(f, { products: [
+          spot(f, { productId: first.id, areaPlace: 'front' }),
+          spot(f, { productId: shared.id, areaPlace: 'back' }),
+        ] });
+        expect(out.status).toBe(200);
+        expect((await typesOf(f)).sort()).toEqual([['back', 'other_insect'], ['front', 'chinch']]);
+      } finally { await cleanup(f); await mockPg('products_catalog').whereIn('id', [first.id, shared.id]).del().catch(() => {}); }
+    });
+
+    test('the shared rung with the sheet\'s chinch hint is chinch (confirmed); a read that fails stores no area for the insecticide row and keeps the application', async () => {
+      const f = await seedLawnVisit();
+      const shared = await insecticide('Shared rung');
+      try {
+        sets({ chinch: new Set([shared.id.toLowerCase()]) });
+        expect((await complete(f, { products: [spot(f, { productId: shared.id, areaPlace: 'front', troubleType: 'chinch' })] })).status).toBe(200);
+        expect(await typesOf(f)).toEqual([['front', 'chinch']]);
+      } finally { await cleanup(f); }
+      const g = await seedLawnVisit();
+      try {
+        sets(null);
+        const out = await complete(g, { products: [spot(g, { productId: shared.id, areaPlace: 'front', troubleType: 'chinch' })] });
+        expect(out.status).toBe(200);
+        expect(await typesOf(g)).toEqual([]);
+        expect(await mockPg('service_products').where({ service_record_id: (await recordOf(g)).id })).toHaveLength(1);
+        expect(await ledgerOf(g, (await recordOf(g)).id)).toMatchObject({ treated_place: 'front' });
+      } finally { await cleanup(g); await mockPg('products_catalog').where({ id: shared.id }).del().catch(() => {}); }
+    });
+
+    test('a failed read for a fungicide row with no hint stores no area (never a generic fungus one); a herbicide row is stored without any read', async () => {
+      const f = await seedLawnVisit();
+      const product = await fungicide();
+      try {
+        const lookup = sets(null);
+        expect((await complete(f, { products: [spot(f, { productId: product.id, areaPlace: 'front' }), spot(f, { areaPlace: 'back' })] })).status).toBe(200);
+        expect(await typesOf(f)).toEqual([['back', 'weeds']]);
+        expect(lookup).toHaveBeenCalledTimes(1);
+      } finally { await cleanup(f); await mockPg('products_catalog').where({ id: product.id }).del().catch(() => {}); }
+    });
+
+    test('the mapped-place rule follows the server and the source, not the sheet\'s tag: an untagged card row at an unmapped place is refused; a failed read refuses nothing and stores nothing at the unmapped place', async () => {
+      const f = await seedLawnVisit();
+      const product = await fungicide();
+      try {
+        const lookup = sets({ takeAll: new Set([product.id.toLowerCase()]) });
+        const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+        const areas = require('../services/lawn-trouble-areas');
+        const card = (extra = {}) => spot(f, { productId: product.id, areaPlace: 'front', troubleSource: 'guide_card', ...extra });
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [card()] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [card({ troubleType: 'fungus' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
+        // A row from Search maps its place; a row with no source is the Search path too.
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { productId: product.id, areaPlace: 'front' })] })).toBeNull();
+        lookup.mockRestore();
+        sets(null);
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [card()] })).toBeNull();
+        // The read succeeded at record time but failed at the preflight: the card row still maps nothing new.
+        sets({ takeAll: new Set([product.id.toLowerCase()]) });
+        expect((await complete(f, { products: [card()] })).status).toBe(200);
+        expect(await typesOf(f)).toEqual([]);
+      } finally { await cleanup(f); await mockPg('products_catalog').where({ id: product.id }).del().catch(() => {}); }
+    });
   });
 
   test('no take_all claim: the take-all lookup is not made', async () => {

@@ -214,7 +214,7 @@ describe('closeout: a spot application is audited at its place (GATE_LAWN_TROUBL
 
   test('the place of the recorded product is handed to the audit; a product with none is audited on the lawn', async () => {
     process.env.GATE_LAWN_SPOT_RULES = 'true';
-    process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+    process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
     try {
       const database = placedLedger([{ product_id: CELSIUS_ID, treated_place: 'back' }, { product_id: DEFAULT_ID, treated_place: null }]);
       limitedIds.add(DEFAULT_ID);
@@ -222,7 +222,7 @@ describe('closeout: a spot application is audited at its place (GATE_LAWN_TROUBL
       expect(placedLedger.columns).toEqual(['product_id', 'treated_place']);
       expect(checkLimits).toHaveBeenCalledWith(service.customer_id, CELSIUS_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID, place: 'back' });
       expect(checkLimits).toHaveBeenCalledWith(service.customer_id, DEFAULT_ID, expect.any(String), expect.anything(), { propertyId: PROPERTY_ID, excludeScheduledServiceId: SERVICE_ID });
-    } finally { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_TROUBLE_AREAS; }
+    } finally { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_TREATMENT_GUIDE; }
   });
 
   test('gate off: the ledger is read for the product ids alone and the audit gets no place', async () => {

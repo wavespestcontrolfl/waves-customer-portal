@@ -1162,8 +1162,9 @@ describe('places beside the report ties and the spot-area marker', () => {
 // ── a take-all card is held to the mapped places; Search maps a new one ─────────────────────────────────────────────
 describe('take-all: the card offers only the mapped places, Search maps a new one', () => {
   const TAKE_ALL = ADD_ONS[4];
+  const CHECK_ONLY = 'Take-all is treated on known trouble areas only. None is on file for this lawn.';
   const MAPPED_BACK = { id: 'area-t', place: 'back', placeLabel: 'Back', type: 'take_all', typeLabel: 'Take-all', lastTreatedOn: '2026-06-01' };
-  const takeAllCard = () => ({ kind: 'fungus', title: 'Fungus', finding: 'Finding for fungus.', check: null, detail: null, note: 'Take-all area on file: Back.', productIds: [P_FUNG], items: [TAKE_ALL], allowedPlaces: ['back'], actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found' });
+  const takeAllCard = () => ({ kind: 'fungus', title: 'Fungus', finding: 'Finding for fungus.', check: null, detail: null, note: 'Take-all area on file: Back.', productIds: [P_FUNG], items: [TAKE_ALL], allowedPlaces: ['back'], checkOnlyNote: CHECK_ONLY, actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found' });
   const ctx = () => placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: areasBlock({ known: [MAPPED_BACK] }) });
   const chips = () => within(placeGroup('Spot Fungicide')).getByRole('group', { name: 'Place for Spot Fungicide' });
   const open2 = async (c = ctx()) => {
@@ -1182,6 +1183,69 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
     expect(sent(P_FUNG)).toMatchObject({ areaPlace: 'back', troubleType: 'take_all', troubleSource: 'guide_card' });
+  });
+
+  // The tech clears the take-all area on the sheet while its card is open: the card follows at once, with no re-read.
+  const clearArea = async (name) => {
+    const line = screen.getByRole('group', { name: 'Known trouble areas' });
+    fireEvent.click(within(line).getByRole('button', { name }));
+    fireEvent.click(within(line).getByRole('button', { name: `Confirm ${name[0].toLowerCase()}${name.slice(1)}` }));
+    await waitFor(() => expect(requests.some((r) => r.path.includes('/trouble-areas/') && r.options?.method === 'POST')).toBe(true));
+  };
+
+  test('clearing the only mapped area turns the card back into the check-only card, at once', async () => {
+    await open2();
+    const group = await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    expect(within(group).getByRole('button', { name: 'I checked. Add it' })).toBeTruthy();
+    await clearArea('Clear Back, take-all');
+    await waitFor(() => expect(within(screen.getByRole('group', { name: 'Suggested from this lawn' })).queryByRole('button', { name: 'I checked. Add it' })).toBeNull());
+    expect(within(screen.getByRole('group', { name: 'Suggested from this lawn' })).getByText(CHECK_ONLY)).toBeTruthy();
+  });
+
+  test('a card row already on the sheet at the cleared place: its chip closes and Complete waits', async () => {
+    await open2();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await clearArea('Clear Back, take-all');
+    await waitFor(() => expect(chipOf(chips(), 'Back').disabled).toBe(true));
+    expect(pressed(chips())).toEqual([]);
+    expect(completeButton().disabled).toBe(true);
+  });
+
+  test('two mapped places, one cleared: the card keeps the other and names only it', async () => {
+    const FRONT = { ...MAPPED_BACK, id: 'area-f', place: 'front', placeLabel: 'Front' };
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [{ ...takeAllCard(), allowedPlaces: ['back', 'front'], note: 'Take-all area on file: Back, Front.' }], takeAllProductIds: [P_FUNG] };
+    const c = placeContext({ treatmentGuide: true, addOns: ADD_ONS, troubleAreas: areasBlock({ known: [MAPPED_BACK, FRONT] }) });
+    await open({ ...c, plannedProducts: { ...c.plannedProducts, takeAllProductIds: [P_FUNG] } });
+    await analyze();
+    const group = await screen.findByRole('group', { name: 'Suggested from this lawn' });
+    expect(within(group).getByText('Take-all area on file: Back, Front.')).toBeTruthy();
+    await clearArea('Clear Back, take-all');
+    await waitFor(() => expect(within(screen.getByRole('group', { name: 'Suggested from this lawn' })).getByText('Take-all area on file: Front.')).toBeTruthy());
+    fireEvent.click(within(screen.getByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    expect(chipOf(chips(), /^Back/).disabled).toBe(true);
+    expect(chipOf(chips(), /^Front/).disabled).toBe(false);
+  });
+
+  test('a lawn_place_not_mapped refusal reads the maps again like a limit refusal, and the chip stays closed', async () => {
+    const urls = [];
+    const c = ctx();
+    const base = makeRequest({ ctx: { ...c, plannedProducts: { ...c.plannedProducts, takeAllProductIds: [P_FUNG] } } });
+    const request = vi.fn(async (path, options) => { urls.push(path); return base(path, options); });
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [takeAllCard()], takeAllProductIds: [P_FUNG] };
+    await openSheet({ request, props: { catalog: CAT } });
+    await analyze();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    completeErrors.push(refusal(400, 'lawn_place_not_mapped', 'Take-all is treated on mapped take-all areas only.', { productId: P_FUNG, place: 'back' }));
+    await submit();
+    await waitFor(() => expect(chipOf(chips(), /^Back/).disabled).toBe(true));
+    await waitFor(() => expect(urls.filter((u) => u.includes(`productIds=${P_FUNG}`))).toHaveLength(2));
+    // The refusal is not dose-dependent: a different area does not reopen the place.
+    typeArea(placeGroup('Spot Fungicide'), '250');
+    expect(chipOf(chips(), /^Back/).disabled).toBe(true);
   });
 
   test('a take-all product added through Search (tech_tap) may take any open place', async () => {

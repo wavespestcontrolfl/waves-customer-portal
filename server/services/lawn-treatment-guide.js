@@ -380,6 +380,16 @@ async function chinchLadderIds({ structured, knex }) {
   return chinchProducts(await stagedChinchRows({ structured, knex })).map((product) => product.productId);
 }
 
+/**
+ * The ladder and its chinch-only rungs, `{ ladder, only }` (product ids), with no limit read: what the completion classifies a placed row by
+ * on its own, whatever the sheet said (a chinch-only first rung is always chinch; a shared rung needs the sheet's word AND the ladder).
+ */
+async function chinchLadderSets({ structured, knex }) {
+  if (!structured?.id) return { ladder: [], only: [] };
+  const products = chinchProducts(await stagedChinchRows({ structured, knex }));
+  return { ladder: products.map((product) => product.productId), only: products.length ? await chinchOnlyIdsOf({ products, structured, knex }) : [] };
+}
+
 // Every rung's product id (all of them are governed by the guide, offered or not). The rungs a READ limit
 // blocked and the rungs whose own read failed come per rung from chooseChinch; only a read that failed
 // as a whole (the limits call itself threw) makes every rung unreadable.
@@ -509,7 +519,7 @@ function fungusCard({ s, offers, troubleAreas }) {
     title: 'Fungus', finding, check: CHECKS.fungus, detail: protocolLine(item), productIds: [item.productId], items: [item],
     // A take-all card offered because the lawn has take-all areas on file names them (GATE_LAWN_TROUBLE_AREAS).
     // GATE_LAWN_TROUBLE_AREAS: the card's row may go only on these mapped places (the sheet offers only them; /complete enforces it for a card row).
-    ...(takeAll ? { note: `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.`, allowedPlaces: [...new Set(troubleAreas.map((area) => area.place))] } : {}),
+    ...(takeAll ? { note: `Take-all area on file: ${[...new Set(troubleAreas.map((area) => area.placeLabel || area.place))].join(', ')}.`, allowedPlaces: [...new Set(troubleAreas.map((area) => area.place))], checkOnlyNote: TAKE_ALL_NOTE } : {}),
     actionLabel: 'I checked. Add it', dismissLabel: 'Nothing found',
   });
 }
@@ -678,6 +688,7 @@ module.exports = {
   UNREADABLE_NOTE,
   resolveChinch,
   chinchLadderIds,
+  chinchLadderSets,
   chinchOnlyIdsOf,
   buildCards,
   treatmentGuideFreeze,

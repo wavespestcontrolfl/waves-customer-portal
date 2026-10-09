@@ -187,3 +187,30 @@ function placed(row, { areas, chosen, weedMix, chinch, weedRows, takeAllPlaces }
 
 /** What a place chip says when it is closed, for the row. */
 export const placeLabel = (areas, id) => areas.places.find((place) => place.id === id)?.label || id;
+
+/**
+ * The guide as the sheet shows it after the tech cleared known take-all areas here (`clearedPlaces`: where they were; `clearedIds`: the
+ * cleared areas of `known`): a take-all card (the one that names `allowedPlaces`) drops each place that has no active take-all area left,
+ * without waiting for a re-read. With no place left the card is the check-only card again (no product offered, the product held, as the
+ * server builds it when no area is on file). A card the clears do not touch, and a guide with no take-all card, come back as they were (the
+ * same object). The server stays authoritative.
+ */
+export function withClearedTakeAll(guide, { known = [], clearedIds = [], clearedPlaces = [] } = {}) {
+  if (!guide || !clearedPlaces.length) return guide;
+  const remaining = (known || []).filter((area) => area.type === 'take_all' && !clearedIds.includes(area.id));
+  const dropped = clearedPlaces.filter((place) => !remaining.some((area) => area.place === place));
+  if (!dropped.length) return guide;
+  const cards = (guide.cards || []).map((card) => takeAllCardNow(card, dropped, remaining));
+  return cards.every((card, index) => card === guide.cards[index]) ? guide : { ...guide, cards };
+}
+
+function takeAllCardNow(card, dropped, remaining) {
+  if (!Array.isArray(card?.allowedPlaces) || !card.allowedPlaces.some((place) => dropped.includes(place))) return card;
+  const allowedPlaces = card.allowedPlaces.filter((place) => !dropped.includes(place));
+  if (allowedPlaces.length) {
+    const labels = [...new Set(allowedPlaces.map((place) => remaining.find((area) => area.place === place)?.placeLabel || place))];
+    return { ...card, allowedPlaces, note: `Take-all area on file: ${labels.join(', ')}.` };
+  }
+  const { allowedPlaces: _gone, ...rest } = card;
+  return { ...rest, productIds: [], items: [], heldProductIds: [...new Set([...(card.heldProductIds || []), ...card.productIds])], note: card.checkOnlyNote || null, actionLabel: null, dismissLabel: null };
+}

@@ -2002,8 +2002,8 @@ async function hardLimitedProductNames(database, ids) {
 async function productLimitFindings({ svc, productId, productName, serviceDate, database, place = null }) {
   try {
     // GATE_LAWN_TROUBLE_AREAS: a spot application that carries a place is audited at that place (the yearly limits are per place).
-    const violations = await savepointRead(database, (k) => require('../services/application-limits')
-      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: svc.property_id || null, excludeScheduledServiceId: svc.id, ...(place ? { place } : {}) }));
+    const violations = await savepointRead(database, async (k) => require('../services/application-limits')
+      .auditHardCountLimits(svc.customer_id, productId, serviceDate, k, { propertyId: (place && await require('../services/lawn-trouble-areas').propertyOf(k, svc)) || svc.property_id || null, excludeScheduledServiceId: svc.id, ...(place ? { place } : {}) }));
     return violations.map((violation) => overLimitFinding(productId, productName, violation));
   } catch (err) {
     logger.warn('completion application limits: read failed, flagging for the office', { serviceId: svc.id, productId, error: err?.message });
@@ -7891,6 +7891,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Shared closeout allowlist (inventory-units.js) — the pest
           // recap validates against the same vocabulary (codex P1 r11).
           const { isValidRateUnit } = require('../services/inventory-units');
+          // GATE_LAWN_TROUBLE_AREAS: a visit whose property cannot be resolved records no place (the gate acts as off for that visit).
+          const placesOn = !!(await require('../services/lawn-trouble-areas').propertyOf(trx, svc));
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;
@@ -7977,7 +7979,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
             // GATE_LAWN_TROUBLE_AREAS: the place a spot treatment went, beside the product record (nothing is added while the gate is off).
-            Object.assign(serviceProductInsert, require('../services/lawn-trouble-areas').placeFields({ cols: serviceProductCols, applicationMethod, input: p }));
+            Object.assign(serviceProductInsert, require('../services/lawn-trouble-areas').placeFields({ cols: serviceProductCols, applicationMethod, input: p, enabled: placesOn }));
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
             insertedServiceProducts.push(serviceProduct);
 

@@ -119,7 +119,7 @@ import {
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
-import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withPlace } from '../../lib/lawn-trouble-places';
+import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
 import CallBridgeLink from '../admin/CallBridgeLink';
@@ -208,8 +208,8 @@ function plainErrors(request, onAreaChanged, onPlaceRefused) {
       const message = plainRefusalMessage(err);
       if (message && err) err.message = message;
       if (err?.code === 'property_service_area_changed') onAreaChanged?.current?.();
-      // GATE_LAWN_TROUBLE_AREAS: a place the limits close refreshes the place maps, so the chip closes without a reload.
-      if (err?.code === 'lawn_place_limit') onPlaceRefused?.current?.(err);
+      // GATE_LAWN_TROUBLE_AREAS: a place the limits close, or a take-all place that is no longer mapped, refreshes the place maps, so the chip closes without a reload.
+      if (err?.code === 'lawn_place_limit' || err?.code === 'lawn_place_not_mapped') onPlaceRefused?.current?.(err);
       throw err;
     }
   };
@@ -1424,7 +1424,11 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // recorded even when the product was already on the sheet (it came from another card) and the tap adds no row.
   const [chinchTap, setChinchTap] = useState(null);
   const onChinchTap = useCallback((productId) => setChinchTap(String(productId).toLowerCase()), []);
-  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick, idsRef: searchedIds });
+  // GATE_LAWN_TROUBLE_AREAS: the known areas the tech cleared on this sheet (and where the take-all ones were): the take-all card follows them at once.
+  const [clearedAreas, setClearedAreas] = useState([]);
+  const [clearedPlaces, setClearedPlaces] = useState([]);
+  const { guide: rawGuide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick, idsRef: searchedIds });
+  const guide = useMemo(() => withClearedTakeAll(rawGuide, { known: placeCtx.troubleAreas?.known, clearedIds: clearedAreas, clearedPlaces }), [rawGuide, placeCtx, clearedAreas, clearedPlaces]);
   // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
   const { gov, removed: removedByGuide } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks, products });
   // The one Weed spots decision on screen (the guide's fresh read once it has answered).
@@ -1440,12 +1444,13 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const [weedArea, setWeedArea] = useState('');
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlace, setWeedPlace] = useState('');
-  const [clearedAreas, setClearedAreas] = useState([]);
   const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, moved });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
     setClearedAreas((prev) => [...prev, id]);
-  }, [request, base]);
+    const gone = placeCtx.troubleAreas?.known?.find((area) => area.id === id);
+    if (gone?.type === 'take_all') setClearedPlaces((prev) => [...prev, gone.place]);
+  }, [request, base, placeCtx]);
   const chinchDecision = effectiveChinch(guide, placeCtx);
   const rows = useMemo(
     () => {

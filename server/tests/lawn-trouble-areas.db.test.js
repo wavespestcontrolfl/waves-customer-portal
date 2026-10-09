@@ -10,7 +10,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 // The preflight loads the whole completion module the first time (a cold transform takes several seconds).
 jest.setTimeout(60000);
-const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TROUBLE_AREAS'];
+const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_TREATMENT_GUIDE'];
 const ARENA = 'Arena 50 WDG';
 const CELSIUS = 'Celsius WG';
 const dayAgo = (n) => etDateString(addETDays(new Date(), -n));
@@ -336,6 +336,15 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         expect(await guide.chinchOnlyIdsOf({ products, structured, knex })).toEqual([catalog[ARENA].id]);
         const mixed = await stage([[ARENA, FIRST], [ARENA, null]]);
         expect(await guide.chinchOnlyIdsOf({ products: [{ productId: catalog[ARENA].id, rung: 0 }], structured: mixed, knex })).toEqual([]);
+      });
+
+      test('chinchLadderSets gives the ladder and its chinch-only rungs in one read; no chinch rows or no protocol gives both empty', async () => {
+        const structured = await stage([[ARENA, FIRST], [ARENA, FIRST], ['Stored Cap Caterpillar Insecticide', SECOND]]);
+        const sets = await guide.chinchLadderSets({ structured, knex });
+        expect(sets.ladder.sort()).toEqual([catalog[ARENA].id, catalog['Stored Cap Caterpillar Insecticide'].id].sort());
+        expect(sets.only).toEqual([catalog[ARENA].id]);
+        expect(await guide.chinchLadderSets({ structured: await stage([[CELSIUS, null]]), knex })).toEqual({ ladder: [], only: [] });
+        expect(await guide.chinchLadderSets({ structured: null, knex })).toEqual({ ladder: [], only: [] });
       });
 
       test('a protocol with no chinch rows has an empty ladder', async () => {

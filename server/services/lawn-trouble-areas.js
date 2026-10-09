@@ -54,6 +54,24 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const live = () => require('../config/feature-gates').lawnTroubleAreasLive();
 
+// The property the places work on for a visit: the visit's own link, else what the property-area flow resolves from the visit's address
+// or the customer's sole property (property-service-areas resolveVisitPropertyId: the one shared resolver). null = the gate is off or the
+// property cannot be resolved: the places are OFF for that visit (no place asked, none stored or judged), as if the gate were off.
+// A visit that has its own property_id uses it as is (that is the resolver's first evidence); only the nullable case reads. Read once per svc.
+const resolved = new WeakMap();
+async function propertyOf(knex, svc) {
+  if (!live() || !svc) return null;
+  if (svc.property_id) return svc.property_id;
+  if (!svc.customer_id) return null;
+  if (!resolved.has(svc)) {
+    resolved.set(svc, require('./property-service-areas').resolveVisitPropertyId(svc, knex).catch((err) => {
+      logger.warn(`[lawn-trouble-areas] visit property unresolved for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+      return null;
+    }));
+  }
+  return resolved.get(svc);
+}
+
 // The closed list as the context sends it (the sheet draws no place of its own).
 const placeChoices = () => PLACES.map((place) => ({ id: place.id, label: place.label }));
 
@@ -69,12 +87,16 @@ const sourceOf = (value) => (value === 'guide_card' ? 'guide_card' : 'tech_tap')
  * alone, a fertilizer). The sheet's `troubleType` hint wins when it is on the closed list; else the catalog
  * category decides. Pure.
  */
-function troubleTypeFor({ category, hint = null, takeAll = false, chinch = false }) {
-  // The hint is not trusted for take-all or chinch: only a product the server itself identifies as a take-all row, or as a rung of the
-  // chinch ladder (the staged-row rules the guide uses), may create that area; any other row falls back to the category type.
-  if ((hint === 'take_all' && !takeAll) || (hint === 'chinch' && !chinch)) return CATEGORY_TYPE[String(category || '').trim().toLowerCase()] || null;
+function troubleTypeFor({ category, hint = null, takeAll = false, chinch = false, chinchOnly = false }) {
+  const byCategory = CATEGORY_TYPE[String(category || '').trim().toLowerCase()] || null;
+  // The server's own staged sets decide the special products, whatever the sheet said: a take-all row is always take_all, and the chinch
+  // ladder's chinch-only first rung is always chinch. The shared later rung (Talak is also the caterpillar product) is chinch only when
+  // the sheet says so AND the server confirms it is a rung of the ladder. The hint is never trusted to CREATE take_all or chinch.
+  if (takeAll) return 'take_all';
+  if (chinchOnly) return 'chinch';
+  if ((hint === 'take_all') || (hint === 'chinch' && !chinch)) return byCategory;
   if (TYPE_IDS.includes(hint)) return hint;
-  return CATEGORY_TYPE[String(category || '').trim().toLowerCase()] || null;
+  return byCategory;
 }
 
 // ── the store ───────────────────────────────────────────────────────────────
@@ -169,7 +191,7 @@ async function clearArea(knex, { areaId, propertyId, technicianId = null }) {
  * `inserted` the service_products rows just written (treated_place, product_id, application_method) and `catalog`
  * a Map of catalog rows by product id.
  */
-function areaRowsOf({ requestRows, inserted, catalog, confirmed = null }) {
+function areaRowsOf({ requestRows, inserted, catalog, confirmed = null, readFailed = false }) {
   const byProduct = new Map((requestRows || []).filter((row) => row?.productId).map((row) => [String(row.productId).toLowerCase(), row]));
   const out = [];
   for (const sp of inserted || []) {
@@ -177,11 +199,21 @@ function areaRowsOf({ requestRows, inserted, catalog, confirmed = null }) {
     const request = byProduct.get(String(sp.product_id || '').toLowerCase()) || {};
     const product = catalog?.get?.(String(sp.product_id).toLowerCase()) || null;
     const id = String(sp.product_id).toLowerCase();
-    const type = troubleTypeFor({ category: product?.category || sp.product_category, hint: request.troubleType, takeAll: !!confirmed?.takeAll?.has(id), chinch: !!confirmed?.chinch?.has(id) });
+    const category = product?.category || sp.product_category;
+    // A staged-set read that failed leaves a row that could be a take-all or chinch row unclassified: its area is not stored (the
+    // application itself is). A wrong generic area, or one that skips the mapped-place rule, is worse than none.
+    if (readFailed && couldBeSpecial(category, request.troubleType)) {
+      logger.warn(`[lawn-trouble-areas] staged sets unavailable: no area stored for product ${id}`);
+      continue;
+    }
+    const type = troubleTypeFor({ category, hint: request.troubleType, takeAll: !!confirmed?.takeAll?.has(id), chinch: !!confirmed?.chinch?.has(id), chinchOnly: !!confirmed?.chinchOnly?.has(id) });
     if (type) out.push({ place: sp.treated_place, type, source: request.troubleSource });
   }
   return out;
 }
+
+// Whether a row's product could be a take-all fungicide or a chinch rung: a fungicide or an insecticide, or a row the sheet tagged so.
+const couldBeSpecial = (category, hint) => ['fungicide', 'insecticide'].includes(String(category || '').trim().toLowerCase()) || hint === 'take_all' || hint === 'chinch';
 
 // The place a completion stores for a product row: only a spot row, only a closed-list place.
 const storedPlace = (applicationMethod, value) => (applicationMethod === 'spot_treatment' && isPlace(value) ? value : null);
@@ -191,8 +223,8 @@ const storedPlace = (applicationMethod, value) => (applicationMethod === 'spot_t
  * gate is live and the column exists, else `{}` (the insert is then the same statement as before the gate). `cols` is the table's
  * columnInfo, `input` the /complete product row.
  */
-function placeFields({ cols, applicationMethod, input }) {
-  const place = live() && cols?.treated_place ? storedPlace(applicationMethod, typeof input?.areaPlace === 'string' ? input.areaPlace.trim() : null) : null;
+function placeFields({ cols, applicationMethod, input, enabled = true }) {
+  const place = live() && enabled && cols?.treated_place ? storedPlace(applicationMethod, typeof input?.areaPlace === 'string' ? input.areaPlace.trim() : null) : null;
   return place ? { treated_place: place } : {};
 }
 
@@ -208,10 +240,23 @@ async function recordStore(trx, { svc, record, products, inserted, catalog, conf
   if (!live() || !inserted.some((sp) => sp.treated_place)) return;
   const { savepointScope } = require('../utils/savepoint-read');
   try {
-    // The staged-row sets are read only when a row claims take_all or chinch; a read that fails leaves the claim unconfirmed (category type).
-    const claims = products?.some((row) => row?.troubleType === 'take_all' || row?.troubleType === 'chinch');
-    const confirmed = claims && confirm ? await confirm().catch(() => null) : null;
-    await savepointScope(trx, (k) => module.exports.recordFromCompletion(k, { svc, record, rows: areaRowsOf({ requestRows: products, inserted, catalog, confirmed }) }));
+    // The places are off for a visit whose property cannot be resolved (the same property the context and the preflight used).
+    const propertyId = await propertyOf(trx, svc);
+    if (!propertyId) return;
+    const scoped = { ...svc, property_id: propertyId };
+    // The server's staged sets (take-all rows, chinch rungs) classify the special products whatever the sheet said. They are read once, and
+    // only when a placed row could need them; a read that fails stores nothing for such a row (areaRowsOf).
+    const byProduct = new Map((products || []).filter((row) => row?.productId).map((row) => [String(row.productId).toLowerCase(), row]));
+    const needs = inserted.some((sp) => sp.treated_place && sp.application_method === 'spot_treatment'
+      && couldBeSpecial(catalog?.get?.(String(sp.product_id).toLowerCase())?.category || sp.product_category, byProduct.get(String(sp.product_id || '').toLowerCase())?.troubleType));
+    const confirmed = needs && confirm ? await confirm().catch(() => null) : null;
+    let rows = areaRowsOf({ requestRows: products, inserted, catalog, confirmed, readFailed: needs && !confirmed });
+    // A take-all row from the guide CARD maps nothing new (the preflight holds it to a mapped place): never store one at an unmapped place.
+    if (rows.some((row) => row.type === 'take_all' && row.source === 'guide_card')) {
+      const mapped = new Set((await loadActive(trx, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
+      rows = rows.filter((row) => !(row.type === 'take_all' && row.source === 'guide_card' && !mapped.has(row.place)));
+    }
+    await savepointScope(trx, (k) => module.exports.recordFromCompletion(k, { svc: scoped, record, rows }));
   } catch (err) {
     logger.warn(`[dispatch] trouble-area store write failed (non-blocking) for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
   }
@@ -279,7 +324,9 @@ function* typedBlocks({ wide, byPlace }) {
  *   { troubleAreas: { v: 1, places, known, knownUnavailable, blocked } }
  */
 async function buildContextBlock({ knex, svc, seed = null, readFailures, extraIds = null, products = seed?.products || [], rows = seed?.rows || new Map() }) {
-  if (!live()) return {};
+  // Gate off, or a visit whose property cannot be resolved: no troubleAreas, so the sheet asks for no place (see propertyOf).
+  const propertyId = await propertyOf(knex, svc);
+  if (!propertyId) return {};
   const failed = (what, name) => (err) => {
     logger.warn(`[lawn-trouble-areas] ${what} unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     readFailures.add(name);
@@ -287,7 +334,7 @@ async function buildContextBlock({ knex, svc, seed = null, readFailures, extraId
   };
   // Products the sheet names that the month's recipe does not (Search-added rows, sent after /complete refused a place) are read too.
   const named = await withSearched(knex, products, extraIds).catch(failed('searched products', 'trouble_area_limits')) || products;
-  const known = await loadActive(knex, svc.property_id).catch(failed('known areas', 'trouble_areas'));
+  const known = await loadActive(knex, propertyId).catch(failed('known areas', 'trouble_areas'));
   const read = await cappedByPlace({ knex, svc, products: named, rows }).catch(failed('place limits', 'trouble_area_limits'));
   return { troubleAreas: { v: 1, places: placeChoices(), known: known || [], knownUnavailable: known === null, blocked: read ? blockedMap(read) : {}, blockedTypes: read ? blockedTypeMap(read) : {} } };
 }
@@ -337,19 +384,21 @@ const UNMAPPED_REASON = 'Take-all is treated on mapped take-all areas only. Pick
  * that came through Search (`troubleSource: 'tech_tap'`) is the deliberate path that maps a NEW area and is not held to it. Only a product the
  * server itself identifies as a take-all row counts, so a mislabelled claim on any other product enforces nothing.
  */
-async function unmappedRefusal({ knex, svc, spots }) {
-  const claims = spots.filter((row) => row.troubleType === 'take_all' && row.troubleSource === 'guide_card' && isPlace(String(row.areaPlace || '').trim()));
+async function unmappedRefusal({ knex, svc, spots, propertyId }) {
+  // The card path is decided by the row's source alone; whether the PRODUCT is a take-all row is the server's call, never the sheet's tag.
+  const claims = spots.filter((row) => row.troubleSource === 'guide_card' && isPlace(String(row.areaPlace || '').trim()));
   if (!claims.length) return null;
   let takeAll;
   try {
     takeAll = (await require('./lawn-fast-complete').troubleTypeIdsFor(svc, knex)).takeAll;
   } catch (err) {
+    // A read failure never refuses the completion; the store then keeps a card take-all row off any unmapped place (recordStore).
     logger.warn(`[lawn-trouble-areas] take-all products unavailable at completion for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return null;
   }
   const rows = claims.filter((row) => takeAll.has(String(row.productId || '').toLowerCase()));
   if (!rows.length) return null;
-  const mapped = new Set((await loadActive(knex, svc.property_id)).filter((area) => area.type === 'take_all').map((area) => area.place));
+  const mapped = new Set((await loadActive(knex, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
   const bad = rows.find((row) => !mapped.has(row.areaPlace.trim()));
   return bad ? { status: 400, payload: { error: UNMAPPED_REASON, code: 'lawn_place_not_mapped', productId: String(bad.productId).toLowerCase(), place: bad.areaPlace.trim() } } : null;
 }
@@ -406,11 +455,13 @@ function refusesAtPlace(block) {
  * Returns `{ status, payload }` or null.
  */
 async function preflightPlaces({ knex = db, svc, products }) {
-  if (!live()) return null;
+  // The places are off for a visit whose property cannot be resolved: nothing is asked and nothing is judged, as with the gate off.
+  const propertyId = await propertyOf(knex, svc);
+  if (!propertyId) return null;
   const spots = await spotRowsOf(knex, products);
   const missing = placeRefusal(spots);
   if (missing) return missing;
-  const unmapped = await unmappedRefusal({ knex, svc, spots });
+  const unmapped = await unmappedRefusal({ knex, svc, spots, propertyId });
   if (unmapped) return unmapped;
   const limits = require('./application-limits');
   const day = !svc.scheduled_date ? new Date() : svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${etCalendarDayOf(svc.scheduled_date)}T12:00:00`);
@@ -431,7 +482,7 @@ async function preflightPlaces({ knex = db, svc, products }) {
       // LATER than this visit (a September visit completed after an October one at the same place) is not held against it here; the
       // closeout audit (auditHardCountLimits) judges both sides of the date and raises the office alert after the commit.
       result = await limits.checkLimits(svc.customer_id, productId, day, knex, {
-        propertyId: svc.property_id || null,
+        propertyId,
         place: row.areaPlace.trim(),
         proposal: true,
         proposedRow: proposedRow(row),
@@ -481,6 +532,7 @@ module.exports = {
   ledgerPlace,
   recordStore,
   cappedByPlace,
+  propertyOf,
   blockedMap,
   blockedTypeMap,
   buildContextBlock,

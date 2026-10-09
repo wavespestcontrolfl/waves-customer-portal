@@ -24,7 +24,7 @@ const { lawnTroubleAreasLive } = require('../config/feature-gates');
 const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const P_CEL = uuid(1);
 const svc = { id: uuid(9), customer_id: 'cust-1', property_id: uuid(8), scheduled_date: '2026-10-05' };
-const GATES = ['GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13'];
+const GATES = ['GATE_LAWN_TROUBLE_AREAS', 'GATE_LAWN_SPOT_RULES', 'GATE_LAWN_V13', 'GATE_LAWN_TREATMENT_GUIDE'];
 const on = () => { for (const name of GATES) process.env[name] = 'true'; };
 
 beforeEach(() => {
@@ -34,10 +34,10 @@ beforeEach(() => {
 });
 afterEach(() => { for (const name of GATES) delete process.env[name]; });
 
-describe('lawnTroubleAreasLive: strict, and only with the spot rules and the v13 program', () => {
-  const set = (own, spot, v13) => {
-    for (const [name, value] of [['GATE_LAWN_TROUBLE_AREAS', own], ['GATE_LAWN_SPOT_RULES', spot], ['GATE_LAWN_V13', v13]]) {
-      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+describe('lawnTroubleAreasLive: strict, and only with the spot rules, the v13 program and the treatment guide', () => {
+  const set = (own, spot, v13, guide = 'true') => {
+    for (const [name, value] of [['GATE_LAWN_TROUBLE_AREAS', own], ['GATE_LAWN_SPOT_RULES', spot], ['GATE_LAWN_V13', v13], ['GATE_LAWN_TREATMENT_GUIDE', guide]]) {
+      if (value === undefined || value === null) delete process.env[name]; else process.env[name] = value;
     }
   };
   test.each([
@@ -52,6 +52,15 @@ describe('lawnTroubleAreasLive: strict, and only with the spot rules and the v13
   ])('own=%s spot rules=%s v13=%s is live: %s', (own, spot, v13, live) => {
     set(own, spot, v13);
     expect(lawnTroubleAreasLive()).toBe(live);
+  });
+
+  test('the treatment guide gate is needed too: the guide supplies the take-all and chinch sets', () => {
+    set('true', 'true', 'true', null);
+    expect(lawnTroubleAreasLive()).toBe(false);
+    set('true', 'true', 'true', '1');
+    expect(lawnTroubleAreasLive()).toBe(false);
+    set('true', 'true', 'true', 'true');
+    expect(lawnTroubleAreasLive()).toBe(true);
   });
 });
 
@@ -81,6 +90,14 @@ describe('troubleTypeFor: the sheet\'s hint when it is on the list, else the cat
     [{ category: 'insecticide', hint: 'chinch', chinch: true }, 'chinch'],
     [{ category: 'fungicide', hint: 'take_all' }, 'fungus'],
     [{ category: 'fungicide', hint: 'take_all', takeAll: true }, 'take_all'],
+    // The server's own sets decide the special products whatever the sheet said (no hint, a generic one, or a wrong one).
+    [{ category: 'fungicide', takeAll: true }, 'take_all'],
+    [{ category: 'fungicide', hint: 'fungus', takeAll: true }, 'take_all'],
+    [{ category: 'insecticide', chinchOnly: true }, 'chinch'],
+    [{ category: 'insecticide', hint: 'other_insect', chinchOnly: true }, 'chinch'],
+    // The shared rung (a rung of the ladder that is also the caterpillar product) stays hint-dependent.
+    [{ category: 'insecticide', chinch: true }, 'other_insect'],
+    [{ category: 'insecticide', hint: 'chinch', chinch: true }, 'chinch'],
     [{ category: 'adjuvant', hint: 'weeds' }, 'weeds'],
     [{ category: 'insecticide', hint: 'moss' }, 'other_insect'],
     [{ category: 'adjuvant' }, null],
@@ -88,6 +105,32 @@ describe('troubleTypeFor: the sheet\'s hint when it is on the list, else the cat
     [{}, null],
   ])('%j is %s', (input, expected) => {
     expect(areas.troubleTypeFor(input)).toBe(expected);
+  });
+});
+
+describe('propertyOf: the property the places work on (the shared visit-property resolver)', () => {
+  const resolver = require('../services/property-service-areas');
+  test('a visit with its own link uses it with no read; the gate off, or a visit with no customer, is null', async () => {
+    const spy = jest.spyOn(resolver, 'resolveVisitPropertyId');
+    expect(await areas.propertyOf({}, { id: 'v1', customer_id: 'c1', property_id: 'prop-1' })).toBe('prop-1');
+    expect(spy).not.toHaveBeenCalled();
+    expect(await areas.propertyOf({}, { id: 'v1', property_id: null })).toBeNull();
+    delete process.env.GATE_LAWN_TROUBLE_AREAS;
+    expect(await areas.propertyOf({}, { id: 'v1', customer_id: 'c1', property_id: 'prop-1' })).toBeNull();
+    spy.mockRestore();
+  });
+
+  test('an unlinked visit asks the shared resolver once (cached on the visit); a failed or empty resolution is null', async () => {
+    const spy = jest.spyOn(resolver, 'resolveVisitPropertyId').mockResolvedValue('prop-9');
+    const visit = { id: 'v2', customer_id: 'c1', property_id: null };
+    expect(await areas.propertyOf({}, visit)).toBe('prop-9');
+    expect(await areas.propertyOf({}, visit)).toBe('prop-9');
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRejectedValue(new Error('boom'));
+    expect(await areas.propertyOf({}, { id: 'v3', customer_id: 'c1', property_id: null })).toBeNull();
+    spy.mockResolvedValue(null);
+    expect(await areas.propertyOf({}, { id: 'v4', customer_id: 'c1', property_id: null })).toBeNull();
+    spy.mockRestore();
   });
 });
 

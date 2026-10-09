@@ -451,7 +451,7 @@ describe('buildLawnFastContext', () => {
         warnings: [], blocks: [],
       }));
       beforeEach(() => { process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; });
-      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_V13; });
+      afterEach(() => { delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN_TREATMENT_GUIDE; });
 
       test('gate off (spot rules on): no troubleAreas, no byPlace, and the limits are read once per product as before', async () => {
         const ctx = await readWith();
@@ -461,7 +461,7 @@ describe('buildLawnFastContext', () => {
       });
 
       test('gate on, nothing capped: the closed list, the known areas, no closed place, and every place takes the lawn-wide mix', async () => {
-        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
         const ctx = await readWith();
         expect(ctx.troubleAreas).toEqual({
           v: 1,
@@ -478,7 +478,7 @@ describe('buildLawnFastContext', () => {
       });
 
       test('gate on, the lead capped at the front only: the front takes the replacement, the others the lead; the top level follows the first place that can take the lead', async () => {
-        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
         leadCappedAtFront();
         const mix = (await readWith()).plannedProducts.weedMix;
         expect(mix.byPlace.front).toMatchObject({ mode: 'replacement', productIds: [P_BLIND] });
@@ -487,27 +487,27 @@ describe('buildLawnFastContext', () => {
       });
 
       test('gate on: the temperature is read once however many places are judged', async () => {
-        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
         leadCappedAtFront();
         await readWith();
         expect(getCurrent).toHaveBeenCalledTimes(1);
       });
 
       test('the gate needs the spot rules and the v13 program: without either, nothing changes', async () => {
-        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
         delete process.env.GATE_LAWN_V13;
         expect('troubleAreas' in (await readWith())).toBe(false);
       });
 
       test('a failed read of the known areas is named and sends an empty line, never invented areas', async () => {
-        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
         const ctx = await readWith({ lawn_trouble_areas: new Error('synthetic read failure') });
         expect(ctx.troubleAreas).toMatchObject({ known: [], knownUnavailable: true });
         expect(ctx.readFailures).toContain('trouble_areas');
       });
 
       test('a visit with no plan (one-time) still carries the places, with nothing closed', async () => {
-        process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+        process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
         resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
         const ctx = await readWith();
         expect(ctx.troubleAreas).toMatchObject({ v: 1, blocked: {} });
@@ -1441,7 +1441,7 @@ describe('preflightLawnFastCompletion', () => {
   };
   const run = (tables, args = {}) => preflightLawnFastCompletion({
     knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: null }, ...tables }),
-    svc: { id: VISIT, customer_id: 'cust-1' },
+    svc: { id: VISIT, customer_id: 'cust-1', property_id: 'prop-1' },
     lawnAssessmentId: ASSESSMENT,
     expectedVisit: IDENTITY,
     lawnFast: { visitType: 'recurring' },
@@ -1484,10 +1484,10 @@ describe('preflightLawnFastCompletion', () => {
     const CONFIRMED = { lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] };
     const spotRow = (extra = {}) => ({ productId: P_HERB, name: 'Test Weed Spray', applicationMethod: 'spot_treatment', ...extra });
     beforeEach(() => {
-      process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; process.env.GATE_LAWN_TROUBLE_AREAS = 'true';
+      process.env.GATE_LAWN_SPOT_RULES = 'true'; process.env.GATE_LAWN_V13 = 'true'; process.env.GATE_LAWN_TROUBLE_AREAS = 'true'; process.env.GATE_LAWN_TREATMENT_GUIDE = 'true';
       v13VisitLimits.mockReset().mockResolvedValue({ capped: new Map(), warnings: [], blocks: [] });
     });
-    afterEach(() => { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN_TROUBLE_AREAS; });
+    afterEach(() => { delete process.env.GATE_LAWN_SPOT_RULES; delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN_TROUBLE_AREAS; delete process.env.GATE_LAWN_TREATMENT_GUIDE; });
 
     test('gate off: the products are not looked at', async () => {
       delete process.env.GATE_LAWN_TROUBLE_AREAS;
