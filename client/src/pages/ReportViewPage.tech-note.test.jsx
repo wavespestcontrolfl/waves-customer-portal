@@ -43,6 +43,16 @@ describe('composeTechNote', () => {
     expect(composeTechNote({ tips: TIPS.slice(0, 2), customerName: 'Pat', seed: 0 }).opener).toMatch(/^(Two things|A couple of things)/);
   });
 
+  it('a note made only of the technician\'s own words gets no advice opener (owner 2026-10-09)', () => {
+    const own = { id: 'custom', copy: 'I brushed the mud dauber nests off the lanai, ready for a paint touch-up.', source: 'technician' };
+    expect(composeTechNote({ tips: [own], customerName: 'Pat', seed: 0 }).opener).toBeNull();
+    // A library tip beside it keeps the opener.
+    expect(composeTechNote({ tips: [TIPS[0], own], customerName: 'Pat', seed: 0 }).opener).toMatch(/^(Two things|A couple of things)/);
+    render(<TechNoteCard data={payload({ techNote: { tips: [own], technicianFirstName: 'Adam' } })} />);
+    expect(screen.getByText(own.copy)).toBeInTheDocument();
+    expect(screen.queryByText(/make a real difference|If you do one thing/)).toBeNull();
+  });
+
   it('varies across seeds and falls back without a name', () => {
     const greetings = new Set([0, 1, 2].map((seed) => composeTechNote({ tips: TIPS, customerName: 'Chris', seed }).greeting));
     expect(greetings.size).toBe(3);

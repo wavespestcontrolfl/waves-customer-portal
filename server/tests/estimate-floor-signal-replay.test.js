@@ -15,6 +15,7 @@
 const {
   rawEngineInputs,
   estimateLawnFloorArmed,
+  savedLawnCostPlusSignal,
   lawnRowsShowFloorEnforcement,
   estimatePestFloorSignal,
   savedFloorReplaySignals,
@@ -56,7 +57,44 @@ describe('savedFloorReplaySignals — tri-state', () => {
     // re-arm every new estimate.
     expect(savedFloorReplaySignals({
       result: { lineItems: [{ service: 'lawn_care', minimumCollectedAnnualPrice: 900, costFloorAnnual: 900 }] },
+    })).toEqual({ lawnCostPlusList: false });
+  });
+
+  it('cost-plus list: a stamp on a priced lawn replays as stamped, with its knob snapshot', () => {
+    const knobs = { listMargin: 0.5 };
+    expect(savedFloorReplaySignals({
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: true, lawnCostPlusListBasis: knobs } },
+    })).toMatchObject({ lawnCostPlusList: true, lawnCostPlusListBasis: knobs });
+    const off = savedFloorReplaySignals({
+      result: { lineItems: [{ service: 'lawn_care' }], pricingMetadata: { lawnCostPlusList: false, lawnCostPlusListBasis: knobs } },
+    });
+    expect(off.lawnCostPlusList).toBe(false);
+    expect('lawnCostPlusListBasis' in off).toBe(false);
+  });
+
+  it('cost-plus list: priced lawn with no stamp pins OFF; no lawn line pins nothing', () => {
+    // Saved before the mode existed.
+    expect(savedLawnCostPlusSignal({ result: { lineItems: [{ service: 'lawn_care' }] } })).toEqual({ lawnCostPlusList: false });
+    expect(savedLawnCostPlusSignal({ result: { results: { lawn: [{ v: 9 }] } } })).toEqual({ lawnCostPlusList: false });
+    // A pest-only estimate (stamped or not) never priced a lawn: a lawn added later follows the live gate.
+    expect(savedLawnCostPlusSignal({ result: { lineItems: [{ service: 'pest_control' }] } })).toEqual({});
+    expect(savedLawnCostPlusSignal({
+      result: { lineItems: [{ service: 'pest_control' }], pricingMetadata: { lawnCostPlusList: false } },
     })).toEqual({});
+    expect(savedLawnCostPlusSignal({ result: {} })).toEqual({});
+    // A lawn the customer opted out of keeps its quote-time mode for the restore.
+    expect(savedLawnCostPlusSignal({
+      result: { pricingMetadata: { lawnCostPlusList: true } },
+      serviceOptOut: { events: [{ serviceKey: 'lawn_care', included: false }] },
+    })).toEqual({ lawnCostPlusList: true });
+  });
+
+  it('cost-plus list: posted options and stored inputs are not evidence', () => {
+    expect(savedLawnCostPlusSignal({
+      engineRequest: { options: { lawnCostPlusList: true } },
+      engineInputs: { lawnCostPlusList: true, services: { lawn: { costPlusList: true } } },
+      result: { lineItems: [{ service: 'lawn_care' }] },
+    })).toEqual({ lawnCostPlusList: false });
   });
 
   it('prefers the engineRequest option over stored inputs, and the stamp over both', () => {

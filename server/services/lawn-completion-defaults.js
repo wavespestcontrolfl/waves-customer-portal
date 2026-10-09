@@ -2,6 +2,7 @@
  * No application record, profile update, inventory write or delivery occurs here.
  */
 const { gateEnvValue } = require('../config/feature-gates');
+const { stepOptionFields } = require('./lawn-bermuda-removal');
 const { addressKey } = require('./customer-properties');
 const history = require('./lawn-assessment-history');
 const { etCalendarDayOf } = require('../utils/datetime-et');
@@ -219,7 +220,10 @@ function completionAddOns(plan, defaults, protocolProductFor) {
   const addOns = [];
   for (const item of [...plan.mixCalculator.items, ...(plan.mixCalculator.conditionalOptions || [])]) {
     const id = item.product?.id ? String(item.product.id) : null;
-    if (!id || seen.has(id) || item.product.active === false || !protocolProductFor(item)) continue;
+    // The bermuda removal step's three lines are one grouped selection (the `options`, with their
+    // group, spot mode, no-prefill marker and spray conditions), never three loose one-tap add-ons:
+    // a lone Recognition or Fusilade II is refused at completion.
+    if (!id || item.bermudaStep || seen.has(id) || item.product.active === false || !protocolProductFor(item)) continue;
     seen.add(id);
     addOns.push(completionItem(item, protocolProductFor(item)));
   }
@@ -266,7 +270,7 @@ function buildLawnCompletionDefaults(plan, context) {
     // would be an action that cannot be completed (Codex r12 P2).
     options: eligible ? [...plan.mixCalculator.items, ...plan.mixCalculator.conditionalOptions]
       .filter(item => protocolProductFor(item) && item.product?.active !== false)
-      .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)) })) : [],
+      .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)), ...(item.bermudaStep ? stepOptionFields(item) : {}) })) : [],
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'
         : !protocolMatches ? 'The appointment protocol could not be resolved. Enter the actual work.'
