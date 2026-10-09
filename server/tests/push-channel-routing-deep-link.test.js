@@ -26,8 +26,7 @@ function tableFake({ serviceRecords = [], invoice = null, fail = null } = {}) {
     const chain = {
       where: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
-      orderBy: jest.fn(() => chain),
-      limit: jest.fn(async () => serviceRecords),
+      orderBy: jest.fn(() => Promise.resolve(serviceRecords)),
       first: jest.fn(async () => invoice),
     };
     chain.table = table;
@@ -61,9 +60,10 @@ describe('report pushes', () => {
     }
   });
 
-  it('skips a suppressed typed report and takes the next qualifying record', async () => {
+  it('skips suppressed typed reports, however many, and takes the first qualifying record', async () => {
+    const held = Array.from({ length: 6 }, (_, i) => ({ report_view_token: `held${i}`.padEnd(32, 'x'), structured_notes: { typedReportDelivery: 'hold' } }));
     db.mockImplementation(tableFake({ serviceRecords: [
-      { report_view_token: 'held'.repeat(8), structured_notes: { typedReportDelivery: 'hold' } },
+      ...held,
       { report_view_token: 'open'.repeat(8), structured_notes: { typedReportDelivery: 'auto_send' } },
     ] }));
     const dest = await resolvePushDestination(pushPresentation('service_complete'), 'service_complete', { customerId, appointmentId: 'visit-1' });
@@ -97,10 +97,11 @@ describe('receipt pushes', () => {
     expect(chain.where).toHaveBeenCalledWith({ id: 'inv-1', customer_id: customerId });
   });
 
-  it('deposit receipts open the receipt page too', async () => {
+  it('deposit receipts keep the Billing tab with no lookup (their sender carries no invoice id)', async () => {
     db.mockImplementation(tableFake({ invoice: { token: 'dep-token' } }));
     const dest = await resolvePushDestination(pushPresentation('deposit_receipt'), 'deposit_receipt', { customerId, invoiceId: 'inv-2' });
-    expect(dest.link).toBe('/receipt/dep-token');
+    expect(dest.link).toBe('/?tab=billing');
+    expect(db).not.toHaveBeenCalled();
   });
 
   it("falls back to Billing without an invoice id or when the invoice is not the customer's", async () => {

@@ -164,14 +164,17 @@ async function reportDeepLink(customerId, appointmentId) {
   const rows = await db('service_records')
     .where({ scheduled_service_id: appointmentId, customer_id: customerId, status: 'completed', report_template_version: 'service_report_v1' })
     .whereNotNull('report_view_token')
-    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .limit(5);
+    .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }]);
+  // No cap: a visit has a handful of sibling records, and a cap applied
+  // before the suppression filter could miss the one viewable report.
   const record = rows.find((row) => !suppressedTypedReport(row));
   return record ? `/report/${encodeURIComponent(record.report_view_token)}` : null;
 }
 
 // The invoice's own permanent receipt page (receipt-v2 never 404s a real
-// token). Null when the invoice is not this customer's.
+// token). Null when the invoice is not this customer's. Deposit receipts are
+// not invoice receipts (their sender carries no invoice id), so they keep the
+// Billing tab.
 async function receiptDeepLink(customerId, invoiceId) {
   if (!customerId || !invoiceId) return null;
   const invoice = await db('invoices').where({ id: invoiceId, customer_id: customerId }).first('token');
@@ -187,7 +190,7 @@ async function resolvePushDestination(presentation, messageType, { customerId, a
   try {
     let link = null;
     if (isReportPush(messageType)) link = await reportDeepLink(customerId, appointmentId);
-    else if (presentation === PRESENTATION.receipt || presentation === PRESENTATION.deposit_receipt) link = await receiptDeepLink(customerId, invoiceId);
+    else if (presentation === PRESENTATION.receipt) link = await receiptDeepLink(customerId, invoiceId);
     return link ? { ...presentation, link } : presentation;
   } catch (err) {
     logger.warn(`[push-routing] ${messageType}: deep link lookup failed, opening the tab instead: ${err.message}`);

@@ -931,6 +931,22 @@ describe('quiet-hours completion SMS deferral clears the pre-send uncertainty ma
     expect(txAt).toBeGreaterThan(deferredDeltaAt);
     expect(mergeAt).toBeGreaterThan(txAt);
   });
+
+  // The scheduled-SMS replay rebuilds appointmentId only from
+  // metadata.scheduled_service_id. Without it a held completion text's App
+  // push has no visit to resolve, and opens Documents instead of the report.
+  test('the deferred completion row carries the visit id the replay turns into appointmentId', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const entryAt = source.indexOf("entry_point: 'dispatch_completion_deferred'");
+    const blockCodeAt = source.indexOf('original_block_code: smsResult.code', entryAt);
+    expect(entryAt).toBeGreaterThan(-1);
+    expect(blockCodeAt).toBeGreaterThan(entryAt);
+    expect(source.slice(entryAt, blockCodeAt)).toMatch(/scheduled_service_id: svc\.id,/);
+    const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(scheduler).toMatch(/claimMeta\.scheduled_service_id \? \{ appointmentId: claimMeta\.scheduled_service_id \}/);
+  });
 });
 
 describe('payment-failed decline notice claim acquisition (#4131 slice 5, deferred by #4632 r2 P2)', () => {
