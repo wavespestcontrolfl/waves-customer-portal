@@ -57,6 +57,7 @@ const BASE_CONTEXT = {
 };
 const CONTEXT = { ...BASE_CONTEXT, pestCheck: PEST_CHECK };
 const MERIT_LINE = 'Merit does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
+const TRISTAR_LINE = 'TriStar does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
 
 function makeRequest({ context = CONTEXT } = {}) {
   const calls = [];
@@ -185,10 +186,18 @@ describe('the Merit rule', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove Merit from this visit' }));
     expect(screen.queryByText(MERIT_LINE)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove Merit from this visit' })).toBeNull();
+    // TriStar is not an armored scale product either (owner 2026-10-09): it
+    // holds Complete until another target it covers is recorded.
     await useProduct('TriStar 8.5 SL');
+    expect(screen.getAllByText(TRISTAR_LINE).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Remove TriStar from this visit' })).toBeTruthy();
+    expect(completeButton().disabled).toBe(true);
+    tick('Whitefly');
+    expect(screen.queryByRole('button', { name: 'Remove TriStar from this visit' })).toBeNull();
+    expect(completeButton().disabled).toBe(false);
     const body = await completeBody(request);
     expect(body.products.map((p) => p.productId)).toEqual(['tristar']);
-    expect(body.treeShrubReview.pestCheck).toEqual({ liveInsectsFound: true, insectTypes: ['armored_scale'] });
+    expect(body.treeShrubReview.pestCheck).toEqual({ liveInsectsFound: true, insectTypes: ['armored_scale', 'whitefly'] });
   });
 
   test('armored scale with soft scale: the line is a note and Complete stays open', async () => {

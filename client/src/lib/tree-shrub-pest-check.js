@@ -30,6 +30,9 @@ const LIVE_FINDS_ONLY = [
   { pattern: /\btritek\b/i, label: 'TriTek' },
 ];
 
+export const TRISTAR_BLOCK_MESSAGE = 'TriStar does not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
+export const MERIT_TRISTAR_BLOCK_MESSAGE = 'Merit and TriStar do not control armored scale. Use Distance or oil on crawlers, or a Zylam drench.';
+
 const MERIT_NAME = /\bmerit\b/i;
 const IMIDACLOPRID = /imidacloprid/i;
 
@@ -40,36 +43,67 @@ export function isMeritProduct(row) {
     || IMIDACLOPRID.test(String(product.active_ingredient ?? ''));
 }
 
+const TRISTAR_NAME = /\btristar\b/i;
+const ACETAMIPRID = /acetamiprid/i;
+
+// TriStar by name, or any acetamiprid product by its active ingredient.
+export function isTristarProduct(row) {
+  const product = row?.product || {};
+  return TRISTAR_NAME.test(String(row?.name ?? product.name ?? ''))
+    || ACETAMIPRID.test(String(product.active_ingredient ?? ''));
+}
+
 export function liveFindsOnlyLabel(row) {
   const name = String(row?.name ?? row?.product?.name ?? '');
   const hit = LIVE_FINDS_ONLY.find((entry) => entry.pattern.test(name));
   return hit ? hit.label : '';
 }
 
+// Armored scale picked: which active Merit and TriStar rows hold Complete, and
+// which only get a note. Soft scale or whitefly beside armored scale: Merit can
+// be right for those. TriStar (owner 2026-10-09) also covers mealybug and
+// aphid, which the tech records as Other.
+function armoredScaleRule(types, active) {
+  const meritRows = active.filter(isMeritProduct);
+  const tristarRows = active.filter(isTristarProduct);
+  const softTarget = types.has('soft_scale') || types.has('whitefly');
+  const meritBlocked = meritRows.length > 0 && !softTarget;
+  const tristarBlocked = tristarRows.length > 0 && !softTarget && !types.has('other');
+  const noteMessages = [];
+  if (meritRows.length && !meritBlocked) noteMessages.push(MERIT_BLOCK_MESSAGE);
+  if (tristarRows.length && !tristarBlocked) noteMessages.push(TRISTAR_BLOCK_MESSAGE);
+  const blocked = [meritBlocked && 'Merit', tristarBlocked && 'TriStar'].filter(Boolean);
+  const messages = { Merit: MERIT_BLOCK_MESSAGE, TriStar: TRISTAR_BLOCK_MESSAGE };
+  return {
+    blockMessage: blocked.length === 2 ? MERIT_TRISTAR_BLOCK_MESSAGE : (messages[blocked[0]] || ''),
+    noteMessages,
+    blockedRows: [...(meritBlocked ? meritRows : []), ...(tristarBlocked ? tristarRows : [])],
+    blockedLabel: blocked.join(' and '),
+  };
+}
+
+function liveFindNotes(active) {
+  const notes = [];
+  const seen = new Set();
+  for (const row of active) {
+    const label = liveFindsOnlyLabel(row);
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    notes.push(`No live insects recorded. ${label} is for live finds only.`);
+  }
+  return notes;
+}
+
 // answer: { found: true | false | null, types: string[] }; rows: the sheet's
 // product rows (only the active ones count).
 export function evaluatePestCheck(answer, rows) {
-  const out = { blockMessage: '', noteMessages: [], meritRows: [] };
+  const out = { blockMessage: '', noteMessages: [], blockedRows: [], blockedLabel: '' };
   const active = (rows || []).filter((row) => row?.active);
   if (answer?.found === true) {
     const types = new Set(answer.types || []);
-    const meritRows = active.filter(isMeritProduct);
-    if (types.has('armored_scale') && meritRows.length) {
-      out.meritRows = meritRows;
-      // Soft scale or whitefly beside armored scale: Merit can be right for
-      // those, so the line stays a note.
-      if (types.has('soft_scale') || types.has('whitefly')) out.noteMessages.push(MERIT_BLOCK_MESSAGE);
-      else out.blockMessage = MERIT_BLOCK_MESSAGE;
-    }
-  } else if (answer?.found === false) {
-    const seen = new Set();
-    for (const row of active) {
-      const label = liveFindsOnlyLabel(row);
-      if (!label || seen.has(label)) continue;
-      seen.add(label);
-      out.noteMessages.push(`No live insects recorded. ${label} is for live finds only.`);
-    }
+    return types.has('armored_scale') ? armoredScaleRule(types, active) : out;
   }
+  if (answer?.found === false) out.noteMessages = liveFindNotes(active);
   return out;
 }
 

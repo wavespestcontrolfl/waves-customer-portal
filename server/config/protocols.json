@@ -991,11 +991,12 @@
         "visit_type": "Granular bed visit + targeted drench if justified",
         "main_goal": "Clean visual start, winter palm nutrition, bed pre-emergent, and documented systemic only where needed.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
-        "secondary": "Merit 2F drench only for documented scale/whitefly/borer history; log as IRAC 4A ($4.25)\nTriTek spray oil 1.0-1.5% if scale crawlers are active and plant/weather safe; under 90°F; not on drought-stressed plants ($6.08)\nOrganic acidifier (Espoma) only for high-pH/chlorosis properties ($17.72)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate",
+        "secondary": "Merit 2F drench only for documented scale/whitefly/borer history; log as IRAC 4A ($4.25)\nTriTek spray oil 1.0–1.5% on live scale crawlers, nymphs, mites or sooty mold only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap ($6.08)\nOrganic acidifier (Espoma) only for high-pH/chlorosis properties ($17.72)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1060,6 +1061,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Do not use turf disease language here. For T&S, document leaf spot, anthracnose, Phytophthora/root rot, palm disease diagnosis, mites, scale, or whitefly by plant group.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1127,6 +1129,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "March is intentionally the non-neonic systemic/IGR month unless severe pressure justifies rescue chemistry.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1191,11 +1194,12 @@
         "visit_type": "Granular bed visit + optional targeted foliar",
         "main_goal": "Visible bed cleanup, Q2 nutrition, spring crawler check, and route-speed discipline.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
-        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nShortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe; under 90°F; not on drought-stressed plants ($6.08)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nShortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0–1.5% on live scale crawlers, nymphs, mites or sooty mold only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap ($6.08)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1263,6 +1267,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1323,6 +1328,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "No N/P landscape fertilizer in Sarasota/Manatee June 1-Sept. 30. Do not run Merit as a standard June drench.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1390,11 +1396,12 @@
         "visit_type": "Granular Snapshot + scout/spot PHC",
         "main_goal": "Keep beds clean during summer while maintaining a zero-N/P route for Sarasota/Manatee.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nScout bed weeds, whitefly, scale crawlers, palm deficiency symptoms, and heat stress\nSarasota/Manatee: zero N/P landscape fertilizer during blackout\nLESCO 0-0-16 #510513 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago",
-        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nMainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nTriTek spray oil 1.0% only if plant/weather safe; under 90°F; not on drought-stressed plants ($6.08)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nMainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nTriTek spray oil 1.0% only, before 9 AM, on live scale crawlers, nymphs, mites or sooty mold only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap ($6.08)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)\nTriStar 8.5 SL (acetamiprid): whitefly, mealybug, aphid or soft scale (wax, cottony cushion), live finds only; foliar only; not for armored scale (use Distance, oil or a Zylam drench); label rate\nDiPel PRO DF (Bt): young oleander or other leaf-eating caterpillars, live finds only; trees 1–2 tsp/gal, shrubs and beds 0.2–0.7 oz per 1,000 sq ft",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "July palm/ornamental N/P fertilizer is blocked on Sarasota/Manatee landscape accounts. Snapshot is fine; LESCO 8-0-12 #511542 and 13-0-13 are not.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1459,6 +1466,7 @@
         "labor_cost": "scout",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "August is low product, high observation. Customer value comes from catching decline early and explaining plant stress clearly.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1518,6 +1526,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Final blackout month for Sarasota/Manatee. Do not make Merit automatic.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1574,6 +1583,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Visible fall reset: Snapshot + legal fertility + fall inspection. Keep this as a granular-first production visit whenever possible. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1633,6 +1643,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Call this cool-season cleanup, not dormant spray. SWFL ornamentals are not truly dormant like northern landscapes.",
         "conditional_cost": null,
         "fieldGuide": {
@@ -1686,6 +1697,7 @@
         "labor_cost": "report",
         "tier_4x": false,
         "tier_6x": true,
+        "tier_9x": true,
         "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying. Palm dose: width × width ÷ 105 lb, rounded down to one decimal (6 ft = 0.3 lb, 8 ft = 0.6 lb, 10 ft = 0.9 lb, 12 ft = 1.3 lb, 14 ft = 1.8 lb, 16 ft = 2.4 lb, 18 ft = 3.0 lb, 20 ft = 3.8 lb); spread under the canopy, not at the trunk.",
         "conditional_cost": null,
         "fieldGuide": {

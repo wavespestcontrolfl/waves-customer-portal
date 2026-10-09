@@ -573,7 +573,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   const previewCurrent = !!photos.preview && sameSet(photos.preview.photos, photoList);
   // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
   const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
-  const removeMerit = (meritRows) => meritRows.forEach((row) => products.updateRow(row.productId, { active: false }));
+  const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
   const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || pestCheck.evaluation.blockMessage;
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
@@ -620,7 +620,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               locked={locked || dictationPending}
             />
           )}
-          <PestCheckSection state={pestCheck} locked={locked} onRemoveMerit={removeMerit} />
+          <PestCheckSection state={pestCheck} locked={locked} onRemoveBlocked={removeBlocked} />
           <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />

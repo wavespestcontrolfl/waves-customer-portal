@@ -80,6 +80,8 @@ describe('resolveMonthProducts', () => {
       expect(lines.some((l) => (summer ? /8-0-12/ : /0-0-16/).test(l))).toBe(false);
       expect(visit.tier_6x).toBe(true);
       expect(visit.tier_4x).toBe(false);
+      // 6 and 9 visits a year are the sold tiers; the protocol calendar badges read these.
+      expect(visit.tier_9x).toBe(true);
     }
   });
 
@@ -130,11 +132,13 @@ describe('resolveMonthProducts', () => {
       expect(oil).toHaveLength(1);
       expect(oil[0]).toMatch(/under 90°F; not on drought-stressed plants/);
     }
-    for (const month of ['Feb', 'Jun', 'Aug', 'Sep', 'Nov']) {
+    // Every card's oil line carries all the limits: the job card shows this raw
+    // text when GATE_TREE_SHRUB_FIELD_GUIDE is off (Codex r2 #6185).
+    for (const month of ['Jan', 'Feb', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Nov']) {
       const oil = protocols.tree_shrub.visits.find((v) => v.month === month).secondary.split('\n').find((l) => /^TriTek/.test(l));
       expect(oil).toMatch(/on live scale crawlers, nymphs, mites or sooty mold only; under 90°F; not on drought-stressed plants; not within 7 days of a forecast cold snap/);
     }
-    for (const month of ['Jun', 'Aug', 'Sep']) {
+    for (const month of ['Jun', 'Jul', 'Aug', 'Sep']) {
       expect(protocols.tree_shrub.visits.find((v) => v.month === month).secondary).toMatch(/TriTek spray oil 1\.0% only, before 9 AM,/);
     }
   });
