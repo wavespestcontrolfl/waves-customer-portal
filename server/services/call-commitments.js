@@ -39,7 +39,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { parseETDateTime, etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, etParts, addETDays, etWallClockOccurrences } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
 const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
@@ -363,16 +363,31 @@ function realWallDate(text) {
   const probe = new Date(Date.UTC(y, mo - 1, d));
   return probe.getUTCFullYear() === y && probe.getUTCMonth() === mo - 1 && probe.getUTCDate() === d;
 }
+const DATED_WALL_RE = /^(\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})(?::\d{2})?)(?:\.\d+)?(-0[45]:?00)?$/;
+// The instant must read back as the wall clock that was written, and that
+// clock must occur once that day: 2:30 on the spring-forward night does not
+// exist and 1:30 on the fall-back night happens twice. No guessed deadline
+// (codex #6215 r3 P2; the rule admin-leads applies to an office-typed callback).
+function oneETWallClock(iso, hhmm) {
+  const at = new Date(iso);
+  const p = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(p.hour)}:${pad(p.minute)}` === hhmm && etWallClockOccurrences(at) === 1;
+}
 function callbackDueAt(value, callStartedAt) {
   if (value == null || value === '') return null;
   const text = String(value).trim();
   const time = TIME_ONLY_RE.exec(text);
   if (!time) {
-    if (!realWallDate(text)) return null;
-    // The schema allows fractional seconds. With an offset isoOrNull drops them;
-    // WITHOUT one the ET parser reads only 'YYYY-MM-DDTHH:MM[:SS]' and would fall
-    // through to a UTC reading, so they are dropped here (pre-push audit P1).
-    return isoOrNull(text.replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+$/, '$1'));
+    // A dated callback time is an Eastern WALL CLOCK: no offset, or an Eastern
+    // offset of either season (isoOrNull's wall-clock rule). A "Z" or any other
+    // offset would be read as an instant and land hours off the spoken time, so
+    // it gets no due time (codex #6215 r3 P1). Fractional seconds are dropped:
+    // the ET parser reads only 'YYYY-MM-DDTHH:MM[:SS]'.
+    const dated = DATED_WALL_RE.exec(text);
+    if (!dated || !realWallDate(text)) return null;
+    const due = isoOrNull(`${dated[1]}${dated[3] || ''}`);
+    return due && oneETWallClock(due, dated[2]) ? due : null;
   }
   const start = callStartedAt ? new Date(callStartedAt) : null;
   if (!start || Number.isNaN(start.getTime())) return null;
@@ -380,6 +395,7 @@ function callbackDueAt(value, callStartedAt) {
   let due = parseETDateTime(`${etDateString(start)}T${hhmm}`);
   if (Number.isNaN(due.getTime())) return null;
   if (due.getTime() < start.getTime()) due = parseETDateTime(`${etDateString(addETDays(start, 1))}T${hhmm}`);
+  if (Number.isNaN(due.getTime()) || !oneETWallClock(due.toISOString(), hhmm)) return null;
   return due.toISOString();
 }
 

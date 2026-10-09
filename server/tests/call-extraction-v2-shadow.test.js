@@ -407,7 +407,9 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
     expect(formErrors(validateModelOutput(withWindow(value, value)))).toEqual([]);
   });
 
-  test.each(['2 PM', '14', '25:00', '2:00', '2026-10-12', '2026-10-12 14:00', 'afternoon'])('the model output rejects %s', (value) => {
+  // A dated time is an Eastern wall clock: a Z or a non-Eastern offset on it would be
+  // read as an instant hours off the spoken time (codex #6215 r3 P1).
+  test.each(['2 PM', '14', '25:00', '2:00', '2026-10-12', '2026-10-12 14:00', 'afternoon', '2026-10-12T14:00Z', '2026-10-12T14:00:00Z', '2026-10-12T14:00:00+02:00'])('the model output rejects %s', (value) => {
     expect(formErrors(validateModelOutput(withWindow(value))).length).toBeGreaterThan(0);
   });
 

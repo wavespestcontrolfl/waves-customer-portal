@@ -243,6 +243,20 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
       expect(cbFor('2026-09-04T09:00', '2026-09-04T11:30:00.5').due_at).toBe(et('2026-09-04T11:30:00'));
     });
 
+    test('a dated time with a Z or a non-Eastern offset gets no due time (codex #6215 r3 P1)', () => {
+      for (const value of ['2026-09-04T14:00Z', '2026-09-04T14:00:00Z', '2026-09-04T14:00:00+02:00', '2026-09-04T14:00:00-07:00']) {
+        expect(cbFor(value, null)).toMatchObject({ due_at: null, due_basis: null });
+      }
+      // An Eastern offset of either season is the wall clock it spells.
+      expect(cbFor('2026-09-04T14:00:00-05:00', null).due_at).toBe(et('2026-09-04T14:00:00'));
+    });
+
+    test('an Eastern clock that does not exist or happens twice gets no due time (codex #6215 r3 P2)', () => {
+      expect(cbFor('2026-03-08T02:30', null, '2026-03-06T09:00:00-05:00')).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-11-01T01:30', null, '2026-10-30T09:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
+      expect(cbFor('2026-11-01T09:30', null, '2026-10-30T09:00:00-04:00').due_at).toBe(new Date('2026-11-01T09:30:00-05:00').toISOString());
+    });
+
     test('an unreadable end falls back to the start', () => {
       expect(cbFor('09:00', '11:00:00Z')).toMatchObject({ due_at: et('2026-09-02T09:00:00'), due_basis: 'suggested' });
     });
