@@ -144,10 +144,24 @@ describe('neonicCapBlocks (the visit\'s own rows against the year so far)', () =
     expect(neonicCapBlocks({ ledger, rows: [{ productId: MERIT.id, totalAmount: 7, unit: 'fl_oz' }] })).toHaveLength(1);
   });
 
-  test('no bed area blocks nothing; an unconvertible unit blocks nothing', () => {
+  test('no bed area blocks nothing', () => {
     const noBed = computeNeonicLedger({ rows: [], bedSqft: null, catalog: CATALOG });
     expect(neonicCapBlocks({ ledger: noBed, rows: [{ productId: ZYLAM.id, totalAmount: 999, unit: 'fl_oz' }] })).toEqual([]);
-    expect(neonicCapBlocks({ ledger: ledgerWith([]), rows: [{ productId: ZYLAM.id, totalAmount: 999, unit: 'each' }] })).toEqual([]);
+  });
+
+  // Fail closed (Codex security r1 #6204): a capped row the check cannot size is refused, not skipped.
+  test('a capped row in a unit that does not convert, or with no amount, is refused', () => {
+    const needed = { code: 'tree_shrub_neonic_cap_amount_needed', productId: ZYLAM.id, message: 'Zylam: enter the amount in fl oz so the yearly limit can be checked.' };
+    expect(neonicCapBlocks({ ledger: ledgerWith([]), rows: [{ productId: ZYLAM.id, totalAmount: 999, unit: 'each' }] })).toEqual([needed]);
+    expect(neonicCapBlocks({ ledger: ledgerWith([]), rows: [{ productId: ZYLAM.id, totalAmount: '', unit: 'fl_oz' }] })).toEqual([needed]);
+    expect(neonicCapBlocks({ ledger: ledgerWith([]), rows: [{ productId: SAFARI.id, totalAmount: 0, unit: 'oz' }] })[0].message)
+      .toBe('Safari: enter the amount in oz so the yearly limit can be checked.');
+  });
+
+  test('a product id in another letter case still matches its cap', () => {
+    const blocks = neonicCapBlocks({ ledger: ledgerWith([row(ZYLAM, 15, 'fl_oz')]), rows: [{ productId: ZYLAM.id.toUpperCase(), totalAmount: 5, unit: 'fl_oz' }] });
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].code).toBe(CODE);
   });
 });
 
@@ -253,16 +267,26 @@ describe('treeShrubNeonicCapBlocks (the /complete check)', () => {
     expect(blocks[0].message).toBe('Zylam: 5.0 fl oz is over the 4.7 fl oz left this year for this property.');
   });
 
-  test('gate on: an amount inside the cap, a product with no cap and a blank amount pass without a ledger read', async () => {
+  test('gate on: an amount inside the cap and a product with no cap pass; the latter without a ledger read', async () => {
     process.env.GATE_TS_NEONIC_CAP = 'true';
     expect(await treeShrubNeonicCapBlocks(fakeDb({ ledger: [row(ZYLAM, 15, 'fl_oz')] }), svc, submit([ZYLAM, 4, 'fl_oz']))).toEqual([]);
     const snapshot = { id: 'cat-snap', name: 'Snapshot 2.5TG', active_ingredient: 'Isoxaben' };
     const noCap = fakeDb({ catalog: [snapshot] });
     expect(await treeShrubNeonicCapBlocks(noCap, svc, submit([snapshot, 999, 'lb']))).toEqual([]);
     expect(noCap.reads).not.toContain('property_application_history');
-    const blank = fakeDb();
-    expect(await treeShrubNeonicCapBlocks(blank, svc, submit([ZYLAM, '', 'fl_oz']))).toEqual([]);
-    expect(blank.reads).toEqual([]);
+  });
+
+  test('gate on: a capped product with a blank amount, an "each" unit or an upper-case id is refused, not skipped', async () => {
+    process.env.GATE_TS_NEONIC_CAP = 'true';
+    const ledger = [row(ZYLAM, 15, 'fl_oz')];
+    for (const item of [[ZYLAM, '', 'fl_oz'], [ZYLAM, 999, 'each']]) {
+      const blocks = await treeShrubNeonicCapBlocks(fakeDb({ ledger }), svc, submit(item));
+      expect(blocks).toMatchObject([{ code: 'tree_shrub_neonic_cap_amount_needed', productId: ZYLAM.id }]);
+      expect(neonicCapBlockPayload(blocks).code).toBe('tree_shrub_neonic_cap_amount_needed');
+    }
+    const upper = await treeShrubNeonicCapBlocks(fakeDb({ ledger }), svc, [{ productId: ZYLAM.id.toUpperCase(), totalAmount: 5, amountUnit: 'fl_oz' }]);
+    expect(upper).toMatchObject([{ code: 'tree_shrub_neonic_cap_exceeded' }]);
+    expect(neonicCapBlockPayload(upper).code).toBe('tree_shrub_neonic_cap_exceeded');
   });
 
   test('gate on, no bed area: not checked, not refused', async () => {

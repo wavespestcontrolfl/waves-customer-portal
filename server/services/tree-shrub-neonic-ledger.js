@@ -31,6 +31,9 @@ function tsNeonicCapLive() {
   return typeof gates.tsNeonicCapLive === 'function' && gates.tsNeonicCapLive() === true;
 }
 
+const UNSIZED_CODE = 'tree_shrub_neonic_cap_amount_needed';
+const idOf = (value) => String(value ?? '').trim().toLowerCase();
+const unitWords = (unit) => (unit === 'fl_oz' ? 'fl oz' : unit);
 const round4 = (n) => Math.round(n * 10000) / 10000;
 const positive = (value) => {
   const n = Number(value);
@@ -182,7 +185,9 @@ const fmtLeft = (n) => (Math.floor(n * 10 ** decimals(n) + 1e-9) / 10 ** decimal
 async function treeShrubNeonicCapBlocks(database, svc, products, { serviceDate = svc.scheduled_date } = {}) {
   if (!tsNeonicCapLive() || !Array.isArray(products) || !products.length) return [];
   const { savepointRead } = require('../utils/savepoint-read');
-  const submitted = products.filter((p) => p && p.productId && positive(p.totalAmount));
+  // Every submitted product row, with or without an amount: a capped row that cannot be sized is
+  // refused below, never skipped. Ids compare in one case (the writer accepts either).
+  const submitted = products.filter((p) => p && p.productId).map((p) => ({ ...p, productId: idOf(p.productId) }));
   if (!submitted.length) return [];
   const catalog = await savepointRead(database, (k) => k('products_catalog')
     .whereIn('id', [...new Set(submitted.map((p) => p.productId))]).select('id', 'name', 'active_ingredient'));
@@ -204,16 +209,27 @@ function neonicCapBlocks({ ledger, rows }) {
   for (const ingredient of ledger) {
     const lines = [];
     for (const row of rows) {
-      const product = ingredient.capByProduct.find((p) => String(p.productId) === String(row.productId));
-      const amount = product?.yearlyAmount && convertInventoryQuantity(row.totalAmount, row.unit, product.unit);
-      if (amount) lines.push({ row, product, amount, share: amount / product.yearlyAmount });
+      const product = ingredient.capByProduct.find((p) => idOf(p.productId) === idOf(row.productId));
+      if (!product?.yearlyAmount) continue;
+      const amount = positive(row.totalAmount) && convertInventoryQuantity(row.totalAmount, row.unit, product.unit);
+      // A capped row with no amount, or one in a unit that does not convert ("each"), cannot be
+      // checked: refuse it rather than let it through unchecked.
+      if (!amount) {
+        blocks.push({
+          code: UNSIZED_CODE,
+          productId: row.productId,
+          message: `${product.name}: enter the amount in ${unitWords(product.unit)} so the yearly limit can be checked.`,
+        });
+        continue;
+      }
+      lines.push({ row, product, amount, share: amount / product.yearlyAmount });
     }
     const total = (ingredient.usedShare || 0) + lines.reduce((sum, line) => sum + line.share, 0);
     if (total <= 1 + SHARE_EPSILON) continue;
     for (const line of lines) {
       const otherShare = total - (ingredient.usedShare || 0) - line.share;
       const left = Math.max(0, 1 - (ingredient.usedShare || 0) - otherShare) * line.product.yearlyAmount;
-      const unit = line.product.unit === 'fl_oz' ? 'fl oz' : line.product.unit;
+      const unit = unitWords(line.product.unit);
       blocks.push({
         code: CODE,
         productId: line.row.productId,
@@ -229,7 +245,7 @@ function neonicCapBlocks({ ledger, rows }) {
 function neonicCapBlockPayload(blocks) {
   return {
     error: blocks.map((block) => block.message).join(' '),
-    code: CODE,
+    code: blocks.some((block) => block.code === CODE) ? CODE : blocks[0].code,
     details: blocks.map((block) => block.message),
     blocks,
   };
@@ -237,6 +253,7 @@ function neonicCapBlockPayload(blocks) {
 
 module.exports = {
   CODE,
+  UNSIZED_CODE,
   UNAVAILABLE_CODE,
   BED_AREA_NEEDED,
   tsNeonicCapLive,
