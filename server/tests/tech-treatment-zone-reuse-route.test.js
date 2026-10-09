@@ -239,4 +239,19 @@ describe('the reuse route\'s rate limit', () => {
     expect(typeof reuseLimit.keyGenerator).toBe('function');
     expect(reuseLimit.message.error).toMatch(/Trace this visit by hand/);
   });
+
+  // Codex P2 r8 on #6175: dark means 404 every time, never 429.
+  test('the limit is skipped while either gate is off, so a dark route never counts or answers 429', () => {
+    const reuseLimit = mockRateLimit.mock.calls.map(([options]) => options).find((options) => options?.message?.code === 'reuse_rate_limited');
+    const featureGates = require('../config/feature-gates');
+    const live = jest.spyOn(featureGates, 'traceReuseLive');
+    const map = jest.spyOn(featureGates, 'isEnabled');
+    live.mockReturnValue(false); map.mockReturnValue(true);
+    expect(reuseLimit.skip()).toBe(true);
+    live.mockReturnValue(true); map.mockReturnValue(false);
+    expect(reuseLimit.skip()).toBe(true);
+    live.mockReturnValue(true); map.mockReturnValue(true);
+    expect(reuseLimit.skip()).toBe(false);
+    live.mockRestore(); map.mockRestore();
+  });
 });

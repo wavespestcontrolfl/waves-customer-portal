@@ -1819,12 +1819,16 @@ router.get('/:id/treatment-zone/last', async (req, res, next) => {
 // fence, the completed-visit refusal and the capture check all apply.
 // A copy reads and re-uploads pictures, so the route has its own tight limit
 // (one tap per visit is the honest cadence; Codex security P2 r7 on #6175).
+const traceReuseOn = () => featureGates.traceReuseLive() && featureGates.isEnabled('treatmentZoneMap');
 const traceReuseLimiter = require('express-rate-limit')({
   windowMs: 60 * 1000,
   max: 12,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  // Dark means absent: with either gate off the limiter neither counts nor
+  // answers, so the route says 404 every time, never 429 (Codex P2 r8 on #6175).
+  skip: () => !traceReuseOn(),
   message: { error: 'Too many copies at once. Trace this visit by hand.', code: 'reuse_rate_limited' },
 });
 router.post('/:id/treatment-zone/reuse', traceReuseLimiter, async (req, res, next) => {
