@@ -203,6 +203,66 @@ describe('the estimate page classifies an add-on row by its key, not its name', 
     expect(preserved).toEqual([expect.objectContaining({ service: 'area_addon', addOnKey: 'fire_ant_yard', catalogServiceKey: 'area_addon_fire_ant_yard', price: 99 })]);
   });
 
+  describe('a manual discount never cuts an add-on row on the one-time choice path (Codex round 5 P1)', () => {
+    const engineWith = (manualDiscount) => estimate(
+      [{ key: 'web_sweep' }, { key: 'fire_ant_yard', areaSqFt: 3000 }],
+      { selected: ['PEST'], options: { manualDiscount } },
+    );
+    const pestEstimate = { show_one_time_option: true };
+    const choice = (estData) => ({
+      amount: publicRoute.oneTimeChoiceAmountForEstimate(pestEstimate, estData),
+      list: publicRoute.acceptedOneTimeChoiceListForEstimate(pestEstimate, estData),
+    });
+    const addOnPrices = (list) => Object.fromEntries(list.filter((r) => r.service === 'area_addon').map((r) => [r.addOnKey, r.price]));
+
+    test.each([
+      ['a percentage', { type: 'PERCENT', value: 10, label: 'Ten percent off' }],
+      ['a fixed amount', { type: 'FIXED', value: 50, label: 'Fifty off' }],
+    ])('%s keeps every add-on row at the engine price and out of the discount base', (_label, manualDiscount) => {
+      const { estData, mapped } = engineWith(manualDiscount);
+      const enginePrices = Object.fromEntries(mapped.oneTime.items.filter((r) => r.service === 'area_addon').map((r) => [r.addOnKey, r.price]));
+      expect(enginePrices).toEqual({ web_sweep: 89, fire_ant_yard: 99 });
+      // The engine took nothing from the add-ons: their rows sum to the full price.
+      expect(Object.values(enginePrices).reduce((a, b) => a + b, 0)).toBe(188);
+      const { amount, list } = choice(estData);
+      expect(addOnPrices(list)).toEqual(enginePrices);
+      expect(list.filter((r) => r.service === 'area_addon').every((r) => r.grossPrice === undefined && r.manualDiscountApplied === undefined)).toBe(true);
+      const pestRow = list.find((r) => r.service === 'one_time_pest');
+      expect(amount).toBe(Math.round((pestRow.price + 89 + 99) * 100) / 100);
+    });
+
+    test('rows mixed with a discountable specialty: only the specialty is cut, and the cut is the whole slice', () => {
+      const { applyManualOneTimeDiscountToChoiceRows: apply } = publicRoute;
+      const roach = { service: 'pest_initial_roach', name: 'Initial Roach Knockdown', label: 'Initial Roach Knockdown', price: 200 };
+      const sweep = { service: 'area_addon', addOnKey: 'web_sweep', name: 'Web Sweep', label: 'Web Sweep', price: 59 };
+      const ants = { service: 'area_addon', addOnKey: 'fire_ant_yard', name: 'Fire Ant Yard Treatment', label: 'Fire Ant Yard Treatment', price: 99 };
+      const percent = apply([sweep, roach, ants], { type: 'PERCENT', value: 10 });
+      expect(percent.map((r) => r.price)).toEqual([59, 180, 99]);
+      expect(percent[1]).toMatchObject({ grossPrice: 200, manualDiscountApplied: 20 });
+      expect(percent[0]).toBe(sweep);
+      expect(percent[2]).toBe(ants);
+      // FIXED uses the engine's slice, capped to the discountable rows only (never to the add-ons too).
+      expect(apply([sweep, roach, ants], { type: 'FIXED', value: 500, oneTimeAmount: 40 }).map((r) => r.price)).toEqual([59, 160, 99]);
+      expect(apply([sweep, roach, ants], { type: 'FIXED', value: 500, oneTimeAmount: 999 }).map((r) => r.price)).toEqual([59, 0, 99]);
+    });
+
+    test('an add-on-only list has nothing to discount and comes back untouched', () => {
+      const { applyManualOneTimeDiscountToChoiceRows: apply } = publicRoute;
+      const rows = [{ service: 'area_addon', addOnKey: 'web_sweep', price: 59 }, { service: 'area_addon', addOnKey: 'fire_ant_yard', price: 99 }];
+      for (const manualDiscount of [{ type: 'PERCENT', value: 25 }, { type: 'FIXED', value: 40, oneTimeAmount: 40 }]) {
+        expect(apply(rows, manualDiscount)).toBe(rows);
+      }
+    });
+
+    test('an add-on-only estimate with a manual discount keeps the engine\'s price and total', () => {
+      for (const manualDiscount of [{ type: 'PERCENT', value: 25 }, { type: 'FIXED', value: 40 }]) {
+        const { mapped } = estimate([{ key: 'web_sweep' }, { key: 'fire_ant_yard', areaSqFt: 3000 }], { options: { manualDiscount } });
+        expect(mapped.oneTime.items.map((r) => r.price)).toEqual([89, 99]);
+        expect(mapped.oneTime.total).toBe(188);
+      }
+    });
+  });
+
   test('the render rows and the acceptance list keep the add-on fields', () => {
     const rendered = publicRoute.oneTimeItemsForRender({}, estData);
     expect(rendered).toHaveLength(6);

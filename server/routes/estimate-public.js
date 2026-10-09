@@ -20019,10 +20019,13 @@ function oneTimePestChoiceAmountForEstimate(estimate = {}, estData = {}, pricing
 // total drives the accept/charge amount — never quotes or bills the gross fee.
 // PERCENT recomputes exactly on the carried subtotal; FIXED uses the engine's
 // one-time slice capped to that subtotal. Rows are reduced proportionally with
-// the last row absorbing the rounding remainder.
+// the last row absorbing the rounding remainder. An area add-on row is never
+// discountable (the engine stamps it discountable:false): it stays out of the
+// subtotal and the redistribution and keeps the engine's price.
 function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null) {
   if (!Array.isArray(rows) || rows.length === 0 || !manualDiscount) return rows;
-  const subtotal = rows.reduce((sum, r) => Math.round((sum + Number(r.price || 0)) * 100) / 100, 0);
+  const targets = rows.filter((row) => !isAreaAddOnItem(row));
+  const subtotal = targets.reduce((sum, r) => Math.round((sum + Number(r.price || 0)) * 100) / 100, 0);
   if (!(subtotal > 0)) return rows;
   const value = Number(manualDiscount.value);
   let discount = 0;
@@ -20035,9 +20038,10 @@ function applyManualOneTimeDiscountToChoiceRows(rows = [], manualDiscount = null
   discount = Math.min(subtotal, discount);
   if (!(discount > 0)) return rows;
   let remaining = discount;
-  return rows.map((row, i) => {
+  return rows.map((row) => {
+    if (isAreaAddOnItem(row)) return row;
     const price = Number(row.price || 0);
-    const cut = i === rows.length - 1
+    const cut = row === targets[targets.length - 1]
       ? remaining
       : Math.round(discount * (price / subtotal) * 100) / 100;
     remaining = Math.round((remaining - cut) * 100) / 100;
