@@ -61,7 +61,10 @@ const {
 } = require('../services/visit-station-facts');
 const router = require('../routes/admin-dispatch');
 
-const answer = (json) => ({ ok: true, json });
+// A model answer as the schema requires it: both lists. A test that needs an
+// answer WITHOUT the unresolved list uses rawAnswer.
+const rawAnswer = (json) => ({ ok: true, json });
+const answer = (json) => rawAnswer(json && Array.isArray(json.exceptions) && !('unresolved' in json) ? { ...json, unresolved: [] } : json);
 // A termite_stations row as the registry holds it.
 const row = (number, extra = {}) => ({ id: `st-${number}`, station_number: number, program: 'termite', is_active: true, ...extra });
 const ROSTER = [row(1), row(2), row(3), row(4), row(7)];
@@ -95,7 +98,7 @@ describe('which forms the sheet reads stations for', () => {
 });
 
 describe('verifyStationExceptions: the code verifies what the model heard, and fails closed', () => {
-  const run = (exceptions, note = NOTE, stations = ROSTER, opts = { program: 'termite' }) => verifyStationExceptions({ exceptions }, note, stations, opts);
+  const run = (exceptions, note = NOTE, stations = ROSTER, opts = { program: 'termite' }, unresolved = []) => verifyStationExceptions({ exceptions, unresolved }, note, stations, opts);
   // The exceptions that stood; and the count of those that did not.
   const kept = (...args) => run(...args).exceptions;
   const dropped = (...args) => run(...args).unresolved;
@@ -119,7 +122,7 @@ describe('verifyStationExceptions: the code verifies what the model heard, and f
   });
 
   test('an answer with no exceptions is clean: nothing was named, nothing is unresolved', () => {
-    expect(run([])).toEqual({ exceptions: [], unresolved: 0 });
+    expect(run([])).toEqual({ exceptions: [], unresolved: 0, unresolvedQuotes: [] });
   });
 
   test('a station number the property does not have is unresolved (a wrong number)', () => {
@@ -204,11 +207,71 @@ describe('verifyStationExceptions: the code verifies what the model heard, and f
 
   test('junk in the answer is unresolved, never an error and never clean', () => {
     for (const json of [null, {}, { exceptions: 'x' }]) {
-      expect(verifyStationExceptions(json, NOTE, ROSTER, { program: 'termite' })).toEqual({ exceptions: [], unresolved: 1 });
+      expect(verifyStationExceptions(json, NOTE, ROSTER, { program: 'termite' })).toEqual({ exceptions: [], unresolved: 1, unresolvedQuotes: [] });
     }
-    expect(verifyStationExceptions({ exceptions: [null, 4, {}] }, NOTE, ROSTER, { program: 'termite' })).toEqual({ exceptions: [], unresolved: 3 });
+    expect(verifyStationExceptions({ exceptions: [null, 4, {}], unresolved: [] }, NOTE, ROSTER, { program: 'termite' })).toEqual({ exceptions: [], unresolved: 3, unresolvedQuotes: [] });
     unresolvedOnly([item('4', 'activity', 'station 4 had activity')]);
     unresolvedOnly([item(4.5, 'activity', 'station 4 had activity')]);
+  });
+});
+
+// The inverse hole (push audit P1): what the tech said about a station that has no
+// number is REPORTED by the model, never dropped, and code does not guess.
+describe('what the model could not place', () => {
+  const CORNER = "Checked them all. I couldn't check the back corner station, the gate was locked.";
+  const verify = (json, note = CORNER) => verifyStationExceptions(json, note, ROSTER, { program: 'termite' });
+
+  test('a remark with no station number, in the note word for word, is unresolved', () => {
+    const result = verify({ exceptions: [], unresolved: [{ quote: "I couldn't check the back corner station" }] });
+    expect(result).toMatchObject({ exceptions: [], unresolved: 1 });
+    expect(result.unresolvedQuotes).toEqual(["i couldn't check the back corner station"]);
+  });
+
+  test('an unresolved quote that is not in the note is ignored: a hallucinated one cannot hold the sheet', () => {
+    expect(verify({ exceptions: [], unresolved: [{ quote: 'the side yard station was flooded' }] })).toMatchObject({ unresolved: 0, unresolvedQuotes: [] });
+    expect(verify({ exceptions: [], unresolved: [{ quote: 'ok' }, null, {}, { quote: 7 }] })).toMatchObject({ unresolved: 0 });
+  });
+
+  test('numbered and unresolved together: the verified ones stand beside the hold', () => {
+    const note = "Station 4 had activity. I couldn't check the back corner station.";
+    const result = verify({ exceptions: [item(4, 'activity', 'station 4 had activity')], unresolved: [{ quote: "couldn't check the back corner station" }] }, note);
+    expect(result.exceptions.map((e) => e.number)).toEqual([4]);
+    expect(result.unresolved).toBe(1);
+  });
+
+  test('the same words reported twice are one remark', () => {
+    const quote = "couldn't check the back corner station";
+    expect(verify({ exceptions: [], unresolved: [{ quote }, { quote }] }).unresolved).toBe(1);
+  });
+
+  test('an answer without the unresolved list is never a clean read', () => {
+    expect(verify({ exceptions: [] })).toMatchObject({ unresolved: 1 });
+    expect(verify({ exceptions: [], unresolved: 'none' })).toMatchObject({ unresolved: 1 });
+  });
+
+  test('the schema requires the list, with no numeric bounds, and the prompt forbids dropping a remark', async () => {
+    const schema = stationFactsSchema();
+    expect(schema.required).toEqual(['exceptions', 'unresolved']);
+    expect(schema.properties.unresolved.items).toEqual({ type: 'object', properties: { quote: { type: 'string' } }, required: ['quote'], additionalProperties: false });
+    dispatchWithFallback.mockResolvedValue(answer({ exceptions: [] }));
+    await readStationExceptions({ note: CORNER, stations: ROSTER, program: 'termite' });
+    const call = dispatchWithFallback.mock.calls[0][1];
+    expect(call.system).toContain('never drop what you cannot place');
+    expect(call.system).not.toContain('leave it out when unsure');
+    expect(call.system).not.toContain('list nothing for it');
+    expect(call.promptVersion).toBe('visit-station-facts-v2');
+  });
+
+  test('the reader: the corner station holds; a hallucinated remark does not; a clean note reads; a missing key fails', async () => {
+    const read = () => readStationExceptions({ note: CORNER, stations: ROSTER, program: 'termite' });
+    dispatchWithFallback.mockResolvedValue(rawAnswer({ exceptions: [], unresolved: [{ quote: "I couldn't check the back corner station" }] }));
+    expect(await read()).toMatchObject({ status: 'unresolved', exceptions: [], unresolved: 1 });
+    dispatchWithFallback.mockResolvedValue(rawAnswer({ exceptions: [], unresolved: [{ quote: 'station nine was missing' }] }));
+    expect(await read()).toMatchObject({ status: 'read', unresolved: 0 });
+    dispatchWithFallback.mockResolvedValue(rawAnswer({ exceptions: [], unresolved: [] }));
+    expect(await read()).toMatchObject({ status: 'read', exceptions: [] });
+    dispatchWithFallback.mockResolvedValue(rawAnswer({ exceptions: [] }));
+    expect(await read()).toMatchObject({ status: 'failed', exceptions: [] });
   });
 });
 
@@ -343,6 +406,24 @@ describe('POST /:serviceId/typed-facts with the sheet\'s stations', () => {
     expect(res.body.stationExceptions.map((e) => [e.id, e.status])).toEqual([['st-4', 'activity'], ['st-7', 'serviced']]);
     // The registry was read for THIS customer's active stations.
     expect(calls).toContainEqual({ table: 'termite_stations', clause: { customer_id: 'cust-1', is_active: true } });
+  });
+
+  test('a remark the model could not place is a failed read, "unresolved"; a numbered one beside it is still returned; a missing list is failed', async () => {
+    const note = "Station 4 had activity. I couldn't check the back corner station.";
+    const send = async (json) => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER);
+      dispatchWithFallback.mockImplementation(async (_policy, request) => (
+        String(request.system).includes('station number') ? rawAnswer(json) : answer(TYPED_FIELDS)
+      ));
+      return (await invoke({ serviceId: 'svc-1' }, { note, stations: SHEET_STATIONS })).body;
+    };
+    const held = await send({ exceptions: [item(4, 'activity', 'station 4 had activity')], unresolved: [{ quote: "couldn't check the back corner station" }] });
+    expect(held).toMatchObject({ stationRead: 'failed', stationReadDetail: 'unresolved' });
+    expect(held.stationExceptions.map((e) => e.number)).toEqual([4]);
+    const invented = await send({ exceptions: [item(4, 'activity', 'station 4 had activity')], unresolved: [{ quote: 'station nine was flooded' }] });
+    expect(invented).toMatchObject({ stationRead: 'read' });
+    const missing = await send({ exceptions: [item(4, 'activity', 'station 4 had activity')] });
+    expect(missing).toMatchObject({ stationRead: 'failed', stationReadDetail: 'failed', stationExceptions: [] });
   });
 
   test('something the model returned that did not verify is a failed read, "unresolved", with the verified exceptions beside it', async () => {

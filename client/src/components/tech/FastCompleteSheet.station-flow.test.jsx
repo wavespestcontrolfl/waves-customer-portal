@@ -676,3 +676,36 @@ describe('the completion is bound to the stations the sheet checked', () => {
     expect(body.stationRosterSeen).toHaveLength(4);
   }, 40000);
 });
+
+// Push audit P1 on #6205: a remark with no station number ("I couldn't check the
+// back corner station") comes back as an unresolved read with NO numbered
+// exception. Nothing is marked, nothing is asserted, and the hand check goes on.
+describe('a station remark with no number', () => {
+  const CORNER_NOTE = 'Checked them all. I couldn’t check the back corner station.';
+  const corner = { ...TERMITE_READ, stationRead: 'failed', stationReadDetail: 'unresolved', stationExceptions: [] };
+
+  test('holds with nothing asserted; the tech marks the station by hand and confirms, and the hand marks are sent', async () => {
+    const request = makeRequest({ typedFacts: corner });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: CORNER_NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText(/Couldn’t match everything you said about the stations\. Mark them by hand and confirm\./, {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')).toEqual([]);
+    expect(within(stationsCard()).queryByText(/all OK/)).toBeNull();
+    expect(within(stationsCard()).queryByRole('group', { name: 'Flagged stations' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+    // Station 4 is the back corner one: no access, by hand.
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Flag a station' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 4' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 4: Activity' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 4: Serviced' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Stations checked by hand' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 4, status: 'inaccessible' }]);
+    const body = await send(request);
+    expect(body.termiteStations.map((entry) => entry.status)).toEqual(['ok', 'ok', 'ok', 'inaccessible']);
+    expect(body.structuredFindings.values).toMatchObject({ stations_checked: '3', stations_inaccessible: '1' });
+  }, 40000);
+});
