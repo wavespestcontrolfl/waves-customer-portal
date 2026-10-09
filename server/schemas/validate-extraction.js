@@ -180,7 +180,14 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // prompt rule said a wrong number is not spam; every model followed the description. A
 // wrong number is now false (lead_quality "wrong_number" carries it). No field added or
 // removed; the version marks rows written under the narrower meaning.
-const SCHEMA_VERSION = '1.26.0';
+// 1.27.0: scheduling.callback_window_start/_end change FORM. They were `format: time`,
+// which this validator reads as a time with seconds and an offset ("14:00:00-04:00"). The
+// model wrote another form on most callback calls, the form check failed and the call went
+// to the fallback model; the one form that passed was a form the callback reader
+// (call-commitments callbackDueAt) could not turn into a due time. Both fields are now an
+// Eastern wall-clock time with an optional date and no offset. The persisted schema also
+// accepts the old offset form, so older rows still validate. No field added or removed.
+const SCHEMA_VERSION = '1.27.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

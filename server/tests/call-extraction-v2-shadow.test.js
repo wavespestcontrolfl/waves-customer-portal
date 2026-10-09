@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v25');
-    expect(PROMPT_HASH).toMatch(/^v25-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v26');
+    expect(PROMPT_HASH).toMatch(/^v26-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
@@ -379,9 +379,67 @@ describe('meta.is_spam: a wrong number is not spam (schema 1.26.0)', () => {
   });
 });
 
+// A callback call failed the form check on most runs: the two fields were
+// `format: time`, which the validator reads as "14:00:00-04:00" only, while the
+// model wrote "14:00" and the callback reader wants a bare time or a datetime.
+describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema 1.27.0)', () => {
+  const { validateModelOutput, validatePersisted } = require('../schemas/validate-extraction');
+  const field = (file, name) => require(`../schemas/${file}`)
+    .properties.scheduling.properties[name];
+  const formErrors = (result) => (result.errors || [])
+    .filter((e) => /callback_window/.test(e.instancePath));
+  const withWindow = (start, end = null) => ({ scheduling: { callback_window_start: start, callback_window_end: end } });
+
+  test.each(['callback_window_start', 'callback_window_end'])('%s has a pattern and a description in both schemas, and no `time` format', (name) => {
+    for (const file of ['call-extraction.model-output.schema.json', 'call-extraction.persisted.schema.json']) {
+      const def = field(file, name);
+      expect(def.format).toBeUndefined();
+      expect(typeof def.pattern).toBe('string');
+      expect(def.description).toMatch(/Eastern wall-clock time in 24-hour form|same form as callback_window_start/);
+    }
+  });
+
+  test.each(['14:00', '09:30', '14:00:00', '2026-10-12T14:00', '2026-10-12T09:00:00'])('the model output accepts %s', (value) => {
+    expect(formErrors(validateModelOutput(withWindow(value, value)))).toEqual([]);
+  });
+
+  test.each(['2 PM', '14', '25:00', '14:00:00-04:00', '14:00Z', '2026-10-12T14:00:00-04:00', '2026-10-12', 'afternoon'])('the model output rejects %s', (value) => {
+    expect(formErrors(validateModelOutput(withWindow(value))).length).toBeGreaterThan(0);
+  });
+
+  test.each(['14:00', '2026-10-12T14:00', '14:00:00-04:00', '14:00:00Z', '09:00:00.000-05:00', '2026-09-02T09:00:00-04:00'])('the persisted schema accepts %s (new form and older rows)', (value) => {
+    expect(formErrors(validatePersisted(withWindow(value, value)))).toEqual([]);
+  });
+
+  test('null stays valid in both schemas', () => {
+    expect(formErrors(validateModelOutput(withWindow(null)))).toEqual([]);
+    expect(formErrors(validatePersisted(withWindow(null)))).toEqual([]);
+  });
+
+  test('the prompt gives the form and keeps a part of day out of the field', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    expect(prompt).toMatch(/callback_window_start \/ callback_window_end: set ONLY when a time for a CALLBACK was stated/);
+    expect(prompt).toMatch(/24-hour form with NO offset and NO "Z"/);
+    expect(prompt).toMatch(/A part of day with no hour \("this afternoon"\) is NOT a time/);
+  });
+});
+
+// Every model in the 2026-10-08 test called a ready-to-buy caller outside the
+// service area "hot": the rule listed the values with no order between them.
+describe('lead_quality: the disposition values win (prompt v26)', () => {
+  test('the prompt states the order and the out-of-area example', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    expect(prompt).toMatch(/lead_quality order: "wrong_number", "spam_or_solicitation" and "out_of_service_area"/);
+    expect(prompt).toMatch(/they win over the interest values/);
+    expect(prompt).toMatch(/ready to buy today is "out_of_service_area", not "hot"/);
+  });
+});
+
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.26.0');
+    expect(SCHEMA_VERSION).toBe('1.27.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

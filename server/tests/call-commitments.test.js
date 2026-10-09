@@ -183,6 +183,23 @@ describe('deriveCommitmentsFromExtraction (V2 seeds)', () => {
     expect(unpinned.description).toContain('asked for 09:00');
   });
 
+  test('a callback time in the old offset form (rows before schema 1.27.0) reads as the same ET wall clock', () => {
+    const at = (value, start) => derive({ v2: { ...v2, scheduling: { ...v2.scheduling, callback_window_start: value } }, callStartedAt: start }).find((i) => i.kind === 'callback');
+    const nine = new Date('2026-09-02T09:00:00-04:00').toISOString();
+    expect(at('09:00:00-04:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    // The season slipped (-05:00 in September): the spoken hour still stands.
+    expect(at('09:00:00-05:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    expect(at('09:00:00', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: nine, due_basis: 'suggested' });
+    // A UTC time is not a bare ET wall clock: no invented instant.
+    expect(at('09:00:00Z', '2026-09-02T08:00:00-04:00')).toMatchObject({ due_at: null, due_basis: null });
+  });
+
+  test('a callback datetime with no offset (the form the model writes when a day was named) is that ET wall clock', () => {
+    const named = { ...v2, scheduling: { ...v2.scheduling, callback_window_start: '2026-09-04T14:00' } };
+    const cb = derive({ v2: named, callStartedAt: '2026-09-02T08:00:00-04:00' }).find((i) => i.kind === 'callback');
+    expect(cb).toMatchObject({ due_at: new Date('2026-09-04T14:00:00-04:00').toISOString(), due_basis: 'stated' });
+  });
+
   test('a callback the caller asked for is a promise only once the agent accepted it: caller-only evidence seeds nothing, and so does the disposition alone (codex gh-r17 P1)', () => {
     const callerOnly = { ...v2, evidence: v2.evidence.filter((e) => !(e.field_path === '/scheduling/callback_window_start' && e.speaker === 'agent')) };
     expect(derive({ v2: callerOnly }).find((i) => i.kind === 'callback')).toBeUndefined();
