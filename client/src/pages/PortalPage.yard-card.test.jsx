@@ -38,7 +38,6 @@ const WEATHER = {
     fungus: { level: 'LOW', color: '#4CAF50', advice: 'x' },
     chinch: { level: 'LOW', color: '#4CAF50', advice: 'x' },
   },
-  irrigationRecommendation: { inches: '0.50', note: 'Warm day' },
 };
 const YARD = {
   available: true, month: 10, monthName: 'October', location: { slug: 'venice-fl', label: 'Venice, FL', city: 'Venice' },
@@ -64,6 +63,8 @@ describe('Local Conditions slot', () => {
     await settle();
     const baseline = standalone.container.innerHTML;
     expect(baseline).toContain('Local Conditions');
+    // The daily irrigation figure is gone (owner 2026-10-09): watering advice is weekly, on the lawn report and the Monday email.
+    expect(baseline).not.toMatch(/Irrigation:|recommended/);
     standalone.unmount();
 
     api.getYardMonth.mockResolvedValue({ available: false });
