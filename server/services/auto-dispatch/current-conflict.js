@@ -18,8 +18,9 @@
  *               services at one address in one hour are one stop for the
  *               technician, grouped or not; the same customer's second
  *               property is a different stop, visit-groups.js canJoin) and,
- *               once there are two technicians, a row assigned to a different
- *               one (owner 2026-10-03: only the same technician or an
+ *               once the schedule is technician-scoped
+ *               (techScopedConfirmActive), a row assigned to a different
+ *               technician (owner 2026-10-03: only the same technician or an
  *               unassigned row counts).
  *
  * The result only lifts the score bar and the drive floor for this visit
@@ -29,7 +30,7 @@
  * A visit with no arrival window is never in conflict here.
  */
 const { toDateStr } = require('./dates');
-const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
+const { occupiedRows, windowsOverlap, techScopedConfirmActive } = require('../scheduling/occupancy');
 
 const FULL_DAY = { start: '00:00', end: '23:59' };
 
@@ -43,8 +44,13 @@ function sameCustomer(row, service) {
   return !!row.customer_id && String(row.customer_id) === String(service.customer_id);
 }
 
-// A row a different technician works is not this technician's stop.
+// A row a different technician works is not this technician's stop — but only
+// once the schedule itself is technician-scoped (occupancy.js
+// techScopedConfirmActive: the multi-tech gate AND capacity mode). Until
+// then occupancy is tech-blind and any overlapping row is a double-booking
+// (Codex #6207 r3 P1).
 function isOtherStop(row, service) {
+  if (!techScopedConfirmActive()) return true;
   return !(row.technician_id && service.technician_id && String(row.technician_id) !== String(service.technician_id));
 }
 

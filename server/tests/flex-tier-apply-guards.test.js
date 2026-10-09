@@ -314,7 +314,7 @@ describe('makeMoveGuard / makeMemberGuard thread the resolved guard mode (Findin
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services as ss') {
         return {
-          leftJoin: () => ({ whereIn: () => ({ select: async () => [sibling] }) }),
+          leftJoin: () => ({ whereIn: () => ({ forShare: () => ({ select: async () => [sibling] }) }) }),
         };
       }
       if (table === 'recurring_plan_alerts') return { where: () => ({ where: () => ({ where: () => ({ whereNull: () => ({ first: async () => null }) }) }) }) };
@@ -470,7 +470,7 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
     };
     const conn = jest.fn((table) => {
       if (table === 'service_visits') return { where: () => ({ first: async () => ({ window_start: '17:00' }) }) };
-      if (table === 'scheduled_services as ss') return { leftJoin: () => ({ whereIn: () => ({ select: async () => [siblingRow] }) }) };
+      if (table === 'scheduled_services as ss') return { leftJoin: () => ({ whereIn: () => ({ forShare: () => ({ select: async () => [siblingRow] }) }) }) };
       if (table === 'recurring_plan_alerts') return { where: () => ({ where: () => ({ where: () => ({ whereNull: () => ({ first: async () => null }) }) }) }) };
       if (table === 'reschedule_log' || table === 'auto_dispatch_audit_logs') {
         const chain = { whereIn: () => chain, where: () => chain, orderBy: () => chain, select: async () => [] };

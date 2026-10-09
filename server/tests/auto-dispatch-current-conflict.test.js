@@ -6,6 +6,10 @@ jest.mock('../services/rebooker', () => ({
   probeMoveConflicts: jest.fn(),
   occupancyProbeEnd: (start, end) => end || `${String(Number(String(start).slice(0, 2)) + 1).padStart(2, '0')}:00`,
 }));
+jest.mock('../services/scheduling/occupancy', () => ({
+  ...jest.requireActual('../services/scheduling/occupancy'),
+  techScopedConfirmActive: jest.fn(() => true),
+}));
 jest.mock('../services/scheduling/blackout-dates', () => ({ isBlackoutDate: jest.fn(async () => false) }));
 
 const rebooker = require('../services/rebooker');
@@ -98,6 +102,13 @@ test('another customer needs no place read', async () => {
   const db = placesDb([]);
   await currentConflict(SERVICE, { ...CTX, db });
   expect(db).not.toHaveBeenCalled();
+});
+
+test('until the schedule is technician-scoped, another technician\'s overlapping stop IS a conflict (Codex r3 P1)', async () => {
+  const occupancy = require('../services/scheduling/occupancy');
+  occupancy.techScopedConfirmActive.mockReturnValueOnce(false);
+  rebooker.probeMoveConflicts.mockResolvedValue({ rows: [row({ technician_id: 't2' })] });
+  expect(await currentConflict(SERVICE, CTX)).toMatchObject({ kind: 'overlap', with: ['o1'] });
 });
 
 test('another technician\'s stop does not count; an unassigned row and an interview do', async () => {

@@ -421,6 +421,21 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       read.mockResolvedValueOnce(null);
       await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict } })({ trx, technicianId: 't1', service: SERVICE }))
         .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('no longer overlaps') });
+      // The conflict's own rows are held (FOR SHARE) before the re-read, so
+      // the other stop cannot move away before this move commits (r3 P2).
+      const locked = [];
+      const lockTrx = jest.fn((table) => {
+        const q = { whereIn: (c, ids) => { locked.push([table, ids]); return q; }, where: (w) => { locked.push([table, w]); return q; }, forShare: () => q, select: async () => [] };
+        return q;
+      });
+      const UUID1 = '11111111-1111-4111-8111-111111111111';
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'overlap', date: '2026-12-07', with: [UUID1, 'interview:a1'] } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      read.mockResolvedValueOnce(null);
+      await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: { sourceConflict: { kind: 'closed_day', date: '2026-11-26' } } })({ trx: lockTrx, technicianId: 't1', service: SERVICE }))
+        .rejects.toMatchObject({ statusCode: 409 });
+      expect(locked).toEqual([['scheduled_services', [UUID1]], ['schedule_blackout_dates', { date: '2026-11-26' }]]);
       // A grouped move runs the guard for each member in turn. The conflict
       // is read once, before the first member moves: afterwards the rest of
       // the unit no longer overlaps, and must still be allowed to follow.

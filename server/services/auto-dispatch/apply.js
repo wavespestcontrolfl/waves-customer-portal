@@ -269,12 +269,29 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination
 // cannot see either. Re-read the conflict here, on the move transaction, with
 // the reader the evaluation used; gone means refuse, and the next run scores
 // the visit on the normal bar (Codex #6207 r1 P2). A read failure refuses too.
+// Hold what the conflict is made of until this move commits: the rebooker
+// locks only the DESTINATION date, so without this the other stop could be
+// moved or cancelled, or the closed day reopened, right after the re-read
+// below (Codex #6207 r3 P2). FOR SHARE on the other stops' rows blocks their
+// update or delete; on the blackout row, its removal. Booked interviews
+// (synthetic `interview:` ids) and a weekly day off have no row to hold.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+async function fenceSourceConflict(trx, sourceConflict) {
+  if (sourceConflict.kind === 'closed_day') {
+    await trx('schedule_blackout_dates').where({ date: sourceConflict.date }).forShare().select('id');
+    return;
+  }
+  const ids = (sourceConflict.with || []).filter((id) => UUID.test(String(id)));
+  if (ids.length) await trx('scheduled_services').whereIn('id', ids).forShare().select('id');
+}
+
 // Read ONCE per move, before the first row is written: the unit mover runs
 // this guard for each member in turn, and after the first member has left,
 // the rest of the unit no longer shows the conflict it is moving away from
 // (pre-push P1). `check.held` carries the first answer to the later members.
 async function assertSourceConflictHolds(trx, service, sourceConflict, refuse, check) {
   if (!sourceConflict || check.held) return;
+  await fenceSourceConflict(trx, sourceConflict);
   const { _internals: { readCurrentConflict } } = require('./candidate-slots');
   const still = await readCurrentConflict(service, { db: trx, conflictMoves: true });
   if (!still) throw refuse(service.id, 'no longer overlaps another stop or sits on a closed day');
@@ -449,6 +466,11 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     const rows = await trx('scheduled_services as ss')
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
       .whereIn('ss.id', siblings.map((m) => m.id))
+      // Held until the move commits: the unit mover's member snapshot and
+      // CAS carry no confirmation flag, so a customer confirmation must not
+      // land between this fresh read (checkMemberEligibility refuses a
+      // confirmed row) and the sibling's write (Codex #6207 r3 P2).
+      .forShare('ss')
       .select('ss.*', 'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
         'c.address_line1 as customer_address_line1', 'c.city as customer_city', 'c.zip as customer_zip',
         'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
