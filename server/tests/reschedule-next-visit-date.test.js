@@ -25,6 +25,17 @@ jest.mock('../services/auto-dispatch/route-tiers', () => ({
   loadReminderFreeze: jest.fn(async () => mockFreeze),
 }));
 
+let mockDeferred = true;
+jest.mock('../services/auto-dispatch/config', () => ({
+  ...jest.requireActual('../services/auto-dispatch/config'),
+  isCustomerRecurringDispatchEnabled: jest.fn(() => mockDeferred),
+}));
+let mockFrozenVisit = false;
+jest.mock('../services/visit-groups', () => ({
+  ...jest.requireActual('../services/visit-groups'),
+  frozenVisitVerdict: jest.fn(async () => ({ frozen: mockFrozenVisit })),
+}));
+
 const SmartRebooker = require('../services/rebooker');
 const router = require('../routes/reschedule-public');
 
@@ -43,18 +54,19 @@ function plan(overrides = {}) {
     { id: 'svc-3', status: 'pending', scheduled_date: '2027-04-15' },
   ].map((row) => ({
     customer_confirmed: false, date_exception: false, date_exception_cadence_date: null,
-    auto_dispatch_locked: false, auto_dispatch_excluded: false, ...row,
+    auto_dispatch_locked: false, auto_dispatch_excluded: false, visit_id: null, ...row,
   }));
   return { service: parent, parent, siblings: rows, ...overrides };
 }
 
-// A read-only connection: .first() answers the service, then the parent;
+// A read-only connection: .first() answers the service, then the parent,
+// then the live-member count of the next visit's stop (when it has one);
 // .select() answers the sibling sweep.
-function connFor({ service, parent, siblings }) {
-  const firsts = [service, parent];
+function connFor({ service, parent, siblings, stopLiveCount = 1 }) {
+  const firsts = [service, parent, { n: stopLiveCount }];
   return () => {
     const chain = {};
-    for (const m of ['where', 'whereRaw', 'whereNotIn', 'orderByRaw']) chain[m] = () => chain;
+    for (const m of ['where', 'whereRaw', 'whereNotIn', 'orderByRaw', 'count']) chain[m] = () => chain;
     chain.first = async () => firsts.shift();
     chain.select = async () => siblings;
     return chain;
@@ -64,6 +76,8 @@ function connFor({ service, parent, siblings }) {
 beforeEach(() => {
   mockNoWeekends = false;
   mockFreeze = { failed: false, frozen: new Set() };
+  mockDeferred = true;
+  mockFrozenVisit = false;
   delete process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE;
   delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
 });
@@ -110,6 +124,47 @@ describe('SmartRebooker.projectNextVisitDates', () => {
     expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(plan()) })).toBeNull();
     mockFreeze = { failed: true, frozen: new Set() };
     expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(plan()) })).toBeNull();
+  });
+
+  test('deferred placement also keeps a next visit that is a reschedule hold', async () => {
+    const p = plan();
+    p.siblings[1] = { ...p.siblings[1], status: 'rescheduled' };
+    expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(p) })).toBeNull();
+  });
+
+  test.each([
+    ['customer-confirmed', { customer_confirmed: true }],
+    ['dispatch-locked', { auto_dispatch_locked: true }],
+    ['a reschedule hold', { status: 'rescheduled' }],
+  ])('without deferred placement the move writes the date on a %s visit, so it is named', async (_label, patch) => {
+    mockDeferred = false;
+    mockFreeze = { failed: false, frozen: new Set(['svc-2']) };
+    const p = plan();
+    p.siblings[1] = { ...p.siblings[1], ...patch };
+    const out = await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(p) });
+    expect(out.byDate).toEqual({ '2026-10-22': '2027-01-28' });
+  });
+
+  test.each([[true], [false]])('a next visit on a stop shared with another live service is never named (deferred placement %s)', async (deferred) => {
+    mockDeferred = deferred;
+    const p = plan({ stopLiveCount: 2 });
+    p.siblings[1] = { ...p.siblings[1], visit_id: 'visit-9' };
+    expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(p) })).toBeNull();
+  });
+
+  test.each([[true], [false]])('a next visit on a frozen visit is never named (deferred placement %s)', async (deferred) => {
+    mockDeferred = deferred;
+    mockFrozenVisit = true;
+    const p = plan();
+    p.siblings[1] = { ...p.siblings[1], visit_id: 'visit-9' };
+    expect(await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(p) })).toBeNull();
+  });
+
+  test('a next visit alone on an open visit is named', async () => {
+    const p = plan();
+    p.siblings[1] = { ...p.siblings[1], visit_id: 'visit-9' };
+    const out = await SmartRebooker.projectNextVisitDates('svc-1', ['2026-10-22'], { conn: connFor(p) });
+    expect(out.byDate).toEqual({ '2026-10-22': '2027-01-28' });
   });
 
   test('a skipped row before it keeps its cadence slot, so the next movable visit is one slot later', async () => {

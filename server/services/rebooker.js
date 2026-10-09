@@ -1255,7 +1255,7 @@ async function loadNextVisitSweep(conn, serviceId) {
     .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
     .whereNotIn('status', ['completed', 'cancelled'])
     .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
   const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
   if (droppedIdx === -1) return null;
   const swept = siblings.slice(droppedIdx);
@@ -1264,16 +1264,37 @@ async function loadNextVisitSweep(conn, serviceId) {
   return { service, parent, swept, nextIdx, next: swept[nextIdx] };
 }
 
-// A later visit the customer's series move leaves where it is. An unreadable
-// reminder state counts as kept, as it does in the move.
-async function nextVisitIsKept(conn, next, now = new Date()) {
-  if (next.customer_confirmed || next.auto_dispatch_locked || next.auto_dispatch_excluded) return true;
+// True when the customer's series move does NOT write the projected date on
+// this later visit, so the page must name no date for it. Mirrors
+// rescheduleSeries for a customer_self_serve move:
+//  - a stop shared with another live service, or a frozen visit: deferred
+//    placement keeps it in place; without deferred placement the move
+//    refuses the whole series. Neither writes the date.
+//  - deferred placement (GATE_CUSTOMER_RECURRING_DISPATCH) also keeps a row
+//    that is not pending/confirmed, is customer-confirmed, is dispatch-locked
+//    or excluded, or has a sendable reminder. An unreadable state counts as
+//    kept, as it does in the move.
+//  - without deferred placement every other movable row takes its date.
+async function nextVisitIsKept(conn, next, { deferred, now = new Date() }) {
   try {
+    if (next.visit_id && await visitStopIsHeld(conn, next.visit_id)) return true;
+    if (!deferred) return false;
+    if (!['pending', 'confirmed'].includes(next.status)) return true;
+    if (next.customer_confirmed || next.auto_dispatch_locked || next.auto_dispatch_excluded) return true;
     const freeze = await require('./auto-dispatch/route-tiers').loadReminderFreeze(conn, [next.id], now);
     return !freeze || freeze.failed || freeze.frozen.has(next.id);
   } catch {
     return true;
   }
+}
+
+async function visitStopIsHeld(conn, visitId) {
+  const live = await conn('scheduled_services').where({ visit_id: visitId })
+    .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
+    .count({ n: 'id' }).first();
+  if (Number(live?.n || 0) >= 2) return true;
+  const verdict = await require('./visit-groups').frozenVisitVerdict(conn, visitId);
+  return !!verdict?.frozen;
 }
 
 class SmartRebooker {
@@ -4363,14 +4384,16 @@ class SmartRebooker {
   // date. The customer reschedule page shows it beside Confirm
   // (GATE_RESCHEDULE_NEXT_VISIT_DATE). Same sibling selection and projector
   // as the move, so the date named is the cadence date the move writes.
-  // Null when there is no later movable visit, or when that visit is a
-  // commitment the sweep keeps in place (customer-confirmed, dispatch-locked
-  // or excluded, reminder already sendable): the page must never name a date
-  // the move will not write.
+  // Null when there is no later movable visit, or when the customer's move
+  // would not write that date on it (nextVisitIsKept): the page must never
+  // name a date the move will not write.
   async projectNextVisitDates(serviceId, candidateDates = [], options = {}) {
     const conn = options.conn || db;
     const sweep = await loadNextVisitSweep(conn, serviceId);
-    if (!sweep || await nextVisitIsKept(conn, sweep.next, options.now)) return null;
+    if (!sweep) return null;
+    // The mode the customer's move runs in (rescheduleSeries reads the same switch).
+    const deferred = require('./auto-dispatch/config').isCustomerRecurringDispatchEnabled();
+    if (await nextVisitIsKept(conn, sweep.next, { deferred, now: options.now })) return null;
     const { service, parent, swept, nextIdx, next } = sweep;
     const currentDate = dateOnly(service.scheduled_date);
     const byDate = {};
