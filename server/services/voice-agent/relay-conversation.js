@@ -3436,7 +3436,9 @@ class RelayConversation {
   _ledgerFailedRound(err, timedOut, modelStartAt) {
     if (err?.billedRound) return this._ledgerRound(err.billedRound, modelStartAt, err.billedRound.errorCode);
     if (timedOut) return this._ledgerRound(null, modelStartAt, `${this._provider}_timeout`);
-    if (err?.name === 'AbortError') return undefined;
+    // The round's own abort signal is the truth: the two SDKs name an abort
+    // differently (AbortError, APIUserAbortError).
+    if (this._controller?.signal?.aborted) return undefined;
     return this._ledgerRound(null, modelStartAt, providerErrorReason(this._provider, err));
   }
 

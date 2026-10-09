@@ -667,7 +667,9 @@ describe('RelayConversation — explicit end after capture', () => {
 
     // barge-in: the caller talked over the reply. Not a failure; nothing is filed.
     recordStreamedMessage.mockClear();
-    const bargedIn = build(async () => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }); });
+    // (whatever the SDK names the error: the round's own abort signal decides)
+    let bargedIn;
+    bargedIn = build(async () => { bargedIn._controller.abort(); throw Object.assign(new Error('Request was aborted.'), { name: 'APIUserAbortError' }); });
     await bargedIn._runLoop('hi').catch(() => {});
     expect(recordStreamedMessage).not.toHaveBeenCalled();
 
