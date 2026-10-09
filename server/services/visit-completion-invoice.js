@@ -203,6 +203,16 @@ async function mintPacketInvoice(args) {
   return parked.length ? { ...result, setupFeeParked: parked } : result;
 }
 
+// The invoices already linked to these members, by the visit or by its service record: the rule behind the mint's
+// `existing_member_invoice` office hand-off, and the combo stop check's up-front refusal
+// (services/combo-fast-complete.js). One predicate, so the two cannot disagree. Returns the query.
+function linkedMemberInvoices(trx, members) {
+  return trx('invoices').where(function linkedMember() {
+    this.whereIn('scheduled_service_id', members.map((member) => member.id))
+      .orWhereIn('service_record_id', members.map((member) => member.record_id));
+  });
+}
+
 async function mintPacketInvoiceInner({ packet, visit, members, customer, trx }) {
   const billed = [];
   const feeReviewCandidates = [];
@@ -246,10 +256,7 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
     // row locks so an unrelated zero-price member does not widen the estimate
     // lock set; then acquire only the stamp lock named by a plausible linked
     // acceptance invoice and re-read the invoice rows under no-wait locks.
-    const peek = await trx('invoices').where(function linkedMember() {
-      this.whereIn('scheduled_service_id', adoptionMembers.map((member) => member.id))
-        .orWhereIn('service_record_id', adoptionMembers.map((member) => member.record_id));
-    }).select('id', 'scheduled_service_id', 'service_record_id', 'title', 'notes');
+    const peek = await linkedMemberInvoices(trx, adoptionMembers).select('id', 'scheduled_service_id', 'service_record_id', 'title', 'notes');
     const candidateEstimateIds = new Set();
     for (const row of peek) {
       const linked = adoptionMembers.find((member) => member.id === row.scheduled_service_id
@@ -272,10 +279,7 @@ async function mintPacketInvoiceInner({ packet, visit, members, customer, trx })
     ? adoptionMembers : billed.map(({ member }) => member);
   if (ownershipMembers.length) {
     try {
-      existing = await trx('invoices').where(function linkedMember() {
-        this.whereIn('scheduled_service_id', ownershipMembers.map((member) => member.id))
-          .orWhereIn('service_record_id', ownershipMembers.map((member) => member.record_id));
-      }).orderBy('id').forUpdate().noWait();
+      existing = await linkedMemberInvoices(trx, ownershipMembers).orderBy('id').forUpdate().noWait();
     } catch (error) { visitBusy(error); }
   }
   if (existing.length) {
@@ -607,4 +611,4 @@ async function createVisitCompletionInvoice(packetId, database = db) {
   return database.isTransaction ? run(database) : database.transaction(run);
 }
 
-module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued };
+module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued, linkedMemberInvoices };

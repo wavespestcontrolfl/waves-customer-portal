@@ -80,7 +80,7 @@ const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
 let mockNotificationRecipientId;
-const GATES = ['GATE_COMBO_FAST_COMPLETE', 'GATE_LAWN_FAST_COMPLETE', 'GATE_VISIT_CLOSEOUT', 'DATA_HYGIENE_VAULT_KEY'];
+const GATES = ['GATE_COMBO_FAST_COMPLETE', 'GATE_FAST_COMPLETE_REPORT', 'GATE_LAWN_FAST_COMPLETE', 'GATE_VISIT_CLOSEOUT', 'DATA_HYGIENE_VAULT_KEY'];
 const savedEnv = Object.fromEntries(GATES.map((name) => [name, process.env[name]]));
 jest.setTimeout(120000);
 
@@ -174,6 +174,7 @@ postgres('a pest + lawn Fast Complete packet on PostgreSQL', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.GATE_COMBO_FAST_COMPLETE = 'true';
+    process.env.GATE_FAST_COMPLETE_REPORT = 'true';
     process.env.GATE_LAWN_FAST_COMPLETE = 'true';
     process.env.GATE_VISIT_CLOSEOUT = 'true';
     sendCustomerMessage.mockImplementation(async (input) => {
@@ -283,5 +284,32 @@ postgres('a pest + lawn Fast Complete packet on PostgreSQL', () => {
     expect(saved.body).toMatchObject({ code: 'lawn_fast_not_eligible', reason: 'grouped_visit' });
     expect(await mockPg('visit_completion_packets').where({ visit_id: grouped.visitId })).toHaveLength(0);
     expect(await mockPg('service_records').whereIn('scheduled_service_id', [grouped.pestId, grouped.lawnId])).toHaveLength(0);
+  });
+
+  test('an invoice created for a member after the bodies were built refuses the packet up front (no office hand-off) and records nothing', async () => {
+    const grouped = await makeStop({ grouped: true });
+    worlds.push(grouped);
+    const bodies = await sheetBodies(grouped);
+    await mockPg('invoices').insert({ customer_id: grouped.customerId, scheduled_service_id: grouped.pestId, invoice_number: `WPC-FIX-${Date.now()}`, token: randomUUID().replace(/-/g, ''), status: 'draft', total: 60, subtotal: 60 });
+    const saved = await saveVisitCompletionPacket({
+      visitId: grouped.visitId, idempotencyKey: randomUUID(), actor: { techRole: 'technician', technicianId: grouped.techId },
+      items: [{ serviceId: grouped.pestId, body: bodies.pest }, { serviceId: grouped.lawnId, body: bodies.lawn }],
+    });
+    expect(saved.status).toBe(409);
+    expect(saved.body).toMatchObject({ code: 'lawn_fast_not_eligible', reason: 'grouped_visit' });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: grouped.visitId })).toHaveLength(0);
+  });
+
+  test('the pest report gate turned off refuses the packet', async () => {
+    const grouped = await makeStop({ grouped: true });
+    worlds.push(grouped);
+    const bodies = await sheetBodies(grouped);
+    process.env.GATE_FAST_COMPLETE_REPORT = 'false';
+    const saved = await saveVisitCompletionPacket({
+      visitId: grouped.visitId, idempotencyKey: randomUUID(), actor: { techRole: 'technician', technicianId: grouped.techId },
+      items: [{ serviceId: grouped.pestId, body: bodies.pest }, { serviceId: grouped.lawnId, body: bodies.lawn }],
+    });
+    expect(saved.status).toBe(409);
+    expect(saved.body).toMatchObject({ reason: 'grouped_visit' });
   });
 });

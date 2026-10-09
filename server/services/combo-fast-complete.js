@@ -8,7 +8,7 @@
  * member the lawn Fast Complete rule admits. A client can ask (header X-Combo-Stop: 1); only this decides.
  */
 
-const { comboFastCompleteLive } = require('../config/feature-gates');
+const { comboFastCompleteLive, fastCompleteReportLive } = require('../config/feature-gates');
 
 const COMBO_STOP_HEADER = 'x-combo-stop';
 // A combined stop is exactly two open services (one pest, one lawn): the container sheet is built for no more.
@@ -47,11 +47,20 @@ function pestReportFlowAdmits(profile, serviceType, isCallback) {
     && require('./visit-lane-facts').voiceLaneFor({ profile, serviceType }) == null;
 }
 
+// Does any invoice already hang on these members? The mint's own `existing_member_invoice` predicate
+// (visit-completion-invoice.js linkedMemberInvoices); a failed read counts as invoiced (fail closed).
+async function membersInvoiced(knex, memberIds) {
+  const { linkedMemberInvoices } = require('./visit-completion-invoice');
+  const found = await linkedMemberInvoices(knex, memberIds.map((id) => ({ id, record_id: null }))).first('id').catch(() => ({}));
+  return !!found;
+}
+
 // Exactly one pest member and one lawn member, each judged by the canonical server rule: the pest report flow
 // above, and resolveLawnFastEligibility (the grouped reason set aside; no recursion: it is called without a
-// grouped ask). Two reads, one per member.
+// grouped ask). The pest report flow gate is read live (the kill switch holds against a stale client), and no
+// invoice may hang on either member yet (an invoiced stop is the long closeout form's). Reads per member.
 async function pairAdmitted(knex, memberIds, allowStatuses) {
-  if (memberIds.length !== COMBO_STOP_MEMBERS) return false;
+  if (memberIds.length !== COMBO_STOP_MEMBERS || !fastCompleteReportLive()) return false;
   const { resolveLawnFastEligibility } = require('./lawn-fast-complete');
   const { serviceHasLinkedProject } = require('./pest-recap');
   // Two reads per member on the caller's connection: the eligibility/profile read, and the project link (the office
@@ -61,6 +70,7 @@ async function pairAdmitted(knex, memberIds, allowStatuses) {
     Promise.all(memberIds.map((id) => serviceHasLinkedProject(id, knex))),
   ]);
   if (verdicts.some((verdict) => !verdict.ok) || linked.some(Boolean)) return false;
+  if (await membersInvoiced(knex, memberIds)) return false;
   const lawn = verdicts.filter((verdict) => verdict.profile?.category === 'lawn_care' && LAWN_REASONS_SET_ASIDE.includes(verdict.reason));
   const pest = verdicts.filter((verdict) => pestReportFlowAdmits(verdict.profile, verdict.svc?.service_type, verdict.svc?.is_callback));
   return lawn.length === 1 && pest.length === 1;
