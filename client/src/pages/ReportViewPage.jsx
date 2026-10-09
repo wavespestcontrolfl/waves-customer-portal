@@ -2684,13 +2684,14 @@ function LawnYourPart({ data, mode, token, othersCarryInstruction = false }) {
   const context = data.dynamicContext?.reentry;
   const nowMs = useReadinessNow(context, mode);
   const reentry = context ? reentryRow(context, readinessView(context, mode, nowMs)) : null;
-  const timed = reentryIsTimed(context);
-  // The re-entry card records that the customer saw its timer; this card replaces it, so TIMED readiness
-  // content records the same event under the same conditions. A condition (no clock) has no timer to view.
+  // The re-entry card records that the customer saw its timer; this card replaces it, so the event is sent
+  // when this card RENDERS timed readiness content (a row for timed targets), once. A condition has no timer;
+  // a finished timer with no pet advisory renders no row, so nothing was seen and nothing is recorded.
+  const timedShown = reentryIsTimed(context) && reentry !== null;
   useEffect(() => {
-    if (mode !== 'live' || !timed) return;
+    if (mode !== 'live' || !timedShown) return;
     trackReportEvent(token, 'reentry_timer_viewed');
-  }, [context, mode, token, timed]);
+  }, [context, mode, token, timedShown]);
   return (
     <LawnYourPartCard
       banner={data.reportV2?.banner}

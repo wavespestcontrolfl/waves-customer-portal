@@ -185,11 +185,11 @@ function WhatWeDid({ data, slots }) {
 }
 
 // ── (d) photos + findings ───────────────────────────────────────────────────
-function PhotosAndFindings({ data, slots, nowMs }) {
+function PhotosAndFindings({ data, slots, nowMs, printing }) {
   const v2 = data.reportV2;
   const { lead } = v2;
   const hasPhotos = v2.photos?.length || v2.photoSet?.length || v2.photoSummary;
-  const insights = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare, nowMs });
+  const insights = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare, nowMs, printing });
   return (
     <>
       {hasPhotos ? <LawnPhotoStrip photos={v2.photos} photoSet={v2.photoSet} summary={v2.photoSummary} lead /> : null}
@@ -327,7 +327,7 @@ const SECTIONS = {
   plan: ({ slots }) => slots.plan,
   upcoming: ({ slots }) => slots.upcoming,
   nextVisit: (props) => <NextVisit {...props} />,
-  yourPart: ({ data, slots, nowMs }) => cloneElement(slots.yourPart, { othersCarryInstruction: pageCarriesInstruction(data, nowMs) }),
+  yourPart: ({ data, slots, nowMs, printing }) => cloneElement(slots.yourPart, { othersCarryInstruction: pageCarriesInstruction(data, nowMs, printing) }),
   whatWeDid: (props) => <WhatWeDid {...props} />,
   photos: (props) => <PhotosAndFindings {...props} />,
   recap: ({ slots }) => slots.recap,
@@ -379,12 +379,15 @@ function useBannerClock(banner) {
 
 export function LawnLayoutBody({ data, slots }) {
   const nowMs = useBannerClock(data.reportV2?.banner);
-  const banner = bannerRepeatsAftercare(data.reportV2?.banner, data.reportV2?.aftercare, nowMs) ? ' lawn-layout-banner' : '';
+  // The same signal LawnWateringBanner reads (usePrintRequested: the browser's print pass): while printing, the
+  // banner prints its lines even after expiry, so the dedupe must follow it.
+  const printing = usePrintRequested();
+  const banner = bannerRepeatsAftercare(data.reportV2?.banner, data.reportV2?.aftercare, nowMs, printing) ? ' lawn-layout-banner' : '';
   return (
     <PrintContext.Provider value={false}>
       <div className={`lawn-layout${banner}`} style={{ display: 'contents' }}>
         <style>{LAYOUT_CSS}</style>
-        {LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots, nowMs })}</Fragment>)}
+        {LAYOUT_ORDER.map((key) => <Fragment key={key}>{SECTIONS[key]({ data, slots, nowMs, printing })}</Fragment>)}
       </div>
     </PrintContext.Provider>
   );

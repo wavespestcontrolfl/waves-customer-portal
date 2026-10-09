@@ -430,3 +430,25 @@ describe('pageCarriesInstruction', () => {
     expect(pageCarriesInstruction(data, Date.now())).toBe(false);
   });
 });
+
+describe('the banner decision while the page is printing', () => {
+  const banner = { lines: ['Skip your turf watering until today’s treatment has dried.'], expiresAt: '2026-10-09T10:00:00.000Z' };
+  const after = Date.parse('2026-10-09T15:00:00Z');
+
+  it('an expired banner prints its lines again in print, so it carries watering; on screen it does not', () => {
+    expect(bannerCarriesWatering(banner, after)).toBe(false);
+    expect(bannerCarriesWatering(banner, after, true)).toBe(true);
+    expect(bannerCarriesWatering({ lines: [] }, after, true)).toBe(false);
+  });
+
+  it('the finding dedupe, the water card\'s hidden line and the instruction test all follow it', () => {
+    const cards = [{ category: 'water', priority: 1, status: 'watch', customerAction: banner.lines[0] }];
+    expect(insightsWithoutRepeats(cards, { banner, aftercare: {}, nowMs: after })).toBe(cards);
+    expect(insightsWithoutRepeats(cards, { banner, aftercare: {}, nowMs: after, printing: true })[0].customerAction).toBeNull();
+    expect(bannerRepeatsAftercare(banner, { watering: banner.lines[0] }, after)).toBe(false);
+    expect(bannerRepeatsAftercare(banner, { watering: banner.lines[0] }, after, true)).toBe(true);
+    const data = { reportV2: { lead: {}, banner, insights: cards, water: {}, aftercare: {} } };
+    expect(pageCarriesInstruction(data, after)).toBe(true);
+    expect(pageCarriesInstruction(data, after, true)).toBe(false);
+  });
+});

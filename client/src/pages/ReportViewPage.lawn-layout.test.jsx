@@ -10,6 +10,8 @@ import spotOn from './__fixtures__/lawn-layout/spot-on.json';
 import spotOff from './__fixtures__/lawn-layout/spot-off.json';
 import granularOn from './__fixtures__/lawn-layout/granular-on.json';
 import cleanOn from './__fixtures__/lawn-layout/clean-on.json';
+import cleanOff from './__fixtures__/lawn-layout/clean-off.json';
+import granularOff from './__fixtures__/lawn-layout/granular-off.json';
 import tree from './__fixtures__/tree-shrub-report-v2.json';
 
 // GATE_LAWN_REPORT_LAYOUT: the live lawn report in the phone order. The payloads are saved synthetic
@@ -475,6 +477,69 @@ describe('gate on: the call block, the recorded findings and the review card tel
     const standard = renderReport(clone(spotOff), '', 'tok-review-standard');
     await waitForReport();
     expect(standard.container.querySelector('[data-section="review-request-top"]')).not.toBeNull();
+  });
+});
+
+describe('the re-entry timer-view event, state by state (standard card vs the lawn layout)', () => {
+  // Standard ReentryReadinessCard: renders whenever a re-entry context exists and sends the event unless the
+  // context is a frozen condition. Layout Your part card: sends it when it RENDERS timed readiness content
+  // (a row for timed targets); the one state it differs in is "all ready, no advisory", where it renders no
+  // re-entry row at all, so nothing was seen and nothing is recorded.
+  const sent = async (payload, token) => {
+    renderReport(payload, '', token);
+    await waitForReport();
+    await waitFor(() => expect(globalThis.fetch.mock.calls.some(([url]) => String(url).includes('/events'))).toBe(true));
+    const names = globalThis.fetch.mock.calls.filter(([url]) => String(url).includes('/events')).map(([, init]) => JSON.parse(init.body).eventName);
+    cleanup();
+    return names.includes('reentry_timer_viewed');
+  };
+  const ready = (base, advisory) => {
+    const payload = clone(base);
+    if (advisory) payload.dynamicContext.reentry.petAdvisory = 'Keep pets off treated turf until it is fully dry.';
+    return payload;
+  };
+
+  it('pending timer: the standard card sends it, the layout sends it', async () => {
+    expect(await sent(clone(spotOff), 'tok-st-pending')).toBe(true);
+    expect(await sent(clone(spotOn), 'tok-ly-pending')).toBe(true);
+  });
+
+  it('all ready WITH a pet advisory: the standard card sends it, the layout (which renders the advisory row) sends it', async () => {
+    expect(await sent(ready(cleanOff, true), 'tok-st-readyadv')).toBe(true);
+    expect(await sent(ready(cleanOn, true), 'tok-ly-readyadv')).toBe(true);
+  });
+
+  it('all ready WITHOUT an advisory: the standard card sends it (it renders "Ready now"), the layout does not (it renders no re-entry row)', async () => {
+    expect(await sent(ready(cleanOff, false), 'tok-st-readynone')).toBe(true);
+    expect(await sent(ready(cleanOn, false), 'tok-ly-readynone')).toBe(false);
+  });
+
+  it('frozen condition: neither the standard card nor the layout sends it', async () => {
+    expect(await sent(clone(granularOff), 'tok-st-cond')).toBe(false);
+    expect(await sent(clone(granularOn), 'tok-ly-cond')).toBe(false);
+  });
+});
+
+describe('the banner dedupe follows what the banner prints, on screen and in print', () => {
+  it('after expiry the repeats come back; while the page is printing the banner prints its lines again and the dedupe returns', async () => {
+    const payload = clone(spotOn);
+    const [line] = payload.reportV2.banner.lines;
+    payload.reportV2.banner.expiresAt = '2026-10-09T15:10:00.001Z';
+    payload.reportV2.insights[0].customerAction = line;
+    const { container } = renderReport(payload, '', 'tok-print-expiry');
+    await waitForReport();
+    expect(container.querySelector('.lawn-layout-banner')).not.toBeNull();
+    act(() => { vi.setSystemTime(new Date('2026-10-09T15:12:00Z')); });
+    await waitFor(() => expect(container.querySelector('.lawn-layout-banner')).toBeNull(), { timeout: 3000 });
+    expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
+    expect(text(container)).toContain(`Your next step: ${line}`);
+    // the browser's print pass: the banner prints its lines (not the ended note) ...
+    act(() => { window.dispatchEvent(new Event('beforeprint')); });
+    await waitFor(() => expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull());
+    expect(screen.getByTestId('lawn-watering-banner-heading')).toHaveTextContent(line);
+    // ... and the layout drops the same instruction from the finding, so it prints once
+    expect(container.querySelector('.lawn-layout-banner')).not.toBeNull();
+    expect(text(container)).not.toContain(`Your next step: ${line}`);
   });
 });
 

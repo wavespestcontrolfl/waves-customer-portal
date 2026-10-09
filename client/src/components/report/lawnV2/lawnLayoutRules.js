@@ -118,7 +118,7 @@ export function yourPartIsEmpty({ banner, reentry, lines }) {
  * weekly watering plan, a coverage-watch callout, the aftercare watering or re-entry note, the tips from your
  * technician. The card then never says "nothing to do" (and is left out when it would be empty).
  */
-export function pageCarriesInstruction(data, nowMs) {
+export function pageCarriesInstruction(data, nowMs, printing = false) {
   const v2 = data?.reportV2 || {};
   const care = v2.aftercare || {};
   const plainInstruction = alsoSteps(v2.lead).length > 0
@@ -126,12 +126,12 @@ export function pageCarriesInstruction(data, nowMs) {
     || Boolean(v2.water?.weekPlan?.title || v2.water?.coverageWatch)
     || (isText(care.watering) && care.neutral !== true)
     || Boolean(data?.techNote?.tips?.length);
-  return plainInstruction || findingsCarryStep(v2, nowMs);
+  return plainInstruction || findingsCarryStep(v2, nowMs, printing);
 }
 
 // A finding the findings block prints has a next step of its own (after the dedupe against the banner).
-function findingsCarryStep(v2, nowMs) {
-  const cards = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare, nowMs }).filter(Boolean);
+function findingsCarryStep(v2, nowMs, printing) {
+  const cards = insightsWithoutRepeats(v2.insights, { banner: v2.banner, aftercare: v2.aftercare, nowMs, printing }).filter(Boolean);
   const shown = [...cards].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)).slice(0, FINDING_CARD_LIMIT);
   if (!shown.length || shown.every((card) => card.category === 'overall')) return false;
   return shown.some((card) => isText(card.customerAction));
@@ -162,8 +162,11 @@ function withoutSentences(text, drop) {
  * True when the "Your part" card prints the banner's watering lines: the banner has lines and has not
  * ended (an ended banner prints one fine-print note instead of its lines, the way LawnWateringBanner reads it).
  */
-export function bannerCarriesWatering(banner, nowMs = Date.now()) {
+export function bannerCarriesWatering(banner, nowMs = Date.now(), printing = false) {
   if (!bannerWateringLines(banner).length) return false;
+  // A page being printed prints the banner's lines whatever the clock says (LawnWateringBanner: ended is
+  // false when print or the browser print pass is on), so the dedupe follows the same signal.
+  if (printing) return true;
   const expiresMs = banner.expiresAt ? Date.parse(banner.expiresAt) : NaN;
   return !(Number.isFinite(expiresMs) && nowMs > expiresMs);
 }
@@ -174,9 +177,9 @@ export function bannerCarriesWatering(banner, nowMs = Date.now()) {
  * aside). Any other sentence stays: a sprinkler check, a mowing or irrigation-repair step, or the rest of a
  * mixed step. A step that is entirely repeats becomes empty. Only while the card prints the banner's lines.
  */
-export function insightsWithoutRepeats(insights, { banner, aftercare, nowMs } = {}) {
+export function insightsWithoutRepeats(insights, { banner, aftercare, nowMs, printing } = {}) {
   const list = Array.isArray(insights) ? insights : [];
-  if (!bannerCarriesWatering(banner, nowMs)) return list;
+  if (!bannerCarriesWatering(banner, nowMs, printing)) return list;
   const known = sentenceSet([...bannerWateringLines(banner), aftercare?.holdTask, aftercare?.waterInTask, aftercare?.customerTask].filter(isText));
   return list.map((card) => {
     if (!card || !isText(card.customerAction)) return card;
@@ -190,8 +193,8 @@ export function insightsWithoutRepeats(insights, { banner, aftercare, nowMs } = 
  * condition note) says nothing the banner does not: every sentence of aftercare.watering is one of the
  * banner's sentences, and the banner carries them.
  */
-export function bannerRepeatsAftercare(banner, aftercare, nowMs) {
-  if (!bannerCarriesWatering(banner, nowMs) || !isText(aftercare?.watering)) return false;
+export function bannerRepeatsAftercare(banner, aftercare, nowMs, printing) {
+  if (!bannerCarriesWatering(banner, nowMs, printing) || !isText(aftercare?.watering)) return false;
   const shown = sentenceSet(bannerWateringLines(banner));
   return sentencesOf(aftercare.watering).every((sentence) => shown.has(norm(sentence)));
 }
