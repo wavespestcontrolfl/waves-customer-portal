@@ -1770,9 +1770,11 @@ async function retirePinSuggestionsBeforeSweep(trx, loserId) {
   }
 }
 
-async function repointPinSuggestions(trx, table, column, winnerId, loserId) {
+// Registered for customer_pin_suggestions only, whose one customer FK is
+// customer_id: a literal table and column, so this is not a dynamic writer.
+async function repointPinSuggestions(trx, _table, _column, winnerId, loserId) {
   await require('./customer-pin-suggestions').retireOnMerge(trx, loserId);
-  return trx(table).where(column, loserId).update({ [column]: winnerId });
+  return trx('customer_pin_suggestions').where({ customer_id: loserId }).update({ customer_id: winnerId });
 }
 
 const UNIQUE_COLLISION_HANDLERS = {
