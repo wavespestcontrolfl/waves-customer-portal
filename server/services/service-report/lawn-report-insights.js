@@ -16,6 +16,7 @@
 
 const { hasCreditableWaterIn, normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
 const { lawnReportLeadLive } = require('../../config/feature-gates');
+const { deficitAction } = require('./lawn-water-rain');
 
 // The water/damp cards below phrase a CREDITED watering-in generically
 // ("Water in today's application as directed…") rather than quoting the
@@ -26,6 +27,12 @@ const { lawnReportLeadLive } = require('../../config/feature-gates');
 // #5033 r8). This marker lets the hero recognize the generic phrasing
 // without hardcoding the sentence in two files.
 const CREDITED_WATER_IN_PHRASE = 'Water in today’s application as directed';
+
+// The no-plan deficit action. GATE_LAWN_WATER_RAIN (water.rainCard): the card's own advice (the amount per run stays
+// fixed; the wilt signs decide), so the card and the insight never differ.
+function deficitAdvice(water, grassLabel) {
+  return water.rainCard ? deficitAction() : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`;
+}
 
 const STATUS_RANK = { needs_attention: 0, urgent: 0, watch: 1, healthy: 2, strong: 2, tracking: 3 };
 
@@ -110,7 +117,8 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
           ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
           : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
-        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`),
+        // GATE_LAWN_WATER_RAIN: the same advice as the card (the amount per run stays fixed; the wilt signs decide).
+        : deficitAdvice(water, grassLabel)),
       nextVisitPlan: hasPlan
         ? 'Recheck moisture and color next visit.'
         : 'Recheck moisture and color next visit to confirm the added water is landing.',

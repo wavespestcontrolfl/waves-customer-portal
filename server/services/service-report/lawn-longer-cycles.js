@@ -73,12 +73,20 @@ function waterAdviceBlock(prefs, visitDate) {
 // ("No watering change from today's treatment.") and a mow-hold-only banner (state null) ask for nothing.
 const WATERING_BANNER_STATES = Object.freeze(['hold', 'hold_then_water_in', 'water_in']);
 
+const aftercareAsksForWatering = (aftercare) => !!(aftercare && hasText(aftercare.watering) && aftercare.neutral !== true);
+
 // The visit prints a post-treatment watering instruction of its own: a hold or water-in banner (whether or not its
 // clock has run out, so a printed or reopened report never changes), or the label's after-visit watering note.
 function visitCarriesWateringInstruction(reportV2) {
-  const aftercare = reportV2.aftercare;
-  return WATERING_BANNER_STATES.includes(reportV2.banner && reportV2.banner.state)
-    || !!(aftercare && hasText(aftercare.watering) && aftercare.neutral !== true);
+  return WATERING_BANNER_STATES.includes(reportV2.banner && reportV2.banner.state) || aftercareAsksForWatering(reportV2.aftercare);
+}
+
+/**
+ * The same question asked BEFORE the banner exists, of the visit's frozen watering instruction (the banner's state is
+ * the instruction's state) and its aftercare: the rain card (lawn-water-rain.js) decides while the report is built.
+ */
+function instructionCarriesWatering(instruction, aftercare) {
+  return WATERING_BANNER_STATES.includes(instruction && instruction.state) || aftercareAsksForWatering(aftercare);
 }
 
 /**
@@ -88,7 +96,8 @@ function visitCarriesWateringInstruction(reportV2) {
 function longerCyclesField(frozen, reportV2) {
   if (frozen !== true || !reportV2 || !reportV2.water) return {};
   const water = reportV2.water;
-  if (water.weekPlan || water.scheduleUnconfirmed || visitCarriesWateringInstruction(reportV2)) return {};
+  // The rain card (GATE_LAWN_WATER_RAIN) says what to do with the sprinklers this week; the advice is said once.
+  if (water.weekPlan || water.scheduleUnconfirmed || water.rainCard === true || visitCarriesWateringInstruction(reportV2)) return {};
   return { longerCycles: true };
 }
 
@@ -97,4 +106,4 @@ function attachLongerCycles(reportV2, frozen) {
   Object.assign((reportV2 && reportV2.water) || {}, longerCyclesField(frozen, reportV2));
 }
 
-module.exports = { attachLongerCycles, MIN_WATERING_DAYS, sodIsEstablished, longerCyclesDecision, waterAdviceBlock, longerCyclesField };
+module.exports = { attachLongerCycles, instructionCarriesWatering, MIN_WATERING_DAYS, sodIsEstablished, longerCyclesDecision, waterAdviceBlock, longerCyclesField };

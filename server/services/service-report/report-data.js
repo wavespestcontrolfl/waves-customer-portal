@@ -5747,6 +5747,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         customerConcern: structuredCustomerConcern(structured),
         // GATE_LAWN_REPORT_FACTS: the frozen re-entry condition, from the record only (null = the label text as before).
         reentryText: reportFacts.frozenReentryText(service),
+        // GATE_LAWN_WATER_RAIN: the rain card's permission, frozen at completion (null = today's card).
+        rainAdvice: reportFacts.frozenRainAdvice('lawn', service.structured_notes),
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,

@@ -16,6 +16,7 @@ import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import { usePrintRequested } from '../usePrintRequested';
 import Icon from '../../Icon';
 import POLISH_COPY from '../../../../../shared/lawn-report-polish-copy.json';
+import RAIN_COPY from '../../../../../shared/lawn-water-rain-copy.json';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -50,6 +51,8 @@ export const STATUS = {
   too_tall: { label: 'A bit tall', color: COLORS.glassNavy },
   low: { label: 'Below target', color: COLORS.glassNavy },
   high: { label: 'Above target', color: COLORS.glassNavy },
+  // GATE_LAWN_WATER_RAIN: the week's rain alone met the target (a neutral pill, not a schedule change).
+  rain_covered: { label: RAIN_COPY.pillLabel, color: COLORS.glassNavy },
   tracking: { label: 'Tracking', color: COLORS.grayMid },
   not_assessed: { label: 'Not assessed', color: COLORS.grayMid },
 };
@@ -1137,12 +1140,38 @@ function WaterScheduleCta({ water, irrOnFile, href }) {
   );
 }
 
+// GATE_LAWN_WATER_RAIN: once, in a rain-covered week, for a property whose rain sensor field is not true. The server
+// sets water.rainSensorLine; the sentence is fixed (shared/lawn-water-rain-copy.json) and prints on the card only.
+function WaterRainSensorLine({ water }) {
+  if (water.rainSensorLine !== true || water.status !== 'rain_covered') return null;
+  return <p data-testid="lawn-water-rain-sensor" style={{ margin: '10px 0 0', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{RAIN_COPY.sensorLine}</p>;
+}
+
 // GATE_LAWN_REPORT_POLISH: the longer-cycles advice, one fixed sentence, once, only when the server sets
 // water.longerCycles (3 or more watering days on file, no banner / weekly plan / after-visit watering note, no new sod).
 function LongerCyclesLine({ water }) {
   if (water.longerCycles !== true) return null;
   return <div data-testid="lawn-water-longer-cycles" style={{ marginTop: 12, fontSize: 16, color: BODY, lineHeight: 1.5 }}>{POLISH_COPY.longerCyclesLine}</div>;
 }
+
+// Whether the card prints the server's explanation. A weekly plan on the card is the sole watering instruction; with no
+// schedule on file the irrigation-flavored prose is withheld alongside the "Not on file" row. The rain card's sentences
+// (water.rainCard, GATE_LAWN_WATER_RAIN) are about the week's rain and stand without a schedule.
+function explanationPrinted(water, irrOnFile) {
+  if (!water.explanation || (water.weekPlan && water.weekPlan.title)) return false;
+  return water.rainCard === true || irrOnFile || !/irrigat|schedul|sprinkler|total|combined/i.test(water.explanation);
+}
+
+// Where the explanation prints: 'card' (under the status line), 'details' (the lead layout folds an ordinary explanation
+// into "Why this reading"), or null. The rain card's sentences (water.rainCard) are the card's main statement after a wet
+// or dry week, so they stay on the card in the lead layout too.
+function explanationPlace(water, irrOnFile, lead) {
+  if (!explanationPrinted(water, irrOnFile)) return null;
+  return lead && water.rainCard !== true ? 'details' : 'card';
+}
+
+// Running prose is 16px (customer-surface policy); the rain card's sentences are new prose, every other explanation keeps 14px.
+const explanationSize = (water) => (water.rainCard === true ? 16 : 14);
 
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
 export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_HREF, aftercare = null, lead = false, coverageCardShown = false }) {
@@ -1205,7 +1234,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
   const stackedExtent = (hasRain ? rain : 0) + (hasIrr && irrOnFile ? irrigation : 0);
   const axisMax = Math.max(hasTotal ? total : 0, stackedExtent, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
-  const explanationShown = Boolean(water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)));
+  const place = explanationPlace(water, irrOnFile, lead);
   const afterNote = Boolean(aftercare && aftercare.watering);
 
   return (
@@ -1264,9 +1293,10 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
           watering instruction — the legacy balance explanation ("more
           irrigation time will help") can contradict a hold or a
           rain-conditional plan (codex gh-r21). */}
-      {!lead && explanationShown ? (
-        <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
+      {place === 'card' ? (
+        <p style={{ margin: '12px 0 0', fontSize: explanationSize(water), color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
+      <WaterRainSensorLine water={water} />
       {water.scheduleUnconfirmed ? (
         <p data-testid="lawn-schedule-unconfirmed" style={{ margin: '10px 0 0', fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
           Your address changed after your sprinkler settings were saved, so they aren’t counted here. Re-enter your zone minutes, watering days and head type (and your weekly inches, if you use them) under Irrigation in your portal to bring your irrigation figure back.
@@ -1291,10 +1321,10 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
           watch" callout is dropped there only when the coverage finding card
           says it; a surplus week with a dry photo read has no coverage card,
           so the callout stays as the one place that says it (Fable P2 #5517). */}
-      {lead && (explanationShown || afterNote) ? (
+      {lead && (place === 'details' || afterNote) ? (
         <details open={printOpen} style={{ marginTop: 12 }}>
           <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED }}>Why this reading</summary>
-          {explanationShown ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p> : null}
+          {place === 'details' ? <p style={{ margin: '8px 0 0', fontSize: explanationSize(water), color: BODY, lineHeight: 1.55 }}>{water.explanation}</p> : null}
           {afterNote ? (
             <div className="lawn-callout-after" style={{ marginTop: 10, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
               <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}

@@ -44,7 +44,11 @@ function waterFacts(water, aftercare) {
   if (!water) return null;
   const plan = renderedWeekPlan(aftercare, water.weekPlan);
   return {
-    status: water.status, droughtSignal: water.droughtSignal ?? null, rain: water.rainInches, irrigation: water.irrigationInches, total: water.totalInches, target: water.targetInches, confidence: water.confidence, rainWindow: 'past 7 days ending on the visit date',
+    // GATE_LAWN_WATER_RAIN: the narrative's status vocabulary is balanced / high / low; a rain-covered week is none of them,
+    // so it is passed as unknown (no watering claim) with the fact that rain covered the week.
+    status: water.status === 'rain_covered' ? 'unknown' : water.status,
+    ...(water.status === 'rain_covered' ? { rainCoveredWeek: true } : {}),
+    droughtSignal: water.droughtSignal ?? null, rain: water.rainInches, irrigation: water.irrigationInches, total: water.totalInches, target: water.targetInches, confidence: water.confidence, rainWindow: 'past 7 days ending on the visit date',
     weekPlan: plan?.title ? { title: plan.title, detail: plan.detail || null, action: plan.action || null } : null,
   };
 }
@@ -239,7 +243,8 @@ function mergeNarrative(v2, out) {
     const v = safeText(cats[d.key], d.explanation || d.customerExplanation);
     return { ...d, explanation: v, customerExplanation: v };
   });
-  if (next.water && !verdictOwnsWatering) next.water.explanation = safeWaterText(out.water, next.water.explanation);
+  // GATE_LAWN_WATER_RAIN: the rain card's sentences are fixed wording (water.rainCard); the model may not rewrite them.
+  if (next.water && !verdictOwnsWatering && next.water.rainCard !== true) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
   if (next.mowing && next.mowing.measuredHeightInches != null && next.mowing.recommendation) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
