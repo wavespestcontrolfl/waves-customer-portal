@@ -72,6 +72,14 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
       expect(() => rows.assertPostedAreaAddOnsSold(sameVisit, [{ key: 'one_time_pest', price: 150 }, { key: WEB, price: 59 }])).not.toThrow();
       expect(() => rows.assertPostedAreaAddOnsSold(sameVisit, [{ key: WEB, price: 59 }])).toThrow(expect.objectContaining({ status: 409, code: 'AREA_ADDON_HOST_REQUIRED', message }));
     });
+    // Codex round 50: the engine's own non-host list (fees, riders, agreements) is not a host here either.
+    test('a fee or agreement line is not a host: a same-visit add-on beside only that is refused', () => {
+      for (const key of ['rodent_bait_setup', 'termite_bond', 'termite_station_rental', 'trap_only_retainer', 'waveguard_setup']) {
+        expect(() => rows.assertPostedAreaAddOnsSold(sameVisit, [{ key, price: 50 }, { key: WEB, price: 59 }])).toThrow(expect.objectContaining({ code: 'AREA_ADDON_HOST_REQUIRED' }));
+      }
+      expect(() => rows.assertPostedAreaAddOnsSold(sameVisit, [{ key: 'pest_initial_roach', price: 150 }, { key: WEB, price: 59 }])).not.toThrow();
+    });
+
     test('an add-on sold for its own visit is booked alone as before', () => {
       expect(() => rows.assertPostedAreaAddOnsSold(both, [{ key: WEB, price: both.prices[WEB] }])).not.toThrow();
     });
@@ -82,6 +90,9 @@ describe('assertPostedAreaAddOnsSold: the posted add-ons against the locked esti
       const hosted = { id: VISIT, service_key_snapshot: 'one_time_pest', is_recurring: false, recurring_parent_id: null, source_estimate_id: 'est-3', primary_line_price: 150 };
       await expect(rows.assertEditedAreaAddOns(trxFor(hosted), VISIT, { updates: {}, rowLines: [{ key: WEB, price: 59 }] })).resolves.toEqual({ keys: [WEB], added: [] });
       await expect(rows.assertEditedAreaAddOns(trxFor(hosted), VISIT, { updates: { service_key_snapshot: WEB, primary_line_price: 59 }, rowLines: [] }))
+        .rejects.toMatchObject({ code: 'AREA_ADDON_HOST_REQUIRED' });
+      // the host replaced by a fee line that has no visit of its own
+      await expect(rows.assertEditedAreaAddOns(trxFor(hosted), VISIT, { updates: { service_key_snapshot: 'rodent_bait_setup' }, rowLines: [{ key: WEB, price: 59 }] }))
         .rejects.toMatchObject({ code: 'AREA_ADDON_HOST_REQUIRED' });
     });
   });

@@ -9819,6 +9819,7 @@ module.exports = {
   priceAreaAddOnList,
   areaAddOnCatalog,
   assertAreaAddOnHostVisit,
+  AREA_ADDON_NON_HOST_SERVICES,
   normalizeAreaAddOnInput,
   isPlainAreaAddOnObject,
   assertAreaAddOnsEnabled,

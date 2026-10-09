@@ -427,7 +427,7 @@ function assertPostedAreaAddOnsSold(estimate, posted = [], { recurring = false, 
   // so a visit of only those would be sold with no trip cost in its price.
   if (wholeVisit) assertCostCarrierKept(estimate, wanted, sold);
   // ... and an add-on sold for the SAME visit as a host service (no drive in its price) rides a visit that keeps a host.
-  if (wholeVisit) assertSameVisitHostKept(estimate, wanted.map((line) => line.key), posted.some((line) => line && line.key && !isAreaAddOnCatalogKey(line.key)));
+  if (wholeVisit) assertSameVisitHostKept(estimate, wanted.map((line) => line.key), posted.some((line) => line && isSameVisitHostKey(line.key)));
 }
 
 // The catalog keys of the sold add-ons that carry the visit's one drive or its one booking-and-invoicing charge.
@@ -436,6 +436,15 @@ function costCarrierServiceKeys(estimate) {
   const rows = require('./estimate-result-container').storedAreaAddOnRows(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority });
   return [...new Set(rows.filter((row) => row && (row.carriesVisitDrive === true || row.carriesJobAdmin === true))
     .map((row) => row.catalogServiceKey || (AREA_ADDONS.items[row.addOnKey] || {}).serviceKey).filter(Boolean))];
+}
+
+// Can a same-visit add-on ride a visit of this service? Not an area add-on, and not one of the lines the pricing engine itself
+// refuses as a host (service-pricing AREA_ADDON_NON_HOST_SERVICES: setup fees, discounts, the rodent guarantee, bait setup,
+// termite bond and station rental, trap-only retainers; the lines that have no visit of their own). ONE list, the engine's.
+function isSameVisitHostKey(serviceKey) {
+  const key = String(serviceKey || '').trim().toLowerCase();
+  if (!key || isAreaAddOnCatalogKey(key)) return false;
+  return !require('./pricing-engine/service-pricing').AREA_ADDON_NON_HOST_SERVICES.has(key);
 }
 
 // The catalog keys of the sold add-ons priced for the same visit as a host service (`visitContext: 'sameTripAddOn'`).
@@ -479,8 +488,9 @@ function editedAddOnPlan(visit, storedRowKeys, updates, posted) {
   const added = [...new Set(finalKeys)].filter((key) => !before.has(key));
   // A save that writes a primary price for a visit whose own service is an add-on touches the add-on too (a price-only edit).
   const ownPriced = isAreaAddOnCatalogKey(ownKey) && updates.primary_line_price !== undefined;
-  // A host: the visit's own service is not an area add-on. (A non-add-on ROW is an extra line, not the visit's host.)
-  const hasHost = Boolean(ownKey) && !isAreaAddOnCatalogKey(ownKey);
+  // A host: the visit's own service is a field service a same-visit add-on can ride (isSameVisitHostKey). A non-add-on
+  // ROW is an extra line, not the visit's host.
+  const hasHost = isSameVisitHostKey(ownKey);
   return { ownKey, rowsAfter, finalKeys, added, hasHost, touched: posted !== null || ownKey !== visit.service_key_snapshot || ownPriced };
 }
 
