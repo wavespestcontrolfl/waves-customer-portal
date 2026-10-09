@@ -25691,7 +25691,7 @@ router.post('/generate-report', async (req, res) => {
     // The technician's station statuses (gate on, a bait station form): a serviced
     // station under the completed work, the rest under what the technician
     // observed (visit-station-facts.js stationChecksWriterLines).
-    const stationLines = require('../services/visit-station-facts').stationChecksWriterLines(structuredFindings, stationChecks);
+    const stationLines = await require('../services/visit-station-facts').stationChecksWriterLinesForVisit(db, { scheduledServiceId, structuredFindings, stationChecks });
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
     const areas = asArray(areasServiced);
     const actions = asArray(actionsCompleted);

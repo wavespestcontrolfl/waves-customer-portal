@@ -1,6 +1,8 @@
 // GATE_STATION_FAST_COMPLETE: the technician's per-station statuses go to the
 // report writer as authoritative inputs, over whatever the note says (the
 // sweep chip's pattern). Mirrors generate-report-sweep-correction.test.js.
+// The customer's active stations as the registry holds them (four rodent, one of another program).
+let mockStationRows = [1, 2, 3, 4].map((n) => ({ id: `s${n}`, program: 'rodent' })).concat([{ id: 't1', program: 'termite' }]);
 const mockProfile = { serviceKey: 'rodent_bait_quarterly', findingsType: 'rodent_bait_station' };
 const mockProvider = jest.fn(async () => ({ ok: true, text: 'WHAT WE DID\n\nTreated the exterior perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' }));
 jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockProvider(...args), callAnthropic: (...args) => mockProvider(...args) }));
@@ -16,7 +18,7 @@ jest.mock('../models/db', () => {
     for (const name of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
     chain.first = async () => table === 'scheduled_services'
       ? { id: '11111111-1111-4111-8111-111111111111', service_type: 'Quarterly Pest Control Service', customer_id: 'customer-1' } : null;
-    chain.then = (resolve) => Promise.resolve([]).then(resolve);
+    chain.then = (resolve) => Promise.resolve(table === 'termite_stations' ? mockStationRows : []).then(resolve);
     return chain;
   });
   db.raw = jest.fn(); db.fn = { now: () => new Date() }; return db;
@@ -112,4 +114,40 @@ test('a corrected status is a different request: the cached draft for the old on
   expect(mockProvider).not.toHaveBeenCalled();
   const text = await send({ ...unique, stationChecks: [{ number: 2, status: 'serviced' }] });
   expect(text).toContain('station 2: the technician serviced the station');
+});
+
+// Codex P2 on #6205: no "every other station is OK" when no station remains. The
+// roster total is the server's own read of the registry.
+describe('the OK remainder against the roster the server reads', () => {
+  const rosterOf = (n) => { mockStationRows = Array.from({ length: n }, (_, i) => ({ id: `s${i + 1}`, program: 'rodent' })); };
+  afterAll(() => rosterOf(4));
+
+  test('the only station flagged: no remainder is claimed', async () => {
+    rosterOf(1);
+    const { observed } = sectionsOf(await send({ stationChecks: [{ number: 1, status: 'inaccessible' }] }));
+    expect(observed).toContain('station 1: could not be reached or checked.');
+    expect(observed).not.toMatch(/is OK/);
+  });
+
+  test('all three flagged, one of them serviced: no remainder, and no empty observed line', async () => {
+    rosterOf(3);
+    const text = await send({ stationChecks: [{ number: 1, status: 'activity' }, { number: 2, status: 'inaccessible' }, { number: 3, status: 'serviced' }] });
+    expect(text).not.toMatch(/is OK/);
+    rosterOf(1);
+    const only = sectionsOf(await send({ stationChecks: [{ number: 1, status: 'serviced' }] }));
+    expect(only.completed).toContain('station 1: the technician serviced the station');
+    expect(only.observed).not.toContain('Technician station checks');
+  });
+
+  test('two of three flagged: the remainder is kept', async () => {
+    rosterOf(3);
+    const { observed } = sectionsOf(await send({ stationChecks: [{ number: 1, status: 'activity' }, { number: 2, status: 'inaccessible' }] }));
+    expect(observed).toMatch(/Every other station was checked and is OK\.$/m);
+  });
+
+  test('another program\'s stations do not count toward the roster', async () => {
+    mockStationRows = [{ id: 's1', program: 'rodent' }, { id: 't1', program: 'termite' }, { id: 't2', program: 'termite' }];
+    const { observed } = sectionsOf(await send({ stationChecks: [{ number: 1, status: 'activity' }] }));
+    expect(observed).not.toMatch(/is OK/);
+  });
 });

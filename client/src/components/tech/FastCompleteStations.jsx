@@ -86,7 +86,10 @@ export function useStationChecks({ service, request, enabled = false, note = '' 
       if (detail === 'roster_changed') rosterChanged();
       else read.send(settlement(verdict === 'read', detail, readNote));
       if (detail === 'unresolved' && facts.stationExceptions) marks.applyHeard(facts.stationExceptions);
-      return verdict === 'read' ? '' : (READ_FAILED_MESSAGES[detail] || READ_FAILED_MESSAGES.default);
+      // A refresh that failed for a note already read ok stands on that read (the
+      // state machine kept it): the report is written from the known stations.
+      if (verdict === 'read' || read.statusNow() === 'ok') return '';
+      return READ_FAILED_MESSAGES[detail] || READ_FAILED_MESSAGES.default;
     },
   } : NO_STATION_READ;
 

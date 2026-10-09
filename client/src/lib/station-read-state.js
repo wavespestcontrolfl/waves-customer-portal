@@ -24,7 +24,13 @@ const EVENTS = {
   readSucceeded: (state, { note }) => ({ ...state, reads: { ...state.reads, [clean(note)]: 'ok' }, attempt: null }),
   // `detail` 'unresolved': the note was read but part of what it said about the
   // stations could not be pinned down, so it is not a clean read either.
-  readFailed: (state, { note, detail }) => ({ ...state, attempt: { note: clean(note), status: detail === 'unresolved' ? 'unresolved' : 'failed' } }),
+  // A newer read that found something unplaced also withdraws an earlier clean read
+  // of the same note: the stations are no longer known.
+  readFailed: (state, { note, detail }) => {
+    if (detail !== 'unresolved') return { ...state, attempt: { note: clean(note), status: 'failed' } };
+    const { [clean(note)]: _withdrawn, ...reads } = state.reads;
+    return { ...state, reads, attempt: { note: clean(note), status: 'unresolved' } };
+  },
   handConfirmed: (state) => ({ ...state, byHand: true }),
   handCleared: (state) => ({ ...state, byHand: false }),
   // The property's stations changed under the sheet: nothing read or checked

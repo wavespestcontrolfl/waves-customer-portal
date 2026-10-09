@@ -662,7 +662,8 @@ describe('stationChecksWriterLines: the tech\'s statuses for the report writer',
   const saved = process.env.GATE_STATION_FAST_COMPLETE;
   beforeEach(() => { process.env.GATE_STATION_FAST_COMPLETE = 'true'; });
   afterEach(() => { if (saved === undefined) delete process.env.GATE_STATION_FAST_COMPLETE; else process.env.GATE_STATION_FAST_COMPLETE = saved; });
-  const lines = (type, checks) => stationChecksWriterLines({ type }, checks);
+  // A roster of ten unless a test says otherwise (the server reads the real total).
+  const lines = (type, checks, total = 10) => stationChecksWriterLines({ type }, checks, { total });
 
   test('a serviced station is work done; activity and no access are observed; both carry the authority', () => {
     const { completed, observed } = lines('termite_bait_station', [{ number: 7, status: 'serviced' }, { number: 4, status: 'activity' }]);
@@ -686,6 +687,17 @@ describe('stationChecksWriterLines: the tech\'s statuses for the report writer',
     expect(both.observed).not.toContain('station 3');
     // None: every station.
     expect(lines('rodent_bait_station', []).observed).toMatch(/: every station was checked and is OK\.$/);
+  });
+
+  test('no remainder when no station remains, or when the roster total is not known', () => {
+    expect(lines('rodent_bait_station', [{ number: 1, status: 'inaccessible' }], 1).observed).toMatch(/could not be reached or checked\.$/);
+    const all = lines('rodent_bait_station', [{ number: 1, status: 'activity' }, { number: 2, status: 'serviced' }, { number: 3, status: 'inaccessible' }], 3);
+    expect(all.observed).not.toMatch(/is OK/);
+    expect(lines('rodent_bait_station', [{ number: 1, status: 'serviced' }], 1).observed).toBe('');
+    expect(lines('rodent_bait_station', [{ number: 1, status: 'activity' }, { number: 2, status: 'inaccessible' }], 3).observed).toMatch(/Every other station was checked and is OK\.$/);
+    expect(lines('rodent_bait_station', [{ number: 1, status: 'activity' }], null).observed).not.toMatch(/is OK/);
+    // Nothing flagged: every station, whatever the total.
+    expect(lines('rodent_bait_station', [], null).observed).toMatch(/every station was checked and is OK\.$/);
   });
 
   test('an empty list is an observation that every station is OK, with no work done', () => {
@@ -753,7 +765,8 @@ describe('the roster rule, one copy', () => {
     transaction: async (fn) => fn(() => ({ where: () => ({ select: async () => rows }) })),
   });
   const profile = { findingsType: 'termite_bait_station' };
-  const run = (rows, seen, p = profile) => assertStationRosterUnderLock(trxWith(rows), { customerId: 'c1', profile: p, stationRosterSeen: seen });
+  const entriesOf = (seen) => (Array.isArray(seen) ? seen.map((id) => ({ id, status: 'ok' })) : []);
+  const run = (rows, seen, p = profile, termiteStations = entriesOf(seen)) => assertStationRosterUnderLock(trxWith(rows), { customerId: 'c1', profile: p, stationRosterSeen: seen, termiteStations });
 
   test('the completion checks it under the lock, only for a completion that sent the marker', async () => {
     await expect(run([{ id: 'a', program: 'termite' }], undefined)).resolves.toBeUndefined();
@@ -770,6 +783,23 @@ describe('the roster rule, one copy', () => {
     locks.length = 0;
     await run([{ id: 'a', program: 'termite' }], undefined);
     expect(locks).toEqual([]);
+  });
+
+  test('the submitted checks must be exactly the roster seen: a subset, a superset, other ids or a duplicate is refused before anything is read', async () => {
+    const rows = [{ id: 'a', program: 'termite' }, { id: 'b', program: 'termite' }];
+    const refused = async (termiteStations) => {
+      locks.length = 0;
+      await expect(run(rows, ['a', 'b'], profile, termiteStations)).rejects.toMatchObject({ code: 'station_checks_incomplete' });
+      expect(locks).toEqual([]);
+    };
+    await refused([{ id: 'a', status: 'ok' }]);
+    await refused([{ id: 'a', status: 'ok' }, { id: 'b', status: 'ok' }, { id: 'c', status: 'ok' }]);
+    await refused([{ id: 'a', status: 'ok' }, { id: 'x', status: 'ok' }]);
+    await refused([{ id: 'a', status: 'ok' }, { id: 'a', status: 'activity' }]);
+    await refused(undefined === 1 ? [] : [null, { id: 'b', status: 'ok' }]);
+    await expect(run(rows, ['a', 'b'], profile, [{ id: 'b', status: 'activity' }, { id: 'a', status: 'ok' }])).resolves.toBeUndefined();
+    const { stationRosterRefusalResponse } = require('../services/visit-station-facts');
+    expect(stationRosterRefusalResponse({ code: 'station_checks_incomplete' })).toMatchObject({ status: 400, body: { code: 'termite_stations_invalid' } });
   });
 
   test('a marker that cannot be judged fails closed: not a list, or not a station sheet visit', async () => {

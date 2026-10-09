@@ -69,7 +69,8 @@ describe('useStationChecks', () => {
     // The refresh begins and fails: the note stays read.
     act(() => { result.current.stationRead.begin(N); });
     expect(result.current.readStatus).toBe('ok');
-    expect(read(result, N, false)).toMatch(/Couldn’t read/);
+    // It stands on the retained read: no failure for the report write.
+    expect(read(result, N, false)).toBe('');
     expect(result.current.readStatus).toBe('ok');
     expect(result.current.currentChecks()).toEqual([]);
   });

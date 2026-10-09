@@ -99,3 +99,13 @@ describe("an unresolved read", () => {
     expect(readStatusFor(state, N)).toBe("ok");
   });
 });
+
+describe("an unresolved refresh of a note already read", () => {
+  it("withdraws the earlier read: the stations are no longer known", () => {
+    const state = run({ type: "readSucceeded", note: N }, { type: "readStarted", note: N }, { type: "readFailed", note: N, detail: "unresolved" });
+    expect(readStatusFor(state, N)).toBe("unresolved");
+    // A plain failure does not.
+    const kept = run({ type: "readSucceeded", note: N }, { type: "readFailed", note: N });
+    expect(readStatusFor(kept, N)).toBe("ok");
+  });
+});

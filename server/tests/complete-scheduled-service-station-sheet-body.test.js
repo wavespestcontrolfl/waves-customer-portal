@@ -130,7 +130,8 @@ function sheetBody(f, statuses, findingsType, values, { seen = f.stationIds } = 
     products: [],
     areasServiced: [],
     structuredFindings: { type: findingsType, values },
-    termiteStations: f.stationIds.map((id, i) => (statuses[i] ? { id, status: statuses[i], touched: true } : { id, status: 'ok' })),
+    // An entry for every station the sheet checked (`seen`), as the sheet sends it.
+    termiteStations: seen.map((id, i) => (statuses[i] ? { id, status: statuses[i], touched: true } : { id, status: 'ok' })),
     // The stations the sheet checked, bound to the completion under the visit lock.
     stationRosterSeen: seen,
     technicianNotes: 'Station 2 had activity. I replaced the bait in 3.',
@@ -364,6 +365,44 @@ postgres('GATE_STATION_FAST_COMPLETE: the sheet\'s completion body writes the sa
         expect(spy).toHaveBeenCalledTimes(1);
         expect(await checksByNumber(f)).toHaveLength(4);
       } finally { spy.mockRestore(); await cleanup(f); }
+    });
+  });
+
+  // Codex P2 on #6205: the checks submitted must be exactly the roster the sheet
+  // says it checked; otherwise the counts and report would claim more than is stored.
+  describe('the submitted checks are bound to the validated roster', () => {
+    const TERMITE = { total_stations: '4', stations_checked: '4', stations_inaccessible: '0', stations_with_activity: '0', termite_activity: 'None observed', bait_consumption: 'None — bait intact' };
+    const withEntries = (f, termiteStations) => ({ ...sheetBody(f, [], 'termite_bait_station', TERMITE), termiteStations });
+    const refusedClean = async (f, termiteStations) => {
+      const out = await complete(f, withEntries(f, termiteStations));
+      expect(out).toMatchObject({ status: 400, body: { code: 'termite_stations_invalid' } });
+      expect(await checksByNumber(f)).toEqual([]);
+      expect(await mockPg('service_records').where({ customer_id: f.customerId })).toEqual([]);
+      expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+    };
+
+    test('a subset of the roster is refused, nothing written', async () => {
+      const f = await seedVisit();
+      try { await refusedClean(f, f.stationIds.slice(0, 2).map((id) => ({ id, status: 'ok' }))); } finally { await cleanup(f); }
+    });
+
+    test('a superset is refused, nothing written', async () => {
+      const f = await seedVisit();
+      try { await refusedClean(f, [...f.stationIds, randomUUID()].map((id) => ({ id, status: 'ok' }))); } finally { await cleanup(f); }
+    });
+
+    test('different ids are refused, nothing written', async () => {
+      const f = await seedVisit();
+      try { await refusedClean(f, [...f.stationIds.slice(0, 3), randomUUID()].map((id) => ({ id, status: 'ok' }))); } finally { await cleanup(f); }
+    });
+
+    test('the full set writes a row for every station', async () => {
+      const f = await seedVisit();
+      try {
+        const out = await complete(f, withEntries(f, f.stationIds.map((id) => ({ id, status: 'ok' }))));
+        expect(out).toMatchObject({ status: 200 });
+        expect(await checksByNumber(f)).toHaveLength(4);
+      } finally { await cleanup(f); }
     });
   });
 });

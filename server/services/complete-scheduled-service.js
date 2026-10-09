@@ -6232,7 +6232,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The stations the station sheet checked, against the registry now (one
           // roster rule: visit-station-facts.js stationRosterMatches).
           await require('./visit-station-facts').assertStationRosterUnderLock(trx, {
-            customerId: svc.customer_id, profile: completionProfile, stationRosterSeen,
+            customerId: svc.customer_id, profile: completionProfile, stationRosterSeen, termiteStations,
           });
           // The photo descriptions the report was written from (Codex P2 on
           // #5701): one changed, added or removed from another device after

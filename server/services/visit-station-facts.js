@@ -255,19 +255,26 @@ function stationFastCompleteEnabled(profile) {
 // of known statuses on a bait station form, nothing is added.
 const MAX_STATION_CHECKS = 80;
 const AUTHORITY = '(authoritative: they override anything the note says about a station)';
-function stationChecksWriterLines(structuredFindings, checks) {
+// Whether the checks are a clean list: each a whole station number, once, with a
+// status the sheet reads.
+function cleanStationChecks(checks) {
+  const seen = new Set();
+  for (const check of checks) {
+    const number = check?.number;
+    if (!Number.isInteger(number) || number < 1 || seen.has(number) || !EXCEPTION_STATUSES.includes(check?.status)) return false;
+    seen.add(number);
+  }
+  return true;
+}
+
+function stationChecksWriterLines(structuredFindings, checks, { total = null } = {}) {
   const none = { completed: '', observed: '' };
   const program = STATION_SHEET_PROGRAMS[structuredFindings?.type];
   if (!program || !Array.isArray(checks) || checks.length > MAX_STATION_CHECKS) return none;
   if (!require('../config/feature-gates').stationFastCompleteLive()) return none;
   const words = PROGRAM_WORDS[program];
   const said = { activity: words.activity, serviced: words.serviced, inaccessible: 'could not be reached or checked' };
-  const seen = new Set();
-  for (const check of checks) {
-    const number = check?.number;
-    if (!Number.isInteger(number) || number < 1 || seen.has(number) || !EXCEPTION_STATUSES.includes(check?.status)) return none;
-    seen.add(number);
-  }
+  if (!cleanStationChecks(checks)) return none;
   const partsOf = (wanted) => checks
     .filter((check) => wanted(check.status))
     .sort((a, b) => a.number - b.number)
@@ -277,12 +284,35 @@ function stationChecksWriterLines(structuredFindings, checks) {
   // The OK remainder is every station that is NOT an exception of any kind,
   // serviced ones included: "station 3: serviced" and "every station is OK" are
   // not both true.
-  const rest = checks.length ? 'Every other station was checked and is OK.' : 'every station was checked and is OK.';
+  // `total` is the property's roster size as the SERVER read it. With exceptions,
+  // the remainder is claimed only when stations remain: none when every station
+  // is an exception, and none when the roster could not be read.
+  let rest = 'every station was checked and is OK.';
+  if (checks.length) rest = Number.isInteger(total) && total > checks.length ? 'Every other station was checked and is OK.' : '';
+  const observedText = `${seenParts.length ? `${seenParts.join('; ')}. ` : ''}${rest}`.trim();
   return {
     completed: done.length ? `\nTechnician station checks, work done ${AUTHORITY}: ${done.join('; ')}.` : '',
     // With servicing the only exception the observation is the remainder alone.
-    observed: `\nTechnician station checks, observed ${AUTHORITY}: ${seenParts.length ? `${seenParts.join('; ')}. ` : ''}${rest}`,
+    observed: observedText ? `\nTechnician station checks, observed ${AUTHORITY}: ${observedText}` : '',
   };
+}
+
+// The same lines for a visit, with the roster total read by the server (the
+// active stations of the visit's customer and program), never a client number.
+// A roster that cannot be read leaves the total unknown.
+async function stationChecksWriterLinesForVisit(db, { scheduledServiceId, structuredFindings, stationChecks }) {
+  const program = STATION_SHEET_PROGRAMS[structuredFindings?.type];
+  let total = null;
+  if (program && scheduledServiceId && Array.isArray(stationChecks) && stationChecks.length) {
+    try {
+      const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+      const rows = svc?.customer_id
+        ? await db('termite_stations').where({ customer_id: svc.customer_id, is_active: true }).select('id', 'program')
+        : null;
+      if (Array.isArray(rows)) total = rows.filter((row) => (row.program || 'termite') === program).length;
+    } catch { total = null; }
+  }
+  return stationChecksWriterLines(structuredFindings, stationChecks, { total });
 }
 
 // THE roster rule, one copy: the stations the sheet shows must be exactly the
@@ -302,8 +332,16 @@ function stationRosterMatches(registryIds, sheetIds) {
 // checked), as it sends `traceSeen` and `photoCaptionsSeen`. Undefined (the full
 // form, every other caller) checks nothing: there the tech edits the roster on
 // the map. Read under the visit row lock, on the transaction's own connection.
-async function assertStationRosterUnderLock(trx, { customerId, profile, stationRosterSeen }) {
+async function assertStationRosterUnderLock(trx, { customerId, profile, stationRosterSeen, termiteStations }) {
   if (stationRosterSeen === undefined) return;
+  // The checks submitted must be exactly the roster the sheet says it checked: one
+  // entry per station, none missing, none extra, none twice. Otherwise the sync
+  // would write some rows while the frozen counts and report claim the roster.
+  const entries = Array.isArray(termiteStations) ? termiteStations : [];
+  const entryIds = entries.map((entry) => entry?.id);
+  if (new Set(entryIds.map(String)).size !== entryIds.length || !stationRosterMatches(entryIds, stationRosterSeen)) {
+    throw Object.assign(new Error('station checks do not cover the roster'), { code: 'station_checks_incomplete' });
+  }
   const program = stationSheetProgramFor(profile);
   let rows = null;
   if (program && customerId && Array.isArray(stationRosterSeen)) {
@@ -346,6 +384,9 @@ async function writeSheetStationChecksInCompletion(trx, { customerId, profile, s
 // completion-consultation-outcome.js answers its own: a distinct 409 the sheet
 // turns into a reload of the stations.
 function stationRosterRefusalResponse(err) {
+  if (err?.code === 'station_checks_incomplete') {
+    return { status: 400, body: { error: 'termiteStations must carry one check for every station in stationRosterSeen', code: 'termite_stations_invalid' } };
+  }
   if (err?.code !== 'station_roster_changed') return null;
   return { status: 409, body: { error: 'The stations on this property changed, so they are loaded again. Try again.', code: 'station_roster_changed' } };
 }
@@ -368,6 +409,7 @@ module.exports = {
   stationFastCompleteEnabled,
   stationReadVerdict,
   stationChecksWriterLines,
+  stationChecksWriterLinesForVisit,
   readStationExceptions,
   verifyStationExceptions,
   namableStations,
