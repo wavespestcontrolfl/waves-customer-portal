@@ -336,6 +336,23 @@ function tieSlots(facts) {
   return slots.slice(0, MAX_TIES);
 }
 
+/**
+ * The category phrase ids for a list of products, in the fixed order (the "applied" slot of the
+ * summary). Other lawn sentences that must not name a product (GATE_LAWN_REPORT_COPY_FIXES: the
+ * "What we applied today" sentence, the technician paragraph's products sentence) reuse this one
+ * table. A product's name and active ingredient are read only to spot a fertilizer analysis.
+ * @param {Array<{kind?: string, name?: string, activeIngredient?: string, alsoFeeds?: boolean}>} products
+ * @returns {string[]} ids that are keys of APPLIED_PHRASES
+ */
+function appliedCategoryIds(products) {
+  return appliedSlots(normalizeFacts({ applied: products }).applied);
+}
+
+/** The category words (never a name) for a list of products, same order. */
+function appliedCategoryPhrases(products) {
+  return appliedCategoryIds(products).map((id) => APPLIED_PHRASES[id]);
+}
+
 /** Facts -> slots, or null when there is nothing grounded to say. Pure. */
 function buildSlots(rawFacts) {
   const facts = normalizeFacts(rawFacts);
@@ -537,6 +554,9 @@ module.exports = {
   MAX_SENTENCES,
   CATEGORY_BY_KIND,
   APPLIED_PHRASES,
+  APPLIED_ORDER,
+  appliedCategoryIds,
+  appliedCategoryPhrases,
   AREA_PHRASES,
   FINDING_PHRASES,
   TIE_PRODUCT_PHRASES,

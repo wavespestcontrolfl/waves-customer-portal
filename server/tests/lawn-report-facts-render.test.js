@@ -131,6 +131,27 @@ describe('the PDF key follows the frozen decision', () => {
     expect(await sig(svc, notesWith({ ...BLOCK, ties: tie }))).not.toBe(base);
   });
 
+  test('the copy-fixes gate (:copyfix=1) and a frozen facts decision (:rf=) BOTH move the key, independently and together, in a stable order', async () => {
+    const COPYFIX = 'GATE_LAWN_REPORT_COPY_FIXES';
+    try {
+      const plain = await sig(svc);
+      const rfOnly = await sig(svc, notesWith(BLOCK));
+      process.env[COPYFIX] = 'true';
+      const fixOnly = await sig(svc);
+      const both = await sig(svc, notesWith(BLOCK));
+      expect(new Set([plain, rfOnly, fixOnly, both]).size).toBe(4);
+      // Stable: the same inputs always give the same key, so the lookup side and the render side agree.
+      expect(await sig(svc, notesWith(BLOCK))).toBe(both);
+      process.env[KEY] = 'true';
+      expect(await sig(svc, notesWith(BLOCK))).toBe(both);
+      // A partial lookup row and a full render row agree with both parts live.
+      const full = { ...svc, customer_latitude: 27.4, customer_longitude: -82.5, structured_notes: notesWith(BLOCK) };
+      expect(await sig(full, notesWith(BLOCK))).toBe(both);
+    } finally {
+      delete process.env[COPYFIX];
+    }
+  });
+
   test('a partial lookup row and a full render row compute the same key', async () => {
     const full = { ...svc, customer_latitude: 27.4, customer_longitude: -82.5, structured_notes: notesWith(BLOCK) };
     expect(await sig(svc, notesWith(BLOCK))).toBe(await sig(full, notesWith(BLOCK)));

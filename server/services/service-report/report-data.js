@@ -20,6 +20,7 @@ const { isOneTimePressureExcludedRecord } = require('../pest-pressure/one-time-e
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
+const { copyFixesPdfStamp, copyFixesPayloadFlag, lawnTreatmentNarrative } = require('./lawn-report-copy-fixes');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
@@ -2870,6 +2871,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
   // so a PDF never depends on the customer's bookings and needs no key for them.
   if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  // The copy fixes (GATE_LAWN_REPORT_COPY_FIXES) change the lawn report's words, labels and charts,
+  // so its PDF key moves with it; the part is empty while the gate is off.
+  irrigationStamp += copyFixesPdfStamp();
   // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
   // photos with zone labels instead of 5, so a PDF cached before a flip must
   // never be served after it. The stamp rides only while the gate is live.
@@ -5884,8 +5888,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // AI "What we applied today" narrative — same contract as the T&S path
       // (owner 2026-07-21: across all reports).
       if (reportV2?.snapshot?.treatmentSummary) {
-        const { buildTreatmentNarrative } = require('./treatment-narrative');
-        const narrative = await buildTreatmentNarrative({
+        const narrative = await lawnTreatmentNarrative({
           serviceRecordId: service.id,
           serviceLine: 'lawn',
           treatment: reportV2.treatment,
@@ -7459,6 +7462,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // A-D legend either (they come from the same default zones). Absent = the
     // payload is byte-identical to before.
     ...(hideDefaultLawnCoverage ? { lawnCoverageHidden: true } : {}),
+    // GATE_LAWN_REPORT_COPY_FIXES (lawn only): the page prints none of the pest program's re-service
+    // wording. Absent = byte-identical payload.
+    ...copyFixesPayloadFlag(serviceLine),
     mapSvgUrl: `/api/reports/${token}/map.svg`,
     treatmentNarrativeRenderedSignature,
     treatmentMap: {

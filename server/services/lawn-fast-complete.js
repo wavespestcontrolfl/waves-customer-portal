@@ -542,8 +542,13 @@ function guidedProductIds(loaded, sheet) {
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   const guide = require('./lawn-treatment-guide');
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
-  const picks = guide.pickAddOns(loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows);
-  return { guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId) };
+  const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
+  const picks = guide.pickAddOns(candidates, rows);
+  return {
+    guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId),
+    // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons.
+    takeAllProductIds: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId),
+  };
 }
 
 async function chinchOffer({ svc, structured, sheetAddOns, knex }) {
@@ -857,7 +862,8 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
  * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
  * asks once the technician confirms; the plan is read again here so the cards name the same add-ons
  * the sheet lists, each one's limits read fresh. Read-only; nothing is added or recorded.
- * `{ ok: true, v: 1, assessmentId, cards, weedMix }` (`weedMix` is the Weed spots decision read fresh, the
+ * `{ ok: true, v: 1, assessmentId, cards, weedMix, takeAllProductIds }` (`takeAllProductIds` are the plan's take-all fungicide rows read now, which the
+ * sheet prefers to the context's; `weedMix` is the Weed spots decision read fresh, the
  * sheet's one source for the weed entry, the weed card and the search exclusion; null when the month has no
  * weed group), `blockedProductIds` (the governed products the fresh read kept out because of a limit, a hold or
  * a failed limit read: see lawn-treatment-guide.blockedProductIds), and `chinch` (the standing chinch tap's decision read fresh the same way: `{ item, note }`, or null
@@ -879,6 +885,8 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   const guide = require('./lawn-treatment-guide');
   const result = (cards, weedMix = null, chinch = null, ids = {}) => ({
     ok: true, v: 1, assessmentId: assessment.id, cards, weedMix, chinch, blockedProductIds: ids.blocked || [], unreadableProductIds: ids.unreadable || [], unreadableNote: guide.UNREADABLE_NOTE,
+    // The take-all fungicide rows of the plan as read now (an assignment or a substitution may have changed them since the sheet opened).
+    takeAllProductIds: ids.takeAll || [],
   });
   // Only a recurring program visit has a plan, and so any product to suggest.
   const loaded = visitType === 'recurring' ? await loadPlan(svc, knex) : null;
@@ -890,8 +898,9 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
   const weedMix = (await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures })).weedMix || null;
   // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
+  const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
   const [offers, chinch] = await Promise.all([
-    guide.addOnOffers({ candidates: loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] })), rows, svc, knex }),
+    guide.addOnOffers({ candidates, rows, svc, knex }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex }) : null,
   ]);
   // A read that throws fails the request (the sheet then follows the context's decisions); only a
@@ -904,7 +913,7 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db }) {
     weeds: guide.weedOffer(weedMix, sheet.addOns),
     // No trouble-area store exists yet, so take-all stays the check only.
     troubleAreas: [],
-  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }) });
+  }), weedMix, chinch, { blocked: guide.blockedProductIds({ offers, chinch, weedMix }), unreadable: guide.unreadableProductIds({ offers, chinch, weedMix }), takeAll: guide.takeAllAddOns(candidates, rows).map((candidate) => candidate.item.productId) });
 }
 
 // ── completion preflight ────────────────────────────────────────────────────

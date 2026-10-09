@@ -19,6 +19,7 @@ const featureGates = require('../../config/feature-gates');
 const { lawnReportLeadLive } = featureGates;
 const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
+const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
@@ -871,4 +872,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   };
 }
 
-module.exports = { buildLawnReportV2, monthLabel, classifyProduct, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };
+// The exported builder: the lawn reportV2 above, then (GATE_LAWN_REPORT_COPY_FIXES live) the copy
+// fixes. The builder above carries none of the gate's decisions; lawn-report-copy-fixes.js owns them.
+function buildLawnReportV2WithCopyFixes(args) {
+  const v2 = buildLawnReportV2(args);
+  return v2 && copyFixesLive() ? applyLawnCopyFixes(v2, args) : v2;
+}
+
+module.exports = { buildLawnReportV2: buildLawnReportV2WithCopyFixes, monthLabel, classifyProduct, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };
