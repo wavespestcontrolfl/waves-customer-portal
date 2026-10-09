@@ -348,3 +348,20 @@ describe('the Intelligence Bar never books an area add-on by name', () => {
     expect(fn.indexOf("startsWith('area_addon_')")).toBeLessThan(fn.indexOf('isAlwaysFreeServiceType(serviceType)'));
   });
 });
+
+// Codex round 44: a failed add-on lookup is not "no add-on".
+describe('the schedule feed when the add-on row lookup fails', () => {
+  const visitRows = require('../services/area-addon-visit-rows');
+  test('the batch is marked failed, and every visit of it carries the marker with every lightweight flow off', async () => {
+    const spy = jest.spyOn(visitRows, 'areaAddOnSoldByVisit').mockRejectedValue(new Error('connection lost'));
+    try {
+      const out = await router._test.areaAddOnVisitIdsForFeed([{ id: VISIT }]);
+      expect(out.failed).toBe(true);
+      expect([out.byVisit.size, out.own.size]).toEqual([0, 0]);
+    } finally { spy.mockRestore(); }
+    const marker = router._test.AREA_ADDON_LOOKUP_FAILED;
+    expect(marker).toMatchObject({ areaAddOnsLookupFailed: true, areaAddOnRowsAttached: false, lawnFastCompleteEnabled: false, fastCompleteReportEnabled: false, treeShrubFastCompleteEnabled: false });
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
+    expect(src).toContain('...(addOnVisits.failed ? AREA_ADDON_LOOKUP_FAILED : {}),');
+  });
+});

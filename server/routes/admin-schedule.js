@@ -68,9 +68,14 @@ async function areaAddOnVisitIdsForFeed(serviceRows) {
     return { byVisit, own };
   } catch (e) {
     logger.warn(`[schedule] area add-on row lookup failed: ${e.message}`);
-    return { byVisit: new Map(), own: new Map() };
+    // `failed`: "no add-on" is not known. Every visit of the batch says so (areaAddOnsLookupFailed), the lightweight
+    // flows stay off, and the completion form refuses to submit a completed visit until the feed reloads.
+    return { byVisit: new Map(), own: new Map(), failed: true };
   }
 }
+// What a visit of a batch whose add-on lookup failed carries: every lightweight flow off (as for a visit with an add-on),
+// and the marker the completion form reads. It does NOT claim an add-on row is attached.
+const AREA_ADDON_LOOKUP_FAILED = Object.freeze({ ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOnRowsAttached: false, areaAddOnsLookupFailed: true });
 // The report flow needs a plain untyped, uncombined profile (the typed forms and
 // companion sections are required at completion and the flow has none).
 function fastCompleteReportOffered(completionProfile) {
@@ -5396,7 +5401,7 @@ async function loadProjectCompletionContextByServiceId(services) {
     // areaAddOnRowsAttached keeps the lightweight flows off; the list (key, name, sold area, governed rate) labels
     // each add-on's product row on the visit's own completion form. areaAddOnOwn is the same for the add-on that IS the visit.
     const own = addOnVisits.own.get(String(service.id));
-    return [service.id, { ...entry, ...(own ? { areaAddOnOwn: own } : {}), ...(addOns ? { ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOns: addOns } : {}) }];
+    return [service.id, { ...entry, ...(addOnVisits.failed ? AREA_ADDON_LOOKUP_FAILED : {}), ...(own ? { areaAddOnOwn: own } : {}), ...(addOns ? { ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOns: addOns } : {}) }];
   }));
   return new Map(entries);
 }
@@ -28366,6 +28371,7 @@ function catalogScreensForPrompt(catalogRows, promptText) {
 
 router._test = {
   assertLockedEstimateAddOns, LINKED_ESTIMATE_COLUMNS, postedAreaAddOnLines, assertAreaAddOnEdit, requestedAreaAddOnServiceKeys,
+  areaAddOnVisitIdsForFeed, AREA_ADDON_LOOKUP_FAILED,
   planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign,
   catalogScreensForPrompt,
   siblingCoverageRefusal,

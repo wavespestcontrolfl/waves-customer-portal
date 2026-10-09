@@ -169,6 +169,15 @@ describe("a host row and an add-on row of the SAME product are two rows", () => 
     expect(within(blockText()).getByLabelText("Product used for Bed Pre-Emergent Weed Control")).toBeInTheDocument();
   });
 
+  // Codex round 44.
+  it("a completed visit is not submitted when the feed could not read its add-ons, and an add-on row is never an off-protocol host product", () => {
+    const refusal = pageSource.indexOf("if (service?.areaAddOnsLookupFailed === true && !isIncompleteVisit) {");
+    expect(refusal).toBeGreaterThan(0);
+    expect(pageSource.slice(refusal, refusal + 120)).toContain("alert(AREA_ADDONS_LOOKUP_FAILED_MESSAGE);");
+    expect(refusal).toBeLessThan(pageSource.indexOf("completionProductRowProblem(service, selectedProducts, typeFor)"));
+    expect(pageSource).toContain("(p) => !p.areaAddOnKey && !treatmentPlanProductIds.includes(String(p.productId)),");
+  });
+
   it("the completion asks for an add-on row's rate, unit and treated square feet before it submits; an incomplete visit skips only the ordinary row checks", () => {
     const call = pageSource.indexOf("completionProductRowProblem(service, selectedProducts, typeFor)");
     expect(call).toBeGreaterThan(0);

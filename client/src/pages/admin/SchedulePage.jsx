@@ -94,7 +94,7 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
-import { addOnActualsProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
+import { AREA_ADDONS_LOOKUP_FAILED_MESSAGE, addOnActualsProblem, areaAddOnRowServiceType, isAreaAddOnVisit, withGovernedAddOnRate } from "../../lib/areaAddOns";
 import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
@@ -14628,9 +14628,10 @@ export function CompletionPanel({
   const nLimitSummaryText = treatmentPlanAnnualN
     ? `Used ${treatmentPlanAnnualN.used ?? 0}, visit ${treatmentPlanAnnualN.visit ?? 0}, projected ${treatmentPlanAnnualN.projected ?? 0} / ${treatmentPlanAnnualN.limit ?? 0} ${treatmentPlanAnnualN.unit || "lb N / 1,000 sqft / year"}.`
     : "";
+  // An area add-on's product row belongs to the add-on, not to the host's protocol: it is never "off protocol".
   const offProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter(
-        (p) => !treatmentPlanProductIds.includes(String(p.productId)),
+        (p) => !p.areaAddOnKey && !treatmentPlanProductIds.includes(String(p.productId)),
       )
     : [];
   const selectedProductIds = new Set(
@@ -18615,6 +18616,11 @@ export function CompletionPanel({
       }
     }
     // An incomplete visit skips the ordinary row checks, but a submitted add-on row still needs its actuals (the server refuses it).
+    // The feed could not say whether this visit carries add-on treatments: a completed visit is not submitted blind.
+    if (service?.areaAddOnsLookupFailed === true && !isIncompleteVisit) {
+      alert(AREA_ADDONS_LOOKUP_FAILED_MESSAGE);
+      return;
+    }
     const productRowProblem = isIncompleteVisit ? addOnActualsProblem(service, selectedProducts) : completionProductRowProblem(service, selectedProducts, typeFor);
     if (productRowProblem) {
       alert(productRowProblem);

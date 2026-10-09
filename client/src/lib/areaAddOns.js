@@ -42,6 +42,9 @@ export function isAreaAddOnVisit(service) {
 // re-service / Tree & Shrub Fast Complete, the voice fill) record no add-on product
 // or treated area, so a visit like that stays off them. This is the SHORTCUT rule
 // only: which completion form a visit takes is isAreaAddOnVisit (below).
+// The completion form's refusal when the schedule feed could not read the visit's add-on rows (`areaAddOnsLookupFailed`).
+export const AREA_ADDONS_LOOKUP_FAILED_MESSAGE = "The add-on treatments for this visit could not be loaded. Close this form, reload the schedule, then complete the visit.";
+
 export function carriesAreaAddOnWork(service) {
   return isAreaAddOnVisit(service) || service?.areaAddOnRowsAttached === true;
 }
