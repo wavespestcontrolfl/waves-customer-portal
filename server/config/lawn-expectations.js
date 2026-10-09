@@ -43,7 +43,9 @@ const { CELSIUS_YTD_CAP, CELSIUS_YTD_CAP_LEGACY, celsiusYtdCap } = require('./la
 const MAX_LINE_WORDS = 33;
 
 // ── Product name -> family ────────────────────────────────────────────────
-// Value is { family, modeLock? }, or null for an explicit "no line" decision.
+// Value is { family, modeLock?, alsoFamilies? }, or null for an explicit "no line" decision.
+// `alsoFamilies` is for a product that is two things at once (a pre-emergent with fertilizer): the
+// visit then reads both families' existing approved rows, exactly as it would with two products.
 // Names are the catalog's own `products_catalog.name` strings as seeded by the
 // migrations (a test cross-checks each key against the migration sources) plus
 // the short display spellings the completion card writes into
@@ -93,6 +95,14 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Barricade 65WG', FAMILY.PRE_EMERGENT],
   ['Barricade 4FL', FAMILY.PRE_EMERGENT],
   ['LESCO Stonewall 4FL', FAMILY.PRE_EMERGENT],
+  // v13 catalog names (a test cross-checks every v13 lawn product). The full Stonewall name is the short
+  // one above spelled out: a liquid prodiamine pre-emergent, same row.
+  ['LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', FAMILY.PRE_EMERGENT],
+  // Dimension 2EW is a liquid dithiopyr pre-emergent: the same barrier, so the same row.
+  ['Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', FAMILY.PRE_EMERGENT],
+  // Dimension 0.21% 18-0-10 is a pre-emergent AND a slow-release feed (0.73 lb N): it reads both approved
+  // rows (greening builds gradually; success is the weeds that never sprout), like a visit with two products.
+  ['LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', FAMILY.PRE_EMERGENT, { alsoFamilies: [FAMILY.GRANULAR_N] }],
 
   // Granular slow-release nitrogen
   ['LESCO 24-0-11', FAMILY.GRANULAR_N],
@@ -123,6 +133,9 @@ const PRODUCT_CLASS_ENTRIES = [
   ['High Manganese Combo', FAMILY.IRON_MICROS],
   ['LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer', FAMILY.IRON_MICROS],
   ['LESCO High Manganese Combo Chelated Micronutrients AM 1% Mg 5.75% S 3% Fe 4% Mn Micronutrient Liquid Soil Amendment', FAMILY.IRON_MICROS],
+  // v13 hose-end liquid micronutrient package (6 to 16 fl oz per 1,000 sq ft): a micronutrient spray like the
+  // High Manganese Combo above, so the same short-lived color row. The catalog records no analysis for it.
+  ['LESCO Nutra-TECH T&O Micronutrient Package', FAMILY.IRON_MICROS],
 
   // Fungicide (curative needs a tagged target or a named issue, else preventive)
   ['Artavia 2 SC', FAMILY.FUNGICIDE],
@@ -134,6 +147,10 @@ const PRODUCT_CLASS_ENTRIES = [
   ['Medallion SC', FAMILY.FUNGICIDE],
   ['Headway G', FAMILY.FUNGICIDE],
   ['Headway Fungicide', FAMILY.FUNGICIDE],
+  // v13 spot fungicides (large patch after Artavia, gray leaf spot, dollar spot, fairy ring, rust): the
+  // same rule as Artavia, curative on a tagged target or named issue, else preventive.
+  ['Velista', FAMILY.FUNGICIDE],
+  ['Gravex 20 EW', FAMILY.FUNGICIDE],
 
   // Insecticide (curative needs a tagged target or a named issue, else preventive)
   ['Atticus Talak', FAMILY.INSECTICIDE],
@@ -143,6 +160,17 @@ const PRODUCT_CLASS_ENTRIES = [
   // lawn visits in the 10-02 P13 replay carried it unmapped.
   ['Talstar P', FAMILY.INSECTICIDE],
   ['Arena 50 WDG', FAMILY.INSECTICIDE],
+  // The catalog row was renamed (migration 20261007180000, same id, EPA 59639-152) and the report reads the
+  // catalog's current name; the SiteOne title is its alias. Same product, same row as above.
+  ['Arena S.E. 50 WDG Insecticide 2.5 lb. (Florida Only)', FAMILY.INSECTICIDE],
+  ['Arena S.E. 50 WDG Insecticide 2.5 lb. (40 oz.) Jug (Florida Only)', FAMILY.INSECTICIDE],
+  // Tetrino: the May whole-lawn pass on sunny turf (preventive when nothing is tagged) and also the first
+  // product for chinch bugs found at a patch edge (curative on a tagged target or named issue). It is used
+  // both ways, so no lock: the default rule picks the true row.
+  ['Tetrino Insecticide', FAMILY.INSECTICIDE],
+  // Dylox 6.2 G is a curative grub / mole cricket granule: the v13 program uses it only for those pests
+  // once seen. Its short residual makes "works ahead of the pests" untrue, so it is locked curative.
+  ['Dylox 6.2 G Granular Insecticide', FAMILY.INSECTICIDE, { modeLock: 'curative' }],
   // Acelepryn is a preventive grub/caterpillar product: never curative.
   ['Acelepryn Xtra', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
   ['Acelepryn Insecticide', FAMILY.INSECTICIDE, { modeLock: 'preventive' }],
@@ -177,7 +205,7 @@ function normalizeProductName(name) {
 const PRODUCT_CLASS = new Map(
   PRODUCT_CLASS_ENTRIES.map(([name, family, opts]) => [
     normalizeProductName(name),
-    family ? { family, modeLock: opts?.modeLock || null } : null,
+    family ? { family, modeLock: opts?.modeLock || null, alsoFamilies: opts?.alsoFamilies || [] } : null,
   ]),
 );
 

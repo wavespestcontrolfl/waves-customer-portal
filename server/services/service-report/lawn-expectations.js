@@ -267,9 +267,12 @@ function resolveProductRows(applications, causes, tied) {
     .filter(Boolean);
   const familyCurative = new Map(); // family -> curative?
   for (const app of mapped) {
-    const { family, modeLock } = classifyLawnProduct(appName(app));
-    // One curative application is enough to make the family's row curative.
-    familyCurative.set(family, familyCurative.get(family) || isCurative(family, app, causes, modeLock, tied));
+    const { family, modeLock, alsoFamilies } = classifyLawnProduct(appName(app));
+    // One curative application is enough to make the family's row curative. A product that is two
+    // things at once (a pre-emergent with fertilizer) counts toward each family it names.
+    for (const f of [family, ...alsoFamilies]) {
+      familyCurative.set(f, familyCurative.get(f) || isCurative(f, app, causes, modeLock, tied));
+    }
   }
   const rows = [...familyCurative].map(([family, curative]) => Object.values(PRODUCT_ROWS)
     .find((r) => r.family === family && (!r.mode || r.mode === (curative ? 'curative' : 'preventive'))));

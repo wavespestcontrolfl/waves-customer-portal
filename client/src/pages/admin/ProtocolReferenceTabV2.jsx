@@ -151,7 +151,7 @@ function TierDotV2({ active, label }) {
   );
 }
 
-function TierDotsV2({ tiers, tier4x, tier6x }) {
+function TierDotsV2({ tiers, tier4x, tier6x, tier9x }) {
   if (tiers) {
     return (
       <div className="flex items-center flex-wrap gap-1">
@@ -163,7 +163,18 @@ function TierDotsV2({ tiers, tier4x, tier6x }) {
       </div>
     );
   }
-  if (tier4x === undefined && tier6x === undefined) return null;
+  if (tier4x === undefined && tier6x === undefined && tier9x === undefined) return null;
+  // Tree & Shrub sells 6 and 9 visits a year; the 4x tier was retired
+  // 2026-09-24, so a program that carries tier_9x shows 6x and 9x.
+  if (tier9x !== undefined) {
+    return (
+      <div className="flex items-center gap-1">
+        {" "}
+        <TierDotV2 active={tier6x} label="6x" />{" "}
+        <TierDotV2 active={tier9x} label="9x" />{" "}
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-1">
       {" "}
@@ -331,6 +342,7 @@ function CurrentVisitCardV2({ visit, trackName, isLawnTrack, pricingRestricted, 
           tiers={visit.tiers}
           tier4x={visit.tier_4x}
           tier6x={visit.tier_6x}
+          tier9x={visit.tier_9x}
         />{" "}
       </div>{" "}
       <div className="px-4 py-3">
@@ -1551,6 +1563,7 @@ export default function ProtocolReferenceTabV2() {
                               tiers={v.tiers}
                               tier4x={v.tier_4x}
                               tier6x={v.tier_6x}
+                              tier9x={v.tier_9x}
                             />{" "}
                           </td>
                           <td className="px-2.5 py-2 text-11 text-ink-tertiary whitespace-pre-wrap align-top">

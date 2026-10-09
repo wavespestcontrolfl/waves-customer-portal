@@ -43,6 +43,14 @@
 //     protocol ties together are ONE "Weed spots" entry (the context's
 //     `plannedProducts.weedMix`, decided on the server: the yearly cap, the
 //     surfactant by temperature) whose rows share one area control.
+//     With the context's `troubleAreas` (GATE_LAWN_TROUBLE_AREAS, owner 2026-10-09) every
+//     spot row also asks WHERE on the lawn (a closed list from the server, one tap, under
+//     the area; the Weed spots and Chinch entries take the place in the same tap that adds
+//     them, and a lawn's single known trouble area of the row's type is the default place).
+//     A place the yearly limits close for the row is off with the limit's words; Complete
+//     waits for a place the way it waits for an area, and goes to /complete as areaPlace.
+//     A "Known trouble areas" line above the guide cards shows the lawn's areas, each with
+//     Clear and one confirm. Lib: lib/lawn-trouble-places.js; parts: LawnSpotPlace.jsx.
 //     With the context's `treatmentGuide` (GATE_LAWN_TREATMENT_GUIDE, owner 2026-10-08),
 //     once the assessment is confirmed the sheet asks the server for "Suggested from
 //     this lawn": one card per photo finding (the finding, the check to do first, the
@@ -110,6 +118,8 @@ import {
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
+import { KnownTroubleAreas, PlaceAddButtons, PlaceControl } from './LawnSpotPlace';
+import { knownPlacesOfType, troubleAreasOf, troubleTypeOfRow, withClearedTakeAll, withPlace } from '../../lib/lawn-trouble-places';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
 import CallBridgeLink from '../admin/CallBridgeLink';
@@ -190,7 +200,7 @@ export function plainRefusalMessage(err) {
 // A completion refused because the property's areas changed under the sheet
 // (`property_service_area_changed`) also reads the areas again, once, through
 // `onAreaChanged`, so the next tap sends the current version.
-function plainErrors(request, onAreaChanged) {
+function plainErrors(request, onAreaChanged, onPlaceRefused) {
   return async (path, options) => {
     try {
       return await request(path, options);
@@ -198,6 +208,8 @@ function plainErrors(request, onAreaChanged) {
       const message = plainRefusalMessage(err);
       if (message && err) err.message = message;
       if (err?.code === 'property_service_area_changed') onAreaChanged?.current?.();
+      // GATE_LAWN_TROUBLE_AREAS: a place the limits close, or a take-all place that is no longer mapped, refreshes the place maps, so the chip closes without a reload.
+      if (err?.code === 'lawn_place_limit' || err?.code === 'lawn_place_not_mapped') onPlaceRefused?.current?.(err);
       throw err;
     }
   };
@@ -211,7 +223,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
   visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
-  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [],
+  findingsType: null, stockAdvisory: undefined, spotRules: false, weedMix: null, treatmentGuide: false, lawnReportTies: false, lawnReportFacts: false, chinch: null, guidedProductIds: [], takeAllProductIds: [], troubleAreas: null,
 };
 
 // Why the live context can't be completed here, or '' when it can.
@@ -231,11 +243,24 @@ const weedMixOf = (data) => {
 };
 // The standing "Chinch bugs found at the edge of damage" offer (GATE_LAWN_TREATMENT_GUIDE): the add-on its tap opens
 // (null when the limits leave nothing to add) and the line that says why, or null.
+// GATE_LAWN_TROUBLE_AREAS: the same decision at each place of the lawn, `{ [placeId]: { item, note, unreadableIds } }`, or null.
+const chinchByPlace = (chinch) => {
+  if (!chinch?.byPlace || typeof chinch.byPlace !== 'object' || Array.isArray(chinch.byPlace)) return null;
+  return Object.fromEntries(Object.entries(chinch.byPlace).map(([place, decision]) => [place, {
+    item: decision?.item?.productId ? decision.item : null,
+    note: decision?.note || null,
+    unreadableIds: Array.isArray(decision?.unreadableIds) ? decision.unreadableIds : [],
+    ...(Array.isArray(decision?.blockedIds) ? { blockedIds: decision.blockedIds } : {}),
+    ...(decision?.amountBlocked === true ? { amountBlocked: true } : {}),
+  }]));
+};
 const chinchShape = (chinch) => {
   const item = chinch?.item?.productId ? chinch.item : null;
   const rungIds = Array.isArray(chinch?.rungIds) ? chinch.rungIds : [];
   const unreadableIds = Array.isArray(chinch?.unreadableIds) ? chinch.unreadableIds : [];
-  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds } : null;
+  const byPlace = chinchByPlace(chinch);
+  const chinchOnlyIds = Array.isArray(chinch?.chinchOnlyIds) ? chinch.chinchOnlyIds : null;
+  return item || chinch?.note ? { item, note: chinch.note || null, rungIds, unreadableIds, ...(byPlace ? { byPlace } : {}), ...(chinchOnlyIds ? { chinchOnlyIds } : {}) } : null;
 };
 const chinchOf = (data) => chinchShape(data?.treatmentGuide === true ? data?.plannedProducts?.chinch : null);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
@@ -254,6 +279,8 @@ const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
 //  - planned_products: the planned list is empty and `plannedProductsUnavailable`
 //    says so; the sheet shows a note and the technician adds what was applied.
 //  - photo_status and turf_height_flag: advisory only, and the sheet shows neither.
+//  - trouble_areas (the known areas could not be read: the line says so) and trouble_area_limits (what a limit closes
+//    at a place could not be read: no place is shown closed, and /complete judges the place); neither holds the sheet.
 // Every other failure is a thrown read (HTTP 500) and is a load error already.
 function visitTypeUnreadable(data) {
   const failures = Array.isArray(data?.readFailures) ? data.readFailures : [];
@@ -282,6 +309,8 @@ const optionalContextFields = (data) => ({
   chinch: chinchOf(data),
   // The add-ons a guide card may own: their taps wait for the fresh guide.
   guidedProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.guidedProductIds) ? data.plannedProducts.guidedProductIds : [],
+  // GATE_LAWN_TROUBLE_AREAS: the closed list of places, the known trouble areas and what a limit closes where; null otherwise.
+  troubleAreas: troubleAreasOf(data),
   takeAllProductIds: data?.treatmentGuide === true && Array.isArray(data?.plannedProducts?.takeAllProductIds) ? data.plannedProducts.takeAllProductIds : [],
 });
 
@@ -358,6 +387,16 @@ function freshWeedMix(data) {
   return mix && Array.isArray(mix.productIds) && Array.isArray(mix.groupProductIds) ? mix : undefined;
 }
 
+// GATE_LAWN_TROUBLE_AREAS: after /complete refused a place (refreshKey > 0) the reads name the spot products on the sheet, so the server reads
+// their per-place limits too (a Search-added product outside the month's recipe is not in the opening seed). Nothing is added to any
+// other request, so a sheet that was never refused sends exactly what it always did.
+const searchedIdsQuery = (refreshKey, idsRef, lead) => (refreshKey && idsRef?.current?.length ? `${lead}productIds=${idsRef.current.join(',')}` : '');
+
+// GATE_LAWN_TROUBLE_AREAS: what the guide's read found closed at each place, `{ [productId]: { [place]: message } }` (an empty entry =
+// open everywhere), or undefined when the answer carries none (then the context's map stands).
+const freshPlaceTypes = (data) => (data.placeBlockedTypes && typeof data.placeBlockedTypes === 'object' && !Array.isArray(data.placeBlockedTypes) ? data.placeBlockedTypes : undefined);
+const freshPlaceBlocked = (data) => (data.placeBlocked && typeof data.placeBlocked === 'object' && !Array.isArray(data.placeBlocked) ? data.placeBlocked : undefined);
+
 // The standing chinch tap's decision the guide read fresh (the limits are read again after Confirm):
 // the offer, null when there is nothing to offer or say, or undefined when the answer carries none.
 function freshChinch(data) {
@@ -380,29 +419,37 @@ const effectiveWeedMix = (guide, ctx) => (guide && guide.weedMix !== undefined ?
 // 'answered' (`guide` = { assessmentId, cards, weedMix, chinch }) or 'failed' (the read failed or
 // the answer was malformed: the sheet then follows the context's decisions, as without a guide).
 const GUIDE_KINDS = ['weeds', 'fungus', 'chinch', 'caterpillars', 'dry_spots'];
+// GATE_LAWN_TROUBLE_AREAS: a weeds or chinch card can carry a decision per place (`byPlace`: { [placeId]: { productIds, items, note } }),
+// and then owns every product any place takes.
+const cardPlaceEntries = (card) => (card.byPlace && typeof card.byPlace === 'object' ? Object.entries(card.byPlace).filter(([, entry]) => Array.isArray(entry?.items) && entry.items.length) : []);
+const cardAllIds = (card) => [...card.productIds, ...cardPlaceEntries(card).flatMap(([, entry]) => entry.items.map((item) => item.productId))];
 const guideCardOk = (card) => !!card && GUIDE_KINDS.includes(card.kind) && typeof card.title === 'string' && Array.isArray(card.productIds) && Array.isArray(card.items);
-function useTreatmentGuide({ base, request, enabled, assessmentId }) {
+function useTreatmentGuide({ base, request, enabled, assessmentId, refreshKey = 0, idsRef = null }) {
   const [state, setState] = useState({ for: null, status: 'idle', guide: null });
   useEffect(() => {
-    if (!enabled || !assessmentId) return undefined;
+    // No confirmed assessment (a retake, or the guide is off): an answer held for an earlier one is dropped, so it can never come back.
+    if (!enabled || !assessmentId) { setState((prev) => (prev.for === null ? prev : { for: null, status: 'idle', guide: null })); return undefined; }
     let active = true;
-    request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}`)
+    // A failed read keeps the answer the sheet has ONLY while that answer belongs to this same confirmed assessment; for a new one
+    // it is a failed read like any other (the sheet then follows the context's opening values).
+    const failed = () => setState((prev) => (refreshKey && prev.for === assessmentId && prev.status === 'answered' ? prev : { for: assessmentId, status: 'failed', guide: null }));
+    request(`${base}/lawn-fast/treatment-guide?assessmentId=${encodeURIComponent(assessmentId)}${searchedIdsQuery(refreshKey, idsRef, '&')}`)
       .then((data) => {
         if (!active) return;
         if (data?.v === 1 && Array.isArray(data.cards)) {
-          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
-        } else setState({ for: assessmentId, status: 'failed', guide: null });
+          setState({ for: assessmentId, status: 'answered', guide: { assessmentId, takeAllProductIds: Array.isArray(data.takeAllProductIds) ? data.takeAllProductIds : undefined, placeBlocked: freshPlaceBlocked(data), placeBlockedTypes: freshPlaceTypes(data), cards: data.cards.filter(guideCardOk), weedMix: freshWeedMix(data), chinch: freshChinch(data), blockedProductIds: Array.isArray(data.blockedProductIds) ? data.blockedProductIds : [], unreadableProductIds: Array.isArray(data.unreadableProductIds) ? data.unreadableProductIds : [], unreadableNote: typeof data.unreadableNote === 'string' ? data.unreadableNote : '' } });
+        } else failed();
       })
-      .catch(() => { if (active) setState({ for: assessmentId, status: 'failed', guide: null }); });
+      .catch(() => { if (active) failed(); });
     return () => { active = false; };
-  }, [base, request, enabled, assessmentId]);
+  }, [base, request, enabled, assessmentId, refreshKey]);
   if (!enabled || !assessmentId) return { guide: null, status: 'idle' };
   return state.for === assessmentId ? { guide: state.guide, status: state.status } : { guide: null, status: 'pending' };
 }
 
 // The guide's cards and the tech's checks on them; a new assessment starts with nothing checked.
-function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable }) {
-  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId });
+function useTreatmentGuideState({ base, request, enabled, assessmentId, unusable, refreshKey, idsRef }) {
+  const { guide, status } = useTreatmentGuide({ base, request, enabled, assessmentId: unusable ? null : assessmentId, refreshKey, idsRef });
   const [checkedState, setCheckedState] = useState({ for: null, map: {} });
   const forId = guide?.assessmentId ?? null;
   const onGuideCheck = useCallback((kind, value) => setCheckedState((prev) => ({
@@ -431,7 +478,7 @@ const lowerIds = (ids) => (ids || []).filter(Boolean).map((id) => String(id).toL
 // list; the search alone still reaches it (guideGovernance: takeAll).
 function cardOwnedIds(guide, checks) {
   return lowerIds((guide?.cards || []).filter((card) => checks[card.kind] !== 'none')
-    .flatMap((card) => [...card.productIds, ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
+    .flatMap((card) => [...cardAllIds(card), ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
 }
 
 // What the guide governs for this visit, and what the LATEST decision does with it. ONE invariant:
@@ -457,6 +504,8 @@ function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
     ...lowerIds(guide?.unreadableProductIds),
     // The mix is withheld as a whole; the members not read as forbidding are released.
     ...(weedMix?.mode === 'unavailable' ? weedGroup.filter((id) => !lowerIds(weedMix.blockedIds).includes(id)) : []),
+    // GATE_LAWN_TROUBLE_AREAS: a member whose limit could not be read at ANY place is released too, whatever the top-level mode.
+    ...lowerIds(weedMix?.unreadableIds),
     ...lowerIds(chinch?.unreadableIds),
   ];
 }
@@ -483,11 +532,13 @@ function guideGovernance({ ctx, guide, status, checks }) {
   const weedMix = effectiveWeedMix(guide, ctx);
   const chinch = effectiveChinch(guide, ctx);
   const picks = lowerIds(ctx.guidedProductIds);
-  const chinchItem = lowerIds([chinch?.item?.productId]);
-  const weedOffered = weedMix && ['lead', 'replacement'].includes(weedMix.mode) ? lowerIds(weedMix.productIds) : [];
+  // With places (GATE_LAWN_TROUBLE_AREAS) a decision is made at each place: a product offered at any place is offered.
+  const chinchItem = lowerIds([chinch?.item?.productId, ...Object.values(chinch?.byPlace || {}).map((decision) => decision.item?.productId)]);
+  const weedOffered = lowerIds([weedMix, ...Object.values(weedMix?.byPlace || {})]
+    .filter((decision) => decision && ['lead', 'replacement'].includes(decision.mode)).flatMap((decision) => decision.productIds || []));
   const blocked = lowerIds(answered ? guide.blockedProductIds : []);
-  const cardIds = lowerIds(cards.flatMap((card) => [...card.productIds, ...card.items.map((item) => item.productId)]));
-  const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => card.productIds));
+  const cardIds = lowerIds(cards.flatMap((card) => [...cardAllIds(card), ...card.items.map((item) => item.productId)]));
+  const chinchCardIds = lowerIds(cards.filter((card) => card.kind === 'chinch').flatMap((card) => cardAllIds(card)));
   const weedGroup = lowerIds(weedMix?.groupProductIds);
   // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
   const unreadable = settled ? unreadableIds({ guide: fresh, weedMix, chinch, weedGroup }) : [];
@@ -611,6 +662,7 @@ function productRow(product, { planned = null, added = false, weedGroup = false,
     // One of the Weed spots entry's rows: they share one area (weedArea).
     weedGroup,
     ...guideRowFields(planned, guided),
+    // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
     method,
     dimension: seeded.dimension,
     totalAmount: seeded.amount,
@@ -820,6 +872,19 @@ function withSpotArea(row, { spotRules, weedMix, weedArea }) {
   };
 }
 
+// GATE_LAWN_TROUBLE_AREAS: every spot row (the ones withSpotArea marked) also carries its place: the tech's tap (the weed
+// entry's rows share `weedPlace`), else the lawn's single known trouble area of its type, with the places the yearly limits
+// close for it. See lib/lawn-trouble-places.js.
+// The places a take-all row from the guide card may go on: the card's own mapped places, else the lawn's known take-all areas.
+const takeAllPlacesOf = (guide, areas) => new Set(((guide?.cards || []).find((card) => Array.isArray(card.allowedPlaces))?.allowedPlaces) || (areas?.known || []).filter((area) => area.type === 'take_all').map((area) => area.place));
+
+function withSpotPlaces(rows, { areas, weedMix, chinch, weedPlace, takeAll, takeAllPlaces }) {
+  const weedRows = rows.filter((row) => row.spotRule && row.weedGroup);
+  return rows.map((row) => (row.spotRule
+    ? withPlace(row, { areas, chosen: row.weedGroup ? weedPlace : row.pickedPlace, weedMix, chinch, weedRows, takeAll, takeAllPlaces })
+    : row));
+}
+
 // A row as the sheet reads, checks and sends it: its figured amount in place
 // of an empty box. The tech's own entry and the plan's quantity pass through.
 function withDerivedAmount(row, lawnSqft) {
@@ -875,10 +940,11 @@ function useProductRows(ctx, catalog) {
       };
     }));
   }, [spotRules]);
-  const addProduct = useCallback((product, { planned = null, weedGroup = false, guided } = {}) => {
+  const addProduct = useCallback((product, { planned = null, weedGroup = false, guided, source = null, place = '' } = {}) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { added: true, planned, weedGroup, guided, spotRules }),
+      // GATE_LAWN_TROUBLE_AREAS: how the row was opened (a guide card or a tech tap) and the place the opening tap named.
+      { ...productRow(product, { added: true, planned, weedGroup, guided, spotRules }), troubleSource: source, pickedPlace: place },
     ]));
   }, [spotRules]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
@@ -935,10 +1001,16 @@ function barActionFor({ missingReason, dictationPending, progress, block }) {
   return { label: missingReason, disabled: !progress[can], onClick: () => block.current?.[run]() };
 }
 
+// The place a row sits at, in the closed list's own words (the label rides the row's chips; the id is the fallback).
+const areaLabelOf = (row) => row.placeLabels?.[row.place] || row.place;
+
 function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
+  // GATE_LAWN_TROUBLE_AREAS: a spot row goes where the yearly limits allow, and names its place.
+  const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
+  const missingPlace = rows.find((row) => row.placeRule && !row.place);
   const [, reason = ''] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
@@ -956,6 +1028,8 @@ function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHe
       : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
     // A spot row needs the area treated or a typed amount (spot rules).
     [missingSpot, missingSpot && `Enter the area treated for ${missingSpot.name}.`],
+    [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
+    [missingPlace, missingPlace && `Pick where on the lawn ${missingPlace.name} went.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
     [typed && !form.condition, 'Pick the lawn condition.'],
@@ -968,13 +1042,7 @@ function missingRequirement({ form, rows, guideHold, lawnSqft, areaHold, gaugeHe
 // chinch: found, taken (the report ties it to the product in one sentence, GATE_LAWN_REPORT_FACTS). Null when
 // the guide recorded nothing. Only while the server says the report ties are live: with that gate off the record is exactly what it was.
 function guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap = null }) {
-  const cards = (guideCards || []).map((card) => ({
-    kind: card.kind,
-    shown: true,
-    checked: guideChecks[card.kind] || null,
-    taken: cardOnSheet(card, on),
-    productIds: card.productIds,
-  }));
+  const cards = (guideCards || []).map((card) => guideRecordCard(card, { checks: guideChecks, on, rows }));
   // The row the technician's chinch tap is about: the one the entry (or the chinch card) opened, or the product
   // already on the sheet that he tapped "found" for. A product that is merely on the sheet is no find.
   const standing = ctx.treatmentGuide && ctx.lawnReportTies
@@ -982,7 +1050,9 @@ function guideRecordCards({ guideCards, guideChecks, rows, on, ctx, chinchTap = 
     : null;
   if (!standing) return guideCards ? cards : null;
   const own = cards.find((card) => card.kind === 'chinch');
-  const chinch = { kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: own ? own.productIds : [String(standing.productId).toLowerCase()] };
+  // With places the record also names the place the product went to (an extra field; the ids stay a flat list of the ids added).
+  const place = own?.place || (standing.placeRule && standing.place) || null;
+  const chinch = { kind: 'chinch', shown: true, checked: 'found', taken: true, productIds: own ? own.productIds : [String(standing.productId).toLowerCase()], ...(place ? { place } : {}) };
   return [...cards.filter((card) => card.kind !== 'chinch'), chinch];
 }
 
@@ -1030,6 +1100,8 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
         ...(requirement ? { areaValue: areaOf(row, lawnSqft), areaUnit: requirement.unit } : {}),
         // A spot row's area, as the full form sends the plan's treatedSqft (spot rules).
         ...(row.spotRule && row.spotArea > 0 ? { areaValue: row.spotArea, areaUnit: 'sqft' } : {}),
+        // GATE_LAWN_TROUBLE_AREAS: where the spot went, and what the row was opened for (the server writes the lawn's trouble area from it).
+        ...(row.placeRule && row.place ? { areaPlace: row.place, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
         targets: [],
       };
     }),
@@ -1148,7 +1220,8 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   const propertyAreas = usePropertyAreaLifecycle();
   const reloadAreas = useRef(null);
   reloadAreas.current = propertyAreas.refresh;
-  const submitRequest = useMemo(() => plainErrors(request, reloadAreas), [request]);
+  const refreshPlaces = useRef(null);
+  const submitRequest = useMemo(() => plainErrors(request, reloadAreas, refreshPlaces), [request]);
   // `sheet` tags a saved attempt as this sheet's: its findings type matches the
   // lawn re-service sheet's, and Tech Home cannot open this one.
   const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit' });
@@ -1188,12 +1261,12 @@ export default function FastCompleteLawnSheet({ service, request, operatorId, ca
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
-      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile }) {
+function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;
@@ -1212,7 +1285,7 @@ function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, 
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} />;
+  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} onFullForm={onFullForm} isMobile={isMobile} refreshPlaces={refreshPlaces} />;
 }
 
 // The photo step's report of the confirmed assessment, plus the context's own
@@ -1272,8 +1345,72 @@ function useStockHold({ ctx, service, rows, products, request }) {
   return { stockRow, checkingStock, checkStock };
 }
 
-function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile }) {
+// Whether a row's dose signature (see dosesRef) holds an amount: [totalAmount, unit, area, rate].
+const hadAmount = (signature) => { try { const [amount] = JSON.parse(signature); return amount !== null && amount !== undefined && amount !== ''; } catch { return false; } };
+
+// What /complete refused, less the amount refusals whose row's dose is not the dose it was refused at; a count or interval refusal stays.
+function pruneAmountRefusals(refused, doses) {
+  const kept = Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).filter(([, e]) => e.dose === null || e.dose === doses[id]))]).filter(([, byPlace]) => Object.keys(byPlace).length));
+  return JSON.stringify(kept) === JSON.stringify(refused) ? refused : kept;
+}
+
+// GATE_LAWN_TROUBLE_AREAS: reads the place maps again after /complete refused a place (400 lawn_place_limit). The context is read aside
+// (the sheet is never reset): its troubleAreas, weed mix and chinch decision replace the opening ones where it carries them, and
+// `tick` makes the treatment guide read again. A read that fails changes nothing. `slot` is the ref the submit's error handler calls.
+function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
+  const [tick, setTick] = useState(0);
+  const [fresh, setFresh] = useState(null);
+  // What /complete refused, `{ [productId]: { [place]: { message, dose } } }`: authoritative, merged into the blocked map at once and kept.
+  // A refusal of the yearly AMOUNT depends on the dose the tech entered (`dose`: that row's amount, unit, area and rate then); a count or an
+  // interval refusal does not (`dose` null), so only the amount kind is dropped when the dose changes (pruneRefused).
+  const [refused, setRefused] = useState({});
+  // The products whose dose changed since /complete last refused them. A yearly-AMOUNT block in ANY map (the opening context, a refresh,
+  // the guide's answer) was judged at the program dose, so it stops closing a chip once that row's dose has moved (see problemAt).
+  const [moved, setMoved] = useState([]);
+  const lastDoses = useRef(null);
+  const refresh = useCallback((err) => {
+    const { productId, place, error, limitType } = err?.details || {};
+    const id = String(productId || '').toLowerCase();
+    if (id) setMoved((prev) => (prev.includes(id) ? prev.filter((other) => other !== id) : prev));
+    const entry = { message: error || err?.message, dose: limitType === 'annual_max_rate' ? (dosesRef?.current?.[id] ?? '') : null, cardOnly: err?.code === 'lawn_place_not_mapped' };
+    if (productId && place) setRefused((prev) => ({ ...prev, [id]: { ...prev[id], [place]: entry } }));
+    setTick((n) => n + 1);
+    request(`${base}/lawn-fast/context${searchedIdsQuery(1, idsRef, '?')}`)
+      .then((data) => setFresh({ troubleAreas: troubleAreasOf(data), weedMix: weedMixOf(data), chinch: chinchOf(data) }))
+      .catch(() => {});
+  }, [base, request]);
+  slot.current = refresh;
+  const placeCtx = useMemo(() => ({ ...ctx, ...Object.fromEntries(Object.entries(fresh || {}).filter(([, value]) => value)) }), [ctx, fresh]);
+  // Drops the amount refusals whose row's dose is not the dose it was refused at; never touches a count or interval refusal.
+  const pruneRefused = useCallback((doses) => {
+    const before = lastDoses.current;
+    lastDoses.current = doses;
+    // A row that had no amount yet gets its first one: that is the dose the maps judged, not a change of it.
+    const changed = before ? Object.keys(doses).filter((id) => id in before && before[id] !== doses[id] && hadAmount(before[id])) : [];
+    if (changed.length) setMoved((prev) => [...new Set([...prev, ...changed])]);
+    setRefused((prev) => pruneAmountRefusals(prev, doses));
+  }, []);
+  const messages = useMemo(() => Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).map(([place, e]) => [place, e.message]))])), [refused]);
+  // The refusals that hold for a guide-card row only (a take-all place that is not mapped), `{ [productId]: { [place]: true } }`.
+  const refusedCard = useMemo(() => Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).filter(([, e]) => e.cardOnly).map(([place]) => [place, true]))])), [refused]);
+  return { tick, placeCtx, refused: messages, refusedCard, moved, pruneRefused };
+}
+
+// The sheet's places: the context's closed list and known areas (less the ones cleared here), with what is closed where taken from the
+// guide's fresh read once it has answered, else the context's.
+function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }) {
+  const base = placeCtx.troubleAreas;
+  const fresh = guide?.placeBlocked;
+  const freshTypes = guide?.placeBlockedTypes;
+  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, blockedTypes: { ...base.blockedTypes, ...freshTypes }, refused, refusedCard, moved } : null), [base, fresh, freshTypes, cleared, refused, refusedCard, moved]);
+}
+
+function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
   const base = `/admin/dispatch/${service?.id}`;
+  // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
+  const searchedIds = useRef([]);
+  const dosesRef = useRef({});
+  const { tick: placeTick, placeCtx, refused, refusedCard, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
@@ -1289,11 +1426,15 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // recorded even when the product was already on the sheet (it came from another card) and the tap adds no row.
   const [chinchTap, setChinchTap] = useState(null);
   const onChinchTap = useCallback((productId) => setChinchTap(String(productId).toLowerCase()), []);
-  const { guide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable });
+  // GATE_LAWN_TROUBLE_AREAS: the known areas the tech cleared on this sheet (and where the take-all ones were): the take-all card follows them at once.
+  const [clearedAreas, setClearedAreas] = useState([]);
+  const [clearedPlaces, setClearedPlaces] = useState([]);
+  const { guide: rawGuide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick, idsRef: searchedIds });
+  const guide = useMemo(() => withClearedTakeAll(rawGuide, { known: placeCtx.troubleAreas?.known, clearedIds: clearedAreas, clearedPlaces }), [rawGuide, placeCtx, clearedAreas, clearedPlaces]);
   // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
-  const { gov, removed: removedByGuide } = useGuideGovernance({ ctx, guide, status: guideStatus, checks: guideChecks, products });
+  const { gov, removed: removedByGuide } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks, products });
   // The one Weed spots decision on screen (the guide's fresh read once it has answered).
-  const weedMix = effectiveWeedMix(guide, ctx);
+  const weedMix = effectiveWeedMix(guide, placeCtx);
   // The whole-lawn area: this visit property's recorded lawn area (or the area
   // the technician set when none is recorded), never a planned product's own
   // (possibly partial) area and never the customer-wide turf profile (at a
@@ -1303,10 +1444,30 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // cards) sees the figured amounts; only the tech's entries live in state.
   // The weed mix's one shared area (spot rules): typed or picked once, it applies to every row of the entry.
   const [weedArea, setWeedArea] = useState('');
+  // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
+  const [weedPlace, setWeedPlace] = useState('');
+  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, refusedCard, moved });
+  const clearArea = useCallback(async (id) => {
+    await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
+    setClearedAreas((prev) => [...prev, id]);
+    const gone = placeCtx.troubleAreas?.known?.find((area) => area.id === id);
+    if (gone?.type === 'take_all') setClearedPlaces((prev) => [...prev, gone.place]);
+  }, [request, base, placeCtx]);
+  const chinchDecision = effectiveChinch(guide, placeCtx);
   const rows = useMemo(
-    () => products.rows.map((row) => withDerivedAmount(withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }), lawnSqft)),
-    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea],
+    () => {
+      const spotted = products.rows.map((row) => withSpotArea(row, { spotRules: ctx.spotRules, weedMix, weedArea }));
+      const placed = areas ? withSpotPlaces(spotted, { areas, weedMix, chinch: chinchDecision, weedPlace, takeAll: gov.takeAll, takeAllPlaces: takeAllPlacesOf(guide, areas) }) : spotted;
+      return placed.map((row) => withDerivedAmount(row, lawnSqft));
+    },
+    [products.rows, lawnSqft, ctx.spotRules, weedMix, weedArea, areas, chinchDecision, weedPlace, gov.takeAll, guide],
   );
+  // The spot products on the sheet, named to the server when a refused place is read again (see searchedIdsQuery).
+  searchedIds.current = rows.filter((row) => row.placeRule).map((row) => String(row.productId));
+  // Each spot row's dose (what the yearly amount depends on); an amount refusal ends when its row's dose changes.
+  dosesRef.current = Object.fromEntries(rows.filter((row) => row.placeRule).map((row) => [String(row.productId).toLowerCase(), JSON.stringify([row.totalAmount, row.amountUnit, row.spotArea ?? null, row.derivedRate?.rate ?? null])]));
+  const doseKey = JSON.stringify(dosesRef.current);
+  useEffect(() => { pruneRefused(JSON.parse(doseKey)); }, [doseKey, pruneRefused]);
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).
@@ -1346,7 +1507,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // surfactant in the heat, a member or the lead at its yearly limit, the replacement before its
   // turn). Only when the limits could not be read does the entry send the tech to the search.
   const searchCatalog = useMemo(() => {
-    const held = weedMix && weedMix.mode !== 'unavailable' ? weedMix.groupProductIds || [] : [];
+    const unreadable = lowerIds(weedMix?.unreadableIds);
+    const held = weedMix && weedMix.mode !== 'unavailable' ? (weedMix.groupProductIds || []).filter((id) => !unreadable.includes(String(id).toLowerCase())) : [];
     // Every guide-governed product that is not released to the generic list comes through its entry
     // or card only (and, before the guide has answered, not at all).
     const hidden = (product) => gov.hidden.has(String(product.id).toLowerCase()) || held.some((id) => sameId(id, product.id));
@@ -1423,7 +1585,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               closeUpPrompt={!!ctx.treatmentGuide}
             />
           </section>
-          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={effectiveChinch(guide, ctx)} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} weedPlace={weedPlace} onWeedPlace={setWeedPlace} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1493,7 +1655,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, weedMix, chinch, areas = null, onClearArea, onWeedPlace, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -1516,13 +1678,17 @@ function ProductsSection({ ctx, weedMix, chinch, gov, removedByGuide = { names: 
             note={surfactantNote && row.weedGroup && sameId(surfactantNote.productId, row.productId) ? surfactantNote.note : takeAllRowNote(gov, row.productId)}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
-          />
+          >
+            {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(place) => updateRow(row.productId, { pickedPlace: place })} /> : null}
+          </ProductEditor>
           {row === areaHost && <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea} />}
+          {row === areaHost && row.placeRule && areas && <PlaceControl areas={areas} row={row} title="Weed spots" locked={locked} onChange={onWeedPlace} />}
         </React.Fragment>
       ))}
-      <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
+      {areas && <KnownTroubleAreas known={areas.known} unavailable={areas.knownUnavailable} locked={locked} clear={onClearArea} />}
+      <TreatmentGuide guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} areas={areas} onWeedPlace={onWeedPlace} />
       {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
-      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} markChinch={ctx.lawnReportTies ? { tapped: chinchTap, onTap: onChinchTap } : null} />
+      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} areas={areas} onWeedPlace={onWeedPlace} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} markChinch={ctx.lawnReportTies ? { tapped: chinchTap, onTap: onChinchTap } : null} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
@@ -1548,13 +1714,37 @@ function splitAddOns(addOns, weedMix, catalog) {
   return {
     items: withProduct.filter((item) => !grouped.has(String(item.productId).toLowerCase())),
     weedEntry: weedMix && weedItems.every(Boolean) ? weedItems : null,
+    withProduct,
   };
+}
+
+// GATE_LAWN_TROUBLE_AREAS: the places the Weed spots entry can add for, each with what that place takes (the server's decision at
+// that place), or null (no places: the one tap as before). A known weed area's place leads.
+function weedPlaceChoices({ weedMix, areas, withProduct }) {
+  if (!areas || !weedMix?.byPlace) return null;
+  const known = knownPlacesOfType(areas, 'weeds');
+  return areas.places.map((place) => {
+    const decision = weedMix.byPlace[place.id];
+    if (!decision || !['lead', 'replacement'].includes(decision.mode)) return null;
+    const items = (decision.productIds || []).map((id) => withProduct.find((item) => sameId(item.productId, id)));
+    return items.length && items.every(Boolean) ? { ...place, items, known: known.has(place.id) } : null;
+  }).filter(Boolean).sort((a, b) => Number(b.known) - Number(a.known));
+}
+
+// The places the chinch entry can add for (the product each place takes), or null.
+function chinchPlaceChoices({ chinch, areas }) {
+  if (!areas || !chinch?.byPlace) return null;
+  const known = knownPlacesOfType(areas, 'chinch');
+  return areas.places.map((place) => {
+    const item = chinch.byPlace[place.id]?.item;
+    return item ? { ...place, item, known: known.has(place.id) } : null;
+  }).filter(Boolean).sort((a, b) => Number(b.known) - Number(a.known));
 }
 
 // What the add-ons group lists. A product a visible card owns is on the card, not here; a card the
 // guide shows for the weed mix or the chinch bugs IS that entry, so it is not listed twice. Nothing
 // to add (the limit is reached) is still said, as a line.
-function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog }) {
+function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog, areas = null }) {
   const split = splitAddOns(addOns, weedMix, catalog);
   const cardShown = (kind) => !!guideCards?.some((card) => card.kind === kind) && guideChecks[kind] !== 'none';
   return {
@@ -1567,12 +1757,15 @@ function addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, cat
     weedEntry: split.weedEntry,
     showWeed: !cardShown('weeds') && !!weedMix && (split.weedEntry?.length > 0 || (!weedMix.productIds.length && !!weedMix.note)),
     showChinch: !cardShown('chinch') && !!chinch,
+    weedPlaces: weedPlaceChoices({ weedMix, areas, withProduct: split.withProduct }),
+    chinchPlaces: chinchPlaceChoices({ chinch, areas }),
   };
 }
 
-function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd, markChinch = null }) {
+function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, areas = null, onWeedPlace, guideCards = null, guideChecks = {}, gov = NO_GOVERNANCE, rows, catalog, locked, onAdd, markChinch = null }) {
   const titleId = useId();
-  const { items, weedEntry, showWeed, showChinch } = addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog });
+  const { items, weedEntry, showWeed, showChinch, weedPlaces, chinchPlaces } = addOnsView({ addOns, weedMix, chinch, guideCards, guideChecks, gov, catalog, areas });
+  const placeLabels = areas ? Object.fromEntries(areas.places.map((place) => [place.id, place.label])) : {};
   if (!items.length && !showWeed && !showChinch) return null;
   const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
   const monthName = month ? MONTH_NAMES[month - 1] : null;
@@ -1583,9 +1776,9 @@ function ProtocolAddOns({ addOns, month, weedMix = null, chinch = null, guideCar
         <p className="tech-visit-muted">Tap what you applied.</p>
       </div>
       {showWeed && (
-        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />
+        <WeedSpotsEntry weedMix={weedMix} items={weedEntry || []} places={weedPlaces} labels={placeLabels} onPlace={onWeedPlace} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} />
       )}
-      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} markChinch={markChinch} />}
+      {showChinch && <ChinchFoundEntry chinch={chinch} catalog={catalog} places={chinchPlaces} labels={placeLabels} on={on} locked={locked} waiting={gov.locked} onAdd={onAdd} markChinch={markChinch} />}
       {items.map((item) => (
         <AddOnLine
           key={item.productId}
@@ -1642,27 +1835,33 @@ const CONFIRM_FIRST = 'Confirm the assessment first.';
 // "Weed spots": the server's one entry for the weed mix (lib: lawn-weed-mix.js). One tap
 // opens the rows it names (each seeded from its own plan item, as a single add-on is) and
 // they share one area. With nothing to add (the yearly limit is reached) it is a line only.
-function WeedSpotsEntry({ weedMix, items, on, locked, waiting = false, onAdd }) {
-  const allOn = items.length > 0 && items.every((item) => on.has(String(item.productId).toLowerCase()));
+function WeedSpotsEntry({ weedMix, items, places = null, labels = {}, onPlace, on, locked, waiting = false, onAdd }) {
+  // What a tap adds: with places (GATE_LAWN_TROUBLE_AREAS) one set per place, each tap naming its place; else the one set.
+  const options = places || (items.length ? [{ id: '', items }] : []);
+  const onSheet = (ids) => ids.some((id) => on.has(String(id).toLowerCase()));
+  // With places any of the group on the sheet closes the entry (the rows' place is then changed on their place control).
+  const done = places ? onSheet(weedMix.groupProductIds || []) : items.length > 0 && items.every((item) => onSheet([item.productId]));
   const names = items.map((item) => item.product.name).join(', ');
+  // What differs by place (a place at its limit, a place that takes the replacement) is said by place.
+  const byPlace = places ? Object.entries(weedMix.byPlace || {}).filter(([, d]) => d.note && d.note !== weedMix.note) : [];
+  const line = [done ? 'On the sheet' : names, weedMix.note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  const add = (option) => {
+    option.items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds', ...(places ? { source: 'tech_tap' } : {}) }));
+    if (places) onPlace(option.id);
+  };
   return (
     <div className="tech-protocol-addon">
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">Weed spots</span>
-        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : [allOn ? 'On the sheet' : names, weedMix.note].filter(Boolean).join(' · ')}</span>
+        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : line.filter(Boolean).join(' · ')}</span>
       </span>
-      {items.length > 0 && !waiting && (
-        <Button
-          type="button"
-          variant="secondary"
-          className="tech-visit-action tech-protocol-addon-add"
-          aria-label={allOn ? 'Weed spots are on the sheet' : 'Add weed spots'}
-          disabled={locked || allOn}
-          onClick={() => items.forEach((item) => onAdd(item.product, { planned: item, weedGroup: true, guided: 'weeds' }))}
-        >
-          {allOn ? '✓' : 'Add'}
-        </Button>
-      )}
+      {options.length > 0 && !waiting && (places && !done
+        ? <PlaceAddButtons choices={places} locked={locked} ariaPrefix="Add weed spots" onPick={(placeId) => add(places.find((choice) => choice.id === placeId))} />
+        : (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={done ? 'Weed spots are on the sheet' : 'Add weed spots'} disabled={locked || done} onClick={() => add(options[0])}>
+            {done ? '✓' : 'Add'}
+          </Button>
+        ))}
     </div>
   );
 }
@@ -1678,14 +1877,47 @@ const guideCardsOf = (guide) => (guide ? guide.cards : null);
 const gateNotesOf = (items) => [...new Set(items.flatMap((item) => item.gateNotes || []))];
 
 // Every product a card offers is on the sheet (a half-added weed mix is not: its tap finishes it).
-const cardOnSheet = (card, on) => card.productIds.length > 0 && card.productIds.every((id) => on.has(String(id).toLowerCase()));
+// What each place takes, said by place, only when the places differ from one another ("Front: Blind Herbicide", "Back: Lead WG, ...").
+function placeSets(card, areas) {
+  const entries = cardPlaceEntries(card);
+  const sets = entries.map(([id, entry]) => [id, entry.items.map((item) => item.name).join(', ')]);
+  if (!areas || new Set(sets.map(([, names]) => names)).size < 2) return [];
+  return sets.map(([id, names]) => `${areas.places.find((place) => place.id === id)?.label || id}: ${names}`);
+}
+
+// What the completion's guide record says of one card: the products actually added (a flat list of ids, as for any card) and, for a card
+// taken at a place, the place as an extra field. One rule for every card: the record's place is the place of the row the card added. A card
+// with a set per place (weeds, chinch) records the set of the place the tech took; any other card (fungus, take-all, caterpillar, dry spot)
+// records the place its own row carries. A card not taken, or whose row has no place, records exactly what it always did.
+function guideRecordCard(card, { checks, on, rows }) {
+  const record = { kind: card.kind, shown: true, checked: checks[card.kind] || null, taken: cardOnSheet(card, on), productIds: card.productIds };
+  if (!record.taken) return record;
+  const onSheet = (item) => on.has(String(item.productId).toLowerCase());
+  const taken = cardPlaceEntries(card).filter(([, entry]) => entry.items.every(onSheet));
+  if (!taken.length) {
+    const ids = lowerIds(card.productIds);
+    const place = rows.find((row) => row.place && ids.includes(String(row.productId).toLowerCase()))?.place;
+    return place ? { ...record, place } : record;
+  }
+  // Several places can share one set; the place is the one the rows of that set carry.
+  const placeOf = ([, entry]) => rows.find((row) => sameId(row.productId, entry.items[0].productId))?.place;
+  const [place, entry] = taken.find((candidate) => placeOf(candidate) === candidate[0]) || taken[0];
+  return { ...record, productIds: entry.items.map((item) => item.productId), place };
+}
+
+const cardOnSheet = (card, on) => {
+  const everyOn = (ids) => ids.length > 0 && ids.every((id) => on.has(String(id).toLowerCase()));
+  const places = cardPlaceEntries(card);
+  // With places, a card is taken once ANY place's own set is on the sheet.
+  return places.length ? places.some(([, entry]) => everyOn(entry.items.map((item) => item.productId))) : everyOn(card.productIds);
+};
 
 // "Suggested from this lawn" (GATE_LAWN_TREATMENT_GUIDE): one card per photo finding. The server
 // decided every word and every product; this renders them and performs the taps. A card with a
 // check asks the tech to do it first: "Found at the edge. Add it" opens the product as a spot row (the
 // same path as a single add-on tap) and "Nothing found" dismisses the card. The weed card is the
 // Weed spots entry's own tap. Nothing is added by itself.
-function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }) {
+function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd, areas = null, onWeedPlace }) {
   const titleId = useId();
   const cards = guideCardsOf(guide);
   if (!cards) return null;
@@ -1695,8 +1927,25 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }
   const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
   // The tap adds what THIS card names (the fresh read), the weed card's rows as the entry's rows.
   const add = (card) => {
-    card.items.forEach((item) => onAdd(catalogProductFor(item, catalog), { planned: item, guided: card.kind, ...(card.kind === 'weeds' ? { weedGroup: true } : {}) }));
+    card.items.forEach((item) => onAdd(catalogProductFor(item, catalog), { planned: item, guided: card.kind, source: 'guide_card', ...(card.kind === 'weeds' ? { weedGroup: true } : {}) }));
     if (card.check) onCheck(card.kind, 'found');
+  };
+  // GATE_LAWN_TROUBLE_AREAS: a card with a decision per place adds a place's own set with one tap on the place (the weeds card as
+  // the Weed spots entry, the chinch card as the chinch entry), so a place that needs the replacement or the second product is
+  // never out of reach. The weeds card names the place on the entry's shared control; the chinch card on the row.
+  const addAt = (card, placeId) => {
+    card.byPlace[placeId].items.forEach((item) => onAdd(catalogProductFor(item, catalog), {
+      planned: item, guided: card.kind, source: 'guide_card', ...(card.kind === 'weeds' ? { weedGroup: true } : { place: placeId }),
+    }));
+    if (card.kind === 'weeds') onWeedPlace?.(placeId);
+    if (card.check) onCheck(card.kind, 'found');
+  };
+  const placeChoices = (card) => {
+    if (!areas) return [];
+    const known = knownPlacesOfType(areas, card.kind === 'weeds' ? 'weeds' : 'chinch');
+    return cardPlaceEntries(card)
+      .map(([id]) => ({ id, label: areas.places.find((place) => place.id === id)?.label || id, known: known.has(id) }))
+      .sort((a, b) => Number(b.known) - Number(a.known));
   };
   return (
     <div className="tech-protocol-addons tech-guide" role="group" aria-labelledby={titleId}>
@@ -1715,9 +1964,13 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }
             {card.detail && <p className="tech-visit-muted">{card.detail}</p>}
             {gateNotesOf(card.items).map((gateNote) => <p key={gateNote} className="tech-visit-muted">{gateNote}</p>)}
             {card.note && <p className="tech-visit-muted" role="status">{card.note}</p>}
+            {placeSets(card, areas).map((line) => <p key={line} className="tech-visit-muted">{line}</p>)}
             {/* A check-only card (take-all, no trouble area on file) has no product to add. */}
             <div className="tech-guide-actions">
-              {card.actionLabel && (
+              {card.actionLabel && !onSheet && placeChoices(card).length > 0 && (
+                <PlaceAddButtons choices={placeChoices(card)} locked={locked} ariaPrefix={card.actionLabel} onPick={(placeId) => addAt(card, placeId)} />
+              )}
+              {card.actionLabel && (onSheet || placeChoices(card).length === 0) && (
                 <Button
                   type="button"
                   variant="secondary"
@@ -1746,36 +1999,43 @@ function TreatmentGuide({ guide, checks, onCheck, rows, catalog, locked, onAdd }
 // Any chinch bugs the tech finds are treated in any month without asking the office; the photo
 // card is seasonal, this tap is not. The server picked the product (Arena, else the bifenthrin
 // product at the Arena yearly limit) and says why; with nothing to add it is a line only.
-// The button's states: not on the sheet (Add), on the sheet and markable while the ties are live (Found), on the sheet (✓).
+// The button's states: not on the sheet (Add), on the sheet and markable while the ties are live (Found), on the sheet (✓). A state is a row
+// of this table, so a new state is a new row.
 const CHINCH_BUTTON = {
   add: { aria: 'Add chinch bug treatment', text: 'Add', disabled: false },
   mark: { aria: 'Chinch bugs found: mark the treatment on the sheet', text: 'Found', disabled: false },
   done: { aria: 'Chinch bug treatment is on the sheet', text: '✓', disabled: true },
 };
 
-function ChinchFoundEntry({ chinch, catalog, on, locked, waiting = false, onAdd, markChinch = null }) {
+function ChinchFoundEntry({ chinch, catalog, places, labels, on, locked, waiting, onAdd, markChinch }) {
   const { item, note } = chinch;
-  const onSheet = !!item && on.has(String(item.productId).toLowerCase());
-  // While the report ties are live, a product already on the sheet (it came from another card) can still be
-  // tapped "found": the tap marks it as the technician's chinch find; it adds no row. Tapped once, it reads ✓.
-  const tapped = !!item && markChinch?.tapped === String(item.productId).toLowerCase();
-  const canMark = onSheet && !!markChinch && !tapped;
+  // What a tap can add: with places (GATE_LAWN_TROUBLE_AREAS) one product per place, each tap naming its place; else the one product.
+  const options = places || (item ? [{ id: '', item }] : []);
+  const offered = [item, ...Object.values(chinch.byPlace || {}).map((decision) => decision.item)];
+  const onSheetItem = offered.find((product) => product && on.has(String(product.productId).toLowerCase()));
+  const onSheet = !!onSheetItem;
+  // While the report ties are live, a product already on the sheet (it came from another card) can still be tapped "found": the tap
+  // marks it as the technician's chinch find; it adds no row. Tapped once, it reads ✓.
+  const canMark = onSheet && !!markChinch && markChinch.tapped !== String(onSheetItem.productId).toLowerCase();
   const button = CHINCH_BUTTON[canMark ? 'mark' : (onSheet ? 'done' : 'add')];
-  const onClick = () => {
-    if (!canMark) onAdd(catalogProductFor(item, catalog), { planned: item, guided: 'chinch' });
-    if (markChinch) markChinch.onTap(item.productId);
+  const names = [...new Set(options.map((option) => option.item.name))];
+  // What differs by place (a place at its limit, a place that takes the second product) is said by place.
+  const byPlace = Object.entries(chinch.byPlace || {}).filter(([, d]) => d.note && d.note !== note);
+  const line = [names.length ? `${names.join(' or ')}, spot treatment` : null, ...(item?.gateNotes || []), note, ...byPlace.map(([id, d]) => `${labels[id] || id}: ${d.note}`)];
+  const add = (option) => {
+    onAdd(catalogProductFor(option.item, catalog), { planned: option.item, guided: 'chinch', ...(places ? { source: 'tech_tap', place: option.id } : {}) });
+    if (markChinch) markChinch.onTap(option.item.productId);
   };
+  const press = () => (canMark ? markChinch.onTap(onSheetItem.productId) : add(options[0]));
   return (
     <div className="tech-protocol-addon">
       <span className="tech-protocol-addon-text">
         <span className="tech-protocol-addon-name">Chinch bugs found at the edge of damage</span>
-        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : [item && `${item.name}, spot treatment`, ...(item?.gateNotes || []), note].filter(Boolean).join(' · ')}</span>
+        <span className="tech-visit-muted">{waiting ? CONFIRM_FIRST : onSheet ? 'On the sheet' : line.filter(Boolean).join(' · ')}</span>
       </span>
-      {item && !waiting && (
-        <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={button.aria} disabled={locked || button.disabled} onClick={onClick}>
-          {button.text}
-        </Button>
-      )}
+      {options.length > 0 && !waiting && (places && !onSheet
+        ? <PlaceAddButtons choices={places} locked={locked} ariaPrefix="Add chinch bug treatment" onPick={(placeId) => add(places.find((choice) => choice.id === placeId))} />
+        : <Button type="button" variant="secondary" className="tech-visit-action tech-protocol-addon-add" aria-label={button.aria} disabled={locked || button.disabled} onClick={press}>{button.text}</Button>)}
     </div>
   );
 }
@@ -1809,7 +2069,7 @@ function SpotAreaControl({ title = null, value, locked, onChange }) {
 
 // A product: its name, how it goes down (the method chips, and the area it will
 // submit when the method needs one), the amount, and Remove.
-function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, onRemove }) {
+function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, onRemove, children = null }) {
   const nameId = useId();
   // The area this row will submit, named for what it is: "whole lawn" only when it
   // is the whole-lawn figure; a planned product's own smaller (or unchecked) area
@@ -1827,6 +2087,8 @@ function ProductEditor({ row, methods, lawnSqft, locked, note = null, onChange, 
       {/* Spot rules: a weed-mix row reads the entry's shared area; any other spot row asks for its own. */}
       {row.spotRule && !row.weedGroup && !row.spotExempt && <SpotAreaControl value={row.spotSqft} locked={locked} onChange={(value) => onChange({ spotSqft: value })} />}
       {row.spotRule && row.spotArea > 0 && <p className="tech-visit-muted">{`Spot area, ${row.spotArea.toLocaleString('en-US')} sq ft`}</p>}
+      {/* GATE_LAWN_TROUBLE_AREAS: where the spot went (the caller's place control; a weed-mix row reads the entry's shared place). */}
+      {children}
       {note && <p className="tech-visit-muted" role="status">{note}</p>}
       {(row.gateNotes || []).map((gateNote) => <p key={gateNote} className="tech-visit-muted" role="status">{gateNote}</p>)}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />

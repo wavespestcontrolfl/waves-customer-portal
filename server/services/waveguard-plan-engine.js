@@ -1726,7 +1726,9 @@ async function lawnProhibitedForVisit(knex, service, product) {
   return lawnProhibitedProductBlock(product, { propertyType });
 }
 
-async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map(), targets = {} } = {}) {
+// `place` (GATE_LAWN_TROUBLE_AREAS, lawn-trouble-areas.js) judges the SPOT application of each product at one place of the
+// lawn (application-limits checkLimits opts.place); absent, every product is judged on the whole lawn, as always.
+async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map(), targets = {}, place = null } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
   const warnings = [];
@@ -1747,13 +1749,19 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     const proposed = v13ProposedApplication(item.product, row, targets);
     // A step line is judged for the property the step was proven for (the visit's own, or a
     // one-property customer's sole one), the same as the completion check.
-    const stepProperty = item.bermudaStep ? await bermudaRemoval.effectivePropertyId(knex, service) : (service.property_id || null);
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, proposal: true, excludeScheduledServiceId: service.id, propertyId: stepProperty, ...(item.bermudaStep ? { program: 'bermuda_removal' } : {}) }))
+    // GATE_LAWN_TROUBLE_AREAS: a per-place read judges the property the places work on (the visit's link, else the resolved one).
+    const propertyId = item.bermudaStep
+      ? await bermudaRemoval.effectivePropertyId(knex, service)
+      : ((place && await require('./lawn-trouble-areas').propertyOf(knex, service)) || service.property_id || null);
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, proposal: true, excludeScheduledServiceId: service.id, propertyId, ...(place ? { place } : {}), ...(item.bermudaStep ? { program: 'bermuda_removal' } : {}) }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
       });
-    if (result.blocks.length) capped.set(id, result.blocks.map((block) => ({ ...block, productName: item.product.name })));
+    // GATE_LAWN_TROUBLE_AREAS: a place's read keeps only what /complete would refuse there (and a read that failed); a lawn-wide limit (the
+    // shared active-ingredient cap) is advisory after the fact, so it closes no place (lawn-trouble-areas blocksAtPlace).
+    const blocks = place ? require('./lawn-trouble-areas').blocksAtPlace(result.blocks) : result.blocks;
+    if (blocks.length) capped.set(id, blocks.map((block) => ({ ...block, productName: item.product.name })));
     warnings.push(...result.warnings.map((warning) => ({
       code: 'lawn_v13_limit_warning', severity: 'warning', limitType: warning.type || null, productId: id, productName: item.product.name, message: warning.message,
     })));
@@ -1803,9 +1811,9 @@ function v13NorthPortReferenceWarnings(items) {
 
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
 // block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
-async function v13VisitLimits(knex, service, items, rows, targets = {}) {
+async function v13VisitLimits(knex, service, items, rows, targets = {}, { place = null } = {}) {
   if (!service || featureGates.lawnV13Live?.() !== true) return { capped: new Map(), warnings: [], blocks: [] };
-  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets });
+  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows, targets, place });
   return { ...found, blocks: v13LineNotices([], found.capped, new Set()).blocks };
 }
 

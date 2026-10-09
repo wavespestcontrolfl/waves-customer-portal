@@ -560,7 +560,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'New sod you had installed (we don’t install sod)',
         level: 2,
-        paragraphs: ['Tell us the install date, the grass type, and what the installer applied. New sod gets an establishment plan, not the standard pass.'],
+        paragraphs: ['Tell us the install date, the grass type, and what the installer applied. New sod stays on your regular program. We hold some products while it roots.'],
         bullets: [
           'Water: days 1–7, 2–3 short cycles a day; days 8–14, once a day, early morning; weeks 3–4, 2–3 times a week at ¼–½ inch; from week 5, your normal schedule at ½–¾ inch. New sod is usually exempt from district watering days for the first 30 days only.',
           'Mow: first cut at 14–21 days, once a tug on the sod holds. Sharp blade, correct height for the grass, never more than a third of the blade.',
