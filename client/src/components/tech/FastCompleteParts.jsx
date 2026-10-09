@@ -730,11 +730,12 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // heading, in library order; a search ignores it, and nothing is ever picked
 // for the tech. A lifted tip may come from the whole library (`library.more`),
 // which a search also reads. Tips this customer had lately (`library.lastSent`)
-// go last in each list.
+// go last in each list, so a recurring visit's short list changes; `sentLast`
+// off (the lawn sheet) keeps the server's order, which ranks by today's findings.
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false }) {
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false, sentLast = true }) {
   const [query, setQuery] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [writing, setWriting] = useState(false);
@@ -743,7 +744,7 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
     [library],
   );
   const everyTip = useMemo(() => [...allTips, ...(library?.more || [])], [allTips, library]);
-  const lastSent = library?.lastSent;
+  const lastSent = sentLast ? library?.lastSent : null;
   const q = query.trim().toLowerCase();
   const priority = useMemo(() => {
     if (!priorityTipIds?.length) return [];

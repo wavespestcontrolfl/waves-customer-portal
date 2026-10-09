@@ -83,8 +83,11 @@ const NOTE_PESTS = [
   ["Centipedes", /\bcentipedes?\b/],
 ];
 
+// "No roaches seen" names no pest: a negated phrase is dropped before the read.
+const NEGATED_PEST_RE = /\b(?:no|not|zero|without)\s+(?:(?:seeing|finding|see|find)\s+)?(?:(?:signs?|evidence)\s+of\s+|live\s+|new\s+|more\s+|any\s+)?[a-z]+\b/g;
+
 export function pestsInNote(note) {
-  const text = String(note || "").toLowerCase();
+  const text = String(note || "").toLowerCase().replace(NEGATED_PEST_RE, " ");
   return NOTE_PESTS.filter(([, re]) => re.test(text)).map(([pest]) => pest);
 }
 
@@ -94,12 +97,15 @@ const PEST_TIP_LIFT_MAX = 4;
 // for a pest the tech tapped or the note names (from the whole library, so a
 // recurring visit reaches roach or flea advice), then the visit's own tips
 // whose keywords the note names. Tips for more of the pests lead; tips this
-// customer had lately go last. A short list, and never a pick.
+// customer had lately go last, and a tip for the other season (wet or dry) is
+// left to search. A short list, and never a pick.
 export function pestSheetTipIds(library, { pests = [], note = "" } = {}) {
   const listed = (library?.groups || []).flatMap((group) => group.tips || []);
   const every = [...listed, ...(library?.more || [])];
   const seen = new Set([...pests, ...pestsInNote(note)]);
+  const inSeason = (tip) => !tip.season || tip.season === "all" || !library?.season || tip.season === library.season;
   const forPests = every
+    .filter(inSeason)
     .map((tip) => ({ tip, hits: (tip.pests || []).filter((pest) => seen.has(pest)).length }))
     .filter((entry) => entry.hits > 0)
     .sort((a, b) => b.hits - a.hits)

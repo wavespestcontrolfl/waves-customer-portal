@@ -12,6 +12,10 @@ describe('pestsInNote', () => {
     expect(pestsInNote('Treated for ants and a few palmetto bugs. Knocked down wasp nests.')).toEqual(['Ants', 'Roaches', 'Wasps']);
     expect(pestsInNote('Plants trimmed back, wanted a quote.')).toEqual([]);
   });
+  it('does not name a pest the note rules out', () => {
+    expect(pestsInNote('No roaches seen. No signs of ants. Spiders on the lanai.')).toEqual(['Spiders']);
+    expect(pestsInNote('Not seeing any fleas, without live wasps.')).toEqual([]);
+  });
 });
 
 describe('unsentTipsFirst', () => {
@@ -37,6 +41,10 @@ describe('pestSheetTipIds', () => {
     expect(pestSheetTipIds({ ...LIBRARY, lastSent: { mats: '2026-09-20' } }, { pests: ['Roaches', 'Earwigs'] })).toEqual(['drains', 'mats']);
     const many = { groups: [{ tips: ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => tip(id, { pests: ['Ants'] })) }] };
     expect(pestSheetTipIds(many, { pests: ['Ants'] })).toHaveLength(4);
+  });
+  it('leaves a tip for the other season to search', () => {
+    const library = { season: 'dry', groups: [{ tips: [tip('sweets', { pests: ['Wasps'], season: 'wet' }), tip('nest', { pests: ['Wasps'], season: 'all' })] }] };
+    expect(pestSheetTipIds(library, { pests: ['Wasps'] })).toEqual(['nest']);
   });
   it('answers nothing before the library loads', () => {
     expect(pestSheetTipIds(null, { pests: ['Ants'] })).toEqual([]);

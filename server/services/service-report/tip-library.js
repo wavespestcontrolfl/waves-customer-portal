@@ -211,7 +211,7 @@ const TIPS = Object.freeze([
   // ── Moisture ──────────────────────────────────────────────────────────
   {
     id: 'moisture_ac_drip', group: 'moisture', label: 'A/C condensate line',
-    pests: ['Ants'], keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
+    pests: ['Ants', 'Roaches'], keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
     copy: "Your A/C condensate line runs all summer, and where it drips the soil against the slab never dries. Ants and roaches follow that moisture gradient straight to the foundation. If the line ends at the wall, a short extension that carries it a couple of feet into the bed makes that strip dry again.",
   },
   {
@@ -275,7 +275,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'ext_palm_roof', group: 'exterior', label: 'Palm fronds off the roof',
-    keywords: ['palm', 'fronds', 'roof', 'rats', 'branches'], lines: ['rodent', 'pest', 'tree_shrub'], season: 'all',
+    pests: ['Ants', 'Roaches'], keywords: ['palm', 'fronds', 'roof', 'rats', 'branches'], lines: ['rodent', 'pest', 'tree_shrub'], season: 'all',
     copy: "Fronds and branches touching the roofline are a highway. Roof rats climb better than they burrow, and ants and roaches use the same route into the soffit. A few feet of clearance is exclusion without a single trap.",
   },
   {
@@ -339,7 +339,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'interior_cardboard', group: 'kitchen', label: 'Cardboard boxes to plastic bins',
-    pests: ['Roaches'], keywords: ['cardboard', 'boxes', 'garage', 'closet', 'storage'], lines: ['pest'], season: 'all',
+    pests: ['Roaches', 'Silverfish'], keywords: ['cardboard', 'boxes', 'garage', 'closet', 'storage'], lines: ['pest'], season: 'all',
     copy: "Corrugated cardboard is roach harborage — they feed on the glue and lay egg cases in the flutes. Boxes in the garage and closets do better as plastic bins with lids, and a move-in is when it matters most.",
   },
 
@@ -804,7 +804,7 @@ const TIPS = Object.freeze([
   },
   {
     id: 'md_fewer_spiders', group: 'stinging', label: "Fewer spiders, fewer mud daubers",
-    keywords: ["spiders", "porch light", "bulbs", "eaves", "webs"], lines: ["pest"], season: 'all',
+    pests: ['Spiders'], keywords: ["spiders", "porch light", "bulbs", "eaves", "webs"], lines: ["pest"], season: 'all',
     services: ["mud_dauber_removal"],
     copy: "Mud daubers stock their nests with spiders, so a house with fewer spiders draws fewer daubers. Warm porch bulbs and swept eaves cut down the insects the spiders live on.",
   },
