@@ -199,13 +199,28 @@ async function stampExistingRowScopes(trx, scheduledServiceId, wanted) {
   return stamped;
 }
 
+async function refreshCarriedAddOnRows(trx, scheduledServiceId, rows) {
+  if (!rows.length) return 0;
+  const cols = await trx('scheduled_service_addons').columnInfo();
+  let refreshed = 0;
+  for (const row of rows) {
+    const price = Math.round(Number(row.addOnPrice) * 100) / 100;
+    const data = { estimated_price: price };
+    if (cols.base_price) data.base_price = price;
+    if (cols.area_addon_scope) data.area_addon_scope = JSON.stringify(soldScope(row));
+    if (cols.estimated_duration_minutes && Number(row.durationMinutes) > 0) data.estimated_duration_minutes = Math.ceil(Number(row.durationMinutes));
+    refreshed += await trx('scheduled_service_addons').where({ scheduled_service_id: scheduledServiceId, service_key_snapshot: row.catalogServiceKey }).update(data);
+  }
+  return refreshed;
+}
+
 /**
  * Write one add-on row per sold area add-on that the appointment does not
  * already carry. `trx` is the booking transaction. Returns the number written.
  * A priced add-on with no catalog key (or no price) cannot be a structured row:
  * it throws, rolling the booking back, rather than dropping a sold add-on.
  */
-async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null, addMissingRows = true }) {
+async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile, ownServiceKey = null, addMissingRows = true, refreshExisting = false }) {
   await stampOwnAreaAddOnScope(trx, { scheduledServiceId, serviceProfile, ownServiceKey });
   const wanted = secondaryAreaAddOns(serviceProfile, ownServiceKey);
   if (!scheduledServiceId || wanted.length === 0) return 0;
@@ -217,6 +232,9 @@ async function writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile
     .select('service_key_snapshot');
   const have = new Set(present.map((r) => r.service_key_snapshot).filter(Boolean));
   const todo = wanted.filter((row) => !have.has(row.catalogServiceKey));
+  // Adoption: a row the visit already carries for a sold add-on is brought to what the LOCKED estimate sells now (price,
+  // minutes, sold scope), so a revision after the staff booking cannot leave dispatch and the invoice on the old tier.
+  if (refreshExisting) await refreshCarriedAddOnRows(trx, scheduledServiceId, wanted.filter((row) => have.has(row.catalogServiceKey)));
   if (todo.length === 0) return 0;
   const catalogRows = await trx('services').whereIn('service_key', todo.map((row) => row.catalogServiceKey))
     .select('id', 'service_key', 'name', 'category');
@@ -275,7 +293,16 @@ async function writeAdoptedAreaAddOns(trx, { scheduledServiceId, estimate, ownSe
   const needed = Number(profile.durationMinutes) || 0;
   const booked = bookedVisitMinutes(adoptedRow);
   if (!(booked >= needed)) throw needsNewSlotError(needed, booked);
-  return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey });
+  const written = await writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, refreshExisting: true });
+  // The accept stamped the accepted one-time total on the visit. A primary-line price left from the original booking would
+  // be billed beside the add-on rows instead of that total: clear it, so the primary line is the total less the rows (the
+  // split a freshly booked accept has).
+  let hasPrimaryLine = false;
+  try { hasPrimaryLine = !!(await trx.schema.hasColumn('scheduled_services', 'primary_line_price')); } catch { hasPrimaryLine = false; }
+  if (hasPrimaryLine) {
+    await trx('scheduled_services').where({ id: scheduledServiceId }).update({ primary_line_price: null });
+  }
+  return written;
 }
 
 /**
@@ -288,6 +315,18 @@ async function writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId, estima
   if (!estimate || require('./area-addon-limits').soldAddOnKeys(estimate.estimate_data, { pricingAuthority: estimate.pricing_authority }).length === 0) return 0;
   const profile = require('./estimate-slot-availability').resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
   return writeAreaAddOnVisitRows(trx, { scheduledServiceId, serviceProfile: profile, ownServiceKey, addMissingRows: false });
+}
+
+// Update Details: the area add-on rows of a visit that carry no sold scope after the carried ones were restored (rows the edit
+// added) get the scope its source estimate sells. One row read for a visit with none; no estimate, nothing stamped.
+async function stampAddedAreaAddOnScopes(trx, visitId) {
+  if (!visitId || !(await hasScopeColumn(trx, 'scheduled_service_addons'))) return 0;
+  const bare = await trx('scheduled_service_addons').where({ scheduled_service_id: visitId }).whereNull('area_addon_scope').select('service_key_snapshot');
+  if (!bare.some((row) => isAreaAddOnCatalogKey(row.service_key_snapshot))) return 0;
+  const visit = await trx('scheduled_services').where({ id: visitId }).first('source_estimate_id');
+  if (!visit || !visit.source_estimate_id) return 0;
+  const estimate = await trx('estimates').where({ id: visit.source_estimate_id }).first('id', 'estimate_data', 'pricing_authority', 'show_one_time_option');
+  return writeStaffBookedAreaAddOnScopes(trx, { scheduledServiceId: visitId, estimate, ownServiceKey: null });
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +490,7 @@ module.exports = {
   secondaryAreaAddOns,
   writeAreaAddOnVisitRows,
   writeStaffBookedAreaAddOnScopes,
+  stampAddedAreaAddOnScopes,
   assertPostedAreaAddOnsSold,
   assertEditedAreaAddOns,
   readAreaAddOnScopesToCarry,

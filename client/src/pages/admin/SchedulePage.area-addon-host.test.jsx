@@ -233,6 +233,11 @@ describe("the add-on's product picker offers only the governed product", () => {
     cleanup();
     await act(async () => { render(<CompletionPanel service={own(null)} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
     expect(screen.queryByTestId("area-addon-own-note")).not.toBeInTheDocument();
+    cleanup();
+    // Codex round 22: the note also shows when the visit carries other add-ons beside its own.
+    await act(async () => { render(<CompletionPanel service={{ ...own("Topchoice Granular Insecticide is not an active product in the Service Library, so no product can be chosen for this add-on. Ask the office."), ...attached([spot(arenaRate)]) }} products={[arena, topchoice]} onClose={() => {}} onSubmit={vi.fn()} />); });
+    expect(screen.getByTestId("area-addon-own-note")).toHaveTextContent("so no product can be chosen for this add-on");
+    expect(screen.getByTestId("area-addon-fields")).toBeInTheDocument();
   });
 });
 

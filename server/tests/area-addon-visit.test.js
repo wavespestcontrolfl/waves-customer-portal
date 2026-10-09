@@ -130,16 +130,24 @@ describe('C. the visit is sized to the sum of the add-ons (capacity gate off)', 
 
 // ── B. the writer, against an in-memory fake of the three tables it touches ──────
 function fakeTrx({ catalog = [], existing = [] } = {}) {
-  const state = { addons: [...existing], calls: [], visitScope: {} };
+  const state = { addons: [...existing], calls: [], visitScope: {}, primaryLine: {} };
   const trx = (table) => {
     state.calls.push(table);
     if (table === 'scheduled_services') {
-      return { where: ({ id }) => ({ update: async (data) => { state.visitScope[id] = JSON.parse(data.area_addon_scope); } }) };
+      return { where: ({ id }) => ({ update: async (data) => {
+        if (data.area_addon_scope !== undefined) state.visitScope[id] = JSON.parse(data.area_addon_scope);
+        if ('primary_line_price' in data) state.primaryLine[id] = data.primary_line_price;
+      } }) };
     }
     if (table === 'scheduled_service_addons') {
       return {
-        where: ({ scheduled_service_id: id }) => ({
+        where: ({ scheduled_service_id: id, service_key_snapshot: key }) => ({
           select: async () => state.addons.filter((r) => r.scheduled_service_id === id).map((r) => ({ service_key_snapshot: r.service_key_snapshot })),
+          update: async (data) => {
+            const hit = state.addons.filter((r) => r.scheduled_service_id === id && r.service_key_snapshot === key);
+            hit.forEach((r) => Object.assign(r, data));
+            return hit.length;
+          },
         }),
         columnInfo: async () => ({
           id: {}, scheduled_service_id: {}, service_id: {}, service_name: {}, estimated_price: {}, created_at: {},
@@ -341,6 +349,23 @@ describe('adopting an existing appointment never squeezes the add-on visit into 
     });
     // The appointment's own service is not repeated as a row.
     expect(trx.state.addons.map((r) => r.service_key_snapshot)).toEqual(KEYS.slice(1));
+    // Codex round 22: a primary-line price left from the original booking is cleared, so the invoice is the accepted total.
+    expect(trx.state.primaryLine).toEqual({ 'visit-1': null });
+  });
+
+  // Codex round 22: staff booked the add-on, the estimate was revised to another tier, then the customer accepted.
+  test('a row the appointment already carries is brought to what the estimate sells now (price, minutes, sold scope); none is duplicated', async () => {
+    const { estimate } = oneTimeEstimate(THREE);
+    const profile = availability.resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const sold = rows.secondaryAreaAddOns(profile, KEYS[0]).find((row) => row.catalogServiceKey === KEYS[1]);
+    const stale = { scheduled_service_id: 'visit-1', service_key_snapshot: KEYS[1], estimated_price: 1, base_price: 1, estimated_duration_minutes: 1, area_addon_scope: JSON.stringify({ areaSqFt: 1 }) };
+    const trx = fakeTrx({ catalog: catalogFor(KEYS), existing: [stale] });
+    await rows.writeAdoptedAreaAddOns(trx, { scheduledServiceId: 'visit-1', estimate, ownServiceKey: KEYS[0], adoptedRow: { estimated_duration_minutes: profile.durationMinutes } });
+    expect(trx.state.addons.map((r) => r.service_key_snapshot).sort()).toEqual(KEYS.slice(1).sort());
+    const refreshed = trx.state.addons.find((r) => r.service_key_snapshot === KEYS[1]);
+    expect([refreshed.estimated_price, refreshed.base_price]).toEqual([sold.addOnPrice, sold.addOnPrice]);
+    expect(JSON.parse(refreshed.area_addon_scope).areaSqFt).not.toBe(1);
+    expect(refreshed.estimated_duration_minutes).toBe(Math.ceil(sold.durationMinutes));
   });
 
   test('an estimate with no area add-on adopts as before, whatever the appointment length', async () => {

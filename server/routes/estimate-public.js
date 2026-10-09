@@ -1299,6 +1299,8 @@ function oneTimeItemFamilyKeys(item = {}) {
   const fields = [
     item?.service, item?.service_key, item?.key, item?.kind,
     item?.name, item?.label, item?.displayName,
+    // The stable catalog key (an area add-on's `area_addon_<key>`): adoption stays key-based after a Service Library rename.
+    item?.catalogServiceKey,
   ];
   const category = serviceCategoryForOneTimeItem(item);
   // A SPECIALTY in a broad category must never make an ordinary visit of

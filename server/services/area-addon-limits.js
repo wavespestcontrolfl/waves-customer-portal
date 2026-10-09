@@ -300,6 +300,19 @@ const historyProperty = (database, customerId, propertyId) => (isUuid(customerId
   ? resolvePropertyId(database, customerId, propertyId)
   : (isUuid(propertyId) ? propertyId : null));
 
+// Whose history, at which property. A known customer with NO property named falls back to their only active property; when
+// the quoted address is provably another place (both canonical keys known and different), that fallback is the wrong
+// property: the history is then the quoted address's alone, read as for a lead (place rows of any customer; the customer's
+// own unplaced rows are not assumed to be there).
+async function historySubject(database, { customerId, propertyId, prospect, address }) {
+  const property = await historyProperty(database, customerId, propertyId);
+  const named = isUuid(propertyId) || Boolean(prospect && prospect.propertyId);
+  const quoted = named || !isUuid(customerId) || !property ? '' : addressPlace(address).canon;
+  if (!quoted) return { subject: customerId, property };
+  const onFile = await database('customer_properties').where({ id: property }).first('address_key');
+  return onFile && onFile.address_key && onFile.address_key !== quoted ? { subject: null, property: null } : { subject: customerId, property };
+}
+
 // The dates behind each wanted key: the ledger first, then the visits booked and held, sorted.
 function assembleHistory(wanted, asOf, ledger, booked) {
   const byKey = {};
@@ -320,12 +333,12 @@ async function loadAreaAddOnHistory(database, options = {}) {
   const wanted = limitedKeys(keys);
   const address = options.address || (prospect && prospect.rawAddress) || '';
   if (!wanted.length || !hasHistorySubject(customerId, { propertyId, prospect, address })) return { available: true, asOf, byKey: {} };
-  const property = await historyProperty(database, customerId, propertyId);
+  const { subject, property } = await historySubject(database, { customerId, propertyId, prospect, address });
   const place = await resolvePlace(database, { seeds: [property, prospect && prospect.propertyId], address });
   const productByKey = await limitProductIds(database, wanted);
   const [ledger, booked] = await Promise.all([
-    ledgerDates(database, { customerId, propertyId: property, place, productByKey, asOf, excludeVisitId }),
-    bookedDates(database, { customerId, propertyId: property, place, keys: wanted, excludeVisitIds: [...excludeVisitIds, excludeVisitId], prospect }),
+    ledgerDates(database, { customerId: subject, propertyId: property, place, productByKey, asOf, excludeVisitId }),
+    bookedDates(database, { customerId: subject, propertyId: property, place, keys: wanted, excludeVisitIds: [...excludeVisitIds, excludeVisitId], prospect }),
   ]);
   return assembleHistory(wanted, asOf, ledger, booked);
 }

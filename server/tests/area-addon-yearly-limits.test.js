@@ -814,7 +814,7 @@ describe('where the recheck runs (source order)', () => {
   });
 
   test('the reserve rechecks inside the reserve transaction on the selected slot day; the staff booking before AND inside its transaction (after the customer lock, before the visit insert); Mark Won in its transaction', () => {
-    expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx, \{ date \} = \{\}\) => \{[\s\S]{0,300}lockedAreaAddOnLimitRefusal\(row, trx, date\)/);
+    expect(read('routes/estimate-slots-public.js')).toMatch(/revalidateEstimate: async \(row, trx, \{ date \} = \{\}\) => \{[\s\S]{0,700}lockedAreaAddOnRuleRefusal\(row, requestedServiceMode\)[\s\S]{0,80}lockedAreaAddOnLimitRefusal\(row, trx, date\)/);
     expect(read('services/slot-reservation.js')).toContain('await revalidateEstimate(estimate, trx, { date });');
     const schedule = read('routes/admin-schedule.js');
     const book = schedule.indexOf('areaAddOnLimitRefusal(db, { estimate: linkedEstimate, customerId, property: bookingProperty, appliedOn: scheduledDate, staff: true })');
@@ -1045,6 +1045,20 @@ describe('the history is the place\'s, whoever the customer record is (Codex rou
       await expect(check(unplaced('9 Other St, Bradenton, FL 34202'))).resolves.toBeUndefined();
       // no source estimate: it cannot be placed, so another customer's visit is not counted
       await expect(check({ scheduled_services: [ownVisit('area_addon_bed_pre_emergent', limits.addDays(TODAY, 5), { 's.property_id': null })] })).resolves.toBeUndefined();
+    });
+  });
+
+  // Codex round 22: an existing customer's estimate with no property id that quotes ANOTHER address. The customer's only
+  // property on file is not the treatment place: the quoted address's history is read, and the on-file one is not.
+  describe('a known customer quoted at another address, no property id on the estimate', () => {
+    const elsewhere = second({ customer_id: CUSTOMER_B, property_id: null, address: '9 Other St, Bradenton, FL 34202' });
+    test('applications at the on-file property do not block; applications at the quoted address do', async () => {
+      // CUSTOMER_B's rows at their own home (1 Test Way): another place than the quote
+      const lone = { customer_properties: props().filter((row) => row.id !== UNIT_PROPERTY) };
+      await expect(check({ ...lone, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, elsewhere)).resolves.toBeUndefined();
+      await expect(check({ ...lone, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER, property_id: OTHER_PROPERTY })] }, elsewhere)).rejects.toMatchObject(refused);
+      // the quote at the on-file address still reads the on-file property
+      await expect(check({ ...lone, property_application_history: [ledger('p-snap', 25, { customer_id: CUSTOMER_B, property_id: PROPERTY_B })] }, second({ customer_id: CUSTOMER_B, property_id: null }))).rejects.toMatchObject(refused);
     });
   });
 

@@ -298,10 +298,12 @@ async function slotBlockingRefusal(estimate, opts, shape) {
 // The re-check a card-intent route runs AFTER its Stripe mint, before a client secret leaves the server: the
 // ESTIMATE row is re-read (staff can edit its phone, email or address, or deactivate it, during the mint) and judged
 // by the same helper with the candidate cache bypassed. An estimate that is no longer active is withheld too.
-async function postMintRefusal(estimate) {
+// The add-on gate (both intent routes) and the one-time-only rule (the recurring intent passes `requestedServiceMode`) are
+// re-judged on the reloaded row as well: an add-on added, or the gate turned off, while Stripe minted the intent.
+async function postMintRefusal(estimate, { requestedServiceMode } = {}) {
   const row = await db('estimates').where({ id: estimate.id }).first();
   if (!row || !isEstimateAcceptActive(row)) return { status: 409, body: ESTIMATE_INACTIVE_409 };
-  return slotBlockingRefusal(row, { fresh: true });
+  return (await slotBlockingRefusal(row, { fresh: true })) || lockedAreaAddOnRuleRefusal(row, requestedServiceMode);
 }
 // The ONE exit of both card-intent routes for every response that carries customer-derived content (the success body with
 // its client secret, and every exemption answer - saved method, Auto Pay, plan member, payer-billed, ... - which can
@@ -324,8 +326,8 @@ async function refuseParkedRecurringIntent(res, estimate, parkState, replaceSetu
   }
   return res.status(409).json(await refuseParkedWrite(estimate, parkState.rejectedCustomerId));
 }
-async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null } = {}) {
-  const blocked = await postMintRefusal(estimate);
+async function sendRecheckedIntentResponse(res, estimate, status, body, { retireSetupIntentId = null, requestedServiceMode } = {}) {
+  const blocked = await postMintRefusal(estimate, { requestedServiceMode });
   if (blocked) {
     if (retireSetupIntentId) {
       try {
@@ -398,6 +400,13 @@ async function lockedAreaAddOnLimitRefusal(row, trx, date) {
     if (err?.code === 'CUSTOMER_BUSY_RETRY') return CUSTOMER_BUSY_REFUSAL;
     throw err;
   }
+}
+// The add-on refusals that need no query, on a freshly read estimate row: the gate (a persisted add-on with the gate off)
+// and, when the route passes the requested mode, the one-time-only rule. { status, body } or null.
+function lockedAreaAddOnRuleRefusal(row, requestedServiceMode) {
+  const body = gatedAddOnRefusal(row)
+    || (requestedServiceMode === undefined ? null : recurringAreaAddOnRefusalBody(row, resolveSlotServiceMode(row, requestedServiceMode)));
+  return body ? { status: 409, body } : null;
 }
 // Answer a no-booking refusal; a park refusal first runs the park side effects (deduped office alert, hold release).
 async function respondNoBookingRefusal(res, estimate, refusal) {
@@ -763,7 +772,10 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // not consume capacity).
         // The add-on yearly limits are judged on the SELECTED slot's day (`date`), not on today.
         revalidateEstimate: async (row, trx, { date } = {}) => {
+          // The add-on gate and the one-time-only rule are re-judged on the LOCKED row too: an estimate revised to carry an
+          // add-on (or a gate turned off) after the pre-transaction read must not take a hold the accept would refuse.
           return (await lockedContactReviewRefusal(row, trx))
+            || lockedAreaAddOnRuleRefusal(row, requestedServiceMode)
             || lockedAreaAddOnLimitRefusal(row, trx, date);
         },
       });
@@ -1125,7 +1137,7 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       // Both estimate UIs bootstrap Stripe Elements from this response — the
       // public estimate pages have no other authenticated key source.
       publishableKey: require('../config/stripe-config').publishableKey,
-    }, { retireSetupIntentId: intent.setupIntentId });
+    }, { retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? '' });
   } catch (err) {
     logger.error(`[estimate-slots-public:recurring-card-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
@@ -1455,4 +1467,4 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, slotBlockingRefusal, postMintRefusal };
+module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection, lockedContactReviewRefusal, lockedAreaAddOnLimitRefusal, lockedAreaAddOnRuleRefusal, slotBlockingRefusal, postMintRefusal };

@@ -520,6 +520,33 @@ describe('area add-ons: a recurring-mode card intent mints nothing (GATE_AREA_AD
     for (const fn of stripeObjects()) expect(fn).not.toHaveBeenCalled();
   });
 
+  // Codex round 22 (two P0): the estimate can gain an add-on, or the gate can turn off, after the route's first read.
+  describe('the add-on rules are re-judged on the freshly read row (locked reserve row, post-mint reload)', () => {
+    const { lockedAreaAddOnRuleRefusal } = require('../routes/estimate-slots-public')._internals;
+    test('a recurring-mode request for a row that now carries an add-on is refused; one-time mode and a plain row are not', () => {
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, 'recurring')).toEqual({ status: 409, body: REFUSAL });
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, '')).toEqual({ status: 409, body: REFUSAL });
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, 'one_time')).toBeNull();
+      expect(lockedAreaAddOnRuleRefusal({ ...WITH_RECURRING, estimate_data: JSON.stringify({ result: { recurring: { services: [{ name: 'Pest Control', mo: 88 }] } } }) }, 'recurring')).toBeNull();
+      // the card-hold route passes no mode: only the gate is judged
+      expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, undefined)).toBeNull();
+    });
+    test('the gate turned off: every mode is refused with the gated code', () => {
+      process.env.GATE_AREA_ADDONS = 'false';
+      for (const mode of ['one_time', 'recurring', undefined]) {
+        expect(lockedAreaAddOnRuleRefusal(WITH_RECURRING, mode)).toMatchObject({ status: 409, body: { code: 'AREA_ADDONS_GATED' } });
+      }
+    });
+    test('source: the reserve callback and the post-mint recheck both ask it; the recurring success exit passes the requested mode', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
+      const callback = src.slice(src.indexOf('revalidateEstimate: async (row, trx, { date } = {}) => {'));
+      expect(callback.slice(0, 900)).toContain('|| lockedAreaAddOnRuleRefusal(row, requestedServiceMode)');
+      const recheck = src.slice(src.indexOf('async function postMintRefusal('), src.indexOf('async function refuseParkedRecurringIntent('));
+      expect(recheck).toContain('|| lockedAreaAddOnRuleRefusal(row, requestedServiceMode)');
+      expect(src).toContain("{ retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? '' }");
+    });
+  });
+
   test('a stale intent the tab submits for replacement is retired, as every other exempt answer does', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-slots-public.js'), 'utf8');
     const route = src.slice(src.indexOf("router.post('/:token/recurring-card-intent'"), src.indexOf("router.delete('/:token/reserve/:scheduledServiceId'"));
@@ -873,12 +900,12 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
       const exit = route.indexOf('return await sendRecheckedIntentResponse(res, estimate, 200, {');
       expect(mint).toBeGreaterThan(0);
       expect(exit).toBeGreaterThan(mint);
-      expect(route.slice(exit)).toContain('{ retireSetupIntentId: intent.setupIntentId }');
+      expect(route.slice(exit)).toContain('{ retireSetupIntentId: intent.setupIntentId, requestedServiceMode: req.body?.serviceMode ?? \'\' }');
       // The exit function re-checks (reloaded row) BEFORE it sends, retiring first when asked.
       const fn = src.slice(src.indexOf('async function sendRecheckedIntentResponse'), src.indexOf('// What a slot route answers') > 0 ? undefined : undefined);
       const body = fn.slice(0, fn.indexOf('\n}\n') + 3);
-      expect(body.indexOf('await postMintRefusal(estimate)')).toBeGreaterThan(0);
-      expect(body.indexOf('await postMintRefusal(estimate)')).toBeLessThan(body.indexOf('res.status(status).json(body)'));
+      expect(body.indexOf('await postMintRefusal(estimate, { requestedServiceMode })')).toBeGreaterThan(0);
+      expect(body.indexOf('await postMintRefusal(estimate, { requestedServiceMode })')).toBeLessThan(body.indexOf('res.status(status).json(body)'));
       expect(body.indexOf('retireOrDenyDroppedCapture')).toBeLessThan(body.indexOf('respondNoBookingRefusal'));
     });
 
@@ -902,7 +929,7 @@ describe('B18 park: a parked estimate (its phone belongs to another customer) ca
         }
       }
       // The re-check helper appears twice: its definition and its one call, inside the exit.
-      expect(src.split('postMintRefusal(estimate)').length - 1).toBe(2);
+      expect(src.split('postMintRefusal(estimate, {').length - 1).toBe(2);
       expect(src.split('sendRecheckedIntentResponse(res, estimate').length - 1).toBeGreaterThanOrEqual(6);
       // Every exit is AWAITED inside the route's try: a rejected final recheck must reach the catch (Express 4
       // does not handle a rejected handler promise, so an un-awaited return would hang the request).

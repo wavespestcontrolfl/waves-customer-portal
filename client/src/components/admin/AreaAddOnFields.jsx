@@ -57,12 +57,13 @@ function AddOnProduct({ addOn, recorded, offered, disabled, onAddProduct, colors
 export default function AreaAddOnFields({ service, selectedProducts, products, onAddProduct, disabled, colors, selectStyle, labelStyle }) {
   const addOns = hostAreaAddOns(service);
   const ownNote = service?.areaAddOnOwn?.governed?.productNote || null;
-  if (addOns.length === 0) {
-    return ownNote ? <div data-testid="area-addon-own-note" style={{ margin: "0 0 16px", fontSize: 14, color: colors.text }}>{ownNote}</div> : null;
-  }
+  // The primary add-on's "no product can be chosen" note shows whether or not the visit carries other add-ons.
+  const ownNoteLine = ownNote ? <div data-testid="area-addon-own-note" style={{ margin: "0 0 16px", fontSize: 14, color: colors.text }}>{ownNote}</div> : null;
+  if (addOns.length === 0) return ownNoteLine;
   const choices = [...(products || [])];
   return (
     <div style={{ display: "grid", gap: 12, margin: "0 0 16px" }} data-testid="area-addon-fields">
+      {ownNoteLine}
       <label style={labelStyle}>Add-on treatments on this visit</label>
       {addOns.map((addOn) => {
         const recorded = (selectedProducts || []).filter((row) => row.areaAddOnKey === addOn.key);
