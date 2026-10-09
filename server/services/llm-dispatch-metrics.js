@@ -280,13 +280,15 @@ const toCount = (v) => (v === null || v === undefined || v === '' || !Number.isF
  *   openai     usage.{input_tokens, input_tokens_details.cached_tokens, output_tokens, output_tokens_details.reasoning_tokens}
  *   gemini     usageMetadata.{promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount}
  */
-// A Managed Agents session reports cache writes only as the per-TTL object
-// (`cache_creation: { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens }`),
-// with no `cache_creation_input_tokens` total. Null when there is no object,
-// so a provider that reports neither stays "unknown", not zero.
-function cacheCreationTotal(cacheCreation) {
-  if (!cacheCreation || typeof cacheCreation !== 'object') return null;
-  return Object.values(cacheCreation).reduce((sum, v) => sum + (Number(v) || 0), 0);
+// Cache-write tokens of an Anthropic usage block. A message gives the total
+// (`cache_creation_input_tokens`); a Managed Agents session gives only the
+// per-TTL object (`cache_creation: { ephemeral_5m_input_tokens,
+// ephemeral_1h_input_tokens }`). Neither present = unknown (null), not zero.
+function anthropicCacheWrites(usage) {
+  if (usage.cache_creation_input_tokens != null) return usage.cache_creation_input_tokens;
+  const perTtl = usage.cache_creation;
+  if (!perTtl || typeof perTtl !== 'object') return null;
+  return Object.values(perTtl).reduce((sum, v) => sum + (Number(v) || 0), 0);
 }
 
 function extractUsage(provider, data) {
@@ -297,7 +299,7 @@ function extractUsage(provider, data) {
       if (!u || typeof u !== 'object') return out;
       out.input_tokens = toCount(u.input_tokens);
       out.cached_input_tokens = toCount(u.cache_read_input_tokens);
-      out.cache_write_tokens = toCount(u.cache_creation_input_tokens ?? cacheCreationTotal(u.cache_creation));
+      out.cache_write_tokens = toCount(anthropicCacheWrites(u));
       out.output_tokens = toCount(u.output_tokens);
     } else if (provider === 'openai') {
       const u = data?.usage;
