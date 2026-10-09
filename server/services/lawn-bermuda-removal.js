@@ -302,6 +302,14 @@ const NOT_CONFIGURED_MESSAGE = 'Bermuda removal cannot be recorded: its applicat
 
 // The rate a completion states for a product ({ ratePer1000, unit }), or null: the cap
 // warning projects the year with what was actually sprayed.
+// The submitted entries with each productId in its canonical spelling (a UUID in upper case is
+// the same product to Postgres and to the completion writer): every comparison below reads this.
+function canonicalEntries(products) {
+  if (!Array.isArray(products)) return products;
+  const { canonicalProductId } = require('./service-report/report-identity-snapshot');
+  return products.map((p) => (p && p.productId != null ? { ...p, productId: canonicalProductId(p.productId) } : p));
+}
+
 function submittedRate(products, id) {
   const entry = products.find((p) => String(p?.productId) === id);
   return Number(entry?.rate) > 0 && entry?.rateUnit ? { ratePer1000: Number(entry.rate), unit: entry.rateUnit } : null;
@@ -324,7 +332,8 @@ async function stepProductIdsByLink(knex) {
 // The step products a completion submitted: { recognition, fusilade } (each a { id, name }
 // or null), matched by catalog ID; `unconfigured` is true when the program's tagged rows
 // are missing yet a step product is present by name (a completion check then refuses).
-async function submittedStepProducts(knex, products) {
+async function submittedStepProducts(knex, submittedEntries) {
+  const products = canonicalEntries(submittedEntries);
   const none = { recognition: null, fusilade: null, unconfigured: false };
   if (!Array.isArray(products)) return none;
   const submitted = [...new Set(products.map((p) => p?.productId).filter(Boolean).map(String))];
@@ -376,10 +385,11 @@ async function bermudaPairViolation(knex, products, { serviceId } = {}) {
 // would count nothing. Refused on a step visit only, on a fresh attempt only (the caller). Returns
 // the message, or null.
 const AREA_REQUIRED_MESSAGE = 'Enter the area treated and the amount used for the bermuda mix.';
-async function bermudaAreaViolation(knex, products, { serviceId } = {}) {
+async function bermudaAreaViolation(knex, submittedEntries, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return null;
+  const products = canonicalEntries(submittedEntries);
   const { recognition, fusilade } = await submittedStepProducts(knex, products);
-  const stepIds = [recognition, fusilade].filter(Boolean).map((row) => String(row.id));
+  const stepIds = [recognition, fusilade].filter(Boolean).map((row) => String(row.id).toLowerCase());
   if (!stepIds.length) return null;
   if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
   const positive = (value) => Number(value) > 0;
@@ -392,7 +402,7 @@ async function bermudaAreaViolation(knex, products, { serviceId } = {}) {
   const capRow = await knex('product_limits').where({ match_value: BERMUDA_GROUP, limit_type: 'annual_max_rate' }).first('product_id', 'limit_unit');
   const { baseQuantityUnit } = require('./inventory-units');
   const countable = (p) => {
-    if (!capRow || String(p.productId) !== String(capRow.product_id)) return true;
+    if (!capRow || String(p.productId) !== String(capRow.product_id).toLowerCase()) return true;
     return require('./application-limits').bermudaRowRate({
       application_rate: p.rate,
       rate_unit: p.rateUnit || null,
@@ -488,7 +498,7 @@ async function rateAdvisories(knex, serviceId, productIds = []) {
     // statement rolls back to its savepoint before the error is swallowed below and the
     // caller's transaction stays usable. resolvedVisitOf isolates its own reads.
     const ids = await savepointRead(knex, (k) => stepProductIds(k));
-    if (!ids.tagged || !productIds.map(String).includes(String(ids.recognition))) return [];
+    if (!ids.tagged || !productIds.map((id) => String(id).toLowerCase()).includes(String(ids.recognition).toLowerCase())) return [];
     const visit = await resolvedVisitOf(knex, serviceId, { strict: true });
     if (!visit) return [];
     const result = await savepointRead(knex, (k) => require('./application-limits').checkLimits(visit.customer_id, ids.recognition, visit.scheduled_date, k, {

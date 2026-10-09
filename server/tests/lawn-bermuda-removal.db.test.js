@@ -935,6 +935,8 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await check([entry(rec, { areaValue: 5000, totalAmount: 0.3, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBe(MESSAGE);
       // A wrong-unit rate with a countable amount and area beside it is counted from the amount.
       expect(await check([entry(rec, { rate: 0.03, rateUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', totalAmount: 0.15, amountUnit: 'oz' }), entry(fus, { rate: 0.55, rateUnit: 'fl_oz' })])).toBeNull();
+      // An upper-case spelling of the product ids is the same products (codex r44 P2): still refused.
+      expect(await check([entry({ id: String(rec.id).toUpperCase() }), entry({ id: String(fus.id).toUpperCase() })])).toBe(MESSAGE);
       // Not a step visit, no step product, nothing submitted, or the gate off: never refused.
       const plain = await lawn({ date: '2026-06-20' });
       expect(await check([entry(rec), entry(fus)], plain.visit)).toBeNull();
