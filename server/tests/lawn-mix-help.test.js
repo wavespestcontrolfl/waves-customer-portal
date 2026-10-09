@@ -275,9 +275,9 @@ describe('gallons sprayed at completion', () => {
     expect(next).toHaveBeenCalledTimes(1);
   });
 
-  test('a plan or staged read that fails is a retryable 503, never a converted area', async () => {
+  test('a plan or staged read that fails is a correctable 400 (never a 5xx the submit hook would lock), never a converted area', async () => {
     const products = [{ productId: P_CEL, sprayedGallons: 2, areaValue: 10, areaUnit: 'sqft' }];
-    expect(await run(products, { readStaged: async () => { throw new Error('down'); } })).toMatchObject({ status: 503, payload: { code: 'lawn_gallons_unreadable' } });
+    expect(await run(products, { readStaged: async () => { throw new Error('down'); } })).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable_now' } });
     expect(products[0].areaValue).toBe(10);
   });
 

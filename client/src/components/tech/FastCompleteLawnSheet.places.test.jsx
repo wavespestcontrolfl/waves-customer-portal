@@ -1579,6 +1579,33 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     expect(gallons.value).toBe('');
   });
 
+  test('the server could not check the gallons (400 lawn_gallons_unavailable_now, nothing written): the form stays editable, and the tech enters the area and completes under a new key', async () => {
+    await open(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    const gallons = within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide');
+    fireEvent.change(gallons, { target: { value: '2' } });
+    fireEvent.click(chipOf(within(row).getByRole('group', { name: 'Place for Spot Fungicide' }), 'Back'));
+    completeErrors.push(refusal(400, 'lawn_gallons_unavailable_now', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.'));
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await screen.findByText(/enter the area instead/);
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_FUNG)).toMatchObject({ sprayedGallons: 2, areaValue: 1000 });
+    // Not the locked "Retry the same completion" state: the form is editable.
+    expect(screen.queryByText(/Tap Retry to send the same completion again/)).toBeNull();
+    expect(within(placeGroup('Spot Fungicide')).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide').disabled).toBe(false);
+    fireEvent.change(within(placeGroup('Spot Fungicide')).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '' } });
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    const [first, second] = completeCalls().map((call) => call.body);
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    expect(second.products.find((p) => p.productId === P_FUNG)).toMatchObject({ areaValue: 100, areaUnit: 'sqft' });
+    expect(second.products.find((p) => p.productId === P_FUNG)).not.toHaveProperty('sprayedGallons');
+  });
+
   test('no mixHelp in the context (gate off, or an older server): none of it renders and the body carries no gallons', async () => {
     await openMix(placeContext());
     addFungicide();

@@ -82,7 +82,11 @@ const ownTags = (row) => (Array.isArray(row?.targets) ? row.targets : []);
  */
 async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, inferMethod, serviceLine, confirm, live = () => require('../config/feature-gates').lawnSpotTargetLive() }) {
   const verdict = new Map();
-  const result = { of: (row) => verdict.get(lowerId(row?.productId)) || ownTags(row) };
+  const of = (row) => verdict.get(lowerId(row?.productId)) || ownTags(row);
+  // The submitted rows as the completion stores them: the SAME list while no verdict exists (gate off, nothing resolved), else copies
+  // whose `targets` are the resolved ones (what the report's frozen facts must read).
+  const submitted = (list) => (verdict.size && Array.isArray(list) ? list.map((row) => (row && verdict.has(lowerId(row.productId)) ? { ...row, targets: of(row) } : row)) : list);
+  const result = { of, submitted };
   if (lawnFast == null || !live()) return result;
   const product = (row) => catalog.get(canonicalId(row.productId)) || {};
   const targetRows = (Array.isArray(rows) ? rows : []).filter((row) => row && row.productId && isTargetCategory(categoryOf(product(row).category)));

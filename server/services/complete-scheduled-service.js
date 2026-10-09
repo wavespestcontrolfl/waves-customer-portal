@@ -6881,8 +6881,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : []
             ).map((row) => [canonicalProductId(row.id), row]),
           );
+          // Lawn Fast Complete: the target a spot fungicide / insecticide row is stored with (lawn-spot-target.js; the row's own tags for any other
+          // completion). Resolved BEFORE the report facts freeze, so the stored application and every frozen report fact use the same targets.
+          const spotTargets = await require('../services/lawn-spot-target').resolveForCompletion({
+            rows: products, lawnFast, catalog: completionCatalogRowsById, canonicalId: canonicalProductId, inferMethod: inferServiceReportApplicationMethod, serviceLine: reportServiceLine,
+            confirm: () => require('./lawn-fast-complete').troubleTypeIdsFor(svc),
+          });
           const reportProductFactsSnapshot = freezeReportProductFacts({
-            productIds: snapshotProductIds, submitted: products, catalogById: completionCatalogRowsById, plan: waveguardPlan,
+            productIds: snapshotProductIds, submitted: spotTargets.submitted(products), catalogById: completionCatalogRowsById, plan: waveguardPlan,
           });
           const reportIdentitySnapshot = buildReportIdentitySnapshot({
             visit: snapshotVisitRow,
@@ -7916,11 +7922,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const { isValidRateUnit } = require('../services/inventory-units');
           // GATE_LAWN_TROUBLE_AREAS: a visit whose property cannot be resolved records no place (the gate acts as off for that visit).
           const placesOn = !!(await savepointRead(trx, (k) => require('../services/lawn-trouble-areas').propertyOf(k, svc)).catch(() => null));
-          // Lawn Fast Complete: the target a spot fungicide / insecticide row is stored with (lawn-spot-target.js; the row's own tags for any other completion).
-          const spotTargets = await require('../services/lawn-spot-target').resolveForCompletion({
-            rows: products, lawnFast, catalog: completionCatalogRowsById, canonicalId: canonicalProductId, inferMethod: inferServiceReportApplicationMethod, serviceLine: reportServiceLine,
-            confirm: () => require('./lawn-fast-complete').troubleTypeIdsFor(svc),
-          });
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;

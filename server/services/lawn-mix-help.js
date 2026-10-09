@@ -297,7 +297,9 @@ function convertGallons(wanted, staged, month) {
  * whatever area the sheet sent, and is marked. null = nothing to refuse; otherwise `{ status, payload }`:
  *   400 lawn_gallons_invalid       not a positive number
  *   400 lawn_gallons_unavailable   no spot row with a carrier volume on file for the product (enter the area instead)
- *   503 lawn_gallons_unreadable    the staged rows or the plan could not be read (retry)
+ *   400 lawn_gallons_unavailable_now  the staged rows or the plan could not be read. A named PRE-COMMIT refusal (nothing is written): a 4xx,
+ *                                  so the shared submit hook treats it as correctable (fresh key, form editable) and the tech can enter the
+ *                                  area instead; a 5xx would lock the form to the same body and key
  * While the gate is off the field is ignored and the row is exactly what the sheet sent. Input: `{ knex, svc, products, loadPlan }`
  * (`loadPlan(svc, knex)` is the sheet's plan reader) plus, for tests, `isLive` and `readStaged`.
  */
@@ -310,7 +312,7 @@ async function applyGallons(input) {
   const bad = wanted.find((row) => gallonsOf(row) === null);
   if (bad) return refusal(400, 'lawn_gallons_invalid', 'Enter the gallons sprayed as a number above zero, or enter the area instead.', { productId: bad.productId });
   const staged = await gallonsStaged({ knex, svc, wanted, loadPlan, readStaged });
-  if (!staged) return refusal(503, 'lawn_gallons_unreadable', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.');
+  if (!staged) return refusal(400, 'lawn_gallons_unavailable_now', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.');
   return convertGallons(wanted, staged, monthOfVisit(svc));
 }
 

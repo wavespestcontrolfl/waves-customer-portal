@@ -235,3 +235,44 @@ describe('what the customer report prints for each case (the real builders)', ()
     expect(sentences(expect_([{ name: 'Atticus Talak 7.9 F', targets: ['Dollar spot'] }]))[0][0]).toBe('insecticide_preventive');
   });
 });
+
+describe('the frozen report facts read the same targets as the stored row', () => {
+  const { freezeReportProductFacts } = require('../services/complete-scheduled-service');
+  const cat = { id: TALAK, name: 'Atticus Talak 7.9 F', category: 'insecticide', epa_reg_number: '91234-145', active: true, label_verified_at: new Date(),
+    approved_for_service_report: true, content_status: 'approved', customer_visibility: 'public' };
+  const catalogById = new Map([[TALAK, cat]]);
+  // A protocol row that holds watering and mowing after the use: only a caterpillar-like target on the use turns it on (withApplicationHold).
+  const plan = { protocol: { structured: { products: [{ productId: TALAK, gates: { delayWateringOrMowingHours: 24 } }] } } };
+  const submitted = [{ productId: TALAK, method: 'spot_treatment', targets: ['Fall armyworms'] }];
+  const freeze = (list) => freezeReportProductFacts({ productIds: [TALAK], submitted: list, catalogById, plan })[TALAK];
+  const names = () => Object.assign(resolveArgs(), {});
+  const resolveArgs = () => ({
+    rows: submitted, lawnFast: {}, catalog: catalogById, canonicalId: (id) => String(id).toLowerCase(), inferMethod: (p, r) => r.method, serviceLine: 'lawn', live: () => true,
+  });
+
+  test('a confirmed target: the frozen facts equal the ones built from the stored row\'s targets', async () => {
+    const resolved = await spotTarget.resolveForCompletion({ ...names(), confirm: async () => SETS() });
+    expect(resolved.of(submitted[0])).toEqual(['Fall armyworms']);
+    expect(freeze(resolved.submitted(submitted))).toEqual(freeze([{ ...submitted[0], targets: resolved.of(submitted[0]) }]));
+    expect(freeze(resolved.submitted(submitted)).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+  });
+
+  test('a rejected target (staged sets unreadable): nothing is stored and the frozen facts hold no target-dependent rule', async () => {
+    const resolved = await spotTarget.resolveForCompletion({ ...names(), confirm: async () => { throw new Error('down'); } });
+    expect(resolved.of(submitted[0])).toEqual([]);
+    expect(freeze(submitted).wateringRule).toBeTruthy();
+    expect(freeze(resolved.submitted(submitted)).wateringRule ?? null).toBeNull();
+  });
+
+  test('a target dropped for a row that is not spot: no target-dependent hold either', async () => {
+    const broadcast = [{ ...submitted[0], method: 'broadcast_spray' }];
+    const resolved = await spotTarget.resolveForCompletion({ ...names(), rows: broadcast, confirm: async () => SETS() });
+    expect(freeze(resolved.submitted(broadcast)).wateringRule ?? null).toBeNull();
+  });
+
+  test('gate off: the very same list goes to the freeze, with the sheet\'s own tags', async () => {
+    const resolved = await spotTarget.resolveForCompletion({ ...names(), live: () => false, confirm: async () => SETS() });
+    expect(resolved.submitted(submitted)).toBe(submitted);
+    expect(freeze(resolved.submitted(submitted)).wateringRule).toMatchObject({ mode: 'hold', hold_hours: 24 });
+  });
+});
