@@ -35,13 +35,16 @@ describe('terminal writer gate', () => {
 });
 
 describe('waitingBriefId: the brief on the latest run, only when that run waits for a draft', () => {
-  const conn = (latest) => () => ({ where: () => ({ orderBy: () => ({ first: async () => latest }) }) });
+  const skipped = [];
+  const conn = (latest) => () => ({ where: () => ({ whereNotIn: (...a) => { skipped.push(a); return { orderBy: () => ({ first: async () => latest }) }; } }) });
   test.each([
     ['a waiting run', { outcome: 'deferred_terminal_draft', brief_id: BRIEF }, BRIEF],
     ['a gate retry (the row needs a new brief first)', { outcome: 'deferred_gate_retry', brief_id: BRIEF }, null],
     ['no run at all', undefined, null],
   ])('%s', async (_label, latest, expected) => {
     expect(await tw.waitingBriefId(ID, { conn: conn(latest) })).toBe(expected);
+    // a publish-cap deferral between two looks is not the row's "latest run"
+    expect(skipped.at(-1)).toEqual(['outcome', ['deferred_publish_cap']]);
   });
 });
 
@@ -146,7 +149,7 @@ describe('waiting rows and the admin item', () => {
     expect(out.rebrief.map((r) => r.opportunity_id)).toEqual([R]);
     expect(out.due[0]).toMatchObject({ branch: `terminal-writer/${ID}`, draft_path: `terminal-drafts/${ID}.json`, brief_id: 'brief-aa' });
     // the latest run of each pending row: waiting ones, and gate retries of a terminal draft
-    expect(d.db.raw.mock.calls[0][1]).toEqual([7, tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
+    expect(d.db.raw.mock.calls[0][1]).toEqual([7, ['deferred_publish_cap'], tw.AWAITING_OUTCOME, tw.GATE_RETRY_OUTCOME, tw.TERMINAL_AGENT_ID]);
 
     branches[C] = draftFor(C);
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);

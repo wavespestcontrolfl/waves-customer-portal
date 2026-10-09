@@ -48,6 +48,11 @@ const AWAITING_OUTCOME = 'deferred_terminal_draft';
 // directives) before the terminal can write again; the next run composes it.
 const GATE_RETRY_OUTCOME = 'deferred_gate_retry';
 const TERMINAL_AGENT_ID = 'terminal-writer';
+// Runs that end before the draft step and decide nothing about a draft. They
+// do not count as a row's "latest run" here: a publish-cap deferral between
+// two looks must not stop the row waiting on its brief (and orphan a draft
+// that is already pushed).
+const PRE_DRAFT_OUTCOMES = Object.freeze(['deferred_publish_cap']);
 const MISSING = 'terminal_draft_missing';
 const INVALID = 'terminal_draft_invalid';
 // The branch could not be read at all (GitHub failed); the row keeps waiting.
@@ -96,12 +101,13 @@ function draftProblem(parsed, opportunityId, expectedBriefId) {
 
 /**
  * The brief the terminal was asked to write from: the brief on the row's
- * LATEST run, when that run ended waiting for a draft. Null when the latest
+ * LATEST run (pre-draft deferrals aside), when that run ended waiting for a draft. Null when the latest
  * run is anything else (a gate retry, a publish): the row then needs a new
  * brief first, and any file still on its branch is stale.
  */
 async function waitingBriefId(opportunityId, { conn = db } = {}) {
   const latest = await conn('autonomous_runs').where('opportunity_id', opportunityId)
+    .whereNotIn('outcome', PRE_DRAFT_OUTCOMES)
     .orderBy('created_at', 'desc').first('outcome', 'brief_id');
   return latest?.outcome === AWAITING_OUTCOME ? latest.brief_id || null : null;
 }
@@ -179,10 +185,11 @@ async function awaitingTerminalDrafts({ deps = {} } = {}) {
         JOIN opportunity_queue q ON q.id = r.opportunity_id
        WHERE q.status = 'pending'
          AND r.created_at >= now() - (?::int * interval '1 day')
+         AND r.outcome <> ALL(?::text[])
        ORDER BY r.opportunity_id, r.created_at DESC
     ) latest
     WHERE outcome = ? OR (outcome = ? AND agent_id = ?)
-    ORDER BY score DESC`, [AWAITING_WINDOW_DAYS, AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
+    ORDER BY score DESC`, [AWAITING_WINDOW_DAYS, [...PRE_DRAFT_OUTCOMES], AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID]);
   const due = [];
   const written = [];
   const rebrief = [];
