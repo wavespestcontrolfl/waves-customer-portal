@@ -66,9 +66,14 @@ function addDays(dateStr, days) {
   return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), days));
 }
 
+// True when the row moved the visit to another date, start or end. Clock
+// values are compared to the minute: writers log '09:00' and '09:00:00' for
+// one time, and a row that only re-assigned the technician is not a move.
 function slotChanged(row) {
-  return dateOnly(row.original_date) !== dateOnly(row.new_date)
-    || String(row.original_window || '') !== String(row.new_window || '');
+  if (dateOnly(row.original_date) !== dateOnly(row.new_date)) return true;
+  const from = windowParts(row.original_window);
+  const to = windowParts(row.new_window);
+  return from.start !== to.start || from.end !== to.end;
 }
 
 function allowanceDays(svc) {

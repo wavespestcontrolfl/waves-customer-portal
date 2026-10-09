@@ -131,6 +131,19 @@ describe('late-move limit', () => {
     expect(customerMovesSince(late, v)).toHaveLength(1);
   });
 
+  test('a Waves row that keeps the date and time (logged with other precision) is not a placement', async () => {
+    // auto-dispatch re-assigns the technician: same slot, '09:00:00-11:00:00' vs '09:00-11:00'.
+    const rows = [
+      ...twoMoves,
+      move({
+        initiated_by: 'auto_dispatch', original_date: '2026-10-30', new_date: '2026-10-30',
+        original_window: '09:00:00-11:00:00', new_window: '09:00-11:00', created_at: '2026-10-04T08:10:00Z',
+      }),
+    ];
+    const limit = await loadMoveLimit(onOct30(), { database: dbFor({ rows }), now: NOW });
+    expect(limit).toEqual({ dueDate: '2026-10-15', lastDate: '2026-11-05', firstVisitBlocked: true });
+  });
+
   test('a staff edit BETWEEN two customer moves: the history starts at the move after it', async () => {
     // Customer: Oct 15 → Oct 22. Staff (no log row): Oct 22 → Oct 26. Customer: Oct 26 → Oct 30.
     const rows = [move(), move({ original_date: '2026-10-26', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
