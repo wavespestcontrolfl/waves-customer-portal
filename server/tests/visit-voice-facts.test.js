@@ -890,6 +890,9 @@ describe('validateVoiceFacts: the web sweep', () => {
     ['a place that is not the home', 'Knocked down webs in the shed.'],
     ['another doer carried over an "and"', 'Customer brushed the porch and swept the eaves.'],
     ['rain carried over an "and"', 'Rain washed the walls and knocked down the webs.'],
+    ['another doer, said for today', 'Customer brushed the porch and swept the eaves today.'],
+    ['rain, said for this morning', 'Rain washed the walls and knocked down the webs this morning.'],
+    ['a denial before a sweep said for today', "Didn't spray and swept the eaves today."],
   ])('no sweep when %s', (_label, note) => {
     expect(readSweep(note, { done: true, quote: note.replace(/\.$/, '') })).toBeNull();
   });

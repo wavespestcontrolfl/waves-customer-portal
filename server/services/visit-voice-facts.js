@@ -778,8 +778,9 @@ const SWEEP_INSIDE_RE = /\b(?:inside|interior|indoors?)\b/;
 // it today's; "I" / "we" opening the part makes a denial before it another's
 // ("customer was not home and I swept the eaves").
 function sweepPartGoverned(part, clauseBefore, clause) {
-  if (SWEEP_TODAY_RE.test(part)) return false;
-  if (OTHER_DAY_RE.test(clause)) return true;
+  // "Today" answers only the day; who did it and whether it was denied are
+  // still asked (pre-push P1).
+  if (OTHER_DAY_RE.test(clause) && !SWEEP_TODAY_RE.test(part)) return true;
   if (/^\s*(?:i|we)\s/.test(part)) return false;
   return DENIAL_IN_RE.test(clauseBefore) || FUTURE_BEFORE_RE.test(`${clauseBefore} `) || !sweepClauseIsOwnWork(clauseBefore);
 }
@@ -789,7 +790,7 @@ function sweepPartGoverned(part, clauseBefore, clause) {
 // past-tense action ("sprayed the perimeter and swept the eaves"). Any other
 // opening names another doer: "customer brushed the porch and swept the
 // eaves", "rain washed the walls and knocked down the webs" (pre-push P1).
-const SWEEP_OWN_OPENING_RE = /^\s*(?:(?:also|then|today)\s+)?(?:(?:i|we)\b|(?:[a-z]+ed|swept|took|put|did|found|saw|ran|went|left|made|set|got|spoke|met|came|gave|kept)\b)/;
+const SWEEP_OWN_OPENING_RE = /^\s*(?:(?:also|then|today|yesterday|previously|last\s+(?:visit|time|service|week|month))\s+)?(?:(?:i|we)\b|(?:[a-z]+ed|swept|took|put|did|found|saw|ran|went|left|made|set|got|spoke|met|came|gave|kept)\b)/;
 function sweepClauseIsOwnWork(clauseBefore) {
   // The joining words themselves ("..., but swept the eaves") are no opening.
   const opening = clauseBefore.replace(/^(?:\s|\b(?:and|then|but|plus)\b)+/, '');
