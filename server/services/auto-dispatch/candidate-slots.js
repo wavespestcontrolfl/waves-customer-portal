@@ -649,7 +649,11 @@ async function legacyGroupBlindField(service, ctx) {
 async function currentConflictField(service, ctx) {
   // findValidCandidateSlots reads it once for the evaluation (evalConflict).
   const conflict = ctx.evalConflict !== undefined ? ctx.evalConflict : await readCurrentConflict(service, ctx);
-  return conflict ? { conflict } : {};
+  if (!conflict) return {};
+  // Every row that moves with this visit: the dry run counts the whole unit
+  // as moved when it recommends one member (Codex #6207 r9 P2).
+  const { excludeIds } = await groupContextFor(service, ctx);
+  return { conflict, conflict_unit_ids: [...new Set([String(service.id), ...[...(excludeIds || [])].map(String)])] };
 }
 
 // Also the apply-time re-read (apply.js makeMoveGuard, on the move

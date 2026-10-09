@@ -305,14 +305,26 @@ function logDryRunRecommendation(run, service, evalResult) {
 // moves nothing, so a visit whose every overlapping partner is already
 // recommended is logged as staying (Codex #6207 r6 P2) — unless an ordinary
 // optimization would move it anyway, as apply mode then does (r8 P2).
+// The rows a recommended conflict fix moves: the visit and its group.
+function unitIdsOf(pm) {
+  const ids = pm.result.current && pm.result.current.conflict_unit_ids;
+  return ids && ids.length ? ids.map(String) : [String(pm.service.id)];
+}
+
 async function recommendOverlapFixes(run) {
   const movers = new Set();
   for (const pm of run.dryRunOverlaps.sort(byDueThenImprovement)) {
     const partners = (overlapOf(pm.result).with || []).map(String);
+    // A visit whose own unit is already recommended moves with it: one
+    // recommendation for the unit, as apply mode makes one move (r9 P2).
+    if (movers.has(String(pm.service.id))) {
+      await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'This visit moves with its group, which is already recommended to move', ...pm.result.audit });
+      continue;
+    }
     if (partners.length && partners.every((id) => movers.has(id)) && !pm.result.movesWithoutConflict) {
       await audit.logDecision(run.runId, { action: 'no_change', service: pm.service, reason_code: 'CONFLICT_PARTNER_MOVES', reason_description: 'The overlapping visit is already recommended to move; this one stays', ...pm.result.audit });
     } else {
-      movers.add(String(pm.service.id));
+      for (const id of unitIdsOf(pm)) movers.add(id);
       await logDryRunRecommendation(run, pm.service, pm.result);
     }
   }

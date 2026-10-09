@@ -814,6 +814,22 @@ describe('conflict moves (GATE_AUTO_DISPATCH_CONFLICT_MOVES)', () => {
     expect(res).toMatchObject({ recommended: 2 });
   });
 
+  // Apply moves a grouped visit as one unit. The partner overlaps two of its
+  // members: one recommendation for the unit, and the partner stays (r9 P2).
+  test('dry run: a recommended grouped visit counts every member as moved', async () => {
+    servicesResult = [svc({ id: 'g1' }), svc({ id: 'g2' }), svc({ id: 'p1' })];
+    const unit = ['g1', 'g2'];
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (service) => ({
+      current: service.id === 'p1'
+        ? { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: unit }, conflict_unit_ids: ['p1'] }
+        : { ...CURRENT_GOOD, conflict: { ...OVERLAP, with: ['p1'] }, conflict_unit_ids: unit },
+      candidates: [CAND_SMALL],
+    }));
+    const res = await runAutoDispatch({ mode: 'dry_run', conflictMovesEnabled: true });
+    expect(res).toMatchObject({ recommended: 1 });
+    expect(lastDecision('no_change')).toMatchObject({ reason_code: 'CONFLICT_PARTNER_MOVES', service: expect.objectContaining({ id: 'p1' }) });
+  });
+
   test('an overlapping visit moves on a gain far under the bar, and the audit names the conflict', async () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
