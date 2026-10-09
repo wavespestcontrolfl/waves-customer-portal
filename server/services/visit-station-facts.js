@@ -218,7 +218,17 @@ function stationChecksWriterLine(formType, checks) {
   return `${head}: ${parts.sort((a, b) => a.number - b.number).map((part) => part.text).join('; ')}. Every other station was checked and is OK.`;
 }
 
+// What the sheet may take from a station read: 'read' only when the note was
+// read (or there was no note to read: nothing was said, nothing is named), else
+// 'failed'. The sheet asserts "all stations OK" to the writer and to the record
+// only on 'read'; a missing key, a timeout, a registry error, a note too long to
+// read and a roster that came to nothing are never an empty list.
+function stationReadVerdict(status) {
+  return status === 'read' || status === 'empty_note' ? 'read' : 'failed';
+}
+
 module.exports = {
+  stationReadVerdict,
   stationChecksWriterLine,
   readStationExceptions,
   validateStationExceptions,

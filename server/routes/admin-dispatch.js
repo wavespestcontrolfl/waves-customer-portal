@@ -982,7 +982,7 @@ router.post('/:serviceId/standard-wording', async (req, res, next) => {
 // program. The registry is read here, never taken from the client; the reader
 // verifies every number, status and quote (services/visit-station-facts.js).
 // Gate off, no stations carried or another kind of visit: null.
-async function readStationFactsForVisit({ svc, profile, note, requested }) {
+async function loadAndReadStationFacts({ svc, profile, note, requested }) {
   if (!Array.isArray(requested) || !requested.length) return null;
   if (!require('../config/feature-gates').stationFastCompleteLive()) return null;
   const { readStationExceptions, STATION_SHEET_PROGRAMS } = require('../services/visit-station-facts');
@@ -1002,6 +1002,22 @@ async function readStationFactsForVisit({ svc, profile, note, requested }) {
     .filter((row) => (row.program || 'termite') === program && sent.has(String(row.id)))
     .map((row) => ({ id: row.id, number: row.station_number, program, is_active: row.is_active }));
   return readStationExceptions({ note, stations, program });
+}
+
+// The answer the sheet takes from that read: `stationRead` is 'read' only when
+// the note was read (or had nothing to read), else 'failed', with no exceptions.
+// A throw, a timeout, a registry error or a roster that came to nothing is
+// 'failed', never an empty list the sheet could take for "all stations OK".
+async function readStationFactsForVisit(args) {
+  const { stationReadVerdict } = require('../services/visit-station-facts');
+  try {
+    const facts = await loadAndReadStationFacts(args);
+    if (!facts) return null;
+    const verdict = stationReadVerdict(facts.status);
+    return { status: verdict, detail: facts.status, exceptions: verdict === 'read' ? facts.exceptions : [] };
+  } catch {
+    return { status: 'failed', detail: 'error', exceptions: [] };
+  }
 }
 
 // POST /api/admin/dispatch/:serviceId/typed-facts — typed voice fill (Fast
@@ -1060,7 +1076,7 @@ router.post('/:serviceId/typed-facts', async (req, res, next) => {
     res.json({
       available: true,
       ...facts,
-      ...(stationFacts ? { stationExceptions: stationFacts.exceptions, stationRead: stationFacts.status } : {}),
+      ...(stationFacts ? { stationExceptions: stationFacts.exceptions, stationRead: stationFacts.status, stationReadDetail: stationFacts.detail } : {}),
     });
   } catch (err) { next(err); }
 });

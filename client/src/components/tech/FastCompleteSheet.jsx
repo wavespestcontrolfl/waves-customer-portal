@@ -1221,7 +1221,7 @@ function typedScoreOf(schema, record) {
   return Number.isInteger(derived) ? derived : null;
 }
 
-function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true, stationConflict = '' }) {
+function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, record, typedSchema, traceOnReport = true, stationSendHold = '' }) {
   const ready = reportReadyHolds({ draft, writing, traceRead });
   const values = record.values;
   const missing = typedCardFields(typedSchema).find((field) => typedFieldRequiredNow(field, values) && !String(values[field.key] ?? '').trim());
@@ -1249,9 +1249,10 @@ function typedSendHolds({ active, draft, writing, perimeterFeet, traceRead, reco
     : typedFormTakesPlaces(typedSchema.type, { sprayed }));
   return [
     ...ready.report,
-    // A consumption mark beside "None" contradicts itself (the completion
-    // refuses it); it holds before the count fields read as missing.
-    [stationConflict, stationConflict],
+    // The stations not known yet (never "all OK" before the note was read), or a
+    // consumption mark beside "None" (the completion refuses it); it holds
+    // before the count fields read as missing.
+    [stationSendHold, stationSendHold],
     [missing, missing && (typedIn ? `Fill in ${missing.label}.` : `Pick ${missing.label}: tap Change beside it.`)],
     [setupConflict, setupConflict],
     [placesMissing, areaField
@@ -1381,7 +1382,7 @@ function pestFactsOf(heard, { houseMix = false } = {}) {
 // read that failed: nothing fills.
 function typedFactsOf(heard) {
   if (heard?.available === true && heard.status === 'nothing_to_fill') {
-    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false, stationExceptions: stationExceptionsOf(heard) };
+    return { status: 'read', type: heard.type, values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false, stationExceptions: stationExceptionsOf(heard), stationRead: stationReadOf(heard) };
   }
   if (heard?.available !== true || heard.status !== 'read') {
     return { status: 'failed', values: {}, heard: {}, unclearFields: [], score: null, scoreUnclear: false };
@@ -1396,6 +1397,7 @@ function typedFactsOf(heard) {
     score: Number.isInteger(heard.score?.value) && typeof heard.score.quote === 'string' ? { value: heard.score.value, quote: heard.score.quote } : null,
     scoreUnclear: heard.scoreUnclear === true,
     stationExceptions: stationExceptionsOf(heard),
+    stationRead: stationReadOf(heard),
   };
 }
 
@@ -1409,6 +1411,11 @@ function stationExceptionsOf(heard) {
   return heard.stationExceptions.filter((item) => item && typeof item.id === 'string' && typeof item.status === 'string' && typeof item.quote === 'string');
 }
 
+// Whether the note's station read is KNOWN to have succeeded: only the server's
+// explicit 'read'. A missing key (a read that never ran, an answer that never
+// came, a typed read that failed) is never an empty list: it is 'failed'.
+const stationReadOf = (heard) => (heard?.available === true && heard.stationRead === 'read' ? 'read' : 'failed');
+
 // Each record mode's reader and the facts it answers.
 const READS = {
   lane: { endpoint: 'lane-facts', factsOf: laneFactsOf },
@@ -1416,12 +1423,14 @@ const READS = {
 };
 const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
 
+const STATION_READ_FAILED = 'Couldn’t read the stations from your note. Try again, or mark the stations by hand and confirm.';
+
 function useReportDraft({ request, base, mode = null, houseMix = false }) {
   const [draft, setDraft] = useState(null);
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
-  const write = useCallback(async ({ buildPayload, note, current, scoreSet, stations = null, signature, fresh, extraRead = null }) => {
+  const write = useCallback(async ({ buildPayload, note, current, scoreSet, stationRead = null, signature, fresh, extraRead = null }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
     setWriteError('');
@@ -1430,7 +1439,9 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     // stored on the server).
     // A station visit's read also carries the stations the sheet shows
     // (GATE_STATION_FAST_COMPLETE), for the server to read their exceptions.
+    const stations = stationRead?.roster;
     const body = mode === 'typed' ? { note, current: current || {}, scoreSet: scoreSet === true, ...(stations?.length ? { stations } : {}) } : { note };
+    stationRead?.begin(note);
     // `extraRead` (voice fill): the note's products, read beside its facts; the
     // answer goes to `signature` and `buildPayload`, which land it on the rows.
     const [heard, extra] = await Promise.all([
@@ -1439,6 +1450,18 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     ]);
     const facts = read.factsOf(heard, { houseMix });
     if (sequence !== sequenceRef.current) return;
+    // A station visit's report is never written without the station read: a
+    // read that did not succeed (a timeout, a registry error, no answer) leaves
+    // the stations unknown, and unknown is never "all OK".
+    if (stationRead) {
+      const ok = facts.stationRead === 'read';
+      stationRead.settle(ok, note);
+      if (!ok) {
+        setWriting(false);
+        setWriteError(STATION_READ_FAILED);
+        return;
+      }
+    }
     // The signature of what the report is written from, read included (a
     // lane visit's record fills from the read).
     const draftSignature = signature(facts, extra);
@@ -1510,7 +1533,7 @@ function useLaneRecord(service) {
 // visit's own record (its typed form's values and, when the tech sets it,
 // the activity score) in place of the pest facts. With no typed form every
 // part answers as absent.
-function useTypedRecord(service, request) {
+function useTypedRecord(service, request, note = '') {
   const typed = routedTypedOf(service);
   const schema = typed && service.typedSchema?.type === typed ? service.typedSchema : null;
   const [typedRecord, setTypedRecord] = useState(EMPTY_TYPED_RECORD);
@@ -1523,13 +1546,19 @@ function useTypedRecord(service, request) {
   // A bait station visit routed with the station map on (GATE_STATION_FAST_COMPLETE):
   // the stations load, the note names exceptions and the station counts come
   // from the stations, as the full form's map fills them. Inert otherwise.
-  const stations = useStationChecks({ service, request, enabled: !!schema && service.stationsFlow === true });
+  const stations = useStationChecks({ service, request, enabled: !!schema && service.stationsFlow === true, note });
   // The record with the station counts the stations give (they replace anything
   // typed for those fields, which the card hides).
   // Their per-station statuses ride on it for the draft's signature, sorted so
   // the same marks always read the same.
   const withCounts = (record, counts, statuses = {}) => (record && counts
-    ? { ...record, values: { ...record.values, ...counts }, stationStatuses: Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)) }
+    ? {
+      ...record,
+      values: { ...record.values, ...counts },
+      stationStatuses: Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b)),
+      // What the stations stand on: the note's read, or the tech's hand check.
+      stationBasis: stations.byHand ? 'hand' : 'note',
+    }
     : record);
   // The record a read lands on: only fields still empty that nobody picked,
   // and only from an answer for this form.
@@ -1557,14 +1586,18 @@ function useTypedRecord(service, request) {
     // A station visit's per-station statuses are part of what the report says
     // (a chip tap makes the draft stale even when the counts do not move).
     signaturePart: (record) => (record
-      ? { typed: record.stationStatuses ? [record.values, record.score, record.stationStatuses] : [record.values, record.score] }
+      ? { typed: record.stationStatuses ? [record.values, record.score, record.stationStatuses, record.stationBasis] : [record.values, record.score] }
       : null),
-    // The stations the sheet shows, for the note's read (null: none).
-    stationRoster: stations.roster,
+    // How the report write reads the stations from the note (null: not to).
+    stationRead: stations.stationRead,
+    // The stations card shows even before a report exists when the read failed.
+    stationCardOpen: stations.active && (stations.readStatus === 'failed' || stations.byHand),
     // What holds the send: a registry the sheet cannot judge (the full form
     // does), or a consumption mark beside "None".
     stationHold: stations.active ? stations.hold : '',
-    stationConflict: stations.active ? (stations.conflictFor(shown?.values) || '') : '',
+    // What holds Complete: the stations not known yet (the note's read, or the
+    // tech's hand check), then a consumption mark beside "None".
+    stationSendHold: stations.active ? (stations.readHold || stations.conflictFor(shown?.values) || '') : '',
     inputs: (record, facts) => {
       const fields = recordInputs(schema ? 'typed' : null, record, facts, schema);
       const entries = stations.entries();
@@ -1619,9 +1652,9 @@ function useTypedRecord(service, request) {
 
 // The record a report-flow visit keeps: a lane visit's, a typed visit's, or
 // none (a pest visit, whose facts the note gives).
-function useVisitRecord(service, request) {
+function useVisitRecord(service, request, note = '') {
   const laneState = useLaneRecord(service);
-  const typedState = useTypedRecord(service, request);
+  const typedState = useTypedRecord(service, request, note);
   return laneState.lane ? laneState : typedState;
 }
 
@@ -1673,7 +1706,7 @@ function ReportFlowForm({
   const visitPhotos = useVisitPhotos({ serviceId: service.id, request, version: photos.version + photoReloads, keepOnFailure: noteBoxPhotos });
   const trace = useVisitTrace({ serviceId: service.id, request });
   // A lane or typed visit's own record (or none: a pest visit).
-  const recordState = useVisitRecord(service, request);
+  const recordState = useVisitRecord(service, request, form.note);
   const { lane, mode, record } = recordState;
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
@@ -1718,7 +1751,7 @@ function ReportFlowForm({
   });
   const completeMissing = reportFlowMissing({
     ...holdInputs, stage: 'complete', draft, writing, perimeterFeet, traceAvailable, traceRead: trace, lane, record, typedSchema: recordState.schema, traceOnReport: ctx.traceOnReport,
-    stationConflict: recordState.stationConflict,
+    stationSendHold: recordState.stationSendHold,
     voiceHolds: productVoice.enabled ? { confirms: productVoice.confirms.length, checks: productVoice.checks.length } : null,
   });
   // The header's Full form button: a hold that sends the tech to the full
@@ -1788,7 +1821,7 @@ function ReportFlowForm({
       current: recordState.current,
       scoreSet: recordState.scoreSet,
       // A station visit's read also names the stations the sheet shows.
-      stations: recordState.stationRoster,
+      stationRead: recordState.stationRead,
       signature: (facts, productFill) => writerSignature(form, rowsFor(facts, productFill), promiseMarks, visitPhotos.photos, recordState.signaturePart(recordState.recordFor(facts))),
       extraRead: productVoice.read && !preFilled ? () => productVoice.read(form.note) : null,
       fresh,
@@ -1880,6 +1913,7 @@ function ReportFlowForm({
         pestHeard={!mode}
         productVoice={productVoice}
         laneCard={recordState.card({ draft, locked, writing })}
+        cardWithoutDraft={!!recordState.stationCardOpen}
         onRetryTrace={trace.failed ? trace.reload : null}
         onRemoveTrace={completeMissing.fix === 'remove_trace' ? removeTrace : null}
         removingTrace={removingTrace}
@@ -1953,7 +1987,7 @@ function ReportFlowForm({
 function ReportStep({
   report, stale, action, locked, submission, generateMissing, completeMissing, stockButton, trace, traced, sources, photoCount,
   blogPost, pestHeard, productVoice, laneCard, onWrite, onSubmit, onTrace, onRetryTrace, onRemoveTrace, removingTrace, traceError, onBack, onConfirm,
-  onBackFromPrompt, sweep = null,
+  onBackFromPrompt, sweep = null, cardWithoutDraft = false,
 }) {
   const { draft, writing, writeError } = report;
   const [editing, setEditing] = useState(false);
@@ -2007,7 +2041,7 @@ function ReportStep({
         {/* Voice fill: the product rows the note filled, each waiting on the tech's
             ✓; a wrong one is changed back on the visit (Products, Edit). */}
         {showDraft && <VoiceFillReview voice={productVoice} locked={locked} />}
-        {showDraft && laneCard}
+        {(showDraft || (cardWithoutDraft && !writing)) && laneCard}
         {showDraft && trace && <TraceSection trace={trace} locked={locked} onTrace={onTrace} />}
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>

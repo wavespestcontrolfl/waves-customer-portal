@@ -83,7 +83,7 @@ function makeRequest({
       return registry;
     }
     if (path === '/admin/schedule/generate-report') return { report: REPORT };
-    if (path.endsWith('/typed-facts')) return typedFacts;
+    if (path.endsWith('/typed-facts')) return typeof typedFacts === 'function' ? typedFacts() : typedFacts;
     if (path.endsWith('/voice-facts') || path.endsWith('/lane-facts')) throw new Error('a typed visit reads only its own form');
     if (path.endsWith('/complete')) return complete;
     return {};
@@ -366,4 +366,101 @@ describe('the report is written from the tech\'s station statuses', () => {
     await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
     expect(request.bodies('generate-report')[1].stationChecks).toEqual([]);
   }, 30000);
+});
+
+describe('"all stations OK" is only said when the note\'s station read is known to have succeeded', () => {
+  const failed = { ...TERMITE_READ, stationRead: 'failed', stationExceptions: [] };
+  const noVerdict = (() => { const { stationRead: _a, stationExceptions: _b, ...rest } = TERMITE_READ; return rest; })();
+  // The typed fields are read fine; the station read did not succeed.
+  const cases = [
+    ['the station read timed out or its model failed (the server says failed)', failed],
+    ['the answer carries no station verdict at all', noVerdict],
+    ['the station read says something else than read', { ...TERMITE_READ, stationRead: 'no_stations' }],
+  ];
+
+  test.each(cases)('%s: no report is written, nothing is asserted, and the card says it was not read', async (_label, typedFacts) => {
+    const request = makeRequest({ typedFacts });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+    // The typed fields were read, but no report was written, and no station fact went anywhere.
+    expect(request.bodies('/typed-facts')).toHaveLength(1);
+    expect(request.bodies('generate-report')).toEqual([]);
+    expect(request.bodies('/complete')).toEqual([]);
+    expect(within(stationsCard()).getByText('4 stations. Couldn’t read them from your note.')).toBeTruthy();
+    expect(within(stationsCard()).queryByText(/all OK/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+  }, 30000);
+
+  test('a typed read that never answers is the same: failed, nothing asserted', async () => {
+    const request = makeRequest({ typedFacts: () => { throw new Error('timeout'); } });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')).toEqual([]);
+  }, 30000);
+
+  test('Try again: a read that succeeds goes on with the exceptions the note named', async () => {
+    let calls = 0;
+    const request = makeRequest({ typedFacts: () => { calls += 1; return calls === 1 ? failed : TERMITE_READ; } });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')).toHaveLength(1);
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'activity' }, { number: 3, status: 'serviced' }]);
+    expect(within(stationsCard()).getByText('4 stations, 2 flagged, the rest OK')).toBeTruthy();
+    const body = await send(request);
+    expect(body.termiteStations.filter((entry) => entry.touched).map((entry) => entry.status)).toEqual(['activity', 'serviced']);
+  }, 30000);
+
+  test('a note edited after a successful read is held until it is read again', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    expect(within(stationsCard()).getByText('4 stations, 2 flagged, the rest OK')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: `${NOTE} Also the gate was locked at station 4.` } });
+    // The edited note is not read for stations: the report is out of date and
+    // only writing it again (which reads the note) goes on; no Complete.
+    expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('/typed-facts')).toHaveLength(2));
+    await waitFor(() => expect(request.bodies('generate-report')).toHaveLength(2));
+    expect(request.bodies('/typed-facts')[1].note).toContain('gate was locked');
+    expect(request.bodies('/typed-facts')[1].stations).toHaveLength(4);
+    await waitFor(() => expect(sendButton().disabled).toBe(false));
+  }, 30000);
+
+  test('the tech can mark the stations by hand and confirm: the hand marks stand, with no read of the note for them', async () => {
+    const request = makeRequest({ typedFacts: failed });
+    await openSheet(request);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    await screen.findByText(/Couldn’t read the stations from your note\. Try again/, {}, { timeout: 10000 });
+    expect(request.bodies('generate-report')).toEqual([]);
+    // Station 2 by hand, then the confirmation.
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Flag a station' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Station 2' }));
+    fireEvent.click(within(stationsCard()).getByRole('button', { name: 'Stations checked by hand' }));
+    expect(within(stationsCard()).getByText('4 stations, checked by hand, 1 flagged, the rest OK')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+    // The hand marks went to the writer, and the note was not asked for stations again.
+    expect(request.bodies('generate-report')[0].stationChecks).toEqual([{ number: 2, status: 'activity' }]);
+    expect(request.bodies('/typed-facts')).toHaveLength(2);
+    expect(request.bodies('/typed-facts')[1]).not.toHaveProperty('stations');
+    const body = await send(request);
+    expect(body.termiteStations.map((entry) => entry.status)).toEqual(['ok', 'activity', 'ok', 'ok']);
+    expect(body.structuredFindings.values).toMatchObject({ stations_checked: '4', stations_with_activity: '1' });
+  }, 40000);
 });

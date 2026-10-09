@@ -55,7 +55,7 @@ function registryOf(res, program) {
 // (service.stationsFlow); off, the hook is inert and every part answers as
 // absent. Reads go through refs so a note's read that lands after the tech
 // tapped judges the marks and the registry as they are now.
-export function useStationChecks({ service, request, enabled = false }) {
+export function useStationChecks({ service, request, enabled = false, note = '' }) {
   const program = enabled ? stationSheetProgram(service?.typedType) : null;
   const active = enabled && program != null;
   const [registry, setRegistry] = useState(NOT_LOADED);
@@ -66,6 +66,30 @@ export function useStationChecks({ service, request, enabled = false }) {
   marksRef.current = marks;
   const [attempt, setAttempt] = useState(0);
   const serviceId = service?.id;
+  // THE RULE: "all stations OK" is asserted (to the report writer, or to the
+  // record as a check for every station) only when the note's station read is
+  // KNOWN to have succeeded for the CURRENT note text, or the tech marked the
+  // stations by hand and confirmed it. The read has a state per note version:
+  // none (not read yet; a changed note is none again), reading, ok, failed.
+  // Every assertion below (entries, currentChecks, assertable) goes through it.
+  const [read, setRead] = useState({ note: null, status: 'none' });
+  const readRef = useRef(read);
+  readRef.current = read;
+  // The ref moves with the state: the report write reads it in the same breath
+  // that the read settles.
+  const commitRead = (next) => {
+    readRef.current = next;
+    setRead(next);
+  };
+  const [byHand, setByHand] = useState(false);
+  const byHandRef = useRef(byHand);
+  byHandRef.current = byHand;
+  const noteNow = String(note || '').trim();
+  const noteRef = useRef(noteNow);
+  noteRef.current = noteNow;
+  const readStatusNow = () => (readRef.current.note === noteRef.current ? readRef.current.status : 'none');
+  const assertableNow = () => byHandRef.current || readStatusNow() === 'ok';
+  const readStatus = byHand ? 'hand' : (read.note === noteNow ? read.status : 'none');
 
   useEffect(() => {
     if (!active || !serviceId) return undefined;
@@ -106,10 +130,41 @@ export function useStationChecks({ service, request, enabled = false }) {
     }
   }
 
+  // What holds Complete (and a report written from it) until the stations are
+  // known: the note's read, or the tech's hand check.
+  const readHolds = {
+    reading: 'Reading your note for the stations…',
+    failed: 'Couldn’t read the stations from your note. Try again, or mark them by hand and tap “Stations checked by hand”.',
+    none: 'Your note hasn’t been read for the stations yet. Write the report again.',
+  };
+  const readHold = active && registry.state === 'ready' && !hold ? (readHolds[readStatus] || '') : '';
+
   return {
     active,
     program,
     state: registry.state,
+    readStatus,
+    byHand,
+    assertable: assertableNow,
+    readHold,
+    // How the report write reads the stations: null unless the note is to be read
+    // (stations ready, and not checked by hand). The write marks the read
+    // starting and settling for the note it read.
+    stationRead: active && registry.state === 'ready' && !hold && !byHand
+      ? {
+        roster: pinned.map((station) => ({ id: station.id, number: station.number })),
+        begin: (readNote) => commitRead({ note: String(readNote || '').trim(), status: 'reading' }),
+        settle: (ok, readNote) => {
+          const forNote = String(readNote || '').trim();
+          const prev = readRef.current;
+          // A failed refresh never downgrades a note already read.
+          if (!ok && prev.note === forNote && prev.status === 'ok') return;
+          commitRead({ note: forNote, status: ok ? 'ok' : 'failed' });
+        },
+      }
+      : null,
+    confirmByHand: () => { byHandRef.current = true; setByHand(true); },
+    readFromNote: () => { byHandRef.current = false; setByHand(false); },
     stations: registry.stations,
     pinned,
     marks,
@@ -118,15 +173,16 @@ export function useStationChecks({ service, request, enabled = false }) {
     roster: active && registry.state === 'ready' && !hold ? pinned.map((station) => ({ id: station.id, number: station.number })) : null,
     counts: active ? countsFor(marks) : null,
     countsFor: active ? countsFor : () => null,
-    // `termiteStations` as the full form sends it: an entry per pinned station.
-    entries: () => (active && registryRef.current.state === 'ready' && !hold
+    // `termiteStations` as the full form sends it: an entry per pinned station,
+    // and none while the stations are not known (never built from defaults).
+    entries: () => (active && assertableNow() && registryRef.current.state === 'ready' && !hold
       ? pinnedOf(registryRef.current).map((station) => stationCheckEntry(station.id, marksRef.current.statuses))
       : []),
     hold,
     // The tech's per-station statuses for the report writer, an exception each
     // by station number (an empty list: every station is OK); null while the
-    // stations cannot be judged. Authoritative over what the note says.
-    currentChecks: () => (active && registryRef.current.state === 'ready' && !hold
+    // stations are not known. Authoritative over what the note says.
+    currentChecks: () => (active && assertableNow() && registryRef.current.state === 'ready' && !hold
       ? pinnedOf(registryRef.current)
         .filter((station) => marksRef.current.statuses[station.id])
         .map((station) => ({ number: station.number, status: marksRef.current.statuses[station.id] }))
@@ -157,15 +213,26 @@ export function FastCompleteStations({ checks, locked = false }) {
   const flagged = pinned.filter((station) => marks.statuses[station.id]);
   const unflagged = pinned.filter((station) => !marks.statuses[station.id]);
   const label = (station) => `Station ${station.number}: ${stationStatusLabel(marks.statuses[station.id], program)}`;
+  const { readStatus, byHand } = checks;
+  const known = byHand || readStatus === 'ok';
+  const count = plural(pinned.length, 'station');
   let summary = null;
   if (state === 'loading') summary = 'Loading the stations…';
   else if (checks.hold) summary = checks.hold;
-  else if (!flagged.length) summary = `${plural(pinned.length, 'station')}, all OK`;
-  else summary = `${plural(pinned.length, 'station')}, ${flagged.length} flagged, the rest OK`;
+  else if (!known) {
+    // Not known: "all OK" is never said before the note was read.
+    summary = {
+      none: `${count}. Not read from your note yet.`,
+      reading: `${count}. Reading your note…`,
+      failed: `${count}. Couldn’t read them from your note.`,
+    }[readStatus];
+  } else if (byHand) summary = `${count}, checked by hand${flagged.length ? `, ${flagged.length} flagged, the rest OK` : ', all OK'}`;
+  else if (!flagged.length) summary = `${count}, all OK`;
+  else summary = `${count}, ${flagged.length} flagged, the rest OK`;
   return (
     <section className="tech-visit-card" aria-labelledby={titleId}>
       <h3 id={titleId} className="tech-visit-section-title">Bait stations</h3>
-      <p className={checks.hold && state !== 'loading' ? 'tech-visit-muted tech-visit-status--warn' : 'tech-lane-value'} role="status">{summary}</p>
+      <p className={(checks.hold && state !== 'loading') || readStatus === 'failed' ? 'tech-visit-muted tech-visit-status--warn' : 'tech-lane-value'} role="status">{summary}</p>
       {state === 'failed' && (
         <Button type="button" variant="ghost" className="tech-visit-action" disabled={locked} onClick={checks.retry}>Load the stations again</Button>
       )}
@@ -185,6 +252,17 @@ export function FastCompleteStations({ checks, locked = false }) {
             <p className="tech-visit-muted">
               {`Tap a chip to change it: ${stationStatusLabel('activity', program)}, Serviced, No access, then back to OK.`}
             </p>
+          )}
+          {readStatus === 'failed' && (
+            <p className="tech-visit-muted">Tap Try again below to read your note again. Or mark each station that needs it, then confirm.</p>
+          )}
+          {!byHand && readStatus !== 'reading' && (readStatus === 'failed' || readStatus === 'none') && (
+            <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" disabled={locked} onClick={checks.confirmByHand}>
+              Stations checked by hand
+            </Button>
+          )}
+          {byHand && (
+            <Button type="button" variant="ghost" className="tech-visit-action" disabled={locked} onClick={checks.readFromNote}>Read the stations from my note instead</Button>
           )}
           {unflagged.length > 0 && (
             <Button type="button" variant="ghost" className="tech-visit-action" aria-expanded={picking} disabled={locked} onClick={() => setPicking(!picking)}>

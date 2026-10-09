@@ -57,7 +57,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 }));
 const { dispatchWithFallback } = require('../services/llm/call');
 const {
-  readStationExceptions, validateStationExceptions, stationChecksWriterLine, namableStations, stationFactsSchema, STATION_SHEET_PROGRAMS, EXCEPTION_STATUSES,
+  readStationExceptions, validateStationExceptions, stationChecksWriterLine, stationReadVerdict, namableStations, stationFactsSchema, STATION_SHEET_PROGRAMS, EXCEPTION_STATUSES,
 } = require('../services/visit-station-facts');
 const router = require('../routes/admin-dispatch');
 
@@ -320,6 +320,70 @@ describe('POST /:serviceId/typed-facts with the sheet\'s stations', () => {
     modelAnswers({ exceptions: [] });
     const res = await invoke({ serviceId: 'svc-1' }, { note: NOTE, stations: SHEET_STATIONS });
     expect(res.body).toMatchObject({ available: true, stationRead: 'failed', stationExceptions: [] });
+  });
+
+  // Never an empty list the sheet could take for "all stations OK": every way
+  // the read does not succeed says so, explicitly.
+  describe('a station read that did not succeed says so', () => {
+    const says = async (note = NOTE) => (await invoke({ serviceId: 'svc-1' }, { note, stations: SHEET_STATIONS })).body;
+    const failedBody = (body) => {
+      expect(body).toMatchObject({ available: true, stationRead: 'failed', stationExceptions: [] });
+    };
+
+    test('the model call fails, times out or throws', async () => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER);
+      dispatchWithFallback.mockImplementation(async (_policy, request) => (
+        String(request.system).includes('station number') ? { ok: false } : answer(TYPED_FIELDS)
+      ));
+      failedBody(await says());
+      dispatchWithFallback.mockImplementation(async (_policy, request) => {
+        if (String(request.system).includes('station number')) throw new Error('timeout');
+        return answer(TYPED_FIELDS);
+      });
+      failedBody(await says());
+    });
+
+    test('the registry query fails, or comes to no station the sheet showed', async () => {
+      mockDbCurrent = (table) => {
+        const chain = {};
+        chain.where = () => chain;
+        chain.select = async () => { throw new Error('db down'); };
+        chain.first = async () => (table === 'scheduled_services' ? SERVICE : null);
+        return chain;
+      };
+      modelAnswers({ exceptions: [item(4, 'activity', 'station 4 had activity')] });
+      const body = await says();
+      failedBody(body);
+      expect(body.stationReadDetail).toBe('failed');
+      mockDbCurrent = stationDb(SERVICE, []);
+      failedBody(await says());
+    });
+
+    test('the reader itself throws, or the note is too long to read', async () => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER);
+      modelAnswers({ exceptions: [] });
+      const spy = jest.spyOn(require('../services/visit-station-facts'), 'readStationExceptions').mockRejectedValue(new Error('boom'));
+      try {
+        const body = await says();
+        failedBody(body);
+        expect(body.stationReadDetail).toBe('error');
+      } finally { spy.mockRestore(); }
+      failedBody(await says('x'.repeat(9000)));
+    });
+
+    test('a read that succeeded says read, with or without exceptions; an empty note has nothing to read', async () => {
+      mockDbCurrent = stationDb(SERVICE, ROSTER);
+      modelAnswers({ exceptions: [] });
+      expect(await says()).toMatchObject({ stationRead: 'read', stationExceptions: [] });
+      expect((await says('   ')).stationRead).toBe('read');
+    });
+
+    test('the verdict is read only for a read or an empty note', () => {
+      expect(['read', 'empty_note'].map(stationReadVerdict)).toEqual(['read', 'read']);
+      for (const status of ['failed', 'no_stations', 'no_program', 'too_long', 'error', undefined, null, '']) {
+        expect(stationReadVerdict(status)).toBe('failed');
+      }
+    });
   });
 
   test('a technician reads only their own current visit, stations or not', async () => {
