@@ -61,7 +61,7 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
 
   it('a customer with no sod record gets no hold lines and nothing else', async () => {
     const { body } = await getNewSod();
-    expect(body.newSod).toEqual({ holdLines: [] });
+    expect(body.newSod).toEqual({ holdLines: [], record: { sod_laid_on: null, sod_covers: null, sod_area: null } });
   });
 
   it('whole-lawn record: three hold lines with dates, from the server', async () => {
@@ -69,6 +69,8 @@ describe('GET /api/admin/customers/:id/new-sod', () => {
     const { body } = await getNewSod();
     const byKey = Object.fromEntries(body.newSod.holdLines.map((l) => [l.key, l]));
     expect(Object.keys(byKey)).toEqual(['fertilizer', 'weedKiller', 'preEmergent']);
+    // The record the lines were built from travels with them.
+    expect(body.newSod.record).toEqual({ sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null });
     expect(byKey.fertilizer.text).toBe(`Fertilizer is held until Oct 31, 2026${byKey.fertilizer.active ? '' : ' (this hold is over)'}.`);
     expect(byKey.weedKiller.text).toContain('Weed killer is held until Oct 31, 2026 and until the technician confirms the sod is rooted');
     expect(byKey.preEmergent.text).toContain('Pre-emergent is held until Oct 1, 2027');

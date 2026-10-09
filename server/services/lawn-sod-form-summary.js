@@ -3,7 +3,8 @@
 /**
  * What the office sees beside the new-sod fields in Customer 360 (Access &
  * Preferences). Read-only, computed here so the client never restates a rule:
- * holdLines, the plain hold lines for a recorded sod, from sodHolds().
+ * holdLines, the plain hold lines for a recorded sod, from sodHolds(), and the
+ * record they were built from.
  *
  * Nothing here writes, texts or emails.
  */
@@ -83,7 +84,17 @@ function holdLinesFor(prefsRow, todayEt) {
  * @param {string} args.todayEt  today as 'YYYY-MM-DD' (America/New_York)
  */
 function buildNewSodSummary({ prefsRow, todayEt }) {
-  return { holdLines: holdLinesFor(prefsRow, todayEt) };
+  return {
+    holdLines: holdLinesFor(prefsRow, todayEt),
+    // The record the lines were built from, as stored. The form shows the lines
+    // only beside the same record (another person may have changed it between
+    // the two reads).
+    record: {
+      sod_laid_on: prefsRow?.sod_laid_on ?? null,
+      sod_covers: prefsRow?.sod_covers ?? null,
+      sod_area: prefsRow?.sod_area ?? null,
+    },
+  };
 }
 
 module.exports = {

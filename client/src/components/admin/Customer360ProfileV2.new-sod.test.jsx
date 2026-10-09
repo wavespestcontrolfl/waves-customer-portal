@@ -77,8 +77,16 @@ function stubFetch({ prefs = {}, newSod = NEW_SOD, newSodFails = false, onPut } 
     if (path.includes('/admin/customers/customer-a/new-sod')) {
       if (newSodFails) return Promise.reject(new Error('network'));
       const value = typeof newSod === 'function' ? newSod(path) : newSod;
+      // The server answers with the record the lines were built from: here, the profile's record unless a test names another.
+      const row = { ...BASE_PREFS, ...prefs };
+      const withRecord = (body) => ({
+        record: { sod_laid_on: row.sod_laid_on, sod_covers: row.sod_covers, sod_area: row.sod_area },
+        ...body,
+      });
       // A function may return a promise (a held request).
-      return typeof value?.then === 'function' ? value.then((body) => response({ newSod: body })) : response({ newSod: value });
+      return typeof value?.then === 'function'
+        ? value.then((body) => response({ newSod: withRecord(body) }))
+        : response({ newSod: withRecord(value) });
     }
     if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
       return onPut(JSON.parse(options.body), options);
@@ -371,6 +379,20 @@ describe('Customer 360 → Access & Preferences → New sod', () => {
     fireEvent.click(screen.getByLabelText('Part of lawn'));
     expect(screen.queryByTestId('sod-hold-lines')).not.toBeInTheDocument();
     expect(screen.getByTestId('sod-hold-lines-stale')).toHaveTextContent('Save to see the hold dates for this change.');
+  });
+
+  it('hold lines built from a record another person changed are not shown beside the old record', async () => {
+    stubFetch({
+      prefs: { sod_laid_on: '2026-10-01', sod_covers: 'whole', sod_area: null },
+      newSod: {
+        record: { sod_laid_on: '2026-10-05', sod_covers: 'part', sod_area: 'front yard' },
+        holdLines: [{ key: 'fertilizer', active: false, text: 'Fertilizer is not held. The new sod covers only part of the lawn.' }],
+      },
+      onPut: () => response({}),
+    });
+    await openEditor();
+    expect(await screen.findByTestId('sod-stale')).toHaveTextContent('The sod record changed. Reload the customer to see the hold dates.');
+    expect(screen.queryByText(/Fertilizer is not held/)).not.toBeInTheDocument();
   });
 
   it('the read view shows the saved record and its hold lines', async () => {

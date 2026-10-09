@@ -7056,9 +7056,20 @@ function accessPrefsSavedSod(dirtyKeys, failed, preferences) {
   return Object.fromEntries(ACCESS_PREFS_SOD_KEYS.map((k) => [k, row[k]]));
 }
 
+// True when the hold lines answer is for the sod record this profile shows.
+function accessPrefsSameSodRecord(prefs, record) {
+  if (!record) return false;
+  const shown = accessPrefsDraftFromRow(prefs);
+  const answered = accessPrefsDraftFromRow(record);
+  return ACCESS_PREFS_SOD_KEYS.every((k) => (shown[k] ?? "") === (answered[k] ?? ""));
+}
+
 // The hold lines for the saved record (computed on the server): loading, a failed
-// read stated as such (never shown as no holds), or the lines.
+// read stated as such (never shown as no holds), a changed record, or the lines.
 function AccessPrefsSodLines({ sodInfo }) {
+  if (sodInfo?.stale) {
+    return <div className="text-ui-label text-ink-secondary" data-testid="sod-stale">The sod record changed. Reload the customer to see the hold dates.</div>;
+  }
   if (sodInfo?.loading) {
     return <div className="text-ui-label text-ink-secondary" data-testid="sod-loading">Checking the hold dates…</div>;
   }
@@ -7735,7 +7746,11 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
     // Not loaded yet is its own state: the lines of the last answer (or none) must not stand beside a newer record.
     setSodInfo({ loading: true });
     adminFetch(`/admin/customers/${customerId}/new-sod`)
-      .then((data) => { if (mine === sodSeq.current) setSodInfo(data?.newSod || null); })
+      .then((data) => {
+        if (mine !== sodSeq.current) return;
+        // Lines built from a record another person changed since this profile loaded are not shown beside the old one.
+        setSodInfo(accessPrefsSameSodRecord(prefs, data?.newSod?.record) ? data.newSod : { stale: true });
+      })
       // A failed read is stated, never shown as no holds.
       .catch(() => { if (mine === sodSeq.current) setSodInfo({ failed: true }); });
     return () => { sodSeq.current += 1; };
