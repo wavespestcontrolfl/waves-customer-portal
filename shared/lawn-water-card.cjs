@@ -10,4 +10,14 @@ function weekPlanOnCard(water) {
   return !!(water && water.weekPlan && water.weekPlan.title);
 }
 
-module.exports = { weekPlanOnCard };
+/**
+ * The one rule for "the card prints the Florida rain shutoff sentence" (GATE_LAWN_WATER_RAIN, advisor A.4): the server set
+ * water.rainSensorLine, and the card is in the rain-covered state. It prints beside a weekly plan too, so it does not
+ * depend on weekPlanOnCard. The client (LawnReportV2.jsx WaterRainSensorLine) and Ask Waves (report-ask-ai.js
+ * lawnWaterFacts) both read this function, so a sentence on the page is always in the Ask facts and the reverse.
+ */
+function rainSensorLineOnCard(water) {
+  return !!(water && water.rainSensorLine === true && water.status === 'rain_covered');
+}
+
+module.exports = { weekPlanOnCard, rainSensorLineOnCard };

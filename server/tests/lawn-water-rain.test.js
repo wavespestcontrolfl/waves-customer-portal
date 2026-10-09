@@ -355,6 +355,77 @@ describe('round 1 review: one watering story across every surface', () => {
   });
 });
 
+describe('round 2 review: the snapshot wet flag, the sensor line in Ask facts, the damp card', () => {
+  const snap = (rainInches, status, interpretation) => ({
+    status, interpretation, confidence: 'high', rain_7day_inches: rainInches, adjusted_rain_7day_inches: rainInches,
+    irrigation_inches_per_week: 0.75, total_water_7day_inches: rainInches + 0.75, target_water_inches_per_week: 1.25,
+  });
+  const runSnap = (snapshot, rainAdvice, assessment = {}) => {
+    const waterContext = buildLawnWaterContext({ turfProfile: { grass_type: 'st_augustine' }, propertyPrefs: SCHEDULE, serviceDate: '2026-07-15' });
+    return buildLawnReportV2({ lawnAssessment: { scores: {}, waterContext, ...assessment }, applications: [], waterSnapshot: snapshot, rainAdvice });
+  };
+
+  test('P1: a snapshot reclassified as rain covered no longer drives the overwatering story (insight, root cause)', () => {
+    const wet = snap(3, 'high', 'wet_condition_watch');
+    const on = runSnap(wet, ON);
+    expect(on.water.status).toBe('rain_covered');
+    expect(waterInsight(on)).toBeNull();
+    expect(on.snapshot.rootCause || '').not.toMatch(/too much water|easing back/);
+    // gate off: the same snapshot still tells today's overwatering story
+    const off = runSnap(wet, null);
+    expect(off.snapshot.rootCause).toMatch(/too much water/);
+    expect(waterInsight(off).headline).toBe('The lawn is likely getting too much water');
+    // a surplus that is NOT rain covered keeps the snapshot wet flag (rain below the target)
+    const surplus = runSnap(snap(0.9, 'high', 'wet_condition_watch'), ON);
+    expect(surplus.water.status).toBe('high');
+    expect(surplus.snapshot.rootCause).toMatch(/too much water/);
+  });
+
+  test('P1: an independent photo overwatering signal still counts on a rain-covered snapshot', () => {
+    const on = runSnap(snap(3, 'high', 'wet_condition_watch'), ON, { overwateringSignal: true });
+    expect(on.water.status).toBe('rain_covered');
+    expect(on.snapshot.rootCause).toMatch(/too much water/);
+  });
+
+  test('P2: the rain shutoff sentence is in the Ask facts exactly when the page prints it', () => {
+    const ask = (report) => buildReportAskFacts({ data: { serviceLine: 'lawn', applications: [], reportV2: report } }).lawn_report.water_this_week;
+    const wet = [0, 3, 3, 0, 0, 0, 0];
+    const PLAN = { title: 'This week: run once', detail: 'x', action: 'run' };
+    expect(ask(weekOf(wet, { rainAdvice: ON })).rain_sensor_note).toBe(SENSOR);
+    // a weekly plan hides the explanation, never the sensor line
+    const withPlan = ask(weekOf(wet, { rainAdvice: ON, extra: { weekPlan: PLAN } }));
+    expect(withPlan.explanation).toBeUndefined();
+    expect(withPlan.rain_sensor_note).toBe(SENSOR);
+    // not printed = not in the facts: sensor field true, a deficit week, gate off
+    expect(ask(weekOf(wet, { rainAdvice: { rainCard: true, sensorLine: false } })).rain_sensor_note).toBeUndefined();
+    expect(ask(weekOf([0, 0, 0.2, 0, 0, 0, 0], { rainAdvice: ON })).rain_sensor_note).toBeUndefined();
+    expect(ask(weekOf(wet)).rain_sensor_note).toBeUndefined();
+  });
+
+  test('P2: page and Ask Waves share one predicate for the sensor line', () => {
+    const { rainSensorLineOnCard } = require('../../shared/lawn-water-card.cjs');
+    expect(rainSensorLineOnCard({ rainSensorLine: true, status: 'rain_covered' })).toBe(true);
+    expect(rainSensorLineOnCard({ rainSensorLine: true, status: 'low' })).toBe(false);
+    expect(rainSensorLineOnCard({ rainSensorLine: false, status: 'rain_covered' })).toBe(false);
+    expect(rainSensorLineOnCard({ status: 'rain_covered' })).toBe(false);
+    expect(rainSensorLineOnCard(null)).toBe(false);
+    const fs = require('fs');
+    const page = fs.readFileSync(require('path').join(__dirname, '../../client/src/components/report/lawnV2/LawnReportV2.jsx'), 'utf8');
+    expect(page).toMatch(/rainSensorLineOnCard/);
+  });
+
+  test('sweep: the moisture-balance card beside a rain-covered card says neither "keep your schedule" nor a cycle count', () => {
+    const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
+    const categories = [{ key: 'water_moisture_stress', status: 'watch', score: 60, customerExplanation: 'Mixed moisture read.' }];
+    const card = (water) => buildLawnInsightCards({ categories, water: { rainCard: true, scheduleOnFile: true, ...water }, grassLabel: 'lawn' }).find((c) => c.category === 'water');
+    expect(card({ status: 'rain_covered' }).customerAction).toBe('We’ll keep watching moisture balance at upcoming visits.');
+    expect(card({ status: 'rain_covered', overwatering: true }).customerAction).toBe('Let the damp areas dry out between waterings.');
+    // not rain covered (and gate off): today's sentences
+    expect(card({ status: 'balanced', rainCard: false }).customerAction).toBe('Keep your current watering schedule unless we flag a change.');
+    expect(card({ status: 'balanced', rainCard: false, overwatering: true }).customerAction).toMatch(/ease back an irrigation cycle/);
+  });
+});
+
 describe('the customer copy', () => {
   test('the exact sentences, built from the shared wilt-signs constant', () => {
     expect(WATERING.wiltSigns).toBe(WILT);

@@ -17,7 +17,7 @@ import { usePrintRequested } from '../usePrintRequested';
 import Icon from '../../Icon';
 import POLISH_COPY from '../../../../../shared/lawn-report-polish-copy.json';
 import RAIN_COPY from '../../../../../shared/lawn-water-rain-copy.json';
-import { weekPlanOnCard } from '@lawn-water-card';
+import { weekPlanOnCard, rainSensorLineOnCard } from '@lawn-water-card';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -1144,7 +1144,7 @@ function WaterScheduleCta({ water, irrOnFile, href }) {
 // GATE_LAWN_WATER_RAIN: once, in a rain-covered week, for a property whose rain sensor field is not true. The server
 // sets water.rainSensorLine; the sentence is fixed (shared/lawn-water-rain-copy.json) and prints on the card only.
 function WaterRainSensorLine({ water }) {
-  if (water.rainSensorLine !== true || water.status !== 'rain_covered') return null;
+  if (!rainSensorLineOnCard(water)) return null;
   return <p data-testid="lawn-water-rain-sensor" style={{ margin: '10px 0 0', fontSize: 16, color: BODY, lineHeight: 1.5 }}>{RAIN_COPY.sensorLine}</p>;
 }
 

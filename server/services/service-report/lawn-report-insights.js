@@ -159,6 +159,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
     // signals, never technician confirmation; 'tech_confirmed' here rendered
     // "Confirmed by your technician" with false provenance (codex P1 r9).
     const damp = !!(water && water.overwatering);
+    const rainCovered = !!(water && water.status === 'rain_covered');
     cards.push({
       category: 'water', status: 'watch', confidence: damp ? 'ai_supported' : 'area_estimated',
       headline: damp ? 'Damp areas are the thing to watch' : 'Moisture balance is the thing to watch',
@@ -182,8 +183,12 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
           // advice — name the exception instead (codex P1 r32).
           ? (waterInRequired
             ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
-            : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
-          : (water && water.scheduleOnFile
+            // GATE_LAWN_WATER_RAIN: a rain-covered card says to leave the sprinklers off until the wilt signs show, so
+            // no cycle count and no "keep your schedule" beside it (the existing neutral sentences, no new copy).
+            : (rainCovered
+              ? 'Let the damp areas dry out between waterings.'
+              : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.'))
+          : (water && water.scheduleOnFile && !rainCovered
             ? 'Keep your current watering schedule unless we flag a change.'
             : 'We’ll keep watching moisture balance at upcoming visits.')),
       nextVisitPlan: 'Recheck the moisture balance next visit.',

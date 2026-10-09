@@ -636,7 +636,10 @@ function buildLawnReportV2({ lawnAssessment: assessmentIn, mowingHeight = null, 
     && waterSnapshot.interpretation !== 'rain_unknown');
   const SNAP_TO_ADVICE = { high: 'surplus', low: 'deficit', balanced: 'balanced' };
   const effectiveWaterStatus = waterStatusFor(water, usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null));
-  const overwatering = !!lawnAssessment.overwateringSignal || (usingSnapshot && waterSnapshot.interpretation === 'wet_condition_watch');
+  // GATE_LAWN_WATER_RAIN: a snapshot the card reclassified as "rain covered" is no longer a wet-condition watch; the
+  // photo-derived overwateringSignal is independent evidence and stays.
+  const snapshotWet = usingSnapshot && waterSnapshot.interpretation === 'wet_condition_watch' && effectiveWaterStatus !== 'rain_covered';
+  const overwatering = !!lawnAssessment.overwateringSignal || snapshotWet;
 
   const categories = buildVisualDiagnosisCategories({
     scores,
