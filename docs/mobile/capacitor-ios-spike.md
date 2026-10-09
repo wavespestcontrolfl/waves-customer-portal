@@ -82,6 +82,9 @@ Workflow settings in App Store Connect → Xcode Cloud:
 - **Build number:** Xcode Cloud counts from 1. Local uploads use a date number
   (`2026100503`), so set Settings → Build Number → next build number above the
   last upload of the same version, or App Store Connect refuses the build.
+- **Export compliance:** the bootstrap writes `ITSAppUsesNonExemptEncryption =
+  false` into `Info.plist` (the app uses only HTTPS and the Keychain), so an
+  upload does not wait at "Missing Compliance" in TestFlight.
 - Run the push check in the section above on the cloud build's IPA
   (Artifacts) before a first submission from Xcode Cloud.
 

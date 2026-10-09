@@ -200,6 +200,16 @@ if [ -f "$PLIST" ]; then
   set_plist NSPhotoLibraryAddUsageDescription "Save photos you attach for your technician."
   echo "==> Info.plist usage strings set (Face ID, camera, photo library R/W) ✓"
 
+  # Export compliance. The app uses only the encryption iOS itself provides
+  # (HTTPS, the Keychain behind Face ID unlock), which Apple treats as exempt.
+  # Without this key App Store Connect holds every upload at "Missing
+  # Compliance" until someone answers the question by hand, and TestFlight
+  # does not show the build. Change it if the app ever ships its own
+  # encryption code.
+  /usr/libexec/PlistBuddy -c "Delete :ITSAppUsesNonExemptEncryption" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
+  echo "==> Info.plist ITSAppUsesNonExemptEncryption = false ✓"
+
   # App-bound domains. WKWebView exposes service workers only to the domains
   # listed in WKAppBoundDomains, so without this the portal's offline copy
   # (client/public/sw.js) never installs inside the app and the app opens to
