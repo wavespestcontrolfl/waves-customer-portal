@@ -13,6 +13,16 @@
 //     recommended (the interest chips): the consultation outcome of
 //     ConsultationOutcomeSheet.jsx, whose options and payload builder are
 //     imported from there, never copied;
+//   - an optional "Call back on" date, the office sheet's own follow-up rule
+//     (followUpApplies, followUpPayload, its blank-date default);
+//   - the customer's estimate, READ-ONLY: whether one exists and whether it
+//     went out, and a link that opens it for staff, or "No estimate yet" and a
+//     link to start one (owner 2026-10-09: the estimate sets the price). The
+//     sheet prints NO amount: the stored totals are annualized accounting
+//     figures, not the price a per-application or one-time-option estimate
+//     states, and no one function states that price to a person. There is no
+//     price field and nothing of the estimate is written into the outcome row;
+//     the quote fields the row already holds ride through untouched;
 //   - the $75 inspection credit toggle, only where the full form shows it.
 //
 // Required before Complete: a note and an outcome pick. Nothing else blocks.
@@ -36,16 +46,21 @@
 // the completion as `expectedVisit`, and the server compares it with the locked
 // visit row, so a visit moved or retyped since the schedule loaded is refused
 // (visit_identity_changed) and the tech reopens it.
-import React, { useCallback, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useOutletContext } from 'react-router-dom';
+import { isPathAdminOnly } from '../../config/adminNavigation';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
+import useVisiblePageRefresh from '../../hooks/useVisiblePageRefresh';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import {
-  INTEREST_OPTIONS, LOST_REASON_OPTIONS, OUTCOME_OPTIONS,
-  buildOutcomePayload, formFromRow, readOnlyReason, useRecordedOutcome, validationErrorOf,
+  FOLLOW_UP_DEFAULT_HINT, INTEREST_OPTIONS, LOST_REASON_OPTIONS, OUTCOME_OPTIONS,
+  buildOutcomePayload, followUpApplies, followUpPayload, formFromRow, readOnlyReason, useRecordedOutcome, validationErrorOf,
 } from '../ConsultationOutcomeSheet';
+import { adminEstimateHref, customerEstimateHref } from '../admin/StickyActionBar';
+import { estimateLineOf } from '../../lib/assessment-fast-complete';
 import { offersInspectionCredit } from '../../lib/pest-fast-complete';
 import { InspectionCreditToggle, PhotoStripSection, useVisitPhotos } from './FastCompleteReport';
 import {
@@ -53,7 +68,7 @@ import {
   refusalWithoutContext, submissionHolds, toggleInSet, usePhotoManager,
 } from './FastCompleteParts';
 import TechServicePhotosModal from './TechServicePhotosModal';
-import { ActionFeedback } from '../ui';
+import { ActionFeedback, Field, Input } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // The visit the tech tapped, in the keys the server compares under its row
@@ -85,6 +100,76 @@ export function assessmentCompletionBody({ note, offerCredit, expectedVisit, con
     sendCompletionSms: false,
     requestReview: false,
   };
+}
+
+// The estimate that belongs to this assessment, read for display. A read that
+// fails or answers nothing shows nothing: the estimate line is a convenience
+// and never blocks the sheet. Both links open a new tab, so the read runs again
+// when this tab is shown or focused again (useVisiblePageRefresh: one request
+// in flight, none while offline or hidden). It holds only the summary; nothing
+// the tech typed is touched. A response that is not the newest request's, or
+// that lands after unmount, is dropped; a failed refresh keeps the last answer.
+export function useAssessmentEstimate(serviceId, request) {
+  const [summary, setSummary] = useState(null);
+  const latest = useRef(0);
+  const load = useCallback(async ({ keepOnError = false } = {}) => {
+    const mine = ++latest.current;
+    try {
+      const data = await request(`/admin/consultations/${encodeURIComponent(serviceId)}/estimate`);
+      if (mine === latest.current) setSummary(data?.estimate || null);
+    } catch {
+      if (mine === latest.current && !keepOnError) setSummary(null);
+    }
+  }, [serviceId, request]);
+  useEffect(() => {
+    setSummary(null);
+    load();
+    // Unmount, or another visit: no later answer of this one may land.
+    return () => { latest.current += 1; };
+  }, [load]);
+  useVisiblePageRefresh(() => load({ keepOnError: true }), { intervalMs: 0 });
+  return summary;
+}
+
+// Whether this login can reach the staff Estimates page: the admin shell's own
+// deep-link rule (AdminLayoutV2: the SERVER-returned role it hands down through
+// its Outlet context, and isPathAdminOnly). A technician is redirected off
+// /admin/estimates and its APIs require admin, so a link there would only
+// bounce. An unknown role gets no link.
+const ESTIMATES_PATH = '/admin/estimates';
+export function useCanOpenEstimates() {
+  const role = useOutletContext()?.user?.role;
+  return role === 'admin' || (Boolean(role) && !isPathAdminOnly(ESTIMATES_PATH));
+}
+
+// Read-only. No input: the estimate sets the price. Everyone who can use the
+// sheet sees the line; the links show only for a login that can open them, in
+// a new tab so the note being typed is not lost.
+function EstimateLine({ summary, service }) {
+  const canOpen = useCanOpenEstimates();
+  const line = estimateLineOf(summary);
+  if (!line) return null;
+  // Open needs the estimate's id, which only an admin's answer carries. Create
+  // prefills the visit's FULL address (the sheet's own `address` is the short
+  // display line, and the estimate tool looks the property up by this text).
+  const href = line.kind === 'found'
+    ? (line.estimateId ? adminEstimateHref(line.estimateId) : null)
+    : customerEstimateHref({
+      id: service?.routedCustomerId,
+      name: service?.customerName,
+      address: service?.fullAddress || service?.address,
+      phone: service?.customerPhone,
+    });
+  return (
+    <section className="tech-visit-card" aria-label="Estimate">
+      <p className="tech-visit-muted" role="status">{line.text}</p>
+      {canOpen && href && (
+        <a href={href} target="_blank" rel="noopener noreferrer">
+          {line.kind === 'found' ? 'Open estimate' : 'Create estimate'}
+        </a>
+      )}
+    </section>
+  );
 }
 
 export default function FastCompleteAssessmentSheet({ service, request, operatorId, onClose, onCompleted, onFullForm }) {
@@ -185,6 +270,10 @@ function AssessmentForm({ service, request, row, submission, locked, photos, dic
   // again, or the office, may have recorded one already), so a soft quote or a
   // follow-up date saved earlier rides through the upsert unchanged.
   const [outcomeForm, setOutcomeForm] = useState(() => formFromRow(row));
+  // The office sheet's rule: a date the tech picked is sent; an untouched one
+  // rides as saved while the outcome is unchanged (followUpPayload).
+  const [followUpTouched, setFollowUpTouched] = useState(false);
+  const estimate = useAssessmentEstimate(service?.id, request);
   const [note, setNote] = useState('');
   // The credit toggle: shown exactly where the full form shows it (an
   // inspection profile, the credit lane live, the profile read answered).
@@ -218,13 +307,18 @@ function AssessmentForm({ service, request, row, submission, locked, photos, dic
         note,
         offerCredit: creditShown ? offerCredit : null,
         expectedVisit: assessmentVisitIdentity(service),
-        consultationOutcome: locksOutcome ? null : buildOutcomePayload(outcomeForm, { followUpTouched: false, loadedRow: row }),
+        consultationOutcome: locksOutcome ? null : buildOutcomePayload(outcomeForm, { followUpTouched, loadedRow: row }),
       }),
       `Assessment · ${locksOutcome ? 'won' : outcomeForm.outcome}`,
     );
   };
 
   const formLocked = locked || dictationPending;
+  // Show the date that will be sent: a saved date the new outcome would not
+  // keep is not shown as if it would be (followUpPayload decides, not a copy).
+  const followUpShown = followUpTouched || followUpPayload({
+    outcome: outcomeForm.outcome, followUpDate: outcomeForm.followUpDate, followUpTouched, loadedRow: row,
+  }) ? outcomeForm.followUpDate : '';
 
   return (
     <div className="tech-visit-form-area">
@@ -276,8 +370,20 @@ function AssessmentForm({ service, request, row, submission, locked, photos, dic
                   />
                 ))}
               </ChoiceSection>
+              {followUpApplies(outcomeForm.outcome) && (
+                <Field label="Call back on" help={FOLLOW_UP_DEFAULT_HINT} className="tech-visit-field">
+                  <Input
+                    className="tech-visit-control"
+                    type="date"
+                    disabled={locked}
+                    value={followUpShown}
+                    onChange={(event) => { setFollowUpTouched(true); setOutcome({ followUpDate: event.target.value }); }}
+                  />
+                </Field>
+              )}
             </>
           )}
+          <EstimateLine summary={estimate} service={service} />
           {creditShown && <InspectionCreditToggle checked={offerCredit} locked={locked} onChange={setOfferCredit} />}
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
