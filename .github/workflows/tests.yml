@@ -13,7 +13,8 @@
 #      so setting DATABASE_URL globally turns them red by design, not by bug.
 #   2. The self-skipping DB-gated suites run WITH DATABASE_URL (the `server`
 #      job) against the migrated database, serially (--runInBand: they share tables and
-#      clash under parallel workers). products-catalog-label-fields is
+#      clash under parallel workers; the job runs three serial lanes, each on
+#      its own Postgres server). products-catalog-label-fields is
 #      excluded — like the golden masters it pins prod-parity data
 #      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
 #
@@ -66,6 +67,35 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # Two more servers so the two longest steps can run beside the rest (see
+      # "Three lanes" below). Separate servers, not extra databases on one
+      # server: 167 suites refuse any database not named waves_test.
+      postgres-b:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres-c:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       NODE_ENV: test
       JWT_SECRET: ci-only-test-secret
@@ -76,10 +106,48 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
-      - name: Migrate from an empty database
+      - parallel:
+          - name: Migrate from an empty database
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+          - name: Migrate the second server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+          - name: Migrate the third server
+            env:
+              DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+            run: npx knex migrate:latest --knexfile server/knexfile.js
+      # Three lanes (2026-10-08 trial). Measured on five green runs: this job
+      # set the length of every run at 16-18 min, and two steps were 8 of
+      # those minutes. They now run as background steps, each on its own
+      # server, while every other step runs below on the first server exactly
+      # as before. Each lane is still serial against its own database. They
+      # sit here, not in their old places, so they start at once. The
+      # `wait-all` step at the end of the job fails if either one failed.
+      - name: DB-gated suites (serial, against the migrated database)
+        id: db-gated
+        background: true
+        working-directory: server
         env:
-          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx knex migrate:latest --knexfile server/knexfile.js
+          DATABASE_URL: postgresql://waves:waves@localhost:5433/waves_test
+        # --forceExit removed 2026-07-16: the open handle was the shared app
+        # pool (models/db) pulled at module scope by lawn-intelligence in
+        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
+        # afterAll, and the full serial run exits cleanly on its own.
+        run: |
+          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
+            | grep -v products-catalog-label-fields \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand
+      - name: Grouped closeout transaction tests
+        id: closeout
+        background: true
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5434/waves_test
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
       # Right after the migration, on purpose: the reconcile reads the WHOLE
       # customer/subscriber tables (its counts assume only migration seeds)
       # and its write-mode cases would import or link any row another suite
@@ -204,11 +272,6 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/request-app-receipts-postgres.test.js
-      - name: Grouped closeout transaction tests
-        working-directory: server
-        env:
-          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
       - name: Estimate draft retire transaction tests
         working-directory: server
         env:
@@ -307,19 +370,6 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/sendgrid-webhook-attempt-fence-postgres.test.js
-      - name: DB-gated suites (serial, against the migrated database)
-        working-directory: server
-        env:
-          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        # --forceExit removed 2026-07-16: the open handle was the shared app
-        # pool (models/db) pulled at module scope by lawn-intelligence in
-        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
-        # afterAll, and the full serial run exits cleanly on its own.
-        run: |
-          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
-            | grep -v products-catalog-label-fields \
-            | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand
       - name: Service-coordinate recovery transaction tests
         working-directory: server
         env:
@@ -385,6 +435,8 @@ jobs:
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js server/tests/invoice-property-history-db.test.js server/tests/customer-properties-db.test.js server/tests/intelligence-bar-properties-db.test.js server/tests/intelligence-bar-inventory-db.test.js server/tests/intelligence-bar-customer-estimates-db.test.js server/tests/intelligence-bar-billing-reader-db.test.js
+      - name: Wait for the two background lanes (fails if either failed)
+        wait-all:
 
   # Step 1 of the two-step design: the full jest suite WITHOUT DATABASE_URL
   # (no Postgres service here, on purpose). It was the long pole of the whole
