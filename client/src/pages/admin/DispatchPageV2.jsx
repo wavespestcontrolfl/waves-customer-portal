@@ -935,8 +935,9 @@ export default function DispatchPageV2({
   // visit or leaves for another screen (move, cancel, billing, edit, checkout,
   // treatment plan, book next) closes it too, so it never completes a stale row.
   const fastSheetBehindDetails = !!(detailService && (pestFastService || treeShrubFastService
-    || lawnReserviceFastService || lawnFastService || assessmentFastService));
+    || lawnReserviceFastService || lawnFastService || assessmentFastService || comboStop));
   const closeFastSheetsBehindDetails = () => {
+    setComboStop(null);
     setPestFastService(null);
     setTreeShrubFastService(null);
     setLawnReserviceFastService(null);
@@ -1025,7 +1026,7 @@ export default function DispatchPageV2({
     // before the long visit closeout below. Anything else, or the sheet's own "Full form", falls through unchanged.
     const comboPair = comboMembersFor(service, fullForm ? null : data?.services);
     if (comboPair) {
-      setComboStop({ visitId: service.visitId, ...comboPair });
+      setComboStop({ visitId: service.visitId, row: service, ...comboPair });
       return;
     }
     if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
@@ -2031,6 +2032,8 @@ export default function DispatchPageV2({
           setComboStop(null);
           setClosingVisitId(visitId);
         }}
+        onViewDetails={() => setDetailService(comboStop.row)}
+        suspended={!!detailService}
       />}
       {completingService && (
         <CompletionPanel

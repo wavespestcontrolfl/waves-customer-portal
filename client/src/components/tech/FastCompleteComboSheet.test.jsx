@@ -79,8 +79,8 @@ const onSaved = vi.fn();
 const onClose = vi.fn();
 const onFullForm = vi.fn();
 
-function mount(operatorId = 'op-1') {
-  return render(<FastCompleteComboSheet visitId="visit" pest={{ service: PEST }} lawn={{ service: LAWN }} request={vi.fn()} operatorId={operatorId} catalog={[]} onClose={onClose} onSaved={onSaved} onFullForm={onFullForm} />);
+function mount(operatorId = 'op-1', extra = {}) {
+  return render(<FastCompleteComboSheet visitId="visit" pest={{ service: PEST }} lawn={{ service: LAWN }} request={vi.fn()} operatorId={operatorId} catalog={[]} onClose={onClose} onSaved={onSaved} onFullForm={onFullForm} {...extra} />);
 }
 const click = (name) => fireEvent.click(screen.getByRole('button', { name }));
 const completeStop = () => screen.getByRole('button', { name: /Complete stop|Resume closeout/ });
@@ -298,6 +298,49 @@ describe('the container', () => {
     expect(await screen.findByText(/This stop changed since the schedule loaded/)).toBeInTheDocument();
     expect(screen.queryByTestId('pest-part')).not.toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: 'Full form' }).length).toBeGreaterThan(0);
+  });
+});
+
+describe('Details (owner 2026-10-09: every Fast Complete sheet)', () => {
+  it('shows once the stop is loaded and still this pair, waits for work in flight, and is absent without a handler', async () => {
+    const onViewDetails = vi.fn();
+    mount('op-1', { onViewDetails });
+    await screen.findByTestId('pest-part');
+    click('Details');
+    expect(onViewDetails).toHaveBeenCalledTimes(1);
+    click('pest busy on');
+    expect(screen.getByRole('button', { name: 'Details' })).toBeDisabled();
+    cleanup();
+    mount();
+    await screen.findByTestId('pest-part');
+    expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument();
+  });
+
+  it('is withheld while the stop loads and when it is no longer this pair', async () => {
+    let release;
+    adminFetch.mockImplementation((path) => (path.startsWith('/admin/schedule?') ? Promise.resolve({ services: rows }) : new Promise((resolve) => { release = () => resolve(detail); })));
+    mount('op-1', { onViewDetails: vi.fn() });
+    expect(await screen.findByText('Loading the stop…')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument();
+    await act(async () => { release?.(); });
+    cleanup();
+    detail = { ...detail, members: [...members, { id: 'svc-third', serviceType: 'Mosquito', status: 'on_site', requiresForm: true }] };
+    adminFetch.mockImplementation(async (path) => (path.startsWith('/admin/schedule?') ? { services: [...rows, { id: 'svc-third', visitId: 'visit' }] } : detail));
+    mount('op-1', { onViewDetails: vi.fn() });
+    expect(await screen.findByText(/This stop changed since the schedule loaded/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Details' })).not.toBeInTheDocument();
+  });
+
+  it('suspended, it stays mounted but hidden and inert, and comes back with what was entered', async () => {
+    const { rerender } = mount('op-1', { onViewDetails: vi.fn() });
+    await screen.findByTestId('pest-part');
+    click('pest save');
+    const props = { visitId: 'visit', pest: { service: PEST }, lawn: { service: LAWN }, request: vi.fn(), operatorId: 'op-1', catalog: [], onClose, onSaved, onFullForm, onViewDetails: vi.fn() };
+    rerender(<FastCompleteComboSheet {...props} suspended />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    rerender(<FastCompleteComboSheet {...props} />);
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByTestId('pest-part')).toHaveTextContent('ok 1');
   });
 });
 

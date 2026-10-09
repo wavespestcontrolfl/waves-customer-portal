@@ -6,7 +6,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DispatchPageV2 from './DispatchPageV2';
 import { adminFetch } from '../../utils/admin-fetch';
@@ -20,10 +20,11 @@ vi.mock('./SchedulePage', () => ({
   completionResumeOwed: () => false,
 }));
 vi.mock('../../components/tech/FastCompleteComboSheet', () => ({
-  default: ({ visitId, pest, lawn, onFullForm }) => (
-    <div>
+  default: ({ visitId, pest, lawn, onFullForm, onViewDetails, suspended }) => (
+    <div data-suspended={String(!!suspended)}>
       Combo sheet for {visitId} (pest {pest.service.id} flow {String(pest.service.reportFlow)}, lawn {lawn.service.id})
       <button type="button" onClick={onFullForm}>Combo full form</button>
+      <button type="button" onClick={() => onViewDetails()}>Combo details</button>
     </div>
   ),
 }));
@@ -34,7 +35,13 @@ vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ ser
   {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.id}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
 </div> }));
 vi.mock('../../components/schedule/MobilePaymentSheet', () => ({ default: () => null }));
-vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service }) => <div>Details sheet for {service.id}</div> }));
+vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service, onClose, onCancelled }) => (
+  <div>
+    Details sheet for {service.id}
+    <button type="button" onClick={() => onClose()}>Details close</button>
+    <button type="button" onClick={() => { onCancelled(service); onClose(); }}>Details cancel</button>
+  </div>
+) }));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true, known: true }) }));
 
@@ -82,6 +89,23 @@ describe('Dispatch routing for a pest + lawn stop', () => {
     mount([pest(), lawn(), pest('svc-done', { status: 'completed' })]);
     await open('svc-pest');
     expect(await screen.findByText(/Combo sheet for visit-1/)).toBeInTheDocument();
+  });
+
+  // Details on the container (owner 2026-10-09: every Fast Complete sheet): opens the details sheet for the row the
+  // tech opened, with the container kept behind it; Close returns to it, a cancel closes it.
+  it('the container\'s Details opens the appointment details sheet over it, which comes back on Close and goes on a cancel', async () => {
+    mount([pest(), lawn()]);
+    await open('svc-lawn');
+    fireEvent.click(await screen.findByRole('button', { name: 'Combo details' }));
+    expect(await screen.findByText('Details sheet for svc-lawn')).toBeInTheDocument();
+    const sheet = () => screen.getByText(/Combo sheet for visit-1/).closest('[data-suspended]');
+    expect(sheet().getAttribute('data-suspended')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Details close' }));
+    await waitFor(() => expect(screen.queryByText('Details sheet for svc-lawn')).not.toBeInTheDocument());
+    expect(sheet().getAttribute('data-suspended')).toBe('false');
+    fireEvent.click(screen.getByRole('button', { name: 'Combo details' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Details cancel' }));
+    await waitFor(() => expect(screen.queryByText(/Combo sheet for/)).not.toBeInTheDocument());
   });
 
   it('the container\'s Full form opens the long visit closeout', async () => {
