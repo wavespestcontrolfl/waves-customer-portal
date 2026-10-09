@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import {
-  carrierOf, gallonsBodyFields, gallonsToArea, mixHelpOf, mixLine, rememberTank, rememberedTank, weedCarrier, weedMixLines, withGallonsArea,
+  carrierOf, gallonsBodyFields, gallonsTooLarge, gallonsToArea, maxGallons, mixHelpOf, mixLine, rememberTank, rememberedTank, weedCarrier, weedMixLines, withGallonsArea,
 } from './lawn-mix-help';
 
 const dose = (text, coversSqft = 1000) => ({ text, coversSqft });
@@ -76,6 +76,21 @@ describe('gallons sprayed', () => {
   });
   test.each([[0, 1], [-1, 1], ['x', 1], [null, 1], [2, 0], [2, null], [2, 'x']])('%s gal at %s -> null', (gallons, carrier) => {
     expect(gallonsToArea(gallons, carrier)).toBeNull();
+  });
+
+  test('the bound is the server\'s: ten fills of the largest tank (40 with 1, 2 and 4); past it, or on overflow, no area', () => {
+    expect(maxGallons([1, 2, 4])).toBe(40);
+    expect(maxGallons([1, 2])).toBe(20);
+    expect(maxGallons(undefined)).toBe(40);
+    expect(gallonsToArea(40, 1)).toBe(40000);
+    expect(gallonsToArea(40.01, 1)).toBeNull();
+    expect(gallonsToArea(1e308, 1)).toBeNull();
+    expect(gallonsToArea(1, 1e-320)).toBeNull();
+    expect(gallonsToArea(21, 1, [1, 2])).toBeNull();
+    expect(gallonsTooLarge('41', [1, 2, 4])).toBe(true);
+    expect(gallonsTooLarge('40', [1, 2, 4])).toBe(false);
+    expect(gallonsTooLarge('', [1, 2, 4])).toBe(false);
+    expect(gallonsTooLarge('x', [1, 2, 4])).toBe(false);
   });
 
   test('a plain spot row takes its own gallons; a weed row the entry\'s; the surfactant and a row with no carrier none', () => {

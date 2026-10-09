@@ -43,6 +43,15 @@ describe('targetBodyFields (decided at payload time)', () => {
     expect(targetBodyFields(row('fungicide', { spotTarget: 'Dollar spot' }), config)).toEqual({ targets: ['Dollar spot'] });
     expect(targetBodyFields(row('insecticide', { guided: 'chinch' }), config)).toEqual({ targets: [], targetFind: 'chinch' });
   });
+  test('the standing Found tap (the product id, no guided marker) is a chinch find for that spot insecticide row only', () => {
+    expect(targetBodyFields(row('insecticide'), config, { chinchTap: 'aaaa-1' })).toEqual({ targets: [], targetFind: 'chinch' });
+    expect(targetBodyFields(row('insecticide'), config, { chinchTap: 'bbbb-2' })).toEqual({ targets: [] });
+    expect(targetBodyFields(row('insecticide', { method: 'broadcast_spray' }), config, { chinchTap: 'aaaa-1' })).toEqual({ targets: [] });
+    expect(targetBodyFields(row('fungicide'), config, { chinchTap: 'aaaa-1' })).toEqual({ targets: [] });
+    expect(targetBodyFields(row('insecticide'), null, { chinchTap: 'aaaa-1' })).toEqual({ targets: [] });
+    expect(spotTargetOffer(row('insecticide'), { config, chinchTap: 'aaaa-1' })).toEqual({ kind: 'auto', target: 'Southern chinch bugs' });
+    expect(spotTargetOffer(row('insecticide'), { config, chinchTap: 'bbbb-2' })).toEqual({ kind: 'choose', choices: ['White grubs'] });
+  });
   test('a row that is no longer a spot row sends no target and no chinch hint', () => {
     expect(targetBodyFields(row('fungicide', { spotTarget: 'Dollar spot', method: 'broadcast_spray' }), config)).toEqual({ targets: [] });
     expect(targetBodyFields(row('insecticide', { guided: 'chinch', method: 'granular_broadcast' }), config)).toEqual({ targets: [] });

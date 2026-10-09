@@ -9,8 +9,8 @@ import { Chip } from './FastCompleteParts';
 import { spotTargetOffer } from '../../lib/lawn-spot-target';
 
 /** `config`: the context's spotTargets; `chinch`: the chinch decision; `takeAll`: the guide's take-all ids (a Set). Renders nothing when the row has no offer. */
-export default function SpotTargetControl({ row, config, chinch, takeAll, locked, onChange }) {
-  const offer = spotTargetOffer(row, { config, chinch, takeAll });
+export default function SpotTargetControl({ row, config, chinch, chinchTap = null, takeAll, locked, onChange }) {
+  const offer = spotTargetOffer(row, { config, chinch, takeAll, chinchTap });
   if (!offer) return null;
   if (offer.kind === 'auto') {
     return <p className="tech-visit-muted" role="status">{`Recorded for: ${offer.target}.`}</p>;

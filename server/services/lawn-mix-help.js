@@ -30,6 +30,13 @@ const FLOZ_TO_ML = 29.5735295625;
 const FLOZ_PER_GAL = 128;
 const OZ_PER_LB = 16;
 
+// The most gallons one spot job can state: ten fills of the largest tank offered (4 gal, a backpack), 40 gallons. The tank sizes are the
+// only sprayer volume in the data (the job card's rig list is 110 gal truck tanks and 4 gal backpacks), and a spot job past ten backpack
+// fills is a whole-lawn pass, which has its own area. At the staged carriers (1 to 4 gal per 1,000 sq ft) 40 gallons is 10,000 to 40,000 sq ft,
+// above any spot. A larger number is a typing slip (or an overflow such as 1e308), so it is refused as invalid, never converted.
+const MAX_FILLS = 10;
+const MAX_GALLONS = Math.max(...TANKS) * MAX_FILLS;
+
 const live = () => require('../config/feature-gates').lawnMixHelpLive();
 
 // The Celsius WG label on file (EPA Reg. No. 432-1507, the EPA-stamped 2021-09-01 version), word for word, the stricter instruction first. Keyed by EPA registration
@@ -76,7 +83,9 @@ const coversSqft = (tankGal, carrier) => Math.round((tankGal / carrier) * 1000);
 function areaFromGallons(gallons, carrier) {
   const gal = positive(gallons);
   const per = positive(carrier);
-  return gal && per ? Math.max(1, Math.round((gal * 1000) / per)) : null;
+  if (!gal || !per || gal > MAX_GALLONS) return null;
+  const area = Math.round((gal * 1000) / per);
+  return Number.isFinite(area) ? Math.max(1, area) : null;
 }
 
 // ── one product's mix help ──────────────────────────────────────────────────
@@ -206,7 +215,9 @@ function weedOrder(groupIds, catalog) {
 }
 
 // The readers a call can swap (tests); everything else is the real thing.
-const DEPS = Object.freeze({ isLive: live, readStaged: stagedRows, readCatalog: catalogRowsFor });
+const DEPS = Object.freeze({
+  isLive: live, readStaged: stagedRows, readCatalog: catalogRowsFor, readSpotRows: (knex, rows) => require('./lawn-trouble-areas').spotRowsOf(knex, rows),
+});
 
 // The rows of the block: each product's entry, spot work only (a whole-lawn product keeps the plan's own amount).
 function rowsOf({ ids, staged, catalog, month }) {
@@ -295,8 +306,9 @@ function convertGallons(wanted, staged, month) {
  * The completion's gallons step (called by the lawn Fast Complete preflight, before the places are judged): every product row that
  * carries `sprayedGallons` gets its recorded spot area from the gallons and the product's STAGED carrier (areaFromGallons), replacing
  * whatever area the sheet sent, and is marked. null = nothing to refuse; otherwise `{ status, payload }`:
- *   400 lawn_gallons_invalid       not a positive number
- *   400 lawn_gallons_unavailable   no spot row with a carrier volume on file for the product (enter the area instead)
+ *   400 lawn_gallons_invalid       not a positive number, or more than MAX_GALLONS (40: ten fills of the largest tank)
+ *   400 lawn_gallons_unavailable   no spot row with a carrier volume on file for the product, or the submitted row is not a spot row as
+ *                                  persistence resolves the method (enter the area instead)
  *   400 lawn_gallons_unavailable_now  the staged rows or the plan could not be read. A named PRE-COMMIT refusal (nothing is written): a 4xx,
  *                                  so the shared submit hook treats it as correctable (fresh key, form editable) and the tech can enter the
  *                                  area instead; a 5xx would lock the form to the same body and key
@@ -304,15 +316,20 @@ function convertGallons(wanted, staged, month) {
  * (`loadPlan(svc, knex)` is the sheet's plan reader) plus, for tests, `isLive` and `readStaged`.
  */
 async function applyGallons(input) {
-  const { knex, svc, products, loadPlan, isLive, readStaged } = { ...DEPS, ...input };
+  const { knex, svc, products, loadPlan, isLive, readStaged, readSpotRows } = { ...DEPS, ...input };
   const rows = (Array.isArray(products) ? products : []).filter((row) => row && typeof row === 'object');
   for (const row of rows) delete row[FROM_GALLONS];
   const wanted = rows.filter(asked);
   if (!wanted.length || !isLive()) return null;
-  const bad = wanted.find((row) => gallonsOf(row) === null);
-  if (bad) return refusal(400, 'lawn_gallons_invalid', 'Enter the gallons sprayed as a number above zero, or enter the area instead.', { productId: bad.productId });
+  const bad = wanted.find((row) => gallonsOf(row) === null || gallonsOf(row) > MAX_GALLONS);
+  if (bad) return refusal(400, 'lawn_gallons_invalid', `Enter the gallons sprayed as a number above zero (up to ${MAX_GALLONS}), or enter the area instead.`, { productId: bad.productId });
   const staged = await gallonsStaged({ knex, svc, wanted, loadPlan, readStaged });
-  if (!staged) return refusal(400, 'lawn_gallons_unavailable_now', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.');
+  const spot = staged && await readSpotRows(knex, wanted).catch(() => null);
+  if (!staged || !spot) return refusal(400, 'lawn_gallons_unavailable_now', 'Could not check the gallons just now. Try again in a moment, or enter the area instead.');
+  // The SUBMITTED row must be a spot row as persistence resolves the method (inferServiceReportApplicationMethod, as preflightPlaces does): a
+  // row sent as a whole-lawn method keeps the area it carries, so gallons never overwrite it.
+  const notSpot = wanted.find((row) => !spot.includes(row));
+  if (notSpot) return refusal(400, 'lawn_gallons_unavailable', 'Gallons sprayed cannot be used for this product. Enter the area instead.', { productId: notSpot.productId });
   return convertGallons(wanted, staged, monthOfVisit(svc));
 }
 
@@ -339,6 +356,7 @@ module.exports = {
   unitOf,
   volumeShare,
   areaFromGallons,
+  MAX_GALLONS,
   tankDoses,
   entryFor,
   agreedRow,

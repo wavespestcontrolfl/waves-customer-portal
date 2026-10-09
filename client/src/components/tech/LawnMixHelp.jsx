@@ -7,7 +7,7 @@ import React, { useCallback, useId, useState } from 'react';
 import { Input } from '../ui';
 import { Chip } from './FastCompleteParts';
 import {
-  carrierOf, gallonsToArea, mixEntryFor, mixLine, rememberTank, rememberedTank, weedCarrier, weedMixLines,
+  carrierOf, gallonsToArea, gallonsTooLarge, maxGallons, mixEntryFor, mixLine, rememberTank, rememberedTank, weedCarrier, weedMixLines,
 } from '../../lib/lawn-mix-help';
 
 /** The sheet's mix state: the block, the shared tank size, and the weed entry's shared gallons. */
@@ -39,9 +39,9 @@ function MixText({ line, note = null }) {
 }
 
 // "Gallons sprayed", typed in place of the area: the area is figured from the gallons (shown), and /complete records it.
-function GallonsControl({ title, value, carrier, locked, onChange }) {
+function GallonsControl({ title, value, carrier, tanks, locked, onChange }) {
   const inputId = useId();
-  const area = gallonsToArea(value, carrier);
+  const area = gallonsToArea(value, carrier, tanks);
   return (
     <div className="tech-spot-area">
       <label htmlFor={inputId} className="tech-product-editor-label">{`Gallons sprayed (instead of the area)${title ? `, ${title}` : ''}`}</label>
@@ -57,6 +57,7 @@ function GallonsControl({ title, value, carrier, locked, onChange }) {
         onChange={(e) => onChange(e.target.value)}
       />
       {area && <p className="tech-visit-muted" role="status">{`About ${area.toLocaleString('en-US')} sq ft at ${carrier} gal per 1,000 sq ft.`}</p>}
+      {gallonsTooLarge(value, tanks) && <p className="tech-visit-muted" role="status">{`That is more than ${maxGallons(tanks)} gallons. Check the number, or enter the area instead.`}</p>}
     </div>
   );
 }
@@ -72,7 +73,7 @@ export function RowMixHelp({ row, mix, locked, onChange }) {
       <TankChips mix={mix} label={row.name} locked={locked} />
       <MixText line={mixLine(entry, mix.tank)} note={entry.perTank ? null : entry.note} />
       {carrier && !row.spotExempt && (
-        <GallonsControl title={row.name} value={row.spotGallons} carrier={carrier} locked={locked} onChange={(value) => onChange({ spotGallons: value, spotSqft: value ? '' : row.spotSqft })} />
+        <GallonsControl title={row.name} value={row.spotGallons} carrier={carrier} tanks={mix.help.tanks} locked={locked} onChange={(value) => onChange({ spotGallons: value, spotSqft: value ? '' : row.spotSqft })} />
       )}
     </div>
   );
@@ -101,6 +102,7 @@ export function WeedMixHelp({ mix, rows, surfactant, locked, onWeedArea }) {
           title="Weed spots"
           value={mix.weedGallons}
           carrier={carrier}
+          tanks={mix.help.tanks}
           locked={locked}
           onChange={(value) => { mix.setWeedGallons(value); if (value) onWeedArea(''); }}
         />

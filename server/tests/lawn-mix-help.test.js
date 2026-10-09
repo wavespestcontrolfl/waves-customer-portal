@@ -214,7 +214,9 @@ describe('gallons sprayed at completion', () => {
     ...Object.entries(over),
   ]);
   const run = (products, extra = {}) => help.applyGallons({
-    knex: {}, svc: SVC, products, loadPlan: async () => ({ plan: { protocol: { structured: { id: 'protocol-1' } } } }), isLive: () => true, readStaged: async () => staged(), ...extra,
+    knex: {}, svc: SVC, products, loadPlan: async () => ({ plan: { protocol: { structured: { id: 'protocol-1' } } } }), isLive: () => true, readStaged: async () => staged(),
+    // The completion's own method resolution, stood in for: a row with no method rides the spot default, as persistence resolves it.
+    readSpotRows: async (knex, rows) => rows.filter((row) => (row.applicationMethod || 'spot_treatment') === 'spot_treatment'), ...extra,
   });
 
   test('gallons become the spot area with the product\'s STAGED carrier, replacing whatever area the sheet sent', async () => {
@@ -252,6 +254,48 @@ describe('gallons sprayed at completion', () => {
 
   test.each([[0], [-2], ['abc'], [{}], [Infinity], [NaN], ['1e400'], ['Infinity'], [true], [[5]], ['5 gal']])('gallons %j: refused as invalid (400)', async (gallons) => {
     expect(await run([{ productId: P_CEL, sprayedGallons: gallons }])).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_invalid', productId: P_CEL } });
+  });
+
+  test('the bound: ten fills of the largest tank (40 gallons) is the most a spot job can state; a finite overflow is refused, never stored as a null area', async () => {
+    expect(help.MAX_GALLONS).toBe(40);
+    const atBound = [{ productId: P_CEL, sprayedGallons: 40 }];
+    expect(await run(atBound)).toBeNull();
+    expect(atBound[0].areaValue).toBe(40000);
+    for (const sprayedGallons of [40.01, 41, 1e6, 1e308, '1e308', '99999999999999999999999999999999999999999999']) {
+      const row = { productId: P_CEL, sprayedGallons, areaValue: 10, areaUnit: 'sqft' };
+      expect(await run([row])).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_invalid', productId: P_CEL } });
+      expect(row.areaValue).toBe(10);
+    }
+    // The one conversion never returns a non-finite or null-stored area.
+    expect(help.areaFromGallons(1e308, 1)).toBeNull();
+    expect(help.areaFromGallons(40.5, 1)).toBeNull();
+    expect(help.areaFromGallons(40, 1e-320)).toBeNull();
+    expect(help.areaFromGallons(1, 1e-320)).toBeNull();
+  });
+
+  test('a row SUBMITTED with a non-spot method keeps its own area: gallons never overwrite it (refused, enter the area instead)', async () => {
+    for (const applicationMethod of ['broadcast_spray', 'granular_broadcast', 'soil_drench']) {
+      const row = { productId: P_CEL, applicationMethod, sprayedGallons: 2, areaValue: 700, areaUnit: 'sqft' };
+      expect(await run([row])).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable', productId: P_CEL } });
+      expect(row.areaValue).toBe(700);
+      expect(help.sprayedGallonsFreeze([row])).toEqual({});
+    }
+    const spot = { productId: P_CEL, applicationMethod: 'spot_treatment', sprayedGallons: 2 };
+    expect(await run([spot])).toBeNull();
+    expect(spot.areaValue).toBe(2000);
+  });
+
+  test('one non-spot row refuses the whole step before any row is converted', async () => {
+    const good = { productId: P_CEL, sprayedGallons: 2 };
+    const moved = { productId: P_ARENA, applicationMethod: 'broadcast_spray', sprayedGallons: 1 };
+    expect(await run([good, moved])).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable', productId: P_ARENA } });
+    expect(good).not.toHaveProperty('areaValue');
+  });
+
+  test('a failed method read is the correctable "could not check" refusal, nothing converted', async () => {
+    const good = { productId: P_CEL, sprayedGallons: 2 };
+    expect(await run([good], { readSpotRows: async () => { throw new Error('down'); } })).toMatchObject({ status: 400, payload: { code: 'lawn_gallons_unavailable_now' } });
+    expect(good).not.toHaveProperty('areaValue');
   });
 
   test('a product with no carrier on file, a whole-lawn product, the surfactant and an unknown product are refused (enter the area instead)', async () => {

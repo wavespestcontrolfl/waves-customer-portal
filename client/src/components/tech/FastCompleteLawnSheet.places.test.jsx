@@ -1505,6 +1505,16 @@ describe('mix help: the amount for a full tank, and gallons sprayed', () => {
     expect(sent(P_FUNG)).toMatchObject({ areaValue: 1000, areaUnit: 'sqft', sprayedGallons: 2, areaPlace: 'back' });
   });
 
+  test('gallons past the bound (more than 40) figure no area and the control says so; the body carries no gallons', async () => {
+    await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
+    addFungicide();
+    const row = placeGroup('Spot Fungicide');
+    fireEvent.change(within(row).getByLabelText('Gallons sprayed (instead of the area), Spot Fungicide'), { target: { value: '41' } });
+    expect(within(row).getByText('That is more than 40 gallons. Check the number, or enter the area instead.')).toBeTruthy();
+    expect(within(row).queryByText(/About .* sq ft at/)).toBeNull();
+    expect(within(row).queryByText(/^Spot area,/)).toBeNull();
+  });
+
   test('an area typed after the gallons clears the gallons (one number, one way)', async () => {
     await openMix(withHelp(placeContext(), MIX_HELP({ [P_FUNG]: FUNG })));
     addFungicide();

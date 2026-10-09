@@ -554,4 +554,5 @@ module.exports = {
   buildContextBlock,
   searchedPlaceBlocks,
   preflightPlaces,
+  spotRowsOf,
 };

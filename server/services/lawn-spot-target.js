@@ -71,6 +71,16 @@ function contextBlock() {
 }
 
 const lowerId = (value) => String(value || '').toLowerCase();
+
+// The product ids the technician's guide record names as a chinch find that was taken (the card, or the standing Found tap on a shared
+// rung already on the sheet): `lawnFast.treatmentGuide.cards[kind 'chinch', checked 'found', taken]`. A chinch find needs no more than the
+// ladder confirmation the caller applies (verifyGuideFind checks a chinch find against the staged rungs alone), so this only names the ids.
+function chinchFoundIds(lawnFast) {
+  const cards = lawnFast && lawnFast.treatmentGuide && lawnFast.treatmentGuide.v === 1 && Array.isArray(lawnFast.treatmentGuide.cards) ? lawnFast.treatmentGuide.cards : [];
+  const ids = cards.filter((card) => card && card.kind === 'chinch' && card.checked === 'found' && card.taken === true && Array.isArray(card.productIds))
+    .flatMap((card) => card.productIds.filter((id) => typeof id === 'string').map(lowerId));
+  return new Set(ids);
+}
 const ownTags = (row) => (Array.isArray(row?.targets) ? row.targets : []);
 
 /**
@@ -95,6 +105,7 @@ async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, infe
   const candidates = targetRows.filter((row) => inferMethod(product(row), row, serviceLine) === 'spot_treatment');
   for (const row of targetRows) if (!candidates.includes(row)) verdict.set(lowerId(row.productId), []);
   if (!candidates.length) return result;
+  const found = chinchFoundIds(lawnFast);
   let sets = null;
   try {
     sets = await confirm();
@@ -106,7 +117,7 @@ async function resolveForCompletion({ rows, lawnFast, catalog, canonicalId, infe
     const id = lowerId(row.productId);
     const category = product(row).category;
     const type = !sets ? null : troubleTypeFor({
-      category, hint: row.troubleType || (row.targetFind === 'chinch' ? 'chinch' : null), takeAll: sets.takeAll.has(id), chinch: sets.chinch.has(id), chinchOnly: sets.chinchOnly.has(id),
+      category, hint: row.troubleType || (row.targetFind === 'chinch' || found.has(id) ? 'chinch' : null), takeAll: sets.takeAll.has(id), chinch: sets.chinch.has(id), chinchOnly: sets.chinchOnly.has(id),
     });
     verdict.set(id, targetsFor({ category, type, requested: ownTags(row).find((tag) => typeof tag === 'string') }));
   }

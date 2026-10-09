@@ -2674,6 +2674,27 @@ describe('suggested from this lawn', () => {
         expect(completeCalls()[0].body.products.filter((p) => p.productId === P_ARENA)).toHaveLength(1);
       });
 
+      test('with GATE_LAWN_SPOT_TARGET lists in the context, the standing Found tap carries the chinch find into the row (no new row, so no guided marker); before the tap it sends none', async () => {
+        const SPOT_TARGETS = { v: 1, fungicide: ['Dollar spot'], insecticide: ['Southern chinch bugs', 'Fall armyworms'], chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' };
+        await putArenaOnSheet(guideContext({ lawnReportTies: true, spotTargets: SPOT_TARGETS }));
+        const mark = within(addons()).getByRole('button', { name: 'Chinch bugs found: mark the treatment on the sheet' });
+        const row = () => within(editorFor('Arena 50 WDG'));
+        expect(row().queryByText('Recorded for: Southern chinch bugs.')).toBeNull();
+        fireEvent.click(mark);
+        expect(row().getByText('Recorded for: Southern chinch bugs.')).toBeTruthy();
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        const sentArena = completeCalls()[0].body.products.find((p) => p.productId === P_ARENA);
+        expect(sentArena).toMatchObject({ targets: [], targetFind: 'chinch' });
+      });
+
+      test('with the lists but no tap, the product on the sheet sends no chinch find', async () => {
+        await putArenaOnSheet(guideContext({ lawnReportTies: true, spotTargets: { v: 1, fungicide: ['Dollar spot'], insecticide: ['Fall armyworms'], chinch: 'Southern chinch bugs', takeAll: 'Take-all root rot' } }));
+        await waitFor(() => expect(completeButton().disabled).toBe(false));
+        await submit();
+        expect(completeCalls()[0].body.products.find((p) => p.productId === P_ARENA)).not.toHaveProperty('targetFind');
+      });
+
       test('product present, no tap: no chinch find (a product on the sheet is not a find)', async () => {
         await putArenaOnSheet(guideContext({ lawnReportTies: true }));
         await waitFor(() => expect(completeButton().disabled).toBe(false));

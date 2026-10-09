@@ -25,16 +25,17 @@ const categoryOf = (row) => String(row?.product?.category || '').trim().toLowerC
 const isSpot = (row) => normalizeApplicationMethod(row?.method) === 'spot_treatment';
 
 // The row is for a chinch find: the chinch entry or card opened it, or the server says the product is a chinch-only rung.
-const isChinchRow = (row, chinch) => row.guided === 'chinch' || !!row.chinchRow || (Array.isArray(chinch?.chinchOnlyIds) && chinch.chinchOnlyIds.some((id) => lowerId(id) === lowerId(row.productId)));
+// `chinchTap`: the lower-case id of the product the technician's standing "Found" tap marked (no row was added, so no `guided`).
+const isChinchRow = (row, chinch, chinchTap = null) => row.guided === 'chinch' || !!row.chinchRow || (!!chinchTap && lowerId(row.productId) === chinchTap) || (Array.isArray(chinch?.chinchOnlyIds) && chinch.chinchOnlyIds.some((id) => lowerId(id) === lowerId(row.productId)));
 
 /**
  * What the row's target control offers: `{ kind: 'auto', target }` (a chinch find: stored with no tap), `{ kind: 'choose', choices }`
  * (one tap, optional), or null (a whole-lawn row, a product of another category, no lists). The take-all product offers only its own
  * name; the chinch name is never offered by tap (the chinch entry is the way to a chinch find).
  */
-export function spotTargetOffer(row, { config, chinch = null, takeAll = null }) {
+export function spotTargetOffer(row, { config, chinch = null, takeAll = null, chinchTap = null }) {
   if (!config || !row || !isSpot(row) || !['fungicide', 'insecticide'].includes(categoryOf(row))) return null;
-  if (categoryOf(row) === 'insecticide' && isChinchRow(row, chinch)) return config.chinch ? { kind: 'auto', target: config.chinch } : null;
+  if (categoryOf(row) === 'insecticide' && isChinchRow(row, chinch, chinchTap)) return config.chinch ? { kind: 'auto', target: config.chinch } : null;
   if (categoryOf(row) === 'fungicide' && takeAll?.has(lowerId(row.productId))) return config.takeAll ? { kind: 'choose', choices: [config.takeAll] } : null;
   const list = config[categoryOf(row)].filter((name) => name !== config.takeAll && name !== config.chinch);
   return list.length ? { kind: 'choose', choices: list } : null;
@@ -43,12 +44,13 @@ export function spotTargetOffer(row, { config, chinch = null, takeAll = null }) 
 /**
  * The /complete row's target fields, decided AT PAYLOAD TIME from what the row is now: the tag the tech picked goes only while the row
  * is still a spot fungicide / insecticide row and the tag is on that product family's closed list (a row moved to a whole-lawn method,
- * or to a product of another family, sends none); the chinch-find hint goes only for a spot insecticide row the chinch entry opened.
+ * or to a product of another family, sends none); the chinch-find hint goes only for a spot insecticide row the chinch entry opened or
+ * the technician's standing "Found" tap marked (`chinchTap`, the lower-case product id, for a shared rung already on the sheet).
  * Always carries `targets` (an empty list when none), exactly `[]` while the context has no `spotTargets`. The server checks it again.
  */
-export function targetBodyFields(row, config = null) {
+export function targetBodyFields(row, config = null, { chinchTap = null } = {}) {
   const category = categoryOf(row);
   const live = !!config && !!row && isSpot(row) && ['fungicide', 'insecticide'].includes(category);
   const picked = live && typeof row.spotTarget === 'string' && config[category].includes(row.spotTarget) ? [row.spotTarget] : [];
-  return { targets: picked, ...(live && category === 'insecticide' && row.guided === 'chinch' ? { targetFind: 'chinch' } : {}) };
+  return { targets: picked, ...(live && category === 'insecticide' && (row.guided === 'chinch' || (!!chinchTap && lowerId(row.productId) === chinchTap)) ? { targetFind: 'chinch' } : {}) };
 }

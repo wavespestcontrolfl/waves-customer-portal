@@ -1112,7 +1112,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
         // GATE_LAWN_TROUBLE_AREAS: where the spot went, and what the row was opened for (the server writes the lawn's trouble area from it).
         ...(row.placeRule && row.place ? { areaPlace: row.place, troubleType: troubleTypeOfRow(row), troubleSource: row.troubleSource || 'tech_tap' } : {}),
         // A spot fungicide / insecticide row's optional target (the server checks it against the row's type), and the chinch-find hint.
-        ...targetBodyFields(row, ctx.spotTargets),
+        ...targetBodyFields(row, ctx.spotTargets, { chinchTap }),
         // Gallons sprayed in place of an area: the server converts them with the product's staged carrier and records the area.
         ...gallonsBodyFields(row),
       };
@@ -1696,7 +1696,7 @@ function ProductsSection({ mix = null, ctx, weedMix, chinch, areas = null, onCle
           >
             <RowMixHelp row={row} mix={mix} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
             {row.placeRule && !row.weedGroup && areas ? <PlaceControl areas={areas} row={row} locked={locked} onChange={(place) => updateRow(row.productId, { pickedPlace: place })} /> : null}
-            <SpotTargetControl row={row} config={ctx.spotTargets} chinch={chinch} takeAll={gov.takeAll} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
+            <SpotTargetControl row={row} config={ctx.spotTargets} chinch={chinch} chinchTap={chinchTap} takeAll={gov.takeAll} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} />
           </ProductEditor>
           {row === areaHost && (
             <SpotAreaControl title="Weed spots" value={weedArea} locked={locked} onChange={onWeedArea}>

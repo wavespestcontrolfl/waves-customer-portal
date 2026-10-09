@@ -71,11 +71,21 @@ export function weedMixLines(help, rows, tank) {
 // ── gallons sprayed ─────────────────────────────────────────────────────────
 
 /** The area (whole sq ft, at least 1) a number of gallons covers at a carrier volume: the server's areaFromGallons, character for character. */
-export function gallonsToArea(gallons, carrier) {
+export function gallonsToArea(gallons, carrier, tanks = DEFAULT_TANKS) {
   const gal = positive(gallons);
   const per = positive(carrier);
-  return gal && per ? Math.max(1, Math.round((gal * 1000) / per)) : null;
+  if (!gal || !per || gal > maxGallons(tanks)) return null;
+  const area = Math.round((gal * 1000) / per);
+  return Number.isFinite(area) ? Math.max(1, area) : null;
 }
+
+// The most gallons one spot job can state: ten fills of the largest tank the server offers (the server's MAX_GALLONS, 40 with 1, 2 and 4).
+// A larger number is a typing slip: no area is figured, and the control says so.
+const MAX_FILLS = 10;
+const DEFAULT_TANKS = [1, 2, 4];
+export const maxGallons = (tanks) => Math.max(...(Array.isArray(tanks) && tanks.length ? tanks : DEFAULT_TANKS)) * MAX_FILLS;
+/** Whether a typed gallons value is a number above zero past the bound (so the control can say the number is too large). */
+export const gallonsTooLarge = (value, tanks) => positive(value) !== null && positive(value) > maxGallons(tanks);
 
 /**
  * A spot row's recorded area from the gallons the tech entered (a preview of what /complete records): a plain spot row from its own
@@ -85,7 +95,7 @@ export function gallonsToArea(gallons, carrier) {
 export function withGallonsArea(row, { help, weedGallons }) {
   if (!row.spotRule || row.spotExempt) return row;
   const gallons = positive(row.weedGroup ? weedGallons : row.spotGallons);
-  const area = gallons ? gallonsToArea(gallons, mixEntryFor(help, row.productId)?.carrierGalPer1000) : null;
+  const area = gallons ? gallonsToArea(gallons, mixEntryFor(help, row.productId)?.carrierGalPer1000, help?.tanks) : null;
   return area ? { ...row, spotArea: area, areaFromGallons: gallons } : row;
 }
 

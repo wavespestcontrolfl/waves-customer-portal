@@ -111,6 +111,27 @@ describe('resolveForCompletion', () => {
     expect((await resolve([row(TALAK, { targets: ['Fall armyworms'] })])).of(row(TALAK))).toEqual(['Fall armyworms']);
   });
 
+  test('the standing Found tap: a shared rung already on the sheet is a chinch find from the submitted guide record, with the same ladder confirmation', async () => {
+    const found = (productIds, extra = {}) => ({ visitType: 'recurring', treatmentGuide: { v: 1, cards: [{ kind: 'chinch', shown: true, checked: 'found', taken: true, productIds, ...extra }] } });
+    const talak = row(TALAK);
+    expect((await resolve([talak], { lawnFast: found([TALAK]) })).of(talak)).toEqual(['Southern chinch bugs']);
+    // The record is matched by id, case-insensitively, and only a find that was taken.
+    expect((await resolve([talak], { lawnFast: found([TALAK.toUpperCase()]) })).of(talak)).toEqual(['Southern chinch bugs']);
+    expect((await resolve([talak], { lawnFast: found([TALAK], { taken: false }) })).of(talak)).toEqual([]);
+    expect((await resolve([talak], { lawnFast: found([TALAK], { checked: 'none' }) })).of(talak)).toEqual([]);
+    expect((await resolve([talak], { lawnFast: found([ARENA]) })).of(talak)).toEqual([]);
+    expect((await resolve([talak], { lawnFast: { visitType: 'recurring', treatmentGuide: { v: 2, cards: found([TALAK]).treatmentGuide.cards } } })).of(talak)).toEqual([]);
+    // Not a chinch card, or a product the ladder does not confirm: no chinch tag.
+    const fung = { v: 1, cards: [{ kind: 'fungus', shown: true, checked: 'found', taken: true, productIds: [TALAK] }] };
+    expect((await resolve([talak], { lawnFast: { visitType: 'recurring', treatmentGuide: fung } })).of(talak)).toEqual([]);
+    const art = row(ARTAVIA);
+    expect((await resolve([art], { lawnFast: found([ARTAVIA]) })).of(art)).toEqual([]);
+    // Still only for a spot row, and a read that fails stores nothing.
+    const moved = row(TALAK, { method: 'broadcast_spray' });
+    expect((await resolve([moved], { lawnFast: found([TALAK]) })).of(moved)).toEqual([]);
+    expect((await resolve([talak], { lawnFast: found([TALAK]), confirm: async () => { throw new Error('down'); } })).of(talak)).toEqual([]);
+  });
+
   test('a hint for a product the ladder does not confirm makes no chinch tag', async () => {
     const out = await resolve([row(ARTAVIA, { targetFind: 'chinch', troubleType: 'chinch', targets: ['Dollar spot'] })]);
     expect(out.of(row(ARTAVIA))).toEqual(['Dollar spot']);
