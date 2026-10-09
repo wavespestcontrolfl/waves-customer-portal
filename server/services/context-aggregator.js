@@ -990,19 +990,22 @@ async function stampSeriesExclusive(customer, rows, baseQuery = upcomingServices
   for (const r of rows) r.series_exclusive = exclusive;
   return rows;
 }
-// A signature of EVERY upcoming visit's occurrence (uncapped; the same base query as
-// the drafter's UPCOMING SERVICES): which visits exist, on which day, in which window.
-// A texting-AI card that only STATES the booked schedule stores it at draft time and
-// the send seams re-read it (agent-decision-send-checks scheduleFactsReason): a visit
-// moved, added, completed or cancelled since changes it. Status is left out on purpose
-// (pending -> confirmed is not a schedule change; a terminal status drops the row).
-// Throws on a failed read: callers fail closed.
+// A signature of EVERY upcoming visit as the drafter states it (uncapped; the same base
+// query as UPCOMING SERVICES): which visits exist, on which day, in which CUSTOMER-FACING
+// arrival window, for which service, with which technician — the fields an UPCOMING
+// SERVICES line carries. A texting-AI card that only STATES the booked schedule stores it
+// at draft time and the send seams re-read it (agent-decision-send-checks
+// scheduleFactsReason): a visit moved, added, completed, cancelled, reassigned or changed
+// to another service since changes it. The window is the derived one (deriveWindow:
+// window_start + 2 h), so an internal window_end / duration edit does NOT change it; status
+// is left out (pending -> confirmed is not a schedule change; a terminal status drops the
+// row). Throws on a failed read: callers fail closed.
 async function upcomingScheduleSignature(customerId) {
   if (!customerId) return null;
   const rows = await upcomingServicesBase({ id: customerId })
-    .select('ss.id', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.window_display', 'ss.time_window');
+    .select('ss.id', 'ss.scheduled_date', 'ss.window_start', 'ss.window_display', 'ss.time_window', 'ss.service_type', 'tech.name as technician_name');
   const parts = rows
-    .map((r) => [r.id, dateOnlyString(r.scheduled_date), r.window_start, r.window_end, r.window_display, r.time_window].map((x) => (x == null ? '' : String(x))).join('|'))
+    .map((r) => [r.id, dateOnlyString(r.scheduled_date), module.exports.deriveWindow(r), r.service_type, r.technician_name].map((x) => (x == null ? '' : String(x))).join('|'))
     .sort();
   return require('node:crypto').createHash('sha256').update(parts.join('\n')).digest('hex');
 }

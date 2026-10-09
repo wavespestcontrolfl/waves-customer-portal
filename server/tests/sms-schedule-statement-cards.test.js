@@ -141,14 +141,19 @@ describe('upcomingScheduleSignature (context-aggregator)', () => {
     jest.doMock('../models/db', () => rowsDb(rows));
     return require('../services/context-aggregator').upcomingScheduleSignature('c1');
   };
-  const visit = (over = {}) => ({ id: 'v1', scheduled_date: '2026-10-13', window_start: '09:00:00', window_end: '11:00:00', window_display: '9-11 AM', time_window: null, ...over });
+  const visit = (over = {}) => ({ id: 'v1', scheduled_date: '2026-10-13', window_start: '09:00:00', window_end: '11:00:00', window_display: null, time_window: null, service_type: 'Quarterly Pest', technician_name: 'Alex', ...over });
 
   test('stable for the same visits in any order; changes when a visit moves day or window, appears, or disappears', async () => {
     const a = await sigFor([visit(), visit({ id: 'v2', scheduled_date: '2027-01-13' })]);
     expect(a).toMatch(/^[0-9a-f]{64}$/);
     expect(await sigFor([visit({ id: 'v2', scheduled_date: '2027-01-13' }), visit()])).toBe(a);
     expect(await sigFor([visit({ scheduled_date: '2026-10-14' }), visit({ id: 'v2', scheduled_date: '2027-01-13' })])).not.toBe(a);
-    expect(await sigFor([visit({ window_start: '13:00:00', window_end: '15:00:00', window_display: '1-3 PM' }), visit({ id: 'v2', scheduled_date: '2027-01-13' })])).not.toBe(a);
+    expect(await sigFor([visit({ window_start: '13:00:00', window_end: '15:00:00' }), visit({ id: 'v2', scheduled_date: '2027-01-13' })])).not.toBe(a);
+    // Codex r1: the service and the technician the draft names are part of it
+    expect(await sigFor([visit({ technician_name: 'Sam' }), visit({ id: 'v2', scheduled_date: '2027-01-13' })])).not.toBe(a);
+    expect(await sigFor([visit({ service_type: 'Lawn Fertilization' }), visit({ id: 'v2', scheduled_date: '2027-01-13' })])).not.toBe(a);
+    // Codex r1: only the CUSTOMER-FACING window counts — an internal duration (window_end) edit changes nothing
+    expect(await sigFor([visit({ window_end: '12:30:00' }), visit({ id: 'v2', scheduled_date: '2027-01-13' })])).toBe(a);
     expect(await sigFor([visit()])).not.toBe(a);
     expect(await sigFor([])).not.toBe(a);
   });
