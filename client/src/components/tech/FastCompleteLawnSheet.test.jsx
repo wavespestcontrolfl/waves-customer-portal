@@ -3425,7 +3425,7 @@ describe('suggested from this lawn', () => {
   });
   // ── one soft prompt for a blade-and-crown close-up when the photos include a problem area ──
   describe('the close-up prompt', () => {
-    const PROMPT = 'Add one close-up of the blades and crown at the edge of the damaged spot and set its slot to Blade and crown, so the insect check can read it.';
+    const PROMPT = 'Add one close-up of the blades and crown at the edge of the damaged spot so the insect check can read it.';
     const tagPhoto = (n, zone) => fireEvent.change(screen.getByLabelText(`Slot for photo ${n}`), { target: { value: zone } });
     const addAnother = async (n) => {
       fireEvent.change(screen.getByLabelText('Add turf photos'), { target: { files: [new File(['b'], `b${n}.jpg`, { type: 'image/jpeg' })] } });
@@ -3455,6 +3455,33 @@ describe('suggested from this lawn', () => {
       // Taking the Blade and crown tag away again does not bring it back.
       tagPhoto(2, 'back');
       expect(screen.queryByText(PROMPT)).toBeNull();
+    });
+
+    test('Add close-up opens the photo picker with the shot set: the photo arrives tagged Blade and crown and the prompt closes', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      const input = screen.getByLabelText('Add turf photos');
+      const clicked = vi.spyOn(input, 'click');
+      fireEvent.click(screen.getByRole('button', { name: 'Add close-up' }));
+      expect(clicked).toHaveBeenCalledTimes(1);
+      fireEvent.change(input, { target: { files: [new File(['c'], 'c.jpg', { type: 'image/jpeg' })] } });
+      await screen.findByLabelText('Slot for photo 2');
+      expect(screen.getByLabelText('Slot for photo 2').value).toBe('blade_crown');
+      await waitFor(() => expect(screen.queryByText(PROMPT)).toBeNull());
+      // Analyze is still open to the tech, and the prompt does not come back.
+      expect(screen.getByRole('button', { name: 'Analyze lawn' }).disabled).toBe(false);
+    });
+
+    test('Add close-up is off while the Blade and crown shot is full or the photo cap is reached, as the slot button is', async () => {
+      await open();
+      await addPhoto();
+      tagPhoto(1, 'trouble');
+      await screen.findByText(PROMPT);
+      expect(screen.getByRole('button', { name: 'Add close-up' }).disabled).toBe(false);
+      for (let n = 2; n <= 8; n += 1) await addAnother(n);
+      expect(screen.getByRole('button', { name: 'Add close-up' }).disabled).toBe(true);
     });
 
     test('a Blade and crown photo already on the sheet means no prompt', async () => {

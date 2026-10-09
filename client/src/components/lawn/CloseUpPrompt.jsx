@@ -4,7 +4,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button } from "../ui";
 
-export const CLOSE_UP_PROMPT = "Add one close-up of the blades and crown at the edge of the damaged spot and set its slot to Blade and crown, so the insect check can read it.";
+export const CLOSE_UP_PROMPT = "Add one close-up of the blades and crown at the edge of the damaged spot so the insect check can read it.";
+export const BLADE_CROWN = "blade_crown";
 
 /**
  * Whether the prompt shows now: a photo is tagged Problem area, none is tagged Blade and crown, and no
@@ -24,12 +25,22 @@ export function useCloseUpPrompt({ enabled, shotList, photos, hasResult }) {
   return { open, dismiss: () => setDone(true) };
 }
 
-export default function CloseUpPrompt({ open, onDismiss, buttonClassName }) {
+// The slot buttons' own disabled rule, for the Blade and crown shot.
+export const closeUpBlocked = ({ disabled, analyzing, photos, photoCap, readingShots, isFull }) => (
+  !!disabled || analyzing || photos.length >= photoCap || isFull(photos, BLADE_CROWN) || readingShots.includes(BLADE_CROWN)
+);
+
+// "Add close-up" opens the same photo picker the slot buttons use, with the shot set to Blade and
+// crown (the block's onAdd), so the photo arrives already tagged and the prompt closes by itself.
+export default function CloseUpPrompt({ open, onAdd, addDisabled, onDismiss, buttonClassName }) {
   if (!open) return null;
   return (
     <div role="status" data-testid="lawn-close-up-prompt" className="flex items-start justify-between gap-2 text-14 text-zinc-500">
       <span>{CLOSE_UP_PROMPT}</span>
-      <Button variant="secondary" className={buttonClassName} onClick={onDismiss}>Dismiss</Button>
+      <span className="flex shrink-0 gap-2">
+        <Button variant="secondary" className={buttonClassName} disabled={addDisabled} onClick={onAdd}>Add close-up</Button>
+        <Button variant="secondary" className={buttonClassName} onClick={onDismiss}>Dismiss</Button>
+      </span>
     </div>
   );
 }
