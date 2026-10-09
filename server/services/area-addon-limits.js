@@ -317,32 +317,40 @@ const HISTORY_STAFF_MESSAGE = 'The treatment history for this property could not
  * be applied (the booked visit); default the earliest day of `excludeVisitIds` (the rows being committed), else today. `database` should be the accept transaction. Staff get the
  * dates; the customer gets the office hand-off.
  */
-async function assertAreaAddOnLimitsOpen(database, { estimate, customerId = null, property = null, resolveCustomer = null, fenceCustomer = null, appliedOn = null, staff = false, excludeVisitIds = [] } = {}) {
+// The booking customer and day, then the history for them: { day, history }. Everything that can fail on the way is one read
+// (the caller turns a failure into the fail-closed 409).
+async function readLimitHistory(database, { estimate, keys, customerId, property, resolveCustomer, fenceCustomer, appliedOn, excludeVisitIds }) {
+  // The caller named the visits it is committing but no day: the day is theirs (the earliest).
+  const day = appliedOn || await visitsFirstDay(database, excludeVisitIds);
+  const named = [customerId, estimate.customer_id];
+  // No customer named yet (a new lead accepting): two accepts by the same person would each read an empty history and both
+  // commit. Serialize on who they are (phone, else address) BEFORE the read; a named customer is already serialized by the
+  // customer lock every booking of that customer takes.
+  if (!named.some(isUuid)) await lockProspectIdentity(database, estimate);
+  const subject = await limitSubject(database, estimate, { customerId, propertyId: property && property.property_id, resolveCustomer });
+  // A customer this check found for itself (the group's owner, a linked appointment's, the phone match) is not one the caller
+  // has locked: the caller's own fence takes the lock that serializes that customer's bookings before the read.
+  if (fenceCustomer && subject.customerId && !named.includes(subject.customerId)) await fenceCustomer(subject.customerId);
+  // In a savepoint: a failed read must not poison the transaction it runs inside (the 409 is the answer).
+  const history = await savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
+    customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeVisitIds, prospect: prospectOf(estimate),
+  }));
+  return { day, history };
+}
+
+async function assertAreaAddOnLimitsOpen(database, { estimate, staff = false, ...options } = {}) {
   const keys = recheckKeys(estimate);
   if (!keys.length) return;
-  let history;
-  let day = appliedOn;
+  let read;
   try {
-    // The caller named the visits it is committing but no day: the day is theirs (the earliest).
-    day = appliedOn || await visitsFirstDay(database, excludeVisitIds);
-    // No customer named yet (a new lead accepting): two accepts by the same person would each read an empty history and both
-    // commit. Serialize on who they are (phone, else address) BEFORE the read; a named customer is already serialized by the
-    // customer lock every booking of that customer takes.
-    if (![customerId, estimate.customer_id].some(isUuid)) await lockProspectIdentity(database, estimate);
-    const subject = await limitSubject(database, estimate, { customerId, propertyId: property && property.property_id, resolveCustomer });
-    // A customer this check found for itself (the group's owner, a linked appointment's, the phone match) is not one the caller
-    // has locked: the caller's own fence takes the lock that serializes that customer's bookings before the read.
-    if (fenceCustomer && subject.customerId && ![customerId, estimate.customer_id].includes(subject.customerId)) await fenceCustomer(subject.customerId);
-    // In a savepoint: a failed read must not poison the transaction it runs inside (the 409 below is the answer).
-    history = await savepointScope(database, (scoped) => loadAreaAddOnHistory(scoped, {
-      customerId: subject.customerId, propertyId: subject.propertyId, keys, excludeVisitIds, prospect: prospectOf(estimate),
-    }));
+    read = await readLimitHistory(database, { estimate, keys, excludeVisitIds: [], ...options });
   } catch (err) {
     // The caller's own retryable answer (the customer is being updated right now) is not a history failure.
     if (err && err.code === 'CUSTOMER_BUSY_RETRY') throw err;
     logger.warn(`[area-addon-limits] accept recheck history unavailable for estimate ${estimate.id}: ${err.code || err.name}: ${err.message}`);
     throw limitError(409, HISTORY_CODE, staff ? HISTORY_STAFF_MESSAGE : HISTORY_CUSTOMER_MESSAGE);
   }
+  const { day, history } = read;
   const reached = keys
     .map((key) => ({ key, verdict: areaAddOnLimitVerdict(key, history, { day: dayOf(day) }) }))
     .find(({ verdict }) => verdict && verdict.reason === LIMIT_REACHED_REASON);
