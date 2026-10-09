@@ -164,6 +164,105 @@ describe('the label floor on the real catalog strings', () => {
   });
 });
 
+// The same catalog AFTER the owner fills the missing re-entry text from the labels (2026-10-08): sentence A for
+// sprays, sentence B for the granules the program waters in. Pinned so the behavior on the future data is visible.
+describe('the label floor on the catalog strings as they will read after the owner\'s fill', () => {
+  const A = 'Stay off treated areas until the application has dried.';
+  const B = 'Stay off treated areas until the product has been watered in and the turf is dry.';
+  const shape = (text, reentryHours = null) => ({
+    untilDry: facts._test.labelIsPlainUntilDry({ reentryHours, reentrySummary: text }),
+    wateredIn: facts._test.labelIsPlainUntilWateredInAndDry({ reentryHours, reentrySummary: text }),
+  });
+  const ruleOf = (text, method, wateringRule, reentryHours = null) => facts.productReentry(row('p', method, {
+    facts: { wateringRule, reentryHours, reentrySummary: text },
+  }));
+  const DEFAULT = { id: 'p', rule: null, source: 'default' };
+
+  // [products, text, method, shape A?, shape B?]
+  test.each([
+    ['Arena 50 WDG', A, 'spot_treatment'],
+    ['Gravex 20 EW', A, 'broadcast_spray'],
+    ['Dispatch Sprayable', A, 'broadcast_spray'],
+    ['LESCO 90/10 Nonionic Surfactant', A, 'broadcast_spray'],
+    ['LESCO Nutra-TECH', A, 'broadcast_spray'],
+  ])('sentence A on %s: until-dry, not watered-in; a spray is dry (water-in rule: watered_in_and_dry)', (_name, text, method) => {
+    expect(shape(text)).toEqual({ untilDry: true, wateredIn: false });
+    expect(ruleOf(text, method, rule('none'))).toEqual({ id: 'p', rule: 'dry', source: 'facts' });
+    expect(ruleOf(text, method, rule('water_in')).rule).toBe('watered_in_and_dry');
+  });
+
+  test.each([
+    ['LESCO Dimension 0.21% 18-0-10'],
+    ['Dylox 6.2 G'],
+    ['LESCO 10-0-22'],
+    ['LESCO 24-0-11'],
+  ])('sentence B on %s: watered_in_and_dry only with a frozen water-in rule; hold, none or missing default', (_name) => {
+    expect(shape(B)).toEqual({ untilDry: false, wateredIn: true });
+    expect(ruleOf(B, 'granular_broadcast', rule('water_in'))).toEqual({ id: 'p', rule: 'watered_in_and_dry', source: 'facts' });
+    for (const wateringRule of [rule('hold', { hold_hours: 24 }), rule('none'), null, { mode: 'sideways' }]) {
+      expect(ruleOf(B, 'granular_broadcast', wateringRule)).toEqual(DEFAULT);
+    }
+  });
+
+  test('a spray whose text is the watered-in shape is watered_in_and_dry only with a frozen water-in rule, else default', () => {
+    expect(ruleOf(B, 'broadcast_spray', rule('water_in')).rule).toBe('watered_in_and_dry');
+    expect(ruleOf(B, 'broadcast_spray', rule('none'))).toEqual(DEFAULT);
+    expect(ruleOf(B, 'spot_treatment', null)).toEqual(DEFAULT);
+  });
+
+  test('sentence B variants the shape accepts: the product / application / treatment / granules, turf / grass / lawn / surface, "is dry" or "has dried", the keep-off lead, a missing full stop', () => {
+    for (const text of [
+      'Stay off treated areas until the granules have been watered in and the grass has dried.',
+      'Stay off treated areas until the application has been watered in and the lawn is dry.',
+      'Keep people and pets off treated areas until the product has been watered in and the surface is dry.',
+      'stay off treated areas until the treatment has been watered in and the turf is dry',
+    ]) {
+      expect(shape(text).wateredIn).toBe(true);
+    }
+  });
+
+  test.each([
+    ['dust', 'Keep people and pets off treated areas until dust has settled.'],
+    ['the 24-0-11 text today', 'Water in per the visit notes; no re-entry wait once dry.'],
+    ['a watered-in sentence that states hours', 'Stay off treated areas until the product has been watered in and the turf is dry for 24 hours.'],
+    ['a watered-in sentence with a digit', 'Stay off treated areas until the product has been watered in and the turf is dry, about 2 h.'],
+    ['a watered-in sentence with a time word', 'Stay off treated areas until the product has been watered in and the turf is dry, usually overnight.'],
+    ['a watered-in sentence with no dryness', 'Stay off treated areas until the product has been watered in.'],
+    ['another subject', 'Stay off treated areas until the dog has been watered in and the turf is dry.'],
+    ['an extra clause after it', 'Stay off treated areas until the product has been watered in and the turf is dry. Call us with questions.'],
+    ['a different lead', 'Follow the product label until the product has been watered in and the turf is dry.'],
+    ['the follow-the-label sentence', 'Follow the product label and technician service report before re-entering treated areas.'],
+  ])('near miss (%s) never qualifies as watered-in', (_label, text) => {
+    expect(shape(text).wateredIn).toBe(false);
+    expect(ruleOf(text, 'granular_broadcast', rule('water_in'))).toEqual(DEFAULT);
+  });
+
+  test('"until the turf is dry" is not the watered-in shape (the shared parser reads it as plain until-dry, so the A rules apply)', () => {
+    const text = 'Stay off treated areas until the turf is dry.';
+    expect(shape(text).wateredIn).toBe(false);
+    expect(ruleOf(text, 'granular_broadcast', rule('none')).rule).toBe(shape(text).untilDry ? 'dry' : null);
+  });
+
+  test('a stored positive rei_hours disqualifies both shapes, even beside the right sentence', () => {
+    expect(shape(B, 12)).toEqual({ untilDry: false, wateredIn: false });
+    expect(shape(A, 12)).toEqual({ untilDry: false, wateredIn: false });
+    expect(ruleOf(B, 'granular_broadcast', rule('water_in'), 12)).toEqual(DEFAULT);
+  });
+
+  test('a stored 0 figure is fine for both shapes', () => {
+    expect(shape(B, 0).wateredIn).toBe(true);
+    expect(ruleOf(B, 'granular_broadcast', rule('water_in'), 0).rule).toBe('watered_in_and_dry');
+  });
+
+  test('a visit of the four granules (sentence B, water-in rules) beside sprays (sentence A) is watered_in_and_dry; one granule missing its water-in rule defaults the visit', () => {
+    const granule = (id, wateringRule) => row(id, 'granular_broadcast', { facts: { wateringRule, reentryHours: null, reentrySummary: B } });
+    const spray = row('sp', 'broadcast_spray', { facts: { wateringRule: rule('none'), reentryHours: null, reentrySummary: A } });
+    const granules = ['g1', 'g2', 'g3', 'g4'].map((id) => granule(id, rule('water_in')));
+    expect(facts.visitReentry([...granules, spray])).toMatchObject({ rule: 'watered_in_and_dry', source: 'facts' });
+    expect(facts.visitReentry([...granules.slice(0, 3), granule('g4', rule('none')), spray])).toMatchObject({ rule: 'default' });
+  });
+});
+
 describe('the visit\'s rule is the strictest of its products', () => {
   test('spray only -> dry', () => {
     expect(facts.visitReentry([SPRAY, SPOT_HERBICIDE])).toMatchObject({ rule: 'dry', source: 'facts' });

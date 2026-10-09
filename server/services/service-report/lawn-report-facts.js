@@ -93,23 +93,53 @@ function labelIsPlainUntilDry(facts) {
   } catch { return false; }
 }
 
+// The second accepted label shape, "plain until watered in and dry": the standard sentence for a granule the
+// program waters in ("Stay off treated areas until the product has been watered in and the turf is dry."). The
+// shared SMS parser (sms-label-facts.js, not changed) does not read it, so it is recognized here, narrowly: the
+// WHOLE text must be one sentence that says to stay off until the product / application / treatment / granules
+// has (have) been watered in and the turf / grass / lawn / surface is dry (or has dried). It must carry no
+// digit and no time word anywhere (an hours figure makes it a different label), and no positive rei_hours may be
+// stored. Near misses ("until dust has settled", "...no re-entry wait once dry", a watered-in sentence that
+// also states hours) do not match.
+const WATERED_IN_AND_DRY_RE = new RegExp(
+  '^(?:stay off|keep (?:people and pets|pets and people|everyone) off)'
+  + ' (?:the )?(?:treated )?(?:areas?|turf|lawn|grass)'
+  + ' until (?:the )?(?:product|application|treatment|granules?) (?:has|have) been watered in'
+  + ' and (?:the )?(?:turf|grass|lawn|surface) (?:is dry|has dried)\\.?$',
+  'i',
+);
+const TIME_WORD_RE = /\d|\b(?:hours?|hrs?|minutes?|mins?|days?|overnight)\b/i;
+function labelIsPlainUntilWateredInAndDry(facts) {
+  const hours = Number(facts && facts.reentryHours);
+  if (Number.isFinite(hours) && hours > 0) return false;
+  const text = String((facts && facts.reentrySummary) || '').replace(/\s+/g, ' ').trim();
+  return !!text && !TIME_WORD_RE.test(text) && WATERED_IN_AND_DRY_RE.test(text);
+}
+
 // One applied product's re-entry rule, from facts the visit already froze: the product's approved frozen
 // facts (label floor, watering rule) and the recorded application method. Never from a name, and never from
 // the method alone. Every branch below must be at least as strict as what the report shows today.
 //   no approved frozen facts                              default (the label floor is unknown)
-//   label is not plain until-dry (hours, unreadable, none) default (today's line or figure is the floor)
-//   frozen water-in rule                                  watered_in_and_dry
-//   a granule whose rule is hold or none, a bait          dry (not watered in)
-//   a granule with no frozen watering rule                default (cannot tell whether it is watered in)
-//   a spray or spot spray                                 dry
+//   label is neither accepted shape (hours, unreadable, none)  default (today's line or figure is the floor)
+//   label "until watered in and dry"                      watered_in_and_dry ONLY with a frozen water-in rule
+//                                                         (hold, none or missing: default; the label and the
+//                                                         watering facts must agree, never weaker than the label)
+//   label "until dry", frozen water-in rule               watered_in_and_dry
+//   label "until dry", a granule whose rule is hold or none, a bait   dry (not watered in)
+//   label "until dry", a granule with no frozen watering rule         default (cannot tell whether it is watered in)
+//   label "until dry", a spray or spot spray              dry
 //   no recorded method                                    default
 function productReentry(row) {
   const id = String(row && row.id);
   const facts = isPlain(row && row.approved_report_product_facts) ? row.approved_report_product_facts : null;
   const unusable = { id, rule: null, source: 'default' };
-  if (!facts || !labelIsPlainUntilDry(facts)) return unusable;
-  const method = methodOf(row);
+  if (!facts) return unusable;
   const mode = isPlain(facts.wateringRule) ? facts.wateringRule.mode : null;
+  if (labelIsPlainUntilWateredInAndDry(facts)) {
+    return mode === 'water_in' ? { id, rule: 'watered_in_and_dry', source: 'facts' } : unusable;
+  }
+  if (!labelIsPlainUntilDry(facts)) return unusable;
+  const method = methodOf(row);
   let rule = null;
   if (mode === 'water_in') rule = 'watered_in_and_dry';
   else if (isBait(method)) rule = 'dry';
@@ -497,5 +527,5 @@ module.exports = {
   freezeReportFacts,
   gatherAndFreezeReportFacts,
   cleanTies,
-  _test: { methodOf, labelIsPlainUntilDry, roundedSqft, photoFindingsByKind, productKinds },
+  _test: { methodOf, labelIsPlainUntilDry, labelIsPlainUntilWateredInAndDry, roundedSqft, photoFindingsByKind, productKinds },
 };
