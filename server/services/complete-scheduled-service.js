@@ -131,6 +131,7 @@ const CompanionCompletions = require('../services/service-report/companion-compl
 const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFollowupAlert } = require('../services/typed-followup-obligation');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
 const areaAddOnGovernedRate = require('./area-addon-governed-rate');
+const areaAddOnLimits = require('./area-addon-limits');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
 // into customer-visible completion text. Three shapes: a code word near a
@@ -2017,10 +2018,12 @@ async function productLimitFindings({ svc, productId, productName, serviceDate, 
 }
 
 // Every finding for the products a closeout recorded (ids from its ledger rows or its submitted
-// list). Never throws: a failed batch read is one 'unavailable' finding.
+// list). Never throws: a failed batch read is one 'unavailable' finding. A lawn visit under GATE_LAWN_V13 audits every product it
+// is given. Any other visit (a Tree & Shrub or pest host, or a lawn visit with the gate off) is audited ONLY when the caller says
+// a row of the closeout is tagged to an area add-on (`addOnRows: true`), and then for the products it is given, which are the
+// tagged rows' products (recordedProductLimitFindings): a host with no add-on row reads nothing, as before.
 async function submittedProductLimitFindings({ svc, productIds = [], serviceDate = null, database = db, places = null, addOnRows } = {}) {
-  if (!svc || require('../config/feature-gates').lawnV13Live?.() !== true) return [];
-  if (detectServiceLine(svc.service_type) !== 'lawn') return [];
+  if (!svc || (!lawnHostAudited(svc) && addOnRows !== true)) return [];
   const ids = [...new Set((productIds || []).filter(Boolean).map(String))].filter((id) => UUID_SHAPE.test(id));
   if (!ids.length) return [];
   let limited;
@@ -2038,25 +2041,33 @@ async function submittedProductLimitFindings({ svc, productIds = [], serviceDate
   return findings;
 }
 
+// The hard-limit audit has always covered lawn visits under GATE_LAWN_V13.
+const lawnHostAudited = (svc) => require('../config/feature-gates').lawnV13Live?.() === true && detectServiceLine(svc.service_type) === 'lawn';
+
 // The findings for the products a committed closeout recorded, read from its ledger rows (so a
-// resume re-derives them). Lawn visits under GATE_LAWN_V13 only. Never throws: ANY failure on the
+// resume re-derives them). Lawn visits under GATE_LAWN_V13, and, whatever the host's line or the gate, the products of the rows
+// tagged to an area add-on (`addOnRows: true`). Never throws: ANY failure on the
 // way (the ledger lookup included) is one 'unavailable' finding, so the closeout still carries the
 // flag and the office still hears about it.
 async function recordedProductLimitFindings({ svc, record, database = db, addOnRows } = {}) {
   if (!svc || !record?.id) return [];
-  if (require('../config/feature-gates').lawnV13Live?.() !== true || detectServiceLine(svc.service_type) !== 'lawn') return [];
+  const lawnHost = lawnHostAudited(svc);
+  if (!lawnHost && addOnRows !== true) return [];
   try {
     // GATE_LAWN_TROUBLE_AREAS: the place each spot application was recorded at, so the audit judges it there.
     const placed = require('../config/feature-gates').lawnTroubleAreasLive();
-    const rows = await savepointRead(database, (k) => k('property_application_history')
+    const recorded = await savepointRead(database, (k) => k('property_application_history')
       .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct(...(placed ? ['product_id', 'treated_place'] : ['product_id'])));
+    // Not a lawn host under the gate: only the add-on rows' products.
+    const tagged = lawnHost ? null : await savepointRead(database, (k) => areaAddOnGovernedRate.taggedProductIds(k, record.id));
+    const rows = (recorded || []).filter((row) => !tagged || tagged.has(String(row.product_id)));
     return await submittedProductLimitFindings({
       svc,
-      productIds: (rows || []).map((row) => row.product_id),
+      productIds: rows.map((row) => row.product_id),
       serviceDate: serviceDateOnly(record.service_date),
       database,
       addOnRows,
-      ...(placed ? { places: new Map((rows || []).filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
+      ...(placed ? { places: new Map(rows.filter((row) => row.treated_place).map((row) => [String(row.product_id), row.treated_place])) } : {}),
     });
   } catch (err) {
     logger.warn('completion application limits: ledger lookup failed, flagging for the office', { serviceId: svc.id, error: err?.message });
@@ -2084,12 +2095,14 @@ const FINDING_WHY = {
   min_interval_days: (name, f) => `${name}: only ${f.current} days since another application, minimum ${f.max}.`,
   annual_max_rate: (name, f) => `${name} is over its yearly amount limit: ${f.current}% used.`,
   annual_max_apps: (name, f) => `${name} is over its yearly limit: ${f.current} of ${f.max} already used.`,
+  [areaAddOnLimits.YEARLY_LIMIT_TYPE]: (name, f) => `${name} is over its add-on yearly limit: ${f.current} before it in 12 months, limit ${f.max}.`,
 };
 // The long form (the "Show full text" detail) of the same.
 const FINDING_DETAIL = {
   [areaAddOnGovernedRate.WRONG_PRODUCT_LIMIT_TYPE]: (fullName, f, svc) => `${fullName} was recorded for an area add-on on a ${svc.service_type || 'lawn'} visit, but the add-on uses ${f.max}. Review it and report it if needed.`,
   [areaAddOnGovernedRate.UNCHECKED_RATE_LIMIT_TYPE]: (fullName, f, svc) => `On a ${svc.service_type || 'lawn'} visit, ${areaAddOnGovernedRate.uncheckedRateSentence(fullName, f)} Check the rate on the application record and report it if needed.`,
 };
+FINDING_DETAIL[areaAddOnLimits.YEARLY_LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'visit'} visit for an area add-on and is over the add-on's yearly limit. ${f.detail} Review it and report it if needed.`;
 for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annual_max_rate', 'annual_max_apps']) {
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
@@ -2106,8 +2119,8 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
       const fullText = over
         ? (FINDING_DETAIL[finding.limitType] || FINDING_DETAIL.annual_max_apps)(fullName, finding, svc)
-        : 'A lawn visit was recorded, but its product limits could not be checked. Review the products applied.';
-      const why = !over ? 'A lawn visit was recorded, but its product limits could not be checked.'
+        : 'A visit was recorded, but its product limits could not be checked. Review the products applied.';
+      const why = !over ? 'A visit was recorded, but its product limits could not be checked.'
         : (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding);
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
@@ -9340,6 +9353,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // flag and office notification, and the same rule: the work is done, so it never blocks.
     applicationLimitAdvisory = await areaAddOnGovernedRate.flagRatesAboveGoverned({
       svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings,
+    });
+
+    // The add-on's OWN yearly limit (maxPerYear / minDaysApart, the place-based history the booking used; the add-ons carry no
+    // product_limits rows): each tagged row is judged whatever the host's line or GATE_LAWN_V13, a second application of the
+    // product on this record counts as a same-day one. Same advisory and office notification; never blocks; a host row with no
+    // tag is never judged here. Nothing is read when no row of this closeout is tagged.
+    applicationLimitAdvisory = await areaAddOnLimits.flagAddOnYearlyLimits({
+      svc, record, database: db, advisory: applicationLimitAdvisory, notify: notifyOfficeOfLimitFindings,
+      addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags),
     });
 
     if (!isIncompleteVisit && (!resumingCommittedCompletion || packetEffects) && products?.length) {

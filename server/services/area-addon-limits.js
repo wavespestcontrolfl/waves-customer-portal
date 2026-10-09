@@ -568,7 +568,88 @@ async function attachLimitUse(cards, { serviceId, visitDay, dbh }) {
   return cards;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The completion audit of an add-on's OWN yearly limit (Codex round 18 P1).
+//
+// The chemical add-ons have NO product_limits rows by owner ruling ("add-on-only limits, no product-wide rows"), so the closeout's
+// hard-limit audit (application-limits auditHardCountLimits) reads nothing for Snapshot, Topchoice, Acelepryn or QuikPro, and a
+// Tree & Shrub or pest host that carries such an add-on was never audited at all. This check judges each application recorded
+// for an add-on (a service_products row tagged `area_addon_key`) against that add-on's own limit (AREA_ADDONS.items maxPerYear /
+// minDaysApart), on the same place-based history the booking uses, with this visit's own ledger rows left out; a second
+// application of the product on the same record counts as a same-day application, so a host row plus an add-on row of one
+// product, or two rows of the add-on, break a spacing rule or a count that the first one met. The work is done and ledgered,
+// so the result is only ever an advisory finding for the office. A host program row without a tag is never judged here.
+// ---------------------------------------------------------------------------------------------------------------------
+const YEARLY_LIMIT_TYPE = 'area_addon_yearly_limit';
+
+// The tagged rows of one record that belong to a LIMITED add-on: { key, productName, productId }. [] before the column exists.
+async function limitedAddOnRows(database, recordId) {
+  const cols = await database('service_products').columnInfo();
+  if (!cols.area_addon_key) return [];
+  const rows = await database('service_products').where({ service_record_id: recordId }).whereNotNull('area_addon_key')
+    .select('product_id', 'product_name', 'area_addon_key');
+  return rows.map((row) => ({ key: limitKeyOfServiceKey(row.area_addon_key), productId: row.product_id || null, productName: row.product_name }))
+    .filter((row) => row.key);
+}
+
+// Applications of the add-on's product recorded on this record (live ledger rows only).
+async function ownApplicationCount(database, recordId, productIds) {
+  const row = await database('property_application_history').where({ service_record_id: recordId }).whereIn('product_id', productIds)
+    .whereNull('retracted_at').count('* as n').first();
+  return Number(row && row.n) || 0;
+}
+
+async function yearlyLimitFindings(database, { svc, record, rows }) {
+  const keys = [...new Set(rows.map((row) => row.key))];
+  const day = dayOf(record.service_date || svc.scheduled_date) || etDateString();
+  const [history, products] = await Promise.all([
+    loadAreaAddOnHistory(database, { customerId: svc.customer_id, propertyId: svc.property_id, keys, excludeVisitId: svc.id, asOf: day }),
+    limitProductIds(database, keys),
+  ]);
+  const findings = [];
+  for (const key of keys) {
+    const extra = Math.max(0, (await ownApplicationCount(database, record.id, products.get(key))) - 1);
+    const dates = [...((history.byKey[key] && history.byKey[key].dates) || []), ...Array(extra).fill(day)];
+    const verdict = areaAddOnLimitVerdict(key, { available: true, asOf: day, byKey: { [key]: { dates } } }, { day });
+    if (!verdict || verdict.reason !== LIMIT_REACHED_REASON) continue;
+    const row = rows.find((entry) => entry.key === key);
+    findings.push({
+      code: 'application_limit_exceeded',
+      productId: row.productId,
+      productName: row.productName,
+      limitType: YEARLY_LIMIT_TYPE,
+      current: verdict.count,
+      max: verdict.max,
+      detail: verdict.detail,
+      message: `Recorded. The office will review: ${verdict.detail}`,
+    });
+  }
+  return findings;
+}
+
+/**
+ * The completion check for the add-ons' own yearly limits. `addOnRows` is false when the closeout has no row tagged to an add-on
+ * (nothing is read then). `notify` sends the findings to the office; the merged advisory comes back (the same object when nothing
+ * is over). A history that cannot be read is one 'unavailable' finding, never a throw and never a block.
+ */
+async function flagAddOnYearlyLimits({ svc, record, database, advisory, notify, addOnRows = true }) {
+  if (!addOnRows || !svc || !record || !record.id) return advisory;
+  let findings;
+  try {
+    const rows = await limitedAddOnRows(database, record.id);
+    findings = rows.length ? await yearlyLimitFindings(database, { svc, record, rows }) : [];
+  } catch (err) {
+    logger.warn(`[area-addon-limits] completion limit check failed for record ${record.id}: ${err.code || err.name}: ${err.message}`);
+    findings = [{ code: 'application_limit_check_unavailable', productId: null, message: 'Recorded. The office will review: product limits could not be checked for this visit.' }];
+  }
+  if (!findings.length) return advisory;
+  await notify({ svc, record, findings });
+  return { advisory: true, blocks: [...((advisory && advisory.blocks) || []), ...findings.map((f) => ({ code: f.code, message: f.message, productId: f.productId }))] };
+}
+
 module.exports = {
+  YEARLY_LIMIT_TYPE,
+  flagAddOnYearlyLimits,
   LIMIT_CODE,
   HISTORY_CODE,
   LIMIT_CUSTOMER_MESSAGE,

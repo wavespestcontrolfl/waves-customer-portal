@@ -437,6 +437,14 @@ async function requireAddOnActuals(knex, products, tags, { fresh = true } = {}) 
   });
 }
 
+// The product ids of the rows this record saved with an add-on tag (a Set of strings). Empty before the column exists.
+async function taggedProductIds(database, recordId) {
+  const cols = await database('service_products').columnInfo();
+  if (!cols.area_addon_key) return new Set();
+  const rows = await database('service_products').where({ service_record_id: recordId }).whereNotNull('area_addon_key').whereNotNull('product_id').select('product_id');
+  return new Set(rows.map((row) => String(row.product_id)));
+}
+
 /**
  * The completion check: reads the add-on rows this record saved and flags the ones recorded above the
  * governed rate. `advisory` is the completion's applicationLimitAdvisory; the merged advisory comes back (the
@@ -493,4 +501,5 @@ module.exports = {
   mayHaveAddOnRows,
   rateFindings,
   flagRatesAboveGoverned,
+  taggedProductIds,
 };
