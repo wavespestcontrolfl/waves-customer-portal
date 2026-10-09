@@ -75,6 +75,8 @@
   border-bottom: 0.5px solid var(--tech-border);
   background: var(--tech-bg);
 }
+.tech-visit-header-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.tech-visit-header-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .tech-visit-title { margin: 0; font-family: inherit; font-size: 18px; font-weight: 500; line-height: 1.35; letter-spacing: -0.005em; }
 /* An UPPERCASE section label like the Today page's overlines, at the 14px floor
    (the portal-brand gate bans smaller text in this stylesheet). */

@@ -310,7 +310,9 @@ function authHeaders() {
   };
 }
 
-export default function RainOutSheet({ service, onClose, onDone }) {
+// `allowRouteScope` false (a non-admin login, which POST /rain-out refuses
+// scope 'route' for): this stop only, no whole-route chip.
+export default function RainOutSheet({ service, onClose, onDone, allowRouteScope = true }) {
   const isMobile = useIsMobile();
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');
@@ -911,7 +913,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               </div>
             )}
 
-            {routeCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && !isCustomReason && (
+            {allowRouteScope && routeCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && !isCustomReason && (
               <>
                 <div style={sectionLabel}>SCOPE</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>

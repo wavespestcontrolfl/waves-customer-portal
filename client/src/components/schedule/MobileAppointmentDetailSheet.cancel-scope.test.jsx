@@ -56,6 +56,18 @@ describe('MobileAppointmentDetailSheet cancel scope', () => {
     expect(confirmCardHoldFeeChoice).toHaveBeenCalledWith(55, { scope: 'this_only' });
   });
 
+  // A technician login (the tech portal passes adminActions={false}): the
+  // status route answers 403 to a non-admin following/series cancel, so the
+  // sheet offers only this appointment, even on a recurring visit.
+  it('a technician login sees no series scopes on a recurring visit and sends this_only', async () => {
+    render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} adminActions={false} onClose={() => {}} />);
+    fireEvent.click(screen.getByText('Cancel appointment'));
+    expect(screen.queryByText('Apply changes to')).toBeNull();
+    fireEvent.click(screen.getByText('Confirm cancellation'));
+    await waitFor(() => expect(statusCall()).not.toBeNull());
+    expect(statusCall().scope).toBe('this_only');
+  });
+
   it('offers the three scopes on a recurring visit and defaults to this_only', async () => {
     render(<MobileAppointmentDetailSheet service={{ ...baseService, isRecurring: true }} onClose={() => {}} />);
     fireEvent.click(screen.getByText('Cancel appointment'));

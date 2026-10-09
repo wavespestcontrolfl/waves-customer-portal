@@ -165,18 +165,24 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
   const address = liveAddressLine(visit?.address);
   return (
     <header className="tech-visit-header">
-      <div>
+      <div className="tech-visit-header-text">
         <h2 id={titleId} className="tech-visit-title">{title}</h2>
         <p className="tech-visit-muted">
           {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
         </p>
         {address && <p className="tech-visit-muted">{address}</p>}
       </div>
-      {!done && onViewDetails && (
-        <Button variant="ghost" className="tech-visit-action" onClick={() => onViewDetails()} disabled={locked || dictationPending}>Details</Button>
-      )}
-      {!done && fullFormOffered && (
-        <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+      {/* Details and Full form share one group that wraps (stacks) on a narrow
+          phone, so neither is clipped beside the title and the close button. */}
+      {!done && (onViewDetails || fullFormOffered) && (
+        <div className="tech-visit-header-actions">
+          {onViewDetails && (
+            <Button variant="ghost" className="tech-visit-action" onClick={() => onViewDetails()} disabled={locked || dictationPending}>Details</Button>
+          )}
+          {fullFormOffered && (
+            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked || dictationPending}>Full form</Button>
+          )}
+        </div>
       )}
       <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={submitting} aria-label="Close">×</Button>
     </header>

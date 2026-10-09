@@ -1121,9 +1121,15 @@ export default function TechHomePage({ section = 'today' }) {
         <MobileAppointmentDetailSheet
           service={detailService}
           onClose={() => setDetailService(null)}
+          // Office-only controls stay hidden for a technician login: the
+          // server refuses series cancels, whole-route moves and card sends.
+          adminActions={staff?.role === 'admin'}
           // A move, cancel or billing change here lands on the route at once.
+          // A move only refreshes: the sheet closes itself after a clean move
+          // and keeps Quick Move open on a partial, not-texted or overlap
+          // result so its warning stays readable (as Dispatch does).
           onCancelled={() => { setDetailService(null); fetchSchedule(); }}
-          onRescheduled={() => { setDetailService(null); fetchSchedule(); }}
+          onRescheduled={() => { fetchSchedule(); }}
           onBillingChanged={() => { setDetailService(null); fetchSchedule(); }}
           // Complete from the details sheet: back into this visit's own sheet.
           onCompleteService={(svc) => {

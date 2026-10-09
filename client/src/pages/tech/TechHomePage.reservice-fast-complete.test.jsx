@@ -31,10 +31,11 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
   ),
 }));
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({
-  default: ({ service, onEdit }) => (
-    <div>
+  default: ({ service, onEdit, onRescheduled, adminActions }) => (
+    <div data-admin-actions={String(adminActions)}>
       Appointment details for {service.id}
       <button type="button" onClick={() => onEdit(service)}>Edit appointment</button>
+      <button type="button" onClick={() => onRescheduled(service)}>Moved with a warning</button>
     </div>
   ),
 }));
@@ -156,6 +157,12 @@ it('the sheet\'s Details opens the appointment details sheet here, and its Edit 
   fireEvent.click(screen.getByRole('button', { name: 'Sheet details' }));
   expect(await screen.findByText('Appointment details for svc-details')).toBeInTheDocument();
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
+  // The fixture login is a technician: the office-only controls stay hidden.
+  expect(screen.getByText('Appointment details for svc-details').closest('[data-admin-actions]').getAttribute('data-admin-actions')).toBe('false');
+  // A move refreshes the route but leaves the sheet up: the sheet closes itself
+  // after a clean move and keeps a partial or not-texted result readable.
+  fireEvent.click(screen.getByRole('button', { name: 'Moved with a warning' }));
+  expect(screen.getByText('Appointment details for svc-details')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Edit appointment' }));
   expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&date=2026-10-09&appointment=svc-details');
 });
