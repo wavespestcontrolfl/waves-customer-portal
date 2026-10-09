@@ -106,8 +106,8 @@ describe('fastCompleteReportEnabled', () => {
     db.raw = (sql) => sql;
     db.mockImplementation((table) => {
       if (!String(table).startsWith('scheduled_service_addons')) throw new Error('linked-project lookup is optional');
-      const qb = { leftJoin: () => qb, whereRaw: () => qb, select: () => qb, whereIn: (_col, ids) => { queried.push(ids); return qb; },
-        then: (res, rej) => Promise.resolve([{ scheduled_service_id: UUID_ADDON_VISIT, service_key: 'area_addon_fire_ant_yard' }]).then(res, rej) };
+      const qb = { leftJoin: () => qb, whereRaw: () => qb, orderBy: () => qb, select: () => qb, whereIn: (_col, ids) => { queried.push(ids); return qb; },
+        then: (res, rej) => Promise.resolve([{ scheduled_service_id: UUID_ADDON_VISIT, service_key: 'area_addon_fire_ant_yard', service_name: 'Fire Ant Yard Treatment' }]).then(res, rej) };
       return qb;
     });
     try {
@@ -117,6 +117,8 @@ describe('fastCompleteReportEnabled', () => {
         fastCompleteReportEnabled: false, lawnFastCompleteEnabled: false, fastCompleteRecapEnabled: false, typedReportFlowEnabled: false,
         reserviceFastCompleteEnabled: false, lawnReserviceFastCompleteEnabled: false, treeShrubFastCompleteEnabled: false,
         areaAddOnRowsAttached: true, areaAddOnKeys: ['area_addon_fire_ant_yard'],
+        // The host keeps its own lane; the list labels the add-on's product fields (name, sold area).
+        areaAddOns: [{ key: 'area_addon_fire_ant_yard', name: 'Fire Ant Yard Treatment', areaSqFt: null, tierSqFt: null, areaLabel: 'lawn', grassType: null }],
       });
       expect(map.get(UUID_PLAIN_VISIT)).toMatchObject({ fastCompleteReportEnabled: true, lawnFastCompleteEnabled: true });
       expect(map.get(UUID_PLAIN_VISIT).areaAddOnRowsAttached).toBeUndefined();

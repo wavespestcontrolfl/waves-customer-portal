@@ -257,3 +257,36 @@ describe('1. every other writer of visits and add-on rows', () => {
     expect(schedule).toContain('module.exports.updateVisitDetails = updateVisitDetails;');
   });
 });
+
+describe('3. the schedule feed lists each attached add-on with what it was sold for (host visits keep their own lane)', () => {
+  const VISIT = '7c1b0a5e-2f3d-4a6b-9c8d-0e1f2a3b4c5d';
+  const fakeFeed = (dbRows, { withScope = true } = {}) => {
+    const knex = () => {
+      const qb = { leftJoin: () => qb, whereIn: () => qb, orderBy: () => qb, select: () => qb, then: (res, rej) => Promise.resolve(dbRows).then(res, rej) };
+      return qb;
+    };
+    knex.schema = { hasColumn: async () => withScope };
+    return knex;
+  };
+
+  test('names, sold area, tier and grass come from the stored scope; a non-add-on row and a bad id are skipped', async () => {
+    const out = await rows.areaAddOnSoldByVisit(fakeFeed([
+      { scheduled_service_id: VISIT, service_key_snapshot: SPOT, service_name: 'Lawn Insect Spot Treatment', area_addon_scope: scopeFor(SPOT, { areaSqFt: 1200, tierSqFt: 2000, grassType: 'st_augustine' }) },
+      { scheduled_service_id: VISIT, service_key_snapshot: SWEEP, service_name: 'Web Sweep', area_addon_scope: null },
+      { scheduled_service_id: VISIT, service_key_snapshot: 'pest_quarterly', service_name: 'Quarterly Pest', area_addon_scope: null },
+    ]), [VISIT, 'not-a-uuid']);
+    expect(out.get(VISIT)).toEqual([
+      { key: SPOT, name: 'Lawn Insect Spot Treatment', areaSqFt: 1200, tierSqFt: 2000, areaLabel: 'treated lawn', grassType: 'st_augustine' },
+      { key: SWEEP, name: 'Web Sweep', areaSqFt: null, tierSqFt: null, areaLabel: null, grassType: null },
+    ]);
+    expect([...out.keys()]).toEqual([VISIT]);
+  });
+
+  test('before the scope column exists the list still answers, with no sold area; no ids means no query', async () => {
+    const out = await rows.areaAddOnSoldByVisit(fakeFeed([{ scheduled_service_id: VISIT, service_key_snapshot: SPOT, service_name: 'Lawn Insect Spot Treatment' }], { withScope: false }), [VISIT]);
+    expect(out.get(VISIT)).toEqual([expect.objectContaining({ key: SPOT, areaSqFt: null, tierSqFt: null })]);
+    const never = () => { throw new Error('no query expected'); };
+    never.schema = { hasColumn: never };
+    expect((await rows.areaAddOnSoldByVisit(never, ['x'])).size).toBe(0);
+  });
+});

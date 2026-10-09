@@ -38,25 +38,55 @@ export function isAreaAddOnVisit(service) {
 // A visit that carries area add-on work: it is an add-on itself, or it has an
 // add-on attached as a row (a same-trip add-on rides a normal pest or lawn visit;
 // the schedule feed sets `areaAddOnRowsAttached` and lists the catalog keys in
-// `areaAddOnKeys`). The lightweight completion flows (pest report flow, lawn /
-// re-service / Tree & Shrub Fast Complete) record no add-on product or treated
-// area, so such a visit takes the generic form.
+// `areaAddOnKeys`). The lightweight completion shortcuts (pest report flow, lawn /
+// re-service / Tree & Shrub Fast Complete, the voice fill) record no add-on product
+// or treated area, so a visit like that stays off them. This is the SHORTCUT rule
+// only: which completion form a visit takes is isAreaAddOnVisit (below).
 export function carriesAreaAddOnWork(service) {
   return isAreaAddOnVisit(service) || service?.areaAddOnRowsAttached === true;
 }
 
-// The visit applies a lawn-family add-on (everything except the web sweep, which
-// is pest control): its own key when the add-on is the visit, else an attached
-// row's. The generic form then asks for the treated area on a lawn product
-// (a broadcast or granular fire-ant or pre-emergent pass is recorded by area),
-// whatever line the host visit belongs to.
+// The add-on that IS the visit is lawn-family (everything except the web sweep,
+// which is pest control): its generic form asks for the treated square feet on a
+// broadcast or granular product ("Fire Ant Yard Treatment" reads as pest).
 const WEB_SWEEP_KEY = "area_addon_web_sweep";
-export function carriesLawnAreaAddOnWork(service) {
-  const keys = [
-    service?.completionProfile?.serviceKey, service?.serviceKey, service?.service_key_snapshot,
-    ...(Array.isArray(service?.areaAddOnKeys) ? service.areaAddOnKeys : []),
-  ];
-  return keys.some((key) => isAreaAddOnServiceKey(key) && key !== WEB_SWEEP_KEY);
+export function isChemicalAreaAddOnKey(key) {
+  return isAreaAddOnServiceKey(key) && key !== WEB_SWEEP_KEY;
+}
+function isChemicalAreaAddOnVisit(service) {
+  return [service?.completionProfile?.serviceKey, service?.serviceKey, service?.service_key_snapshot]
+    .some(isChemicalAreaAddOnKey);
+}
+
+// Only an appointment whose own service is an area add-on takes the generic
+// lane. A normal pest or lawn visit with add-on rows attached keeps its own full
+// completion form and gains the add-on fields beside it (AreaAddOnFields).
+export const LAWN_AREA_SERVICE_TYPE = "Lawn Care";
+
+// The attached add-ons a host visit gains fields for: [] for an add-on visit (its
+// own form is the generic one) and for a visit with none attached.
+export function hostAreaAddOns(service) {
+  if (isAreaAddOnVisit(service) || !Array.isArray(service?.areaAddOns)) return [];
+  return service.areaAddOns.filter((addOn) => isAreaAddOnServiceKey(addOn?.key));
+}
+
+// The service type a product row's application method and area requirement are
+// judged by. An add-on visit's rows follow the add-on's family; on a host visit
+// every row follows the host, except the rows recorded for a chemical add-on
+// (tagged `areaAddOnKey`), which are lawn-family work whatever line the host is.
+export function areaAddOnRowServiceType(service, ownServiceType, row) {
+  const lawnFamily = isAreaAddOnVisit(service) ? isChemicalAreaAddOnVisit(service) : isChemicalAreaAddOnKey(row?.areaAddOnKey);
+  return lawnFamily ? LAWN_AREA_SERVICE_TYPE : ownServiceType;
+}
+
+// What the estimate sold for an attached add-on, in plain words, or null (the web
+// sweep has no area): "Sold: up to 2,000 sq ft of bed area".
+export function soldAreaText(addOn) {
+  const tier = Number(addOn?.tierSqFt);
+  const area = Number(addOn?.areaSqFt);
+  const label = addOn?.areaLabel ? ` of ${addOn.areaLabel} area` : "";
+  if (tier > 0) return `Sold: up to ${tier.toLocaleString("en-US")} sq ft${label}`;
+  return area > 0 ? `Sold: about ${area.toLocaleString("en-US")} sq ft${label}` : null;
 }
 
 export const STANDALONE_VISIT = "standalone";

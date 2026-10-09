@@ -22,6 +22,7 @@
  * (a replayed accept, a second adoption) is skipped.
  */
 const logger = require('./logger');
+const { areaAddOnConfig } = require('./pricing-engine/constants');
 
 const AREA_ADDON_ENGINE_KEY = 'area_addon';
 const AREA_ADDON_KEY_PREFIX = 'area_addon_';
@@ -286,12 +287,47 @@ async function areaAddOnKeysByVisit(knex, visitIds = []) {
   return byVisit;
 }
 
+// What the completion screen shows beside a host visit's own form for each attached add-on:
+// its catalog key and name and what the estimate sold (the stored `area_addon_scope`). The
+// screen labels each add-on's product row with it. ONE batched read; the scope is read only
+// where the column exists, so an environment before migration 20261008230000 still answers.
+async function areaAddOnSoldByVisit(knex, visitIds = []) {
+  const byVisit = new Map();
+  const ids = [...new Set((Array.isArray(visitIds) ? visitIds : []).filter(Boolean).map(String))].filter((id) => UUID_RE.test(id));
+  if (!ids.length) return byVisit;
+  const withScope = await hasScopeColumn(knex, 'scheduled_service_addons');
+  const rows = await knex('scheduled_service_addons as a')
+    .leftJoin('services as s', 's.id', 'a.service_id')
+    .whereIn('a.scheduled_service_id', ids)
+    .orderBy('a.created_at', 'asc')
+    .orderBy('a.id', 'asc')
+    .select('a.scheduled_service_id', 'a.service_key_snapshot', 'a.service_name', 's.service_key', ...(withScope ? ['a.area_addon_scope'] : []));
+  for (const row of rows) {
+    const key = String(row.service_key_snapshot || row.service_key || '');
+    if (!key.startsWith(AREA_ADDON_KEY_PREFIX)) continue;
+    const scope = parseScope(row.area_addon_scope) || {};
+    const cfg = areaAddOnConfig({ service: AREA_ADDON_ENGINE_KEY, addOnKey: key.slice(AREA_ADDON_KEY_PREFIX.length) });
+    const num = (value) => (Number(value) > 0 ? Number(value) : null);
+    const id = String(row.scheduled_service_id);
+    byVisit.set(id, [...(byVisit.get(id) || []), {
+      key,
+      name: String(row.service_name || cfg?.name || '').slice(0, 120),
+      areaSqFt: num(scope.areaSqFt),
+      tierSqFt: num(scope.tierSqFt),
+      areaLabel: cfg?.areaLabel || null,
+      grassType: scope.grassType || null,
+    }]);
+  }
+  return byVisit;
+}
+
 async function visitHasAreaAddOnRows(knex, visitId) {
   return (await areaAddOnKeysByVisit(knex, [visitId])).has(String(visitId));
 }
 
 module.exports = {
   areaAddOnKeysByVisit,
+  areaAddOnSoldByVisit,
   visitHasAreaAddOnRows,
   writeAdoptedAreaAddOns,
   bookedVisitMinutes,

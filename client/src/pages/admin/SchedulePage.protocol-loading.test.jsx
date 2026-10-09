@@ -280,6 +280,13 @@ describe("area add-on visits are generic work, whatever their name says", () => 
     expect(new Set(lines)).toEqual(new Set(["general"]));
   });
 
+  it("a lawn visit with an add-on row attached still loads the lawn program (only an add-on visit is generic)", async () => {
+    const host = { ...service, serviceType: "Lawn Care", completionProfile: { serviceKey: "lawn", category: "lawn_care", findingsType: null }, areaAddOnRowsAttached: true, areaAddOnKeys: ["area_addon_fire_ant_yard"] };
+    await act(async () => { render(<ProtocolPanel service={host} onClose={() => {}} />); });
+    await waitFor(() => expect(paths().some((path) => path.endsWith("/turf-profile"))).toBe(true));
+    expect(paths().some((path) => path.endsWith("/programs"))).toBe(true);
+  });
+
   it("the same lawn name on an ordinary lawn visit still loads the lawn program", async () => {
     await act(async () => { render(<ProtocolPanel service={{ ...service, serviceType: "Lawn Insect Control" }} onClose={() => {}} />); });
     await waitFor(() => expect(paths().some((path) => path.endsWith("/turf-profile"))).toBe(true));

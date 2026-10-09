@@ -45,8 +45,9 @@ function lawnFastCompleteOffered(completionProfile) {
 // A visit that carries an attached area add-on row (a same-trip add-on rides a normal
 // pest or lawn visit as a scheduled_service_addons row) has work the lightweight flows
 // cannot record: its product and treated area. Every lightweight flow is off for it and
-// the generic completion form is the way in. One batched read per feed
-// (areaAddOnKeysByVisit). The flags are a hint: each sheet's context route re-reads
+// the visit's own full completion form is the way in (a host keeps its lawn or pest lane
+// and gains the add-on's product fields; only an add-on that IS the visit is generic). One batched read per feed
+// (areaAddOnSoldByVisit). The flags are a hint: each sheet's context route re-reads
 // the rows (resolveEligibility fails closed) and is the authority, so a failed read
 // here is logged and leaves the flags as they were.
 const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
@@ -58,7 +59,7 @@ const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
 });
 async function areaAddOnVisitIdsForFeed(serviceIds) {
   try {
-    return await areaAddOnRows.areaAddOnKeysByVisit(db, serviceIds);
+    return await areaAddOnRows.areaAddOnSoldByVisit(db, serviceIds);
   } catch (e) {
     logger.warn(`[schedule] area add-on row lookup failed: ${e.message}`);
     return new Map();
@@ -5277,8 +5278,10 @@ async function loadProjectCompletionContextByServiceId(services) {
       // look project-free and complete on its own record.
       linkedProjectLookupFailed,
     };
-    const addOnKeys = addOnVisitIds.get(String(service.id));
-    return [service.id, addOnKeys ? { ...entry, ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOnKeys: addOnKeys } : entry];
+    const addOns = addOnVisitIds.get(String(service.id));
+    // The keys keep the lightweight flows off; the list (name, sold area) labels each add-on's
+    // product row on the host visit's own completion form.
+    return [service.id, addOns ? { ...entry, ...LIGHT_COMPLETION_FLOWS_OFF, areaAddOnKeys: [...new Set(addOns.map((a) => a.key))], areaAddOns: addOns } : entry];
   }));
   return new Map(entries);
 }
@@ -6391,6 +6394,7 @@ router.get('/', async (req, res, next) => {
         lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
         areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
         areaAddOnKeys: projectCompletionContext.areaAddOnKeys || [],
+        areaAddOns: projectCompletionContext.areaAddOns || [],
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_RECAP — see loadProjectCompletionContextByServiceId.
         fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
@@ -7024,6 +7028,7 @@ router.get('/week', async (req, res, next) => {
           lawnFastCompleteEnabled: projectCompletionContext.lawnFastCompleteEnabled === true,
           areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
           areaAddOnKeys: projectCompletionContext.areaAddOnKeys || [],
+          areaAddOns: projectCompletionContext.areaAddOns || [],
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
           fastCompleteReportEnabled: projectCompletionContext.fastCompleteReportEnabled === true,

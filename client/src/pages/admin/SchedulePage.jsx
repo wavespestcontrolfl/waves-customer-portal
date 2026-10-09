@@ -90,7 +90,8 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
-import { carriesAreaAddOnWork, carriesLawnAreaAddOnWork } from "../../lib/areaAddOns";
+import { areaAddOnRowServiceType, isAreaAddOnVisit } from "../../lib/areaAddOns";
+import AreaAddOnFields from "../../components/admin/AreaAddOnFields";
 import { productDimension } from "../../lib/fast-complete-products";
 import { DOSE_UNITS, doseText, injectionBasis, injectionLabelRate, injectionLabelText, injectionRecordView, parseDose, quantityOf, pickedBand, recordForProduct, recordWithBand, trunkInchesText, typedDraft } from "../../lib/injection-dose";
 import {
@@ -942,15 +943,17 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
   termite: "termite",
 };
 
-// An area add-on visit (GATE_AREA_ADDONS), or a visit with an add-on row attached, is generic work. The name
+// An appointment whose own service is an area add-on (GATE_AREA_ADDONS) is generic work. The name
 // reads "lawn" for "Lawn Insect Spot Treatment" and "pest" for "Web Sweep", and
-// neither takes that line's completion form: the visit's catalog key decides.
+// neither takes that line's completion form: the visit's catalog key decides. A normal
+// pest or lawn visit with add-on rows attached keeps its own lane (AreaAddOnFields adds the
+// add-on's product beside it); only the lightweight shortcuts stay off for it.
 const AREA_ADDON_LINE = "general";
 function visitServiceCategory(service, serviceType) {
-  return carriesAreaAddOnWork(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : detectServiceCategory(serviceType);
 }
 function visitServiceLine(service, serviceType) {
-  return carriesAreaAddOnWork(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
 }
 
 function detectServiceCategory(serviceType) {
@@ -10394,7 +10397,7 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
 // covers two areas, so it records no single shared coverage (null) and its
 // products and findings keep their own areas.
 function propertyAreaLineFor(service) {
-  if (carriesAreaAddOnWork(service)) return null;
+  if (isAreaAddOnVisit(service)) return null;
   const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
   const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
   return raw === normalized ? normalized : null;
@@ -13588,10 +13591,12 @@ export function CompletionPanel({
   // compliance gate still requires its own completion photos (T&S needs >=2),
   // so keep the uploader whenever any companion is present.
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
-  // A lawn-family area add-on (own visit or attached row) is recorded by area on a lawn
-  // product, whatever line the host visit belongs to ("Fire Ant Yard Treatment" reads as pest).
+  // A lawn-family area add-on that IS the visit is recorded by area on a lawn product ("Fire Ant
+  // Yard Treatment" reads as pest). On a host visit, only the rows recorded for a chemical add-on
+  // are lawn-family (typeFor); every other row keeps the host's own type.
   const ownServiceType = service?.serviceType || service?.service_type || "";
-  const serviceTypeForArea = carriesLawnAreaAddOnWork(service) ? "Lawn Care" : ownServiceType;
+  const serviceTypeForArea = areaAddOnRowServiceType(service, ownServiceType, null);
+  const typeFor = (row) => areaAddOnRowServiceType(service, ownServiceType, row);
   const calibrationRequired = isLawn && !!service.waveguardTier;
   // Advisory inventory posture is member-tier only — mirrors the server's
   // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets
@@ -14615,7 +14620,7 @@ export function CompletionPanel({
       !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
-      (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
+      (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product))),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
@@ -15822,7 +15827,7 @@ export function CompletionPanel({
     setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
-            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            const normalized = normalizeProductArea(product, typeFor(product));
             // Bed bug: a pre-migration draft carries the old inferred
             // perimeter default — reclassify it to the interior default so
             // a restored draft can't demand perimeter footage or record
@@ -17064,7 +17069,7 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
-        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationMethod: productApplicationMethod(p, typeFor(p)),
         applicationArea:
           p.applicationArea ||
           (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
@@ -17273,6 +17278,8 @@ export function CompletionPanel({
   // whole-lawn broadcast quantity: only a broadcast method takes it; any other
   // method on a lawn visit (a soil drench, spot work) stays manual.
   function productUsesPropertyArea(product, applicationMethod) {
+    // An add-on's product is entered with the area the add-on was sold for, never the host line's property area.
+    if (product.areaAddOnKey) return false;
     if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
     return !!propertyAreaKey
       && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
@@ -17287,12 +17294,14 @@ export function CompletionPanel({
     // default falls to 'perimeter_spray' and wrongly demands linear
     // footage for an interior placement. Passed in by the protocol
     // completion-defaults seed only; every other caller is unaffected.
+    // A product recorded for a chemical add-on carries its key (areaAddOnKey) and is judged lawn-family.
+    const rowType = typeFor(product);
     const applicationMethod = applicationMethodOverride
-      || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
+      || defaultApplicationMethod(product, rowType, { interiorLane: isBedBugVisit });
     const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
-      serviceTypeForArea, false, !!currentPropertyAreas && productUsesServiceArea,
+      rowType, false, !!currentPropertyAreas && productUsesServiceArea,
     );
     // Shared rate-prefill decision (lib/product-rate-prefill.js) — the same
     // resolver ServiceRecapModal uses, so both completion paths prefill
@@ -17306,7 +17315,7 @@ export function CompletionPanel({
       labelMaxRate,
     } = resolveRatePrefill(product, {
       applicationMethod,
-      serviceLine: serviceLineFromType(serviceTypeForArea),
+      serviceLine: serviceLineFromType(rowType),
     });
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
@@ -17394,9 +17403,10 @@ export function CompletionPanel({
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
+        areaAddOnKey: product.areaAddOnKey,
         areaValue: prefillArea,
         propertyServiceAreaField: !!currentPropertyAreas && productUsesServiceArea,
-        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, serviceTypeForArea, false, true)?.unit === "sqft"
+        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, rowType, false, true)?.unit === "sqft"
           ? { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId ?? null, kind: propertyAreaKey, pending: !currentPropertyAreas } : null,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
@@ -17445,14 +17455,24 @@ export function CompletionPanel({
     setSelectedProducts((prev) =>
       prev.map((p) => {
         const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
+          productApplicationMethod(p, typeFor(p)),
+          typeFor(p),
         );
         if (areaRequirement?.unit !== "linear_ft") return p;
         if (Number(p.areaValue) > 0) return p;
         return { ...p, areaValue: rounded, areaUnit: "linear_ft" };
       }),
     );
+  }
+  // Records a chemical area add-on's product on a host visit (AreaAddOnFields): an ordinary product
+  // row tagged with the add-on, so its method and treated area follow the lawn rules (typeFor)
+  // whatever line the host visit is, and the server saves it like any other application row.
+  function addAreaAddOnProduct(product, addOn) {
+    if (generating) return;
+    invalidateGeneratedReportOnTypedEdit();
+    lawnDefaultMixSeededRef.current = true;
+    const row = buildSelectedProduct({ ...product, areaAddOnKey: addOn.key });
+    setSelectedProducts((prev) => [...prev.filter((p) => p.productId !== row.productId), row]);
   }
   function removeProduct(productId) {
     if (generating) return;
@@ -17531,7 +17551,7 @@ export function CompletionPanel({
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
-            serviceTypeForArea, false, next.propertyServiceAreaField,
+            typeFor(next), false, next.propertyServiceAreaField,
           );
           if (areaRequirement) {
             if (next.areaUnit && next.areaUnit !== areaRequirement.unit) {
@@ -17556,8 +17576,8 @@ export function CompletionPanel({
           }
         } else if (field === "areaValue") {
           const areaRequirement = requiredApplicationArea(
-            productApplicationMethod(next, serviceTypeForArea),
-            serviceTypeForArea,
+            productApplicationMethod(next, typeFor(next)),
+            typeFor(next),
             governed, next.propertyServiceAreaField,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
@@ -18506,8 +18526,8 @@ export function CompletionPanel({
     }
       const missingRequiredAreaProduct = selectedProducts.find((p) => {
         const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(p, serviceTypeForArea),
-          serviceTypeForArea,
+          productApplicationMethod(p, typeFor(p)),
+          typeFor(p),
         );
       if (!areaRequirement) return false;
       const value = Number(p.areaValue);
@@ -18515,8 +18535,8 @@ export function CompletionPanel({
     });
     if (!isIncompleteVisit && missingRequiredAreaProduct) {
         const areaRequirement = requiredApplicationArea(
-          productApplicationMethod(missingRequiredAreaProduct, serviceTypeForArea),
-          serviceTypeForArea,
+          productApplicationMethod(missingRequiredAreaProduct, typeFor(missingRequiredAreaProduct)),
+          typeFor(missingRequiredAreaProduct),
         );
       alert(`Enter ${areaRequirement.alertLabel} for ${missingRequiredAreaProduct.name}.`);
       return;
@@ -18634,7 +18654,7 @@ export function CompletionPanel({
             ...(p.amountUnit === "tsp"
               ? submittedAmount(p.totalAmount, p.amountUnit)
               : { totalAmount: p.totalAmount, amountUnit: p.amountUnit }),
-            applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+            applicationMethod: productApplicationMethod(p, typeFor(p)),
           applicationArea:
             p.applicationArea ||
             (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
@@ -19302,7 +19322,7 @@ export function CompletionPanel({
       // cannot survive beside a newer application measurement.
       selectedProducts.map((p) => [
         p.productId, p.name, p.rate || null, p.rateUnit || null,
-        productApplicationMethod(p, serviceTypeForArea),
+        productApplicationMethod(p, typeFor(p)),
         p.applicationArea || null, p.areaValue ?? null, p.areaUnit || null,
         Array.isArray(p.targets) ? p.targets : [],
       ]),
@@ -21100,6 +21120,16 @@ export function CompletionPanel({
                 />
               );
             })}
+            <AreaAddOnFields
+              service={service}
+              selectedProducts={selectedProducts}
+              products={products}
+              onAddProduct={addAreaAddOnProduct}
+              disabled={generating}
+              colors={{ text: M.ink, muted: M.ink3, border: M.hairline }}
+              selectStyle={mSelect}
+              labelStyle={eyebrowStyle}
+            />
             {/* Products applied */}
             <Field label="Products applied">
               {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -21367,7 +21397,7 @@ export function CompletionPanel({
                         );
                       })()}
                       <select
-                        value={productApplicationMethod(sp, serviceTypeForArea)}
+                        value={productApplicationMethod(sp, typeFor(sp))}
                         onChange={(e) =>
                           updateProduct(
                             sp.productId,
@@ -21398,8 +21428,8 @@ export function CompletionPanel({
                       </select>
                       {(() => {
                         const areaRequirement = requiredApplicationArea(
-                          productApplicationMethod(sp, serviceTypeForArea),
-                          serviceTypeForArea,
+                          productApplicationMethod(sp, typeFor(sp)),
+                          typeFor(sp),
                           lawnDefaultsEnabled, sp.propertyServiceAreaField,
                         );
                         if (!areaRequirement) return null;
@@ -23562,6 +23592,16 @@ export function CompletionPanel({
               />
             );
           })}
+          <AreaAddOnFields
+            service={service}
+            selectedProducts={selectedProducts}
+            products={products}
+            onAddProduct={addAreaAddOnProduct}
+            disabled={generating}
+            colors={{ text: D.text, muted: D.muted, border: D.border }}
+            selectStyle={inputStyle}
+            labelStyle={labelStyle}
+          />
           {/* Products Applied */}
           <label style={labelStyle}>Products Applied</label>
           {protocolCompletionDefaults?.holds?.map(hold => <p key={hold.name} style={{ fontSize: 14, color: D.muted, margin: '0 0 8px' }}>{hold.name}: {hold.reason}</p>)}
@@ -23825,7 +23865,7 @@ export function CompletionPanel({
                     );
                   })()}
                   <select
-                    value={productApplicationMethod(sp, serviceTypeForArea)}
+                    value={productApplicationMethod(sp, typeFor(sp))}
                     onChange={(e) =>
                       updateProduct(
                         sp.productId,
@@ -23855,8 +23895,8 @@ export function CompletionPanel({
                   </select>
                   {(() => {
                     const areaRequirement = requiredApplicationArea(
-                      productApplicationMethod(sp, serviceTypeForArea),
-                      serviceTypeForArea,
+                      productApplicationMethod(sp, typeFor(sp)),
+                      typeFor(sp),
                       lawnDefaultsEnabled, sp.propertyServiceAreaField,
                     );
                     if (!areaRequirement) return null;
