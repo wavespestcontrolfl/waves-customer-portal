@@ -981,7 +981,7 @@ describe('replay extraction gets the call facts production gives the extractor',
     const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
     const at = src.indexOf('CRP._test.extractCallDataV2(transcriptForExtraction');
     expect(src.slice(at, at + 300)).toMatch(/\.\.\.callFacts,/);
-    expect(src).toMatch(/productionCallFacts\(\{ call, contactPhone, bookableServices, CRP, db, callStart: new Date\(extractionCallStart\) \}\)/);
+    expect(src).toMatch(/productionCallFacts\(\{ call, contactPhone, bookableServices, CRP, db, callStart: new Date\(extractionCallStart\), storedExtractedAt: priorV2\?\.meta\?\.extracted_at \|\| null \}\)/);
   });
 
   test('catalog names, caller-ID name, direction and the prior call are passed the way production builds them', async () => {
@@ -1021,9 +1021,33 @@ describe('replay extraction gets the call facts production gives the extractor',
     const relinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-old', at: '2026-09-12T10:00:00Z' } } };
     const none = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, null), db: 'DB', callStart });
     expect(none.knownCaller).toBeNull();
-    const src = require('fs').readFileSync(require.resolve('../scripts/replay-call-extraction-variance'), 'utf8');
-    const at = src.indexOf('async function productionCallFacts');
-    expect(src.slice(at, at + 1500)).not.toContain('resolveKnownCallerCustomer');
+  });
+
+  test('an override the stored extraction was made AFTER (a reprocess) is the prompt customer (codex #6214 r2 P1)', async () => {
+    const chosen = { ...customer('2026-01-05T12:00:00Z'), id: 'cust-chosen', first_name: 'Sam' };
+    const relinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-chosen', at: '2026-09-12T10:00:00Z' } } };
+    const crp = { ...fakeCRP(null, customer('2026-01-05T12:00:00Z')), resolveKnownCallerCustomer: jest.fn(async () => chosen) };
+    const facts = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: 'DB', callStart, storedExtractedAt: '2026-09-12T10:05:00Z' });
+    expect(facts.knownCaller).toEqual(CRP._test.summarizeKnownCaller(chosen));
+    expect(crp.resolveKnownCallerCustomer).toHaveBeenCalledWith(relinked, '+19415550100', { db: 'DB' });
+    expect(crp._test.findCustomerForCallContact).not.toHaveBeenCalled();
+
+    // An unlink before the reprocess: that pass had no known caller.
+    const unlinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: null, at: '2026-09-12T10:00:00Z' } } };
+    const crp2 = { ...fakeCRP(null, customer('2026-01-05T12:00:00Z')), resolveKnownCallerCustomer: jest.fn(async () => null) };
+    const none = await productionCallFacts({ call: unlinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp2, db: 'DB', callStart, storedExtractedAt: '2026-09-12T10:05:00Z' });
+    expect(none.knownCaller).toBeNull();
+  });
+
+  test('an override set after the stored extraction, or with no usable time, never reaches the prompt', async () => {
+    const phone = customer('2026-01-05T12:00:00Z');
+    for (const [at, storedExtractedAt] of [['2026-09-12T10:00:00Z', '2026-09-10T14:06:00Z'], ['2026-09-12T10:00:00Z', null], [undefined, '2026-09-12T10:05:00Z'], ['not a date', '2026-09-12T10:05:00Z']]) {
+      const relinked = { ...call, metadata: JSON.stringify({ ...call.metadata, customer_link_override: { customer_id: 'cust-old', at } }) };
+      const crp = { ...fakeCRP(null, phone), resolveKnownCallerCustomer: jest.fn(async () => ({ ...phone, id: 'cust-old' })) };
+      const facts = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: 'DB', callStart, storedExtractedAt });
+      expect(crp.resolveKnownCallerCustomer).not.toHaveBeenCalled();
+      expect(facts.knownCaller.id).toBe(phone.id);
+    }
   });
 
   test('a failed phone lookup degrades to no known caller', async () => {

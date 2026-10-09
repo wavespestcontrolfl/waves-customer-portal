@@ -1319,15 +1319,29 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
 // production's prompt for that call had no known caller: telling the model
 // "existing customer" would change the answer the review recorded.
 //
-// An operator's link or unlink (metadata.customer_link_override) is ignored here
-// (codex #6214 r1 P1): staff set it on the admin page AFTER the call was
-// extracted, so the prompt the review judged never carried it. Linking an old
-// customer later would pass the predates-call test and add a known caller the
-// extraction never saw; a later unlink would hide one it did see. The prompt's
-// customer is the phone lookup, which is what the first pass ran. The routing
-// context below keeps the override: it replays today's routing decision.
-async function productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart }) {
-  const linkedCustomer = await CRP._test.findCustomerForCallContact(contactPhone, {}, { db }).catch(() => null);
+// An operator's link or unlink (metadata.customer_link_override) is stamped on
+// the admin page with its own time. It counts for the prompt only when the
+// stored extraction was made AFTER it (a reprocess, which honors the override
+// in Step 2). An override set after the stored extraction never reached that
+// prompt: linking an old customer later would pass the predates-call test and
+// add a known caller the extraction never saw, and a later unlink would hide
+// one it did see (codex #6214 r1 and r2 P1). With no usable times the phone
+// lookup, which is what a pass without an override runs, is used. The routing
+// context below always keeps the override: it replays today's routing decision.
+function overrideReachedStoredExtraction(call, storedExtractedAt) {
+  let metadata = call?.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const override = metadata?.customer_link_override;
+  if (!override || typeof override !== 'object' || !('customer_id' in override)) return false;
+  const overrideMs = override.at ? new Date(override.at).getTime() : NaN;
+  const extractedMs = storedExtractedAt ? new Date(storedExtractedAt).getTime() : NaN;
+  return Number.isFinite(overrideMs) && Number.isFinite(extractedMs) && overrideMs < extractedMs;
+}
+
+async function productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart, storedExtractedAt = null }) {
+  const linkedCustomer = await (overrideReachedStoredExtraction(call, storedExtractedAt)
+    ? CRP.resolveKnownCallerCustomer(call, contactPhone, { db })
+    : CRP._test.findCustomerForCallContact(contactPhone, {}, { db })).catch(() => null);
   const startMs = callStart instanceof Date ? callStart.getTime() : NaN;
   const createdMs = linkedCustomer?.created_at ? new Date(linkedCustomer.created_at).getTime() : NaN;
   const predatesCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
@@ -1471,7 +1485,7 @@ async function replayCall(call, context) {
   const extractionCallStart = require('../utils/call-timeline').callStartedAt(call)
     || (call.created_at && !isNaN(new Date(call.created_at)) ? new Date(call.created_at) : new Date());
   const callFacts = transcriptForExtraction
-    ? await productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart: new Date(extractionCallStart) })
+    ? await productionCallFacts({ call, contactPhone, bookableServices, CRP, db, callStart: new Date(extractionCallStart), storedExtractedAt: priorV2?.meta?.extracted_at || null })
     : null;
   const startedAt = Date.now();
   const current = transcriptForExtraction
