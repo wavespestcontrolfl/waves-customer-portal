@@ -853,7 +853,11 @@ gate is off, the visit is a missed visit, or the move history cannot be read. `P
 answers `409 { code: 'MOVE_LIMIT' }` for a date past an applied limit or a
 blocked first visit, after its idempotent replay; the client reloads.
 `find-slots` answers `409 { code: 'MOVE_LIMIT', reason: 'move_limit' }` for a
-blocked first visit, and the client reloads there too.
+blocked first visit, and the client reloads there too. The commit route's
+`SLOT_TAKEN` refresh reads the visit again first: when its date, start or
+status changed since the request loaded it (another tab moved, rebooked or
+closed it), the answer is `409 SCOPE_CHANGED` and the page reloads (only
+while this gate is set).
 
 Reschedule GET `nextVisit` (owner 2026-10-09; `GATE_RESCHEDULE_NEXT_VISIT_DATE`,
 dark, read at call time in `routes/reschedule-public.js`): `GET

@@ -310,6 +310,29 @@ describe('reschedule-public wiring', () => {
     expect(out.payload.moveLimit.laterByOffice).toBe(false);
   });
 
+  test('visitChangedSince: another date, start or status, or an unreadable visit, is a change', async () => {
+    const { visitChangedSince } = router._test;
+    const svc = { id: 'svc-1', scheduled_date: '2026-10-15', window_start: '09:00:00', status: 'confirmed' };
+    let row;
+    const database = () => {
+      const chain = { leftJoin: () => chain, where: () => chain, first: async () => row };
+      return chain;
+    };
+    database.raw = (sql) => sql;
+    const answer = (next) => { row = next; };
+    answer({ ...svc, window_start: '09:00' });
+    expect(await visitChangedSince(svc, database)).toBe(false);
+    answer({ ...svc, scheduled_date: '2026-10-22' });
+    expect(await visitChangedSince(svc, database)).toBe(true);
+    answer({ ...svc, window_start: '13:00:00' });
+    expect(await visitChangedSince(svc, database)).toBe(true);
+    answer({ ...svc, status: 'cancelled' });
+    expect(await visitChangedSince(svc, database)).toBe(true);
+    answer(undefined);
+    expect(await visitChangedSince(svc, database)).toBe(true);
+    expect(await visitChangedSince(svc, () => { throw new Error('db down'); })).toBe(true);
+  });
+
   test('GET and the search read one verdict: a blocked first visit is not reschedulable (move_limit) before any build', () => {
     const fold = src.slice(src.indexOf('async function pageEligibilityWithLimit(svc) {'));
     expect(fold.slice(0, 500)).toMatch(/blocked \? \{ ok: false, reason: 'move_limit', code: 'MOVE_LIMIT' \} : elig/);
@@ -343,10 +366,13 @@ describe('reschedule-public wiring', () => {
     const taken = src.slice(src.indexOf('const slotTakenResponse = async () => {'));
     const body = taken.slice(0, taken.indexOf('// Anti-forgery'));
     expect(body).toMatch(/applyMoveLimit\(limit, refreshed, refreshed, range\)/);
-    // Another tab may have moved the visit: the refresh reads it again and
-    // hands a now-blocked visit to the office.
-    expect(body).toMatch(/const current = \(await loadById\(svc\.id\)\.catch\(\(\) => null\)\) \|\| svc;/);
-    expect(body).toMatch(/loadMoveLimit\(current, elig\);\s*if \(blocked\) return res\.status\(409\)\.json\(\{ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' \}\);/);
-    expect(body).toMatch(/\.\.\.limited\.payload/);
+    // Another tab may have changed the visit: the refresh reads it again and
+    // answers SCOPE_CHANGED (the page reloads) before it uses any old state.
+    const changed = body.indexOf('if (moveLimits.moveLimitsEnabled() && await visitChangedSince(svc)) {');
+    const limitRead = body.indexOf('await loadMoveLimit(svc, elig)');
+    expect(changed).toBeGreaterThan(-1);
+    expect(body.slice(changed, changed + 400)).toMatch(/code: 'SCOPE_CHANGED'/);
+    expect(limitRead).toBeGreaterThan(changed);
+    expect(body).toMatch(/if \(blocked\) return res\.status\(409\)\.json\(\{ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' \}\);/);
   });
 });

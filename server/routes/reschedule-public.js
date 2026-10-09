@@ -195,6 +195,18 @@ function applyMoveLimit(limit, full, shown, range) {
   return moveLimits.applyLimit(limit, full, shown, { rangeTo: range.rangeTo });
 }
 
+// True when the visit is not on the date, start and status this request
+// loaded it with (another tab moved, rebooked or closed it), or cannot be
+// read again.
+async function visitChangedSince(svc, database = db) {
+  let current = null;
+  try { current = await loadById(svc.id, database); } catch { /* unreadable = changed */ }
+  return !current
+    || apptDateStr(current.scheduled_date) !== apptDateStr(svc.scheduled_date)
+    || hhmm(current.window_start) !== hhmm(svc.window_start)
+    || current.status !== svc.status;
+}
+
 // Confirm: true when a move limit refuses this move to `date` (a blocked
 // first visit, or a date past a late-move limit that applies).
 async function moveLimitRefuses(svc, elig, range, config, date) {
@@ -914,21 +926,31 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // any other code falls through to a bare error line with the stale
     // slot still selected).
     const slotTakenResponse = async () => {
-      // The slot can be gone because another tab just moved this visit. Read
-      // the visit again, so the move limit is judged against where it is now:
-      // a visit that became blocked reloads into the text-or-call card.
-      const current = (await loadById(svc.id).catch(() => null)) || svc;
-      const { limit, blocked } = await loadMoveLimit(current, elig);
+      // The slot can be gone because another tab just moved, rebooked or
+      // closed this visit. Then nothing this request holds (the visit row,
+      // its verdict, its move limit) is current, and patching the page from
+      // it would mix old and new state. Read the visit again; when its date,
+      // start or status changed, answer SCOPE_CHANGED: the page reloads and
+      // GET gives the one current answer. An unchanged visit keeps `svc` and
+      // `elig`, which are then still true.
+      // Only with the move-limit gate set: unset, this path is unchanged.
+      if (moveLimits.moveLimitsEnabled() && await visitChangedSince(svc)) {
+        return res.status(409).json({
+          error: 'The scheduling details for your plan just updated — please review the latest options.',
+          code: 'SCOPE_CHANGED',
+        });
+      }
+      const { limit, blocked } = await loadMoveLimit(svc, elig);
       if (blocked) return res.status(409).json({ error: MOVE_LIMIT_MESSAGE, code: 'MOVE_LIMIT' });
       let refreshed = null;
       try {
-        refreshed = await buildAvailabilityForService(current, { ...range, config });
+        refreshed = await buildAvailabilityForService(svc, { ...range, config });
       } catch (err) {
         logger.warn(`[reschedule-public] refresh availability failed for ${svc.id}: ${err.message}`);
       }
       const limited = applyMoveLimit(limit, refreshed, refreshed, range);
       refreshed = limited.availability;
-      const nextVisit = refreshed ? await loadNextVisitShift(current, refreshed) : null;
+      const nextVisit = refreshed ? await loadNextVisitShift(svc, refreshed) : null;
       return res.status(409).json({
         error: 'That time is no longer open. Here are the latest available times.',
         code: 'SLOT_TAKEN',
@@ -1257,6 +1279,7 @@ router._test = {
   nextVisitDisclosureMismatch,
   applyMoveLimit,
   moveLimitRefuses,
+  visitChangedSince,
   pageEligibilityWithLimit,
   MOVE_LIMIT_MESSAGE,
   eligibility,
