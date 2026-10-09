@@ -335,6 +335,7 @@ describe('Details (owner 2026-10-09: every Fast Complete sheet)', () => {
     const { rerender } = mount('op-1', { onViewDetails: vi.fn() });
     await screen.findByTestId('pest-part');
     click('pest save');
+    await waitFor(() => expect(screen.getByTestId('pest-part')).toHaveTextContent('ok 1'));
     const props = { visitId: 'visit', pest: { service: PEST }, lawn: { service: LAWN }, request: vi.fn(), operatorId: 'op-1', catalog: [], onClose, onSaved, onFullForm, onViewDetails: vi.fn() };
     rerender(<FastCompleteComboSheet {...props} suspended />);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
