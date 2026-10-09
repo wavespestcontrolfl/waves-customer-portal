@@ -35,7 +35,7 @@ function deps(rows, extra = {}) {
     dayHours: { DAY_START_HOUR: 8, DAY_END_HOUR: 17 },
     customerName: jest.fn(async () => 'Test Person'),
     raiseAdminAlert: jest.fn(async () => ({ notification: { id: 'n1' } })),
-    standingKeys: jest.fn(async () => []),
+    episodes: { openAdminAlertKeys: jest.fn(async () => []), closeAdminAlertKeys: jest.fn(async () => 1) },
     ...extra,
   };
 }
@@ -53,7 +53,7 @@ describe('auto-dispatch rain pass', () => {
   test('an outdoor visit in rain gets one notice that names the nearest dry open hour and passes the admin-alert rule', async () => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
     const d = deps([stop()]);
-    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 1, wet: 1, noticed: 1, deferred: 0 });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 1, wet: 1, noticed: 1, deferred: 0, closed: 0 });
     expect(d.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [category, spec, opts] = d.raiseAdminAlert.mock.calls[0];
     expect(category).toBe('schedule');
@@ -65,7 +65,10 @@ describe('auto-dispatch rain pass', () => {
     expect(opts.dedupeKey).toBe(`rain-pass:visit-1:${D1}:14:00`);
     // A later run rewrites the standing notice (a new chance, a new dry hour) and never rings it again.
     expect(opts.refreshOnDedupe).toBe(true);
-    expect(opts.ringOnRefresh()).toBe(false);
+    expect(opts.ringOnRefresh({}, { autoCleared: false })).toBe(false);
+    // The one refresh that rings: the pass closed the notice as dry and the rain is back.
+    expect(opts.ringOnRefresh({}, { autoCleared: true })).toBe(true);
+    expect(opts.dedupeVersion).toBe(`run:${NOW.toISOString()}`);
     // The relevance sweep reads these to close the notice when the visit moves.
     expect(opts.metadata).toMatchObject({ scheduledServiceId: 'visit-1', scheduled_date: D1, window_start: '14:00', proposed_start: '10:00' });
   });
@@ -141,11 +144,28 @@ describe('auto-dispatch rain pass', () => {
   test('a storm rings at most ten new notices a run; a standing notice is rewritten outside the budget', async () => {
     process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
     const rows = Array.from({ length: 13 }, (_, i) => stop({ id: `visit-${i}` }));
-    const d = deps(rows, { standingKeys: jest.fn(async () => [`rain-pass:visit-12:${D1}:14:00`]) });
+    const d = deps(rows);
+    d.episodes.openAdminAlertKeys = jest.fn(async () => [`rain-pass:visit-12:${D1}:14:00`]);
     d.raiseAdminAlert = jest.fn(async (_category, _spec, opts) => (opts.dedupeKey.includes('visit-12:')
       ? { notification: { id: 'old' }, deduped: true, refreshed: true, rung: false } : { notification: { id: 'new' } }));
-    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 13, wet: 13, noticed: 10, deferred: 2 });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 13, wet: 13, noticed: 10, deferred: 2, closed: 0 });
+    // The standing notice is rewritten with no version: only its content can change it.
+    expect(d.raiseAdminAlert.mock.calls.find(([, , opts]) => opts.dedupeKey.includes('visit-12:'))[2].dedupeVersion).toBeUndefined();
     expect(d.raiseAdminAlert).toHaveBeenCalledTimes(11);
+  });
+
+  test('a standing notice is closed when every hour of its visit reads dry, and kept when an hour has no reading', async () => {
+    process.env.GATE_AUTO_DISPATCH_RAIN_PASS = 'true';
+    const key = (id) => `rain-pass:${id}:${D1}:14:00`;
+    const allDry = hourlyFor([]);
+    const d = deps([stop(), stop({ id: 'visit-2' })], {
+      // visit-2's point has no reading for 15:00.
+      hourlyRain: jest.fn(async (lat) => (lat === 2 ? allDry.filter((h) => !h.startTime.startsWith(`${D1}T15`)) : allDry)),
+      visitPoint: jest.fn(async (visit) => ({ lat: visit.id === 'visit-2' ? 2 : 1, lng: -82.4 })),
+    });
+    d.episodes.openAdminAlertKeys = jest.fn(async () => [key('visit-1'), key('visit-2')]);
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, noticed: 0, closed: 1 });
+    expect(d.episodes.closeAdminAlertKeys.mock.calls[0].slice(1, 3)).toEqual([[key('visit-1')], 'forecast_dry']);
   });
 
   test('a date column value (a Date at UTC midnight) keeps its calendar date', async () => {
@@ -166,7 +186,7 @@ describe('auto-dispatch rain pass', () => {
       .mockRejectedValueOnce(new Error('db down'))
       .mockResolvedValueOnce({ notification: { id: 'n1' }, deduped: true });
     const d = deps([stop(), stop({ id: 'visit-2' })], { raiseAdminAlert });
-    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 2, wet: 2, noticed: 0, deferred: 0 });
+    expect(await runRainPass({ now: NOW, db: {}, deps: d })).toEqual({ ran: true, checked: 2, wet: 2, noticed: 0, deferred: 0, closed: 0 });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(2);
   });
 });

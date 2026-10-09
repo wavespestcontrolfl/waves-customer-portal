@@ -20,8 +20,8 @@
  * Noise limits: outdoor work only; MOVE_PCT is above the booking ranking's
  * RAIN_PCT (in the wet season most afternoons read 60%); one notice per
  * visit at a given date and start (dedupeKey), so a forecast that goes back
- * and forth never rings twice; at most MAX_NOTICES_PER_RUN new notices a
- * run; a visit that starts within LEAD_MINUTES is
+ * and forth never rings twice while the notice stands; a notice whose visit
+ * reads dry again is closed; at most MAX_NOTICES_PER_RUN new notices a run; a visit that starts within LEAD_MINUTES is
  * left to storm-watch.js, which nudges the technician. Never throws.
  */
 const logger = require('../logger');
@@ -162,9 +162,10 @@ async function judgeStop(visit, ctx) {
   const point = await deps.visitPoint(visit, { db, deps });
   if (!point) return { wet: false, reason: 'no_point' };
   const hourly = await (deps.hourlyRain || boundedHourlyRain)(point.lat, point.lng, true);
-  const { peak } = spanRain(hourly, date, reach.startMin, reach.endMin);
+  const { peak, complete } = spanRain(hourly, date, reach.startMin, reach.endMin);
   if (peak == null) return { wet: false, reason: 'no_forecast' };
-  if (peak < MOVE_PCT) return { wet: false, reason: 'not_wet', peak };
+  // `dry` only when every hour was read: a missing hour is not a dry one.
+  if (peak < MOVE_PCT) return { wet: false, reason: 'not_wet', peak, dry: complete };
   const isFree = (startMin, endMin) => !occupancy.conflicts(visit, date, startMin, endMin);
   const proposal = dryStart({ hourly, date, reach, isFree, earliestMin, dayStartMin: day.startMin, dayEndMin: day.endMin });
   return { wet: true, reason: 'wet', peak, proposal: proposal == null ? null : toHHMM(proposal) };
@@ -226,7 +227,7 @@ const noticeKey = (row) => `${KEY_PREFIX}${row.visit.id}:${row.date}:${row.start
 
 // The notice, by the shared composer: the customer's name in the headline, a
 // spoken day and time in the why (no ISO date), a link that opens the visit.
-async function sendNotice(row, { db, deps }) {
+async function sendNotice(row, { db, deps, reopen = null }) {
   const { raiseAdminAlert, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
   const { lookupCustomerName, fitAction } = require('../admin-alert-names');
   const { visit, date, start, peak, proposal } = row;
@@ -258,18 +259,23 @@ async function sendNotice(row, { db, deps }) {
       // hour that has since turned wet or been taken.
       dedupeKey: noticeKey(row),
       refreshOnDedupe: true,
-      ringOnRefresh: () => false,
+      // The one refresh that rings: a notice this pass closed when the
+      // forecast dried, and the rain is back. `reopen` (set only for a key
+      // with no standing notice) makes that refresh happen even when the
+      // chance and the dry hour read the same as before.
+      ringOnRefresh: (_existing, meta) => meta?.autoCleared === true,
+      ...(reopen ? { dedupeVersion: reopen } : {}),
       detail: `${name || 'A customer'}: ${service} on ${date} at ${start}. `
         + `Hourly chance of rain reaches ${peak}% from the visit start through ${RAIN_AFTER_HOURS} hours after it ends. `
         + (proposal ? `${proposal} that day reads below ${DRY_PCT}% and no other stop is in it. ` : `No hour that day is both below ${DRY_PCT}% and open. `)
         + 'Nothing was moved and the customer was not contacted. Move it with Quick Move.',
-      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal },
+      metadata: { scheduledServiceId: visit.id, rain_chance_pct: peak, scheduled_date: date, window_start: start, proposed_start: proposal, autoCleared: false },
     },
   );
 }
 
 /**
- * The cron entry. Resolves to { ran, checked, wet, noticed, deferred } (for logs and
+ * The cron entry. Resolves to { ran, checked, wet, noticed, deferred, closed } (for logs and
  * tests); never rejects.
  */
 async function runRainPass({ now = new Date(), db = require('../../models/db'), deps = {} } = {}) {
@@ -278,24 +284,30 @@ async function runRainPass({ now = new Date(), db = require('../../models/db'), 
     if (!gateEnvValue(GATE)) return { ran: false, reason: 'gate_off' };
     const rows = await planRainPass({ now, db, deps });
     const wet = rows.filter((row) => row.wet);
-    const standing = new Set(wet.length
-      ? await (deps.standingKeys || ((conn) => require('../admin-alert-episodes').openAdminAlertKeys(conn, KEY_PREFIX)))(db)
-      : []);
+    const episodes = deps.episodes || require('../admin-alert-episodes');
+    const standing = new Set(rows.length ? await episodes.openAdminAlertKeys(db, KEY_PREFIX) : []);
+    // A standing notice whose visit now reads dry in every hour is closed:
+    // the office must not move a visit for rain that left the forecast.
+    const dried = rows.filter((row) => row.dry === true).map(noticeKey).filter((key) => standing.has(key));
+    if (dried.length) {
+      await episodes.closeAdminAlertKeys(db, dried, 'forecast_dry', { now, resolution: 'Cleared: the forecast for this visit is now dry' });
+    }
     let noticed = 0;
     let deferred = 0;
     for (const row of wet) {
       // A standing notice is only rewritten; a new one needs room in the budget.
-      if (!standing.has(noticeKey(row)) && noticed >= MAX_NOTICES_PER_RUN) { deferred += 1; continue; }
+      const isStanding = standing.has(noticeKey(row));
+      if (!isStanding && noticed >= MAX_NOTICES_PER_RUN) { deferred += 1; continue; }
       try {
-        const result = await sendNotice(row, { db, deps });
-        if (result && !result.deduped && !result.suppressed) noticed += 1;
+        const result = await sendNotice(row, { db, deps, reopen: isStanding ? null : `run:${now.toISOString()}` });
+        if (result && !result.suppressed && (!result.deduped || result.rung === true)) noticed += 1;
       } catch (err) {
         logger.warn(`[rain-pass] notice for visit ${row.visit.id} failed: ${err.message}`);
       }
     }
     if (deferred) logger.warn(`[rain-pass] notice budget hit (${MAX_NOTICES_PER_RUN}); ${deferred} wait for the next run`);
-    logger.info(`[rain-pass] checked=${rows.length} wet=${wet.length} noticed=${noticed} deferred=${deferred}`);
-    return { ran: true, checked: rows.length, wet: wet.length, noticed, deferred };
+    logger.info(`[rain-pass] checked=${rows.length} wet=${wet.length} noticed=${noticed} deferred=${deferred} closed=${dried.length}`);
+    return { ran: true, checked: rows.length, wet: wet.length, noticed, deferred, closed: dried.length };
   } catch (err) {
     logger.warn(`[rain-pass] run skipped: ${err.message}`);
     return { ran: false, reason: 'error' };
