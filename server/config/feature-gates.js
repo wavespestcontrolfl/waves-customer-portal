@@ -3979,8 +3979,8 @@ const gates = {
   // standardWordingPreviewLive().
   standardWordingPreview: process.env.GATE_STANDARD_WORDING_PREVIEW === 'true',
   // GATE_TRACE_REUSE — "Same as last visit" on the Fast Complete report flow
-  // copies the property's last saved spray trace onto the open visit; read at
-  // call time via traceReuseLive().
+  // copies the customer's last saved spray trace whose outline holds this
+  // visit's location onto the open visit; read at call time via traceReuseLive().
   traceReuse: process.env.GATE_TRACE_REUSE === 'true',
   // GATE_BLOG_SEARCH_SUGGEST — a search no post covers suggested as a new
   // post for the autonomous blog queue; read at call time via
