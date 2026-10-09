@@ -5618,6 +5618,10 @@ router.patch('/:id', async (req, res, next) => {
     // the row still holds the status we validated against, so a customer
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
+    // The row must still be in the archive state this handler read: an edit
+    // that waited behind an archive (staff, or the draft-retire sweep) must
+    // not land on the now-hidden row and report success.
+    updateQuery = estimate.archived_at ? updateQuery.whereNotNull('archived_at') : updateQuery.whereNull('archived_at');
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
     const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
     if (changesDeliveryOptions) {

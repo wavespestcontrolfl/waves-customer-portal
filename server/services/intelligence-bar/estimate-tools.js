@@ -3602,6 +3602,11 @@ async function setEstimatePresentation(input, actionContext = {}) {
   };
 }
 
+// A toggle lands only while the row is still in the archive state it was
+// read in: one that waited behind an archive (staff, or the draft-retire
+// sweep) must not change the now-hidden row and report success.
+const sameArchiveState = (estimate) => (q) => (estimate.archived_at ? q.whereNotNull('archived_at') : q.whereNull('archived_at'));
+
 async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_flag_value }) {
   if (!estimate_identifier) {
     return { error: 'estimate_identifier required (UUID, token, or phone)' };
@@ -3621,6 +3626,7 @@ async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_fl
   const updated = await db('estimates')
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(use_v2_view, false) = ?', [expected]); })
+    .modify(sameArchiveState(estimate))
     // updated_at marks the staff edit (the draft-retire sweep keeps a draft touched after a newer delivery).
     .update({ use_v2_view: next, updated_at: db.fn.now() });
   if (!updated) {
@@ -3667,6 +3673,7 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
   const updated = await db('estimates')
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(show_one_time_option, false) = ?', [expected]); })
+    .modify(sameArchiveState(estimate))
     .update({ show_one_time_option: next, updated_at: db.fn.now() });
   if (!updated) {
     return { error: 'This estimate\'s one-time-option flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
