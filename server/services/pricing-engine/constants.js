@@ -1609,7 +1609,8 @@ const AREA_ADDONS = {
       maxPerYear: 1,
       limitProduct: 'Topchoice Granular Insecticide',
     },
-    // Acelepryn at 0.184 fl oz/1,000 ($14.14/fl oz), once a year (April).
+    // Acelepryn at 0.184 fl oz/1,000 ($14.14/fl oz), once in 12 months (April is the best time, not a limit: the
+    // label ties the product to no month; the protocol note says so).
     lawn_insect_preventive: {
       name: 'Yearly Lawn Insect Preventive',
       serviceKey: 'area_addon_lawn_insect_preventive',

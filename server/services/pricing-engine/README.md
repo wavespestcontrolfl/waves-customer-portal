@@ -185,6 +185,24 @@ Price table, "carrier" = the first priced add-on of the group, "other" = every f
 
 An area above the largest tier returns an unpriced custom-quote line. Labor minutes in `AREA_ADDONS` are estimates, not measured times.
 
+**The yearly limit is the only schedule rule the system enforces, and "April" is not part of it (Codex round 8).** `lawn_insect_preventive` is sold when the customer asks, in any month: the label ties Acelepryn to no month, so the governed limit text is "Once in 12 months." (the enforced `maxPerYear: 1`), and April is an advisory timing note on the visit ("Best timing: April, before mole cricket nymphs and caterpillars build. Any month is allowed."). The catalog note on the `area_addon_lawn_insect_preventive` services row (`internal_notes`, frozen migration `20261008200000`) still reads "once a year (April)": it is advisory staff text, not a rule, and nothing reads it. What each add-on's governed text declares, and where it is enforced:
+
+| Key | Declared in the governed text | Where it holds |
+|---|---|---|
+| `bed_pre_emergent` | 4 in 12 months, 60 days apart | Enforced: `AREA_ADDONS` `maxPerYear` / `minDaysApart` at quote, accept, reserve, Mark Won and booking (`area-addon-limits.js`); not at completion |
+| `bed_pre_emergent` | "Technician instruction: clear existing weeds from the beds before you apply" | Technician instruction on the job card; not checked |
+| `lawn_insect_spot` | 2 in 12 months, 56 days apart | Enforced at the same points (and the v13 lawn program's own Arena cap at completion) |
+| `lawn_insect_spot` | St. Augustine only | Enforced: custom quote for any other or unknown grass; the job card withholds the rate unless the grass on the estimate is St. Augustine; the completion form prefills no rate then |
+| `lawn_insect_spot` | "Technician instruction: carry the Florida FIFRA 2(ee) sheet" | Technician instruction; not checked |
+| `fire_ant_yard` | 1 in 12 months | Enforced at the same points |
+| `fire_ant_yard` | "Restricted-use product: only a certified applicator applies it" | Shown to the technician; closeout checks the technician's license and category after the visit (`requires_license`, `L&O`); nothing blocks the visit |
+| `lawn_insect_preventive` | 1 in 12 months | Enforced at the same points |
+| `lawn_insect_preventive` | Best timing April | Advisory only (any month is allowed) |
+| `hardscape_weed` | 2 in 12 months (32 fl oz per 1,000) | Enforced at the same points |
+| `hardscape_weed` | "Technician instruction: apply to hard surfaces and bare ground only" | Technician instruction; not checked |
+| every chemical add-on | The governed rate per 1,000 sq ft | The completion form prefills it and treats it as the ceiling; a row recorded above it is flagged on the completion and sent to the office (never blocked) |
+
+
 ## 6. Palm Injection
 
 Palm injection pricing requires explicit `treatmentType` and positive integer `palmCount`; the service no longer silently defaults to combo or one palm.

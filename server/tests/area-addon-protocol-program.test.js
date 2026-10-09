@@ -53,7 +53,7 @@ describe('the area_addon program', () => {
     expect(facts['Arena 50 WDG']).toMatchObject({ rate: expect.stringContaining('0.147 oz per 1,000 sq ft'), limit: expect.stringMatching(/8 weeks.*2 applications/), safety: expect.stringContaining('2028-12-31'), requiresGrass: 'st_augustine' });
     expect(facts['Arena 50 WDG'].rate).toContain('4 gal of water per 1,000 sq ft');
     expect(facts['Topchoice Granular Insecticide']).toMatchObject({ rate: expect.stringContaining('2 lb per 1,000 sq ft'), limit: 'Once per 12 months.', safety: expect.stringMatching(/Restricted-use/) });
-    expect(facts['Acelepryn Insecticide']).toMatchObject({ rate: expect.stringContaining('0.184 fl oz per 1,000 sq ft'), limit: 'Once a year (April).', safety: null });
+    expect(facts['Acelepryn Insecticide']).toMatchObject({ rate: expect.stringContaining('0.184 fl oz per 1,000 sq ft'), limit: 'Once in 12 months.', safety: null });
     expect(JSON.stringify(facts['Acelepryn Insecticide'])).not.toMatch(/0\.4|16 fl oz|ceiling|maximum/i);
     expect(facts['Roundup QuikPro SC']).toMatchObject({ rate: expect.stringContaining('16 fl oz in 1 gal'), limit: expect.stringMatching(/32 fl oz per 1,000 sq ft.*12 months/), safety: expect.stringContaining('indaziflam') });
   });
@@ -103,5 +103,36 @@ describe('the job card resolves the program through the existing matcher', () =>
     expect(out.visit).toMatchObject({ month: 'Any' });
     expect(out.lines.map((l) => l.product.id)).toEqual([id]);
     expect(out.lines[0]).toMatchObject({ selected: true, role: 'base', governed: expect.objectContaining({ rate: expect.any(String) }) });
+  });
+});
+
+describe('Codex round 8: "Once a year (April)" was declared but never enforced - April is advice, any month is allowed', () => {
+  const acelepryn = program.visits.find((v) => Object.values(v.lineMeta)[0].catalogProductHints[0] === 'Acelepryn Insecticide');
+
+  test('the limit is the enforced one (maxPerYear 1, no minimum gap) and names no month', () => {
+    expect(AREA_ADDONS.items.lawn_insect_preventive).toMatchObject({ maxPerYear: 1, limitProduct: 'Acelepryn Insecticide' });
+    expect(AREA_ADDONS.items.lawn_insect_preventive.minDaysApart).toBeUndefined();
+    expect(acelepryn.labelFacts.limit).toBe('Once in 12 months.');
+    expect(JSON.stringify(program.visits.map((v) => v.labelFacts))).not.toMatch(/april/i);
+  });
+
+  test('April is an advisory timing note on the visit, and says any month is allowed', () => {
+    expect(acelepryn.notes).toBe('Best timing: April, before mole cricket nymphs and caterpillars build. Any month is allowed.');
+    expect(acelepryn.month).toBe('Any');
+  });
+
+  test('the pricer comment no longer states April as a limit', () => {
+    const source = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'pricing-engine', 'constants.js'), 'utf8');
+    expect(source).not.toMatch(/once a year \(April\)/i);
+    expect(source).toContain('once in 12 months (April is the best time, not a limit');
+  });
+
+  test('the technician-instruction lines are worded as instructions, not as limits the system claims to enforce', () => {
+    const byProduct = Object.fromEntries(program.visits.map((v) => [Object.values(v.lineMeta)[0].catalogProductHints[0], v]));
+    expect(byProduct['Snapshot 2.5TG'].labelFacts.safety).toMatch(/^Technician instruction: clear existing weeds/);
+    expect(byProduct['Arena 50 WDG'].labelFacts.safety).toMatch(/^Technician instruction: carry the Florida FIFRA 2\(ee\) sheet/);
+    expect(byProduct['Roundup QuikPro SC'].labelFacts.safety).toContain('Technician instruction: apply to hard surfaces and bare ground only');
+    expect(byProduct['Roundup QuikPro SC'].notes).toMatch(/^Technician instruction: apply to hard surfaces/);
+    expect(byProduct['Snapshot 2.5TG'].notes).toMatch(/^Technician instruction:/);
   });
 });
