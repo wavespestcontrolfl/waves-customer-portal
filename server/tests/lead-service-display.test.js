@@ -75,6 +75,8 @@ describe('leadServiceDisplay', () => {
   test.each([
     ['WDO Inspection Service', 'WDO Inspection Service'],
     ['WDO inspection and report', 'WDO Inspection Service'],
+    ['One-Time WDO inspection and termite treatment', 'WDO Inspection Service + Termite Liquid Treatment Service'],
+    ['Termite inspection for a closing', 'Waves Assessment (Termite)'],
     ['Quarterly Pest Control Service + Bee / Wasp Nest Removal Service', 'Quarterly Pest Control Service + Bee / Wasp Nest Removal Service'],
     ['Waves Assessment + WDO Inspection Service', 'Waves Assessment + WDO Inspection Service'],
     ['Ongoing lawn treatment, including fertilizer, weed, pest, and disease treatments', 'Monthly Lawn Care Service'],

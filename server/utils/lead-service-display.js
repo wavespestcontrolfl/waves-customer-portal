@@ -72,6 +72,7 @@ const COVERED_BY = {
   lawn: ['lawn_pest', 'plugging'],
   pest: ['lawn_pest', 'cockroach'],
 };
+const TERMITE_WORK_RE = /\btreat(?:ment|ments|ing)?\b|\bbait\b|\btermite\s+(?:control|protection)\b/i;
 const RODENT_NAMED_RE = /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/i;
 const ASSESS_WORD_RE = /\bconsultation\b|\bassessment\b|\bnot\s+sure\b/i;
 
@@ -80,7 +81,11 @@ function topicsFor(text) {
   const keys = new Set(hits.map((topic) => topic.key));
   const namesPestControl = /\bpest\s+control\b/i.test(text);
   return hits.filter((topic) => {
-    if ((COVERED_BY[topic.key] || []).some((key) => keys.has(key))) return false;
+    // An inspection covers the word "termite", but termite TREATMENT named
+    // beside it is its own job and stays visible.
+    const keepsTermiteWork = topic.key === 'termite' && TERMITE_WORK_RE.test(text)
+      && !keys.has('pre_slab') && !keys.has('wood_treatment');
+    if (!keepsTermiteWork && (COVERED_BY[topic.key] || []).some((key) => keys.has(key))) return false;
     // "lawn treatment for weeds, pests and disease" is a lawn request.
     if (topic.key === 'pest' && !namesPestControl && (keys.has('lawn') || keys.has('bed_bug'))) return false;
     // "termite bait stations" is termite work; bait stations are rodent
