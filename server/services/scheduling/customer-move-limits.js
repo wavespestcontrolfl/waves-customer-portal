@@ -66,14 +66,14 @@ function addDays(dateStr, days) {
   return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), days));
 }
 
-// True when the row moved the visit to another date, start or end. Clock
-// values are compared to the minute: writers log '09:00' and '09:00:00' for
-// one time, and a row that only re-assigned the technician is not a move.
+// True when the row moved the visit to another date or start: the slot the
+// customer sees (the arrival window comes from the start; the end is the
+// job's length). Clock values are compared to the minute: writers log
+// '09:00' and '09:00:00' for one time. A row that only re-assigned the
+// technician or corrected the duration is not a move.
 function slotChanged(row) {
   if (dateOnly(row.original_date) !== dateOnly(row.new_date)) return true;
-  const from = windowParts(row.original_window);
-  const to = windowParts(row.new_window);
-  return from.start !== to.start || from.end !== to.end;
+  return windowParts(row.original_window).start !== windowParts(row.new_window).start;
 }
 
 function allowanceDays(svc) {
@@ -205,8 +205,7 @@ function choiceCount(availability, lastDate) {
 
 // True when the late-move limit is applied:
 //   - it ends before the booking range does (`rangeTo`). A limit at or past
-//     the end of the range drops nothing, and naming its date would promise
-//     a day the picker cannot offer;
+//     the end of the range drops nothing;
 //   - enough times remain inside it.
 // `fullAvailability` must cover the page's whole range, so GET, the search
 // and the commit reach one answer. Null (not built) applies no limit.
@@ -246,9 +245,12 @@ function applyLimit(limit, full, shown, { rangeTo, now = new Date() } = {}) {
   const applies = lateLimitApplies(limit, full, rangeTo);
   return {
     availability: applies ? withinLimit(shown, limit.lastDate) : shown,
+    // No date is sent: the limit's date need not have an open time, and the
+    // page must not name a day it cannot offer. `laterByOffice` says only
+    // that later days were held back for the office to arrange.
     payload: {
       moveLimit: {
-        lastDate: applies ? limit.lastDate : null,
+        laterByOffice: applies,
         noTimeSoon: noTimeSoon(applies ? withinLimit(full, limit.lastDate) : full, now),
       },
     },

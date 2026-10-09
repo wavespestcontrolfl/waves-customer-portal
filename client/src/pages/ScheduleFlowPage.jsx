@@ -723,20 +723,21 @@ function IneligibleCard({ data }) {
 // reframes as the optional "different time?" ask — the moved-to slot is
 // already confirmed.
 // Customer move limits (payload.moveLimit, server gate
-// GATE_RESCHEDULE_MOVE_LIMITS). lastDate: the picker stops at this date for
-// this visit. noTimeSoon: nothing is open in the next 7 days. Each line
-// hands off to the office; the picker below stays usable.
+// GATE_RESCHEDULE_MOVE_LIMITS). laterByOffice: later days are held back for
+// this visit and the office arranges them. noTimeSoon: nothing is open in the
+// next 7 days. Each line hands off to the office; the picker below stays
+// usable. No date is named: the server sends none.
 function MoveLimitNote({ moveLimit }) {
-  if (!moveLimit?.lastDate && !moveLimit?.noTimeSoon) return null;
+  if (!moveLimit?.laterByOffice && !moveLimit?.noTimeSoon) return null;
   return (
     // 16px: these lines are guidance the customer acts on, not fine print.
     <div data-glass="soft" data-testid="move-limit-note" style={{ ...SOFT_NOTE, fontSize: 16, lineHeight: 1.55, marginTop: 14 }}>
       {moveLimit.noTimeSoon ? (
         <div>Nothing is open in the next 7 days. If you need a sooner visit, text or call the office and we&apos;ll find a time.</div>
       ) : null}
-      {moveLimit.lastDate ? (
+      {moveLimit.laterByOffice ? (
         <div style={moveLimit.noTimeSoon ? { marginTop: 8 } : undefined}>
-          Online, this visit can move as late as {shortDateLabel(moveLimit.lastDate)}. Need something later? Text or call us and we&apos;ll find a time.
+          Need a later date than the ones shown? Text or call us and we&apos;ll find a time.
         </div>
       ) : null}
       <ContactRow />

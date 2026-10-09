@@ -144,6 +144,18 @@ describe('late-move limit', () => {
     expect(limit).toEqual({ dueDate: '2026-10-15', lastDate: '2026-11-05', firstVisitBlocked: true });
   });
 
+  test('a Waves row that changes only the end (a duration correction) is not a placement', async () => {
+    const rows = [
+      ...twoMoves,
+      move({
+        initiated_by: 'admin', original_date: '2026-10-30', new_date: '2026-10-30',
+        original_window: '09:00-10:00', new_window: '09:00-10:30', created_at: '2026-10-04T08:10:00Z',
+      }),
+    ];
+    const limit = await loadMoveLimit(onOct30(), { database: dbFor({ rows }), now: NOW });
+    expect(limit).toEqual({ dueDate: '2026-10-15', lastDate: '2026-11-05', firstVisitBlocked: true });
+  });
+
   test('a staff edit BETWEEN two customer moves: the history starts at the move after it', async () => {
     // Customer: Oct 15 → Oct 22. Staff (no log row): Oct 22 → Oct 26. Customer: Oct 26 → Oct 30.
     const rows = [move(), move({ original_date: '2026-10-26', new_date: '2026-10-30', created_at: '2026-10-03T14:00:00Z' })];
@@ -236,7 +248,7 @@ describe('the picker is never emptied', () => {
     expect(lateLimitApplies(limit, availability, '2026-11-06')).toBe(true);
     const out = applyLimit(limit, availability, availability, { rangeTo: '2026-11-05', now: new Date('2026-11-01T16:00:00Z') });
     expect(out.availability).toBe(availability);
-    expect(out.payload).toEqual({ moveLimit: { lastDate: null, noTimeSoon: false } });
+    expect(out.payload).toEqual({ moveLimit: { laterByOffice: false, noTimeSoon: false } });
   });
 
   test('no whole-range list (the build failed): the list is returned as built with no key', () => {
@@ -280,17 +292,17 @@ describe('reschedule-public wiring', () => {
     expect(applyMoveLimit(null, full, full, range)).toEqual({ availability: full, payload: {} });
   });
 
-  test('limit applies: later days are dropped and the page is told the last date', () => {
+  test('limit applies: later days are dropped and the page is told later dates go through the office (no date)', () => {
     const out = applyMoveLimit(limit, full, full, range);
     expect(out.availability.days.map((d) => d.date)).toEqual(['2026-11-04']);
-    expect(out.payload.moveLimit.lastDate).toBe('2026-11-05');
+    expect(out.payload.moveLimit).toEqual({ laterByOffice: true, noTimeSoon: expect.any(Boolean) });
   });
 
-  test('fewer than 3 times inside the limit: nothing is dropped and no last date is named', () => {
+  test('fewer than 3 times inside the limit: nothing is dropped and no hand-off line is sent', () => {
     const thin = { ...full, days: [day('2026-11-04', 2), day('2026-11-09', 2)] };
     const out = applyMoveLimit(limit, thin, thin, range);
     expect(out.availability).toBe(thin);
-    expect(out.payload.moveLimit.lastDate).toBeNull();
+    expect(out.payload.moveLimit.laterByOffice).toBe(false);
   });
 
   test('GET and the search read one verdict: a blocked first visit is not reschedulable (move_limit) before any build', () => {

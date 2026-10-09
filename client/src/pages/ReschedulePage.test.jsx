@@ -755,29 +755,29 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByTestId('next-visit-note')).not.toBeInTheDocument();
   });
 
-  it('move limits: names the last online date and hands off to the office (GATE_RESCHEDULE_MOVE_LIMITS)', async () => {
-    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { lastDate: '2026-07-31', noTimeSoon: false } })) });
+  it('move limits: says later dates go through the office, and names no date (GATE_RESCHEDULE_MOVE_LIMITS)', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { laterByOffice: true, noTimeSoon: false } })) });
     renderPage();
     const note = await screen.findByTestId('move-limit-note');
-    expect(note).toHaveTextContent('Online, this visit can move as late as Fri, Jul 31.');
+    expect(note).toHaveTextContent('Need a later date than the ones shown? Text or call us and we\'ll find a time.');
     expect(note).not.toHaveTextContent('next 7 days');
     expect(await screen.findByRole('button', { name: /Choose 1:00 PM on/ })).toBeInTheDocument();
   });
 
   it('move limits: says when nothing is open in the next 7 days; no note when the server sends neither', async () => {
-    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { lastDate: null, noTimeSoon: true } })) });
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { laterByOffice: false, noTimeSoon: true } })) });
     const { unmount } = renderPage();
     expect(await screen.findByTestId('move-limit-note')).toHaveTextContent('Nothing is open in the next 7 days.');
     unmount();
 
-    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { lastDate: null, noTimeSoon: false } })) });
+    stubFetch({ get: jsonResponse(reschedulablePayload({ moveLimit: { laterByOffice: false, noTimeSoon: false } })) });
     renderPage();
     await screen.findByRole('button', { name: /Choose 1:00 PM on/ });
     expect(screen.queryByTestId('move-limit-note')).not.toBeInTheDocument();
   });
 
   it('move limits: a slot-taken refresh that carries no limit clears the line', async () => {
-    const payload = reschedulablePayload({ moveLimit: { lastDate: '2026-07-31', noTimeSoon: false } });
+    const payload = reschedulablePayload({ moveLimit: { laterByOffice: true, noTimeSoon: false } });
     stubFetch({
       get: jsonResponse(payload),
       post: jsonResponse({
