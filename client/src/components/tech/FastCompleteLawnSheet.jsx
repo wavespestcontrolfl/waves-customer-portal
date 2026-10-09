@@ -1372,7 +1372,7 @@ function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
     const { productId, place, error, limitType } = err?.details || {};
     const id = String(productId || '').toLowerCase();
     if (id) setMoved((prev) => (prev.includes(id) ? prev.filter((other) => other !== id) : prev));
-    const entry = { message: error || err?.message, dose: limitType === 'annual_max_rate' ? (dosesRef?.current?.[id] ?? '') : null };
+    const entry = { message: error || err?.message, dose: limitType === 'annual_max_rate' ? (dosesRef?.current?.[id] ?? '') : null, cardOnly: err?.code === 'lawn_place_not_mapped' };
     if (productId && place) setRefused((prev) => ({ ...prev, [id]: { ...prev[id], [place]: entry } }));
     setTick((n) => n + 1);
     request(`${base}/lawn-fast/context${searchedIdsQuery(1, idsRef, '?')}`)
@@ -1391,16 +1391,18 @@ function usePlaceRefresh({ base, request, ctx, slot, idsRef, dosesRef }) {
     setRefused((prev) => pruneAmountRefusals(prev, doses));
   }, []);
   const messages = useMemo(() => Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).map(([place, e]) => [place, e.message]))])), [refused]);
-  return { tick, placeCtx, refused: messages, moved, pruneRefused };
+  // The refusals that hold for a guide-card row only (a take-all place that is not mapped), `{ [productId]: { [place]: true } }`.
+  const refusedCard = useMemo(() => Object.fromEntries(Object.entries(refused).map(([id, byPlace]) => [id, Object.fromEntries(Object.entries(byPlace).filter(([, e]) => e.cardOnly).map(([place]) => [place, true]))])), [refused]);
+  return { tick, placeCtx, refused: messages, refusedCard, moved, pruneRefused };
 }
 
 // The sheet's places: the context's closed list and known areas (less the ones cleared here), with what is closed where taken from the
 // guide's fresh read once it has answered, else the context's.
-function useSheetAreas({ placeCtx, guide, cleared, refused, moved }) {
+function useSheetAreas({ placeCtx, guide, cleared, refused, refusedCard, moved }) {
   const base = placeCtx.troubleAreas;
   const fresh = guide?.placeBlocked;
   const freshTypes = guide?.placeBlockedTypes;
-  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, blockedTypes: { ...base.blockedTypes, ...freshTypes }, refused, moved } : null), [base, fresh, freshTypes, cleared, refused, moved]);
+  return useMemo(() => (base ? { ...base, known: base.known.filter((area) => !cleared.includes(area.id)), blocked: { ...base.blocked, ...fresh }, blockedTypes: { ...base.blockedTypes, ...freshTypes }, refused, refusedCard, moved } : null), [base, fresh, freshTypes, cleared, refused, refusedCard, moved]);
 }
 
 function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onFullForm, isMobile, refreshPlaces }) {
@@ -1408,7 +1410,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // The place maps, read again when /complete refuses a place (the context aside, and the guide below).
   const searchedIds = useRef([]);
   const dosesRef = useRef({});
-  const { tick: placeTick, placeCtx, refused, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
+  const { tick: placeTick, placeCtx, refused, refusedCard, moved, pruneRefused } = usePlaceRefresh({ base, request, ctx, slot: refreshPlaces, idsRef: searchedIds, dosesRef });
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
@@ -1444,7 +1446,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const [weedArea, setWeedArea] = useState('');
   // GATE_LAWN_TROUBLE_AREAS: the weed entry's one place (as its one area), and the known areas the tech cleared on this sheet.
   const [weedPlace, setWeedPlace] = useState('');
-  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, moved });
+  const areas = useSheetAreas({ placeCtx, guide, cleared: clearedAreas, refused, refusedCard, moved });
   const clearArea = useCallback(async (id) => {
     await request(`${base}/lawn-fast/trouble-areas/${encodeURIComponent(id)}/clear`, { method: 'POST', body: JSON.stringify({}) });
     setClearedAreas((prev) => [...prev, id]);

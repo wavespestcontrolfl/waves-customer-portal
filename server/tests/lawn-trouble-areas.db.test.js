@@ -265,9 +265,9 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         await knex('property_application_history').insert({
           customer_id: world.customerId, property_id: world.property.id, product_id: catalog[ARENA].id, application_date: dayAgo(0), service_record_id: record.id,
           application_rate: row.rate || null, rate_unit: row.rateUnit || null, quantity_applied: row.totalAmount, quantity_unit: baseQuantityUnit(row.amountUnit),
-          area_treated_sqft: Math.round(row.areaValue), treated_place: 'front',
+          area_treated_sqft: row.areaValue ? Math.round(row.areaValue) : null, treated_place: 'front',
         });
-        const found = await limits.auditHardCountLimits(world.customerId, catalog[ARENA].id, dayAgo(0), knex, { propertyId: world.property.id, place: 'front', excludeScheduledServiceId: null });
+        const found = await limits.auditHardCountLimits(world.customerId, catalog[ARENA].id, dayAgo(0), knex, { propertyId: world.property.id, place: 'front', excludeScheduledServiceId: record.scheduled_service_id });
         await knex('property_application_history').where({ service_record_id: record.id }).del();
         return found.some((v) => v.type === 'annual_max_rate');
       };
@@ -294,8 +294,32 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         const rateRow = typed({ totalAmount: 5, rate: 0.147, rateUnit: 'oz' });
         expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [rateRow] })).toBeNull();
         expect(await audited(rateRow)).toBe(false);
+        // A quantity with no spot area cannot be sized: the preflight counts the cap row's fixed fallback rate, the recorded row's own reading.
         const noArea = typed({ totalAmount: 5, areaValue: undefined, areaUnit: undefined });
         expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [noArea] })).toBeNull();
+        expect(await audited(noArea)).toBe(false);
+      });
+
+      // One earlier 0.147 oz pass is half the cap. A quantity-only row (no spot area, no rate) is then counted at the fallback (0.29 oz,
+      // 98.6% of the cap) by BOTH the preflight and the audit: ~149% in total, refused, and the audit of the recorded row flags it too.
+      // Sized by the program dose (0.147, 50%) it used to read exactly 100% and pass.
+      test('one earlier 0.147 oz pass plus a quantity-only row: the preflight refuses where the recorded row is flagged, and the other way round', async () => {
+        await applied(ARENA, { place: 'front', daysAgo: 100, rate: 0.147 });
+        // The program states Arena at 0.147 oz (the dose a proposal with no row counts): the case where the old sizing read exactly 100%.
+        const [program] = await knex('lawn_protocols').insert({ protocol_key: `fixture_${randomUUID().slice(0, 6)}`, version: '2026.10-v13', name: 'Fixture v13', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
+        const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: program.id, month: 5, window_key: `w_${randomUUID().slice(0, 6)}`, title: 'w', visit_type: 'fixture' }).returning('*');
+        await knex('lawn_protocol_products').insert({ lawn_protocol_window_id: window.id, product_id: catalog[ARENA].id, product_name: ARENA, role: 'insecticide_spot', application_mode: 'spot', default_in_plan: false, rate_per_1000: 0.147, rate_unit: 'oz', gates: '{}' });
+        expect((await limits.programDose(knex, catalog[ARENA].id)).ratePer1000).toBe(0.147);
+        const quantityOnly = typed({ totalAmount: 0.147, areaValue: undefined, areaUnit: undefined });
+        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [quantityOnly] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_limit', limitType: 'annual_max_rate', place: 'front' } });
+        expect(await audited(quantityOnly)).toBe(true);
+        // A row the ledger CAN size (a stated rate of 0.147 oz per 1,000, exactly the remaining half): both agree it fits, at 100%.
+        const sized = typed({ totalAmount: 1, rate: 0.147, rateUnit: 'oz' });
+        expect(await areas.preflightPlaces({ knex, svc: await visit(), products: [sized] })).toBeNull();
+        expect(await audited(sized)).toBe(false);
+        await knex('lawn_protocol_products').where({ lawn_protocol_window_id: window.id }).del();
+        await knex('lawn_protocol_windows').where({ id: window.id }).del();
+        await knex('lawn_protocols').where({ id: program.id }).del();
       });
     });
 
@@ -307,6 +331,15 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       const checked = await check('Shared AI fixture', { place: 'front' });
       expect(checked.blocks.some((b) => b.matchType === 'active_ingredient')).toBe(true);
       const svc = await svcOf();
+      // The lawn-wide block stays what checkLimits says, but it closes NO place on the sheet: the context map, the typed map, the plan reader's
+      // per-place read and the guide's per-place answer all keep only what /complete would refuse.
+      const sheet = await areas.cappedByPlace({ knex, svc, products: [{ id: ai.id, name: 'Shared AI fixture' }], rows: new Map() });
+      expect(sheet.wide.get(ai.id).some((b) => b.matchType === 'active_ingredient')).toBe(true);
+      expect(areas.blockedMap(sheet)).toEqual({});
+      expect(areas.blockedTypeMap(sheet)).toEqual({});
+      for (const place of areas.PLACE_IDS) expect(sheet.byPlace[place].has(ai.id)).toBe(false);
+      const block = await areas.buildContextBlock({ knex, svc, seed: { products: [{ id: ai.id, name: 'Shared AI fixture' }], rows: new Map() }, readFailures: new Set() });
+      expect(block.troubleAreas.blocked).toEqual({});
       expect(await areas.preflightPlaces({ knex, svc, products: [{ productId: ai.id, name: 'Shared AI fixture', applicationMethod: 'spot_treatment', areaPlace: 'front', rate: 0.5, rateUnit: 'oz' }] })).toBeNull();
     });
 

@@ -182,7 +182,7 @@ async function openSomewhere({ chosen, wide, rows, svc, knex, places, placeBlock
     for (const [, c] of closed) {
       const id = idOf(c.raw.product.id);
       const blocks = here ? here.get(id) || [] : null;
-      const typed = blocks?.find((block) => block.type);
+      const typed = blocks?.find(require('./lawn-trouble-areas').refusesAtPlace);
       if (typed) {
         placeBlocked[id][place] = typed.message || 'A yearly limit is reached for this place.';
         (placeTypes[id] = placeTypes[id] || {})[place] = typed.type;

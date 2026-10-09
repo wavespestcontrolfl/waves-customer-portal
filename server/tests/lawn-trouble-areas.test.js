@@ -108,6 +108,33 @@ describe('troubleTypeFor: the sheet\'s hint when it is on the list, else the cat
   });
 });
 
+describe('blocksAtPlace: a place keeps only what /complete would refuse there, and a read that failed', () => {
+  test('the product count, the product interval and the v13 amount stay; a shared-ingredient cap, a stored rate and a typed non-limit go; an unreadable block stays', () => {
+    const blocks = [
+      { type: 'annual_max_apps', message: 'count' },
+      { type: 'min_interval_days', matchType: 'product', message: 'interval' },
+      { type: 'annual_max_rate', matchType: 'v13_amount', message: 'amount' },
+      { type: 'annual_max_rate', matchType: 'active_ingredient', message: 'shared ai' },
+      { type: 'annual_max_rate', matchType: 'product', message: 'stored rate' },
+      { type: 'annual_max_apps', matchType: 'active_ingredient', message: 'shared count' },
+      { type: 'lawn_prohibited_product', message: 'prohibited' },
+      { message: 'could not be read' },
+    ];
+    expect(areas.blocksAtPlace(blocks).map((b) => b.message)).toEqual(['count', 'interval', 'amount', 'could not be read']);
+    expect(areas.blocksAtPlace(blocks).filter(areas.refusesAtPlace).map((b) => b.message)).toEqual(['count', 'interval', 'amount']);
+    expect(areas.blocksAtPlace(undefined)).toEqual([]);
+  });
+
+  test('blockedMap and blockedTypeMap list only the refusing block of a product, the same predicate as the preflight', () => {
+    const SHARED = [{ type: 'annual_max_rate', matchType: 'active_ingredient', message: 'shared' }];
+    const COUNT = [{ type: 'annual_max_apps', message: 'count' }];
+    const wide = new Map([[P_CEL, SHARED], [uuid(2), [...SHARED, ...COUNT]]]);
+    const byPlace = { front: new Map([[P_CEL, SHARED], [uuid(2), [...SHARED, ...COUNT]]]), back: new Map(), left_side: new Map(), right_side: new Map() };
+    expect(areas.blockedMap({ wide, byPlace })).toEqual({ [uuid(2)]: { front: 'count' } });
+    expect(areas.blockedTypeMap({ wide, byPlace })).toEqual({ [uuid(2)]: { front: 'annual_max_apps' } });
+  });
+});
+
 describe('propertyOf: the property the places work on (the shared visit-property resolver)', () => {
   const resolver = require('../services/property-service-areas');
   test('a visit with its own link uses it with no read; the gate off, or a visit with no customer, is null', async () => {

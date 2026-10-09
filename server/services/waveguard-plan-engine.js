@@ -1742,7 +1742,10 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
       });
-    if (result.blocks.length) capped.set(id, result.blocks.map((block) => ({ ...block, productName: item.product.name })));
+    // GATE_LAWN_TROUBLE_AREAS: a place's read keeps only what /complete would refuse there (and a read that failed); a lawn-wide limit (the
+    // shared active-ingredient cap) is advisory after the fact, so it closes no place (lawn-trouble-areas blocksAtPlace).
+    const blocks = place ? require('./lawn-trouble-areas').blocksAtPlace(result.blocks) : result.blocks;
+    if (blocks.length) capped.set(id, blocks.map((block) => ({ ...block, productName: item.product.name })));
     warnings.push(...result.warnings.map((warning) => ({
       code: 'lawn_v13_limit_warning', severity: 'warning', limitType: warning.type || null, productId: id, productName: item.product.name, message: warning.message,
     })));

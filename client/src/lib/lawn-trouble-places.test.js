@@ -324,3 +324,15 @@ describe('withClearedTakeAll: the take-all card follows the areas cleared on the
     expect(out.cards[0].items).toEqual([]);
   });
 });
+
+describe('an unmapped refusal holds for the guide-card row only', () => {
+  const base = troubleAreasOf(data());
+  const areas = { ...base, refused: { p1: { front: 'Take-all is treated on mapped areas only.' } }, refusedCard: { p1: { front: true } } };
+  test('the card row stays closed; the same product added through Search (or with no source) is open; a limit refusal is source-agnostic', () => {
+    expect(placeProblems(row({ troubleSource: 'guide_card' }), { areas }).front).toBe('Take-all is treated on mapped areas only.');
+    expect(placeProblems(row({ troubleSource: 'tech_tap' }), { areas }).front).toBeNull();
+    expect(placeProblems(row(), { areas }).front).toBeNull();
+    const limit = { ...areas, refusedCard: {} };
+    expect(placeProblems(row({ troubleSource: 'tech_tap' }), { areas: limit }).front).toBe('Take-all is treated on mapped areas only.');
+  });
+});

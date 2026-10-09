@@ -1248,6 +1248,33 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     expect(chipOf(chips(), /^Back/).disabled).toBe(true);
   });
 
+  test('an unmapped refusal belongs to the card row only: removing it and adding the same product through Search opens the place, and the area is stored as a Search one', async () => {
+    const c = ctx();
+    const base = makeRequest({ ctx: { ...c, plannedProducts: { ...c.plannedProducts, takeAllProductIds: [P_FUNG] } } });
+    guideAnswer = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [takeAllCard()], takeAllProductIds: [P_FUNG] };
+    await openSheet({ request: base, props: { catalog: CAT } });
+    await analyze();
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    completeErrors.push(refusal(400, 'lawn_place_not_mapped', 'Take-all is treated on mapped take-all areas only.', { productId: P_FUNG, place: 'back' }));
+    await submit();
+    await waitFor(() => expect(chipOf(chips(), /^Back/).disabled).toBe(true));
+    // The stale card row comes off; the same fungicide is added through Search, the path that may map a new area.
+    fireEvent.click(within(placeGroup('Spot Fungicide')).getByRole('button', { name: 'Remove' }));
+    fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Spot Fungicide' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Spot Fungicide/ }));
+    const method = within(placeGroup('Spot Fungicide')).getByRole('combobox', { name: /^Method for / });
+    fireEvent.change(method, { target: { value: [...method.options].find((o) => o.textContent === 'Spot treatment').value } });
+    await waitFor(() => expect(chipOf(chips(), 'Front').disabled).toBe(false));
+    expect(chipOf(chips(), /^Back/).disabled).toBe(false);
+    fireEvent.click(chipOf(chips(), 'Front'));
+    typeArea(placeGroup('Spot Fungicide'), '100');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls().at(-1).body.products.find((p) => p.productId === P_FUNG)).toMatchObject({ areaPlace: 'front', troubleType: 'take_all', troubleSource: 'tech_tap' });
+  });
+
   test('a take-all product added through Search (tech_tap) may take any open place', async () => {
     await open2();
     fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Spot Fungicide' } });

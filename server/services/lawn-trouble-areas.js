@@ -192,28 +192,36 @@ async function clearArea(knex, { areaId, propertyId, technicianId = null }) {
  * a Map of catalog rows by product id.
  */
 function areaRowsOf({ requestRows, inserted, catalog, confirmed = null, readFailed = false }) {
-  const byProduct = new Map((requestRows || []).filter((row) => row?.productId).map((row) => [String(row.productId).toLowerCase(), row]));
   const out = [];
-  for (const sp of inserted || []) {
-    if (!isPlace(sp.treated_place) || sp.application_method !== 'spot_treatment') continue;
-    const request = byProduct.get(String(sp.product_id || '').toLowerCase()) || {};
-    const product = catalog?.get?.(String(sp.product_id).toLowerCase()) || null;
-    const id = String(sp.product_id).toLowerCase();
-    const category = product?.category || sp.product_category;
+  for (const row of placedSpotRows({ requestRows, inserted, catalog })) {
     // A staged-set read that failed leaves a row that could be a take-all or chinch row unclassified: its area is not stored (the
     // application itself is). A wrong generic area, or one that skips the mapped-place rule, is worse than none.
-    if (readFailed && couldBeSpecial(category, request.troubleType)) {
-      logger.warn(`[lawn-trouble-areas] staged sets unavailable: no area stored for product ${id}`);
+    if (readFailed && needsSets(row)) {
+      logger.warn(`[lawn-trouble-areas] staged sets unavailable: no area stored for product ${row.id}`);
       continue;
     }
-    const type = troubleTypeFor({ category, hint: request.troubleType, takeAll: !!confirmed?.takeAll?.has(id), chinch: !!confirmed?.chinch?.has(id), chinchOnly: !!confirmed?.chinchOnly?.has(id) });
-    if (type) out.push({ place: sp.treated_place, type, source: request.troubleSource });
+    const type = troubleTypeFor({
+      category: row.category, hint: row.request.troubleType, takeAll: !!confirmed?.takeAll?.has(row.id), chinch: !!confirmed?.chinch?.has(row.id), chinchOnly: !!confirmed?.chinchOnly?.has(row.id),
+    });
+    if (type) out.push({ place: row.place, type, source: row.request.troubleSource });
   }
   return out;
 }
 
-// Whether a row's product could be a take-all fungicide or a chinch rung: a fungicide or an insecticide, or a row the sheet tagged so.
-const couldBeSpecial = (category, hint) => ['fungicide', 'insecticide'].includes(String(category || '').trim().toLowerCase()) || hint === 'take_all' || hint === 'chinch';
+// The product rows a completion recorded as SPOT treatments at a closed-list place: `{ id, place, request, category }` (the lower-case
+// product id, the stored place, the sheet's own row for it and the catalog category).
+function placedSpotRows({ requestRows, inserted, catalog }) {
+  const byProduct = new Map((requestRows || []).filter((row) => row?.productId).map((row) => [String(row.productId).toLowerCase(), row]));
+  return (inserted || []).filter((sp) => isPlace(sp.treated_place) && sp.application_method === 'spot_treatment').map((sp) => {
+    const id = String(sp.product_id || '').toLowerCase();
+    return { id, place: sp.treated_place, request: byProduct.get(id) || {}, category: catalog?.get?.(id)?.category || sp.product_category };
+  });
+}
+
+// Whether a row's product could be a take-all fungicide or a chinch rung (so the server's staged sets are needed to classify it): a
+// fungicide or an insecticide, or a row the sheet tagged so.
+const needsSets = ({ category, request }) => ['fungicide', 'insecticide'].includes(String(category || '').trim().toLowerCase())
+  || request.troubleType === 'take_all' || request.troubleType === 'chinch';
 
 // The place a completion stores for a product row: only a spot row, only a closed-list place.
 const storedPlace = (applicationMethod, value) => (applicationMethod === 'spot_treatment' && isPlace(value) ? value : null);
@@ -246,9 +254,7 @@ async function recordStore(trx, { svc, record, products, inserted, catalog, conf
     const scoped = { ...svc, property_id: propertyId };
     // The server's staged sets (take-all rows, chinch rungs) classify the special products whatever the sheet said. They are read once, and
     // only when a placed row could need them; a read that fails stores nothing for such a row (areaRowsOf).
-    const byProduct = new Map((products || []).filter((row) => row?.productId).map((row) => [String(row.productId).toLowerCase(), row]));
-    const needs = inserted.some((sp) => sp.treated_place && sp.application_method === 'spot_treatment'
-      && couldBeSpecial(catalog?.get?.(String(sp.product_id).toLowerCase())?.category || sp.product_category, byProduct.get(String(sp.product_id || '').toLowerCase())?.troubleType));
+    const needs = placedSpotRows({ requestRows: products, inserted, catalog }).some(needsSets);
     const confirmed = needs && confirm ? await confirm().catch(() => null) : null;
     let rows = areaRowsOf({ requestRows: products, inserted, catalog, confirmed, readFailed: needs && !confirmed });
     // A take-all row from the guide CARD maps nothing new (the preflight holds it to a mapped place): never store one at an unmapped place.
@@ -312,7 +318,7 @@ function blockedTypeMap({ wide, byPlace }) {
 function* typedBlocks({ wide, byPlace }) {
   for (const [id] of wide) {
     for (const place of PLACE_IDS) {
-      const block = (byPlace[place].get(id) || []).find((b) => b.type);
+      const block = (byPlace[place].get(id) || []).find(refusesAtPlace);
       if (block) yield [id, place, block];
     }
   }
@@ -445,6 +451,10 @@ function refusesAtPlace(block) {
   return block.type === 'annual_max_rate' && matchType === 'v13_amount';
 }
 
+// What a place's limit read keeps: the blocks /complete would refuse there, and a read that failed (no type: the unknown stays unknown).
+// The one predicate for every per-place answer (the context's map, the guide's, the weed and chinch decisions, the preflight).
+const blocksAtPlace = (blocks) => (blocks || []).filter((block) => !block.type || refusesAtPlace(block));
+
 /**
  * The /complete preflight of the places (called from preflightLawnFastCompletion while the gate is live): every spot
  * row names a closed-list place (400 lawn_place_required / lawn_place_invalid), and the place the cap forbids is
@@ -518,6 +528,7 @@ module.exports = {
   TYPE_IDS,
   SOURCES,
   refusesAtPlace,
+  blocksAtPlace,
   proposedRow,
   isPlace,
   placeLabel,

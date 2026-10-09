@@ -384,12 +384,12 @@ class ApplicationLimitChecker {
       return size > 0 ? size : null;
     };
     // GATE_LAWN_TROUBLE_AREAS: the /complete preflight names the row it is about to record (`proposedRow`: the rate, the typed quantity
-    // and the row's own spot area, as the ledger will hold them). It is sized by capShare, the very function that sizes a recorded
-    // ledger row (the recorded rate when readable, else the quantity over the treated area), so the preflight and the closeout audit
-    // compute one number from the same inputs. A row capShare cannot size falls back to the program's dose, as any proposal does.
-    const rowShare = ctx.proposedRow
-      ? capShare({ ...ctx.proposedRow, default_rate_per_1000: null, limit_value: limit.limit_value, limit_unit: limit.limit_unit })
-      : null;
+    // and the row's own spot area, as the ledger will hold them). It is sized by v13AmountShare, the very function that sizes a recorded
+    // ledger row for the closeout audit (the recorded rate when readable, else the quantity over the treated area, else the cap row's
+    // FIXED fallback rate), so the preflight and the audit can never disagree on a row: a quantity with no spot area counts the same
+    // fallback in both. A proposal with no row (the plan's selected products, the sheet's reads, the compliance route) has no dose
+    // entered yet, so it counts the program's dose, then the same fixed fallback.
+    const rowShare = ctx.proposedRow ? v13AmountShare(ctx.proposedRow, limit) : null;
     let dose = readable(ctx.proposed);
     if (dose == null && ctx.proposal && !rowShare) dose = readable(await this.programDose(database, product.id));
     const adds = rowShare ? rowShare.share : (dose != null ? dose / cap : ((ctx.proposed || ctx.proposal) ? Number(limit.fallback_rate) / cap : 0));

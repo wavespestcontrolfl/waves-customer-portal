@@ -76,9 +76,17 @@ const NOT_MAPPED = 'Take-all is treated on mapped take-all areas only. Pick a ma
 const AMOUNT_LIMIT = 'annual_max_rate';
 const doseMoved = (areas, rows) => { const moved = lowerIds(areas.moved); return rows.some((row) => moved.includes(String(row.productId).toLowerCase())); };
 
+// What /complete refused for this product at this place. A limit refusal belongs to the product and the place. An UNMAPPED refusal
+// (`areas.refusedCard`) belongs to the guide-card row only: the same product added through Search is the deliberate path that maps a new area.
+function refusedAt(areas, row, placeId) {
+  const id = String(row.productId).toLowerCase();
+  const message = areas.refused?.[id]?.[placeId];
+  return message && (!areas.refusedCard?.[id]?.[placeId] || row.troubleSource === 'guide_card') ? message : null;
+}
+
 function problemAt(placeId, row, { areas, weedMix, chinch, weedRows, takeAllPlaces }) {
   // What /complete itself refused for this product at this place is authoritative, whatever any map says.
-  const refused = areas.refused?.[String(row.productId).toLowerCase()]?.[placeId];
+  const refused = refusedAt(areas, row, placeId);
   if (refused) return reasonText(refused, 'A yearly limit is reached at this place.');
   // A take-all row the guide CARD opened may go only on a mapped take-all place; one added through Search maps a new place (the server enforces the same).
   if (unmappedTakeAll(row, placeId, takeAllPlaces)) return NOT_MAPPED;
