@@ -715,8 +715,30 @@ async function projectBermudaStep(items, { knex, rows, probeLimits, productOf = 
   const capped = found ? found.capped.size > 0 : false;
   const usable = stepProgramConsistent(ids, bound) && !capped && stepLinesAvailable(members, rows);
   const settled = settleStep(bindable, usable);
-  const noted = withRowGateNotes(settled.items, rows);
+  const noted = withAcceptedUnits(withRowGateNotes(settled.items, rows));
   return { ...settled, items: testPatch ? addTestPatchNote(noted) : noted, limitWarnings: found?.warnings || [] };
+}
+
+// A step line's product reaches the completion with the unit its catalog row states. A row an
+// alias links may still spell a unit the completion does not accept ('fl oz' for 'fl_oz'), and the
+// screen sends that unit back, so the whole grouped mix could not be completed. Every unit field
+// of a step line's product is given in its accepted spelling here, for every projection; a unit
+// that has no accepted spelling is left as it is. No catalog row is changed.
+// Every string field of the product whose name ends in "unit" (rateUnit, defaultUnit, the sheet's own unit fields).
+const isUnitField = (key, value) => typeof value === 'string' && /unit$/i.test(key);
+function acceptedUnit(unit) {
+  const { isValidRateUnit, normalizeInventoryUnit } = require('./inventory-units');
+  if (!unit || isValidRateUnit(unit)) return unit;
+  const normalized = normalizeInventoryUnit(unit);
+  return isValidRateUnit(normalized) ? normalized : unit;
+}
+function withAcceptedUnits(items) {
+  return items.map((item) => {
+    if (!isStepLine(item) || !item.product) return item;
+    const product = { ...item.product };
+    for (const [key, value] of Object.entries(product)) if (isUnitField(key, value)) product[key] = acceptedUnit(value);
+    return { ...item, product };
+  });
 }
 
 // A step line that carries no gate notes of its own (the completion actions are built

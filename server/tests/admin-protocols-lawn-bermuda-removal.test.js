@@ -222,6 +222,22 @@ describe('step members come from the staged rows\' product links, not the name m
     expect(keysOf(actions, ALIAS)).toEqual(keysOf(actions, FUS));
   });
 
+  test('a linked catalog row that spells its unit "fl oz" reaches the sheet and the actions as "fl_oz", the unit the completion accepts (codex r57 P2)', async () => {
+    const nis = CATALOG.find((p) => p.id === 'nis');
+    const before = nis.rate_unit;
+    nis.rate_unit = 'fl oz';
+    try {
+      const surfactant = (items) => items.find((item) => item.product?.id === 'nis').product;
+      // The completion actions carry the catalog unit to the completion screen.
+      expect(surfactant((await actionsFor()).actions.filter((a) => a.group)).rateUnit).toBe('fl_oz');
+      // No projection hands out the unaccepted spelling in any product unit field.
+      const sheet = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'fus' });
+      expect(Object.values(surfactant(sheet.items.filter((item) => item.bermudaStep)))).not.toContain('fl oz');
+    } finally {
+      nis.rate_unit = before;
+    }
+  });
+
   test('tagged limit ids that differ from the window\'s linked herbicides: the step is withheld (sheet and actions)', async () => {
     rename();
     // The limits judge other ids than the staged rows link.
