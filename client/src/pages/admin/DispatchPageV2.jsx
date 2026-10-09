@@ -2099,6 +2099,8 @@ export default function DispatchPageV2({
             customerName: assessmentFastService.customer_name || assessmentFastService.customerName,
             serviceType: assessmentFastService.service_type || assessmentFastService.serviceType,
             address: shortAddress(assessmentFastService.address) || assessmentFastService.address || "",
+            // The whole address, for the "Create estimate" prefill (the line above is display only).
+            fullAddress: assessmentFastService.address || "",
             timeLabel: serviceWindowLabel(assessmentFastService) || "",
             // The visit the user opened. The sheet sends it with the completion
             // for the server to check against the live visit.
