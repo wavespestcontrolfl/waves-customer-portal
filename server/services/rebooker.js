@@ -1122,7 +1122,7 @@ function parseWindow(w) {
 // rescheduleSeries (inside its transaction) and previewSeriesMove (read-only
 // counts for the surfaces), so what a surface previews is exactly what the
 // move probes and writes.
-async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db }) {
+async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, conn = db, prefersNoWeekends }) {
   const pattern = parent.recurring_pattern;
   const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
   // Seasonal series keep their seeded weekend/season contract on re-anchor
@@ -1136,8 +1136,12 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr, co
   // B6: the projected siblings honor the customer's LIVE weekday
   // preference alongside the operator-set series flag — the flag alone
   // is operator provenance; the preference is never persisted onto rows.
+  // A caller projecting many dates for one series passes the preference it
+  // already loaded (prefersNoWeekends) so each projection adds no query.
   const seriesSkipWeekends = !!parent.skip_weekends
-    || await customerPrefersNoWeekends(conn, parent.customer_id);
+    || (typeof prefersNoWeekends === 'boolean'
+      ? prefersNoWeekends
+      : await customerPrefersNoWeekends(conn, parent.customer_id));
   const projectSeriesDate = (raw) => {
     let out = String(raw).split('T')[0];
     // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
@@ -4399,11 +4403,16 @@ class SmartRebooker {
     const { service, parent, swept, nextIdx, next } = sweep;
     const currentDate = dateOnly(service.scheduled_date);
     const byDate = {};
+    // One read for every candidate: the customer and the preference are the
+    // same for each projected date.
+    const prefersNoWeekends = parent.skip_weekends
+      ? true
+      : !!(await customerPrefersNoWeekends(conn, parent.customer_id));
     for (const raw of candidateDates) {
       const seriesDateStr = dateOnly(raw);
       if (!seriesDateStr || seriesDateStr === currentDate || byDate[seriesDateStr]) continue;
       const { cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
-        service, parent, newDate: seriesDateStr, seriesDateStr, conn,
+        service, parent, newDate: seriesDateStr, seriesDateStr, conn, prefersNoWeekends,
       });
       // Walk the rows before it in sweep order, exactly as the move does: a
       // row that does not move still reserves its cadence slot.

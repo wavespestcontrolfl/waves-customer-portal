@@ -468,6 +468,18 @@ function nextVisitShiftFor(data, slotDate) {
   return from && to && from !== to ? { from, to } : null;
 }
 
+// A search or a slot-taken refresh can offer a day the first load did not:
+// keep the dates already named and add the new ones.
+function withNextVisit(prev, body) {
+  if (!body?.nextVisit) return {};
+  return {
+    nextVisit: {
+      currentDate: body.nextVisit.currentDate,
+      byDate: { ...(prev?.nextVisit?.byDate || {}), ...(body.nextVisit.byDate || {}) },
+    },
+  };
+}
+
 function shortDateLabel(dateStr) {
   try {
     const [y, m, d] = String(dateStr).split('-').map(Number);
@@ -1402,6 +1414,10 @@ const FLOWS = {
       disclosed_collective: !!data?.collectiveAnchor,
       disclosed_future_placement_days: data?.futurePlacementDays ?? null,
       disclosed_current_date: data?.current?.date || null,
+      // The next-visit date the note under Confirm named for this slot
+      // (null = none named). The server projects it again under its locks
+      // and answers SCOPE_CHANGED when the plan no longer matches.
+      disclosed_next_visit_date: data?.collectiveAnchor ? (nextVisitShiftFor(data, slot.date)?.to ?? null) : null,
     }),
     // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.
     // SELF_SERVE_NOTICE (owner ruling 2026-09-23): the visit slid inside the
@@ -1773,7 +1789,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (body.availability) {
       // The pick survives when the results still offer it (see the
       // availability effect above); otherwise that effect clears it.
-      setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+      setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(prev, body) } : prev));
       setSubmitError(null);
       setAiFiltered(true);
     }
@@ -1871,7 +1887,7 @@ export default function ScheduleFlowPage({ flow }) {
           if (body.lead) mergeData({ lead: body.lead });
         }
         if (body.availability) {
-          setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
+          setData((prev) => (prev ? { ...prev, availability: body.availability, ...withNextVisit(prev, body) } : prev));
         } else if (flow === 'inspection') {
           // The server's own refresh attempt came back empty — fall back
           // to a client-side refresh through the SAME address-aware helper

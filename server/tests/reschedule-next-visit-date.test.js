@@ -39,7 +39,7 @@ jest.mock('../services/visit-groups', () => ({
 const SmartRebooker = require('../services/rebooker');
 const router = require('../routes/reschedule-public');
 
-const { loadNextVisitShift, nextVisitDateActive } = router._test;
+const { loadNextVisitShift, nextVisitDateActive, projectedNextVisitDate } = router._test;
 
 // A quarterly plan: the parent is the visit being moved, with two later rows.
 function plan(overrides = {}) {
@@ -233,5 +233,65 @@ describe('reschedule-public loadNextVisitShift', () => {
     expect(await loadNextVisitShift(series, availability)).toBeNull();
     spy.mockResolvedValueOnce(null);
     expect(await loadNextVisitShift(series, availability)).toBeNull();
+  });
+});
+
+describe('reschedule-public projectedNextVisitDate (the Confirm pin, Codex r2 P1)', () => {
+  const series = { id: 'svc-1', is_recurring: true, scheduled_date: '2026-10-15' };
+  const trx = { marker: 'locked transaction' };
+  let spy;
+  beforeEach(() => {
+    process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE = 'true';
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    spy = jest.spyOn(SmartRebooker, 'projectNextVisitDates')
+      .mockResolvedValue({ currentDate: '2027-01-15', byDate: { '2026-10-22': '2027-01-22' } });
+  });
+  afterEach(() => spy.mockRestore());
+
+  test('projects the one picked date on the connection it is given', async () => {
+    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBe('2027-01-22');
+    expect(spy).toHaveBeenCalledWith('svc-1', ['2026-10-22'], { conn: trx });
+  });
+
+  test('null when the mover would keep the next visit, the date has no entry, or the date does not change', async () => {
+    spy.mockResolvedValueOnce(null);
+    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
+    expect(await projectedNextVisitDate(series, '2026-10-29', trx)).toBeNull();
+    spy.mockResolvedValueOnce({ currentDate: '2027-01-22', byDate: { '2026-10-22': '2027-01-22' } });
+    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
+  });
+
+  test('gate off, no collective anchoring or a one-time visit: null without a read', async () => {
+    delete process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE;
+    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
+    process.env.GATE_RESCHEDULE_NEXT_VISIT_DATE = 'true';
+    delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    expect(await projectedNextVisitDate(series, '2026-10-22', trx)).toBeNull();
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    expect(await projectedNextVisitDate({ ...series, is_recurring: false }, '2026-10-22', trx)).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('the series commit runs the pin inside the mover\'s locked guard and refuses SCOPE_CHANGED', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/reschedule-public'), 'utf8');
+    const pin = src.slice(src.indexOf('const nextVisitPin = async ({ trx }) => {'));
+    const body = pin.slice(0, pin.indexOf('const officeApprovalRecheck'));
+    expect(body).toMatch(/projectedNextVisitDate\(svc, date, trx\)/);
+    expect(body).toMatch(/req\.body\?\.disclosed_next_visit_date/);
+    expect(body).toMatch(/if \(disclosed !== expected\)[\s\S]*code: 'SCOPE_CHANGED'/);
+    const series = src.slice(src.indexOf('await SmartRebooker.rescheduleSeries('), src.indexOf(': await SmartRebooker.reschedule('));
+    expect(series).toMatch(/moveGuard: async \(ctx\) => \{\s*await officeApprovalRecheck\(ctx\);\s*await nextVisitPin\(ctx\);/);
+  });
+});
+
+describe('projectNextVisitDates reads the weekday preference once (Codex r2 P2)', () => {
+  test('many offered dates, one preference read', async () => {
+    const { customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
+    customerPrefersNoWeekends.mockClear();
+    const shift = await SmartRebooker.projectNextVisitDates(
+      'svc-1', ['2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23'], { conn: connFor(plan()) },
+    );
+    expect(Object.keys(shift.byDate)).toHaveLength(4);
+    expect(customerPrefersNoWeekends).toHaveBeenCalledTimes(1);
   });
 });

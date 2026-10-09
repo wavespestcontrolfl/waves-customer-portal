@@ -827,9 +827,18 @@ with another live service or its visit is frozen; under
 `GATE_CUSTOMER_RECURRING_DISPATCH` also a row that is not pending/confirmed, is
 customer-confirmed, is dispatch-locked or excluded, or has a sendable
 reminder); the projection fails. `byDate` has no entry for the visit's own
-date (a time-only move does not shift the plan). Display only: the commit
-route does not read it. `find-slots` results are covered only where their
-dates are in the GET's day list; a date with no entry shows no line.
+date (a time-only move does not shift the plan). `POST .../find-slots` and
+the commit route's `SLOT_TAKEN` refresh carry the same key for the days they
+return, and the client adds those dates to the ones it holds; a date with no
+entry shows no line. Confirm pin: the commit body carries
+`disclosed_next_visit_date` (the date the line named for the picked slot, or
+null when it named none). While the gate is on, a series commit projects the
+date again on the mover's locked transaction, before its first write
+(`moveGuard`); when the answer differs (the next visit became
+customer-confirmed, dispatch-locked, reminded, shared or frozen after the page
+loaded, or the reverse) the commit is refused `409 SCOPE_CHANGED` and the
+page reloads. A page loaded before the gate was set sends no field and gets
+the same reload when a date would be named.
 
 Public self-serve reschedule (`/api/public/reschedule/:token`,
 `routes/reschedule-public.js`) joined the certified-order group for its
