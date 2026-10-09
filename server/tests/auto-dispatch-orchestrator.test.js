@@ -274,7 +274,8 @@ test('a lapsed plan raises no missing-geo notice', async () => {
   eligibility.isRecurringPlanActive.mockResolvedValue({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE', reason_description: 'lapsed' });
   await runAutoDispatch({ mode: 'dry_run' });
   expect(notifications.notifyAdmin).not.toHaveBeenCalled();
-  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(), expect.any(Date));
+  // The lapsed visit is in the close list: a standing pin notice for it closes.
+  expect(audit.retireMissingGeoNotices).toHaveBeenCalledWith(new Set(['s1']), expect.any(Date));
 });
 
 describe('missing-geo notice close at the end of a run', () => {

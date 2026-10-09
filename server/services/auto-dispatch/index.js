@@ -657,6 +657,14 @@ async function noticeMissingGeo(run, service) {
 
 // A visit that passed eligibility has a usable pin: the run's end closes a
 // standing missing-pin notice for it. Nothing else closes one early.
+// A missing-pin visit whose plan has lapsed is no longer placed, so nobody
+// needs to fix its pin: a standing notice for it closes at the run's end too
+// (Codex #6208 r4 P2).
+function logLapsedPlanSkip(run, service, skip) {
+  run.pinOkIds.add(String(service.id));
+  return logSkip(run, service, skip);
+}
+
 function notePinOk(run, service, elig) {
   if (elig.eligible) run.pinOkIds.add(String(service.id));
 }
@@ -728,7 +736,7 @@ async function evaluateServiceForRun(service, run) {
   const { config, guardMode, totals } = run;
   const eligCtx = buildEligCtx(guardMode, run.today, run.lockBoundary, config.lockWindowDays);
   const gate = await eligibilityWithGeoHeal(service, eligCtx, run);
-  if (gate.skip) return logSkip(run, service, gate.skip);
+  if (gate.skip) return logLapsedPlanSkip(run, service, gate.skip);
   notePinOk(run, service, gate.elig);
   if (!gate.elig.eligible) return logIneligible(run, service, gate.elig);
 
