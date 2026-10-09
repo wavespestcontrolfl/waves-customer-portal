@@ -54,7 +54,10 @@ function installServiceLookup(service, { existingAudit } = {}) {
     noWait: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(service),
     // the grouped-stop member read: only this member, still open, by default
-    select: jest.fn().mockResolvedValue([{ id: service?.id, arrived_at: null, track_state: service?.track_state, status: service?.status }]),
+    select: jest.fn().mockResolvedValue([{
+      id: service?.id, arrived_at: null, track_state: service?.track_state, status: service?.status,
+      en_route_at: service?.group_en_route_at ?? null,
+    }]),
   };
   const audit = auditQueryMock(existingAudit);
   db.mockImplementation((table) => {
@@ -686,6 +689,22 @@ describe('gps-arrival-detector not_marked diagnostics (ungated)', () => {
     expect(notMarkedWrites()).toHaveLength(0);
     expect(query.locked.where).toHaveBeenCalledWith({ visit_id: 'visit-3' });
     expect(query.locked.noWait).toHaveBeenCalled();
+  });
+
+  test('a sibling restarted since the snapshot is a different grouped attempt: nothing is written', async () => {
+    const service = baseService({ visit_id: 'visit-5', group_en_route_at: EN_ROUTE_TIME, scheduled_date: '2026-10-08' });
+    const query = installServiceLookup(service);
+    // under the lock the earliest member time is no longer the snapshot's
+    query.locked.select.mockResolvedValue([
+      { id: 'svc-1', arrived_at: null, track_state: 'en_route', status: 'en_route', en_route_at: new Date().toISOString() },
+      { id: 'svc-2', arrived_at: null, track_state: 'en_route', status: 'en_route', en_route_at: new Date().toISOString() },
+    ]);
+
+    await detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(), point: basePoint({ speed_mph: 32, ignition: true }), configOverride: detector._test.DEFAULT_CONFIG,
+    });
+
+    expect(notMarkedWrites()).toHaveLength(0);
   });
 
   test('a member locked by a lifecycle write makes the diagnostic give up and release its claim', async () => {

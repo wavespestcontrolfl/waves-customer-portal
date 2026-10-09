@@ -419,8 +419,14 @@ async function stillTheObservedMiss(trx, snapshot, fresh) {
     .orderBy('id')
     .forShare()
     .noWait()
-    .select('id', 'arrived_at', 'track_state', 'status');
-  return !members.some((m) => m.arrived_at || m.track_state === 'on_property' || m.status === 'on_site');
+    .select('id', 'arrived_at', 'track_state', 'status', 'en_route_at');
+  if (members.some((m) => m.arrived_at || m.track_state === 'on_property' || m.status === 'on_site')) return false;
+  // The grouped attempt is the earliest member en_route_at: it must still be
+  // the one the caller keyed this row on (a sibling restarted since = a new
+  // attempt, which a later sample records under its own key).
+  const times = members.map((m) => timestampMs(m.en_route_at)).filter((ms) => ms != null);
+  const lockedGroupMs = times.length ? Math.min(...times) : null;
+  return lockedGroupMs === timestampMs(snapshot.group_en_route_at);
 }
 
 async function writeNotMarkedOnce(serviceId, reason, row) {
