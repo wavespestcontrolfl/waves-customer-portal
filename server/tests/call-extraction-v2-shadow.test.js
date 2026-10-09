@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v26');
-    expect(PROMPT_HASH).toMatch(/^v26-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v27');
+    expect(PROMPT_HASH).toMatch(/^v27-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
@@ -463,6 +463,18 @@ describe('scheduling.callback_window_start/_end: Eastern wall-clock form (schema
     expect(prompt).toMatch(/callback_window_start \/ callback_window_end: set ONLY when a time for a CALLBACK was stated/);
     expect(prompt).toMatch(/24-hour form with NO offset and NO "Z"/);
     expect(prompt).toMatch(/A part of day with no hour \("this afternoon"\) is NOT a time/);
+  });
+});
+
+// A genuine caller who asked for staff by name and agreed to call back was marked
+// spam in about 1 run in 5: nothing on the call was a pitch.
+describe('is_spam needs a pitch that was heard (prompt v27)', () => {
+  test('the prompt keeps a call with no stated purpose out of spam', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const prompt = buildExtractionPrompt('t', '2026-10-09', 'c');
+    expect(prompt).toMatch(/is_spam needs a pitch that was HEARD on the call/);
+    expect(prompt).toMatch(/ends before\s+the caller says why they are calling/);
+    expect(prompt).toMatch(/When the purpose is unknown, lead_quality is\s+"cold", never "spam_or_solicitation"/);
   });
 });
 

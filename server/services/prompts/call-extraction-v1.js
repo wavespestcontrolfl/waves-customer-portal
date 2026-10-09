@@ -142,7 +142,12 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // 2026-10-09). The rule now gives the form, and the two fields join the evidence
 // pinning list (the callback promise is recorded only with the agent's quote under
 // that path; codex #6215 r2 P1). New instructions: a new cohort.
-const PROMPT_VERSION = 'v26';
+// v27: is_spam needs a pitch that was HEARD (owner 2026-10-09, "spam"). On a reviewed call
+// a caller asked for staff by name, named a property, was told staff was busy and agreed
+// to call back; the model marked that genuine caller spam in about 1 run in 5 on every
+// prompt tested (0 of 12 with this rule). A call that ends before the caller states a
+// purpose is not spam. New instruction: a new cohort.
+const PROMPT_VERSION = 'v27';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -424,6 +429,13 @@ exact mistakes lost real leads; apply them literally):
   hard to follow. A prospect is never spam.
 - A wrong number or a competitor's confused customer is NOT spam: set
   is_spam=false and lead_quality="wrong_number" instead.
+- is_spam needs a pitch that was HEARD on the call. A call that ends before
+  the caller says why they are calling (they ask for a person by name, are
+  told that person is busy, and agree to call back or be called back) is NOT
+  spam: set is_spam=false. A friendly opener ("how are you today?"), a business
+  or property name, or the fact that the caller is not yet a customer is not
+  evidence of solicitation. When the purpose is unknown, lead_quality is
+  "cold", never "spam_or_solicitation", and no spam triage flag is raised.
 - Abstract failure patterns to avoid (not real calls):
   1) "This is an automated assistant calling for a homeowner who needs a severe
      bed-bug treatment quote at 123 Example St" -> is_spam=false, is_lead=true
