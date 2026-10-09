@@ -159,6 +159,17 @@ describe("shouldOpenLawnReserviceFastComplete (owner 2026-10-08)", () => {
     }
   });
 
+  it("a visit the server's own check refuses opens the full form, not a blocked sheet (Codex P2 on #6140)", () => {
+    const profile = reservice().completionProfile;
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ completionProfile: { ...profile, companions: [{ type: "rodent_bait" }] } }))).toBe(false);
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ completionProfile: { ...profile, findingsType: null } }))).toBe(false);
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ completionProfile: { ...profile, projectBacked: true } }))).toBe(false);
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ completionProfile: { ...profile, requiresProject: true } }))).toBe(false);
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ linkedProject: { id: "proj-1" } }))).toBe(false);
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ visitCloseoutPacket: { id: "pkt" } }))).toBe(false);
+    expect(shouldOpenLawnReserviceFastComplete(reservice({ visitId: "v1", visitCloseoutEnabled: true }))).toBe(false);
+  });
+
   it("keeps this page's guards: the payment return and rows with no propertyId key", () => {
     expect(shouldOpenLawnReserviceFastComplete(reservice({ completionInvoiceAlreadySent: true }))).toBe(false);
     expect(shouldOpenLawnReserviceFastComplete(reservice({ checkoutInvoiceToken: "tok" }))).toBe(false);

@@ -1,6 +1,6 @@
 import { isTreeShrubFastCompleteEligible } from "./tree-shrub-fast-complete";
-import { isLawnFastCompleteEligible, isLawnReserviceFastCompleteEligible } from "./lawn-fast-complete";
-import { isFastCompleteReportEligible, isLaneReportEligible, isTypedReportEligible } from "./pest-fast-complete";
+import { isLawnFastCompleteEligible, isLawnReserviceFastCompleteEligible, LAWN_FINDINGS_TYPE } from "./lawn-fast-complete";
+import { closesOutAsVisit, isFastCompleteReportEligible, isLaneReportEligible, isTypedReportEligible } from "./pest-fast-complete";
 
 export const TERMINAL_VISIT_STATUSES = new Set([
   "completed",
@@ -58,12 +58,28 @@ export function shouldOpenLawnFastComplete(service) {
 // Admin Dispatch opens the lawn re-service's own Fast Complete sheet for a
 // visit the shared rule makes eligible (owner 2026-10-08: the technician home
 // already did), on the same terms as the sheets above.
+// It also asks what the server's own check refuses and the row already
+// shows (lawnReserviceIneligibleReason: not the typed lawn form, a project,
+// companion findings, a whole-visit closeout), so those visits open the
+// working form and not a blocked sheet.
 export function shouldOpenLawnReserviceFastComplete(service) {
   return isLawnReserviceFastCompleteEligible(service)
+    && !lawnReserviceServerRefuses(service)
     && "propertyId" in service
-    && !service?.completionInvoiceAlreadySent
-    && !service?.checkoutInvoiceId
-    && !service?.checkoutInvoiceToken;
+    && !returningFromPayment(service);
+}
+
+function lawnReserviceServerRefuses(service) {
+  const profile = service.completionProfile;
+  if (profile.findingsType !== LAWN_FINDINGS_TYPE) return true;
+  if (profile.projectBacked || profile.requiresProject || service.linkedProject?.id) return true;
+  if ((profile.companions || []).length) return true;
+  return !!service.visitCloseoutPacket || closesOutAsVisit(service);
+}
+
+// A visit returning from the payment flow carries invoice fields no sheet sends.
+function returningFromPayment(service) {
+  return !!(service.completionInvoiceAlreadySent || service.checkoutInvoiceId || service.checkoutInvoiceToken);
 }
 
 // Admin Dispatch opens the pest Fast Complete sheet, in its report flow, for the
