@@ -230,6 +230,19 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(notifications.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  // The soonest visit got a window after the scan: the locked recheck drops
+  // it, and the eleventh visit takes the slot (Codex #6208 r10 P2).
+  test('a candidate the locked recheck drops leaves its slot for the next visit', async () => {
+    const rows = Array.from({ length: 11 }, (_, i) => ({ id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(10 + i).padStart(2, '0')}` }));
+    query.select = jest.fn().mockResolvedValueOnce(rows).mockResolvedValue([]);
+    query.first = jest.fn().mockResolvedValueOnce(undefined).mockResolvedValue({ id: 'live' });
+    notifications.notifyAdmin.mockResolvedValue({ id: 'noticeX' });
+    expect(await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2026-08-01T16:00:00Z'))).toBe(10);
+    const keys = notifications.notifyAdmin.mock.calls.map((c) => c[3].dedupeKey);
+    expect(keys).not.toContain('recurring-no-window:n0:2026-08-10');
+    expect(keys).toContain('recurring-no-window:n10:2026-08-20');
+  });
+
   test('rings at most 10 new notices a run, soonest date first; the rest wait for the next run', async () => {
     const rows = Array.from({ length: 11 }, (_, i) => ({
       id: `n${i}`, customer_id: `c${i}`, recurring_parent_id: `p${i}`, scheduled_date: `2026-08-${String(30 - i).padStart(2, '0')}`,
@@ -275,6 +288,8 @@ describe('recurring visit with no arrival time and no due date', () => {
     expect(budgetWhere).toEqual([{ recipient_type: 'admin' }]);
     expect(bindings()).toEqual(expect.arrayContaining(['unpriced-series:%', 'lawn-email-gap:%', 'prepay-coverage:%', 'accepted-schedule:%', 'churned-live-work:%', 'combined-booking-check:%', 'recurring-dispatch:%']));
     expect(budgetSql.join(' ')).toContain("COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours'");
+    // An Activity-only row never rings and takes no slot (r10 P2).
+    expect(budgetSql.join(' ')).toContain("COALESCE(metadata->>'feed', '') <> 'activity'");
   });
 
   test('a resolved notice is not standing: reopening it spends budget (Codex #6208 r3)', async () => {

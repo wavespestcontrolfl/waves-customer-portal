@@ -319,14 +319,15 @@ async function standingNoticeKeys(keyPattern, resolvedTitle) {
 
 // Dedupe keys of the budgeted lanes' notices that RANG in the last 24 hours.
 // A reopened notice keeps its created_at; notification-service stamps
-// metadata.rungAt on each ring, so that is the time counted.
+// metadata.rungAt on each ring, so that is the time counted. An Activity-only
+// row never rings and is not counted.
 async function recentBudgetKeys() {
   // No category filter: the watchdog and the combined-booking check ring
   // under 'alert', these lanes under 'schedule_conflict' (Codex #6208 r8 P1).
   const rows = await db('notifications')
     .where({ recipient_type: 'admin' })
     .whereRaw(
-      `COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours' AND (${BUDGET_LANE_KEYS.map(() => "metadata->>'dedupeKey' LIKE ?").join(' OR ')})`,
+      `COALESCE((metadata->>'rungAt')::timestamptz, created_at) >= now() - interval '24 hours' AND COALESCE(metadata->>'feed', '') <> 'activity' AND (${BUDGET_LANE_KEYS.map(() => "metadata->>'dedupeKey' LIKE ?").join(' OR ')})`,
       BUDGET_LANE_KEYS.map((k) => `${k}%`),
     )
     .select(db.raw("metadata->>'dedupeKey' as dedupe_key"));
@@ -355,11 +356,16 @@ async function prepareNoWindowNotices(nowDate, today, to) {
 // the due-date notice, so a staff placement that wins the lock makes this a no-op.
 async function flagNoWindowVisits(candidates, today, to) {
   const { shortDateET } = require('../admin-alert-names');
-  const rows = candidates.length
-    ? withinRingBudget(candidates, await standingNoticeKeys('recurring-no-window:%', NO_WINDOW_RESOLVED_TITLE), await ringsLeft())
-    : [];
+  if (!candidates.length) return 0;
+  const standing = await standingNoticeKeys('recurring-no-window:%', NO_WINDOW_RESOLVED_TITLE);
+  // A slot is spent only when a NEW notice is raised: a candidate the locked
+  // recheck below drops (window set, cancelled, plan lapsed) leaves its slot
+  // for the next visit in date order (Codex #6208 r10 P2).
+  let left = await ringsLeft();
   let flagged = 0;
-  for (const row of rows) {
+  for (const row of withinRingBudget(candidates, standing, Infinity)) {
+    const isStanding = standing.has(noWindowKey(row));
+    if (!isStanding && left <= 0) continue;
     const date = row.date;
     const notice = await db.transaction(async (trx) => {
       const current = await noWindowVisits(trx, today, to)
@@ -390,6 +396,7 @@ async function flagNoWindowVisits(candidates, today, to) {
       return inserted;
     });
     if (notice) flagged += 1;
+    if (notice && !isStanding) left -= 1;
   }
   return flagged;
 }
