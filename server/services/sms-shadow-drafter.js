@@ -3554,7 +3554,7 @@ function serviceIdentityVisits(context) {
   const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type)
     // scheduledServiceId stays on this internal object only — the identity
     // prompt renders id/type/date, never the row id.
-    .map((s, i) => ({ id: `V${i + 1}`, type: String(s.type), date: s.date, upcoming: true, scheduledServiceId: s.scheduledServiceId ?? null, seriesKey: s.seriesKey ?? null }));
+    .map((s, i) => ({ id: `V${i + 1}`, type: String(s.type), date: s.date, upcoming: true, scheduledServiceId: s.scheduledServiceId ?? null, seriesKey: s.seriesKey ?? null, seriesExclusive: s.seriesExclusive === true }));
   const last = (context?.serviceHistory || []).find((s) => s && s.type);
   return last ? [...upcoming, { id: 'C1', type: String(last.type), date: last.date, upcoming: false }] : upcoming;
 }
@@ -3633,13 +3633,14 @@ function visitIdField(visit, visits = []) {
 // 14 of 23 scheduling drafts without times had several upcoming visits).
 // "Series" is the schedule's own link, never a matching label (Codex #6172 r2): every
 // upcoming visit must carry the SAME seriesKey (context-aggregator: the parent row's id
-// for a recurring visit, null for a one-time job). Two one-time jobs of one service, a
-// visit outside the series, a missing date, or two visits on the earliest date all stay
-// ambiguous (null).
+// for a recurring visit, null for a one-time job) AND seriesExclusive: the context lists
+// at most three visits, so the aggregator asks the schedule whether any other upcoming
+// work exists beyond them. Two one-time jobs of one service, a visit outside the series
+// (listed or not), a missing date, or two visits on the earliest date all stay ambiguous.
 function nextVisitOfSeries(upcoming) {
   if (upcoming.length < 2) return null;
   const key = upcoming[0].seriesKey;
-  if (!key || upcoming.some((v) => v.seriesKey !== key || v.type !== upcoming[0].type)) return null;
+  if (!key || upcoming.some((v) => v.seriesKey !== key || v.type !== upcoming[0].type || v.seriesExclusive !== true)) return null;
   const times = upcoming.map((v) => (v.date ? new Date(v.date).getTime() : NaN));
   if (times.some((t) => !Number.isFinite(t))) return null;
   const order = upcoming.map((v, i) => i).sort((x, y) => times[x] - times[y]);

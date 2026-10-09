@@ -164,13 +164,13 @@ function withScheduledServiceId(entry, id) {
   return entry;
 }
 
-// The recurring series a visit belongs to, by the schedule's own link (the
-// same rule admin-schedule uses: a series job has a parent id or is the
-// recurring parent itself; its key is the parent row's id). null for a
-// one-time job. Non-enumerable for the same reason as the row id above.
+// The series link of an upcoming visit for the texting AI's next-of-series
+// identity: seriesKey (seriesKeyOfRow) and seriesExclusive (stampSeriesExclusive:
+// that series is ALL of the customer's upcoming work, beyond the listed rows).
+// Non-enumerable for the same reason as the row id above.
 function withSeriesKey(entry, row) {
-  const key = row && (row.recurring_parent_id || row.is_recurring) ? String(row.recurring_parent_id || row.id) : null;
-  Object.defineProperty(entry, 'seriesKey', { value: key, enumerable: false });
+  Object.defineProperty(entry, 'seriesKey', { value: seriesKeyOfRow(row), enumerable: false });
+  Object.defineProperty(entry, 'seriesExclusive', { value: row?.series_exclusive === true, enumerable: false });
   return entry;
 }
 
@@ -963,11 +963,38 @@ function mergeLiveUpcoming(limited, liveRows, cap = 3) {
   }
   return merged.sort((a, b) => dateOrderKey(a) - dateOrderKey(b));
 }
+// The recurring series a visit row belongs to, by the schedule's own link (the
+// same rule admin-schedule uses: a series job has a parent id or is the
+// recurring parent itself; its key is the parent row's id). null = a one-time job.
+function seriesKeyOfRow(row) {
+  return row && (row.recurring_parent_id || row.is_recurring) ? String(row.recurring_parent_id || row.id) : null;
+}
+// The listed rows are capped at three, so "they are all one series" proves
+// nothing about a fourth visit. When the listed rows share ONE series, ask the
+// schedule itself (same base query, uncapped) whether any OTHER upcoming work
+// exists, and stamp the answer on the rows: series_exclusive true only when
+// that series is ALL of the customer's upcoming work. A failed read is false.
+async function stampSeriesExclusive(customer, rows, baseQuery = upcomingServicesBase) {
+  const key = rows.length > 1 ? seriesKeyOfRow(rows[0]) : null;
+  if (!key || rows.some((r) => seriesKeyOfRow(r) !== key)) return rows;
+  let exclusive = false;
+  try {
+    const other = await baseQuery(customer)
+      .whereNot('ss.id', key)
+      .where((q) => q.whereNull('ss.recurring_parent_id').orWhereNot('ss.recurring_parent_id', key))
+      .first('ss.id');
+    exclusive = !other;
+  } catch (err) {
+    logger.warn(`[context-aggregator] series-exclusive read failed: ${err.message}`);
+  }
+  for (const r of rows) r.series_exclusive = exclusive;
+  return rows;
+}
 async function loadUpcomingServices(customer, includeLiveEta) {
   const limited = await upcomingServicesBase(customer).orderBy('ss.scheduled_date').limit(3).select(...UPCOMING_SERVICE_COLUMNS);
-  if (!includeLiveEta) return limited;
+  if (!includeLiveEta) return stampSeriesExclusive(customer, limited);
   const liveRows = await liveServicesQuery(customer).orderBy('ss.scheduled_date').limit(10).select(...UPCOMING_SERVICE_COLUMNS);
-  return mergeLiveUpcoming(limited, liveRows);
+  return stampSeriesExclusive(customer, mergeLiveUpcoming(limited, liveRows));
 }
 
 // The send-time snapshot input: one group per distinct live STOP (Codex
@@ -1972,4 +1999,6 @@ module.exports.perVisitLiveEtas = perVisitLiveEtas;
 module.exports.buildLiveEtaGroups = buildLiveEtaGroups;
 module.exports.mergeLiveUpcoming = mergeLiveUpcoming;
 module.exports.loadUpcomingServices = loadUpcomingServices;
+module.exports.seriesKeyOfRow = seriesKeyOfRow;
+module.exports.stampSeriesExclusive = stampSeriesExclusive;
 module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

@@ -47,11 +47,12 @@ const PICKER_DAYS = [
   { date: '2026-10-03', slots: [{ startTime24: '08:00' }] },
 ];
 
-function upcomingEntry(type, date, id, seriesKey = null) {
+function upcomingEntry(type, date, id, seriesKey = null, seriesExclusive = Boolean(seriesKey)) {
   const entry = { type, date, window: null, status: 'confirmed', tech: null, isToday: false };
   // Same shape context-aggregator builds: the id and the series link are NON-ENUMERABLE.
   if (id) Object.defineProperty(entry, 'scheduledServiceId', { value: id, enumerable: false });
   Object.defineProperty(entry, 'seriesKey', { value: seriesKey, enumerable: false });
+  Object.defineProperty(entry, 'seriesExclusive', { value: seriesExclusive, enumerable: false });
   return entry;
 }
 
@@ -336,6 +337,16 @@ describe('gate on — an upcoming visit is offered through the reschedule link p
     ])));
     expect(picker.loadById).not.toHaveBeenCalled();
     expect(oldFinder).not.toHaveBeenCalled();
+  });
+
+  test('one series in the listed visits but OTHER upcoming work beyond them (seriesExclusive false): still ambiguous', async () => {
+    const drafter = freshDrafter();
+    const context = baseContext([
+      upcomingEntry('Quarterly Pest', '2026-10-02', 'id-a', 'series-1', false),
+      upcomingEntry('Quarterly Pest', '2027-01-02', 'id-b', 'series-1', false),
+    ]);
+    expect(await drafter.serviceIdentityFor('can we move my appointment?', context)).toEqual({ serviceType: null, certain: false, reason: 'ambiguous_upcoming' });
+    expect(mockIdentity.prompts.join('\n')).not.toContain('it is about the NEXT one');
   });
 
   test('gate on: the effective prompt version is the next-of-series cohort, with or without category tags (Codex r2 P1)', () => {
