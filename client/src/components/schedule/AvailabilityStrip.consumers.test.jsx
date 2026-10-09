@@ -155,8 +155,11 @@ it('rain-out, same day only: a chip on another day does not change the custom da
   await waitFor(() => expect(document.querySelector('input[type="date"]')).toBeDisabled());
   const dateInput = document.querySelector('input[type="date"]');
   const before = dateInput.value;
+  expect(before).toBeTruthy();
   const futureChip = screen.getAllByTestId('availability-hour').find((chip) => chip.textContent.includes('10'));
-  if (futureChip && !futureChip.disabled) fireEvent.click(futureChip);
+  expect(futureChip).toBeTruthy();
+  expect(futureChip).not.toBeDisabled();
+  fireEvent.click(futureChip);
   expect(document.querySelector('input[type="date"]').value).toBe(before);
   expect(document.querySelector('input[type="date"]').value).not.toBe('2035-01-09');
 });
