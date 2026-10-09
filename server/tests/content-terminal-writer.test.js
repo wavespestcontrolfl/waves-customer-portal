@@ -106,6 +106,14 @@ describe('terminal writer hand-off', () => {
     expect((await terminalWriterWork({ now, deps: earlier.deps })).due.map((r) => r.id)).toEqual([uid('a'), uid('b'), uid('c')]);
   });
 
+  test('a merge from last week that is not settled yet does not use a slot of this week', async () => {
+    // Monday 2026-10-12, read before the 9:00 AM run; the PR merged on Sunday.
+    const now = new Date('2026-10-12T11:00:00Z');
+    const rows = [row('a'), row('z')];
+    const f = fakes({ rows, closed: [pr('z', { state: 'closed', merged_at: '2026-10-11T20:00:00Z' })], doneThisWeek: 9 });
+    expect((await terminalWriterWork({ now, deps: f.deps })).due.map((r) => r.id)).toEqual([uid('a')]);
+  });
+
   test('other queue rows cannot hide a writing row: each writing action is read on its own', async () => {
     const f = fakes({ rows: [row('a', { action_type: 'refresh_existing_page' })] });
     expect((await terminalWriterWork({ deps: f.deps })).due.map((r) => r.id)).toEqual([uid('a')]);

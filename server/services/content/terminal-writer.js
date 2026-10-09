@@ -140,7 +140,9 @@ async function terminalWriterWork({ complete = false, now = new Date(), deps = {
     .count({ n: '*' })
     .first();
   // Merged rows this pass did not mark done (read-only) still used a slot.
-  const doneThisWeek = Number(doneRow?.n || 0) + (complete ? 0 : unsettled.length);
+  // Only this week's: a Sunday merge read before Monday's run belongs to last week.
+  const unsettledThisWeek = unsettled.filter((id) => prs.merged.get(id).mergedAt >= weekStart).length;
+  const doneThisWeek = Number(doneRow?.n || 0) + (complete ? 0 : unsettledThisWeek);
   // Every open terminal PR holds a slot, whether or not its row was read above,
   // and so does every post merged today: a second pass on the same day must
   // not hand out the day's slots again.
