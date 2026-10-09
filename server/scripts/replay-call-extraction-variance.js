@@ -1314,7 +1314,8 @@ async function findLegacyScheduledService(db, call, scheduledColumns) {
 // the call id and start, so the reviewed-call eval scored a thinner prompt than
 // the one live calls get. Built from production's own helpers.
 //
-// The linked customer is given only when its row PREDATES the call. A lead this
+// The linked customer is given only when its row PREDATES the extraction being
+// replayed (see the cutoff below). A lead this
 // very call created (or an operator created afterwards) is a customer today, but
 // production's prompt for that call had no known caller: telling the model
 // "existing customer" would change the answer the review recorded.
@@ -1342,7 +1343,13 @@ async function productionCallFacts({ call, contactPhone, bookableServices, CRP, 
   const linkedCustomer = await (overrideReachedStoredExtraction(call, storedExtractedAt)
     ? CRP.resolveKnownCallerCustomer(call, contactPhone, { db })
     : CRP._test.findCustomerForCallContact(contactPhone, {}, { db })).catch(() => null);
-  const startMs = callStart instanceof Date ? callStart.getTime() : NaN;
+  // The cutoff is the STORED extraction's own time when it is known, else the call
+  // start. A first pass extracts before its Step 3 creates the lead, so that row
+  // postdates the extraction and is left out. A reprocess extracts after the first
+  // pass's row (or an operator-linked row) already existed, and Step 2 gave it to the
+  // prompt with no call-start test (pre-push audit P1).
+  const extractedMs = storedExtractedAt ? new Date(storedExtractedAt).getTime() : NaN;
+  const startMs = Number.isFinite(extractedMs) ? extractedMs : (callStart instanceof Date ? callStart.getTime() : NaN);
   const createdMs = linkedCustomer?.created_at ? new Date(linkedCustomer.created_at).getTime() : NaN;
   const predatesCall = Number.isFinite(startMs) && Number.isFinite(createdMs) && createdMs < startMs;
   const priorCall = await CRP.summarizePriorCall(contactPhone, call.id, db, call.created_at).catch(() => null);

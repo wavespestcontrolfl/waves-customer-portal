@@ -1050,6 +1050,24 @@ describe('replay extraction gets the call facts production gives the extractor',
     }
   });
 
+  test('a customer created after the call but before the stored reprocess is the known caller (pre-push audit P1)', async () => {
+    // call start < customer creation < override < stored extraction
+    const created = { ...customer('2026-09-10T14:20:00Z'), id: 'cust-new' };
+    const relinked = { ...call, metadata: { ...call.metadata, customer_link_override: { customer_id: 'cust-new', at: '2026-09-11T09:00:00Z' } } };
+    const crp = { ...fakeCRP(), resolveKnownCallerCustomer: jest.fn(async () => created) };
+    const facts = await productionCallFacts({ call: relinked, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: 'DB', callStart, storedExtractedAt: '2026-09-11T09:05:00Z' });
+    expect(facts.knownCaller).toEqual(CRP._test.summarizeKnownCaller(created));
+    // No override: the first pass's own lead, found by phone, was on file for the reprocess.
+    const byPhone = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, created), db: 'DB', callStart, storedExtractedAt: '2026-09-11T09:05:00Z' });
+    expect(byPhone.knownCaller).toEqual(CRP._test.summarizeKnownCaller(created));
+  });
+
+  test('a lead the stored first pass created after extracting is not a known caller', async () => {
+    const created = customer('2026-09-10T14:06:30Z');
+    const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: fakeCRP(null, created), db: 'DB', callStart, storedExtractedAt: '2026-09-10T14:06:00Z' });
+    expect(facts.knownCaller).toBeNull();
+  });
+
   test('a failed phone lookup degrades to no known caller', async () => {
     const crp = { summarizePriorCall: jest.fn(async () => null), _test: { ...CRP._test, findCustomerForCallContact: jest.fn(async () => { throw new Error('db down'); }) } };
     const facts = await productionCallFacts({ call, contactPhone: '+19415550100', bookableServices: [], CRP: crp, db: 'DB', callStart });
