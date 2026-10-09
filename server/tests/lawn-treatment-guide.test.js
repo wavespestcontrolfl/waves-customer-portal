@@ -386,6 +386,8 @@ describe('blockedProductIds: what the fresh read kept out, per governed kind', (
   test('a clean read blocks nothing, and a pick with no finding is not blocked', () => {
     expect(blockedProductIds({ offers: { blocked: [] }, chinch: { blockedIds: [] }, weedMix: { mode: 'lead', groupProductIds: [P_CEL, P_CERT], productIds: [P_CEL, P_CERT] } })).toEqual([]);
     expect(blockedProductIds({})).toEqual([]);
+    // A member at its own yearly cap while the lead stays open is blocked too (the decision's blockedIds).
+    expect(blockedProductIds({ weedMix: { mode: 'lead', groupProductIds: [P_CEL, P_CERT], productIds: [P_CEL], blockedIds: [P_CERT] } })).toEqual([P_CERT]);
   });
   test('the picks, the chinch rungs and the weed group are all named, each once', () => {
     const ids = blockedProductIds({

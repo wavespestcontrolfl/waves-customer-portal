@@ -268,8 +268,9 @@ function offerFor(kind, candidate, { capped, rows }) {
  */
 function blockedProductIds({ offers, chinch, weedMix }) {
   // Unavailable (a member's own read failed): only the members whose limit WAS read as forbidding stay blocked.
+  // In every mode the decision's own `blockedIds` count: a member at its yearly cap while the lead stays open.
   const weedOut = (weedMix?.mode === 'unavailable' ? weedMix.blockedIds || []
-    : weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : [])
+    : [...(weedMix && weedMix.mode !== 'lead' ? (weedMix.groupProductIds || []).filter((id) => !(weedMix.productIds || []).includes(id)) : []), ...(weedMix?.blockedIds || [])])
     // Unreadable at some place (GATE_LAWN_TROUBLE_AREAS): not forbidden.
     .filter((id) => !(weedMix?.unreadableIds || []).includes(id));
   return [...new Set([...(offers?.blocked || []), ...(chinch?.blockedIds || []), ...weedOut].map(idOf))];
@@ -443,7 +444,14 @@ function chinchProducts(staged) {
 //                     later blocked rung stays blocked, a later unreadable one is released too, a later
 //                     clean one is simply not offered)
 // Rungs after an offered rung are not reached: neither blocked nor unreadable, only not offered.
+// `limitedIds` (additive, every answer): the rungs whose OWN limit was read as forbidding. `blockedIds` also holds a clean
+// rung that a sibling's interval or blackout keeps off the offer; the sheet's search leaves out only the rungs in `limitedIds`.
 function chooseChinch(products, capped) {
+  const limitedIds = products.filter((product) => (capped.get(product.productId) || []).some((block) => block.type)).map((product) => product.productId);
+  return { ...walkChinch(products, capped), limitedIds };
+}
+
+function walkChinch(products, capped) {
   const none = (note, blockedIds, unreadableIds = []) => ({ productId: null, name: null, stagedRow: null, note, blockedIds, unreadableIds });
   const typedOf = (product) => (capped.get(product.productId) || []).filter((block) => block.type);
   const stateOf = (product) => {
