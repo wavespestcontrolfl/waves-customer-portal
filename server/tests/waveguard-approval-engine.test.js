@@ -496,8 +496,8 @@ describe('one group held twice on a catalog row (moa_group "Group 1B" and irac_g
     expect(repeats(await run([moaOnly], [prior({ product_name: 'Older organophosphate', moa_group: 'Group 1B' })]))).toEqual(['repeat_moa_group']);
   });
 
-  test('v13 off: both findings, as before', async () => {
+  test('v13 off: still ONE finding (the catalog rows keep both columns when the gate is off)', async () => {
     delete process.env.GATE_LAWN_V13;
-    expect(repeats(await run([LIQUID], [liquidBefore]))).toEqual(['repeat_moa_group', 'repeat_irac_group']);
+    expect(repeats(await run([LIQUID], [liquidBefore]))).toEqual(['repeat_irac_group']);
   });
 });

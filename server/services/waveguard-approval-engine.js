@@ -354,11 +354,11 @@ async function repeatGroupFindings(knex, { customerId, propertyId, product, inpu
 
 // A catalog row can hold one group twice: in the older free-text column (moa_group "Group 1B") and in the typed column
 // of the label's system (irac_group "1B"). One earlier application then matched both, and the technician saw two
-// findings for one repeat. With the v13 gate on, the free-text finding is dropped when a typed finding names the same
-// group and the same earlier application; the typed one stays (it carries the fungicide code). Gate off: as before.
+// findings for one repeat. The free-text finding is dropped when a typed finding names the same group and the same
+// earlier application; the typed one stays (it carries the fungicide code). Not behind the v13 gate: the catalog rows
+// keep both columns when the gate is off, and one repeat is one finding there too.
 const bareGroup = (value) => String(value ?? '').trim().replace(/^group\s+/i, '').toLowerCase();
 function withoutMoaDuplicates(findings) {
-  if (!v13Rotation()) return findings;
   const sameRepeat = (a, b) => bareGroup(a.evidence.groupValue) === bareGroup(b.evidence.groupValue)
     && a.evidence.lastProduct === b.evidence.lastProduct && a.evidence.lastDate === b.evidence.lastDate;
   const typed = findings.filter((finding) => finding.evidence.groupType !== 'moa');
