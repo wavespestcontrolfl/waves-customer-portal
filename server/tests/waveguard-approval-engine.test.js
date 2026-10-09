@@ -355,6 +355,33 @@ describe('waveguard approval engine', () => {
       expect(productGroups({ name: 'Headway Fungicide', frac_group: null })).toEqual([]);
     });
 
+    // Migration 20261009175000 fills the typed column of the label's own system with the bare code, the format of Velista '7',
+    // Headway '3 + 11' and Stonewall '3'. Rows shaped as it writes them:
+    const GRAVEX_FILLED = { id: 'base', name: 'Gravex 20 EW', category: 'fungicide', frac_group: '3' };
+    const DYLOX_FILLED = { id: 'base', name: 'Dylox 6.2 G Granular Insecticide', category: 'insecticide', irac_group: '1B' };
+    const DIMENSION_MOP_FILLED = { id: 'base', name: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', category: 'fertilizer', hrac_group: '3' };
+
+    test('the filled catalog groups read as pairs: Gravex FRAC 3, Dylox 6.2 G IRAC 1B, Dimension MOP HRAC 3 (empty before)', () => {
+      const { productGroups } = require('../services/waveguard-approval-engine');
+      expect(productGroups(GRAVEX_FILLED)).toEqual([['frac', '3']]);
+      expect(productGroups(DYLOX_FILLED)).toEqual([['irac', '1B']]);
+      expect(productGroups(DIMENSION_MOP_FILLED)).toEqual([['hrac', '3']]);
+      expect(productGroups({ ...GRAVEX_FILLED, frac_group: null })).toEqual([]);
+    });
+
+    test('with the groups filled a repeat gives the existing advisory finding: Gravex after Headway (FRAC 3), Dylox 6.2 G after Dylox 6.2 G (IRAC 1B)', async () => {
+      const headway = prior({ service_date: '2026-05-13', product_name: 'Headway Fungicide', product_category: 'fungicide', catalog_group: '3 + 11', frac_group: '3 + 11' });
+      const found = repeats(await run([GRAVEX_FILLED], [headway], { productId: 'base' }));
+      expect(found.map((b) => b.code)).toEqual(['fungicide_frac_rotation_approval']);
+      expect(found[0].evidence).toMatchObject({ groupType: 'frac', groupValue: '3' });
+      const dylox = prior({ service_date: '2026-05-13', product_name: 'Dylox 6.2 G Granular Insecticide', product_category: 'insecticide', catalog_group: '1B', irac_group: '1B' });
+      const again = repeats(await run([DYLOX_FILLED], [dylox], { productId: 'base' }));
+      expect(again.map((b) => b.code)).toEqual(['repeat_irac_group']);
+      expect(again[0].evidence).toMatchObject({ groupType: 'irac', groupValue: '1B' });
+      // Another group is no repeat.
+      expect(repeats(await run([GRAVEX_FILLED], [prior({ ...headway, catalog_group: '7', frac_group: '7' })], { productId: 'base' }))).toEqual([]);
+    });
+
     test('a mixed-group field is a set: "3 + 11", "3/11", "11, 3" and "28+3A" compare by intersection', async () => {
       const groups = (frac) => ({ id: 'base', name: 'Mixed', category: 'fungicide', frac_group: frac });
       const last = prior({ service_date: '2026-05-13', product_name: 'Artavia 2 SC (Azoxy)', product_category: 'fungicide', catalog_group: '11', frac_group: '11' });
