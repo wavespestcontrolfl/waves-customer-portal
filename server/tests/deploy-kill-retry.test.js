@@ -179,3 +179,18 @@ describe('retryDeployKilledJobs', () => {
     expect(() => registerDeployKillRetry('x', () => {}, { shouldRetry: 'yes' })).toThrow();
   });
 });
+
+// Wiring: the weekly call extraction replay is one of the jobs that re-run
+// after a deploy kills them (2026-10-05: killed at 3:48 AM, no verdict that
+// week). The retry must run the same function the cron tick runs.
+describe('the call extraction replay is registered for the deploy retry', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+  test('the cron tick and the retry share one entry point', () => {
+    expect(src).toMatch(/cron\.schedule\('40 3 \* \* 1', runCallReplayEvalTick,/);
+    expect(src).toMatch(/registerDeployKillRetry\('call-extraction-replay-eval', runCallReplayEvalTick\)/);
+    // the entry point keeps the job's own gate and its own job lock
+    const body = src.slice(src.indexOf('const runCallReplayEvalTick = async () => {'), src.indexOf("cron.schedule('40 3 * * 1', runCallReplayEvalTick"));
+    expect(body).toMatch(/isEnabled\('callReplayEval'\)/);
+    expect(body).toMatch(/runExclusive\('call-extraction-replay-eval'/);
+  });
+});

@@ -3877,7 +3877,7 @@ function initScheduledJobs() {
   // runExclusive: live model calls; don't double-spend on deploy-overlap ticks.
   // Kill switch: GATE_CALL_REPLAY_EVAL=false.
   // =========================================================================
-  cron.schedule('40 3 * * 1', async () => {
+  const runCallReplayEvalTick = async () => {
     if (!isEnabled('callReplayEval')) return;
     logger.info('Running: call extraction replay eval');
     try {
@@ -3892,7 +3892,13 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('40 3 * * 1', runCallReplayEvalTick, { timezone: 'America/New_York' });
+  // A deploy that kills the replay mid-run leaves the week with no verdict
+  // (2026-10-05: started 3:40, the server restarted at 3:48). A second run
+  // is harmless: it reads call rows, writes no business record, and its
+  // failure notification is keyed, so it re-runs after a kill.
+  registerDeployKillRetry('call-extraction-replay-eval', runCallReplayEvalTick);
 
   // =========================================================================
   // WEEKLY MONDAY 3:50AM ET — Voice relay conversation eval. Replays the
