@@ -1,6 +1,11 @@
 jest.mock('../services/ops-digest', () => ({ deliverOpsDigest: jest.fn(async ({ sendEmail }) => sendEmail()) }));
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 1) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The run's reported-verdict marker is a settings upsert; no test reaches a real database.
+jest.mock('../models/db', () => jest.fn(() => ({
+  insert: () => ({ onConflict: () => ({ merge: async () => {} }) }),
+  where: () => ({ first: async () => undefined }),
+})));
 
 const {
   runCallExtractionReplayEval,
@@ -351,6 +356,32 @@ describe('call extraction replay scheduled eval', () => {
       'missed-booking-recovery-monday-11: fixture expectation failed (current_schedule_window_start)',
       'call-2: replay error (model timeout)',
     ]);
+  });
+});
+
+// A scheduled run records that it reported, for the deploy-kill retry: only
+// after the notify step returned, and never for a pass or a manual run.
+describe('the reported-verdict marker is written by the run', () => {
+  const run = (over) => runCallExtractionReplayEval({ notify: jest.fn(async () => {}), sendEmail: jest.fn(async () => ({ ok: true })), markReported: jest.fn(async () => {}), ...over });
+
+  test('a reported failure writes it once', async () => {
+    const markReported = jest.fn(async () => {});
+    const out = await run({ runReplay: async () => failingRun(), markReported });
+    expect(out.status).toBe('fail');
+    expect(markReported).toHaveBeenCalledTimes(1);
+  });
+
+  test('a pass, and a manual run, write nothing', async () => {
+    const markReported = jest.fn(async () => {});
+    await run({ runReplay: async () => replayRun(), markReported });
+    await run({ runReplay: async () => failingRun(), markReported, notifyOnFailure: false });
+    expect(markReported).not.toHaveBeenCalled();
+  });
+
+  test('a notify step that throws writes nothing, so the run stays eligible for the retry', async () => {
+    const markReported = jest.fn(async () => {});
+    await expect(run({ runReplay: async () => failingRun(), markReported, notify: jest.fn(async () => { throw new Error('db down'); }) })).rejects.toThrow('db down');
+    expect(markReported).not.toHaveBeenCalled();
   });
 });
 

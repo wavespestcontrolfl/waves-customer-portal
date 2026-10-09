@@ -262,6 +262,9 @@ async function runCallExtractionReplayEval(opts = {}) {
     || ((options) => require('../../scripts/replay-call-extraction-variance').runReplayVariance(options));
   const notify = opts.notify || defaultNotify;
   const sendEmail = opts.sendEmail || defaultSendEmail;
+  // Written only after the notify step returned: a notify that threw did not
+  // deliver for certain, so that run stays eligible for the deploy-kill retry.
+  const markReported = opts.markReported || markVerdictReported;
   // notifyOnFailure: false = a manual run — no bell, no email and no ops
   // digest (emailFailure's deliverOpsDigest writes an in-app notification
   // under GATE_OPS_DIGESTS_IN_APP even with the email sender stubbed).
@@ -292,9 +295,11 @@ async function runCallExtractionReplayEval(opts = {}) {
   if (!notifyOnFailure) {
     logger.info(`[call-replay-eval] manual run — ${finalAttempt.status}, no notification`);
   } else if (finalAttempt.status === 'fail') {
-    await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath }).finally(() => markVerdictReported());
+    await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
+    await markReported();
   } else if (finalAttempt.status === 'inconclusive') {
-    await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath }).finally(() => markVerdictReported());
+    await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+    await markReported();
   } else if (notifyOnFailure && finalAttempt.status === 'pass') {
     // Fall-off: an explicit SCHEDULED PASS clears the standing FIX — never
     // "not fail and not inconclusive" (a skip / crash status must leave the
@@ -324,7 +329,7 @@ async function runCallExtractionReplayEval(opts = {}) {
 }
 
 // system_settings key: when this eval last REPORTED a verdict (a failure or
-// an inconclusive run), written after both channels were tried. It is the
+// an inconclusive run), written after the notify step succeeded. It is the
 // deploy-kill retry's "already reported" marker. A notification row cannot
 // serve: under the bell policy the eval_regression row can be suppressed
 // while the verdict still goes out by the ops digest or email.
