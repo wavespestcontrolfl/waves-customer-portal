@@ -593,8 +593,15 @@ class AutonomousRunner {
     // Kill switch (house rule: every lane keeps one): default ON; set
     // AUTONOMOUS_WRITER_SELF_LINT=false to disarm the in-loop lint — the
     // authoritative run-level gates are untouched either way.
+    // GATE_CONTENT_WRITER_TERMINAL: the draft comes from the owner's terminal
+    // (terminal-writer.js), not from an agent session. Only this step
+    // changes; the claim, the brief and every gate below are the same.
+    const terminalWriter = require('./terminal-writer');
+    const viaTerminal = !dryRun && terminalWriter.writesInTerminal(brief);
     let selfLintOptions = null;
-    if (envBool('AUTONOMOUS_WRITER_SELF_LINT', true)) {
+    // The in-loop lint belongs to an agent session; a terminal draft meets
+    // the authoritative run-level gates directly.
+    if (!viaTerminal && envBool('AUTONOMOUS_WRITER_SELF_LINT', true)) {
       selfLintOptions = brief.action_type === 'refresh_existing_page'
         ? await this._deriveGuardrailOptions(opp, brief).catch((err) => {
           logger.warn(`[autonomous-runner] refresh self-lint options unavailable (${err.message}) — writer runs without the in-loop lint; gate 3c stays authoritative`);
@@ -607,7 +614,10 @@ class AutonomousRunner {
       sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
       selfLintOptions,
     };
-    const dispatchOnce = () => dispatcher.runWithBrief(brief, dispatchOptions).catch((err) => ({
+    const dispatchOnce = () => (viaTerminal
+      ? terminalWriter.fetchTerminalDraft(opp.id)
+      : dispatcher.runWithBrief(brief, dispatchOptions)
+    ).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
     let dispatchResult = await dispatchOnce();
@@ -645,6 +655,22 @@ class AutonomousRunner {
     // hung sessions could not be correlated against the Managed Agents log.
     run.agent_id = lastSessionResult.agent_id || null;
     run.agent_session_id = lastSessionResult.session_id || null;
+
+    // No usable draft from the terminal yet: not a failure. Record the run,
+    // keep the brief on it for the writing session, and look again later
+    // (defer refunds the attempt this claim used).
+    if (viaTerminal && [terminalWriter.MISSING, terminalWriter.INVALID].includes(dispatchResult.code)) {
+      const finalized = await finalize(run, t0, {
+        outcome: terminalWriter.AWAITING_OUTCOME,
+        skip_reason: dispatchResult.code,
+        reviewer_notes: dispatchResult.reason,
+      });
+      await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + terminalWriter.RECHECK_MS), { claimToken });
+      return finalized;
+    }
+    // The runner holds the draft now. Delete its branch so the file is read
+    // once: a gate retry must get a draft written against the retry brief.
+    if (viaTerminal && dispatchResult.ok) await terminalWriter.retireTerminalDraft(opp.id);
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
@@ -1940,6 +1966,14 @@ class AutonomousRunner {
       break;
     }
     logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
+    // Terminal writer: one admin item for the rows that now wait for a draft.
+    // Its own failure must not fail the batch (the 1pm pass raises it again).
+    const terminalWriter = require('./terminal-writer');
+    if (terminalWriter.terminalWriterLive()) {
+      await terminalWriter.raiseTerminalDue().catch((err) => {
+        logger.warn(`[autonomous-runner] terminal writer item failed: ${err.message}`);
+      });
+    }
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
     });
@@ -2024,6 +2058,9 @@ class AutonomousRunner {
       && (r.outcome === 'completed_published'
         || (r.outcome === 'completed_pending_review' && r.skip_reason === 'astro_pr_pending_merge')));
     if (blogStarted) return;
+    // A blog that waits for its terminal draft is not a drought: the content
+    // admin item already names it, and "no blog today" would be a false alarm.
+    if (real.some((r) => r.action_type === 'new_supporting_blog' && r.outcome === require('./terminal-writer').AWAITING_OUTCOME)) return;
 
     // Day-dedupe (Codex r2+r3): the 1pm catch-up re-triggers this alert when
     // the morning batch died before ITS send, so without a persisted marker

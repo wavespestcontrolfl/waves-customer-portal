@@ -5279,3 +5279,65 @@ describe('citability backfill retry feedback — every gate\'s one redraft hears
     expect(lines[1]).toContain('[Gate reported: planned_gaps_unresolved:comparison(structure_missing)]');
   });
 });
+
+describe('terminal writer: the draft step asks the terminal instead of an agent (GATE_CONTENT_WRITER_TERMINAL)', () => {
+  const claimedAt = new Date('2026-10-09T13:00:00Z');
+  const draft = { frontmatter: { title: 'Ant Control in Venice' }, body: 'Body text. '.repeat(40) };
+  function setup({ fetched, brief = { id: 'brief_tw', action_type: 'create_or_refresh_city_service_page', page_type: 'city-service' } }) {
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_tw', action_type: brief.action_type, claimed_at: claimedAt }),
+      defer: jest.fn().mockResolvedValue(true), release: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true), complete: jest.fn().mockResolvedValue(true),
+    };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: false, reason: 'the agent must not run' }) };
+    const runner = loadRunnerWith({ queue, briefBuilder: { compose: jest.fn().mockResolvedValue(brief) }, dispatcher });
+    const real = jest.requireActual('../services/content/terminal-writer');
+    const terminalWriter = {
+      ...real,
+      writesInTerminal: (b) => b.page_type !== 'metadata',
+      fetchTerminalDraft: jest.fn().mockResolvedValue(fetched),
+      retireTerminalDraft: jest.fn().mockResolvedValue(undefined),
+    };
+    jest.doMock('../services/content/terminal-writer', () => terminalWriter);
+    return { queue, dispatcher, runner, terminalWriter };
+  }
+
+  test('no draft yet: the run is recorded as waiting and the claim is deferred, with no agent session', async () => {
+    const { queue, dispatcher, runner, terminalWriter } = setup({ fetched: { ok: false, code: 'terminal_draft_missing', reason: 'no draft on the terminal branch yet' } });
+    const before = Date.now();
+    const result = await runner.runNext();
+    expect(result.outcome).toBe('deferred_terminal_draft');
+    expect(result.skip_reason).toBe('terminal_draft_missing');
+    expect(result.brief_id).toBe('brief_tw');
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+    expect(terminalWriter.retireTerminalDraft).not.toHaveBeenCalled();
+    const [id, availableAt, payload] = queue.defer.mock.calls[0];
+    expect(id).toBe('opp_tw');
+    expect(payload).toEqual({ claimToken: claimedAt });
+    expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(3 * 3600e3 - 1000);
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('a draft: its branch is deleted and the same draft goes on to the gates', async () => {
+    const { dispatcher, runner, terminalWriter } = setup({ fetched: { ok: true, draft, duration_ms: 5, agent_id: 'terminal-writer', session_id: null } });
+    jest.doMock('../services/content/editorial-evidence', () => ({
+      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('editorial'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED', findings: [] })),
+      reviewError: jest.fn(),
+    }));
+    const onward = jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'reached_the_gates' });
+    await expect(runner.runNext()).resolves.toEqual({ outcome: 'reached_the_gates' });
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+    expect(terminalWriter.fetchTerminalDraft).toHaveBeenCalledWith('opp_tw');
+    expect(terminalWriter.retireTerminalDraft).toHaveBeenCalledWith('opp_tw');
+    expect(onward.mock.calls[0][2].draft_payload).toEqual(draft);
+    expect(onward.mock.calls[0][2].agent_id).toBe('terminal-writer');
+  });
+
+  test('a title/meta rewrite stays on the agent', async () => {
+    const brief = { id: 'brief_tw_meta', action_type: 'rewrite_title_meta', page_type: 'metadata', human_review_required: false };
+    const { dispatcher, runner, terminalWriter } = setup({ fetched: { ok: true, draft }, brief });
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(terminalWriter.fetchTerminalDraft).not.toHaveBeenCalled();
+  });
+});
