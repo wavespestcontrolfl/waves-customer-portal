@@ -207,7 +207,7 @@
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
       "targets": "Whiteflies and scale crawlers. Scale species include black, California red, euonymus, Florida wax, San Jose, and snow scale. Mealybugs: suppression only.",
-      "apply": "Spot treatment: cover the infested plants evenly to the point of runoff. Measure the area treated and stay inside the yearly limit below. Time scale treatments for crawlers.",
+      "apply": "Cover all plant surfaces evenly to the point of runoff. The label volume is 100 gal of mix per 20,000 sq ft, which is 5 gal per 1,000 sq ft: do not exceed it. Time scale treatments for crawlers.",
       "rates": [
         [
           "6–8 fl oz / 100 gal",
@@ -234,7 +234,7 @@
         "Does not provide rapid adult-insect control.",
         "Scales and mealybugs: one application per calendar year. A property gets one scale spray a year.",
         "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz at least 21 days later.",
-        "Yearly limit: the label prints 12 fl oz per acre and 0.176 lb active ingredient per acre, and the two do not agree. Until Valent confirms, use the stricter one: no more than 0.27 fl oz of Distance per 1,000 sq ft of treated area per year, all pyriproxyfen products together. At 12 fl oz per 100 gal that is about 2 gallons of mix per 1,000 sq ft, so Distance is a spot treatment.",
+        "Yearly limit: 0.176 lb of active ingredient per acre, all pyriproxyfen products together. Distance holds 0.86 lb per gallon, so that is 26 fl oz of Distance per acre, or 0.60 fl oz per 1,000 sq ft. One spray at 12 fl oz per 100 gal and 5 gal of mix per 1,000 sq ft uses all of it.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
       "source": "Valent · EPA 59639-96 · label accepted 11-08-23 · Table 1",
@@ -245,8 +245,7 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Choose target rate",
-      "program": "The label's yearly limit is unclear (owner 2026-10-09 follow-up: ask Valent). The guide holds the stricter reading until it is confirmed."
+      "summary": "Choose target rate"
     },
     "tristar": {
       "kind": "Insects · foliar spray",
@@ -411,6 +410,8 @@
         "Do not treat dormant plants or plants under heat or moisture stress.",
         "Do not exceed the rates or the intervals on the label; higher rates can injure plants.",
         "Do not mix with copper or foliar fertilizer without a jar test and a small plant test first.",
+        "Do not apply when rain is forecast within 24 hours (label runoff advisory).",
+        "Keep people and pets out until the spray dries.",
         "No soil drench on the program. The label's residential drench is a 0.5–1% mix (⅔–1⅓ fl oz per gal) at 25 gal per 100 sq ft: 16–32 fl oz of Reliant per 100 sq ft. Call the office before any drench."
       ],
       "program": "Reliant takes the place of KPHITE 7LP (owner 2026-10-09). The two labels use the same foliar rate.",
@@ -422,11 +423,7 @@
         "flowzone",
         "rig"
       ],
-      "summary": "",
-      "mix": [
-        0.333334,
-        0.666666
-      ]
+      "summary": "2–4 tsp per gallon (1–2 qt per 100 gal)"
     },
     "conserve": {
       "kind": "Insects · foliar spray",

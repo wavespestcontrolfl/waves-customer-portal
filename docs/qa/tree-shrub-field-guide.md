@@ -152,5 +152,8 @@ Technician-facing text only; no gate, migration, catalog or price change.
 - **Distance IGR: one scale spray a year.** The current label (accepted
   2023-11-08) allows one scale or mealybug application per calendar year, and
   for whitefly one spray at 8 fl oz per 100 gal or 6 then 6 at least 21 days
-  apart. All seven Distance lines and the guide entry now state the limit. The
-  sheet does not enforce it.
+  apart. The yearly limit is 0.176 lb ai per acre; at 0.86 lb ai per gallon
+  that is 0.60 fl oz of Distance per 1,000 sq ft, which one spray at 12 fl oz
+  per 100 gal and the label volume (5 gal of mix per 1,000 sq ft) uses in full.
+  All seven Distance lines and the guide entry state the one-spray limit and
+  the 5 gal per 1,000 sq ft volume limit. The sheet does not enforce it.

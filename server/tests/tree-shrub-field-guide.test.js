@@ -179,7 +179,6 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     expect(acelepryn.targets).toMatch(/no whitefly use/);
     expect(acelepryn.name).toBe('Acelepryn Insecticide');
     expect(acelepryn.limits.join(' ')).toMatch(/rain is forecast within 48 hours/);
-    expect(guide.products.distance.apply).not.toMatch(/100 gal of mix per 20,000 sq ft/);
     expect(acelepryn.limits.join(' ')).toMatch(/At least 7 days between treatments\..*38\.3 fl oz per acre/);
   });
 
@@ -191,10 +190,11 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
     // drench (0.5–1% at 25 gal per 100 sq ft) is named as a limit, never offered as a rate.
     expect(reliant.source).toMatch(/residential Ornamental Applications/);
     expect(reliant.rates.map((r) => r[0])).toEqual(['Foliar: 2–4 tsp / gal']);
-    // Exact thirds of a fl oz (2 and 4 tsp), nudged inward so a rig recipe never leaves the label range.
-    expect(reliant.mix[0]).toBeGreaterThanOrEqual(1 / 3);
-    expect(reliant.mix[1]).toBeLessThanOrEqual(2 / 3);
-    expect(reliant.mix[0] * 110).toBeCloseTo(36.667, 2);
+    // No computed mix: a decimal fl oz cannot keep both the 1-gallon (2-4 tsp) and the rig bounds
+    // exact, so the row shows the label's own two statements of the rate.
+    expect(reliant.mix).toBeUndefined();
+    expect(reliant.summary).toBe('2–4 tsp per gallon (1–2 qt per 100 gal)');
+    expect(reliant.limits.join(' ')).toMatch(/rain is forecast within 24 hours.*out until the spray dries/);
     expect(JSON.stringify(reliant)).not.toMatch(/6¼|12¾/);
     expect(reliant.limits.join(' ')).toMatch(/No soil drench on the program\..*0\.5–1% mix/);
     for (const month of ['Mar', 'Jun', 'Oct']) {
@@ -230,15 +230,18 @@ describe('Acelepryn, Reliant and the Distance yearly limit (owner 2026-10-09)', 
   test('every Distance line and the guide state one scale spray a year', () => {
     const lines = visits.flatMap((v) => `${v.primary}\n${v.secondary}`.split('\n')).filter((line) => /^Distance IGR/.test(line));
     expect(lines).toHaveLength(7);
-    for (const line of lines) expect(line).toMatch(/spot treatment only: no more than 0\.27 fl oz per 1,000 sq ft a year; one scale spray per property per calendar year \(\$16\.52\)$/);
+    for (const line of lines) expect(line).toMatch(/no more than 5 gal of mix per 1,000 sq ft; one scale spray per property per calendar year \(\$16\.52\)$/);
     const limits = guide.products.distance.limits.join(' ');
     expect(limits).toMatch(/Scales and mealybugs: one application per calendar year\./);
     expect(limits).toMatch(/6 fl oz followed by 6 fl oz at least 21 days later/);
     expect(limits).not.toMatch(/two per six months/);
-    // The label's two yearly numbers disagree: the guide holds the stricter one (12 fl oz per acre
-    // = 0.275 fl oz per 1,000 sq ft, rounded down) and says so.
-    expect((12 / 43.56).toFixed(3)).toBe('0.275');
-    expect(limits).toMatch(/use the stricter one: no more than 0\.27 fl oz of Distance per 1,000 sq ft of treated area per year/);
-    expect(limits).not.toMatch(/0\.6 fl oz/);
+    // The yearly limit is 0.176 lb ai per acre. Distance holds 0.86 lb ai per gallon (label p. 1), so
+    // that is 26.2 fl oz per acre = 0.60 fl oz per 1,000 sq ft: the 12 fl oz per 100 gal rate at the
+    // label volume of 100 gal per 20,000 sq ft (5 gal per 1,000 sq ft). The figures agree.
+    expect(((0.176 / 0.86) * 128).toFixed(1)).toBe('26.2');
+    expect((26.2 / 43.56).toFixed(2)).toBe('0.60');
+    expect((12 * (43560 / 20000)).toFixed(1)).toBe('26.1');
+    expect(limits).toMatch(/0\.60 fl oz per 1,000 sq ft\. One spray at 12 fl oz per 100 gal and 5 gal of mix per 1,000 sq ft uses all of it\./);
+    expect(guide.products.distance.apply).toMatch(/5 gal per 1,000 sq ft: do not exceed it/);
   });
 });
