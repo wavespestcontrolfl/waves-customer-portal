@@ -101,11 +101,6 @@ const WATCH_REFER_LINE = 'Take a photo, add a note and call the office.';
 // A server boolean flag: only a literal true counts.
 const flagFrom = (data, key) => data?.[key] === true;
 
-// The account reminders the sheet lists above the note, in order: one line for
-// each server flag that is set. Neutral text, never an alert.
-const REMINDERS = [['jointMosquitoAccount', JOINT_MOSQUITO_NOTICE]];
-const remindersFrom = (data) => REMINDERS.filter(([key]) => flagFrom(data, key)).map(([, text]) => text);
-
 // The server's list for the visit month, or null when the gate is off (no key).
 function watchListFrom(data) {
   if (!Array.isArray(data?.watchList)) return null;
@@ -318,7 +313,8 @@ function contextFrom(data, service) {
       .map((warning) => ({ ...warning, message: warningText(warning) }))
       .filter((warning) => warning.message),
     warningsUnavailable: flagFrom(data, 'warningsUnavailable'),
-    reminders: remindersFrom(data),
+    // The account reminders listed above the note: neutral text, never an alert.
+    reminders: [JOINT_MOSQUITO_NOTICE].filter(() => flagFrom(data, 'jointMosquitoAccount')),
     visitIdentity: recapVisitIdentity(data?.service),
     watchList: watchListFrom(data),
     pestCheck: data?.pestCheck && typeof data.pestCheck === 'object' ? data.pestCheck : null,
