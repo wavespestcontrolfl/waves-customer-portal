@@ -54,7 +54,7 @@ function lawnFastCompleteOffered(completionProfile) {
 const LIGHT_COMPLETION_FLOWS_OFF = Object.freeze({
   ...Object.fromEntries([
     'reserviceFastCompleteEnabled', 'treeShrubFastCompleteEnabled', 'lawnReserviceFastCompleteEnabled', 'lawnFastCompleteEnabled',
-    'fastCompleteRecapEnabled', 'fastCompleteReportEnabled', 'typedReportFlowEnabled',
+    'fastCompleteRecapEnabled', 'fastCompleteReportEnabled', 'typedReportFlowEnabled', 'assessmentFastCompleteEnabled',
   ].map((flag) => [flag, false])),
   areaAddOnRowsAttached: true,
 });
@@ -5268,6 +5268,9 @@ async function loadProjectCompletionContextByServiceId(services) {
       // lawn re-service sheet (instead of the typed Dispatch form) when on.
       // Read at call time; no per-tech flag.
       lawnReserviceFastCompleteEnabled: lawnReserviceFastCompleteLive(),
+      // GATE_ASSESSMENT_FAST_COMPLETE: Dispatch opens the Waves Assessment's one-screen sheet; only an assessment profile.
+      assessmentFastCompleteEnabled: require('../config/feature-gates').assessmentFastCompleteLive()
+        && completionProfile?.serviceKey === require('../services/assessment-booking').ASSESSMENT_SERVICE_KEY,
       // GATE_LAWN_FAST_COMPLETE: the admin Dispatch/Schedule surfaces open the
       // regular lawn Fast Complete sheet for an eligible lawn visit when on.
       // Read at call time; the context route is the eligibility authority.
@@ -6452,6 +6455,7 @@ router.get('/', async (req, res, next) => {
         areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
         areaAddOns: projectCompletionContext.areaAddOns,
         areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
+        assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
         fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
         // GATE_FAST_COMPLETE_INVOICED_VISITS — see loadProjectCompletionContextByServiceId.
         invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
@@ -7095,6 +7099,7 @@ router.get('/week', async (req, res, next) => {
           areaAddOnRowsAttached: projectCompletionContext.areaAddOnRowsAttached === true,
           areaAddOns: projectCompletionContext.areaAddOns,
           areaAddOnOwn: projectCompletionContext.areaAddOnOwn,
+          assessmentFastCompleteEnabled: projectCompletionContext.assessmentFastCompleteEnabled === true,
           fastCompleteVoiceFillEnabled: projectCompletionContext.fastCompleteVoiceFillEnabled === true,
           invoicedVisitFastCompleteEnabled: projectCompletionContext.invoicedVisitFastCompleteEnabled === true,
           fastCompleteRecapEnabled: projectCompletionContext.fastCompleteRecapEnabled === true,
