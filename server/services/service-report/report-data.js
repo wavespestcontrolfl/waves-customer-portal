@@ -2084,6 +2084,7 @@ function buildProtocolPayload(record) {
         id: String(tip.id || ''),
         copy: String(tip.copy).trim(),
         source: tip.source === 'technician' ? 'technician' : 'library',
+        ...(tip.aftercare === true ? { aftercare: true } : {}),
         ...(tip.link && typeof tip.link.path === 'string' && tip.link.path.startsWith('/portal')
           ? { link: { label: String(tip.link.label || 'My Property'), path: tip.link.path } }
           : {}),

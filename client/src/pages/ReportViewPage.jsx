@@ -2491,6 +2491,10 @@ const TECH_NOTE_OPENERS = {
   3: ['Three things that will make a real difference:', 'A few things I’d take care of soon:'],
 };
 
+// A note made only of aftercare tips (what to expect after this service's
+// work, owner 2026-10-09) is not "one thing to do": it gets its own opener.
+const TECH_NOTE_AFTERCARE_OPENERS = ['Here is what to expect after this visit:', 'A quick note on what comes next:'];
+
 export function techNoteSeed(value) {
   let h = 0;
   for (const ch of String(value || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
@@ -2514,7 +2518,7 @@ export function composeTechNote({ tips = [], customerName = '', firstName, seed 
   // under "One thing that will make a real difference:". A note made only of
   // their own words gets the greeting and no opener.
   if (tips.length > 0 && tips.every((tip) => tip?.source === 'technician')) return { greeting, opener: null };
-  const openers = TECH_NOTE_OPENERS[count];
+  const openers = tips.length > 0 && tips.every((tip) => tip?.aftercare === true) ? TECH_NOTE_AFTERCARE_OPENERS : TECH_NOTE_OPENERS[count];
   return { greeting, opener: openers[Math.floor(seed / 7) % openers.length] };
 }
 

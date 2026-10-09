@@ -120,6 +120,19 @@ case) and lockbox or keypad shorthand ("lockbox 42") are masked.
 
 Symptom and ingestion questions (behavior change to the public route, owner review round 5, 2026-10-05; narrowed by owner option A, 2026-10-05): a question that reports a symptom, an ingestion or eye/skin contact ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged. A question that mentions spray plus a person, a pet or a body part from the cue list (`exposureSafetyLine`) and reports no symptom keeps its normal answer, with the fixed line "If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911." in front, gate on or off (owner 2026-10-05, option A); an unlisted word gets no line.
 
+Tips from your tech, aftercare flag (owner 2026-10-09): on the service-report
+payload (`/api/reports/:token/data` and the renders that share
+`buildReportV1Data`), an entry of `techNote.tips` (present only while
+`GATE_TECH_TIPS` is `true`) may carry the optional key `aftercare: true`. The
+server sets it at completion from the tip registry
+(`server/services/service-report/tip-library.js`) and freezes it with the
+tip's copy in `structured_notes.techTips`; the client never supplies it, and
+a tip in the technician's own words never carries it. The web report reads it
+only to choose the note's opening line (a note made only of aftercare tips
+opens "Here is what to expect after this visit:"). Tips frozen before this
+change carry no key and render as before. Auth, headers and routes are
+unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
