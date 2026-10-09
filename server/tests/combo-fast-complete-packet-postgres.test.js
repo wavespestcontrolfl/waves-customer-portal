@@ -92,10 +92,17 @@ const REPORT = [
 ].join('\n');
 const SCORES = { turf_density: 80, weed_suppression: 70, color_health: 60, stress_damage: 50 };
 
+// Ids in packet order (the packet records members by id): lawn first when asked, so the lawn preflight runs before the pest
+// member is completed.
+const memberIds = (lawnFirst) => {
+  const [a, b] = [randomUUID(), randomUUID()].sort();
+  return lawnFirst ? { lawnId: a, pestId: b } : { pestId: a, lawnId: b };
+};
+
 // One customer with a pest visit and a lawn visit on one date; `grouped` puts both on one stop.
-async function makeStop({ grouped }) {
+async function makeStop({ grouped, lawnFirst = false }) {
   const date = etDateString();
-  const world = { customerId: randomUUID(), techId: randomUUID(), visitId: grouped ? randomUUID() : null, pestId: randomUUID(), lawnId: randomUUID(), productId: randomUUID(), lawnProductId: randomUUID(), assessmentId: randomUUID() };
+  const world = { customerId: randomUUID(), techId: randomUUID(), visitId: grouped ? randomUUID() : null, ...memberIds(lawnFirst), productId: randomUUID(), lawnProductId: randomUUID(), assessmentId: randomUUID() };
   const pestCatalog = await mockPg('services').where({ service_key: 'pest_general_quarterly' }).first('id', 'name');
   const lawnCatalog = await mockPg('services').where({ service_key: 'lawn_care_monthly' }).first('id', 'name');
   await mockPg('customers').insert({ id: world.customerId, first_name: 'Fixture', last_name: 'Combo', phone: '+12025550123',
@@ -334,5 +341,41 @@ postgres('a pest + lawn Fast Complete packet on PostgreSQL', () => {
       expect(photos.map((photo) => photo.caption)).toEqual([caption]);
     }
     expect(await mockPg('scheduled_service_photo_staging').whereIn('scheduled_service_id', [grouped.pestId, grouped.lawnId])).toHaveLength(0);
+  });
+
+  test('a reopened member whose invoice hangs only on its service record refuses the packet up front and records nothing', async () => {
+    // The lawn member is first in packet order, so its preflight (the pair check) runs before the pest member's own record check.
+    const grouped = await makeStop({ grouped: true, lawnFirst: true });
+    worlds.push(grouped);
+    const bodies = await sheetBodies(grouped);
+    // A record the member already has (a reopened visit), and an invoice carrying only that record id.
+    const [record] = await mockPg('service_records').insert({ customer_id: grouped.customerId, scheduled_service_id: grouped.pestId, technician_id: grouped.techId,
+      service_date: etDateString(), service_type: 'Quarterly Pest Control Service', status: 'completed' }).returning('id');
+    await mockPg('invoices').insert({ customer_id: grouped.customerId, service_record_id: record.id, invoice_number: `WPC-REC-${Date.now()}`, token: randomUUID().replace(/-/g, ''), status: 'sent', total: 60, subtotal: 60 });
+    const saved = await saveVisitCompletionPacket({
+      visitId: grouped.visitId, idempotencyKey: randomUUID(), actor: { techRole: 'technician', technicianId: grouped.techId },
+      items: [{ serviceId: grouped.pestId, body: bodies.pest }, { serviceId: grouped.lawnId, body: bodies.lawn }],
+    });
+    expect(saved.status).toBe(409);
+    expect(saved.body).toMatchObject({ code: 'lawn_fast_not_eligible', reason: 'grouped_visit' });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: grouped.visitId })).toHaveLength(0);
+    expect(await mockPg('invoices').where({ customer_id: grouped.customerId })).toHaveLength(1);
+  });
+
+  test('the up-front record ids are the ones the mint bills with (one relation: record.scheduled_service_id = member)', async () => {
+    const grouped = await makeStop({ grouped: true });
+    worlds.push(grouped);
+    const bodies = await sheetBodies(grouped);
+    const saved = await saveVisitCompletionPacket({
+      visitId: grouped.visitId, idempotencyKey: randomUUID(), actor: { techRole: 'technician', technicianId: grouped.techId },
+      items: [{ serviceId: grouped.pestId, body: bodies.pest }, { serviceId: grouped.lawnId, body: bodies.lawn }],
+    });
+    expect(saved.status).toBe(202);
+    const { membersWithRecordIds } = require('../services/visit-completion-invoice');
+    const resolved = await membersWithRecordIds(mockPg, [grouped.pestId, grouped.lawnId]);
+    const packetItems = await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId });
+    for (const item of packetItems) {
+      expect(resolved).toContainEqual({ id: item.scheduled_service_id, record_id: item.service_record_id });
+    }
   });
 });

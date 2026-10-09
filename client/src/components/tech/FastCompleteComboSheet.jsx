@@ -93,7 +93,10 @@ function ComboPart({ kind, part, shared }) {
   const label = LABELS[kind];
   const showSaved = readiness.ready(id) && readiness.restored.includes(id);
   // A null after a body marks the part as changed; a body clears it.
-  const onPrepared = (serviceId, bodyOrNull, seq) => readiness.apply(serviceId, bodyOrNull, seq).then(() => markChanged(kind, !bodyOrNull));
+  const onPrepared = (serviceId, bodyOrNull, seq) => {
+    if (!bodyOrNull) markChanged(kind, true);
+    return readiness.apply(serviceId, bodyOrNull, seq).then(() => markChanged(kind, !bodyOrNull));
+  };
   return (
     <PartCard title={`${label} · ${part.service.serviceType || ''}`.trim()} status={partStatus(readiness, id, label, changed[kind]).status}>
       {showSaved ? (
@@ -108,12 +111,13 @@ function ComboPart({ kind, part, shared }) {
   );
 }
 
-function ComboFooter({ error, state, lines, blocked, canComplete, onDone, onSubmit }) {
+function ComboFooter({ error, state, lines, blocked, canComplete, onDone, onSubmit, onRetry }) {
   const finished = isFinishedState(state);
   const resume = state === 'pending_resume';
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked">
       {error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{error}</ActionFeedback>}
+      {onRetry && <Button variant="secondary" className="tech-visit-action tech-visit-wide" onClick={onRetry}>Try again</Button>}
       {!finished && lines.length > 0 && <p className="tech-visit-muted" role="status">{lines.join(' · ')}</p>}
       <div className="tech-visit-actions">
         {finished ? (
@@ -137,11 +141,17 @@ function FinishedNote({ state, result }) {
   );
 }
 
-// The set of in-flight work the parts report (see usePartBusy).
+// The in-flight work the parts report, one key per hook instance and source (see usePartBusy): a key is present while its
+// work runs, and the parts are busy while any key is.
 function usePartsBusy() {
   const [busy, setBusy] = useState({});
-  const report = useCallback((source, on) => setBusy((cur) => ((cur[source] || false) === on ? cur : { ...cur, [source]: on })), []);
-  return { anyPartBusy: Object.values(busy).some(Boolean), report };
+  const report = useCallback((key, on) => setBusy((cur) => {
+    if (!!cur[key] === on) return cur;
+    const next = { ...cur };
+    if (on) next[key] = true; else delete next[key];
+    return next;
+  }), []);
+  return { anyPartBusy: Object.keys(busy).length > 0, report };
 }
 
 export default function FastCompleteComboSheet({ visitId, pest, lawn, request, operatorId, catalog, onClose, onSaved, onFullForm }) {
@@ -165,7 +175,7 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
   const samePair = load.status === 'ready' && live.join() === [ids.pest, ids.lawn].sort().join();
   const finished = isFinishedState(send.display);
   const blocked = send.busy || dictating || anyPartBusy;
-  const canComplete = [[ids.pest, ids.lawn].every(readiness.ready), !blocked, !send.refusal, samePair, !finished].every(Boolean);
+  const canComplete = [[ids.pest, ids.lawn].every(readiness.ready), !readiness.persistError, !blocked, !send.refusal, samePair, !finished].every(Boolean);
 
   const close = useCallback(() => { if (!blocked) onClose?.(); }, [blocked, onClose]);
   closeRef.current = close;
@@ -211,7 +221,7 @@ export default function FastCompleteComboSheet({ visitId, pest, lawn, request, o
         )}
         {finished && <FinishedNote state={send.display} result={send.result} />}
       </div>
-      <ComboFooter error={error} state={send.display} lines={lines} blocked={blocked} canComplete={canComplete} onDone={onClose} onSubmit={() => send.submit()} />
+      <ComboFooter error={error} state={send.display} lines={lines} blocked={blocked} canComplete={canComplete} onDone={onClose} onSubmit={() => send.submit()} onRetry={readiness.persistError ? readiness.retryPersist : null} />
     </FastCompleteFrame>
   );
 }

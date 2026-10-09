@@ -213,6 +213,18 @@ function linkedMemberInvoices(trx, members) {
   });
 }
 
+// The members with the service record id(s) they already have, for the same invoice lookup: a member's record is the one
+// whose scheduled_service_id is the member (the identity the mint insists on, `record_scheduled_service_id === member.id`,
+// before it bills). Post-completion invoices often carry only that record id, so a check that looks at the visit alone
+// would miss an open or reopened member's invoice. A member with no record yet is { id, record_id: null }.
+async function membersWithRecordIds(trx, serviceIds) {
+  const records = await trx('service_records').whereIn('scheduled_service_id', serviceIds).select('id', 'scheduled_service_id');
+  return serviceIds.flatMap((id) => {
+    const mine = records.filter((record) => String(record.scheduled_service_id) === String(id));
+    return mine.length ? mine.map((record) => ({ id, record_id: record.id })) : [{ id, record_id: null }];
+  });
+}
+
 async function mintPacketInvoiceInner({ packet, visit, members, customer, trx }) {
   const billed = [];
   const feeReviewCandidates = [];
@@ -611,4 +623,4 @@ async function createVisitCompletionInvoice(packetId, database = db) {
   return database.isTransaction ? run(database) : database.transaction(run);
 }
 
-module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued, linkedMemberInvoices };
+module.exports = { createVisitCompletionInvoice, deferredSetupClaimStillQueued, linkedMemberInvoices, membersWithRecordIds };
