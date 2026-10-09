@@ -21,6 +21,7 @@ const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { copyFixesLive, applyLawnCopyFixes } = require('./lawn-report-copy-fixes');
 const { photoZoneLabel } = require('../lawn-visit-input');
+const { waterPolishFields } = require('./lawn-report-polish');
 const { filterByCardStatus } = require('./lawn-photo-findings');
 const { NO_OBSERVATIONS } = require('../lawn-visit-customer-copy');
 const {
@@ -205,6 +206,7 @@ function mapWater(waterContext, waterSnapshot = null) {
   if (!clientRainKnown && !snapshotUnconfirmed && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
+    const snapshotScheduleOnFile = (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0;
     return {
       rainInches: num(rain),
       irrigationInches: num(waterSnapshot.irrigation_inches_per_week),
@@ -219,10 +221,12 @@ function mapWater(waterContext, waterSnapshot = null) {
       // schedule on file — the "add your watering schedule" CTA should not show. A
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
       // `irrigation <= 0 = missing`), so the CTA must stay up.
-      scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
+      scheduleOnFile: snapshotScheduleOnFile,
       scheduleUnconfirmed: false,
       // The sent plan is independent of which rainfall source the card uses.
       weekPlan: (waterContext && waterContext.weekPlan) || null,
+      // GATE_LAWN_REPORT_POLISH: the card's third state (nothing while the gate is off).
+      ...waterPolishFields(waterContext, { target: num(waterSnapshot.target_water_inches_per_week), scheduleOnFile: snapshotScheduleOnFile, live: false }),
     };
   }
   if (!waterContext) return null;
@@ -255,6 +259,8 @@ function mapWater(waterContext, waterSnapshot = null) {
     // This week's legal-first watering plan (GATE_IRRIGATION_WEEK_PLAN):
     // { title, detail } or null — rendered as its own callout on the card.
     weekPlan: waterContext.weekPlan || null,
+    // GATE_LAWN_REPORT_POLISH: the card's third state, the basis line of a derived figure (nothing while the gate is off).
+    ...waterPolishFields(waterContext, { target, scheduleOnFile: advice.profileMissing === false }),
   };
 }
 

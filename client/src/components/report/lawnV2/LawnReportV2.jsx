@@ -15,6 +15,7 @@ import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import { usePrintRequested } from '../usePrintRequested';
 import Icon from '../../Icon';
+import POLISH_COPY from '../../../../../shared/lawn-report-polish-copy.json';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -1061,6 +1062,67 @@ function WeekPlanCallout({ weekPlan, aftercare }) {
   );
 }
 
+// ── The card's irrigation states (GATE_LAWN_REPORT_POLISH) ──────────────────────
+// A: inches known. B (water.scheduleKind 'runtime_only'): a schedule is on file but weekly inches are not, so the row
+// prints what IS on file and the call to action asks for the weekly inches. C: nothing on file, today's card. The
+// payload carries scheduleKind only while the gate is live, so without it these print exactly what they always did.
+
+// The Irrigation row when no irrigation inches print: the schedule on file (B), else "Not on file" (C).
+function IrrigationOnFileRow({ water }) {
+  const onFile = water.scheduleKind === 'runtime_only' && typeof water.scheduleText === 'string' && water.scheduleText ? water.scheduleText : null;
+  return (
+    <>
+      <span style={{ color: MUTED }}>Irrigation</span>
+      {onFile
+        ? <strong data-testid="lawn-water-schedule-on-file" style={{ textAlign: 'right', color: TEXT }}>{onFile}</strong>
+        : <span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span>}
+    </>
+  );
+}
+
+// The confidence line's override when the schedule is not usable: weekly inches missing (B), or the whole
+// irrigation schedule (C), only when the rain reading is solid.
+function irrigationConfidenceLabel(water, irrOnFile, hasRain) {
+  if (irrOnFile || !hasRain) return null;
+  return water.scheduleKind === 'runtime_only' ? POLISH_COPY.confidenceLabel : 'Irrigation not on file';
+}
+
+// A derived irrigation figure says where it came from (the server's basis line); nothing otherwise.
+function WaterBasisNote({ water }) {
+  if (typeof water.irrigationBasis !== 'string' || !water.irrigationBasis) return null;
+  return <span data-testid="lawn-water-basis" style={{ gridColumn: '1 / -1', color: MUTED, fontSize: 14, lineHeight: 1.45 }}>{water.irrigationBasis}</span>;
+}
+
+// The call to action under the card when the irrigation figure is missing: the weekly inches when a schedule is on
+// file (B), the watering schedule when nothing is (C). Keyed off the same effective irrOnFile as the row above, so a
+// card showing inches never claims the schedule is missing (codex P2 r4).
+function WaterScheduleCta({ water, irrOnFile, href }) {
+  if (irrOnFile || !href) return null;
+  const inches = water.scheduleKind === 'runtime_only';
+  return (
+    <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
+      <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{inches ? POLISH_COPY.ctaTitle : 'Get a water reading built for your lawn'}</div>
+      <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
+        {inches
+          ? POLISH_COPY.ctaBody
+          : 'We’re estimating right now because we don’t have your watering schedule yet. Add it once and every report is tailored to exactly what your lawn gets.'}
+      </div>
+      <a
+        data-glass-accent=""
+        href={href}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 7,
+          background: COLORS.glassNavy, color: '#fff', textDecoration: 'none',
+          fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14,
+          padding: '11px 18px', borderRadius: 999,
+        }}
+      >
+        {inches ? POLISH_COPY.ctaButton : 'Add your watering schedule →'}
+      </a>
+    </div>
+  );
+}
+
 // ── 3. Water This Week (stacked bar vs target band) ──────────────────────────────
 export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_HREF, aftercare = null, lead = false, coverageCardShown = false }) {
   const mounted = useMounted();
@@ -1135,7 +1197,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
             can carry irrigationInches: null, and gating on a finite amount
             hid the promised row exactly when the schedule was missing
             (codex P2 r24). */}
-        {!irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
+        {!irrOnFile ? <IrrigationOnFileRow water={water} /> : null}
         {hasTotal ? <><span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong></> : null}
         {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
         {/* GATE_LAWN_REPORT_COPY_FIXES: one fixed sentence from the server naming where the
@@ -1143,6 +1205,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
         {hasTarget && typeof water.targetNote === 'string' && water.targetNote.trim() ? (
           <span data-testid="lawn-water-target-note" style={{ gridColumn: '1 / -1', color: MUTED, fontSize: 14, lineHeight: 1.45 }}>{water.targetNote}</span>
         ) : null}
+        <WaterBasisNote water={water} />
       </div>
       {/* Stacked bar with a target marker — segments grow on mount. Skipped
           entirely when nothing is measurable (all-missing payload kept alive
@@ -1169,7 +1232,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
             "Limited data this week" blamed the rain — name the actual gap.
             hasRain is a strict known() check, so a rain-unknown report keeps
             the low-confidence label warning about the rain (codex P2 r2/r6). */}
-        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && hasRain ? 'Irrigation not on file' : null} /> : null}
+        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={irrigationConfidenceLabel(water, irrOnFile, hasRain)} /> : null}
       </div>
       {/* The server-built explanation was composed assuming the irrigation
           figure is real — with no schedule on file it can claim a schedule,
@@ -1241,26 +1304,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = IRRIGATION_SETUP_H
       {/* Keyed off the same effective irrOnFile as the row above — a card
           showing `Irrigation 1.25"` must not also claim "we don't have your
           watering schedule yet" (codex P2 r4). */}
-      {!irrOnFile && irrigationHref ? (
-        <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
-          <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
-          <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
-            We’re estimating right now because we don’t have your watering schedule yet. Add it once and every report is tailored to exactly what your lawn gets.
-          </div>
-          <a
-            data-glass-accent=""
-            href={irrigationHref}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 7,
-              background: COLORS.glassNavy, color: '#fff', textDecoration: 'none',
-              fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14,
-              padding: '11px 18px', borderRadius: 999,
-            }}
-          >
-            Add your watering schedule →
-          </a>
-        </div>
-      ) : null}
+      <WaterScheduleCta water={water} irrOnFile={irrOnFile} href={irrigationHref} />
     </Card>
   );
 }

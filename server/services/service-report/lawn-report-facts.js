@@ -23,6 +23,8 @@
  *              products: [{ id, rule, source }] },
  *   productUse: { [service_products.id]: { sqft: number | null } },   // spot rows only
  *   ties: { assessmentId, items: [...] },       // see cleanTies
+ *   labelLines: { v: 1, items: { [service_products.id]: [dropped precaution sentence indexes] } },
+ *                                                // GATE_LAWN_REPORT_POLISH: one label line per card (lawn-label-lines.js)
  * }
  *
  * Only structured facts are stored. Every customer sentence is chosen by code from the closed tables
@@ -34,6 +36,7 @@
 const crypto = require('crypto');
 const logger = require('../logger');
 const { CONDITION_LABEL_VALUES } = require('../lawn-diagnostic-report');
+const labelLines = require('./lawn-label-lines');
 
 const FREEZE_KEY = 'lawnReportFacts';
 const FREEZE_VERSION = 1;
@@ -424,6 +427,12 @@ function cleanTie(raw) {
   return { source: 'photo', kind: raw.kind, label: raw.label, sure: raw.sure === true, product: raw.product };
 }
 
+// A stored labelLines block, shape-checked: { [id]: [indexes] }; {} when absent or not whole.
+function cleanLabelLines(raw) {
+  if (!isPlain(raw) || raw.v !== 1 || !isPlain(raw.items)) return {};
+  return Object.fromEntries(Object.entries(raw.items).map(([id, drops]) => [id, labelLines.cleanDrops(drops)]).filter(([, drops]) => drops).slice(0, 50));
+}
+
 function cleanTies(raw) {
   if (!isPlain(raw) || !Array.isArray(raw.items)) return null;
   const items = raw.items.map(cleanTie).filter(Boolean).slice(0, MAX_TIES);
@@ -433,13 +442,14 @@ function cleanTies(raw) {
 // ── The frozen block: build, read, key ──────────────────────────────────────
 
 // `withTies` is false while the tie part is not live (feature-gates.js lawnReportTiesLive): no tie is read or stored.
-function buildReportFacts({ rows, run, assessment, techFindings, withTies = true, recordedSpotAreas: recorded = null, now = new Date() }) {
+function buildReportFacts({ rows, run, assessment, techFindings, withTies = true, withLabelLines = false, recordedSpotAreas: recorded = null, now = new Date() }) {
   const reentry = visitReentry(rows);
   return {
     v: FREEZE_VERSION,
     frozenAt: now.toISOString(),
     ...(reentry ? { reentry } : {}),
     productUse: productUseEntries(rows, recorded),
+    ...(withLabelLines ? { labelLines: { v: 1, items: labelLines.labelLineDrops(rows) } } : {}),
     ...(withTies ? { ties: { assessmentId: assessment && assessment.id != null ? String(assessment.id) : null, items: buildTies({ rows, run, assessment, techFindings }) } } : {}),
   };
 }
@@ -452,6 +462,7 @@ function readFrozenReportFacts(structuredNotes) {
     reentry: cleanReentry(raw.reentry),
     productUse: cleanProductUse(raw.productUse),
     ties: cleanTies(raw.ties),
+    labelLines: cleanLabelLines(raw.labelLines),
   };
 }
 
@@ -540,10 +551,12 @@ function frozenReportFactsStamp(structuredNotes) {
   if (!facts) return '';
   const hasDecision = (facts.reentry && facts.reentry.rule !== 'default')
     || Object.keys(facts.productUse).length > 0
-    || (facts.ties && facts.ties.items.length > 0);
+    || (facts.ties && facts.ties.items.length > 0)
+    || Object.keys(facts.labelLines).length > 0;
   if (!hasDecision) return '';
   const reentry = facts.reentry && facts.reentry.rule !== 'default' ? { rule: facts.reentry.rule } : null;
-  const body = JSON.stringify({ reentry, productUse: facts.productUse, ties: facts.ties });
+  // labelLines joins the key body only when a card drops a sentence, so a record without one keeps its old key.
+  const body = JSON.stringify({ reentry, productUse: facts.productUse, ties: facts.ties, ...(Object.keys(facts.labelLines).length ? { labelLines: facts.labelLines } : {}) });
   return `:rf=${crypto.createHash('sha1').update(body).digest('hex').slice(0, 8)}`;
 }
 
@@ -566,6 +579,17 @@ function frozenReentryText(record) {
 /** { [service_products.id]: card text } for a LAWN record; {} for any other line. */
 function frozenUseTextsFor(serviceLine, structuredNotes) {
   return serviceLine === 'lawn' ? frozenProductUseTexts(structuredNotes) : {};
+}
+
+/** { [service_products.id]: [dropped precaution sentence indexes] } for a LAWN record; {} for any other line. */
+function frozenLabelDropsFor(serviceLine, structuredNotes) {
+  const facts = serviceLine === 'lawn' ? readFrozenReportFacts(structuredNotes) : null;
+  return facts ? facts.labelLines : {};
+}
+
+/** The precaution text one product card prints: the catalog's, less the sentences the frozen decision dropped. */
+function precautionForCard(drops, product, precaution) {
+  return labelLines.precautionAfterDrops(precaution, product && product.id ? drops[String(product.id)] : null);
 }
 
 /** { areaUse } for one product row that has a frozen spot text, else {} (a spread, so the caller decides nothing). */
@@ -650,7 +674,7 @@ async function loadAssessmentAndRun(record, knex) {
  * decide, freeze. Never throws; a failed read freezes nothing and the report renders as it always did.
  * Returns the frozen block (for the caller's in-memory notes) or null.
  */
-async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now = new Date() }) {
+async function gatherAndFreezeReportFacts({ record, knex, withTies = false, withLabelLines = false, now = new Date() }) {
   if (!record || !record.id || !knex) return null;
   // Cheap exit: a block already on the row (a resumed completion, a second run, a recorded failure) is never rebuilt.
   if (readFrozenReportFacts(record.structured_notes)) return null;
@@ -666,7 +690,7 @@ async function gatherAndFreezeReportFacts({ record, knex, withTies = false, now 
     const taps = tiesAllowed ? require('../lawn-treatment-guide').guideTakenFindings(record.structured_notes) : [];
     // A read that fails here THROWS (verifiedTechFindings): a find that could not be checked is not a find we may leave out.
     const techFindings = await verifiedTechFindings({ taps, rows, assessment, run, knex });
-    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
+    const facts = buildReportFacts({ rows, run, assessment, techFindings, withTies: tiesAllowed, withLabelLines, recordedSpotAreas: recordedSpotAreas(record.structured_notes), now });
     const frozen = await freezeReportFacts({ knex, serviceRecordId: record.id, facts });
     // freezeReportFacts swallows a write error and answers null: that is a failed attempt like any other, so the marker is
     // attempted (below) before anything is allowed to render.
@@ -730,6 +754,8 @@ module.exports = {
   frozenReentryForRecord,
   frozenReentryText,
   frozenUseTextsFor,
+  frozenLabelDropsFor,
+  precautionForCard,
   areaUseFields,
   reportFactsKeyStamp,
   frozenProductUseTexts,

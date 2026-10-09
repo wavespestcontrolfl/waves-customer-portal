@@ -206,3 +206,35 @@ describe('a failed early freeze followed by a succeeding later call (the real en
     expect(out.reportFactsFreeze).toBeUndefined();
   });
 });
+
+describe('GATE_LAWN_REPORT_POLISH: the one-label-line decision rides the same freeze (the real write gate)', () => {
+  const SPRAY_CATALOG = [{
+    ...catalog(6, 'fungicide'),
+    reentry_summary: 'Stay off treated areas until the application has dried.',
+    customer_precaution_summary: 'Per the product label: keep people and pets off treated areas until sprays have dried.',
+  }];
+  const sprayRow = { ...productRow(6, 1), application_method: 'broadcast_spray' };
+  async function completeSpray() {
+    loadServiceRecordForPdf.mockResolvedValue({ id: 'sr-1', customer_id: 'c-1', service_line: 'lawn', structured_notes: '{}' });
+    const { knex, state } = store({ service_products: [sprayRow], products_catalog: SPRAY_CATALOG, lawn_assessments: [], lawn_assessment_runs: [], lawn_protocol_products: [] });
+    await finalizeLawnReportSynthesis({ service: { id: 'sr-1', service_line: 'lawn' }, knex });
+    return state.notes.lawnReportFacts;
+  }
+
+  test('gate live: the block carries labelLines, and the card drops the duplicate precaution', async () => {
+    live();
+    process.env.GATE_LAWN_REPORT_POLISH = 'true';
+    const block = await completeSpray();
+    delete process.env.GATE_LAWN_REPORT_POLISH;
+    expect(block.labelLines).toEqual({ v: 1, items: { 'sp-1': [0] } });
+    const drops = facts.frozenLabelDropsFor('lawn', JSON.stringify({ lawnReportFacts: block }));
+    expect(facts.precautionForCard(drops, { id: 'sp-1' }, SPRAY_CATALOG[0].customer_precaution_summary)).toBeNull();
+  });
+
+  test('gate off: no labelLines key, so a record renders exactly as before', async () => {
+    live();
+    const block = await completeSpray();
+    expect(block).not.toHaveProperty('labelLines');
+    expect(facts.frozenLabelDropsFor('lawn', JSON.stringify({ lawnReportFacts: block }))).toEqual({});
+  });
+});

@@ -814,14 +814,16 @@ function conditionWarningLine(condition, reserviceNoApplication) {
   return condition && !reserviceNoApplication ? [condition.text, condition.pets].filter(Boolean).join(' ') : '';
 }
 
-function conditionStatus(condition, completedItems, completedAreas) {
+function conditionStatus(condition, completedItems, completedAreas, resultOverridden = false) {
   return {
     heading: 'your service is complete!',
     status: 'Service complete',
     statusTone: 'neutral',
     result: condition.text,
     completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service completed today.',
-    detail: condition.pets || '',
+    // GATE_LAWN_REPORT_POLISH: the keep-off line belongs right after the condition sentence; when the result line is
+    // another sentence (the page's own status headline) there is no condition above it to follow.
+    detail: resultOverridden ? '' : (condition.pets || ''),
   };
 }
 
@@ -980,7 +982,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   }
 
   // A frozen re-entry condition (lawn): the result line IS the condition. It never counts down.
-  if (condition) return conditionStatus(condition, completedItems, completedAreas);
+  if (condition) return conditionStatus(condition, completedItems, completedAreas, data.statusResultOverridden === true);
 
   if (pendingTarget) {
     return {
@@ -2718,6 +2720,28 @@ function RecommendationsSection({ data }) {
       </ul>
     </section>
   );
+}
+
+// GATE_LAWN_REPORT_POLISH: what the lawn status card prints for its result line and whether the keep-off line
+// follows. With a frozen re-entry condition the plain status prints the condition sentence as the result and the
+// keep-off line right after it. When another sentence is the result (the page's own, or, on the lawn layout, the
+// lead's status headline instead of the walk-on rule that "Your part" states) the keep-off line has no condition
+// above it, so it is left off the card. The layout hero is changed only when the lead has a headline to print.
+function polishStatusProps(data, mode, override, layout) {
+  const condition = data.lawnPolish === true && mode === 'live' ? reentryCondition(data.dynamicContext?.reentry) : null;
+  if (!condition) return { data, override };
+  const headline = !override && layout && smartStatusSummary(data, mode, Date.now()).result === condition.text
+    ? data.reportV2?.lead?.headline || null : null;
+  const result = override || headline;
+  return result ? { data: { ...data, statusResultOverridden: true }, override: result } : { data, override };
+}
+
+// The lawn status card, standard or on the lawn layout (the layout drops "Your documents" and a next appointment the
+// plan area prints; see lawnLayoutStatusData).
+function LawnStatusCard({ data, mode, layout }) {
+  const base = layout ? lawnLayoutStatusData(data, mode) : data;
+  const props = polishStatusProps(base, mode, layout ? lawnTodaysResult(data) : (data.reportV2?.todaysResult || null), layout);
+  return <ServiceStatusCard data={props.data} mode={mode} resultOverride={props.override} />;
 }
 
 function ServiceStatusCard({ data, mode, resultOverride = null }) {
@@ -9737,7 +9761,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             <LawnLayoutBody
               data={data}
               slots={{
-                status: <ServiceStatusCard data={lawnLayoutStatusData(data, mode)} mode={mode} resultOverride={lawnTodaysResult(data)} />,
+                status: <LawnStatusCard data={data} mode={mode} layout />,
                 reservice: <ReserviceReportCard data={data} mode={mode} />,
                 plan: <PlanSummaryCard data={data} mode={mode} />,
                 upcoming: <UpcomingVisitsCard data={data} mode={mode} />,
@@ -9761,7 +9785,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           )}
         >
-        <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
+        <LawnStatusCard data={data} mode={mode} layout={false} />
 
         {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
             under the visit status, ahead of everything else the customer

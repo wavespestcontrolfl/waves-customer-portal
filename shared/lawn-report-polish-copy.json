@@ -1,0 +1,7 @@
+{
+  "_note": "Fixed customer sentences for the lawn report polish (GATE_LAWN_REPORT_POLISH): the Water card's third state (a sprinkler schedule on file, no weekly inches). Read by the web report (LawnReportV2.jsx WaterScheduleCta, irrigationConfidenceLabel) and screened by server/tests/lawn-report-polish.test.js with the same customer-copy rules every report sentence passes. The schedule row (\"45 min, Mondays\"), the basis line of a derived figure and the Ask Waves explanation are built by server/services/service-report/lawn-report-polish.js from the customer's own entries.",
+  "confidenceLabel": "Weekly inches not on file",
+  "ctaTitle": "Tell us your weekly inches",
+  "ctaBody": "We can’t turn your sprinkler minutes into weekly inches yet. If you know how many inches a week your system puts down, add it once and this card shows your full weekly water.",
+  "ctaButton": "Add your weekly inches →"
+}
