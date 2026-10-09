@@ -138,8 +138,10 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
       && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
       return blocked('estimate carries a gated add-on');
     }
-    if (require('./pricing-engine/v1-legacy-mapper').estimateAreaAddOnsGated(estData)) {
-      return blocked('estimate carries a gated add-on');
+    // An area add-on is a one-time job the recurring accept refuses
+    // (AREA_ADDONS_ONE_TIME_ACCEPT_ONLY), gate on or off: never suggested.
+    if (require('./pricing-engine/v1-legacy-mapper').estimateDataCarriesAreaAddOns(estData)) {
+      return blocked('estimate carries an area add-on');
     }
   } catch {
     return blocked('estimate acceptance blockers could not be verified');
