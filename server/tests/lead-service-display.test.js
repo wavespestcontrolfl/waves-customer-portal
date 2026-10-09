@@ -37,6 +37,8 @@ describe('leadServiceDisplay', () => {
     ['Recurring Lawn Care + One-Time Lawn Treatment', 'Monthly Lawn Care Service'],
     ['Recurring Cockroach Control', 'Quarterly Pest Control Service'],
     ['Rodent Bait Stations', 'Quarterly Rodent Bait Station Service'],
+    ['Recurring Termite Bait Stations', 'Termite Bait Station Service'],
+    ['Termite bait stations and rodent bait stations', 'Termite Bait Station Service + Quarterly Rodent Bait Station Service'],
     ['Recurring Lawn Care + One-Time Lawn Care Service', 'Monthly Lawn Care Service'],
     ['Quarterly Pest Control Service + One-Time Lawn Care Service', 'Quarterly Pest Control Service + Monthly Lawn Care Service'],
   ])('one frequency for the lead, recurring wins: %s → %s', (text, expected) => {

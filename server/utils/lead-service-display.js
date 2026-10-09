@@ -72,6 +72,7 @@ const COVERED_BY = {
   lawn: ['lawn_pest', 'plugging'],
   pest: ['lawn_pest', 'cockroach'],
 };
+const RODENT_NAMED_RE = /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/i;
 const ASSESS_WORD_RE = /\bconsultation\b|\bassessment\b|\bnot\s+sure\b/i;
 
 function topicsFor(text) {
@@ -82,6 +83,9 @@ function topicsFor(text) {
     if ((COVERED_BY[topic.key] || []).some((key) => keys.has(key))) return false;
     // "lawn treatment for weeds, pests and disease" is a lawn request.
     if (topic.key === 'pest' && !namesPestControl && (keys.has('lawn') || keys.has('bed_bug'))) return false;
+    // "termite bait stations" is termite work; bait stations are rodent
+    // wording only when a rodent is named or no termite is.
+    if (topic.key === 'rodent' && keys.has('termite') && !RODENT_NAMED_RE.test(text)) return false;
     return true;
   });
 }
