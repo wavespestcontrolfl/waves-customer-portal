@@ -124,13 +124,13 @@ describe('auditAnnualCount counts a visit\'s second row of the product as anothe
   const product = { name: 'Arena 50 WDG' };
 
   test('one row on the visit: unchanged (others at the cap block, below it do not)', async () => {
-    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, 0)).toBeNull();
-    expect(await applicationLimits.auditAnnualCount(others(2), product, '2026-10-09', 2, 0)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2 });
+    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, undefined, 0)).toBeNull();
+    expect(await applicationLimits.auditAnnualCount(others(2), product, '2026-10-09', 2, undefined, 0)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2 });
   });
 
   test('two rows on the visit with one other application: used 2 of 2, reached', async () => {
-    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, 1)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2, message: expect.stringContaining('2/2') });
-    expect(await applicationLimits.auditAnnualCount(others(0), product, '2026-10-09', 2, 1)).toBeNull();
+    expect(await applicationLimits.auditAnnualCount(others(1), product, '2026-10-09', 2, undefined, 1)).toMatchObject({ type: 'annual_max_apps', current: 2, max: 2, message: expect.stringContaining('2/2') });
+    expect(await applicationLimits.auditAnnualCount(others(0), product, '2026-10-09', 2, undefined, 1)).toBeNull();
   });
 
   // Codex round 11 P1 on #6135: a visit booked while the gate was on is completed after it is turned off; the audit returned 0
