@@ -115,8 +115,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v27');
-    expect(PROMPT_HASH).toMatch(/^v27-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v28');
+    expect(PROMPT_HASH).toMatch(/^v28-[a-f0-9]{12}$/);
   });
 
   test('includes the on-site consent rules (schema 1.22.0, prompt v21, owner ruling 2026-09-30)', () => {
@@ -495,6 +495,18 @@ describe('is_spam needs a pitch that was heard (prompt v27)', () => {
     expect(prompt).toMatch(/follows up on a meeting, a call or an email that Waves staff\s+AGREED to/);
     expect(prompt).toMatch(/spam_verdict follows the same rules as is_spam/);
     expect(prompt).toMatch(/spam_verdict\.is_spam_content is false and spam_kind is\s+"not_spam"/);
+  });
+});
+
+// "I don't know what he charges, I'll have him text you back on that" is a promised
+// quote. With the rules sent first, the model missed it on a reviewed call.
+describe('quote_promised covers a promise with no "quote" word (prompt v28)', () => {
+  test.each([false, true])('the rule is in the prompt (system layout: %s)', (systemLayout) => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const built = buildExtractionPrompt('t', '2026-10-09', 'c', { systemLayout });
+    const rules = systemLayout ? built.system : built;
+    expect(rules).toMatch(/The promise does not need the word "quote"/);
+    expect(rules).toMatch(/text, call or email the caller back WITH it/);
   });
 });
 

@@ -4795,6 +4795,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           expectedVisit,
           lawnFast,
           products,
+          packetContext,
           technicianNotes,
         });
         if (lawnFastBlock) {
