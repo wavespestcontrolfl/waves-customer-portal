@@ -51,7 +51,7 @@ describeDb('lawn size from the estimate (real PostgreSQL)', () => {
       t.string('service_category_snapshot'); t.uuid('service_id');
     });
     await knex.schema.createTable('services', t => { t.uuid('id').primary(); t.string('category'); });
-    await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); });
+    await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); t.date('sod_laid_on'); t.string('sod_covers', 8); t.string('sod_area', 120); t.date('sod_rooted_on'); });
     await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.string('grass_type'); t.boolean('active').defaultTo(true); t.timestamp('updated_at'); });
     await knex.schema.createTable('estimates', t => {
       t.uuid('id').primary(); t.uuid('customer_id'); t.uuid('property_id'); t.string('address'); t.string('status');
