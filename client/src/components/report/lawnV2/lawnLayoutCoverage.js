@@ -15,6 +15,7 @@ export const STANDARD_BODY_COVERAGE = Object.freeze({
   LawnWateringBanner: { how: 'yourPart', note: 'printed once inside the Your part card' },
   LawnLeadCard: { how: 'split', note: 'next visit, Your part, what we did, score, what to expect, watching' },
   ReserviceReportCard: { how: 'slot', key: 'reservice' },
+  LawnNewSodCard: { how: 'slot', key: 'newSod', note: 'the New sod card (GATE_LAWN_NEW_SOD_REPORT_CARD): same component after the yourPart section' },
   PlanSummaryCard: { how: 'slot', key: 'plan' },
   NearYouCard: { how: 'slot', key: 'nearYou' },
   ReviewRequestCard: { how: 'slot', key: 'review', note: 'the bottom mount needs !reviewAskOnTop, false whenever reportV2 exists' },

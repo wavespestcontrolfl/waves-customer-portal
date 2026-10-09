@@ -389,12 +389,12 @@ async function assertNoProductUnderLock(trx, { svc, technicianNotes }) {
  * completion, the visit applied the swap bag, and the sheet context rebuilt NOW on the transaction (as a sod-aware
  * sheet) still makes that swap. A failed read is `[]` (the ledger is secondary; it never fails the visit).
  */
-async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts }) {
+async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts, allowGrouped }) {
   if (lawnFast == null || !featureGates.lawnNewSodNoteLive()) return [];
   const applied = new Set((Array.isArray(appliedProducts) ? appliedProducts : []).map((row) => lowerId(row?.product_id)).filter(Boolean));
   if (!applied.size) return [];
   try {
-    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex: trx, sodAware: true });
+    const ctx = await require('./lawn-fast-complete').buildLawnFastContext(svc.id, { knex: trx, sodAware: true, allowGrouped });
     const items = ctx?.ok && ctx.eligible && Array.isArray(ctx.plannedProducts?.items) ? ctx.plannedProducts.items : [];
     return items.filter((item) => item?.sodSwap?.forProductId && applied.has(lowerId(item.productId))).map((item) => {
       const original = items.find((other) => !other.sodSwap && lowerId(other.productId) === item.sodSwap.forProductId);
@@ -416,6 +416,20 @@ async function sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts }) {
     logger.warn(`[lawn-sod-sheet] swap substitution unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
     return [];
   }
+}
+
+/**
+ * The report hold classes of the products a visit applied (`service_products` rows: product_id, application_method),
+ * as a Set. The customer report card uses it: a class the technician applied is not reported as held.
+ */
+async function appliedClassKinds(knex, appliedProducts) {
+  const rowsIn = (Array.isArray(appliedProducts) ? appliedProducts : []).filter((row) => row?.product_id);
+  const catalog = await loadClassRows(knex, [...new Set(rowsIn.map((row) => lowerId(row.product_id)))]);
+  const kinds = new Set();
+  for (const row of rowsIn) {
+    for (const kind of classesOf(catalog.get(lowerId(row.product_id)), { method: row.application_method })) kinds.add(kind);
+  }
+  return kinds;
 }
 
 // Every product the plan could put on this visit, with the hold classes of each (by lower-case id).
@@ -483,6 +497,33 @@ function noProductNoteOf(holds, heldKinds) {
   return `${NO_PRODUCT_NOTE_PREFIX} is rooting (laid ${formatDay(holds.sodLaidOn)}).${waits.length ? ` Held: ${waits.join(', ')}.` : ''}`;
 }
 
+// The hold classes the customer report card names, in the order it prints them. Tetrino and Gravex are held on the
+// sheet but never named to the customer.
+const REPORT_CLASSES = Object.freeze(['fertilizer', 'weedKiller', 'preEmergent', 'dylox']);
+
+// The hold that applies to a PLANNED line of this class today, or null. A whole-lawn record holds the class itself; a
+// part-of-lawn record keeps the line on and skips the sod area (fertilizer: keeps it off the sod until day 30).
+function reportHoldOf(holds, kind) {
+  if (holds.covers === 'part' && kind === 'fertilizer') return holds.fertilizerKeepOff?.on ? { until: holds.fertilizerKeepOff.until } : null;
+  return holds[kind]?.held ? holds[kind] : null;
+}
+
+/**
+ * The classes that kept a PLANNED line (the plan's own primary lines, never the swap bag or an add-on) off, or away from
+ * the sod area on, this visit: `[{ kind, until, rootedCheck, productIds }]` in REPORT_CLASSES order. The completion
+ * transaction freezes it for the report card (lawn-sod-report-card.js). `until` is the first day the class is allowed
+ * again (null for a weed killer that waits only for the rooted check).
+ */
+function plannedHeldOf(holds, items, classesById) {
+  const found = [];
+  for (const kind of REPORT_CLASSES) {
+    const hold = reportHoldOf(holds, kind);
+    const productIds = hold ? items.map((item) => lowerId(item.productId)).filter((id) => (classesById.get(id) || []).includes(kind)) : [];
+    if (productIds.length) found.push({ kind, until: hold.until || null, rootedCheck: kind === 'weedKiller', productIds });
+  }
+  return found;
+}
+
 /**
  * Applies the holds to the plan: the hold decision of every line, the bag swap, the banner.
  * `noProductAllowed` (with `noProductNote`) is set only when this is a whole-lawn record, every
@@ -511,6 +552,7 @@ async function withLines({ holds, visitDay, knex, plannedProducts, ruleFor }) {
     ...(noProductAllowed ? { noProductAllowed: true, noProductNote: noProductNoteOf(holds, heldKinds) } : {}),
     rooted: holds.weedKiller.needsRootedCheck ? { sodLaidOn: holds.sodLaidOn, label: ROOTED_LABEL } : null,
     lines,
+    plannedHeld: plannedHeldOf(holds, items, classesById),
   };
   return { newSod, plannedProducts: nextItems === items ? plannedProducts : { ...plannedProducts, items: nextItems } };
 }
@@ -586,6 +628,7 @@ module.exports = {
   lockSodRecordForNoProduct,
   assertNoProductUnderLock,
   sodSwapSubstitutions,
+  appliedClassKinds,
   NO_PRODUCT_STALE,
   confirmSodRooted,
 };

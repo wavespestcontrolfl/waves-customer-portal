@@ -8152,7 +8152,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             // GATE_LAWN_NEW_SOD_NOTE: the new-sod bag swap as a substitution, so the ledger ties the swap bag to the bag it replaced.
-            visitSubstitutions: await require('./lawn-sod-sheet').sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts: insertedServiceProducts }),
+            visitSubstitutions: await require('./lawn-sod-sheet').sodSwapSubstitutions(trx, { svc, lawnFast, appliedProducts: insertedServiceProducts, allowGrouped: { packetContext } }),
             completionInput: {
               ...(lawnProtocolCompletion || {}),
               // Under a consumer gate the writer receives the validated visit
@@ -8189,6 +8189,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
               .update({ structured_notes: serializeJsonb(record.structured_notes) });
           }
         }
+
+        // GATE_LAWN_NEW_SOD_REPORT_CARD: what the new-sod holds kept off this visit, frozen for the report's New sod card
+        // (lawn-sod-report-card.js). Secondary and savepointed; never fails the visit.
+        await require('./lawn-sod-report-card').freezeNewSodCard(trx, {
+          svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts: insertedServiceProducts, allowGrouped: { packetContext },
+        });
 
         if (inventoryDeductions.length) {
           // Reconcile the advisory with what the FOR UPDATE deduction actually

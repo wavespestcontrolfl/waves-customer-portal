@@ -227,11 +227,13 @@ describe('whole lawn, day 5', () => {
   });
 
   test('what is recorded is what is selected: the held line is not in the products sent, and is a skipped plan default as before', async () => {
-    await openSheet(context(WHOLE_DAY5));
+    await openSheet(context({ ...WHOLE_DAY5, plannedHeld: [{ kind: 'fertilizer', until: '2026-10-31', rootedCheck: false, productIds: [P_BAG24] }] }));
     await analyzeAndComplete();
     const sent = completeCalls()[0].body;
     expect(sent.products.map((p) => p.productId)).toEqual([P_NUTRA]);
     expect(sent.lawnProtocolCompletion.skippedProducts.map((p) => p.productId)).toEqual([P_BAG24]);
+    // The sod record the sheet showed goes back with the completion (the report's New sod card binds to it).
+    expect(sent.lawnFast.sod).toEqual({ laidOn: WHOLE_DAY5.sodLaidOn, covers: 'whole', held: ['fertilizer'] });
   });
 });
 

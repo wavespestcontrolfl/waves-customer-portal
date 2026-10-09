@@ -783,3 +783,48 @@ describe('confirmSodRooted', () => {
     expect(out.body.code).toBe('sod_date_required');
   });
 });
+
+// The classes that kept a PLANNED line off the visit, for the customer report card (GATE_LAWN_NEW_SOD_REPORT_CARD).
+describe('plannedHeld: the hold classes the report card names', () => {
+  const held = (out) => out.newSod.plannedHeld.map(({ kind, until, rootedCheck }) => ({ kind, until, rootedCheck }));
+  const celsius = planItem(P_CELSIUS, 'Celsius WG', { applicationMethod: 'spot_treatment' });
+  const bag24 = planItem(P_BAG24, SOD_SWAP_BAG.name);
+
+  test('whole lawn, day 5: the fertilizer and weed killer lines of the plan, with their dates; add-ons and Tetrino are not named', async () => {
+    const items = [bag24, celsius, planItem(P_TETRINO, 'Tetrino Insecticide', { applicationMethod: 'broadcast_spray' })];
+    const out = await load({ record: prefs(), planned: { items, addOns: [planItem(P_DYLOX, 'Dylox 6.2 G Granular Insecticide')] } });
+    expect(held(out)).toEqual([
+      { kind: 'fertilizer', until: '2026-10-31', rootedCheck: false },
+      { kind: 'weedKiller', until: '2026-10-31', rootedCheck: true },
+    ]);
+    expect(out.newSod.plannedHeld[0].productIds).toEqual([P_BAG24]);
+  });
+
+  test('day 31, not rooted: the weed killer has no date, only the rooted check', async () => {
+    const out = await load({ record: prefs({ sod_laid_on: '2026-09-05' }), planned: { items: [celsius], addOns: [] } });
+    expect(held(out)).toEqual([{ kind: 'weedKiller', until: null, rootedCheck: true }]);
+  });
+
+  test('the October bag swap: only the pre-emergent is named (the swap bag is not a planned line)', async () => {
+    const dim = planItem(P_DIM_BAG, 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer');
+    const out = await load({ record: prefs({ sod_laid_on: '2026-08-01' }), planned: { items: [dim], addOns: [] } });
+    expect(held(out)).toEqual([{ kind: 'preEmergent', until: '2027-10-01', rootedCheck: false }]);
+    expect(out.newSod.plannedHeld[0].productIds).toEqual([P_DIM_BAG]);
+  });
+
+  test('part of the lawn: the lines stay on, the classes skipped on the sod area are named, fertilizer through day 30', async () => {
+    const items = [bag24, planItem(P_DIM_LIQ, 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', { applicationMethod: 'broadcast_spray' })];
+    const out = await load({ record: prefs({ sod_covers: 'part', sod_area: 'Back left corner' }), planned: { items, addOns: [] } });
+    expect(held(out)).toEqual([
+      { kind: 'fertilizer', until: '2026-10-31', rootedCheck: false },
+      { kind: 'preEmergent', until: '2027-10-01', rootedCheck: false },
+    ]);
+    const after = await load({ record: prefs({ sod_laid_on: '2026-09-05', sod_covers: 'part', sod_area: 'Back left corner' }), planned: { items, addOns: [] } });
+    expect(held(after)).toEqual([{ kind: 'preEmergent', until: '2027-10-01', rootedCheck: false }]);
+  });
+
+  test('nothing planned is held: an empty list', async () => {
+    const out = await load({ record: prefs(), planned: { items: [planItem(P_NUTRA, 'LESCO Nutra-TECH T&O Micronutrient Package', { applicationMethod: 'broadcast_spray' })], addOns: [] } });
+    expect(out.newSod.plannedHeld).toEqual([]);
+  });
+});
