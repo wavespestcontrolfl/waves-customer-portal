@@ -758,26 +758,28 @@ describe('the day of the visit is judged on every path (Codex round 9)', () => {
 });
 
 describe('the job card shows the count beside the governed limit text', () => {
-  const card = (id) => ({ id, name: 'x', governed: { limit: 'Label limit text.' } });
-  const catalog = CATALOG.map((p) => ({ ...p, aliases: [] }));
+  const ADDON_OF = { 'p-arena': 'area_addon_lawn_insect_spot', 'p-round': 'area_addon_hardscape_weed' };
+  const card = (id) => ({ id, rowId: `${id}::${ADDON_OF[id]}`, addOnKey: ADDON_OF[id], name: 'x', governed: { limit: 'Label limit text.' } });
 
-  test('an add-on product card gets "Application N of M in 12 months; last applied ..." from the property history', async () => {
+  test('an add-on card gets "Application N of M in 12 months; last applied ..." from the property history; a host card of the same product gets none', async () => {
     const db = fakeDb(world({
       scheduled_services: [{ id: 'visit-1', customer_id: CUSTOMER, property_id: PROPERTY }],
       property_application_history: [ledger('p-arena', 90)],
     }));
-    const cards = await service.attachLimitUse([card('p-arena'), { id: 'p-other', name: 'y' }, card('p-round')], { catalog, serviceId: 'visit-1', visitDay: TODAY, dbh: db });
-    expect(cards[0].governed).toEqual({ limit: 'Label limit text.', use: `Application 2 of 2 in 12 months; last applied ${daysBefore(90)}.` });
-    expect(cards[1].governed).toBeUndefined();
-    expect(cards[2].governed.use).toBe('Application 1 of 2 in 12 months.');
+    const host = { id: 'p-arena', rowId: 'p-arena', addOnKey: null, name: 'host' };
+    const cards = await service.attachLimitUse([host, card('p-arena'), { id: 'p-other', name: 'y' }, card('p-round')], { serviceId: 'visit-1', visitDay: TODAY, dbh: db });
+    expect(cards[0]).toEqual(host);
+    expect(cards[1].governed).toEqual({ limit: 'Label limit text.', use: `Application 2 of 2 in 12 months; last applied ${daysBefore(90)}.` });
+    expect(cards[2].governed).toBeUndefined();
+    expect(cards[3].governed.use).toBe('Application 1 of 2 in 12 months.');
   });
 
   test('a failed read leaves the card as it was; a card with no governed text reads nothing', async () => {
     const broken = fakeDb(world({ scheduled_services: [{ id: 'visit-1', customer_id: CUSTOMER, property_id: PROPERTY }], property_application_history: () => { throw new Error('down'); } }));
-    const cards = await service.attachLimitUse([card('p-arena')], { catalog, serviceId: 'visit-1', visitDay: TODAY, dbh: broken });
+    const cards = await service.attachLimitUse([card('p-arena')], { serviceId: 'visit-1', visitDay: TODAY, dbh: broken });
     expect(cards[0].governed).toEqual({ limit: 'Label limit text.' });
     const quiet = fakeDb(world());
-    await service.attachLimitUse([{ id: 'p-arena', name: 'x' }], { catalog, serviceId: 'visit-1', visitDay: TODAY, dbh: quiet });
+    await service.attachLimitUse([{ id: 'p-arena', name: 'x' }], { serviceId: 'visit-1', visitDay: TODAY, dbh: quiet });
     expect(quiet.calls).toEqual([]);
   });
 });

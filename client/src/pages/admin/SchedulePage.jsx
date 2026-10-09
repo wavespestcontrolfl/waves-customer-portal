@@ -7123,12 +7123,13 @@ function JobCardChip({ tone = "unknown", label, D }) {
   );
 }
 
-function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D }) {
+function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D, domId = undefined }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
       <button
         type="button"
+        id={domId}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         style={{
@@ -7217,6 +7218,12 @@ function JobCardStrip({ strip, D }) {
   );
 }
 
+// A card's title: the product, and for a sold add-on's own card the add-on, so two cards of one product read apart.
+const jobCardProductTitle = (p) => (p.source ? `${p.name} · ${p.source}` : p.name);
+// A card's identity: the product, and the add-on for a sold add-on's own card (the server's rowId; the product ID alone for a
+// card without one). Keys the list, the DOM ids and every lookup of a card by product.
+const jobCardRowId = (p) => p.rowId || p.id;
+
 function JobCardSprayCheck({ sprayCheck, products, D }) {
   const f = sprayCheck?.forecast;
   const range = f?.tempF && f.tempF[0] != null ? `${f.tempF[0]}–${f.tempF[1]}°F` : null;
@@ -7239,8 +7246,8 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
             {products.map((p) => (
-              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              <div key={jobCardRowId(p)} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{jobCardProductTitle(p)}</span>
                 <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
                   {p.verdict !== "ok" && p.verdictReason && (
                     <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
@@ -7347,7 +7354,7 @@ function JobCardProduct({ p, serviceId, D }) {
     </>
   );
   return (
-    <JobCardCollapsible title={p.name} right={right} defaultOpen={Boolean(p.governed)} D={D}>
+    <JobCardCollapsible title={jobCardProductTitle(p)} right={right} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
         <JobCardGoverned governed={p.governed} D={D} />
@@ -7655,7 +7662,7 @@ export function JobCardPrepPhotos({ serviceId, submissions, D, request = adminFe
   );
 }
 
-function JobCardTab({ card, loading, error, D }) {
+export function JobCardTab({ card, loading, error, D }) {
   if (loading) {
     return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
   }
@@ -7700,7 +7707,7 @@ function JobCardTab({ card, loading, error, D }) {
       {(card.addons || []).filter((a) => a.note).map((a) => (
         <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
       ))}
-      {products.map((p) => <JobCardProduct key={p.id} p={p} serviceId={card.serviceId} D={D} />)}
+      {products.map((p) => <JobCardProduct key={jobCardRowId(p)} p={p} serviceId={card.serviceId} D={D} />)}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}

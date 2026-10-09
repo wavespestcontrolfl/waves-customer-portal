@@ -49,6 +49,12 @@ function governedVisit(serviceKey) {
   return { facts, productName: hints[0] || null };
 }
 
+// The catalog service key of the add-on a matched protocol visit belongs to (a booking whose snapshot carries no key), or null.
+function addOnKeyOfVisit(visit) {
+  const rule = MATCH_RULES.find((r) => r.programKey === 'area_addon' && r.visit === visit?.visit);
+  return (rule && (rule.serviceKeys || [])[0]) || null;
+}
+
 // Is this catalog service key a chemical add-on that has a governed rate?
 function isGoverned(serviceKey) {
   return governedVisit(serviceKey) !== null;
@@ -383,6 +389,7 @@ async function flagRatesAboveGoverned({ svc, record, database, advisory, notify 
 }
 
 module.exports = {
+  addOnKeyOfVisit,
   LIMIT_TYPE,
   WRONG_PRODUCT_LIMIT_TYPE,
   UNCHECKED_RATE_LIMIT_TYPE,

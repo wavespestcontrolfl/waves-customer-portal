@@ -2105,6 +2105,89 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       });
     });
 
+    // Codex round 12 on #6135: a host and a sold add-on of the SAME product are two applications, so two cards.
+    describe('a host card and an add-on card of one product are separate cards', () => {
+      const all = require('../config/protocols.json');
+      const fullProtocols = { tree_shrub: all.tree_shrub, pest: all.pest, area_addon: all.area_addon };
+      const BED = 'area_addon_bed_pre_emergent';
+      const bedAddOn = { name: 'Bed Pre-Emergent Treatment', category: 'lawn_care', serviceKey: BED, areaAddOnScope: { areaSqFt: 1450, tierSqFt: 2000 } };
+      const cardsOf = async (facts, deps = {}, protocolSet = fullProtocols, cat = catalog) => {
+        const out = await jobCard.resolveVisitLines({ facts, protocols: protocolSet, catalog: cat, dbh: () => ({}), deps });
+        return { out, cards: await cardsFor(out.lines) };
+      };
+
+      test('Tree & Shrub host that selects Snapshot plus the Bed Pre-Emergent add-on: two cards, the add-on one governed', async () => {
+        const { out, cards } = await cardsOf({ isLawn: false, serviceType: 'Tree & Shrub Care', serviceCategory: 'tree_shrub', scheduledDate: '2026-01-15', addons: [bedAddOn] });
+        const snapshot = cards.filter((card) => card.id === 'gov0');
+        expect(snapshot.map((card) => card.rowId)).toEqual(['gov0', `gov0::${BED}`]);
+        const [host, addOn] = snapshot;
+        // The host card: the plan's line, no governed block, no add-on identity.
+        expect(host.governed).toBeUndefined();
+        expect(host.addOnKey).toBeNull();
+        expect(host.source).toBeNull();
+        expect(host.line).toMatch(/^Snapshot 2\.5TG/);
+        // The add-on card: its governed rate, the sold scope, its source label.
+        expect(addOn.governed).toMatchObject({ sold: 'Sold: up to 2,000 sq ft of bed', rate: expect.stringMatching(/3\.45 lb/), area: expect.any(String), limit: expect.any(String) });
+        expect(addOn.addOnKey).toBe(BED);
+        expect(addOn.source).toBe('Bed Pre-Emergent Treatment');
+        expect(addOn.line).toMatch(/^Bed Pre-Emergent Treatment: /);
+        expect(out.addons).toMatchObject([{ name: 'Bed Pre-Emergent Treatment', products: 1, note: null }]);
+      });
+
+      test('lawn host that plans Arena plus the lawn insect spot: two cards, the host card keeps the plan amount', async () => {
+        const spot = { name: 'Lawn Insect Spot Treatment', category: 'lawn_care', serviceKey: 'area_addon_lawn_insect_spot', areaAddOnScope: { areaSqFt: 800, tierSqFt: 1000, grassType: 'st_augustine' } };
+        const buildPlan = jest.fn().mockResolvedValue({
+          propertyGate: { month: 'Sep', visit: 9, blocks: [] },
+          mixCalculator: { items: [{ raw: 'Arena 50 WDG', role: 'base', selected: true, product: { id: 'gov1' }, mix: { amount: 4, amountUnit: 'oz' } }], conditionalOptions: [] },
+        });
+        const { cards } = await cardsOf({ isLawn: true, serviceId: 'svc1', serviceType: 'WaveGuard Lawn Care', serviceCategory: 'lawn_care', scheduledDate: '2026-09-04', addons: [spot] }, { buildPlan });
+        const arena = cards.filter((card) => card.id === 'gov1');
+        expect(arena.map((card) => card.rowId)).toEqual(['gov1', 'gov1::area_addon_lawn_insect_spot']);
+        expect(arena[0]).toMatchObject({ planned: { amount: 4, unit: 'oz' } });
+        expect(arena[0].governed).toBeUndefined();
+        expect(arena[1].planned).toBeNull();
+        expect(arena[1].governed).toMatchObject({ sold: 'Sold: up to 1,000 sq ft of treated lawn', grass: 'Grass on the estimate: St. Augustine', rate: expect.stringMatching(/0\.147/) });
+      });
+
+      test('an add-on whose product the host does not use is one card, still apart from any host card', async () => {
+        const fireAnt = { name: 'Fire Ant Yard Treatment', category: 'lawn_care', serviceKey: 'area_addon_fire_ant_yard', areaAddOnScope: { tierSqFt: 5000 } };
+        const { cards } = await cardsOf({ isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [fireAnt] });
+        expect(cards.filter((card) => card.id === 'gov2')).toEqual([expect.objectContaining({ rowId: 'gov2::area_addon_fire_ant_yard', addOnKey: 'area_addon_fire_ant_yard' })]);
+        expect(cards.find((card) => card.id === 'd').rowId).toBe('d');
+      });
+
+      test('the add-on that IS the visit has no host: its card is the product alone, carrying its key', async () => {
+        const { cards } = await cardsOf({ isLawn: true, serviceId: 'svc1', serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: BED, areaAddOnScope: { tierSqFt: 2000 }, scheduledDate: '2026-09-04', addons: [] });
+        expect(cards).toEqual([expect.objectContaining({ rowId: 'gov0', addOnKey: BED, source: null })]);
+      });
+
+      test('two base lines of one product on a plain visit still merge into one card, exactly as before', () => {
+        const merged = jobCard.mergeProductLines([
+          { raw: 'Alpine WSG perimeter', role: 'base', selected: true, product: { id: 'p' } },
+          { raw: 'Alpine WSG interior', role: 'base', selected: true, product: { id: 'p' } },
+          { raw: 'Alpine WSG if needed', role: 'conditional', selected: false, product: { id: 'p' } },
+        ]);
+        expect(merged).toEqual([expect.objectContaining({ raw: 'Alpine WSG perimeter', extraLines: ['Alpine WSG interior', 'Alpine WSG if needed'] })]);
+      });
+
+      test('a hosted add-on line never merges into the host line, and two lines of the same hosted add-on do', () => {
+        const host = { raw: 'host', role: 'base', selected: true, product: { id: 'p' } };
+        const hosted = (raw, selected) => ({ raw, role: 'base', selected, product: { id: 'p' }, governed: { rate: 'r' }, addOnKey: BED, hosted: true, source: 'Bed' });
+        const merged = jobCard.mergeProductLines([host, hosted('a', false), hosted('b', true)]);
+        expect(merged).toHaveLength(2);
+        expect(merged[0]).toMatchObject({ raw: 'host', extraLines: [] });
+        expect(merged[0].governed).toBeUndefined();
+        expect(merged[1]).toMatchObject({ raw: 'b', extraLines: ['a'], addOnKey: BED });
+      });
+
+      test('the readiness strip asks no carrier rate for a governed add-on line (it is never a tank amount)', () => {
+        const base = { facts: { serviceId: 's' }, blocks: [], sprayCheck: { hold: false, verdicts: [] }, tank: { calibrated: false }, isToday: true, now: new Date('2026-09-04T12:00:00Z') };
+        const line = (extra) => ({ raw: 'x', role: 'base', selected: true, product: { id: 'a', name: 'Arena', formulation: 'WDG', application_method: 'foliar', default_rate_per_1000: 0.29 }, ...extra });
+        const kinds = (lines) => jobCard._test.dispatchReadiness({ ...base, lines }).issues.map((issue) => issue.kind);
+        expect(kinds([line({ governed: { rate: 'r' }, addOnKey: BED, hosted: true })])).not.toContain('carrier');
+      });
+    });
+
     test('a card for an ordinary product carries no governed field', async () => {
       const [card] = await cardsFor([{ raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P' } }]);
       expect(card.governed).toBeUndefined();

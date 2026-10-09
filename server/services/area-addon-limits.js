@@ -429,30 +429,27 @@ async function areaAddOnLimitRefusal(database, options) {
   }
 }
 
+// The limit key (AREA_ADDONS.items key) of a catalog service key, or null when the add-on has no limit.
+const limitKeyOfServiceKey = (serviceKey) => limitedKeys(Object.keys(AREA_ADDONS.items)).find((key) => configOf(key).serviceKey === serviceKey) || null;
+
 // The job card line for a chemical add-on's product ("Application 1 of 2 in 12 months; last applied
-// 2026-08-01."). The cards are already built; this adds `governed.use` to each card whose product is an
-// add-on's limit product, from the visit's property history (its own visit left out). Display only: a
-// failed read leaves the card as it was.
-async function attachLimitUse(cards, { catalog, serviceId, visitDay, dbh }) {
-  const governedCards = (cards || []).filter((card) => card && card.governed);
+// 2026-08-01."). The cards are already built; this adds `governed.use` to each card that is an add-on's own card
+// (`addOnKey`, the add-on's catalog service key: a host card of the same product has none), from the visit's property
+// history (its own visit left out). Display only: a failed read leaves the card as it was.
+async function attachLimitUse(cards, { serviceId, visitDay, dbh }) {
+  const governedCards = (cards || []).filter((card) => card && card.governed && card.addOnKey);
   if (!governedCards.length) return cards;
   try {
-    const { matchCatalogProduct } = require('./waveguard-plan-engine');
     const visit = await dbh('scheduled_services').where({ id: serviceId }).first('customer_id', 'property_id');
     if (!visit || !isUuid(visit.customer_id)) return cards;
-    const keyOfProduct = new Map();
-    for (const key of limitedKeys(Object.keys(AREA_ADDONS.items))) {
-      const hint = configOf(key).limitProduct;
-      const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
-      if (product) keyOfProduct.set(String(product.id), key);
-    }
-    const keys = governedCards.map((card) => keyOfProduct.get(String(card.id))).filter(Boolean);
+    const keyOfCard = new Map(governedCards.map((card) => [card, limitKeyOfServiceKey(card.addOnKey)]));
+    const keys = [...keyOfCard.values()].filter(Boolean);
     if (!keys.length) return cards;
     const history = await loadAreaAddOnHistory(dbh, { customerId: visit.customer_id, propertyId: visit.property_id, keys, asOf: visitDay, excludeVisitId: serviceId });
-    for (const card of governedCards) {
-      const key = keyOfProduct.get(String(card.id));
-      const dates = key ? ((history.byKey[key] && history.byKey[key].dates) || []).filter((d) => d !== null) : null;
-      if (key) card.governed = { ...card.governed, use: limitUseText(configOf(key), dates, visitDay) };
+    for (const [card, key] of keyOfCard) {
+      if (!key) continue;
+      const dates = ((history.byKey[key] && history.byKey[key].dates) || []).filter((d) => d !== null);
+      card.governed = { ...card.governed, use: limitUseText(configOf(key), dates, visitDay) };
     }
   } catch (err) {
     logger.warn(`[area-addon-limits] job card use line skipped for ${serviceId}: ${err.code || err.name}: ${err.message}`);
