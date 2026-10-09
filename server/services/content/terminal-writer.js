@@ -166,23 +166,38 @@ async function retireTerminalDraft(opportunityId, { gh = require('../content-ast
 }
 
 /**
+ * Delete the branch of every draft these finished runs took. Called after the
+ * batch, when each run (and the draft on it) is stored: a run that never
+ * reached the database (`id` unset) keeps its branch, so its draft is not
+ * lost with the process. Never throws.
+ */
+async function cleanupConsumedDrafts(runs, { gh } = {}) {
+  for (const run of runs || []) {
+    if (!run?.terminal_draft_revision || !run.id || !run.opportunity_id) continue;
+    await retireTerminalDraft(run.opportunity_id, { ...(gh ? { gh } : {}), revision: run.terminal_draft_revision });
+  }
+}
+
+/**
  * Pending rows by what their LATEST run says, best score first:
  *   due      it ended waiting and no usable draft for its brief is pushed
  *            (a file the run would reject counts as not pushed)
  *   written  a usable draft is on the branch; the next run takes it
- *   rebrief  a terminal draft failed a gate; the next run writes the retry
- *            brief, and only then can the terminal write again
+ *   rebrief  the row needs a new brief before the terminal can write: its
+ *            draft failed a gate (the next run writes the retry brief), or
+ *            the brief it waits on is too old
  */
-async function awaitingTerminalDrafts({ deps = {} } = {}) {
+async function awaitingTerminalDrafts({ now = new Date(), deps = {} } = {}) {
   const conn = deps.db || db;
   const gh = deps.gh || require('../content-astro/github-client');
   const { rows } = await conn.raw(`
     SELECT * FROM (
       SELECT DISTINCT ON (r.opportunity_id)
              r.opportunity_id, r.brief_id, r.action_type, r.outcome, r.agent_id, r.skip_reason, r.reviewer_notes, r.created_at,
-             q.query, q.page_url, q.service, q.city, q.score
+             q.query, q.page_url, q.service, q.city, q.score, b.created_at AS brief_created_at
         FROM autonomous_runs r
         JOIN opportunity_queue q ON q.id = r.opportunity_id
+        LEFT JOIN content_briefs b ON b.id = r.brief_id
        WHERE q.status = 'pending'
          AND r.created_at >= now() - (?::int * interval '1 day')
          AND r.outcome <> ALL(?::text[])
@@ -195,7 +210,10 @@ async function awaitingTerminalDrafts({ deps = {} } = {}) {
   const rebrief = [];
   for (const row of rows) {
     const item = { ...row, branch: branchFor(row.opportunity_id), draft_path: draftPathFor(row.opportunity_id) };
-    if (row.outcome !== AWAITING_OUTCOME) { rebrief.push(item); continue; }
+    // Same rule as the runner (_briefHandedToTerminal): a brief that is gone
+    // or too old is replaced at the next run, so it is not offered for writing.
+    const briefAge = row.brief_created_at ? now.getTime() - new Date(row.brief_created_at).getTime() : Infinity;
+    if (row.outcome !== AWAITING_OUTCOME || briefAge > MAX_BRIEF_AGE_MS) { rebrief.push(item); continue; }
     const fetched = await fetchTerminalDraft(row.opportunity_id, { gh, expectedBriefId: row.brief_id });
     if (fetched.ok) written.push(item);
     else due.push({ ...item, problem: fetched.code === INVALID ? fetched.reason : null });
@@ -213,7 +231,7 @@ const describe = (r) => `${String(r.action_type || 'post').replace(/_/g, ' ')}: 
  * that failed a gate) reopens the item and rings.
  */
 async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
-  const { due, written, rebrief } = await awaitingTerminalDrafts({ deps });
+  const { due, written, rebrief } = await awaitingTerminalDrafts({ now, deps });
   const n = due.length;
   const todayKey = `${ALERT_KEY_PREFIX}${etDateString(now)}`;
   const episodes = deps.episodes || require('../admin-alert-episodes');
@@ -246,14 +264,14 @@ async function raiseTerminalDue({ now = new Date(), deps = {} } = {}) {
       'Run blog-run in the terminal. Waiting for a draft:',
       ...due.map((r) => `- ${describe(r)}${r.problem ? ' (the last draft file was rejected)' : ''}`),
       ...(written.length ? ['', `Written and waiting for the next run: ${written.length}`] : []),
-      ...(rebrief.length ? ['', `Failed a check and waiting for a new brief at the next run: ${rebrief.length}`] : []),
+      ...(rebrief.length ? ['', `Waiting for a new brief at the next run: ${rebrief.length}`] : []),
     ].join('\n'),
   });
   return counts;
 }
 
 module.exports = {
-  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, awaitingTerminalDrafts, raiseTerminalDue,
+  terminalWriterLive, writesInTerminal, waitingBriefId, fetchTerminalDraft, retireTerminalDraft, cleanupConsumedDrafts, awaitingTerminalDrafts, raiseTerminalDue,
   branchFor, draftPathFor, draftProblem,
   AWAITING_OUTCOME, GATE_RETRY_OUTCOME, TERMINAL_AGENT_ID, MISSING, INVALID, UNREADABLE, RECHECK_MS, MAX_BRIEF_AGE_MS, BRANCH_PREFIX, DRAFT_DIR, DRAFT_FIELDS,
 };

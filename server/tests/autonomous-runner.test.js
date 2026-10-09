@@ -5335,7 +5335,7 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     expect(terminalWriter.fetchTerminalDraft).toHaveBeenCalledWith('opp_tw', { expectedBriefId: 'brief_handed' });
   });
 
-  test('a draft goes on to the gates under the brief it was written from; its branch is cleaned up at the commit that was read', async () => {
+  test('a draft goes on to the gates under the brief it was written from; its branch is not deleted before the run is stored', async () => {
     const { dispatcher, briefBuilder, runner, terminalWriter } = setup({
       fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read', duration_ms: 5, agent_id: 'terminal-writer', session_id: null },
       handed: city('brief_handed'),
@@ -5348,20 +5348,10 @@ describe('terminal writer: the draft step asks the terminal instead of an agent 
     await expect(runner.runNext()).resolves.toEqual({ outcome: 'reached_the_gates' });
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
     expect(briefBuilder.compose).not.toHaveBeenCalled();
-    expect(terminalWriter.retireTerminalDraft).toHaveBeenCalledWith('opp_tw', { revision: 'sha_read' });
+    expect(terminalWriter.retireTerminalDraft).not.toHaveBeenCalled();
     const run = onward.mock.calls[0][2];
-    expect(run).toMatchObject({ brief_id: 'brief_handed', agent_id: 'terminal-writer', draft_payload: draft });
-  });
-
-  test('a failed branch cleanup does not stop the run', async () => {
-    const { runner, terminalWriter } = setup({ fetched: { ok: true, draft, brief_id: 'brief_handed', revision: 'sha_read' }, handed: city('brief_handed') });
-    terminalWriter.retireTerminalDraft.mockResolvedValue(false);
-    jest.doMock('../services/content/editorial-evidence', () => ({
-      prepareDraft: jest.fn().mockRejectedValue(Object.assign(new Error('editorial'), { code: 'BLOG_EDITORIAL_REVIEW_FAILED', findings: [] })),
-      reviewError: jest.fn(),
-    }));
-    jest.spyOn(runner, '_gateFailRetryOrSkip').mockResolvedValue({ outcome: 'reached_the_gates' });
-    await expect(runner.runNext()).resolves.toEqual({ outcome: 'reached_the_gates' });
+    // the revision rides the run in memory for the end-of-batch cleanup
+    expect(run).toMatchObject({ brief_id: 'brief_handed', agent_id: 'terminal-writer', draft_payload: draft, terminal_draft_revision: 'sha_read' });
   });
 
   test('a handed brief that is too old, or no longer stored, is replaced by a fresh one', async () => {

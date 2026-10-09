@@ -115,11 +115,21 @@ describe('retireTerminalDraft', () => {
   });
 });
 
+test('cleanupConsumedDrafts deletes the branch of a stored run that took a draft, and nothing else', async () => {
+  const gh = ghWith(good());
+  await tw.cleanupConsumedDrafts([
+    { id: 'run_1', opportunity_id: ID, terminal_draft_revision: 'commit-1' },
+    { id: null, opportunity_id: ID, terminal_draft_revision: 'commit-1' }, // never stored: the pushed file is the only copy
+    { id: 'run_3', opportunity_id: ID }, // waited; took no draft
+  ], { gh });
+  expect(gh.retireBranch).toHaveBeenCalledTimes(1);
+});
+
 describe('waiting rows and the admin item', () => {
   const B = '00000000-0000-4000-8000-0000000000bb';
   const C = '00000000-0000-4000-8000-0000000000cc';
   const R = '00000000-0000-4000-8000-0000000000dd';
-  const waiting = (id, over = {}) => ({ opportunity_id: id, brief_id: `brief-${id.slice(-2)}`, action_type: 'new_supporting_blog', outcome: tw.AWAITING_OUTCOME, agent_id: null, skip_reason: tw.MISSING, query: `topic ${id.slice(-2)}`, score: 80, ...over });
+  const waiting = (id, over = {}) => ({ opportunity_id: id, brief_id: `brief-${id.slice(-2)}`, brief_created_at: new Date(), action_type: 'new_supporting_blog', outcome: tw.AWAITING_OUTCOME, agent_id: null, skip_reason: tw.MISSING, query: `topic ${id.slice(-2)}`, score: 80, ...over });
   const draftFor = (id, over = {}) => ({ opportunity_id: id, brief_id: `brief-${id.slice(-2)}`, frontmatter: {}, body, ...over });
   // branches: opportunity id -> the file on its branch (absent = no branch)
   function deps({ rows, branches = {}, openKeys = [] }) {
@@ -153,6 +163,18 @@ describe('waiting rows and the admin item', () => {
 
     branches[C] = draftFor(C);
     expect((await tw.awaitingTerminalDrafts({ deps: d })).written.map((r) => r.opportunity_id)).toEqual([B, C]);
+  });
+
+  test('a waiting row whose brief is too old, or gone, is not offered for writing: the next run briefs it again', async () => {
+    const now = new Date('2026-10-09T13:00:00Z');
+    const d = deps({ rows: [
+      waiting(ID, { brief_created_at: new Date('2026-10-03T13:00:00Z') }),
+      waiting(B, { brief_created_at: new Date('2026-10-01T13:00:00Z') }),
+      waiting(C, { brief_created_at: null }),
+    ] });
+    const out = await tw.awaitingTerminalDrafts({ now, deps: d });
+    expect(out.due.map((r) => r.opportunity_id)).toEqual([ID]);
+    expect(out.rebrief.map((r) => r.opportunity_id)).toEqual([B, C]);
   });
 
   test('rows due: one item for today through the reopen mechanism, versioned by what is due; earlier days are closed', async () => {

@@ -683,10 +683,11 @@ class AutonomousRunner {
     }
     // The run that takes a draft becomes the row's latest run, so its brief
     // stops being "the one the row waits on" and the same file can never be
-    // accepted again. Deleting the branch is cleanup only.
-    if (viaTerminal && dispatchResult.ok) {
-      await terminalWriter.retireTerminalDraft(opp.id, { revision: dispatchResult.revision });
-    }
+    // accepted again. Its branch is deleted only AFTER this run is persisted
+    // (cleanupConsumedDrafts, end of the batch): until then the pushed file
+    // is the only copy of the draft. In-memory only, like
+    // citability_backfill_brief (finalize persists named columns).
+    if (viaTerminal && dispatchResult.ok) run.terminal_draft_revision = dispatchResult.revision;
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
@@ -1986,6 +1987,8 @@ class AutonomousRunner {
     // Its own failure must not fail the batch (the 1pm pass raises it again).
     const terminalWriter = require('./terminal-writer');
     let terminalItemRaised = false;
+    // Drafts this batch took are stored on their runs now; delete their branches.
+    await terminalWriter.cleanupConsumedDrafts(runs);
     if (terminalWriter.terminalWriterLive()) {
       terminalItemRaised = await terminalWriter.raiseTerminalDue().then((r) => r.due > 0).catch((err) => {
         logger.warn(`[autonomous-runner] terminal writer item failed: ${err.message}`);
